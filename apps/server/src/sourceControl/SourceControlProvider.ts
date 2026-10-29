@@ -172,6 +172,19 @@ export interface ChangeRequestWatchFingerprint {
   readonly remarks: string;
 }
 
+/** One page of a search across every repository on a host (see `searchInvolvedChangeRequests`). */
+export interface SourceControlInvolvedSearchPage {
+  /** The host searched (`github.com`). */
+  readonly host: string;
+  /** The account the host answered for. */
+  readonly viewerLogin: string | null;
+  readonly items: ReadonlyArray<ChangeRequest>;
+  /** More change requests matched than the page holds. */
+  readonly truncated: boolean;
+  /** Matches the host did not return to this account (organization access policies). */
+  readonly skippedRows: number;
+}
+
 export interface SourceControlProviderShape {
   readonly kind: SourceControlProviderKind;
   readonly listChangeRequests: (input: {
@@ -415,6 +428,18 @@ export interface SourceControlProviderShape {
     readonly cwd: string;
     readonly context?: SourceControlProviderContext;
   }) => Effect.Effect<SourceControlLinkStates, SourceControlProviderError>;
+  /**
+   * Change requests involving the viewer across every repository on the host `cwd`'s
+   * repository belongs to, newest activity first (GitHub: one search). Optional: without
+   * it, callers read each repository's involvement list.
+   */
+  readonly searchInvolvedChangeRequests?: (input: {
+    readonly cwd: string;
+    readonly context?: SourceControlProviderContext;
+    readonly involvement: ChangeRequestInvolvement;
+    readonly state: ChangeRequestState | "all";
+    readonly limit?: number;
+  }) => Effect.Effect<SourceControlInvolvedSearchPage, SourceControlProviderError>;
   readonly getIssueState: (input: {
     readonly number: number;
     readonly cwd: string;

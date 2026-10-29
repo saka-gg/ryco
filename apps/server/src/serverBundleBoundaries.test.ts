@@ -286,6 +286,21 @@ describe("server boot import boundaries", () => {
     );
     expect(graph.files).not.toContain("apps/server/src/sourceControl/gitCloneRun.ts");
   });
+
+  it("loads the cross-repository involvement read on its first call", () => {
+    // `sourceControl.listInvolvedChangeRequests` imports it with import(); a static import
+    // anywhere on the serve path would put it in every boot.
+    const graph = staticGraph("src/cliMain.ts");
+    expect(
+      graph.files.filter((file) =>
+        /^apps\/server\/src\/sourceControl\/involvedChangeRequests\.ts$/u.test(file),
+      ),
+    ).toEqual([]);
+    // It is reachable at all (the handler's import() points at the file this test guards).
+    expect(staticGraph("src/cliMain.ts", { dynamic: true }).files).toContain(
+      "apps/server/src/sourceControl/involvedChangeRequests.ts",
+    );
+  });
 });
 
 /** Static imports of a built ES chunk (rolldown output keeps them at top level). */

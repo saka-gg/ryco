@@ -37,6 +37,7 @@ import * as GitHubPullRequests from "./gitHubPullRequests.ts";
 import * as GitHubRequiredChecks from "./gitHubRequiredChecks.ts";
 import { sourceControlProviderErrorFrom } from "./forgeFailure.ts";
 import * as SourceControlProvider from "./SourceControlProvider.ts";
+import { changeRequestHostName } from "./pullRequestIndex.ts";
 import { withSourceControlBodyFile } from "./sourceControlBodyFile.ts";
 export { githubDiscovery as discovery } from "./SourceControlProviderDiscoveryCatalog.ts";
 
@@ -1218,6 +1219,27 @@ export const make = Effect.fn("makeGitHubSourceControlProvider")(function* () {
             issues: records.issues,
           })),
           Effect.mapError((cause) => providerError("getLinkStates", cause)),
+        ),
+    searchInvolvedChangeRequests: (input) =>
+      github
+        .searchInvolvedPullRequests({
+          cwd: input.cwd,
+          host:
+            (input.context ? changeRequestHostName(input.context.provider.baseUrl) : null) ??
+            "github.com",
+          involvement: input.involvement,
+          state: input.state,
+          ...(input.limit !== undefined ? { limit: input.limit } : {}),
+        })
+        .pipe(
+          Effect.map((page) => ({
+            host: page.host,
+            viewerLogin: page.viewerLogin,
+            items: page.items.map((item) => toChangeRequest(item.summary)),
+            truncated: page.truncated,
+            skippedRows: page.skippedRows,
+          })),
+          Effect.mapError((cause) => providerError("searchInvolvedChangeRequests", cause)),
         ),
     // Only the state: one aliased GraphQL read, not the issue's body, comments and
     // comment reactions.

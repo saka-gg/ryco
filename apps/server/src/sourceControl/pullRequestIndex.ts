@@ -81,6 +81,27 @@ export function pullRequestIndexRepositoryKey(input: {
   return `${input.providerKind}\u0000${url}`;
 }
 
+/** The lowercase host name (no port) of a provider's base URL; null when it has none. */
+export function changeRequestHostName(baseUrl: string): string | null {
+  try {
+    return new URL(baseUrl).hostname.toLowerCase() || null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Identifies a forge host (provider kind plus host name), for reads that span every
+ * repository there; null without a host name.
+ */
+export function changeRequestHostKey(input: {
+  readonly providerKind: string;
+  readonly baseUrl: string;
+}): string | null {
+  const host = changeRequestHostName(input.baseUrl);
+  return host === null ? null : `host\u0000${input.providerKind}\u0000${host}`;
+}
+
 export interface PullRequestIndex {
   /**
    * The repository's listing for `scope`. While the forge is rate limiting, a

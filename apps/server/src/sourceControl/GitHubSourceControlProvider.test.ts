@@ -2102,3 +2102,61 @@ it.effect("reports a failed watch fingerprint read as a provider error", () =>
     assert.include(error.detail, "rate limit");
   }),
 );
+
+it.effect("searches involved pull requests on the context's host, github.com without one", () =>
+  Effect.gen(function* () {
+    const calls: Array<{ readonly host: string; readonly limit: number | undefined }> = [];
+    const provider = yield* makeProvider({
+      searchInvolvedPullRequests: (input) =>
+        Effect.sync(() => {
+          calls.push({ host: input.host, limit: input.limit });
+          return {
+            host: input.host,
+            viewerLogin: "octocat",
+            items: [
+              {
+                summary: {
+                  number: 9,
+                  title: "Nine",
+                  url: `https://${input.host}/acme/app/pull/9`,
+                  baseRefName: "main",
+                  headRefName: "feature/nine",
+                  state: "open" as const,
+                  isDraft: true,
+                },
+                stackSummary: null,
+              },
+            ],
+            truncated: false,
+            skippedRows: 0,
+          };
+        }),
+    });
+    const search = provider.searchInvolvedChangeRequests;
+    assert.ok(search);
+    const enterprise = yield* search({
+      cwd: "/repo",
+      context: {
+        provider: {
+          kind: "github",
+          name: "GitHub Self-Hosted",
+          baseUrl: "https://GitHub.Example.com:8443",
+        },
+        remoteName: "origin",
+        remoteUrl: "ssh://git@github.example.com:8443/acme/app.git",
+      },
+      involvement: "authored",
+      state: "open",
+      limit: 50,
+    });
+    yield* search({ cwd: "/repo", involvement: "authored", state: "open" });
+
+    assert.deepStrictEqual(calls, [
+      { host: "github.example.com", limit: 50 },
+      { host: "github.com", limit: undefined },
+    ]);
+    assert.strictEqual(enterprise.items[0]?.provider, "github");
+    assert.strictEqual(enterprise.items[0]?.isDraft, true);
+    assert.strictEqual(enterprise.viewerLogin, "octocat");
+  }),
+);

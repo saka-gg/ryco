@@ -63,6 +63,7 @@ it.layer(NodeServices.layer)("ServerEnvironmentLive", (it) => {
       expect(second.capabilities.environmentIcon).toBe(true);
       expect(second.platform.machine).toBeDefined();
       expect(second.capabilities.repositoryIdentity).toBe(true);
+      expect(second.capabilities.crossRepositoryChangeRequests).toBe(true);
       expect(second.capabilities.worktreeSubmoduleSettings).toBe(true);
       expect(second.capabilities.requiredWorktreeBootstrap).toBe(true);
       expect(second.capabilities.nodeAutoSettlement).toBe(true);

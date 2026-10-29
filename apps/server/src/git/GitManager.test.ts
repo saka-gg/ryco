@@ -609,6 +609,7 @@ function createGitHubCliWithFakeGh(scenario: FakeGhScenario = {}): {
       getPullRequestFileContents: () => Effect.die("unused"),
       execute,
       listPullRequests: () => Effect.die("unused"),
+      searchInvolvedPullRequests: () => Effect.die("unused"),
       getLinkStates: () => Effect.die("unused"),
       listOpenPullRequests: (input) =>
         execute({

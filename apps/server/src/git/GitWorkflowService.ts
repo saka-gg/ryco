@@ -95,6 +95,7 @@ export interface GitWorkflowServiceShape {
   readonly indexedPullRequestStates: GitManagerShape["indexedPullRequestStates"];
   readonly indexedChangeRequests: GitManagerShape["indexedChangeRequests"];
   readonly cachedRepositoryList: GitManagerShape["cachedRepositoryList"];
+  readonly cachedInvolvedList: GitManagerShape["cachedInvolvedList"];
   readonly invalidateRepositoryLists: GitManagerShape["invalidateRepositoryLists"];
   readonly refreshRemoteTrackingRefs: GitManagerShape["refreshRemoteTrackingRefs"];
   readonly invalidateLocalStatus: (cwd: string) => Effect.Effect<void, never>;
@@ -387,6 +388,7 @@ export const make = Effect.fn("makeGitWorkflowService")(function* () {
     indexedPullRequestStates: gitManager.indexedPullRequestStates,
     indexedChangeRequests: gitManager.indexedChangeRequests,
     cachedRepositoryList: gitManager.cachedRepositoryList,
+    cachedInvolvedList: gitManager.cachedInvolvedList,
     invalidateRepositoryLists: gitManager.invalidateRepositoryLists,
     // Gated like the status reads: a folder that is not a Git repository
     // (cached detection) refreshes nothing and spawns no git.

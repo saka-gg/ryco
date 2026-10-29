@@ -2,6 +2,11 @@ import { Schema } from "effect";
 import { describe, expect, it } from "vite-plus/test";
 
 import { AtlassianSaveProjectLinkInput } from "./atlassian.ts";
+import {
+  INVOLVED_CHANGE_REQUESTS_MAX_CWDS,
+  SourceControlInvolvedChangeRequestsResult,
+  SourceControlListInvolvedChangeRequestsInput,
+} from "./changeRequestReview.ts";
 import { CONTEXT_HANDOFF_WS_METHODS, ORCHESTRATION_WS_METHODS } from "./orchestration.ts";
 import { SideQuestionInput, SideQuestionResult, WS_METHODS, WsRpcGroup } from "./rpc.ts";
 import { StatisticsSnapshot } from "./statistics.ts";
@@ -17,6 +22,10 @@ describe("WS_METHODS Atlassian and work item names", () => {
     expect(WS_METHODS.atlassianSaveManualJiraToken).toBe("atlassian.saveManualJiraToken");
     expect(WS_METHODS.sourceControlSearchRepositories).toBe("sourceControl.searchRepositories");
     expect(WS_METHODS.sourceControlListChangeRequests).toBe("sourceControl.listChangeRequests");
+    expect(WS_METHODS.sourceControlListInvolvedChangeRequests).toBe(
+      "sourceControl.listInvolvedChangeRequests",
+    );
+    expect(WsRpcGroup.requests.has(WS_METHODS.sourceControlListInvolvedChangeRequests)).toBe(true);
     expect(WS_METHODS.sourceControlAddIssueComment).toBe("sourceControl.addIssueComment");
     expect(WS_METHODS.sourceControlAddIssueCommentReaction).toBe(
       "sourceControl.addIssueCommentReaction",
@@ -173,5 +182,60 @@ describe("side question RPC contracts", () => {
         Schema.decodeUnknownSync(SideQuestionResult)({ requestId: "q", answer }),
       ).toThrow();
     }
+  });
+});
+
+describe("involved change requests RPC contracts", () => {
+  const decodeInput = Schema.decodeUnknownSync(SourceControlListInvolvedChangeRequestsInput);
+
+  it("bounds the checkouts and involvements one call reads", () => {
+    const cwds = Array.from({ length: INVOLVED_CHANGE_REQUESTS_MAX_CWDS }, (_, i) => `/repo/${i}`);
+    expect(
+      decodeInput({ cwds, state: "open", involvements: ["review-requested", "authored"] }).cwds,
+    ).toHaveLength(INVOLVED_CHANGE_REQUESTS_MAX_CWDS);
+    expect(() =>
+      decodeInput({ cwds: [...cwds, "/repo/extra"], state: "open", involvements: ["authored"] }),
+    ).toThrow();
+    expect(() => decodeInput({ cwds: [], state: "open", involvements: [] })).toThrow();
+    expect(() =>
+      decodeInput({ cwds: [], state: "open", involvements: ["authored"], sources: "all" }),
+    ).toThrow();
+  });
+
+  it("decodes paused (with its retry time), skipping and loading sources", () => {
+    const result = Schema.decodeUnknownSync(SourceControlInvolvedChangeRequestsResult)({
+      entries: [],
+      sources: [
+        {
+          scope: "host",
+          provider: "github",
+          name: "github.com",
+          status: "paused",
+          truncated: false,
+          retryAt: 1_800_000_000_000,
+          message: "GitHub API rate limit exceeded.",
+        },
+        {
+          scope: "host",
+          provider: "github",
+          name: "ghe.example.com",
+          status: "ok",
+          viewerLogin: "octocat",
+          truncated: true,
+          skippedRows: 2,
+        },
+        {
+          scope: "repository",
+          provider: "gitlab",
+          name: "acme/tools",
+          status: "loading",
+          truncated: false,
+        },
+      ],
+      skippedCwds: ["/scratch"],
+      truncated: false,
+    });
+    expect(result.sources.map((source) => source.status)).toEqual(["paused", "ok", "loading"]);
+    expect(result.sources[1]?.skippedRows).toBe(2);
   });
 });

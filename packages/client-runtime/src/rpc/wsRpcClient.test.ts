@@ -96,6 +96,25 @@ describe("wsRpcClient", () => {
     });
   });
 
+  it("routes involved change requests to their wire method", async () => {
+    const result = { entries: [], sources: [], skippedCwds: [], truncated: false };
+    const wire = vi.fn(() => Effect.succeed(result));
+    const transport = {
+      request: vi.fn((invoke: (client: unknown) => Effect.Effect<unknown>) =>
+        Effect.runPromise(invoke({ [WS_METHODS.sourceControlListInvolvedChangeRequests]: wire })),
+      ),
+    };
+    const client = createWsRpcClient(transport as unknown as WsTransport);
+    const input = {
+      cwds: ["/repo/app"],
+      state: "open" as const,
+      involvements: ["review-requested" as const],
+      sources: "hosts" as const,
+    };
+    await expect(client.sourceControl.listInvolvedChangeRequests(input)).resolves.toEqual(result);
+    expect(wire).toHaveBeenCalledWith(input);
+  });
+
   it("calls the worktree notes wire methods", async () => {
     const snapshot = { projectId: "project", notes: [], limit: 500, truncated: false };
     const listWireMethod = vi.fn(() => Effect.succeed(snapshot));

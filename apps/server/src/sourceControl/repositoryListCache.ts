@@ -22,6 +22,8 @@ interface Entry {
   readonly repository: string;
   /** Infinity while the read is in flight. */
   expiresAtMs: number;
+  /** When the read finished; Infinity while it is in flight. */
+  storedAtMs: number;
   /** Holds a rate-limited answer, or a value served while paused, until the pause ends. */
   held: boolean;
   /** The read's outcome, typed by the caller that started it. */
@@ -34,6 +36,14 @@ interface GetInput<A, E, R> {
   readonly load: Effect.Effect<A, E, R>;
   /** Overrides the cache's TTL for this entry. */
   readonly ttlMs?: number;
+  /** A finished read older than this is read again; an in-flight one is still joined. */
+  readonly maxAgeMs?: number;
+  /**
+   * Lifetime of an entry stored within one TTL of `invalidate` dropping the repository: for
+   * reads that lag behind writes (host searches), so a read made right after a change
+   * request mutation is not kept for the whole TTL.
+   */
+  readonly settleTtlMs?: number;
   /**
    * Keep the last good value and serve it to background readers when a read fails with a
    * rate limit. For reads background readers make, and not for large values.
@@ -62,6 +72,8 @@ export function makeRepositoryListCache(options?: {
   const nowMs = options?.nowMs ?? Date.now;
   const entries = new Map<string, Entry>();
   const lastGood = makeLastGood<object>(REPOSITORY_LIST_CACHE_CAPACITY);
+  /** When `invalidate` last dropped each repository (for `settleTtlMs`). */
+  const droppedAtMs = new Map<string, number>();
 
   /** When a finished read is held until: its pause's end, or null to cache it as usual. */
   const holdUntil = (exit: Exit.Exit<unknown, unknown>, now: number) => {
@@ -75,7 +87,12 @@ export function makeRepositoryListCache(options?: {
   const read = <A, E, R>(id: string, input: GetInput<A, E, R>): Effect.Effect<A, E, R> =>
     Effect.suspend(() => {
       const hit = entries.get(id);
-      if (hit && hit.expiresAtMs > nowMs()) {
+      const now = nowMs();
+      if (
+        hit &&
+        hit.expiresAtMs > now &&
+        (input.maxAgeMs === undefined || now - hit.storedAtMs < input.maxAgeMs)
+      ) {
         return Deferred.await(hit.result).pipe(
           Effect.flatMap((exit) => exit as unknown as Exit.Exit<A, E>),
           // The read it joined was cancelled: read again.
@@ -88,6 +105,7 @@ export function makeRepositoryListCache(options?: {
       const entry: Entry = {
         repository: input.repository,
         expiresAtMs: Number.POSITIVE_INFINITY,
+        storedAtMs: Number.POSITIVE_INFINITY,
         held: false,
         result: Deferred.makeUnsafe<Exit.Exit<unknown, never>>(),
       };
@@ -103,9 +121,16 @@ export function makeRepositoryListCache(options?: {
           const heldUntilMs = holdUntil(exit, now);
           if (heldUntilMs !== null) {
             entry.held = true;
+            entry.storedAtMs = now;
             entry.expiresAtMs = heldUntilMs;
           } else if (Exit.isSuccess(exit)) {
-            entry.expiresAtMs = now + (input.ttlMs ?? ttlMs);
+            const lifetime = input.ttlMs ?? ttlMs;
+            const dropped = droppedAtMs.get(input.repository);
+            const settling =
+              input.settleTtlMs !== undefined && dropped !== undefined && now - dropped < lifetime;
+            entry.storedAtMs = now;
+            entry.expiresAtMs =
+              now + (settling ? Math.min(lifetime, input.settleTtlMs ?? lifetime) : lifetime);
             if (input.lastGood && typeof exit.value === "object" && exit.value !== null) {
               lastGood.remember(id, exit.value, now);
             }
@@ -146,6 +171,12 @@ export function makeRepositoryListCache(options?: {
           if (entry.repository !== repository) continue;
           if (keep && entry.held && entry.expiresAtMs > nowMs()) continue;
           entries.delete(id);
+        }
+        droppedAtMs.delete(repository);
+        droppedAtMs.set(repository, nowMs());
+        for (const oldest of droppedAtMs.keys()) {
+          if (droppedAtMs.size <= REPOSITORY_LIST_CACHE_CAPACITY) break;
+          droppedAtMs.delete(oldest);
         }
       });
     });

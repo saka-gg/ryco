@@ -2,9 +2,11 @@ import { assert, describe, it } from "@effect/vitest";
 import { Option, Result } from "effect";
 
 import {
+  buildGitHubInvolvedPullRequestSearchQuery,
   buildGitHubPullRequestInvolvementSearch,
   buildGitHubPullRequestListQuery,
   buildGitHubLinkStatesQuery,
+  decodeGitHubInvolvedSearchJson,
   decodeGitHubLinkStatesJson,
   decodeGitHubIssueListPageJson,
   decodeGitHubPullRequestListPageJson,
@@ -359,5 +361,154 @@ describe("pull request states by number", () => {
     if (!Result.isSuccess(decoded)) return;
     assert.deepStrictEqual([...decoded.success.pullRequests.keys()], [12]);
     assert.deepStrictEqual([...decoded.success.issues], [[30, "closed"]]);
+  });
+});
+
+describe("involvement searches across repositories", () => {
+  const searchPage = (
+    nodes: ReadonlyArray<unknown>,
+    extra: Record<string, unknown> = {},
+    hasNextPage = false,
+  ) =>
+    JSON.stringify({
+      data: { viewer: { login: "octocat" }, search: { pageInfo: { hasNextPage }, nodes } },
+      ...extra,
+    });
+
+  it("builds a host-wide involvement search, newest activity first, without archived repositories", () => {
+    assert.strictEqual(
+      buildGitHubPullRequestInvolvementSearch({
+        involvement: "review-requested",
+        state: "open",
+        sort: "updated",
+        excludeArchived: true,
+      }),
+      "review-requested:@me state:open archived:false type:pr sort:updated-desc",
+    );
+    assert.strictEqual(
+      buildGitHubPullRequestInvolvementSearch({
+        involvement: "authored",
+        state: "merged",
+        sort: "updated",
+        excludeArchived: true,
+      }),
+      "author:@me is:merged archived:false type:pr sort:updated-desc",
+    );
+  });
+
+  it("keeps the per-repository search byte for byte", () => {
+    const expected = {
+      open: "author:@me state:open repo:owner/repo type:pr",
+      closed: "author:@me state:closed repo:owner/repo type:pr",
+      merged: "author:@me is:merged repo:owner/repo type:pr",
+      all: "author:@me repo:owner/repo type:pr",
+    } as const;
+    for (const state of ["open", "closed", "merged", "all"] as const) {
+      assert.strictEqual(
+        buildGitHubPullRequestInvolvementSearch({ repository, involvement: "authored", state }),
+        expected[state],
+      );
+    }
+  });
+
+  it("asks for the account and one page of list rows, without stack fields", () => {
+    const query = buildGitHubInvolvedPullRequestSearchQuery({ checks: true });
+    assert.include(query, "viewer { login }");
+    assert.include(query, "search(query: $q, type: ISSUE, first: $first)");
+    assert.include(query, "comments { totalCount }");
+    assert.include(query, "statusCheckRollup");
+    assert.notInclude(query, "stackEntry");
+    assert.notInclude(query, "$after");
+    assert.notInclude(
+      buildGitHubInvolvedPullRequestSearchQuery({ checks: false }),
+      "statusCheckRollup",
+    );
+  });
+
+  it("decodes the account, the rows and whether more matched", () => {
+    const decoded = decodeGitHubInvolvedSearchJson(
+      searchPage(
+        [node(), node({ number: 13, url: "https://github.com/acme/api/pull/13" })],
+        {},
+        true,
+      ),
+    );
+    assert.isTrue(Result.isSuccess(decoded));
+    if (!Result.isSuccess(decoded)) return;
+    assert.strictEqual(decoded.success.viewerLogin, "octocat");
+    assert.isTrue(decoded.success.hasNextPage);
+    assert.strictEqual(decoded.success.skippedRows, 0);
+    assert.deepStrictEqual(
+      decoded.success.rows.map((row) => row.record.url),
+      ["https://github.com/owner/repo/pull/12", "https://github.com/acme/api/pull/13"],
+    );
+    assert.strictEqual(decoded.success.rows[0]?.record.checkRollup?.length, 2);
+  });
+
+  it("skips and counts rows from organizations the login may not read instead of failing", () => {
+    const raw = searchPage([node(), null, node({ number: 13 })], {
+      errors: [
+        {
+          type: "FORBIDDEN",
+          path: ["search", "nodes", 1],
+          message:
+            "Resource protected by organization SAML enforcement. You must grant your OAuth token access to this organization.",
+        },
+      ],
+    });
+    // The per-repository decoder treats this as fatal: one such row would blank the host.
+    assert.isTrue(Result.isFailure(decodeGitHubPullRequestListPageJson(raw, { search: true })));
+    const decoded = decodeGitHubInvolvedSearchJson(raw);
+    assert.isTrue(Result.isSuccess(decoded));
+    if (!Result.isSuccess(decoded)) return;
+    assert.deepStrictEqual(
+      decoded.success.rows.map((row) => row.record.number),
+      [12, 13],
+    );
+    assert.strictEqual(decoded.success.skippedRows, 1);
+  });
+
+  it("drops checks only from the row whose rollup was refused", () => {
+    const decoded = decodeGitHubInvolvedSearchJson(
+      searchPage(
+        [
+          node({ commits: { nodes: [{ commit: { statusCheckRollup: null } }] } }),
+          node({ number: 13 }),
+        ],
+        {
+          errors: [
+            {
+              message: "Resource not accessible by personal access token",
+              path: ["search", "nodes", 0, "commits", "nodes", 0, "commit", "statusCheckRollup"],
+            },
+          ],
+        },
+      ),
+    );
+    assert.isTrue(Result.isSuccess(decoded));
+    if (!Result.isSuccess(decoded)) return;
+    assert.strictEqual(decoded.success.rows[0]?.record.checkRollup, undefined);
+    assert.strictEqual(decoded.success.rows[1]?.record.checkRollup?.length, 2);
+    assert.strictEqual(decoded.success.skippedRows, 0);
+  });
+
+  it("fails on errors outside the rows and on malformed documents", () => {
+    for (const error of [
+      { message: "Something went wrong while executing your query.", path: ["search"] },
+      { message: "API rate limit exceeded" },
+    ]) {
+      const decoded = decodeGitHubInvolvedSearchJson(
+        JSON.stringify({ data: { viewer: { login: "octocat" }, search: null }, errors: [error] }),
+      );
+      assert.isTrue(Result.isFailure(decoded));
+      if (Result.isFailure(decoded)) assert.include(decoded.failure, error.message);
+    }
+    assert.isTrue(Result.isFailure(decodeGitHubInvolvedSearchJson("not json")));
+    assert.isTrue(Result.isFailure(decodeGitHubInvolvedSearchJson(JSON.stringify({ data: {} }))));
+    const anonymous = decodeGitHubInvolvedSearchJson(
+      JSON.stringify({ data: { search: { pageInfo: { hasNextPage: false }, nodes: [] } } }),
+    );
+    assert.isTrue(Result.isSuccess(anonymous));
+    if (Result.isSuccess(anonymous)) assert.strictEqual(anonymous.success.viewerLogin, null);
   });
 });

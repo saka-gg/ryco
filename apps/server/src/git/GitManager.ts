@@ -78,6 +78,7 @@ import type {
 } from "../sourceControl/SourceControlProvider.ts";
 import {
   BRANCH_CHANGE_REQUEST_LIMIT,
+  changeRequestHostKey,
   lookupIndexedChangeRequest,
   makePullRequestIndex,
   pullRequestIndexRepositoryKey,
@@ -167,7 +168,28 @@ export interface GitManagerShape {
      */
     readonly lastGood?: boolean;
   }) => Effect.Effect<A, E, R>;
-  /** Drops `cwd`'s repository's cached list reads (after a change request mutation). */
+  /**
+   * A forge read for the involvement list across repositories
+   * (`sourceControl.listInvolvedChangeRequests`), cached apart from the repository lists:
+   * `host` scope keys it by `cwd`'s host (one search spans every repository there),
+   * `repository` scope by `cwd`'s repository. Change request mutations drop both
+   * (`invalidateRepositoryLists`); remote refreshes, which fire on every periodic poll, do
+   * not. Without a known host the read runs uncached.
+   */
+  readonly cachedInvolvedList: <A, E, R>(input: {
+    readonly cwd: string;
+    readonly scope: "host" | "repository";
+    readonly key: string;
+    readonly load: Effect.Effect<A, E, R>;
+    readonly ttlMs: number;
+    readonly maxAgeMs?: number;
+    /** Lifetime of an entry stored within `ttlMs` of a mutation dropping it (search lag). */
+    readonly settleTtlMs?: number;
+  }) => Effect.Effect<A, E, R>;
+  /**
+   * Drops `cwd`'s repository's cached list reads and its host's involvement reads (after a
+   * change request mutation).
+   */
   readonly invalidateRepositoryLists: (cwd: string) => Effect.Effect<void>;
   /** State and draft flag of the repository's indexed change requests; never asks the forge. */
   readonly indexedPullRequestStates: (
@@ -260,6 +282,8 @@ const pullRequestUpdatedAtDescOrder: Order.Order<PullRequestInfo> = Order.mapInp
 
 interface PullRequestIndexTarget {
   readonly repository: string;
+  /** `changeRequestHostKey` of the repository's host; null without a host name. */
+  readonly host: string | null;
   readonly provider: SourceControlProviderShape;
   readonly context: SourceControlProviderContext;
 }
@@ -1278,6 +1302,10 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* (
                 providerKind: handle.provider.kind,
                 remoteUrl: handle.context.remoteUrl,
               }),
+              host: changeRequestHostKey({
+                providerKind: handle.provider.kind,
+                baseUrl: handle.context.provider.baseUrl,
+              }),
               provider: handle.provider,
               context: handle.context,
             },
@@ -1286,6 +1314,9 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* (
     );
 
   const repositoryListCache = makeRepositoryListCache();
+  // Its own cache: page lists never join a background involvement read, and remote
+  // refreshes leave it alone.
+  const involvedListCache = makeRepositoryListCache();
 
   // The writing style code (presets, example reader) loads with the first generated text. No
   // result is kept here: the module system holds the loaded module, and a load that failed is
@@ -1396,10 +1427,34 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* (
       Effect.flatMap((target) =>
         target === null
           ? Effect.void
-          : repositoryListCache.invalidate(target.repository, {
-              keepHeldWhile: forgeStillPaused(target),
-            }),
+          : Effect.all(
+              [
+                repositoryListCache.invalidate(target.repository, {
+                  keepHeldWhile: forgeStillPaused(target),
+                }),
+                involvedListCache.invalidate(target.repository),
+                target.host === null ? Effect.void : involvedListCache.invalidate(target.host),
+              ],
+              { discard: true },
+            ),
       ),
+    );
+
+  const cachedInvolvedList: GitManagerShape["cachedInvolvedList"] = (input) =>
+    resolvePullRequestIndexTarget(input.cwd).pipe(
+      Effect.flatMap((target) => {
+        const id = input.scope === "host" ? (target?.host ?? null) : (target?.repository ?? null);
+        return id === null
+          ? input.load
+          : involvedListCache.get({
+              repository: id,
+              key: input.key,
+              load: input.load,
+              ttlMs: input.ttlMs,
+              ...(input.maxAgeMs !== undefined ? { maxAgeMs: input.maxAgeMs } : {}),
+              ...(input.settleTtlMs !== undefined ? { settleTtlMs: input.settleTtlMs } : {}),
+            });
+      }),
     );
 
   const cachedRepositoryList: GitManagerShape["cachedRepositoryList"] = (input) =>
@@ -2686,6 +2741,7 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* (
     indexedPullRequestStates,
     indexedChangeRequests,
     cachedRepositoryList,
+    cachedInvolvedList,
     invalidateRepositoryLists,
     invalidateStatus,
     resolvePullRequest,

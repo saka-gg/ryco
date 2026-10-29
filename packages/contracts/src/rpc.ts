@@ -396,6 +396,8 @@ import {
   ChangeRequestUpdateCommentResult,
   ChangeRequestUpdateInput,
   ChangeRequestUpdateResult,
+  SourceControlInvolvedChangeRequestsResult,
+  SourceControlListInvolvedChangeRequestsInput,
 } from "./changeRequestReview.ts";
 import { VcsError } from "./vcs.ts";
 import {
@@ -601,6 +603,7 @@ export const WS_METHODS = {
   sourceControlGetIssue: "sourceControl.getIssue",
   sourceControlSearchIssues: "sourceControl.searchIssues",
   sourceControlListChangeRequests: "sourceControl.listChangeRequests",
+  sourceControlListInvolvedChangeRequests: "sourceControl.listInvolvedChangeRequests",
   sourceControlSearchChangeRequests: "sourceControl.searchChangeRequests",
   sourceControlGetChangeRequestDetail: "sourceControl.getChangeRequestDetail",
   sourceControlGetChangeRequestFilesViewed: "sourceControl.getChangeRequestFilesViewed",
@@ -1301,6 +1304,20 @@ export const WsSourceControlListChangeRequestsRpc = Rpc.make(
       view: Schema.optional(Schema.Literals(["picker"])),
     }),
     success: Schema.Array(ChangeRequest),
+    error: Schema.Union([SourceControlProviderError, AuthRpcError]),
+  },
+);
+
+/**
+ * Change requests involving the viewer across the node's repositories: one search per host
+ * where the host can (GitHub), each other repository's involvement lists otherwise. A source
+ * that fails is reported in `sources`; it never fails the call.
+ */
+export const WsSourceControlListInvolvedChangeRequestsRpc = Rpc.make(
+  WS_METHODS.sourceControlListInvolvedChangeRequests,
+  {
+    payload: SourceControlListInvolvedChangeRequestsInput,
+    success: SourceControlInvolvedChangeRequestsResult,
     error: Schema.Union([SourceControlProviderError, AuthRpcError]),
   },
 );
@@ -2603,6 +2620,7 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   | typeof WsSourceControlGetIssueRpc
   | typeof WsSourceControlSearchIssuesRpc
   | typeof WsSourceControlListChangeRequestsRpc
+  | typeof WsSourceControlListInvolvedChangeRequestsRpc
   | typeof WsSourceControlSearchChangeRequestsRpc
   | typeof WsSourceControlGetChangeRequestDetailRpc
   | typeof WsSourceControlGetChangeRequestFilesViewedRpc
@@ -2829,6 +2847,7 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   WsSourceControlGetIssueRpc,
   WsSourceControlSearchIssuesRpc,
   WsSourceControlListChangeRequestsRpc,
+  WsSourceControlListInvolvedChangeRequestsRpc,
   WsSourceControlSearchChangeRequestsRpc,
   WsSourceControlGetChangeRequestDetailRpc,
   WsSourceControlGetChangeRequestFilesViewedRpc,
