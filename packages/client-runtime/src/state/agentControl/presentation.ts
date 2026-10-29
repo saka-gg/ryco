@@ -219,13 +219,17 @@ function planPresentation(proposal: AgentControlProposal): {
       const runtimes = [
         ...new Set(plan.entries.map((entry) => `${entry.runtimeMode} · ${entry.envMode}`)),
       ];
+      const runtime = runtimes.length === 1 ? runtimes[0]! : "mixed runtime modes";
       return {
         actionLabel: count === 1 ? "Create 1 thread" : `Create ${count} threads`,
         targetLabel:
           projectIds.length === 1
             ? `project ${shortId(projectIds[0]!)}`
             : `${projectIds.length} projects`,
-        runtimeLabel: runtimes.length === 1 ? runtimes[0]! : "mixed runtime modes",
+        runtimeLabel:
+          plan.maxConcurrent === undefined
+            ? runtime
+            : `${runtime} · at most ${plan.maxConcurrent} run at once`,
         detailSections: plan.entries.map((entry, index) => ({
           heading: `Thread ${index + 1}: ${entry.title}`,
           lines: [

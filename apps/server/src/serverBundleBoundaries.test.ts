@@ -326,6 +326,8 @@ describe("server boot import boundaries", () => {
     // The follow-up queue drain loads once commands are admitted; the boot path holds only its
     // layer (and the decider's and projector's queue rules).
     expect(reached(/^apps\/server\/src\/orchestration\/serverQueueDrainRuntime\.ts$/u)).toEqual([]);
+    // Delegation slots load with the first queue held for one (a capped ryco_create_threads).
+    expect(reached(/^apps\/server\/src\/agentControl\/delegationSlotRuntime\.ts$/u)).toEqual([]);
   });
 
   it("loads the repository clone runner with the first clone", () => {

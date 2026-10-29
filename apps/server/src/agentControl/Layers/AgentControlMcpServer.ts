@@ -133,6 +133,7 @@ const makeAgentControlMcpServer = Effect.gen(function* () {
             events: proposalEvents,
             projections,
             sql: sql.value,
+            engine,
           }),
         })
       : artifactTools;

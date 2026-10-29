@@ -21,7 +21,14 @@ called. This matters for clients such as Codex that cache the initial MCP catalo
 - `ryco_create_threads`: a bounded batch of local or isolated-worktree threads, with an optional base
   ref. The caller's project, runtime permission and worktree-isolation restrictions still apply.
   An entry's `artifacts` hands over up to 8 of the caller's own artifacts (see
-  [Handing over artifacts](#handing-over-artifacts)).
+  [Handing over artifacts](#handing-over-artifacts)). Every entry starts at once unless the request
+  sets `maxConcurrent` (1 to 8): then the first entries start, and each later one waits, its first
+  message held in its own thread's follow-up queue ("Waiting for a free slot"), until an earlier
+  task of the request stops working (its turn ended and nothing else runs in it, or it was
+  archived, moved to Trash or deleted). Waiting tasks start in entry order, once the request has
+  created all its tasks, with the chat's current model and modes (never above the runtime mode the
+  task was created with), and the cap holds across a restart. Resuming a waiting task by hand starts it at once;
+  it then counts against the cap.
 - `ryco_list_artifacts`: the caller's own thread's artifacts, newest first, with the ids a
   handover takes. Needs the `read` grant.
 - `ryco_send_message`, `ryco_interrupt_thread`, `ryco_update_thread`: queue/steer work (a queued
@@ -123,11 +130,15 @@ chat with one automatic message, a normal queued turn that starts or resumes its
   its returns too.
 - **Task tools.** `ryco_task_status` lists up to 20 of this chat's returnToOrigin tasks (or one by
   `taskId`) with the run state, the return status and the redacted, untrusted result, or the
-  notice for a task that ended without one. Pending questions are reported only as a flag. Reading
+  notice for a task that ended without one. A task still waiting for a free slot of a capped
+  request reports the run state `waiting`, with why; its 24 hours count from its creation. Pending questions are reported only as a flag. Reading
   one finished task by `taskId` during the chat's own turn acknowledges it, so no separate
   automatic message is sent for it; a list never acknowledges, because a long list may not reach
   the agent in full. `ryco_task_cancel` stops the automatic return first and then interrupts the
-  task's running turn through the normal routine interrupt request. If the return is changing at
+  task's running turn through the normal routine interrupt request. A task whose first message
+  was not sent yet (it waits for a free slot) has that message and the agent's own queued
+  follow-ups taken out of its queue instead: it never starts, takes no slot, and reads as
+  `interrupted`. A person's own queued messages stay. If the return is changing at
   that moment, it does not interrupt and asks for a retry.
 - **Long results and messages.** A result read by `taskId` comes in pages of 8,000 characters:
   the reply is redacted as a whole first, so a page never shows part of a secret, and each page

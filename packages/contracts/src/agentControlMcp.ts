@@ -293,6 +293,7 @@ export type AgentControlMcpWaitForControlRequestInput =
 export const AgentControlMcpCreateThreadsInput = Schema.Struct({
   requestId: AgentControlRequestId,
   entries: AgentControlCreateThreadsPlan.fields.entries,
+  maxConcurrent: AgentControlCreateThreadsPlan.fields.maxConcurrent,
 }).pipe(rejectExcessProperties);
 export type AgentControlMcpCreateThreadsInput = typeof AgentControlMcpCreateThreadsInput.Type;
 

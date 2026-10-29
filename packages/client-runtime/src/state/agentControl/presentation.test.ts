@@ -86,6 +86,25 @@ describe("buildAgentControlProposalCardModel", () => {
     expect(model.detailSections[0]?.lines).toContain("Prompt: Prompt 1");
   });
 
+  it("says how many tasks of a capped createThreads batch run at once", () => {
+    const entries = [1, 2, 3].map((index) => ({
+      projectId: ProjectId.make("project-1"),
+      title: `Task ${index}`,
+      prompt: `Prompt ${index}`,
+      modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.6" },
+      runtimeMode: "auto" as const,
+      envMode: "worktree" as const,
+    }));
+    const capped = buildAgentControlProposalCardModel(
+      makeProposal({ plan: { kind: "createThreads", entries, maxConcurrent: 2 } }),
+    );
+    expect(capped.runtimeLabel).toBe("auto · worktree · at most 2 run at once");
+    const uncapped = buildAgentControlProposalCardModel(
+      makeProposal({ plan: { kind: "createThreads", entries } }),
+    );
+    expect(uncapped.runtimeLabel).toBe("auto · worktree");
+  });
+
   it("labels sendMessage steering distinctly from queueing", () => {
     const queueModel = buildAgentControlProposalCardModel(makeProposal());
     expect(queueModel.actionLabel).toBe("Queue message");

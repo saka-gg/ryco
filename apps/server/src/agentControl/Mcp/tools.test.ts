@@ -1218,6 +1218,56 @@ it.effect("creates an immutable proposal without mutating the target", () =>
       createPlan?.kind === "createThreads" ? createPlan.entries[0]?.tokenMode : undefined,
       "balanced",
     );
+    // No cap asked for: the plan carries none, as before.
+    assert.notProperty(createPlan, "maxConcurrent");
+    const capped = yield* call(
+      deps,
+      AGENT_CONTROL_MCP_TOOLS.createThreads,
+      {
+        requestId: "request-create-capped",
+        maxConcurrent: 2,
+        entries: [1, 2, 3].map((index) => ({
+          projectId: "project-1",
+          title: `Worker ${index}`,
+          prompt: "Complete the bounded task.",
+          modelSelection,
+          runtimeMode: "auto",
+          envMode: "worktree",
+        })),
+      },
+      writeSession,
+    );
+    assert.isUndefined(capped.isError);
+    const cappedPlan = submitted[2]?.plan;
+    assert.strictEqual(
+      cappedPlan?.kind === "createThreads" ? cappedPlan.maxConcurrent : undefined,
+      2,
+    );
+    assert.strictEqual(
+      (submitted[2] as { readonly promptSummary?: string } | undefined)?.promptSummary,
+      "Create 3 threads. At most 2 run at once",
+    );
+    const outOfRange = yield* call(
+      deps,
+      AGENT_CONTROL_MCP_TOOLS.createThreads,
+      {
+        requestId: "request-create-too-many",
+        maxConcurrent: 9,
+        entries: [
+          {
+            projectId: "project-1",
+            title: "Worker",
+            prompt: "Complete the bounded task.",
+            modelSelection,
+            runtimeMode: "auto",
+            envMode: "worktree",
+          },
+        ],
+      },
+      writeSession,
+    );
+    assert.isTrue(outOfRange.isError);
+    assert.strictEqual(submitted.length, 3);
     assert.strictEqual(shellSnapshot.threads, before);
     assert.strictEqual((structured(result) as { replayed: boolean }).replayed, false);
   }),

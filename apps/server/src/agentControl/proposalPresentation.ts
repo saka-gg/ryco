@@ -101,7 +101,10 @@ export const agentControlPromptSummaryForPlan = (plan: AgentControlActionPlan): 
     case "createThreads": {
       const tasks = plan.entries.filter((entry) => entry.localTaskId !== undefined).length;
       const threads = `Create ${plan.entries.length} thread${plan.entries.length === 1 ? "" : "s"}`;
-      return tasks === 0 ? threads : `${threads}, ${tasks} started from a task`;
+      const created = tasks === 0 ? threads : `${threads}, ${tasks} started from a task`;
+      return plan.maxConcurrent === undefined
+        ? created
+        : `${created}. At most ${plan.maxConcurrent} run at once`;
     }
     case "sendMessage":
       return `Send a message to thread ${plan.threadId}`;

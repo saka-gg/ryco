@@ -56,7 +56,7 @@ const statusDescriptor: AgentControlMcpToolDescriptor = {
 const cancelDescriptor: AgentControlMcpToolDescriptor = {
   name: AGENT_CONTROL_DELEGATION_MCP_TOOLS.taskCancel,
   description:
-    "Stop the automatic return of a returnToOrigin task this chat delegated and interrupt its running turn. Use a new requestId per cancel.",
+    "Stop the automatic return of a returnToOrigin task this chat delegated and interrupt its running turn; a task still waiting for a free slot never starts. Use a new requestId per cancel.",
   inputSchema: {
     type: "object",
     properties: {
@@ -166,7 +166,7 @@ export function withDelegationTools(
       if (Option.isNone(authority)) return yield* Effect.fail(new ToolFailure(NO_AUTHORITY));
       yield* authorize(session, cancelDescriptor.name, authority.value.turnId);
       const input = yield* Schema.decodeUnknownEffect(AgentControlTaskCancelInput)(args);
-      const { record, child } = yield* deps.control.cancel({
+      const { record, child, stoppedBeforeStart } = yield* deps.control.cancel({
         callerThreadId: session.threadId,
         taskId: input.taskId,
         now: new Date().toISOString(),
@@ -183,6 +183,12 @@ export function withDelegationTools(
           taskId: input.taskId,
           return: summary,
           interrupt: { requested: false, reason: "already being delivered" },
+        });
+      if (stoppedBeforeStart)
+        return textResult({
+          taskId: input.taskId,
+          return: summary,
+          interrupt: { requested: false, reason: "not started; it will not start" },
         });
       if (!activeTurnId)
         return textResult({

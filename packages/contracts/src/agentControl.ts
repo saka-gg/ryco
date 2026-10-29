@@ -338,6 +338,8 @@ export const AGENT_CONTROL_PLAN_VERSION = 1;
 export const AGENT_CONTROL_PROMPT_MAX_CHARS = 120_000;
 export const AGENT_CONTROL_TITLE_MAX_CHARS = 200;
 export const AGENT_CONTROL_CREATE_THREADS_MAX_ENTRIES = 10;
+/** The largest `maxConcurrent` a `createThreads` request may ask for. */
+export const AGENT_CONTROL_CREATE_THREADS_MAX_CONCURRENT = 8;
 export const AGENT_CONTROL_PERSISTENT_GOAL_MAX_CHARS = 4_000;
 export const AGENT_CONTROL_AUTOMATION_PROMPT_MAX_CHARS = 12_000;
 export const AGENT_CONTROL_AUTOMATION_MIN_INTERVAL_MS = 15 * 60_000;
@@ -405,6 +407,16 @@ export const AgentControlCreateThreadsPlan = Schema.Struct({
   entries: Schema.Array(AgentControlCreateThreadEntry).check(
     Schema.isMinLength(1),
     Schema.isMaxLength(AGENT_CONTROL_CREATE_THREADS_MAX_ENTRIES),
+  ),
+  /**
+   * At most this many entries work at once. The first ones start; each later one waits, held,
+   * in its chat's follow-up queue and starts, in entry order, when an earlier one stops working.
+   * Absent: every entry starts at once.
+   */
+  maxConcurrent: Schema.optional(
+    Schema.Int.check(
+      Schema.isBetween({ minimum: 1, maximum: AGENT_CONTROL_CREATE_THREADS_MAX_CONCURRENT }),
+    ),
   ),
 }).pipe(rejectExcessProperties);
 export type AgentControlCreateThreadsPlan = typeof AgentControlCreateThreadsPlan.Type;
