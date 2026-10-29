@@ -1,3 +1,4 @@
+import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import { NonNegativeInt, PositiveInt, TrimmedNonEmptyString } from "./baseSchemas.ts";
 import { VcsDriverKind } from "./vcs.ts";
@@ -731,8 +732,13 @@ export class SourceControlProviderError extends Schema.TaggedError<SourceControl
     provider: SourceControlProviderKind,
     operation: Schema.String,
     detail: Schema.String,
-    /** Unset when the server did not classify the failure (and from servers before this field). */
-    reason: Schema.optional(SourceControlProviderErrorReason),
+    /**
+     * "failed" when the server could not classify the failure (the constructor's default), so
+     * every error a server builds carries one; unset only from servers before this field.
+     */
+    reason: Schema.optional(SourceControlProviderErrorReason).pipe(
+      Schema.withConstructorDefault(Effect.succeed("failed" as const)),
+    ),
     /** Epoch ms when the host should accept requests again; set with reason "rate-limited". */
     retryAt: Schema.optional(NonNegativeInt),
     cause: Schema.optional(Schema.Defect()),

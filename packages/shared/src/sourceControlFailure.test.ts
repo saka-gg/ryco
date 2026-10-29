@@ -2,7 +2,10 @@ import { SourceControlProviderError } from "@ryco/contracts";
 import * as Schema from "effect/Schema";
 import { describe, expect, it } from "vite-plus/test";
 
-import { isRateLimitedSourceControlFailure, readSourceControlFailure } from "./sourceControl.ts";
+import {
+  isRateLimitedSourceControlFailure,
+  readSourceControlFailure,
+} from "./sourceControlFailure.ts";
 
 describe("readSourceControlFailure", () => {
   it("reads a wire-decoded provider error", () => {
@@ -31,7 +34,9 @@ describe("readSourceControlFailure", () => {
         reason: "not-found",
       }),
     ).toEqual({ provider: "gitlab", reason: "not-found", retryAt: null });
-    const legacy = new SourceControlProviderError({
+    // A server before the fields sends neither.
+    const legacy = Schema.decodeUnknownSync(SourceControlProviderError)({
+      _tag: "SourceControlProviderError",
       provider: "github",
       operation: "listChangeRequests",
       detail: "GitHub API rate limit exceeded. Wait for the reset window and retry.",

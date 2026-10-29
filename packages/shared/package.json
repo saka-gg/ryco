@@ -180,6 +180,10 @@
       "types": "./src/sourceControl.ts",
       "import": "./src/sourceControl.ts"
     },
+    "./sourceControlFailure": {
+      "types": "./src/sourceControlFailure.ts",
+      "import": "./src/sourceControlFailure.ts"
+    },
     "./changeRequestHostCapabilities": {
       "types": "./src/changeRequestHostCapabilities.ts",
       "import": "./src/changeRequestHostCapabilities.ts"

@@ -1,7 +1,7 @@
 import { hostedHubStore } from "@ryco/client-runtime/authorization";
 import { appAtomRegistry } from "@ryco/client-runtime/rpc";
 import { classifyOverviewError } from "~/components/overview/overviewErrors.logic";
-import { EnvironmentId } from "@ryco/contracts";
+import { EnvironmentId, SourceControlProviderError } from "@ryco/contracts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 const mode = vi.hoisted(() => ({ hosted: false }));
@@ -66,6 +66,7 @@ import {
   workflowRunsBinding,
   mergeSourceControlChangeRequest,
 } from "./sourceControlAtoms";
+import { latestSourceControlPause } from "../sourceControlPause";
 
 const ENVIRONMENT_ID = EnvironmentId.make("environment-local");
 const OTHER_ENVIRONMENT_ID = EnvironmentId.make("environment-other");
@@ -324,6 +325,138 @@ describe("sourceControlAtoms — change request list polling", () => {
     expect(listChangeRequests).toHaveBeenCalledWith({ cwd: CWD, state: "open", limit: 100 });
     expect(resolveIntervalMs).toHaveBeenCalledWith(data);
     expect(changeRequestListBinding.snapshotFor(input).data).toBe(data);
+
+    release();
+  });
+
+  it("waits for a rate-limit pause to end before polling again, and reports it", async () => {
+    vi.setSystemTime(1_000_000_000_000);
+    const retryAt = Date.now() + 10 * 60_000;
+    listChangeRequests.mockRejectedValueOnce(
+      new SourceControlProviderError({
+        provider: "github",
+        operation: "listChangeRequests",
+        detail: "GitHub API rate limit exceeded.",
+        reason: "rate-limited",
+        retryAt,
+      }),
+    );
+    listChangeRequests.mockResolvedValue([changeRequest(1)]);
+    const input = { environmentId: ENVIRONMENT_ID, cwd: CWD, state: "open" as const };
+    // Polls every 30 s until rows arrive.
+    const release = changeRequestListBinding.watch(input, (data) =>
+      data === null ? 30_000 : false,
+    );
+    await flush();
+
+    expect(listChangeRequests).toHaveBeenCalledTimes(1);
+    expect(latestSourceControlPause()).toEqual({ provider: "github", retryAt });
+    // Backoff alone would have polled at 30 s, 90 s, 210 s and 450 s; poll
+    // jitter never moves the read before the pause ends.
+    await vi.advanceTimersByTimeAsync(10 * 60_000 - 1_000);
+    expect(listChangeRequests).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(2 * 60_000);
+    expect(listChangeRequests).toHaveBeenCalledTimes(2);
+    expect(changeRequestListBinding.snapshotFor(input).error).toBeNull();
+    // The read answered again, so the sidebar's notice is gone.
+    expect(latestSourceControlPause()).toBeNull();
+
+    release();
+  });
+
+  it("never reads before a pause as long as the longest wait ends", async () => {
+    vi.setSystemTime(1_000_000_000_000);
+    listChangeRequests.mockRejectedValueOnce(
+      new SourceControlProviderError({
+        provider: "github",
+        operation: "listChangeRequests",
+        detail: "GitHub requests are paused after a rate limit.",
+        reason: "rate-limited",
+        retryAt: Date.now() + 15 * 60_000,
+      }),
+    );
+    listChangeRequests.mockResolvedValue([changeRequest(1)]);
+    const input = { environmentId: ENVIRONMENT_ID, cwd: CWD, state: "open" as const };
+    const release = changeRequestListBinding.watch(input, (data) =>
+      data === null ? 30_000 : false,
+    );
+    await flush();
+
+    // The 15-minute cap is stretched like any shorter wait: jitter cannot pull
+    // the read before it.
+    await vi.advanceTimersByTimeAsync(15 * 60_000 - 1);
+    expect(listChangeRequests).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(3 * 60_000);
+    expect(listChangeRequests).toHaveBeenCalledTimes(2);
+
+    release();
+  });
+
+  it("reads a list nothing polls again when its pause ends, unless refresh is manual", async () => {
+    vi.setSystemTime(1_000_000_000_000);
+    const paused = () =>
+      new SourceControlProviderError({
+        provider: "forgejo",
+        operation: "listChangeRequests",
+        detail: "Forgejo requests are paused after a rate limit.",
+        reason: "rate-limited",
+        retryAt: Date.now() + 5 * 60_000,
+      });
+    listChangeRequests.mockRejectedValueOnce(paused()).mockRejectedValueOnce(paused());
+    listChangeRequests.mockResolvedValue([changeRequest(1)]);
+    // A settled list: no cadence of its own.
+    const automatic = { environmentId: ENVIRONMENT_ID, cwd: CWD, state: "open" as const };
+    const releaseAutomatic = changeRequestListBinding.watch(automatic, {
+      resolveIntervalMs: () => false,
+      allowsRetryAfterFailure: () => true,
+    });
+    const manual = { environmentId: ENVIRONMENT_ID, cwd: CWD, state: "closed" as const };
+    const releaseManual = changeRequestListBinding.watch(manual, {
+      resolveIntervalMs: () => false,
+      allowsRetryAfterFailure: () => false,
+    });
+    await flush();
+    expect(listChangeRequests).toHaveBeenCalledTimes(2);
+
+    await vi.advanceTimersByTimeAsync(5 * 60_000 - 1_000);
+    expect(listChangeRequests).toHaveBeenCalledTimes(2);
+    await vi.advanceTimersByTimeAsync(2 * 60_000);
+    // Only the automatic list read again, once, and its rows arrived.
+    expect(listChangeRequests).toHaveBeenCalledTimes(3);
+    expect(changeRequestListBinding.snapshotFor(automatic).data).toHaveLength(1);
+    expect(changeRequestListBinding.snapshotFor(manual).error).not.toBeNull();
+    // A success with no cadence schedules nothing more.
+    await vi.advanceTimersByTimeAsync(60 * 60_000);
+    expect(listChangeRequests).toHaveBeenCalledTimes(3);
+
+    releaseAutomatic();
+    releaseManual();
+  });
+
+  it("backs off while a pause's end has already passed instead of reading every second", async () => {
+    vi.setSystemTime(1_000_000_000_000);
+    // The server still holds a rate-limited answer whose end is behind it (or the browser's
+    // clock runs ahead of the node's).
+    listChangeRequests.mockImplementation(async () => {
+      throw new SourceControlProviderError({
+        provider: "github",
+        operation: "listChangeRequests",
+        detail: "GitHub requests are paused after a rate limit.",
+        reason: "rate-limited",
+        retryAt: Date.now() - 5_000,
+      });
+    });
+    const input = { environmentId: ENVIRONMENT_ID, cwd: CWD, state: "open" as const };
+    const release = changeRequestListBinding.watch(input, {
+      resolveIntervalMs: () => false,
+      allowsRetryAfterFailure: () => true,
+    });
+    await flush();
+    expect(listChangeRequests).toHaveBeenCalledTimes(1);
+
+    // Waits of about 1, 2 and 4 s; every 1 s would have read ten times.
+    await vi.advanceTimersByTimeAsync(10_000);
+    expect(listChangeRequests).toHaveBeenCalledTimes(4);
 
     release();
   });

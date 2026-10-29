@@ -16,7 +16,7 @@
  * On the boot path (the caches are built at startup), so it stays small.
  */
 import { Effect } from "effect";
-import { readSourceControlFailure } from "@ryco/shared/sourceControl";
+import { readSourceControlFailure } from "@ryco/shared/sourceControlFailure";
 
 import { ProcessLaneRef } from "../processGovernor.ts";
 import { isForgeRequestRefusedWhilePaused } from "./forgeRequestPaused.ts";

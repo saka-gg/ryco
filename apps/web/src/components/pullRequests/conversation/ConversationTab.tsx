@@ -1,6 +1,8 @@
 import { useCallback, useRef } from "react";
 
+import { useSettings } from "../../../hooks/useSettings";
 import { invalidateSourceControl } from "../../../rpc/useSourceControl";
+import { formatSourceControlPause } from "../../../sourceControlPause";
 import { Skeleton } from "../../ui/skeleton";
 import { usePullRequestSelection, usePullRequestsPage } from "../PullRequestsPageContext";
 import { FactsPanel } from "../rail/FactsPanel";
@@ -92,6 +94,7 @@ function Conversation() {
 
 function DescriptionArea() {
   const selection = usePullRequestSelection();
+  const timestampFormat = useSettings((settings) => settings.timestampFormat);
   if (selection.detail.data) {
     return (
       <div className="mt-7">
@@ -103,7 +106,10 @@ function DescriptionArea() {
     return (
       <div className="mt-7">
         <TimelineNotice
-          message="Couldn’t load this pull request."
+          message={
+            formatSourceControlPause(selection.detail.error, timestampFormat)?.title ??
+            "Couldn’t load this pull request."
+          }
           onRetry={() =>
             invalidateSourceControl({
               environmentId: selection.mutationTarget.environmentId,

@@ -7,7 +7,9 @@ import { groupChangeRequestTimeline } from "@ryco/client-runtime/state/pull-requ
 import { ArrowUpRightIcon, HistoryIcon } from "lucide-react";
 import { memo, useMemo, type Ref } from "react";
 
+import { useSettings } from "../../../hooks/useSettings";
 import { invalidateSourceControl } from "../../../rpc/useSourceControl";
+import { formatSourceControlPause } from "../../../sourceControlPause";
 import { Skeleton } from "../../ui/skeleton";
 import { usePullRequestSelection, usePullRequestsPage } from "../PullRequestsPageContext";
 import {
@@ -40,6 +42,7 @@ export function PullRequestTimeline(props: {
   const { model } = usePullRequestsPage();
   const selection = usePullRequestSelection();
   const activity = selection.activity;
+  const timestampFormat = useSettings((settings) => settings.timestampFormat);
 
   if (!model.capabilities.activity) return <DetailCommentsTimeline />;
   if (activity.data) {
@@ -54,7 +57,10 @@ export function PullRequestTimeline(props: {
   if (activity.error) {
     return (
       <TimelineNotice
-        message="Couldn’t load the activity."
+        message={
+          formatSourceControlPause(activity.error, timestampFormat)?.title ??
+          "Couldn’t load the activity."
+        }
         onRetry={() =>
           invalidateSourceControl({
             environmentId: selection.mutationTarget.environmentId,

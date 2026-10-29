@@ -20,6 +20,7 @@ import type { ActivePlanState, LatestProposedPlanState } from "../../session-log
 import type { AgentPanelModel, ThreadSubagentView } from "../../threadWorkspaceViewModel";
 import type { TurnDiffSummary } from "../../types";
 import { buildOverviewChangedFiles } from "../overviewChanges.logic";
+import { sourceControlPauseTimeFormatter } from "../../sourceControlPause";
 import { classifyOverviewError } from "../overview/overviewErrors.logic";
 import type {
   OverviewChanges,
@@ -152,6 +153,7 @@ export function useChatOverviewModel(input: ChatOverviewModelInput): ChatOvervie
   } = input;
 
   const sourceControlRefreshMode = useSettings((settings) => settings.sourceControlRefreshMode);
+  const timestampFormat = useSettings((settings) => settings.timestampFormat);
   const postPushWorkflowWatchForContext = selectActivePostPushWorkflowDiscoveryWatch({
     watch: postPushWorkflowWatch,
     environmentId,
@@ -318,8 +320,14 @@ export function useChatOverviewModel(input: ChatOverviewModelInput): ChatOvervie
           workflowError: overviewWorkflowRuns.error,
           detailError: overviewPullRequestDetail.error,
         }),
+        { formatTime: sourceControlPauseTimeFormatter(timestampFormat) },
       ),
-    [overviewWorkflowRunsSupported, overviewWorkflowRuns.error, overviewPullRequestDetail.error],
+    [
+      overviewWorkflowRunsSupported,
+      overviewWorkflowRuns.error,
+      overviewPullRequestDetail.error,
+      timestampFormat,
+    ],
   );
 
   const overviewPullRequest = useMemo<OverviewPullRequestState | null>(() => {
@@ -496,14 +504,16 @@ export function useChatOverviewModel(input: ChatOverviewModelInput): ChatOvervie
   // rather than a persistent banner in the panel. The dedupe signature keys off
   // the PR + kind + message, so the 30s polling loop won't re-toast the same
   // failure; it resets when the error clears, so a later recurrence notifies
-  // again. The raw command dump stays out of the UI and only goes to the log.
+  // again. A rate-limit pause keys on itself, not its end time, so a pause the
+  // host extends does not toast again. The raw command dump stays out of the
+  // UI and only goes to the log.
   const lastToastedErrorRef = useRef<string | null>(null);
   useEffect(() => {
     if (!checksErrorInfo) {
       lastToastedErrorRef.current = null;
       return;
     }
-    const signature = `${overviewPullRequestNumber ?? "?"}|${checksErrorInfo.kind}|${checksErrorInfo.message}`;
+    const signature = `${overviewPullRequestNumber ?? "?"}|${checksErrorInfo.kind}|${checksErrorInfo.paused ? "rate-limited" : checksErrorInfo.message}`;
     if (lastToastedErrorRef.current === signature) return;
     lastToastedErrorRef.current = signature;
     if (checksErrorInfo.raw) {

@@ -480,6 +480,16 @@ describe("SourceControlProviderError", () => {
     );
   });
 
+  it("sends reason failed for an error the server did not classify", () => {
+    const unclassified = new SourceControlProviderError({
+      provider: "github",
+      operation: "listChangeRequests",
+      detail: "gh pr list (/Users/x/rate limit demo) exited with 1",
+    });
+    expect(unclassified.reason).toBe("failed");
+    expect(decode(wire(unclassified)).reason).toBe("failed");
+  });
+
   it("decodes errors from servers that send neither field", () => {
     const decoded = decode({
       _tag: "SourceControlProviderError",

@@ -11,6 +11,7 @@ import {
   type ChangeRequestHostCapabilities,
   type ChangeRequestIdleRefresh,
 } from "@ryco/shared/changeRequestHostCapabilities";
+import { readSourceControlPause, type SourceControlPause } from "@ryco/shared/sourceControlFailure";
 import {
   deriveChangeRequestNextAction,
   indexReviewThreads,
@@ -27,6 +28,7 @@ import { DateTime, Option } from "effect";
 
 import type { ChangeRequestMutationTarget } from "../../rpc/sourceControlAtoms";
 import type { SourceControlQueryState } from "../../rpc/useSourceControl";
+import type { SourceControlPauseText } from "../../sourceControlPause";
 import { arrangePullRequestStacks } from "./list/pullRequestListStacks.logic";
 import {
   resolvePullRequestsSort,
@@ -57,6 +59,8 @@ export interface PullRequestsListModel {
   readonly isLoading: boolean;
   readonly isFetching: boolean;
   readonly error: string | null;
+  /** Set while a list read is refused because the host is rate limiting this account. */
+  readonly pause: SourceControlPauseText | null;
 }
 
 export interface PullRequestSelectionModel {
@@ -117,6 +121,39 @@ export function shouldReadInvolvementLists(input: {
   return input.listEnabled && (input.provider === null || input.capabilities.involvementFilters);
 }
 
+/**
+ * Whether the involvement reads can group the list. A host without the
+ * filters answers them with an error (one flat list); a read that keeps its
+ * rows through a rate-limit pause still groups, so the rows stay where they are.
+ */
+export function involvementReadsUsable(
+  supported: boolean,
+  reads: ReadonlyArray<Pick<SourceControlQueryState<unknown>, "data" | "error">>,
+): boolean {
+  return (
+    supported &&
+    reads.every(
+      (read) =>
+        read.error === null || (read.data !== null && readSourceControlPause(read.error) !== null),
+    )
+  );
+}
+
+/**
+ * The pause behind the list reads that failed because the host is rate
+ * limiting this account: the one that ends last (they share the host's pause,
+ * and a later refusal may carry its extension), else any without a known end.
+ */
+export function findSourceControlPause(errors: ReadonlyArray<unknown>): SourceControlPause | null {
+  let found: SourceControlPause | null = null;
+  for (const error of errors) {
+    const pause = readSourceControlPause(error);
+    if (pause === null) continue;
+    if (found === null || (pause.retryAt ?? -1) > (found.retryAt ?? -1)) found = pause;
+  }
+  return found;
+}
+
 export function mergeChangeRequestLists(
   ...lists: ReadonlyArray<ReadonlyArray<ChangeRequest> | null | undefined>
 ): Map<number, ChangeRequest> {
@@ -163,7 +200,7 @@ export function derivePullRequestsList(input: {
   readonly search: PullRequestsSearch;
   /** Folded list groups; their rows leave `ordered`, so J/K walks only what is visible. */
   readonly foldedGroups?: ReadonlyArray<string> | undefined;
-}): Omit<PullRequestsListModel, "isLoading" | "isFetching" | "error"> {
+}): Omit<PullRequestsListModel, "isLoading" | "isFetching" | "error" | "pause"> {
   const { search } = input;
   const byNumber = mergeChangeRequestLists(
     input.stateList,

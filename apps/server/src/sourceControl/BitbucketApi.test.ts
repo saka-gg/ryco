@@ -1221,7 +1221,7 @@ it.effect("types a 429 with Retry-After as a rate limit up to the provider error
   }).pipe(Effect.provide(layer));
 });
 
-it.effect("types a 404 as not found and leaves other failures unclassified", () => {
+it.effect("types a 404 as not found and other failures as failed", () => {
   const { layer } = makeLayer({
     response: (request) =>
       request.url.endsWith("/pullrequests/404")
@@ -1239,7 +1239,7 @@ it.effect("types a 404 as not found and leaves other failures unclassified", () 
     const failed = yield* provider
       .getChangeRequest({ cwd: "/repo", reference: "500" })
       .pipe(Effect.flip);
-    assert.strictEqual(failed.reason, undefined);
+    assert.strictEqual(failed.reason, "failed");
     assert.ok(failed.detail.startsWith("Bitbucket returned HTTP 500"));
   }).pipe(Effect.provide(layer));
 });
