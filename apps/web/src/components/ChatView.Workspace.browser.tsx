@@ -2301,7 +2301,23 @@ describe("ChatView Workspace (full app)", () => {
         targetMessageId: "msg-user-sticky-claude-model-test" as MessageId,
         targetText: "sticky claude model test",
       }),
-      configureFixture: enableChatNewLocalShortcut,
+      configureFixture: (nextFixture) => {
+        enableChatNewLocalShortcut(nextFixture);
+        // The last-used choice stands only on a node that lists its provider.
+        const codex = nextFixture.serverConfig.providers[0];
+        if (!codex) throw new Error("Expected the default Codex provider fixture.");
+        nextFixture.serverConfig = {
+          ...nextFixture.serverConfig,
+          providers: [
+            ...nextFixture.serverConfig.providers,
+            {
+              ...codex,
+              driver: ProviderDriverKind.make("claudeAgent"),
+              instanceId: ProviderInstanceId.make("claudeAgent"),
+            },
+          ],
+        };
+      },
     });
 
     try {

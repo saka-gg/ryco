@@ -98,7 +98,14 @@ export function getDefaultServerModel(
   providers: ReadonlyArray<ServerProvider>,
   provider: ProviderDriverKind,
 ): string {
-  const models = getProviderModels(providers, provider);
+  return getDefaultProviderModel(getProviderModels(providers, provider), provider);
+}
+
+/** The default model of one provider instance, given the models it reports. */
+export function getDefaultProviderModel(
+  models: ReadonlyArray<ServerProviderModel>,
+  provider: ProviderDriverKind,
+): string {
   const configuredDefault = DEFAULT_MODEL_BY_PROVIDER[provider] ?? DEFAULT_MODEL;
   return (
     models.find((model) => model.slug === configuredDefault)?.slug ??

@@ -3,11 +3,13 @@ import {
   DEFAULT_SERVER_SETTINGS,
   EnvironmentId,
   ProjectId,
+  ProviderDriverKind,
   ProviderInstanceId,
   ThreadId,
   type EffectiveProjectPreferences,
   type EnvironmentApi,
   type ServerConfig,
+  type ServerProvider,
 } from "@ryco/contracts";
 import { scopedProjectKey } from "@ryco/client-runtime/scoped";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
@@ -317,6 +319,61 @@ describe("draft settings for canonical environment identities", () => {
     await new Promise((resolve) => setTimeout(resolve, 50));
     expect(readDraft()).toMatchObject({ envMode: "local" });
   });
+  it("opens on the last-used provider instead of a signed-out built-in default", async () => {
+    const provider = (driver: string, state: Partial<ServerProvider>): ServerProvider => ({
+      instanceId: ProviderInstanceId.make(driver),
+      driver: ProviderDriverKind.make(driver),
+      enabled: true,
+      installed: true,
+      version: "1.0.0",
+      status: "ready",
+      auth: { status: "authenticated" },
+      checkedAt: "2026-10-28T00:00:00.000Z",
+      models: [],
+      slashCommands: [],
+      skills: [],
+      ...state,
+    });
+    const primaryConfig = {
+      ...config(canonicalId),
+      providers: [
+        provider("codex", { status: "error", auth: { status: "unauthenticated" } }),
+        provider("cursor", {}),
+      ],
+    };
+    writePrimaryEnvironmentDescriptor(primaryConfig.environment);
+    setServerConfigSnapshot(primaryConfig);
+    __setEnvironmentApiOverrideForTests(canonicalId, {
+      server: {
+        getProjectPreferences: async () => ({
+          ...effective,
+          initialModelSelection: {
+            value: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.6-terra" },
+            source: "builtin",
+          },
+        }),
+      },
+    } as unknown as EnvironmentApi);
+    const cursor = ProviderInstanceId.make("cursor");
+    useComposerDraftStore.setState({
+      stickyModelSelectionByProvider: { [cursor]: { instanceId: cursor, model: "composer-2" } },
+      stickyActiveProvider: cursor,
+    });
+    mounted = await render(<NewDraft environmentId={canonicalId} />);
+    await page.getByRole("button", { name: "New draft" }).click();
+    await vi.waitFor(() => expect(navigate).toHaveBeenCalledOnce());
+
+    const draft = useComposerDraftStore
+      .getState()
+      .getDraftSessionByLogicalProjectKey(
+        scopedProjectKey({ environmentId: canonicalId, projectId }),
+      );
+    expect(useComposerDraftStore.getState().getComposerDraft(draft!.draftId)).toMatchObject({
+      activeProvider: cursor,
+      modelSelectionByProvider: { [cursor]: { instanceId: cursor, model: "composer-2" } },
+    });
+  });
+
   it("leaves a task's draft to its task when a new thread is opened from it", async () => {
     const primaryConfig = config(canonicalId);
     writePrimaryEnvironmentDescriptor(primaryConfig.environment);
