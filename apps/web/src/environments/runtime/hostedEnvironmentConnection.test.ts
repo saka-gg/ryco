@@ -1,6 +1,7 @@
 import {
   EnvironmentId,
   ORCHESTRATION_WS_METHODS,
+  WS_METHODS,
   type OrchestrationShellSnapshot,
 } from "@ryco/contracts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
@@ -13,12 +14,30 @@ interface CapturedTransport {
       readonly tag: string;
       readonly stream: boolean;
     }) => string;
+    readonly onRequestStart?: (request: {
+      readonly id: string;
+      readonly tag: string;
+      readonly stream: boolean;
+    }) => void;
   };
+}
+
+interface GitCall {
+  readonly input: unknown;
+  readonly resolve: (value: unknown) => void;
+  readonly reject: (error: unknown) => void;
 }
 
 interface CapturedClient {
   readonly dispose: ReturnType<typeof vi.fn>;
+  readonly git: {
+    readonly runStackedAction: ReturnType<typeof vi.fn>;
+    readonly resumeStackedAction: ReturnType<typeof vi.fn>;
+  };
+  readonly gitStarts: GitCall[];
+  readonly gitResumes: GitCall[];
   emitShellSnapshot(snapshot: OrchestrationShellSnapshot): void;
+  emitConfigCapabilities(capabilities: object): void;
 }
 
 const { capturedTransports, capturedClients, createWsRpcClient } = vi.hoisted(() => ({
@@ -74,13 +93,44 @@ function makeClient(): CapturedClient & Record<string, unknown> {
   let shellListener:
     | ((item: { kind: "snapshot"; snapshot: OrchestrationShellSnapshot }) => void)
     | null = null;
+  let configListener: ((event: unknown) => void) | null = null;
+  const gitStarts: GitCall[] = [];
+  const gitResumes: GitCall[] = [];
+  const record = (calls: GitCall[]) => (input: unknown) =>
+    new Promise((resolve, reject) => {
+      calls.push({ input, resolve, reject });
+    });
   return {
     reconnect: vi.fn(async () => undefined),
     dispose: vi.fn(async () => undefined),
     isHeartbeatFresh: vi.fn(() => false),
     server: {
       subscribeLifecycle: vi.fn(() => () => undefined),
-      subscribeConfig: vi.fn(() => () => undefined),
+      subscribeConfig: vi.fn((listener: typeof configListener) => {
+        configListener = listener;
+        return () => {
+          configListener = null;
+        };
+      }),
+    },
+    git: {
+      runStackedAction: vi.fn(record(gitStarts)),
+      resumeStackedAction: vi.fn(record(gitResumes)),
+    },
+    gitStarts,
+    gitResumes,
+    emitConfigCapabilities(capabilities) {
+      configListener?.({
+        version: 1,
+        type: "snapshot",
+        config: {
+          environment: { environmentId, label: node.label, capabilities },
+          providers: [],
+          issues: [],
+          keybindings: [],
+          settings: {},
+        },
+      });
     },
     orchestration: {
       dispatchCommand: vi.fn(async () => ({ sequence: 0 })),
@@ -295,6 +345,167 @@ describe("hosted environment connections", () => {
     await service.suspendHostedEnvironment(environmentId, renewed);
     expect(service.readEnvironmentConnection(environmentId)).toBeNull();
     expect(capturedClients[0]!.dispose).toHaveBeenCalledOnce();
+  });
+
+  it("follows a dropped Git action only on the next generation, once its session is adoptable", async () => {
+    const { service, sessions, generation } = await setup();
+    const { recordWsConnectionAttempt, recordWsConnectionOpened } =
+      await import("@ryco/client-runtime/rpc");
+    const openSocket = () => {
+      recordWsConnectionAttempt("wss://hub.example.test/v1/relay/client", {
+        environmentId,
+        recordGlobal: false,
+      });
+      recordWsConnectionOpened({ environmentId, recordGlobal: false });
+    };
+    const flush = async () => {
+      for (let index = 0; index < 20; index += 1) await Promise.resolve();
+    };
+    const input = {
+      actionId: "6f1c0d3e-8a5b-4c2d-9e7f-1a2b3c4d5e6f",
+      cwd: "/repo",
+      action: "push" as const,
+    };
+
+    await service.connectHostedEnvironment(node, generation);
+    sessions.transportStatus(environmentId, generation, "online");
+    openSocket();
+    capturedClients[0]!.emitConfigCapabilities({ recoverableGitActions: true });
+    capturedClients[0]!.emitShellSnapshot(shellSnapshot(1));
+    const run = service
+      .readEnvironmentConnection(environmentId)!
+      .client.git.runStackedAction(input, { recoverable: true });
+    expect(capturedClients[0]!.gitStarts[0]!.input).toEqual({ ...input, recoverable: true });
+
+    // The relay drops: the old generation's connection is suspended and replaced.
+    sessions.connectionClosed(environmentId, generation);
+    capturedClients[0]!.gitStarts[0]!.reject(
+      Object.assign(new Error("SocketReadError"), { _tag: "RpcClientError" }),
+    );
+    await flush();
+    sessions.suspendAll();
+    await service.suspendHostedEnvironment(environmentId, generation);
+    const next = sessions.read(environmentId)!.generation;
+    sessions.markConnectRequested(environmentId, next);
+    await service.connectHostedEnvironment(node, next);
+    sessions.transportStatus(environmentId, next, "online");
+    openSocket();
+    capturedClients[1]!.emitConfigCapabilities({ recoverableGitActions: true });
+    await flush();
+    expect(capturedClients[1]!.git.resumeStackedAction).not.toHaveBeenCalled();
+
+    // The new generation accepts its own snapshot: now it may follow the action.
+    capturedClients[1]!.emitShellSnapshot(shellSnapshot(2));
+    await flush();
+    expect(capturedClients[1]!.git.resumeStackedAction).toHaveBeenCalledOnce();
+    expect(capturedClients[1]!.gitResumes[0]!.input).toEqual(input);
+    capturedClients[1]!.gitResumes[0]!.resolve({ action: "push" });
+    await expect(run).resolves.toEqual({ action: "push" });
+    expect(capturedClients[0]!.git.resumeStackedAction).not.toHaveBeenCalled();
+    expect(capturedClients[0]!.git.runStackedAction).toHaveBeenCalledOnce();
+    expect(capturedClients[1]!.git.runStackedAction).not.toHaveBeenCalled();
+  });
+
+  it("does not follow a dropped Git action on a snapshot the lifecycle owner did not accept", async () => {
+    const { service, sessions, generation } = await setup();
+    const { recordWsConnectionAttempt, recordWsConnectionOpened } =
+      await import("@ryco/client-runtime/rpc");
+    recordWsConnectionAttempt("wss://hub.example.test/v1/relay/client", {
+      environmentId,
+      recordGlobal: false,
+    });
+    recordWsConnectionOpened({ environmentId, recordGlobal: false });
+    const flush = async () => {
+      for (let index = 0; index < 20; index += 1) await Promise.resolve();
+    };
+    const input = {
+      actionId: "0b7e6f52-3c1d-4a9e-8f20-6d5c4b3a2918",
+      cwd: "/repo",
+      action: "commit" as const,
+    };
+
+    await service.connectHostedEnvironment(node, generation);
+    sessions.transportStatus(environmentId, generation, "online");
+    const client = capturedClients[0]!;
+    client.emitConfigCapabilities({ recoverableGitActions: true });
+    client.emitShellSnapshot(shellSnapshot(1));
+    const run = service
+      .readEnvironmentConnection(environmentId)!
+      .client.git.runStackedAction(input, { recoverable: true });
+
+    sessions.connectionClosed(environmentId, generation);
+    client.gitStarts[0]!.reject(
+      Object.assign(new Error("SocketReadError"), { _tag: "RpcClientError" }),
+    );
+    await flush();
+    // A snapshot inside the relay gap came from the lost channel: the record ignores it.
+    client.emitShellSnapshot(shellSnapshot(2));
+    await flush();
+    expect(client.git.resumeStackedAction).not.toHaveBeenCalled();
+
+    sessions.transportStatus(environmentId, generation, "online");
+    sessions.connectionRecovered(environmentId, generation);
+    client.emitShellSnapshot(shellSnapshot(3));
+    await flush();
+    expect(client.git.resumeStackedAction).toHaveBeenCalledOnce();
+    client.gitResumes[0]!.resolve({ action: "commit" });
+    await expect(run).resolves.toEqual({ action: "commit" });
+  });
+
+  it("leaves its Git actions' delivery to the recovery, which holds the session only for a lost request-owned one", async () => {
+    const { service, sessions, generation } = await setup();
+    const { recordWsConnectionAttempt, recordWsConnectionOpened } =
+      await import("@ryco/client-runtime/rpc");
+    const { hostedHubController } = await import("@ryco/client-runtime/authorization");
+    recordWsConnectionAttempt("wss://hub.example.test/v1/relay/client", {
+      environmentId,
+      recordGlobal: false,
+    });
+    recordWsConnectionOpened({ environmentId, recordGlobal: false });
+    const flush = async () => {
+      for (let index = 0; index < 20; index += 1) await Promise.resolve();
+    };
+    const input = {
+      actionId: "2f4e6a8c-0b1d-4e3f-9a5c-7e9b1d3f5a7c",
+      cwd: "/repo",
+      action: "push" as const,
+    };
+    const started = (id: string) =>
+      capturedTransports[0]!.options.onRequestStart?.({
+        id,
+        tag: WS_METHODS.gitRunStackedAction,
+        stream: true,
+      });
+
+    await service.connectHostedEnvironment(node, generation);
+    sessions.transportStatus(environmentId, generation, "online");
+    const client = capturedClients[0]!;
+    client.emitConfigCapabilities({ recoverableGitActions: true });
+    client.emitShellSnapshot(shellSnapshot(1));
+    const connection = service.readEnvironmentConnection(environmentId)!;
+
+    // A request-owned action lost with its channel: nothing follows it again.
+    const owned = connection.client.git.runStackedAction(input).catch((error: unknown) => error);
+    started("owned");
+    client.gitStarts[0]!.reject(
+      Object.assign(new Error("SocketReadError"), { _tag: "RpcClientError" }),
+    );
+    await owned;
+    expect(sessions.read(environmentId)).toMatchObject({
+      sessionStatus: "delivery-unknown",
+      sessionRecoveredAfterUnknown: true,
+    });
+    hostedHubController.acknowledgeDeliveryUnknown(environmentId);
+    expect(sessions.read(environmentId)?.sessionStatus).toBe("ready");
+
+    // A recoverable one still open when the connection is suspended is followed again instead.
+    void connection.client.git
+      .runStackedAction(input, { recoverable: true })
+      .catch(() => undefined);
+    started("recoverable");
+    await flush();
+    sessions.suspendAll();
+    expect(sessions.read(environmentId)?.sessionStatus).not.toBe("delivery-unknown");
   });
 
   it("never builds a hosted connection on the generic primary path", async () => {

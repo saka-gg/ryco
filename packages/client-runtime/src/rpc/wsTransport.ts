@@ -13,6 +13,7 @@ import type { ObservabilityService, SocketService } from "../platform/index.ts";
 import { clearAllTrackedRpcRequests } from "./requestLatencyState.ts";
 import {
   createWsRpcProtocolLayer,
+  hasErrorTag,
   isAwaitingAdmission,
   makeHostedRpcProtocolClient,
   makeDeviceRpcProtocolClient,
@@ -144,6 +145,26 @@ export function resyncSubscriptionRetryDelayMs(
  */
 export function isUnsupportedRpcError(error: unknown): boolean {
   return formatErrorMessage(error).includes("Unknown request tag");
+}
+
+/**
+ * Effect's `Cause.squash` of a cause made only of interruptions: what a request
+ * rejects with when its client is disposed or reconnected mid-request, or when
+ * the node interrupts it on its way down. The wire test pins it.
+ */
+const INTERRUPTED_WITHOUT_ERROR = "All fibers interrupted without error";
+
+/**
+ * Whether the transport gave up on the request rather than the node answering
+ * it: every socket failure reaches a pending request as an `RpcClientError`, a
+ * disposal or reconnect interrupts it, and a disposed transport sends nothing.
+ */
+export function isRpcTransportFailure(error: unknown): boolean {
+  return (
+    hasErrorTag(error, "RpcClientError") ||
+    error instanceof RpcTransportDisposedError ||
+    (error instanceof Error && error.message === INTERRUPTED_WITHOUT_ERROR)
+  );
 }
 
 /** The response did not fit the largest message the connection carries (relay cap). */

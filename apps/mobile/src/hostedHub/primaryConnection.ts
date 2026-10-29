@@ -6,6 +6,7 @@ import {
 } from "@ryco/client-runtime/connection";
 import {
   getHostedEnvironmentSessions,
+  hostedEnvironmentResumeReadiness,
   hostedHubController,
   hostedHubStore,
   markHostedSessionReady,
@@ -22,7 +23,7 @@ import {
   createHostedEnvironmentAttemptFactory,
   hostedDispatchLineage,
 } from "@ryco/client-runtime/relay";
-import { createWsRpcClient } from "@ryco/client-runtime/rpc";
+import { bindHostedGitActionDelivery, createWsRpcClient } from "@ryco/client-runtime/rpc";
 
 import { WsTransport } from "../rpc/wsTransport";
 import { readMobileHostedConnectionCoordinator } from "../connection/hostedConnectionCoordinator";
@@ -118,17 +119,20 @@ export function createHostedEnvironmentConnection(
       },
     },
   });
+  // Environment-scoped, not generation-scoped: the replay may give up, and a
+  // Git action fail, after this connection's generation has been replaced.
+  const markUncertain = () => hostedHubController.markEnvironmentDeliveryUnknown(environmentId);
   const dispatchReplay = bindHostedDispatchReplay({
     environmentId,
     lineage: hostedDispatchLineage(hostedHubStore.getState()),
-    // Environment-scoped, not generation-scoped: the replay may give up after
-    // this connection's generation has been replaced.
-    markUncertain: () => hostedHubController.markEnvironmentDeliveryUnknown(environmentId),
+    markUncertain,
   });
+  // The connection's Git action recovery answers for its actions' delivery.
+  const gitActionDelivery = bindHostedGitActionDelivery(markUncertain);
   const client = dispatchReplay.wrap(
     createWsRpcClient(
       new WsTransport(() => attemptFactory.nextUrl(), {
-        ...attemptFactory.lifecycleHandlers(dispatchReplay),
+        ...attemptFactory.lifecycleHandlers(dispatchReplay, gitActionDelivery),
         getConnectionLabel: () => node.label,
         getEnvironmentId: () => environmentId,
       }),
@@ -163,6 +167,9 @@ export function createHostedEnvironmentConnection(
       generation,
       readCurrent: () => sessions.read(environmentId)?.generation ?? null,
     },
+    // A dropped Git action is followed again only once this generation's session is adoptable.
+    resumeReadiness: hostedEnvironmentResumeReadiness(sessions, environmentId, generation),
+    gitActionDelivery,
     onConfigUpdated: (config) => {
       if (!acceptsEvent()) return;
       writeEnvironmentServerConfig(environmentId, config);

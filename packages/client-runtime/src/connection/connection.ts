@@ -11,6 +11,11 @@ import type {
 } from "@ryco/contracts";
 
 import type { KnownEnvironment } from "../knownEnvironment.ts";
+import {
+  getGitActionRecovery,
+  type GitActionRecoveryReadiness,
+  type HostedGitActionDeliveryBinding,
+} from "../rpc/gitActionRecovery.ts";
 import type { WsRpcClient } from "../rpc/index.ts";
 import { skipNewerNodeContent } from "../rpc/newerNodeState.ts";
 import { projectServerConfigEvent } from "../rpc/serverConfigProjection.ts";
@@ -141,6 +146,18 @@ export interface EnvironmentConnectionInput extends OrchestrationHandlers {
   ) => void;
   /** Hosted connections only: see {@link ConnectionLifecycleGeneration}. */
   readonly lifecycleGeneration?: ConnectionLifecycleGeneration;
+  /**
+   * Hosted connections only: whether the lifecycle owner lets this connection's session follow
+   * a dropped Git action again (`hostedEnvironmentResumeReadiness`). On top of a connected
+   * socket, the current generation and a shell snapshot of the current attempt.
+   */
+  readonly resumeReadiness?: GitActionRecoveryReadiness;
+  /**
+   * Hosted connections only: the claim on this connection's Git action deliveries that its relay
+   * attempt factory was given too (`bindHostedGitActionDelivery`). The connection's recovery
+   * takes it up once attached.
+   */
+  readonly gitActionDelivery?: HostedGitActionDeliveryBinding;
   readonly onWelcome?: (payload: ServerLifecycleWelcomePayload) => void;
   readonly onResubscribe?: (environmentId: EnvironmentId) => void;
   readonly onShellError?: (environmentId: EnvironmentId) => void;
@@ -420,8 +437,89 @@ export function createEnvironmentConnection(
   const deviceBinding = input.client.device
     ? registerDeviceConnection(environmentId, input.client.device)
     : null;
+  const shellSnapshotReadiness: EnvironmentConnection["shellSnapshotReadiness"] = {
+    read: () => {
+      const status = getWsConnectionStatusForEnvironment(environmentId);
+      return !disposed &&
+        status.phase === "connected" &&
+        shellSnapshot?.attempt === status.attemptCount
+        ? shellSnapshot
+        : null;
+    },
+    subscribe: (listener) => {
+      shellReadinessListeners.add(listener);
+      return () => {
+        shellReadinessListeners.delete(listener);
+      };
+    },
+  };
+  const config: EnvironmentConnectionConfig = {
+    read: () => {
+      if (disposed || observedConfig === null) return null;
+      const status = getWsConnectionStatusForEnvironment(environmentId);
+      if (status.phase !== "connected" || observedConfig.attempt !== status.attemptCount) {
+        return null;
+      }
+      if (
+        lifecycleGeneration !== undefined &&
+        (observedConfig.generation !== lifecycleGeneration.generation || !isCurrentGeneration())
+      ) {
+        return null;
+      }
+      return observedConfig.config;
+    },
+    subscribe: (listener) => {
+      if (disposed) return () => undefined;
+      const entry = (update: EnvironmentConfigUpdate) => listener(update);
+      configListeners.add(entry);
+      const release = holdConfigStream();
+      return () => {
+        configListeners.delete(entry);
+        release();
+      };
+    },
+  };
+  // Every git action of this connection goes through the recovery: a caller that asks for it
+  // gets an action that outlives a drop and is followed again on whichever connection of the
+  // environment is ready next.
+  const resumeReadiness = input.resumeReadiness;
+  const gitRecovery = input.client.git
+    ? getGitActionRecovery().attach({
+        environmentId,
+        git: input.client.git,
+        readiness: {
+          read: () =>
+            shellSnapshotReadiness.read() !== null &&
+            isCurrentGeneration() &&
+            (resumeReadiness?.read() ?? true),
+          subscribe: (listener) => {
+            const unsubscribeShell = shellSnapshotReadiness.subscribe(listener);
+            const unsubscribeResume = resumeReadiness?.subscribe(listener);
+            return () => {
+              unsubscribeShell();
+              unsubscribeResume?.();
+            };
+          },
+        },
+        isCurrent: () => !disposed && isCurrentGeneration(),
+        supportsRecoverable: () =>
+          config.read()?.environment.capabilities.recoverableGitActions === true,
+        accountBound: lifecycleGeneration !== undefined,
+        ...(input.gitActionDelivery
+          ? { markUncertain: input.gitActionDelivery.markUncertain }
+          : {}),
+      })
+    : null;
+  if (gitRecovery) input.gitActionDelivery?.claim();
+  const client: WsRpcClient = gitRecovery
+    ? {
+        ...input.client,
+        git: { ...input.client.git, runStackedAction: gitRecovery.runStackedAction },
+      }
+    : input.client;
   const cleanup = () => {
     disposed = true;
+    gitRecovery?.detach();
     invalidateShellReadiness();
     shellReadinessListeners.clear();
     unsubShell();
@@ -441,50 +539,10 @@ export function createEnvironmentConnection(
     kind: input.kind,
     environmentId,
     knownEnvironment: input.knownEnvironment,
-    client: input.client,
+    client,
     ensureBootstrapped: () => bootstrapGate.wait(),
-    shellSnapshotReadiness: {
-      read: () => {
-        const status = getWsConnectionStatusForEnvironment(environmentId);
-        return !disposed &&
-          status.phase === "connected" &&
-          shellSnapshot?.attempt === status.attemptCount
-          ? shellSnapshot
-          : null;
-      },
-      subscribe: (listener) => {
-        shellReadinessListeners.add(listener);
-        return () => {
-          shellReadinessListeners.delete(listener);
-        };
-      },
-    },
-    config: {
-      read: () => {
-        if (disposed || observedConfig === null) return null;
-        const status = getWsConnectionStatusForEnvironment(environmentId);
-        if (status.phase !== "connected" || observedConfig.attempt !== status.attemptCount) {
-          return null;
-        }
-        if (
-          lifecycleGeneration !== undefined &&
-          (observedConfig.generation !== lifecycleGeneration.generation || !isCurrentGeneration())
-        ) {
-          return null;
-        }
-        return observedConfig.config;
-      },
-      subscribe: (listener) => {
-        if (disposed) return () => undefined;
-        const entry = (update: EnvironmentConfigUpdate) => listener(update);
-        configListeners.add(entry);
-        const release = holdConfigStream();
-        return () => {
-          configListeners.delete(entry);
-          release();
-        };
-      },
-    },
+    shellSnapshotReadiness,
+    config,
     reconnect: async () => {
       bootstrapGate.reset();
       invalidateShellReadiness();

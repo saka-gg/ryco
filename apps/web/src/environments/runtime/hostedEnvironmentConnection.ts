@@ -1,10 +1,11 @@
 import type { HostedHubNode } from "@ryco/client-runtime/authorization";
 import type { HostedEnvironmentSessions } from "@ryco/client-runtime/authorization/hostedEnvironmentSessions";
 import { createKnownEnvironment } from "@ryco/client-runtime/knownEnvironment";
-import { createDeviceRpcClient } from "@ryco/client-runtime/rpc";
+import { bindHostedGitActionDelivery, createDeviceRpcClient } from "@ryco/client-runtime/rpc";
 import type { EnvironmentId } from "@ryco/contracts";
 
 import {
+  hostedEnvironmentResumeReadiness,
   hostedHubController,
   hostedHubStore,
   markHostedSessionReady,
@@ -43,7 +44,13 @@ export interface HostedConnectionFence {
 
 type HostedConnectionHandlers = Omit<
   Parameters<typeof createEnvironmentConnection>[0],
-  "kind" | "knownEnvironment" | "client" | "lifecycleGeneration" | "onConfigUpdated"
+  | "kind"
+  | "knownEnvironment"
+  | "client"
+  | "lifecycleGeneration"
+  | "resumeReadiness"
+  | "gitActionDelivery"
+  | "onConfigUpdated"
 >;
 
 /**
@@ -120,13 +127,16 @@ export function createHostedEnvironmentConnection(
     ports: webHostedEnvironmentAttemptPorts({ nodeId: node.id, environmentId }),
     isDemanded: input.isDemanded,
   });
+  const markUncertain = () => hostedHubController.markEnvironmentDeliveryUnknown(environmentId);
   const dispatchReplay = bindHostedDispatchReplay({
     environmentId,
     lineage: hostedDispatchLineage(hostedHubStore.getState()),
-    markUncertain: () => hostedHubController.markEnvironmentDeliveryUnknown(environmentId),
+    markUncertain,
   });
+  // The connection's Git action recovery answers for its actions' delivery.
+  const gitActionDelivery = bindHostedGitActionDelivery(markUncertain);
   const transport = new HostedWsTransport(() => factory.nextUrl(), {
-    ...factory.lifecycleHandlers(dispatchReplay),
+    ...factory.lifecycleHandlers(dispatchReplay, gitActionDelivery),
     getConnectionLabel: () => node.label,
     getEnvironmentId: () => environmentId,
   });
@@ -150,6 +160,9 @@ export function createHostedEnvironmentConnection(
       generation,
       readCurrent: () => sessions.read(environmentId)?.generation ?? null,
     },
+    // A dropped Git action is followed again only once this generation's session is adoptable.
+    resumeReadiness: hostedEnvironmentResumeReadiness(sessions, environmentId, generation),
+    gitActionDelivery,
     onConfigUpdated: (config, type) => writeEnvironmentServerConfig(environmentId, config, type),
     ...input.handlersFor(hostedRecordFence(sessions, environmentId, generation)),
   });

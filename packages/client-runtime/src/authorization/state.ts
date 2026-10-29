@@ -26,6 +26,7 @@ import {
   type HostedEnvironmentSessions,
 } from "./hostedEnvironmentSessions.ts";
 import { getHostedDispatchReplay } from "../relay/dispatchReplay.ts";
+import { getGitActionRecovery } from "../rpc/gitActionRecovery.ts";
 import { NativeHandoffClientError } from "./nativeHandoff.ts";
 import {
   getHostedHubApi,
@@ -2481,6 +2482,8 @@ class HostedHubController {
     this.#clearAccountSurface();
     // No orchestration command replays into whatever account signs in next.
     getHostedDispatchReplay().endAccountSession();
+    // A Git action of this account session that waits to be followed again stops waiting.
+    getGitActionRecovery().endAccountSession();
     const previousEnvironmentId = hostedHubStore.getState().selectedNode?.environmentId ?? null;
     patchState({
       ...initialState,

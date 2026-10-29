@@ -186,6 +186,25 @@ refused, so Git never runs twice for one action. The client then asks the user t
 repository status instead of retrying: a graceful node shutdown stops the Git child, but a
 node that crashed may leave it running to completion, and a retry could race it.
 
+Clients go through `GitActionRecovery` (`packages/client-runtime/src/rpc/gitActionRecovery.ts`),
+which wraps every environment connection's `git.runStackedAction`. A caller asks for recovery per
+call (`runStackedAction(input, { recoverable: true })`), and only a caller that offers Stop should:
+closing or reloading the client no longer stops the action. The run is recoverable only when the
+connection it goes to reports `recoverableGitActions`; otherwise it stays request-owned. When a
+recoverable start ends without an answer, the client never sends it again. It waits until a
+connection of the same environment is ready (newest first): connected, on its current lifecycle
+generation, with a shell snapshot of the current socket attempt, and for a hosted connection a
+session the lifecycle owner can adopt (`canAdoptHostedEnvironmentSession`). Then it sends
+`git.resumeStackedAction`. A resume is a read, so it is admitted while a hosted session holds
+mutations after an unconfirmed action. On a hosted connection the recovery also answers for the
+delivery of its Git actions (`bindHostedGitActionDelivery`), the way the dispatch replay does for
+orchestration commands: a dropped recoverable action does not make the session delivery unknown,
+while a request-owned one lost with its connection still does. Progress from a connection that
+was replaced or disposed is dropped. The client stops waiting after 30 minutes without progress or a new connection
+(`expired`), when the hosted account session ends (`ended`), or when the node cannot resume
+(`unsupported`). In-flight actions are kept in memory only, so a reloaded client cannot follow
+them again.
+
 ### Guarded index mutation
 
 `vcs.readLocalChanges` authorizes cwd and the resolved worktree through
