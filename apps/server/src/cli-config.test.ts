@@ -1398,4 +1398,43 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
       });
     }),
   );
+
+  it.effect("lets an explicit --auto-bootstrap-project-from-cwd win over `serve`'s default", () =>
+    Effect.gen(function* () {
+      const { join } = yield* Path.Path;
+      const resolve = (autoBootstrapProjectFromCwd: Option.Option<boolean>) =>
+        resolveServerConfig(
+          {
+            mode: Option.some("web"),
+            port: Option.some(3773),
+            host: Option.none(),
+            baseDir: Option.some(join(os.tmpdir(), "ryco-cli-config-serve-bootstrap")),
+            cwd: Option.none(),
+            devUrl: Option.none(),
+            noBrowser: Option.none(),
+            bootstrapFd: Option.none(),
+            autoBootstrapProjectFromCwd,
+            logWebSocketEvents: Option.none(),
+            tailscaleServeEnabled: Option.none(),
+            tailscaleServePort: Option.none(),
+          },
+          Option.none(),
+          // What `ryco serve` passes.
+          { startupPresentation: "headless", defaultAutoBootstrapProjectFromCwd: false },
+        ).pipe(
+          Effect.provide(
+            Layer.mergeAll(
+              ConfigProvider.layer(
+                ConfigProvider.fromEnv({ env: { RYCO_AUTO_BOOTSTRAP_PROJECT_FROM_CWD: "true" } }),
+              ),
+              NetService.layer,
+            ),
+          ),
+        );
+
+      expect((yield* resolve(Option.some(true))).autoBootstrapProjectFromCwd).toBe(true);
+      // Without the flag the environment does not override it.
+      expect((yield* resolve(Option.none())).autoBootstrapProjectFromCwd).toBe(false);
+    }),
+  );
 });

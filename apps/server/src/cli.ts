@@ -491,7 +491,7 @@ export const resolveServerConfig = (
   cliLogLevel: Option.Option<LogLevel.LogLevel>,
   options?: {
     readonly startupPresentation?: StartupPresentation;
-    readonly forceAutoBootstrapProjectFromCwd?: boolean;
+    readonly defaultAutoBootstrapProjectFromCwd?: boolean;
     /**
      * Read `<state dir>/node.json` as the layer between environment variables
      * and defaults. Server commands only; never for a Desktop-spawned backend.
@@ -671,11 +671,13 @@ export const resolveServerConfig = (
     );
     const desktopBootstrapToken = bootstrap?.desktopBootstrapToken;
     const desktopControlToken = bootstrap?.desktopControlToken;
+    // An explicit flag wins; otherwise `serve`/`setup` and headless startups never register the
+    // directory they happen to run in, whatever the environment says.
     const autoBootstrapProjectFromCwd = Option.getOrElse(
       resolveOptionPrecedence(
-        Option.fromUndefinedOr(options?.forceAutoBootstrapProjectFromCwd),
-        isHeadlessStartup ? Option.some(false) : Option.none(),
         normalizedFlags.autoBootstrapProjectFromCwd,
+        Option.fromUndefinedOr(options?.defaultAutoBootstrapProjectFromCwd),
+        isHeadlessStartup ? Option.some(false) : Option.none(),
         Option.fromUndefinedOr(env.autoBootstrapProjectFromCwd),
         Option.fromUndefinedOr(bootstrap?.autoBootstrapProjectFromCwd),
       ),
@@ -3393,7 +3395,7 @@ const runServerCommand = (
   flags: CliServerFlags,
   options?: {
     readonly startupPresentation?: StartupPresentation;
-    readonly forceAutoBootstrapProjectFromCwd?: boolean;
+    readonly defaultAutoBootstrapProjectFromCwd?: boolean;
   },
 ) =>
   Effect.gen(function* () {
@@ -4023,7 +4025,7 @@ const bindSetupOperations = (
   runInForeground: bind(
     runServerCommand(emptyServerFlags(flags.baseDir), {
       startupPresentation: "headless",
-      forceAutoBootstrapProjectFromCwd: false,
+      defaultAutoBootstrapProjectFromCwd: false,
     }),
   ).pipe(Effect.asVoid, Effect.mapError(asError)),
 });
@@ -4307,7 +4309,7 @@ const serveCommand = Command.make("serve", { ...sharedServerCommandFlags }).pipe
   Command.withHandler((flags) =>
     runServerCommand(flags, {
       startupPresentation: "headless",
-      forceAutoBootstrapProjectFromCwd: false,
+      defaultAutoBootstrapProjectFromCwd: false,
     }),
   ),
 );
