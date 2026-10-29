@@ -61,6 +61,7 @@ import {
   listThreadsByProjectId,
   listThreadsByWorktree,
   requireActiveProject,
+  requireBranchPrecondition,
   requireProject,
   requireProjectAbsent,
   requireThread,
@@ -1460,10 +1461,15 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
     }
 
     case "thread.meta.update": {
-      yield* requireThread({
+      const thread = yield* requireThread({
         readModel,
         command,
         threadId: command.threadId,
+      });
+      yield* requireBranchPrecondition({
+        command,
+        subject: `Thread '${command.threadId}'`,
+        current: thread.branch,
       });
       const occurredAt = nowIso();
       return {
@@ -2506,6 +2512,18 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
     }
 
     case "worktree.meta.update": {
+      if (command.expectedBranch !== undefined) {
+        const worktree = yield* requireWorktree({
+          readModel,
+          command,
+          worktreeId: command.worktreeId,
+        });
+        yield* requireBranchPrecondition({
+          command,
+          subject: `Workspace '${command.worktreeId}'`,
+          current: worktree.branch,
+        });
+      }
       return {
         ...withEventBase({
           aggregateKind: "worktree",

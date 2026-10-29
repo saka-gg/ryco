@@ -375,6 +375,62 @@ export function requireWorktreeNotDeleted(input: {
     : Effect.void;
 }
 
+const describeBranch = (branch: string | null) =>
+  branch === null ? "no branch" : `branch '${branch}'`;
+
+/**
+ * Why a branch-guarded metadata update no longer applies, or null when it does: it carries no
+ * guard, the record still holds `expected`, or the record already holds `next` (the same change
+ * landed first, and applying it again only repeats it).
+ */
+export function branchPreconditionFailure(input: {
+  /** Names the record in the detail, e.g. "Thread 'x'". */
+  readonly subject: string;
+  readonly current: string | null;
+  readonly expected: string | null | undefined;
+  readonly next: string | null | undefined;
+}): string | null {
+  if (input.expected === undefined || input.current === input.expected) return null;
+  if (input.next !== undefined && input.current === input.next) return null;
+  return `${input.subject} records ${describeBranch(input.current)} now, but the update expected ${describeBranch(input.expected)}.`;
+}
+
+/** Fails a command whose `expectedBranch` no longer holds (see `branchPreconditionFailure`). */
+export function requireBranchPrecondition(input: {
+  readonly command: Extract<
+    OrchestrationCommand,
+    { type: "thread.meta.update" | "worktree.meta.update" }
+  >;
+  readonly subject: string;
+  /** The branch the record holds now. */
+  readonly current: string | null;
+}): Effect.Effect<void, OrchestrationCommandInvariantError> {
+  const detail = branchPreconditionFailure({
+    subject: input.subject,
+    current: input.current,
+    expected: input.command.expectedBranch,
+    next: input.command.branch,
+  });
+  return detail === null
+    ? Effect.void
+    : Effect.fail(
+        new OrchestrationCommandInvariantError({
+          commandType: input.command.type,
+          detail,
+          failedPrecondition: "expectedBranch",
+        }),
+      );
+}
+
+/**
+ * Whether a dispatch failed only because its `expectedBranch` lost a race to a newer branch
+ * write. Other invariant failures of the same commands (a pending checkout relocation, an
+ * unknown record) are real errors.
+ */
+export const isBranchPreconditionFailure = (error: unknown): boolean =>
+  Schema.is(OrchestrationCommandInvariantError)(error) &&
+  error.failedPrecondition === "expectedBranch";
+
 /** Why a conversation of a deleted workspace cannot continue. */
 export const deletedWorkspaceTurnBlocker = (
   worktree: Pick<OrchestrationWorktreeShell, "title" | "branch">,

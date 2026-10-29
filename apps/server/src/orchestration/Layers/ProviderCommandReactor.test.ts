@@ -75,6 +75,7 @@ import {
   type ProviderServiceError,
 } from "../../provider/Errors.ts";
 import { PersistenceSqlError } from "../../persistence/Errors.ts";
+import { OrchestrationCommandInvariantError } from "../Errors.ts";
 import { STORAGE_FAILURE_DETAIL } from "../userFacingErrors.ts";
 import { OrchestrationEventStoreLive } from "../../persistence/Layers/OrchestrationEventStore.ts";
 import { OrchestrationCommandReceiptRepositoryLive } from "../../persistence/Layers/OrchestrationCommandReceipts.ts";
@@ -137,6 +138,21 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { VcsStatusBroadcaster } from "../../vcs/VcsStatusBroadcaster.ts";
 import { GitWorkflowService, type GitWorkflowServiceShape } from "../../git/GitWorkflowService.ts";
+
+/** Checkouts whose HEAD was read: the idle branch rename decides right after its read. */
+const checkoutHeadReads = vi.hoisted(() => [] as string[]);
+
+vi.mock("../../vcs/gitCheckoutHead.ts", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../vcs/gitCheckoutHead.ts")>();
+  const { Effect } = await import("effect");
+  return {
+    ...actual,
+    readCheckoutHead: (checkoutRoot: string) =>
+      actual
+        .readCheckoutHead(checkoutRoot)
+        .pipe(Effect.tap(() => Effect.sync(() => checkoutHeadReads.push(checkoutRoot)))),
+  };
+});
 
 const asProjectId = (value: string): ProjectId => ProjectId.make(value);
 const asApprovalRequestId = (value: string): ApprovalRequestId => ApprovalRequestId.make(value);
@@ -2215,6 +2231,8 @@ describe("ProviderCommandReactor", () => {
       );
 
       await waitFor(() => harness.generateBranchName.mock.calls.length === 1);
+      // The rename reads the checkout's HEAD first, so it lands a moment after the name.
+      await waitFor(() => harness.renameBranch.mock.calls.length === 1);
       await waitFor(() => harness.refreshStatus.mock.calls.length >= 1);
       expect(harness.generateBranchName.mock.calls[0]?.[0]).toMatchObject({
         message: "Add a safer reconnect backoff.",
@@ -4901,16 +4919,25 @@ describe("ProviderCommandReactor", () => {
     expect(harness.sendTurn).not.toHaveBeenCalled();
   });
 
+  const FIRST_TURN_WORKTREE_ID = WorktreeId.make("worktree-first-turn-generation");
+  const FIRST_TURN_WORKTREE_PATH = "/tmp/provider-project-first-turn-worktree";
+
   /**
    * Gives thread-1 the default title and a temporary worktree branch, so a
    * first turn generates both a title and a branch.
    */
-  async function enableFirstTurnGeneration(harness: ReactorHarness) {
+  async function enableFirstTurnGeneration(
+    harness: ReactorHarness,
+    options?: {
+      /** A real checkout to record; omitted, the recorded path does not exist. */
+      readonly worktreePath?: string;
+    },
+  ) {
     const now = new Date().toISOString();
     const threadId = ThreadId.make("thread-1");
-    const worktreeId = WorktreeId.make("worktree-first-turn-generation");
+    const worktreeId = FIRST_TURN_WORKTREE_ID;
     const temporaryBranch = "ryco/1234abcd";
-    const worktreePath = "/tmp/provider-project-first-turn-worktree";
+    const worktreePath = options?.worktreePath ?? FIRST_TURN_WORKTREE_PATH;
     harness.listLocalBranchNames.mockReturnValue(Effect.succeed([temporaryBranch]));
     await Effect.runPromise(
       harness.engine.dispatch({
@@ -5116,6 +5143,237 @@ describe("ProviderCommandReactor", () => {
       newBranch: "ryco/reconnect-backoff",
     });
     expect(harness.generateBranchName).not.toHaveBeenCalled();
+  });
+
+  describe("idle worktree branch rename against newer branches", () => {
+    const threadId = ThreadId.make("thread-1");
+
+    const readBranches = async (harness: ReactorHarness) => {
+      const readModel = await harness.readModel();
+      return {
+        thread: readModel.threads.find((thread) => thread.id === threadId)?.branch,
+        workspace: readModel.worktrees?.find(
+          (worktree) => worktree.worktreeId === FIRST_TURN_WORKTREE_ID,
+        )?.branch,
+      };
+    };
+
+    /** A first turn whose generated name is `ryco/reconnect-backoff`; git's rename waits for `release`. */
+    async function startHeldRename(harness: ReactorHarness, messageId: string) {
+      await enableFirstTurnGeneration(harness);
+      let release!: () => void;
+      const held = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      harness.renameBranch.mockImplementation((input: unknown) =>
+        Effect.promise(() => held).pipe(
+          Effect.as({ branch: (input as { readonly newBranch: string }).newBranch }),
+        ),
+      );
+      harness.generateThreadTitle.mockReturnValue(
+        Effect.succeed({ title: "Reconnect backoff", branch: "reconnect-backoff" }),
+      );
+      await dispatchTurnStart(harness, messageId);
+      await waitFor(() => harness.renameBranch.mock.calls.length === 1, 8_000);
+      expect(harness.renameBranch.mock.calls[0]?.[0]).toMatchObject({
+        oldBranch: "ryco/1234abcd",
+        newBranch: "ryco/reconnect-backoff",
+      });
+      // Worktree recovery refreshed the (missing) checkout before the turn; count past it.
+      const refreshesBefore = harness.refreshStatus.mock.calls.length;
+      return {
+        release,
+        /** Resolves once the rename refreshed the checkout's status, its last step. */
+        finished: () =>
+          waitFor(
+            () =>
+              harness.refreshStatus.mock.calls
+                .slice(refreshesBefore)
+                .some(([cwd]) => cwd === FIRST_TURN_WORKTREE_PATH),
+            8_000,
+          ),
+      };
+    }
+
+    /** What a web client writes when it follows the checkout's live branch: no guard. */
+    const recordUnguarded = (
+      harness: ReactorHarness,
+      branch: string,
+      records: { readonly workspace: boolean; readonly thread: boolean },
+    ) =>
+      Effect.runPromise(
+        Effect.gen(function* () {
+          if (records.workspace) {
+            yield* harness.engine.dispatch({
+              type: "worktree.meta.update",
+              commandId: CommandId.make(`cmd-live-branch-meta-${branch}`),
+              worktreeId: FIRST_TURN_WORKTREE_ID,
+              branch,
+              changedAt: new Date().toISOString(),
+            });
+          }
+          if (records.thread) {
+            yield* harness.engine.dispatch({
+              type: "thread.meta.update",
+              commandId: CommandId.make(`cmd-live-branch-${branch}`),
+              threadId,
+              branch,
+            });
+          }
+        }),
+      );
+
+    it("keeps a branch both records adopted while git renamed the temporary one", async () => {
+      const harness = await createHarness({ worktreeBranchPrefix: "ryco" });
+      const rename = await startHeldRename(harness, "rename-race-both");
+
+      await recordUnguarded(harness, "feat/agent", { workspace: true, thread: true });
+      rename.release();
+      await rename.finished();
+
+      expect(await readBranches(harness)).toEqual({
+        thread: "feat/agent",
+        workspace: "feat/agent",
+      });
+    });
+
+    it("still moves the thread off the renamed branch when only the workspace record kept a newer one", async () => {
+      const harness = await createHarness({ worktreeBranchPrefix: "ryco" });
+      const rename = await startHeldRename(harness, "rename-race-workspace");
+
+      await recordUnguarded(harness, "feat/third", { workspace: true, thread: false });
+      rename.release();
+      await rename.finished();
+
+      // The old name no longer exists in git, so the thread must not keep it.
+      expect(await readBranches(harness)).toEqual({
+        thread: "ryco/reconnect-backoff",
+        workspace: "feat/third",
+      });
+    });
+
+    it("records only the branch, so a path the thread moved to meanwhile stays", async () => {
+      const harness = await createHarness({ worktreeBranchPrefix: "ryco" });
+      const rename = await startHeldRename(harness, "rename-race-path");
+      const movedPath = `${FIRST_TURN_WORKTREE_PATH}-moved`;
+
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.meta.update",
+          commandId: CommandId.make("cmd-thread-path-moved"),
+          threadId,
+          worktreePath: movedPath,
+        }),
+      );
+      rename.release();
+      await rename.finished();
+
+      const thread = await readThread(harness);
+      expect(thread?.branch).toBe("ryco/reconnect-backoff");
+      expect(thread?.worktreePath).toBe(movedPath);
+    });
+
+    it("records the renamed branch on the thread when the workspace write fails for another reason", async () => {
+      const harness = await createHarness({
+        worktreeBranchPrefix: "ryco",
+        decorateDispatch: (dispatch) => (command, options) =>
+          command.type === "worktree.meta.update" &&
+          String(command.commandId).includes("worktree-branch-rename-meta")
+            ? Effect.fail(
+                // What storage admission raises while a checkout relocation is pending.
+                new OrchestrationCommandInvariantError({
+                  commandType: command.type,
+                  detail:
+                    "Checkout relocation is pending. Reload the workspace before changing its metadata.",
+                }),
+              )
+            : dispatch(command, options),
+      });
+      const rename = await startHeldRename(harness, "rename-workspace-blocked");
+
+      rename.release();
+      await rename.finished();
+
+      expect(await readBranches(harness)).toEqual({
+        thread: "ryco/reconnect-backoff",
+        workspace: "ryco/1234abcd",
+      });
+    });
+
+    it.each([
+      {
+        name: "renames while the checkout is still on its temporary branch",
+        checkout: "temporary",
+      },
+      // Not checked out, so git renames it safely (it refuses mid-rebase or bisect itself).
+      { name: "renames while HEAD is detached", checkout: "detached" },
+      { name: "leaves the agent's own branch alone", checkout: "feat/own" },
+    ] as const)("$name", async ({ checkout }) => {
+      const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), "ryco-rename-head-"));
+      const repo = path.join(baseDir, "repo");
+      const worktreePath = path.join(baseDir, "worktrees", "first-turn");
+      fs.mkdirSync(repo);
+      const git = (cwd: string, ...args: string[]) =>
+        execFileSync("git", args, {
+          cwd,
+          stdio: "pipe",
+          env: { ...process.env, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" },
+        });
+      git(repo, "init");
+      git(
+        repo,
+        "-c",
+        "user.name=Fixture",
+        "-c",
+        "user.email=fixture@example.invalid",
+        "commit",
+        "--allow-empty",
+        "-m",
+        "init",
+      );
+      git(repo, "worktree", "add", "-b", "ryco/1234abcd", worktreePath);
+      if (checkout === "detached") git(worktreePath, "checkout", "--detach");
+      if (checkout === "feat/own") git(worktreePath, "checkout", "-b", checkout);
+
+      const harness = await createHarness({
+        baseDir,
+        workspaceRoot: repo,
+        worktreeBranchPrefix: "ryco",
+      });
+      await enableFirstTurnGeneration(harness, { worktreePath });
+      harness.listWorktreePaths.mockReturnValue(Effect.succeed([worktreePath]));
+      harness.generateThreadTitle.mockReturnValue(
+        Effect.succeed({ title: "Reconnect backoff", branch: "reconnect-backoff" }),
+      );
+
+      await dispatchTurnStart(harness, `rename-head-${checkout}`);
+      if (checkout !== "feat/own") {
+        await waitFor(() => harness.renameBranch.mock.calls.length === 1, 8_000);
+        expect(harness.renameBranch.mock.calls[0]?.[0]).toMatchObject({
+          cwd: worktreePath,
+          oldBranch: "ryco/1234abcd",
+          newBranch: "ryco/reconnect-backoff",
+        });
+        await waitFor(
+          async () => (await readBranches(harness)).thread === "ryco/reconnect-backoff",
+          8_000,
+        );
+        expect(await readBranches(harness)).toEqual({
+          thread: "ryco/reconnect-backoff",
+          workspace: "ryco/reconnect-backoff",
+        });
+        return;
+      }
+      // Only the rename reads this checkout's HEAD, and it decides right after the
+      // read with no I/O in between: a short settle is enough to see no git call.
+      await waitFor(() => checkoutHeadReads.includes(worktreePath), 8_000);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      expect(harness.renameBranch).not.toHaveBeenCalled();
+      expect(await readBranches(harness)).toEqual({
+        thread: "ryco/1234abcd",
+        workspace: "ryco/1234abcd",
+      });
+    });
   });
 
   it("surfaces a project read failure on the context-handoff branch", async () => {
