@@ -95,6 +95,12 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
    */
   conversationRevert: Schema.optionalKey(Schema.Boolean),
   /**
+   * The node records a checkout's branch changes into its threads and workspaces itself (at
+   * turn start and end, and after git and pull request commands); absent on older servers,
+   * whose clients write the branch they see.
+   */
+  threadBranchAdoption: Schema.optionalKey(Schema.Boolean),
+  /**
    * `projects.searchEntries` accepts an empty query (the shallowest entries,
    * which also warms the workspace index); absent on older servers.
    */

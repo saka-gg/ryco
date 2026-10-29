@@ -6,6 +6,7 @@ import { ContextHandoffCoordinator } from "../Services/ContextHandoffCoordinator
 import { ProviderCommandReactor } from "../Services/ProviderCommandReactor.ts";
 import { ProviderRuntimeIngestionService } from "../Services/ProviderRuntimeIngestion.ts";
 import { ThreadDeletionReactor } from "../Services/ThreadDeletionReactor.ts";
+import { ThreadGitMetadataReactor } from "../Services/ThreadGitMetadataReactor.ts";
 import { ThreadPurgeReactor } from "../Services/ThreadPurgeReactor.ts";
 import { OrchestrationReactor } from "../Services/OrchestrationReactor.ts";
 import { makeOrchestrationReactor } from "./OrchestrationReactor.ts";
@@ -20,7 +21,7 @@ describe("OrchestrationReactor", () => {
     runtime = null;
   });
 
-  it("starts provider ingestion, provider command, checkpoint, and thread deletion reactors", async () => {
+  it("starts provider ingestion, provider command, checkpoint, thread deletion and thread git metadata reactors", async () => {
     const started: string[] = [];
 
     runtime = ManagedRuntime.make(
@@ -87,6 +88,15 @@ describe("OrchestrationReactor", () => {
             awaitStartupSweep: Effect.succeed(null),
           }),
         ),
+        Layer.provideMerge(
+          Layer.succeed(ThreadGitMetadataReactor, {
+            start: () => {
+              started.push("thread-git-metadata-reactor");
+              return Effect.void;
+            },
+            drain: Effect.void,
+          }),
+        ),
       ),
     );
 
@@ -94,7 +104,7 @@ describe("OrchestrationReactor", () => {
     const scope = await Effect.runPromise(Scope.make("sequential"));
     await Effect.runPromise(reactor.start().pipe(Scope.provide(scope)));
 
-    expect(started).toHaveLength(7);
+    expect(started).toHaveLength(8);
     expect(started.slice(0, 2)).toEqual(["context-handoff-recovery", "checkpoint-revert-recovery"]);
     expect(new Set(started.slice(2))).toEqual(
       new Set([
@@ -103,6 +113,7 @@ describe("OrchestrationReactor", () => {
         "checkpoint-reactor",
         "thread-deletion-reactor",
         "thread-purge-reactor",
+        "thread-git-metadata-reactor",
       ]),
     );
 
@@ -137,6 +148,7 @@ describe("OrchestrationReactor", () => {
         Layer.provideMerge(Layer.mock(CheckpointReactor)({ drain: Effect.void })),
         Layer.provideMerge(Layer.mock(ThreadDeletionReactor)({})),
         Layer.provideMerge(Layer.mock(ThreadPurgeReactor)({})),
+        Layer.provideMerge(Layer.mock(ThreadGitMetadataReactor)({ drain: Effect.void })),
       ),
     );
     const reactor = await runtime.runPromise(Effect.service(OrchestrationReactor));

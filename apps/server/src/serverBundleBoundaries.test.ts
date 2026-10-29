@@ -312,6 +312,19 @@ describe("server boot import boundaries", () => {
       ),
     ).toEqual([]);
   });
+
+  it("loads the thread git metadata sync with the first provider event that can use it", () => {
+    const graph = staticGraph("src/cliMain.ts");
+    // The reactor layer at boot is only an event filter and an import(); the sync, its rules,
+    // the command classifier and the tool-command reader load with the first turn.
+    expect(
+      graph.files.filter((file) =>
+        /^(?:apps\/server\/src\/orchestration\/threadGitMetadata(?:Runtime)?|packages\/shared\/src\/(?:vcsCommand|toolActivity))\.ts$/u.test(
+          file,
+        ),
+      ),
+    ).toEqual([]);
+  });
 });
 
 /** Static imports of a built ES chunk (rolldown output keeps them at top level). */
@@ -478,6 +491,23 @@ describe.skipIf(!hasCurrentBuild)("built server bundle pull request watches", ()
       expect(source).not.toMatch(/^\/\/#region src\/sourceControl\/changeRequestTemplates\.ts$/mu);
       // In case the module carries no region marker of its own: its log line is unique.
       expect(source).not.toContain("change request templates: read failed");
+    }
+  });
+});
+
+describe.skipIf(!hasCurrentBuild)("built thread git metadata chunks", () => {
+  it("keeps the thread git metadata sync out of the boot chunks", () => {
+    const cliChunk = readFileSync(builtEntry, "utf8").match(/import\("(\.\/cliMain[^"]+)"\)/u)?.[1];
+    const serve = builtStaticClosure(path.resolve(serverRoot, "dist", cliChunk!));
+    for (const chunk of serve.chunks) {
+      const source = readFileSync(chunk, "utf8");
+      expect(source).not.toMatch(
+        /^\/\/#region src\/orchestration\/threadGitMetadataRuntime\.ts$/mu,
+      );
+      expect(source).not.toMatch(/^\/\/#region src\/orchestration\/threadGitMetadata\.ts$/mu);
+      expect(source).not.toMatch(
+        /^\/\/#region \.\.\/\.\.\/packages\/shared\/src\/vcsCommand\.ts$/mu,
+      );
     }
   });
 });

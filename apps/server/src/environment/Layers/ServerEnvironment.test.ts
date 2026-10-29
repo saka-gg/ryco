@@ -74,6 +74,7 @@ it.layer(NodeServices.layer)("ServerEnvironmentLive", (it) => {
       expect(second.capabilities.nodeSelfUpdate).toBe(true);
       expect(second.capabilities.terminalWriteRequireIdle).toBe(true);
       expect(second.capabilities.threadFork).toBe(true);
+      expect(second.capabilities.threadBranchAdoption).toBe(true);
       expect(second.capabilities.projectSearchEmptyQuery).toBe(true);
       expect(second.capabilities.projectContentSearch).toBe(true);
       expect(second.capabilities.projectReadFileChunk).toBe(true);

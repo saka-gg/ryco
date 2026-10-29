@@ -71,6 +71,7 @@ describe("pre-auth server environment descriptor", () => {
       "stagedOnlyCommit",
       "storageManagement",
       "terminalWriteRequireIdle",
+      "threadBranchAdoption",
       "threadFork",
       "threadSettlement",
       "threadSidebarUndo",
