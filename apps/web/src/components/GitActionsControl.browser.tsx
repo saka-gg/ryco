@@ -305,10 +305,20 @@ import {
   useSavedEnvironmentRuntimeStore,
 } from "~/environments/runtime";
 
-function setEnvironmentConfig(environmentId: EnvironmentId, prefix: string | null) {
-  // Only the branch prefix is consumed by this component's configuration seam.
+function setEnvironmentConfig(
+  environmentId: EnvironmentId,
+  prefix: string | null,
+  capabilities: Partial<ServerConfig["environment"]["capabilities"]> = {},
+) {
+  // Only the branch prefix and the capabilities are consumed by this
+  // component's configuration seam.
   const serverConfig =
-    prefix === null ? null : ({ settings: { worktreeBranchPrefix: prefix } } as ServerConfig);
+    prefix === null
+      ? null
+      : ({
+          settings: { worktreeBranchPrefix: prefix },
+          environment: { capabilities },
+        } as unknown as ServerConfig);
   if (environmentId === ENVIRONMENT_A) {
     primaryServerConfigRef.current = serverConfig;
   } else {
@@ -393,6 +403,7 @@ describe("GitActionsControl thread-scoped progress toast and GitThreadSync", () 
     primaryServerConfigRef.current = null;
     resetPrimaryEnvironmentDescriptorForTests();
     resetSavedEnvironmentRuntimeStoreForTests();
+    __resetEnvironmentApiOverridesForTests();
     liveBranchRef.current = "";
     document.body.innerHTML = "";
   });
@@ -637,6 +648,102 @@ describe("GitActionsControl thread-scoped progress toast and GitThreadSync", () 
     } finally {
       await screen.unmount();
     }
+  });
+
+  describe.each([
+    { environment: "primary", environmentId: ENVIRONMENT_A },
+    { environment: "saved", environmentId: ENVIRONMENT_B },
+  ])("$environment environment started thread", ({ environmentId }) => {
+    function stubDispatch() {
+      const dispatchCommand = vi.fn((_command: unknown) => Promise.resolve({ sequence: 1 }));
+      __setEnvironmentApiOverrideForTests(environmentId, {
+        orchestration: { dispatchCommand },
+      } as unknown as EnvironmentApi);
+      return dispatchCommand;
+    }
+
+    it("leaves the branch to a node that records it", async () => {
+      const dispatchCommand = stubDispatch();
+      serverThreadWorktreePathRef.current = WORKTREE_CWD;
+      setEnvironmentConfig(environmentId, "ryco", { threadBranchAdoption: true });
+      liveBranchRef.current = "feat/agent-branch";
+      const threadRef = scopeThreadRef(environmentId, SHARED_THREAD_ID);
+      const screen = await render(
+        <GitThreadSync gitCwd={WORKTREE_CWD} activeThreadRef={threadRef} />,
+      );
+
+      try {
+        await Promise.resolve();
+        liveBranchRef.current = "feat/agent-other";
+        await screen.rerender(<GitThreadSync gitCwd={WORKTREE_CWD} activeThreadRef={threadRef} />);
+        await Promise.resolve();
+
+        expect(setThreadBranchSpy).not.toHaveBeenCalled();
+        expect(dispatchCommand).not.toHaveBeenCalled();
+      } finally {
+        await screen.unmount();
+      }
+    });
+
+    it("still records it for an older node", async () => {
+      const dispatchCommand = stubDispatch();
+      serverThreadWorktreePathRef.current = WORKTREE_CWD;
+      // An older node's config has no `threadBranchAdoption` key.
+      setEnvironmentConfig(environmentId, "ryco");
+      liveBranchRef.current = "feat/agent-branch";
+      const threadRef = scopeThreadRef(environmentId, SHARED_THREAD_ID);
+      const screen = await render(
+        <GitThreadSync gitCwd={WORKTREE_CWD} activeThreadRef={threadRef} />,
+      );
+
+      try {
+        await Promise.resolve();
+
+        expect(setThreadBranchSpy).toHaveBeenCalledExactlyOnceWith(
+          threadRef,
+          "feat/agent-branch",
+          WORKTREE_CWD,
+        );
+        expect(dispatchCommand).toHaveBeenCalledExactlyOnceWith(
+          expect.objectContaining({
+            type: "thread.meta.update",
+            threadId: SHARED_THREAD_ID,
+            branch: "feat/agent-branch",
+            worktreePath: WORKTREE_CWD,
+          }),
+        );
+      } finally {
+        await screen.unmount();
+      }
+    });
+
+    it("keeps following the checkout into a draft on a node that records started threads", async () => {
+      const dispatchCommand = stubDispatch();
+      hasServerThreadRef.current = false;
+      activeDraftThreadRef.current = {
+        threadId: SHARED_THREAD_ID,
+        projectId: PROJECT_ID,
+        environmentId,
+        branch: null,
+        worktreePath: null,
+      };
+      setEnvironmentConfig(environmentId, "ryco", { threadBranchAdoption: true });
+      const threadRef = scopeThreadRef(environmentId, SHARED_THREAD_ID);
+      const screen = await render(<GitThreadSync gitCwd={GIT_CWD} activeThreadRef={threadRef} />);
+
+      try {
+        await Promise.resolve();
+
+        expect(setDraftThreadContextSpy).toHaveBeenCalledExactlyOnceWith(threadRef, {
+          branch: BRANCH_NAME,
+          worktreePath: null,
+        });
+        expect(setThreadBranchSpy).not.toHaveBeenCalled();
+        expect(dispatchCommand).not.toHaveBeenCalled();
+      } finally {
+        await screen.unmount();
+      }
+    });
   });
 
   it("does not overwrite a selected base branch while a new worktree draft is being configured", async () => {

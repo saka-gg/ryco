@@ -1,3 +1,4 @@
+import { selectNodeRecordsThreadBranch } from "@ryco/client-runtime/state/threads";
 import type { ChangeRequest, ScopedThreadRef } from "@ryco/contracts";
 import type {
   SourceControlCloneProtocol,
@@ -959,8 +960,12 @@ function PublishRepositoryDialog(props: PublishRepositoryDialogProps) {
   );
 }
 
-/** The branch prefix of the environment's temporary worktree branches, once its config is known. */
-function useWorktreeBranchPrefix(environmentId: ScopedThreadRef["environmentId"] | null) {
+/**
+ * What following the checkout's branch needs from the environment's config: the
+ * prefix of its temporary worktree branches (undefined until the config is
+ * known), and whether the node records a started thread's branch itself.
+ */
+function useThreadBranchSyncConfig(environmentId: ScopedThreadRef["environmentId"] | null) {
   const primaryEnvironmentId = usePrimaryEnvironmentId();
   const primaryServerConfig = useServerConfig();
   const environmentServerConfig = useSavedEnvironmentRuntimeStore((state) =>
@@ -968,15 +973,19 @@ function useWorktreeBranchPrefix(environmentId: ScopedThreadRef["environmentId"]
   );
   const serverConfig =
     environmentId === primaryEnvironmentId ? primaryServerConfig : environmentServerConfig;
-  return serverConfig?.settings.worktreeBranchPrefix;
+  return {
+    worktreeBranchPrefix: serverConfig?.settings.worktreeBranchPrefix,
+    nodeRecordsThreadBranch: selectNodeRecordsThreadBranch(serverConfig),
+  };
 }
 
 /**
  * The git controls' background work, independent of where (or whether) the
- * controls are shown: follows the checkout's live branch into the thread, and
- * refreshes git status when the window regains focus. The overview mounts it
- * once while it is open, so the hover flyout and the card can mount and
- * unmount the visual controls freely.
+ * controls are shown: follows the checkout's live branch into a draft (and
+ * into a started thread on an older node; a current node records that
+ * itself), and refreshes git status when the window regains focus. The
+ * overview mounts it once while it is open, so the hover flyout and the card
+ * can mount and unmount the visual controls freely.
  */
 export function GitThreadSync({
   gitCwd,
@@ -984,7 +993,8 @@ export function GitThreadSync({
   draftId,
 }: Pick<GitActionsControlProps, "gitCwd" | "activeThreadRef" | "draftId">): null {
   const activeEnvironmentId = activeThreadRef?.environmentId ?? null;
-  const worktreeBranchPrefix = useWorktreeBranchPrefix(activeEnvironmentId);
+  const { worktreeBranchPrefix, nodeRecordsThreadBranch } =
+    useThreadBranchSyncConfig(activeEnvironmentId);
   const {
     activeServerThread,
     activeDraftThread,
@@ -1002,9 +1012,18 @@ export function GitThreadSync({
     !activeServerThread &&
     activeDraftThread?.envMode === "worktree" &&
     activeDraftThread.worktreePath === null;
+  // The node follows a started thread's checkout at every turn boundary and
+  // after its agent's git commands, guarded against newer branch changes; an
+  // unguarded second writer here could only race it.
+  const isBranchRecordedByNode = Boolean(activeServerThread) && nodeRecordsThreadBranch;
 
   useEffect(() => {
-    if (isGitActionRunning || isSelectingWorktreeBase || worktreeBranchPrefix === undefined) {
+    if (
+      isGitActionRunning ||
+      isSelectingWorktreeBase ||
+      isBranchRecordedByNode ||
+      worktreeBranchPrefix === undefined
+    ) {
       return;
     }
 
@@ -1028,6 +1047,7 @@ export function GitThreadSync({
     activeWorktreeBranch,
     gitCwd,
     gitStatus,
+    isBranchRecordedByNode,
     isGitActionRunning,
     isSelectingWorktreeBase,
     worktreeBranchPrefix,
