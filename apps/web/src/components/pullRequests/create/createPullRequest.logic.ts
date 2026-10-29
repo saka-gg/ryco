@@ -6,6 +6,7 @@
 import type {
   ChangeRequest,
   ChangeRequestCreateInput,
+  ChangeRequestTemplate,
   VcsRef,
   VcsStatusResult,
 } from "@ryco/contracts";
@@ -259,4 +260,47 @@ export function buildCreatePullRequestInput(input: {
     body: input.body.trimEnd(),
     ...(draft ? { draft: true } : {}),
   };
+}
+
+/**
+ * The template a new description starts from: the one a generated description follows, as the
+ * server chose it (`generationTemplatePath`), so the dialog and generation share one rule.
+ */
+export function initialTemplate(
+  templates: ReadonlyArray<ChangeRequestTemplate>,
+  generationTemplatePath: string | null,
+): ChangeRequestTemplate | null {
+  if (generationTemplatePath === null) return null;
+  return templates.find((template) => template.path === generationTemplatePath) ?? null;
+}
+
+/** Untouched by the author: empty, or exactly the text the last template choice put in. */
+export function isDescriptionPristine(body: string, inserted: string | null): boolean {
+  return body.trim().length === 0 || body === inserted;
+}
+
+/** A template's name in the picker; a template cut at its size limit says so. */
+export function templateOptionLabel(template: ChangeRequestTemplate): string {
+  return template.truncated ? `${template.name} (shortened)` : template.name;
+}
+
+/**
+ * The picker's label for each template, by path: its name, or its path when another template
+ * has the same name (`bug.md` and `bug.txt`, or `bug.md` in two template directories).
+ */
+export function templateOptionLabels(
+  templates: ReadonlyArray<ChangeRequestTemplate>,
+): ReadonlyMap<string, string> {
+  const counts = new Map<string, number>();
+  for (const template of templates) {
+    counts.set(template.name, (counts.get(template.name) ?? 0) + 1);
+  }
+  return new Map(
+    templates.map((template) => [
+      template.path,
+      templateOptionLabel(
+        (counts.get(template.name) ?? 0) > 1 ? { ...template, name: template.path } : template,
+      ),
+    ]),
+  );
 }

@@ -3858,6 +3858,136 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
     }),
   );
 
+  /**
+   * `main` (pushed) holds the given template files; `feature/templates` (pushed, nothing left to
+   * commit) changes them, so a read of the wrong tree shows.
+   */
+  const makeTemplateFixture = (templates: Record<string, string>) =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("ryco-git-manager-");
+      yield* initRepo(repoDir);
+      const write = (files: Record<string, string>) => {
+        for (const [file, content] of Object.entries(files)) {
+          fs.mkdirSync(path.dirname(path.join(repoDir, file)), { recursive: true });
+          fs.writeFileSync(path.join(repoDir, file), content);
+        }
+      };
+      write(templates);
+      yield* runGit(repoDir, ["add", "-A"]);
+      yield* runGit(repoDir, ["commit", "-m", "Add templates"]);
+      const remoteDir = yield* createBareRemote();
+      yield* runGit(repoDir, ["remote", "add", "origin", remoteDir]);
+      yield* runGit(repoDir, ["push", "-u", "origin", "main"]);
+      yield* runGit(repoDir, ["checkout", "-b", "feature/templates"]);
+      write(
+        Object.fromEntries(
+          Object.keys(templates).map((file) => [file, "Changed on the feature branch.\n"]),
+        ),
+      );
+      fs.writeFileSync(path.join(repoDir, "feature.txt"), "feature change\n");
+      yield* runGit(repoDir, ["add", "-A"]);
+      yield* runGit(repoDir, ["commit", "-m", "Add feature"]);
+      yield* runGit(repoDir, ["push", "-u", "origin", "feature/templates"]);
+      return repoDir;
+    });
+
+  const createPullRequestWithTemplates = (
+    repoDir: string,
+    options: {
+      readonly settingsPatch?: ServerSettingsPatch;
+      readonly gitOperations?: Array<string>;
+    } = {},
+  ) =>
+    Effect.gen(function* () {
+      const prPolicies: Array<TextGenerationPolicy | undefined> = [];
+      const { manager } = yield* makeManager({
+        ghScenario: { prListSequence: ["[]", "[]"] },
+        ...(options.settingsPatch ? { settingsPatch: options.settingsPatch } : {}),
+        gitExecute: (command, execute) => {
+          options.gitOperations?.push(command.operation);
+          return execute(command);
+        },
+        textGeneration: {
+          generatePrContent: (input) => {
+            prPolicies.push(input.policy);
+            return Effect.succeed({ title: "Add feature", body: "Feature body" });
+          },
+        },
+      });
+      const result = yield* runStackedAction(manager, { cwd: repoDir, action: "commit_push_pr" });
+      expect(result.pr.status).toBe("created");
+      expect(prPolicies).toHaveLength(1);
+      return { policy: prPolicies[0], manager };
+    });
+
+  it.effect("fills generated pull request descriptions from the base branch's template", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTemplateFixture({
+        ".github/pull_request_template.md": "## What changed\n\n## How to test\n",
+      });
+      const { policy, manager } = yield* createPullRequestWithTemplates(repoDir);
+      expect(policy?.changeRequestTemplate).toMatchObject({
+        path: ".github/pull_request_template.md",
+        body: "## What changed\n\n## How to test",
+      });
+      expect(policy?.changeRequestTemplate?.rules.length).toBeGreaterThan(0);
+      // The writing style stays as it was; the template is added to it.
+      expect(policy?.kind).toBe("repo_conventions");
+
+      // The create dialog lists the same base tree's templates.
+      expect(
+        yield* manager.listChangeRequestTemplates({ cwd: repoDir, baseRefName: "main" }),
+      ).toEqual({
+        templates: [
+          {
+            path: ".github/pull_request_template.md",
+            name: "Default",
+            isDefault: true,
+            body: "## What changed\n\n## How to test",
+            truncated: false,
+          },
+        ],
+        generationTemplatePath: ".github/pull_request_template.md",
+      });
+    }),
+  );
+
+  it.effect("reads no template when pull request templates are off", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTemplateFixture({
+        ".github/pull_request_template.md": "## What changed\n",
+      });
+      const gitOperations: Array<string> = [];
+      const { policy } = yield* createPullRequestWithTemplates(repoDir, {
+        settingsPatch: { pullRequestTemplates: false, gitWritingStyle: "default" },
+        gitOperations,
+      });
+      expect(policy).toBeUndefined();
+      expect(
+        gitOperations.filter((operation) => operation.startsWith("changeRequestTemplates.")),
+      ).toEqual([]);
+    }),
+  );
+
+  it.effect("never guesses between several pull request templates", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTemplateFixture({
+        ".github/PULL_REQUEST_TEMPLATE/bug.md": "## Bug\n",
+        ".github/PULL_REQUEST_TEMPLATE/feature.md": "## Feature\n",
+      });
+      const { policy, manager } = yield* createPullRequestWithTemplates(repoDir, {
+        settingsPatch: { gitWritingStyle: "default" },
+      });
+      expect(policy).toBeUndefined();
+      const listed = yield* manager.listChangeRequestTemplates({
+        cwd: repoDir,
+        baseRefName: "main",
+      });
+      expect(listed.templates.map((template) => template.name)).toEqual(["bug", "feature"]);
+      expect(listed.generationTemplatePath).toBeNull();
+    }),
+  );
+
   it.effect("keeps repository text from providers that cannot write without tools", () =>
     Effect.gen(function* () {
       const received = new Map<string, TextGenerationPolicy | undefined>();

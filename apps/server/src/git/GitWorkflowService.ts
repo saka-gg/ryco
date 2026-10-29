@@ -1,10 +1,12 @@
 import { readGitLocalChanges, applyGitIndexPatch } from "../vcs/GitIndexReview.ts";
-import { authorizeGitReadCwd } from "../vcs/GitReadWorkspace.ts";
+import { authorizeGitReadCwd, authorizeGitReadWorkspace } from "../vcs/GitReadWorkspace.ts";
 import type { WorkspaceAccessPolicy } from "../workspace/Services/WorkspaceAccessPolicy.ts";
 import { readGitLineBlame } from "../vcs/GitLineBlame.ts";
 import { readGitImageBlob } from "../vcs/GitImageBlob.ts";
 import { readGitComparison } from "../vcs/GitComparison.ts";
 import type {
+  ChangeRequestTemplateListInput,
+  ChangeRequestTemplateListResult,
   GitReadLineBlameInput,
   GitReadLineBlameResult,
   GitReadImageBlobInput,
@@ -74,6 +76,10 @@ export interface GitWorkflowServiceShape {
   readonly readComparison: (
     input: GitReadComparisonInput,
   ) => Effect.Effect<GitReadComparisonResult, GitCommandError, WorkspaceAccessPolicy>;
+  /** The base branch's change request templates, read from an authorized Git checkout. */
+  readonly listChangeRequestTemplates: (
+    input: ChangeRequestTemplateListInput,
+  ) => Effect.Effect<ChangeRequestTemplateListResult, GitCommandError, WorkspaceAccessPolicy>;
   readonly status: (
     input: VcsStatusInput,
   ) => Effect.Effect<VcsStatusResult, GitManagerServiceError>;
@@ -254,6 +260,20 @@ export const make = Effect.fn("makeGitWorkflowService")(function* () {
     }
   });
 
+  // Authorize before repository-kind discovery; readers also validate Git's resolved root.
+  const authorizedGitRead = <Input extends { readonly cwd: string }, A, E, R>(
+    operation: string,
+    input: Input,
+    read: (authorized: Input) => Effect.Effect<A, E, R>,
+  ) =>
+    authorizeGitReadCwd(input.cwd, operation).pipe(
+      Effect.flatMap((cwd) =>
+        ensureGitCommand(`GitWorkflowService.${operation}`, cwd).pipe(
+          Effect.andThen(() => read({ ...input, cwd })),
+        ),
+      ),
+    );
+
   const detectGitRepositoryForStatus = Effect.fn("GitWorkflowService.detectGitRepositoryForStatus")(
     function* (operation: string, cwd: string) {
       const handle = yield* registry.detect({ cwd }).pipe(
@@ -397,32 +417,26 @@ export const make = Effect.fn("makeGitWorkflowService")(function* () {
       ensureGit("GitWorkflowService.preparePullRequestThread", input.cwd).pipe(
         Effect.andThen(gitManager.preparePullRequestThread(input, options)),
       ),
-    // Authorize before repository-kind discovery; readers also validate Git's resolved root.
     readLineBlame: (input) =>
-      authorizeGitReadCwd(input.cwd, "readLineBlame").pipe(
-        Effect.flatMap((cwd) =>
-          ensureGitCommand("GitWorkflowService.readLineBlame", cwd).pipe(
-            Effect.andThen(readGitLineBlame(git.execute, { ...input, cwd })),
-          ),
-        ),
+      authorizedGitRead("readLineBlame", input, (authorized) =>
+        readGitLineBlame(git.execute, authorized),
       ),
     readImageBlob: (input) =>
-      authorizeGitReadCwd(input.cwd, "readImageBlob").pipe(
-        Effect.flatMap((cwd) =>
-          ensureGitCommand("GitWorkflowService.readImageBlob", cwd).pipe(
-            Effect.andThen(readGitImageBlob(git.execute, { ...input, cwd })),
-          ),
+      authorizedGitRead("readImageBlob", input, (authorized) =>
+        readGitImageBlob(git.execute, authorized),
+      ),
+    listChangeRequestTemplates: (input) =>
+      authorizedGitRead("listChangeRequestTemplates", input, (authorized) =>
+        // The workspace policy applies to Git's own worktree root too.
+        authorizeGitReadWorkspace(git.execute, authorized.cwd, "listChangeRequestTemplates").pipe(
+          Effect.flatMap((cwd) => gitManager.listChangeRequestTemplates({ ...authorized, cwd })),
         ),
       ),
     readLocalChanges: (input) => readGitLocalChanges(git.execute, input),
     applyIndexPatch: (input) => applyGitIndexPatch(git.execute, input),
     readComparison: (input) =>
-      authorizeGitReadCwd(input.cwd, "readComparison").pipe(
-        Effect.flatMap((cwd) =>
-          ensureGitCommand("GitWorkflowService.readComparison", cwd).pipe(
-            Effect.andThen(readGitComparison(git.execute, { ...input, cwd })),
-          ),
-        ),
+      authorizedGitRead("readComparison", input, (authorized) =>
+        readGitComparison(git.execute, authorized),
       ),
     listRefs: (input) =>
       detectGitRepositoryForCommand("GitWorkflowService.listRefs", input.cwd).pipe(

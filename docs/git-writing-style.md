@@ -54,6 +54,54 @@ Cursor and Grok cannot turn every tool off, so with them the repository style se
 guidance but no examples, and the model is told none are available. Conventional Commits and
 Standard work the same with every provider.
 
+## Pull request templates
+
+When a repository has a pull request template, generated pull request descriptions fill it in:
+the model keeps the template's headings in order and writes each section for the change,
+instead of Ryco's own Summary and Testing sections. The **New pull request** dialog puts the
+template into the description, and its **Template** picker offers the repository's other
+templates. Turn both off with **Pull request templates** in the same settings section.
+
+Where Ryco looks, on GitHub (file names in any case):
+
+- the default template, `pull_request_template.md` or `.txt`, in `.github/`, the repository
+  root or `docs/` (the first of these that has one, like GitHub);
+- the files ending in `.md` or `.txt` in a `PULL_REQUEST_TEMPLATE/` directory in those places.
+
+On GitLab, the `.md` files in `.gitlab/merge_request_templates/`, where `default.md` is the
+default. Other hosts have no templates yet.
+
+What Ryco picks:
+
+- A generated description follows the default template. Without one, on GitHub, it follows
+  the only template there is (GitLab applies only `default.md` on its own, so Ryco does too).
+  With several templates and no default, or two default files in one place, it follows none
+  and writes Summary and Testing as usual: Ryco never guesses.
+- The dialog fills an empty description with the same template (the server picks it for both)
+  and lists every template, default first. Choosing one replaces the text; once you edit the
+  text the picker locks (clear the description to switch). Changing the base branch swaps an
+  untouched description for the new base's template. A read that failed, for example while the
+  connection was down, is tried again when the connection comes back.
+
+Templates come from the **base branch** the pull request targets, as committed on the remote
+(`origin/<base>`), else the local branch; when neither exists there is no template. A template
+that exists only on your feature branch or in uncommitted files is never used, so a branch
+cannot supply its own template. Ryco reads committed objects only, never files on disk, and
+never fetches: in a partial clone (`--filter=blob:none`) a template whose contents were not
+downloaded is skipped, and with a Git older than 2.44, which cannot promise not to fetch, a
+partial clone gets no templates at all.
+
+Limits: up to 16 templates, each file up to 100,000 bytes (larger ones are skipped), and the
+first 8,000 bytes of each, cut between characters; a shortened template says so in the picker
+and is marked `[truncated]` for the model. Reading templates is limited to five seconds and
+never fails a pull request: without templates the description is written as before. Only time
+the server could run counts toward those five seconds, so a stall or a sleeping Mac does not
+drop a template.
+
+Templates are repository text, so like the examples they only reach providers that write
+without tools. With Cursor or Grok, generated descriptions use Summary and Testing; the dialog
+still offers the templates, because nothing is generated there.
+
 ## Integration boundary
 
 - Contracts: `GitWritingStyle` (`default`, `repository`, `conventional`), the node setting
@@ -75,3 +123,21 @@ Standard work the same with every provider.
   supply a project id for it.
 - The text generation router drops `repositoryExamples` for every provider instance that does
   not declare `gitWritingToolFree`.
+- Templates: `sourceControl.listChangeRequestTemplates` (operator role, a read; the workspace
+  policy applies to the checkout and its Git root before any read), the node setting
+  `pullRequestTemplates` (default on) and the environment capability `changeRequestTemplates`.
+  Older servers lack the capability; the dialog then never calls the method and the switch
+  stays disabled. `baseRefName` must be a valid branch name; the server builds only fully
+  qualified refs from it (`refs/remotes/<remote>/<base>`, `refs/heads/<base>`; `HEAD` only
+  when no base is given), so no revision syntax and no tag of the same name can select the
+  tree. The result's `generationTemplatePath` names the template a generated description
+  follows (`selectTemplateForGeneration`); the dialog starts from it rather than choosing
+  itself.
+- `sourceControl/changeRequestTemplates.ts` reads a tree's templates with four Git processes
+  (resolve the tree, list it, size the chosen files, read them; five when a template directory
+  is spelled in an unusual case, plus a one-time `git version` probe per server) and a tree it
+  read before with one, because results are cached by tree id. It loads on first use.
+  It lists tree entries by name only and asks for the sizes of the chosen files alone, so no
+  unrelated object is ever looked up. The pull request step reads it alongside the commit range
+  and adds the chosen template to `TextGenerationPolicy.changeRequestTemplate`; the router drops
+  it, like the examples, for instances without `gitWritingToolFree`.

@@ -152,8 +152,9 @@ export interface TextGenerationService {
 export interface TextGenerationShape {
   /**
    * Commit messages and pull request text run without tools here, so their policy may carry
-   * text from the repository and its forge (`TextGenerationPolicy.repositoryExamples`). Absent
-   * means they may have tools: the router then drops that text before calling.
+   * text from the repository and its forge (`TextGenerationPolicy.repositoryExamples` and
+   * `changeRequestTemplate`). Absent means they may have tools: the router then drops that text
+   * before calling.
    */
   readonly gitWritingToolFree?: boolean | undefined;
 
@@ -241,16 +242,24 @@ const resolveInstance = (
   );
 
 /**
- * Repository and forge text in a Git writing policy reaches only instances that write commit
- * messages and pull request text without tools; any other instance gets the style without it.
+ * Repository and forge text in a Git writing policy (examples, the pull request template)
+ * reaches only instances that write commit messages and pull request text without tools; any
+ * other instance gets the style without it.
  */
 export const gitWritingPolicyForInstance = (
   textGeneration: Pick<TextGenerationShape, "gitWritingToolFree">,
   policy: TextGenerationPolicy | undefined,
 ): TextGenerationPolicy | undefined => {
-  if (policy?.repositoryExamples === undefined || textGeneration.gitWritingToolFree === true)
+  if (
+    textGeneration.gitWritingToolFree === true ||
+    (policy?.repositoryExamples === undefined && policy?.changeRequestTemplate === undefined)
+  )
     return policy;
-  const { repositoryExamples: _untrusted, ...withoutRepositoryText } = policy;
+  const {
+    repositoryExamples: _untrustedExamples,
+    changeRequestTemplate: _untrustedTemplate,
+    ...withoutRepositoryText
+  } = policy;
   return withoutRepositoryText;
 };
 

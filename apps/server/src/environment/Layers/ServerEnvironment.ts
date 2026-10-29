@@ -89,6 +89,7 @@ export const makeServerEnvironment = Effect.fn("makeServerEnvironment")(function
       repositoryIdentity: true,
       worktreeSubmoduleSettings: true,
       gitWritingStyle: true,
+      changeRequestTemplates: true,
       threadSettlement: true,
       nodeAutoSettlement: true,
       threadSnooze: true,

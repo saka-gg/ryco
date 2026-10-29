@@ -886,6 +886,15 @@ export const makeSourceControlHandlers = (ctx: WsRpcContext) => {
         ),
         { "rpc.aggregate": "source-control" },
       ),
+    [WS_METHODS.sourceControlListChangeRequestTemplates]: (input) =>
+      observeRpcEffect(
+        WS_METHODS.sourceControlListChangeRequestTemplates,
+        ownerEffect(
+          WS_METHODS.sourceControlListChangeRequestTemplates,
+          gitWorkflow.listChangeRequestTemplates(input),
+        ),
+        { "rpc.aggregate": "source-control" },
+      ),
     [WS_METHODS.sourceControlCreateChangeRequest]: (input) =>
       observeRpcEffect(
         WS_METHODS.sourceControlCreateChangeRequest,

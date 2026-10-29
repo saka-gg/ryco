@@ -418,6 +418,17 @@ describe.skipIf(!hasCurrentBuild)("built server bundle pull request watches", ()
       expect(source).not.toContain("repository writing examples: commit subjects unavailable");
     }
   });
+
+  it("loads the pull request template reader on first use", () => {
+    const cliChunk = readFileSync(builtEntry, "utf8").match(/import\("(\.\/cliMain[^"]+)"\)/u)?.[1];
+    const serve = builtStaticClosure(path.resolve(serverRoot, "dist", cliChunk!));
+    for (const chunk of serve.chunks) {
+      const source = readFileSync(chunk, "utf8");
+      expect(source).not.toMatch(/^\/\/#region src\/sourceControl\/changeRequestTemplates\.ts$/mu);
+      // In case the module carries no region marker of its own: its log line is unique.
+      expect(source).not.toContain("change request templates: read failed");
+    }
+  });
 });
 
 describe.skipIf(!hasCurrentBuild)("built server bundle imports", () => {

@@ -332,6 +332,10 @@ import type {
   SourceControlSetPullRequestWatchInput,
   SourceControlSetPullRequestWatchResult,
 } from "./pullRequestWatchRpc.ts";
+import type {
+  ChangeRequestTemplateListInput,
+  ChangeRequestTemplateListResult,
+} from "./changeRequestReview.ts";
 
 export interface ContextMenuItem<T extends string = string> {
   id: T;
@@ -1517,6 +1521,10 @@ export interface EnvironmentApi {
     setPullRequestWatch?: (
       input: SourceControlSetPullRequestWatchInput,
     ) => Promise<SourceControlSetPullRequestWatchResult>;
+    /** Optional: older shapes and test doubles lack it; gate on `changeRequestTemplates`. */
+    listChangeRequestTemplates?: (
+      input: ChangeRequestTemplateListInput,
+    ) => Promise<ChangeRequestTemplateListResult>;
   };
   vcs: {
     readLineBlame: (input: GitReadLineBlameInput) => Promise<GitReadLineBlameResult>;

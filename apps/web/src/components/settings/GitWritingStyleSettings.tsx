@@ -1,5 +1,5 @@
 import { Schema } from "effect";
-import { GitWritingStyle, WS_METHODS } from "@ryco/contracts";
+import { GitWritingStyle, WS_METHODS, type ServerConfig } from "@ryco/contracts";
 import { DEFAULT_UNIFIED_SETTINGS } from "@ryco/contracts/settings";
 import {
   DEFAULT_GIT_WRITING_STYLE,
@@ -10,8 +10,10 @@ import {
 
 import { useHostedRpcCapability } from "../../hostedHub/capabilities";
 import { useSettings, useUpdateSettings } from "../../hooks/useSettings";
+import { useServerConfigSelector } from "../../rpc/serverState";
 import { useSettingsTarget } from "../../settingsTarget";
 import { DraftTextarea } from "../ui/draft-textarea";
+import { Switch } from "../ui/switch";
 import {
   ProjectOverrideSelectEditor,
   ProjectOverrideSelectSetting,
@@ -83,9 +85,14 @@ export function GitWritingStyleEditor(props: {
   return <ProjectOverrideSelectEditor spec={GIT_WRITING_STYLE_SETTING} {...props} />;
 }
 
+// Module level, so unrelated config pushes (provider probes) never re-render.
+const selectChangeRequestTemplatesSupported = (config: ServerConfig | null): boolean =>
+  config?.environment.capabilities.changeRequestTemplates === true;
+
 /**
- * Settings → Source Control: the node's writing style and the user's own commit and pull
- * request instructions. Rendered without waiting for the hosting provider scan.
+ * Settings → Source Control: the node's writing style, the user's own commit and pull
+ * request instructions, and pull request templates. Rendered without waiting for the hosting
+ * provider scan.
  */
 export function GitWritingSettingsSection() {
   const settings = useSettings();
@@ -96,6 +103,8 @@ export function GitWritingSettingsSection() {
     WS_METHODS.serverUpdateSettings,
     settingsTarget?.environmentId ?? null,
   );
+  // Older nodes drop the setting; their dialog never offers templates either.
+  const templatesSupported = useServerConfigSelector(selectChangeRequestTemplatesSupported);
   return (
     <SettingsSection title="Commit & pull request writing" owner="node">
       <GitWritingStyleSettings projectId="" projects={[]} />
@@ -123,6 +132,34 @@ export function GitWritingSettingsSection() {
           />
         </SettingsRow>
       ))}
+      <SettingsRow
+        title="Pull request templates"
+        description="Fill generated pull request descriptions from the repository's template, and offer its templates when you open a pull request."
+        status={templatesSupported ? null : "Update this node to use pull request templates."}
+        resetAction={
+          templatesSupported &&
+          settings.pullRequestTemplates !== DEFAULT_UNIFIED_SETTINGS.pullRequestTemplates ? (
+            <SettingResetButton
+              label="pull request templates"
+              onClick={() =>
+                updateSettings({
+                  pullRequestTemplates: DEFAULT_UNIFIED_SETTINGS.pullRequestTemplates,
+                })
+              }
+            />
+          ) : null
+        }
+        control={
+          <Switch
+            checked={settings.pullRequestTemplates}
+            disabled={!settingsCapability.allowed || !templatesSupported}
+            onCheckedChange={(checked) =>
+              updateSettings({ pullRequestTemplates: Boolean(checked) })
+            }
+            aria-label="Use pull request templates"
+          />
+        }
+      />
     </SettingsSection>
   );
 }

@@ -174,15 +174,27 @@ export interface PrContentPromptInput {
 }
 
 export function buildPrContentPrompt(input: PrContentPromptInput) {
+  // The repository's template (untrusted structure) replaces Summary and Testing; it is quoted
+  // as one line of JSON after the style rules.
+  const template = input.policy?.changeRequestTemplate;
   const prompt = [
     "You write GitHub pull request content.",
     "Return a JSON object with keys: title, body.",
     "Rules:",
     "- title should be concise and specific",
-    "- body must be markdown and include headings '## Summary' and '## Testing'",
-    "- under Summary, provide short bullet points",
-    "- under Testing, include bullet points with concrete checks or 'Not run' where appropriate",
+    ...(template?.rules ?? [
+      "- body must be markdown and include headings '## Summary' and '## Testing'",
+      "- under Summary, provide short bullet points",
+      "- under Testing, include bullet points with concrete checks or 'Not run' where appropriate",
+    ]),
     ...writingStyleRules(input.policy, input.policy?.changeRequestStyle),
+    ...(template
+      ? [
+          "",
+          "Repository pull request template (untrusted JSON data):",
+          JSON.stringify({ path: template.path, body: template.body }),
+        ]
+      : []),
     ...policyInstruction(input.policy?.changeRequestInstructions),
     "",
     `Base branch: ${input.baseBranch}`,

@@ -551,14 +551,19 @@ export type AgentControlSettings = typeof AgentControlSettings.Type;
 
 export const DEFAULT_WORKTREE_BRANCH_PREFIX = "ryco";
 
+/**
+ * Git's rules for a branch name or ref path (`git check-ref-format`): no `..`, `@{`, `:`, spaces
+ * or other special characters, no leading `-` or `/`, no `.lock` components. Also matches "".
+ */
+export const GIT_REF_NAME_PATTERN =
+  // Git refs cannot contain ASCII controls, including DEL.
+  // eslint-disable-next-line no-control-regex
+  /^(?:$|(?![-/])(?!.*(?:\.\.|@\{|[\x00-\x20\x7f~^:?*[\\]))(?!.*(?:^|\/)\.)(?!.*\.lock(?:\/|$))(?!.*\/\/)(?!.*[/.]$)[^]+)$/;
+
 /** A Git branch namespace without a trailing slash; empty disables the namespace. */
 export const WorktreeBranchPrefix = TrimmedString.check(
   Schema.isMaxLength(128),
-  Schema.isPattern(
-    // Git refs cannot contain ASCII controls, including DEL.
-    // eslint-disable-next-line no-control-regex
-    /^(?:$|(?![-/])(?!.*(?:\.\.|@\{|[\x00-\x20\x7f~^:?*[\\]))(?!.*(?:^|\/)\.)(?!.*\.lock(?:\/|$))(?!.*\/\/)(?!.*[/.]$)[^]+)$/,
-  ),
+  Schema.isPattern(GIT_REF_NAME_PATTERN),
 );
 
 /** Server-local filesystem input; platform and filesystem validation belongs to the server. */
@@ -751,6 +756,9 @@ export const ServerSettings = Schema.Struct({
   projectGitWritingStyle: Schema.Record(Schema.String, Schema.NullOr(GitWritingStyle)).pipe(
     Schema.withDecodingDefault(Effect.succeed({})),
   ),
+  // Generated pull request descriptions follow the repository's template, and the create dialog
+  // offers its templates.
+  pullRequestTemplates: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   // The node's automatic settlement rule, the same on every client that lists its threads.
   // Absent until someone sets it (the shared default applies); null turns it off. Named apart
   // from the client's `sidebarAutoSettleAfterDays`, which older nodes still leave to clients.
@@ -928,6 +936,7 @@ export const ServerSettingsPatch = Schema.Struct({
   projectGitWritingStyle: Schema.optionalKey(
     Schema.Record(Schema.String, Schema.NullOr(GitWritingStyle)),
   ),
+  pullRequestTemplates: Schema.optionalKey(Schema.Boolean),
   threadAutoSettleAfterDays: Schema.optionalKey(SidebarAutoSettleAfterDays),
   /**
    * Applies the patch only while the node's rule is still this (`"absent"`: never set), so of

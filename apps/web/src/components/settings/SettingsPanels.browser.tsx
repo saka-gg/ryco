@@ -2513,6 +2513,50 @@ describe("SourceControlSettingsPanel discovery states", () => {
       .toBeInTheDocument();
     expect(calls).toBe(1);
   });
+
+  it("turns pull request templates off on a node that reads them", async () => {
+    resetServerStateForTests();
+    const updateSettings = vi
+      .fn<LocalApi["server"]["updateSettings"]>()
+      .mockResolvedValue({ ...DEFAULT_SERVER_SETTINGS, pullRequestTemplates: false });
+    installSettingsNativeApi({ updateSettings });
+    const config = createBaseServerConfig();
+    setServerConfigSnapshot({
+      ...config,
+      environment: {
+        ...config.environment,
+        capabilities: { ...config.environment.capabilities, changeRequestTemplates: true },
+      },
+    });
+
+    mounted = await renderSourceControlSettingsPanel();
+
+    const toggle = page.getByRole("switch", { name: "Use pull request templates" });
+    await expect.element(toggle).toBeChecked();
+    await expect.element(toggle).toBeEnabled();
+    await toggle.click();
+    await vi.waitFor(() =>
+      expect(updateSettings).toHaveBeenLastCalledWith({ pullRequestTemplates: false }),
+    );
+    await expect.element(toggle).not.toBeChecked();
+  });
+
+  it("asks a node that cannot read pull request templates to update", async () => {
+    resetServerStateForTests();
+    const updateSettings = vi.fn<LocalApi["server"]["updateSettings"]>();
+    installSettingsNativeApi({ updateSettings });
+    setServerConfigSnapshot(createBaseServerConfig());
+
+    mounted = await renderSourceControlSettingsPanel();
+
+    await expect
+      .element(page.getByRole("switch", { name: "Use pull request templates" }))
+      .toBeDisabled();
+    await expect
+      .element(page.getByText("Update this node to use pull request templates."))
+      .toBeInTheDocument();
+    expect(updateSettings).not.toHaveBeenCalled();
+  });
 });
 
 describe("ConnectionsSettings Hub section", () => {

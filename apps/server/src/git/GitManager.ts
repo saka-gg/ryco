@@ -35,6 +35,8 @@ import {
   ModelSelection,
   type OrchestrationProjectShell,
   type ServerSettings,
+  type ChangeRequestTemplateListInput,
+  type ChangeRequestTemplateListResult,
 } from "@ryco/contracts";
 import {
   parseGitHubRepositoryNameWithOwnerFromRemoteUrl,
@@ -52,6 +54,7 @@ import {
 import { GitManagerError } from "@ryco/contracts";
 import { TextGeneration } from "../textGeneration/TextGeneration.ts";
 import type { TextGenerationPolicy } from "../textGeneration/TextGenerationPolicy.ts";
+import type { ChangeRequestTemplates } from "../sourceControl/changeRequestTemplates.ts";
 import { ProjectSetupScriptRunner } from "../project/Services/ProjectSetupScriptRunner.ts";
 import { ProjectionSnapshotQuery } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 import { resolveProjectPreferences } from "../project/projectPreferences.ts";
@@ -171,6 +174,14 @@ export interface GitManagerShape {
     input: GitRunStackedActionInput,
     options?: GitRunStackedActionOptions,
   ) => Effect.Effect<GitRunStackedActionResult, GitManagerServiceError>;
+  /**
+   * The change request templates of the base branch's tree (the remote's branch, else the
+   * local one) on hosts whose layout Ryco reads, and the one a generated description follows.
+   * Never fails: none on errors.
+   */
+  readonly listChangeRequestTemplates: (
+    input: ChangeRequestTemplateListInput,
+  ) => Effect.Effect<ChangeRequestTemplateListResult>;
 }
 
 export interface RemoteStatusOptions {
@@ -523,6 +534,8 @@ interface GitWriting {
    * first use and at most once per action, so only generated text pays for its reads.
    */
   readonly policy: Effect.Effect<TextGenerationPolicy | undefined>;
+  /** Generated pull request descriptions follow the repository's template. */
+  readonly pullRequestTemplates: boolean;
 }
 
 /**
@@ -1285,6 +1298,27 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* (
       }),
     );
 
+  // Pull request templates load on first use. One instance serves the pull request step and the
+  // create dialog, so both share its cache; a load that failed gives no templates.
+  let changeRequestTemplates: ChangeRequestTemplates | undefined;
+  const withChangeRequestTemplates = <A>(
+    use: (templates: ChangeRequestTemplates) => Effect.Effect<A>,
+    orElse: Effect.Effect<A>,
+  ) =>
+    Effect.tryPromise(() => import("../sourceControl/changeRequestTemplates.ts")).pipe(
+      Effect.matchEffect({
+        onFailure: () => orElse,
+        onSuccess: (module) =>
+          use((changeRequestTemplates ??= module.makeChangeRequestTemplates(gitCore))),
+      }),
+    );
+
+  const listChangeRequestTemplates: GitManagerShape["listChangeRequestTemplates"] = (input) =>
+    withChangeRequestTemplates(
+      (templates) => templates.list(input, sourceControlProvider(input.cwd)),
+      Effect.succeed({ templates: [], generationTemplatePath: null }),
+    );
+
   const invalidatePullRequestIndex = (cwd: string) =>
     resolvePullRequestIndexTarget(cwd).pipe(
       Effect.flatMap((target) =>
@@ -1766,14 +1800,25 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* (
       phase: "pr",
       label: `Generating ${terms.shortLabel} content...`,
     });
-    // The writing policy (cached when the commit step resolved it) overlaps the range read.
+    // A fork's head remote must not supply the target repository's base.
+    const remoteName = headContext.isCrossRepository ? "origin" : headContext.remoteName;
+    // The writing policy (cached when the commit step resolved it) and the base branch's
+    // template overlap the range read.
     const [rangeContext, policy] = yield* Effect.all(
       [
-        gitCore.readRangeContext(cwd, baseBranch, {
-          // A fork's head remote must not supply the target repository's base.
-          remoteName: headContext.isCrossRepository ? "origin" : headContext.remoteName,
-        }),
-        writing.policy,
+        gitCore.readRangeContext(cwd, baseBranch, { remoteName }),
+        writing.pullRequestTemplates
+          ? withChangeRequestTemplates(
+              (templates) =>
+                templates.withTemplate(writing.policy, {
+                  cwd,
+                  host: provider,
+                  baseBranch,
+                  remoteName,
+                }),
+              writing.policy,
+            )
+          : writing.policy,
       ],
       { concurrency: 2 },
     );
@@ -2423,6 +2468,7 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* (
           policy: yield* Effect.cached(
             resolveWritingPolicy(input.cwd, settings, options?.checkoutProjectId),
           ),
+          pullRequestTemplates: settings.pullRequestTemplates,
         };
 
         if (input.featureBranch) {
@@ -2582,6 +2628,7 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* (
     resolvePullRequest,
     preparePullRequestThread,
     runStackedAction,
+    listChangeRequestTemplates,
   } satisfies GitManagerShape;
 });
 

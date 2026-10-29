@@ -390,6 +390,8 @@ import {
   ChangeRequestSetThreadResolvedResult,
   ChangeRequestSubmitReviewInput,
   ChangeRequestSubmitReviewResult,
+  ChangeRequestTemplateListInput,
+  ChangeRequestTemplateListResult,
   ChangeRequestUpdateCommentInput,
   ChangeRequestUpdateCommentResult,
   ChangeRequestUpdateInput,
@@ -624,6 +626,7 @@ export const WS_METHODS = {
   sourceControlUpdateChangeRequestComment: "sourceControl.updateChangeRequestComment",
   sourceControlUpdateChangeRequest: "sourceControl.updateChangeRequest",
   sourceControlCreateChangeRequest: "sourceControl.createChangeRequest",
+  sourceControlListChangeRequestTemplates: "sourceControl.listChangeRequestTemplates",
   sourceControlLinkWorktreePullRequest: "sourceControl.linkWorktreePullRequest",
   sourceControlDismissWorktreePullRequest: "sourceControl.dismissWorktreePullRequest",
   sourceControlSetPullRequestWatch: "sourceControl.setPullRequestWatch",
@@ -1531,6 +1534,15 @@ export const WsSourceControlCreateChangeRequestRpc = Rpc.make(
     payload: ChangeRequestCreateInput,
     success: ChangeRequest,
     error: Schema.Union([SourceControlProviderError, AuthRpcError]),
+  },
+);
+
+export const WsSourceControlListChangeRequestTemplatesRpc = Rpc.make(
+  WS_METHODS.sourceControlListChangeRequestTemplates,
+  {
+    payload: ChangeRequestTemplateListInput,
+    success: ChangeRequestTemplateListResult,
+    error: Schema.Union([GitCommandError, AuthRpcError]),
   },
 );
 
@@ -2616,6 +2628,7 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   | typeof WsSourceControlUpdateChangeRequestCommentRpc
   | typeof WsSourceControlUpdateChangeRequestRpc
   | typeof WsSourceControlCreateChangeRequestRpc
+  | typeof WsSourceControlListChangeRequestTemplatesRpc
   | typeof WsSourceControlLinkWorktreePullRequestRpc
   | typeof WsSourceControlDismissWorktreePullRequestRpc
   | typeof WsSourceControlSetPullRequestWatchRpc
@@ -2841,6 +2854,7 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   WsSourceControlUpdateChangeRequestCommentRpc,
   WsSourceControlUpdateChangeRequestRpc,
   WsSourceControlCreateChangeRequestRpc,
+  WsSourceControlListChangeRequestTemplatesRpc,
   WsSourceControlLinkWorktreePullRequestRpc,
   WsSourceControlDismissWorktreePullRequestRpc,
   WsSourceControlSetPullRequestWatchRpc,

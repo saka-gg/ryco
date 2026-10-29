@@ -88,6 +88,15 @@ describe("settings reset ownership", () => {
     });
     expect(settingsRestorePlan(settings, "system", "client").patch).toEqual({});
   });
+  it("turns pull request templates back on as a node setting", () => {
+    const settings = { ...DEFAULT_UNIFIED_SETTINGS, pullRequestTemplates: false };
+    expect(settingsRestorePlan(settings, "system", "node")).toEqual({
+      labels: ["Pull request templates"],
+      resetTheme: false,
+      patch: { pullRequestTemplates: true },
+    });
+    expect(settingsRestorePlan(settings, "system", "client").patch).toEqual({});
+  });
   it("does not write defaults for unchanged settings", () => {
     expect(settingsRestorePlan(DEFAULT_UNIFIED_SETTINGS, "system", "node").patch).toEqual({});
   });

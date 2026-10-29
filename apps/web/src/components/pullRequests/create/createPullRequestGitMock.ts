@@ -15,6 +15,8 @@
  * ```
  */
 import type {
+  ChangeRequestTemplateListInput,
+  ChangeRequestTemplateListResult,
   EnvironmentApi,
   VcsListRefsInput,
   VcsListRefsResult,
@@ -84,6 +86,12 @@ export const createPullRequestGitMock = {
   ]),
   /** Every remote lookup, in order. */
   listRefsCalls: [] as VcsListRefsInput[],
+  /** The template listing of each base branch's tree; a base not listed has none. */
+  templatesByBase: new Map<string, ChangeRequestTemplateListResult>(),
+  /** Bases whose template read fails. */
+  failingTemplateBases: new Set<string>(),
+  /** Every template read, in order. */
+  listTemplatesCalls: [] as ChangeRequestTemplateListInput[],
   reset(): void {
     createPullRequestGitMock.refs = fixtureRefs();
     createPullRequestGitMock.status = fixtureGitStatus();
@@ -96,6 +104,9 @@ export const createPullRequestGitMock = {
       "release/2026.10",
     ]);
     createPullRequestGitMock.listRefsCalls.length = 0;
+    createPullRequestGitMock.templatesByBase = new Map();
+    createPullRequestGitMock.failingTemplateBases = new Set();
+    createPullRequestGitMock.listTemplatesCalls.length = 0;
   },
 };
 
@@ -131,7 +142,11 @@ export function createUseGitMock<T extends object>(original: T) {
   };
 }
 
-/** `vcs.listRefs({ originOnly })` over `originBranches`; install with `__setEnvironmentApiOverrideForTests`. */
+/**
+ * `vcs.listRefs({ originOnly })` over `originBranches` and
+ * `sourceControl.listChangeRequestTemplates` over `templatesByBase` (rejecting for
+ * `failingTemplateBases`); install with `__setEnvironmentApiOverrideForTests`.
+ */
 export function createPullRequestEnvironmentApi(): EnvironmentApi {
   const listRefs = async (input: VcsListRefsInput): Promise<VcsListRefsResult> => {
     createPullRequestGitMock.listRefsCalls.push(input);
@@ -146,5 +161,20 @@ export function createPullRequestEnvironmentApi(): EnvironmentApi {
       totalCount: refs.length,
     };
   };
-  return { vcs: { listRefs } } as unknown as EnvironmentApi;
+  const listChangeRequestTemplates = async (input: ChangeRequestTemplateListInput) => {
+    createPullRequestGitMock.listTemplatesCalls.push(input);
+    if (createPullRequestGitMock.failingTemplateBases.has(input.baseRefName ?? "")) {
+      throw new Error("The template read failed.");
+    }
+    return (
+      createPullRequestGitMock.templatesByBase.get(input.baseRefName ?? "") ?? {
+        templates: [],
+        generationTemplatePath: null,
+      }
+    );
+  };
+  return {
+    vcs: { listRefs },
+    sourceControl: { listChangeRequestTemplates },
+  } as unknown as EnvironmentApi;
 }

@@ -16,6 +16,13 @@ import {
   validateCreatePullRequest,
   type CreatePullRequestBranch,
 } from "./createPullRequest.logic";
+import type { ChangeRequestTemplate } from "@ryco/contracts";
+import {
+  initialTemplate,
+  isDescriptionPristine,
+  templateOptionLabel,
+  templateOptionLabels,
+} from "./createPullRequest.logic";
 
 function local(name: string, extra: Partial<VcsRef> = {}): VcsRef {
   return { name, current: false, isDefault: false, worktreePath: null, isRemote: false, ...extra };
@@ -274,5 +281,58 @@ describe("buildCreatePullRequestInput", () => {
         capabilities: { create: { supported: true, draft: false } },
       }),
     ).not.toHaveProperty("draft");
+  });
+});
+
+describe("pull request templates", () => {
+  const template = (
+    path: string,
+    extra: Partial<ChangeRequestTemplate> = {},
+  ): ChangeRequestTemplate => ({
+    path,
+    name: path.slice(path.lastIndexOf("/") + 1).replace(/\.[^.]+$/u, ""),
+    isDefault: false,
+    body: `## ${path}`,
+    truncated: false,
+    ...extra,
+  });
+  const fallback = template(".github/pull_request_template.md", {
+    name: "Default",
+    isDefault: true,
+  });
+  const bug = template(".github/PULL_REQUEST_TEMPLATE/bug.md");
+  const feature = template(".github/PULL_REQUEST_TEMPLATE/feature.md");
+
+  it("starts from the template the server says a generated description follows", () => {
+    expect(initialTemplate([fallback, bug, feature], fallback.path)).toBe(fallback);
+    expect(initialTemplate([bug], bug.path)).toBe(bug);
+    // The server's rule picked none (several templates, or a lone one GitLab does not apply).
+    expect(initialTemplate([bug], null)).toBeNull();
+    expect(initialTemplate([bug, feature], null)).toBeNull();
+    expect(initialTemplate([], null)).toBeNull();
+    expect(initialTemplate([bug], feature.path)).toBeNull();
+  });
+
+  it("treats a description as untouched while it is empty or exactly the inserted template", () => {
+    expect(isDescriptionPristine("", null)).toBe(true);
+    expect(isDescriptionPristine("  \n", "## Summary")).toBe(true);
+    expect(isDescriptionPristine("## Summary", "## Summary")).toBe(true);
+    expect(isDescriptionPristine("## Summary\nFixes the login", "## Summary")).toBe(false);
+    expect(isDescriptionPristine("Written by hand", null)).toBe(false);
+  });
+
+  it("labels a template cut at its size limit", () => {
+    expect(templateOptionLabel(bug)).toBe("bug");
+    expect(templateOptionLabel({ ...feature, truncated: true })).toBe("feature (shortened)");
+  });
+
+  it("tells templates with the same name apart by their paths", () => {
+    const docsBug = template("docs/PULL_REQUEST_TEMPLATE/bug.md", { truncated: true });
+    expect([...templateOptionLabels([fallback, bug, docsBug, feature])]).toEqual([
+      [fallback.path, "Default"],
+      [bug.path, ".github/PULL_REQUEST_TEMPLATE/bug.md"],
+      [docsBug.path, "docs/PULL_REQUEST_TEMPLATE/bug.md (shortened)"],
+      [feature.path, "feature"],
+    ]);
   });
 });
