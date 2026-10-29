@@ -441,10 +441,16 @@ export const MERGED_CHUNK_GROUP_NAMES = [
  * As separate chunks they cost a request round after boot: +0.35 s to the
  * hosted sign-in at 150 ms / 1.6 Mbps, and about 30 ms (10%) to the standard
  * shell paint on loopback.
+ *
+ * The app shell's new-chat shortcuts join them: they used to live in the chat
+ * layout, which brought the new-thread actions they run into boot. Grouped
+ * here, those modules stay in the boot chunk rather than splitting into a
+ * dozen shell chunks.
  */
 export const BOOT_ROOT_MODULES = [
   "src/components/routeViews/ChatLayoutRouteView.tsx",
   "src/components/routeViews/ChatIndexRouteView.tsx",
+  "src/components/NewChatShortcuts.tsx",
 ] as const;
 
 export function createWebCodeSplittingOptions(input: {
