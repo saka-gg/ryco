@@ -9663,6 +9663,620 @@ describe("ClaudeAdapterLive turn ownership", () => {
   });
 });
 
+const PLAN_SUBAGENT_TOOL_USE_ID = "toolu_agent_plan";
+
+/** The start, input and stop frames of one streamed tool call. */
+function planToolStreamFrames(input: {
+  readonly index: number;
+  readonly toolUseId: string;
+  readonly name: string;
+  readonly input: Record<string, unknown>;
+  readonly parentToolUseId?: string;
+  readonly sessionId?: string;
+}): ReadonlyArray<SDKMessage> {
+  const frame = (part: string, event: Record<string, unknown>) =>
+    ({
+      type: "stream_event",
+      parent_tool_use_id: input.parentToolUseId ?? null,
+      uuid: `${input.toolUseId}-${part}`,
+      session_id: input.sessionId ?? GAUGE_SDK_SESSION,
+      event,
+    }) as unknown as SDKMessage;
+  return [
+    frame("start", {
+      type: "content_block_start",
+      index: input.index,
+      content_block: { type: "tool_use", id: input.toolUseId, name: input.name, input: {} },
+    }),
+    frame("delta", {
+      type: "content_block_delta",
+      index: input.index,
+      delta: { type: "input_json_delta", partial_json: JSON.stringify(input.input) },
+    }),
+    frame("stop", { type: "content_block_stop", index: input.index }),
+  ];
+}
+
+function planToolResultFrame(input: {
+  readonly toolUseId: string;
+  readonly text: string;
+  readonly structured?: Record<string, unknown>;
+  readonly parentToolUseId?: string;
+  readonly sessionId?: string;
+}): SDKMessage {
+  return {
+    type: "user",
+    uuid: `${input.toolUseId}-result`,
+    session_id: input.sessionId ?? GAUGE_SDK_SESSION,
+    parent_tool_use_id: input.parentToolUseId ?? null,
+    message: {
+      role: "user",
+      content: [{ type: "tool_result", tool_use_id: input.toolUseId, content: input.text }],
+    },
+    ...(input.structured ? { tool_use_result: input.structured } : {}),
+  } as unknown as SDKMessage;
+}
+
+/** A subagent's assistant snapshot holding one tool call, never streamed. */
+function planSubagentSnapshotFrame(toolUseId: string, name: string, input: unknown): SDKMessage {
+  return {
+    type: "assistant",
+    uuid: `${toolUseId}-snapshot`,
+    session_id: GAUGE_SDK_SESSION,
+    parent_tool_use_id: PLAN_SUBAGENT_TOOL_USE_ID,
+    message: {
+      id: `${toolUseId}-message`,
+      model: GAUGE_MODEL,
+      content: [{ type: "tool_use", id: toolUseId, name, input }],
+      usage: {},
+    },
+  } as unknown as SDKMessage;
+}
+
+const planUpdates = (events: ReadonlyArray<ProviderRuntimeEvent>) =>
+  events.flatMap((event) => (event.type === "turn.plan.updated" ? [event] : []));
+
+describe("ClaudeAdapterLive plan tasks", () => {
+  const startPlanSession = (adapter: ClaudeAdapterShape, id: string) =>
+    adapter.startSession({
+      runtimeSessionId: RuntimeSessionId.make(id),
+      threadId: THREAD_ID,
+      provider: ProviderDriverKind.make("claudeAgent"),
+      runtimeMode: "full-access",
+    });
+
+  const emitAll = (harness: ReturnType<typeof makeHarness>, frames: ReadonlyArray<SDKMessage>) =>
+    Effect.sync(() => {
+      for (const frame of frames) harness.query.emit(frame);
+    });
+
+  it.effect("plan tasks: root Task tool results fill the turn's plan", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const log = yield* makeRuntimeEventLog(adapter);
+      yield* startPlanSession(adapter, "plan-tasks-root");
+      const turn = yield* adapter.sendTurn({ threadId: THREAD_ID, input: "plan it" });
+
+      yield* emitAll(
+        harness,
+        planToolStreamFrames({
+          index: 1,
+          toolUseId: "toolu_create_1",
+          name: "TaskCreate",
+          input: { subject: "Write tests", description: "Cover the tracker" },
+        }),
+      );
+      harness.query.emit(
+        planToolResultFrame({
+          toolUseId: "toolu_create_1",
+          text: "Task #1 created successfully: Write tests",
+          structured: { task: { id: "1", subject: "Write tests" } },
+        }),
+      );
+      const created = yield* log.waitFor((event) => event.type === "turn.plan.updated");
+      assert.equal(String(created.turnId), String(turn.turnId));
+      assert.deepEqual(created.type === "turn.plan.updated" ? created.payload.plan : undefined, [
+        { step: "Write tests", status: "pending" },
+      ]);
+
+      yield* emitAll(
+        harness,
+        planToolStreamFrames({
+          index: 2,
+          toolUseId: "toolu_update_1",
+          name: "TaskUpdate",
+          input: { taskId: "1", status: "in_progress" },
+        }),
+      );
+      harness.query.emit(
+        planToolResultFrame({
+          toolUseId: "toolu_update_1",
+          text: "Updated task #1 status",
+          structured: {
+            success: true,
+            taskId: "1",
+            updatedFields: ["status"],
+            statusChange: { from: "pending", to: "in_progress" },
+          },
+        }),
+      );
+      const started = yield* log.waitFor((event) => event.type === "turn.plan.updated");
+      assert.deepEqual(started.type === "turn.plan.updated" ? started.payload.plan : undefined, [
+        { step: "Write tests", status: "inProgress" },
+      ]);
+
+      // A TaskList that only confirms the list sends no plan event.
+      yield* emitAll(
+        harness,
+        planToolStreamFrames({ index: 3, toolUseId: "toolu_list_1", name: "TaskList", input: {} }),
+      );
+      harness.query.emit(
+        planToolResultFrame({
+          toolUseId: "toolu_list_1",
+          text: "#1 [in_progress] Write tests",
+          structured: {
+            tasks: [{ id: "1", subject: "Write tests", status: "in_progress", blockedBy: [] }],
+          },
+        }),
+      );
+      harness.query.emit(resultFrame());
+      yield* log.waitFor(isTurnTerminal);
+      yield* log.drain;
+      assert.equal(planUpdates(log.events).length, 2);
+
+      // The rows read as tool calls, not file changes, and say what they did.
+      const createStarted = log.events.find(
+        (event) => event.type === "item.started" && String(event.itemId) === "toolu_create_1",
+      );
+      assert.equal(
+        createStarted?.type === "item.started" ? createStarted.payload.itemType : undefined,
+        "dynamic_tool_call",
+      );
+      const completedDetail = (itemId: string) => {
+        const completed = log.events.find(
+          (event) => event.type === "item.completed" && String(event.itemId) === itemId,
+        );
+        return completed?.type === "item.completed" ? completed.payload.detail : undefined;
+      };
+      assert.equal(completedDetail("toolu_create_1"), "TaskCreate: Write tests");
+      assert.equal(completedDetail("toolu_update_1"), "TaskUpdate: #1 → in_progress");
+      assert.equal(completedDetail("toolu_list_1"), "TaskList");
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("plan tasks: a subagent's snapshot-only TaskCreate updates the shared plan", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const log = yield* makeRuntimeEventLog(adapter);
+      yield* startPlanSession(adapter, "plan-tasks-subagent");
+      const turn = yield* adapter.sendTurn({ threadId: THREAD_ID, input: "delegate" });
+
+      harness.query.emit(
+        planSubagentSnapshotFrame("toolu_sub_create", "TaskCreate", {
+          subject: "Investigate",
+          description: "Find the cause",
+        }),
+      );
+      // Subagent results carry no structured tool_use_result.
+      harness.query.emit(
+        planToolResultFrame({
+          toolUseId: "toolu_sub_create",
+          text: "Task #1 created successfully: Investigate",
+          parentToolUseId: PLAN_SUBAGENT_TOOL_USE_ID,
+        }),
+      );
+      const updated = yield* log.waitFor((event) => event.type === "turn.plan.updated");
+      assert.equal(String(updated.turnId), String(turn.turnId));
+      assert.deepEqual(updated.type === "turn.plan.updated" ? updated.payload.plan : undefined, [
+        { step: "Investigate", status: "pending" },
+      ]);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("plan tasks: an update after the turn closed carries the completed turn", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const log = yield* makeRuntimeEventLog(adapter);
+      yield* startPlanSession(adapter, "plan-tasks-late");
+      const turn = yield* adapter.sendTurn({ threadId: THREAD_ID, input: "background work" });
+
+      harness.query.emit(
+        planSubagentSnapshotFrame("toolu_late_create", "TaskCreate", { subject: "Background" }),
+      );
+      harness.query.emit(resultFrame());
+      const completed = yield* log.waitFor(isTurnTerminal);
+      assert.equal(String(completed.turnId), String(turn.turnId));
+
+      // A background subagent's result lands after its turn settled.
+      harness.query.emit(
+        planToolResultFrame({
+          toolUseId: "toolu_late_create",
+          text: "Task #1 created successfully: Background",
+          parentToolUseId: PLAN_SUBAGENT_TOOL_USE_ID,
+        }),
+      );
+      const updated = yield* log.waitFor((event) => event.type === "turn.plan.updated");
+      assert.equal(String(updated.turnId), String(turn.turnId));
+      assert.deepEqual(updated.type === "turn.plan.updated" ? updated.payload.plan : undefined, [
+        { step: "Background", status: "pending" },
+      ]);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("plan tasks: a subagent's TodoWrite leaves the plan alone", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const log = yield* makeRuntimeEventLog(adapter);
+      yield* startPlanSession(adapter, "plan-tasks-subagent-todo");
+      yield* adapter.sendTurn({ threadId: THREAD_ID, input: "delegate" });
+
+      yield* emitAll(
+        harness,
+        planToolStreamFrames({
+          index: 1,
+          toolUseId: "toolu_sub_todo",
+          name: "TodoWrite",
+          input: { todos: [{ content: "Subagent step", status: "in_progress" }] },
+          parentToolUseId: PLAN_SUBAGENT_TOOL_USE_ID,
+        }),
+      );
+      yield* emitAll(
+        harness,
+        planToolStreamFrames({
+          index: 2,
+          toolUseId: "toolu_root_todo",
+          name: "TodoWrite",
+          input: { todos: [{ content: "Root step", status: "pending" }] },
+        }),
+      );
+      harness.query.emit(resultFrame());
+      yield* log.waitFor(isTurnTerminal);
+      yield* log.drain;
+
+      const updates = planUpdates(log.events);
+      assert.deepEqual(
+        updates.map((event) => event.payload.plan),
+        [[{ step: "Root step", status: "pending" }]],
+      );
+      const subagentRow = log.events.find(
+        (event) => event.type === "item.started" && String(event.itemId) === "toolu_sub_todo",
+      );
+      assert.equal(
+        subagentRow?.type === "item.started" ? subagentRow.payload.itemType : undefined,
+        "dynamic_tool_call",
+      );
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  describe("resume cursor", () => {
+    const PLAN_RESUME_SESSION = "44444444-4444-4444-8444-444444444444";
+    const PLAN_OTHER_SESSION = "55555555-5555-4555-8555-555555555555";
+    const WRITE_TESTS_LIST = {
+      nativeSessionId: PLAN_RESUME_SESSION,
+      tasks: [{ id: "1", subject: "Write tests", status: "pending" }],
+    };
+
+    const startResumed = (
+      adapter: ClaudeAdapterShape,
+      resumeCursor: Record<string, unknown>,
+      resumePolicy?: "fresh",
+    ) =>
+      adapter.startSession({
+        runtimeSessionId: RuntimeSessionId.make("plan-tasks-resume"),
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+        resumeCursor,
+        ...(resumePolicy ? { resumePolicy } : {}),
+      });
+
+    const cursorOf = (adapter: ClaudeAdapterShape) =>
+      adapter
+        .listSessions()
+        .pipe(
+          Effect.map(
+            (sessions) =>
+              sessions.find((session) => session.threadId === THREAD_ID)?.resumeCursor as
+                | Record<string, unknown>
+                | undefined,
+          ),
+        );
+
+    /** One completed turn on the newest query; `frames` run between the send and the result. */
+    const completeTurn = (input: {
+      readonly adapter: ClaudeAdapterShape;
+      readonly log: Effect.Success<ReturnType<typeof makeRuntimeEventLog>>;
+      readonly emit: (frame: SDKMessage) => void;
+      readonly frames?: ReadonlyArray<SDKMessage>;
+    }) =>
+      Effect.gen(function* () {
+        const turn = yield* input.adapter.sendTurn({ threadId: THREAD_ID, input: "go" });
+        for (const frame of input.frames ?? []) input.emit(frame);
+        input.emit(resultFrame({ session_id: PLAN_RESUME_SESSION }));
+        yield* input.log.waitFor(
+          (event) => isTurnTerminal(event) && String(event.turnId) === String(turn.turnId),
+        );
+        return turn.turnId;
+      });
+
+    const createWriteTestsFrames = (toolUseId: string): ReadonlyArray<SDKMessage> => [
+      ...planToolStreamFrames({
+        index: 1,
+        toolUseId,
+        name: "TaskCreate",
+        input: { subject: "Write tests", description: "Cover the cursor" },
+        sessionId: PLAN_RESUME_SESSION,
+      }),
+      planToolResultFrame({
+        toolUseId,
+        text: "Task #1 created successfully: Write tests",
+        structured: { task: { id: "1", subject: "Write tests" } },
+        sessionId: PLAN_RESUME_SESSION,
+      }),
+    ];
+
+    /** A text-only update that names its task by id alone, as after a restart. */
+    const completeTaskOneFrames = (toolUseId: string): ReadonlyArray<SDKMessage> => [
+      ...planToolStreamFrames({
+        index: 1,
+        toolUseId,
+        name: "TaskUpdate",
+        input: { taskId: "1", status: "completed" },
+        sessionId: PLAN_RESUME_SESSION,
+      }),
+      planToolResultFrame({
+        toolUseId,
+        text: "Updated task #1 status",
+        sessionId: PLAN_RESUME_SESSION,
+      }),
+    ];
+
+    it.effect("plan tasks: the task list survives a restart through the resume cursor", () => {
+      const harness = makeSequencedHarness();
+      const emit = (frame: SDKMessage) => harness.queries.at(-1)!.emit(frame);
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const log = yield* makeRuntimeEventLog(adapter);
+        yield* startResumed(adapter, {
+          threadId: THREAD_ID,
+          resume: PLAN_RESUME_SESSION,
+          turnCount: 0,
+        });
+        yield* completeTurn({
+          adapter,
+          log,
+          emit,
+          frames: createWriteTestsFrames("toolu_resume_create"),
+        });
+        const cursor = yield* cursorOf(adapter);
+        assert.deepEqual(cursor?.planTasks, WRITE_TESTS_LIST);
+
+        // A restart opens a new CLI from the binding's cursor.
+        yield* adapter.stopSession(THREAD_ID);
+        const resumed = yield* startResumed(adapter, cursor!);
+        assert.equal(harness.inputs.at(-1)?.options.resume, PLAN_RESUME_SESSION);
+        assert.deepEqual(
+          (resumed.resumeCursor as Record<string, unknown> | undefined)?.planTasks,
+          WRITE_TESTS_LIST,
+        );
+        yield* log.drain;
+        // The thread already shows the list; the resume does not send it again.
+        assert.equal(planUpdates(log.events).length, 1);
+
+        yield* completeTurn({
+          adapter,
+          log,
+          emit,
+          frames: completeTaskOneFrames("toolu_resume_update"),
+        });
+        yield* log.drain;
+        assert.deepEqual(
+          planUpdates(log.events).map((event) => event.payload.plan),
+          [
+            [{ step: "Write tests", status: "pending" }],
+            [{ step: "Write tests", status: "completed" }],
+          ],
+        );
+        assert.deepEqual((yield* cursorOf(adapter))?.planTasks, {
+          nativeSessionId: PLAN_RESUME_SESSION,
+          tasks: [{ id: "1", subject: "Write tests", status: "completed" }],
+        });
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    });
+
+    it.effect(
+      "plan tasks: a fresh start replaces the shown list with its first task result",
+      () => {
+        const harness = makeHarness();
+        return Effect.gen(function* () {
+          const adapter = yield* ClaudeAdapter;
+          const log = yield* makeRuntimeEventLog(adapter);
+          const session = yield* startResumed(
+            adapter,
+            {
+              threadId: THREAD_ID,
+              resume: PLAN_RESUME_SESSION,
+              turnCount: 1,
+              planTasks: WRITE_TESTS_LIST,
+            },
+            "fresh",
+          );
+          assert.isUndefined(harness.getLastCreateQueryInput()?.options.resume);
+          const seeded = (session.resumeCursor as Record<string, unknown>).planTasks as
+            | Record<string, unknown>
+            | undefined;
+          assert.deepEqual([seeded?.tasks, seeded?.shown], [[], false]);
+
+          yield* completeTurn({
+            adapter,
+            log,
+            emit: (frame) => harness.query.emit(frame),
+            frames: [
+              ...planToolStreamFrames({
+                index: 1,
+                toolUseId: "toolu_fresh_list",
+                name: "TaskList",
+                input: {},
+                sessionId: PLAN_RESUME_SESSION,
+              }),
+              planToolResultFrame({
+                toolUseId: "toolu_fresh_list",
+                text: "No tasks found",
+                sessionId: PLAN_RESUME_SESSION,
+              }),
+            ],
+          });
+          yield* log.drain;
+          // The thread still showed the earlier session's list; an empty plan clears it.
+          assert.deepEqual(
+            planUpdates(log.events).map((event) => event.payload.plan),
+            [[]],
+          );
+          assert.isUndefined((yield* cursorOf(adapter))?.planTasks);
+        }).pipe(
+          Effect.provideService(Random.Random, makeDeterministicRandomService()),
+          Effect.provide(harness.layer),
+        );
+      },
+    );
+
+    it.effect("plan tasks: a cursor written by another Claude session seeds no task list", () => {
+      const harness = makeHarness();
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const log = yield* makeRuntimeEventLog(adapter);
+        const session = yield* startResumed(adapter, {
+          threadId: THREAD_ID,
+          resume: PLAN_RESUME_SESSION,
+          turnCount: 1,
+          planTasks: { ...WRITE_TESTS_LIST, nativeSessionId: PLAN_OTHER_SESSION },
+        });
+        assert.equal(harness.getLastCreateQueryInput()?.options.resume, PLAN_RESUME_SESSION);
+        assert.isUndefined((session.resumeCursor as Record<string, unknown>).planTasks);
+
+        yield* completeTurn({
+          adapter,
+          log,
+          emit: (frame) => harness.query.emit(frame),
+          frames: completeTaskOneFrames("toolu_unseeded_update"),
+        });
+        yield* log.drain;
+        // The update names no subject, so a task the tracker does not know stays out.
+        assert.deepEqual(planUpdates(log.events), []);
+        assert.isUndefined((yield* cursorOf(adapter))?.planTasks);
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    });
+
+    it.effect("plan tasks: a revert keeps the list; a revert to the start drops it", () => {
+      const harness = makeSequencedHarness();
+      const emit = (frame: SDKMessage) => harness.queries.at(-1)!.emit(frame);
+      const completedList = {
+        nativeSessionId: PLAN_RESUME_SESSION,
+        tasks: [{ id: "1", subject: "Write tests", status: "completed" }],
+      };
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const log = yield* makeRuntimeEventLog(adapter);
+        yield* startResumed(adapter, {
+          threadId: THREAD_ID,
+          resume: PLAN_RESUME_SESSION,
+          turnCount: 0,
+        });
+        const turn1 = yield* completeTurn({
+          adapter,
+          log,
+          emit,
+          frames: createWriteTestsFrames("toolu_revert_create"),
+        });
+        const turn2 = yield* completeTurn({
+          adapter,
+          log,
+          emit,
+          frames: completeTaskOneFrames("toolu_revert_complete"),
+        });
+        harness.setTranscript([
+          { type: "user", uuid: turn1, parent_tool_use_id: null },
+          { type: "assistant", uuid: "a1", parent_tool_use_id: null },
+          { type: "user", uuid: turn2, parent_tool_use_id: null },
+          { type: "assistant", uuid: "a2", parent_tool_use_id: null },
+        ]);
+
+        // Reverting the conversation leaves Claude's task store as it is. The thread loses turn
+        // 2's plan and shows turn 1's again, so the list is marked as not shown.
+        yield* adapter.rollbackThread(THREAD_ID, {
+          numTurns: 1,
+          targetTurnId: turn1,
+          droppedTurnIds: [turn2],
+        });
+        assert.equal(harness.inputs.at(-1)?.options.resumeSessionAt, "a1");
+        const revertedCursor = yield* cursorOf(adapter);
+        assert.deepEqual(revertedCursor?.planTasks, { ...completedList, shown: false });
+
+        // A restart before the next plan keeps the mark.
+        yield* adapter.stopSession(THREAD_ID);
+        const restarted = yield* startResumed(adapter, revertedCursor!);
+        assert.deepEqual((restarted.resumeCursor as Record<string, unknown>).planTasks, {
+          ...completedList,
+          shown: false,
+        });
+
+        // Claude redoes turn 2's work: the update changes nothing in its store, but the thread
+        // gets the list again.
+        yield* log.drain;
+        const planCountBefore = planUpdates(log.events).length;
+        const turn3 = yield* completeTurn({
+          adapter,
+          log,
+          emit,
+          frames: completeTaskOneFrames("toolu_revert_redo"),
+        });
+        yield* log.drain;
+        const afterRevert = planUpdates(log.events).slice(planCountBefore);
+        assert.deepEqual(
+          afterRevert.map((event) => event.payload.plan),
+          [[{ step: "Write tests", status: "completed" }]],
+        );
+        assert.equal(String(afterRevert[0]?.turnId), String(turn3));
+        assert.deepEqual((yield* cursorOf(adapter))?.planTasks, completedList);
+
+        // Checkpoint 0 is a new Claude session, whose list starts empty.
+        yield* adapter.rollbackThread(THREAD_ID, {
+          numTurns: 2,
+          targetTurnId: null,
+          droppedTurnIds: [turn1, turn3],
+        });
+        assert.equal(harness.inputs.at(-1)?.options.resume, undefined);
+        assert.isUndefined((yield* cursorOf(adapter))?.planTasks);
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        Effect.provide(harness.layer),
+      );
+    });
+  });
+});
+
 function rootStreamFrame(uuid: string, event: Record<string, unknown>): SDKMessage {
   return {
     type: "stream_event",
