@@ -73,6 +73,7 @@ import type {
   DesktopAppUpdateRequestFrame,
   DesktopBackendLifecycleFrame,
 } from "@ryco/shared/desktopResourceTelemetry";
+import { isRemoteEditorLink } from "@ryco/shared/remoteEditorLink";
 import { AsyncRotatingFileSink, DESKTOP_BACKEND_LOG_FILE_NAME } from "@ryco/shared/logging";
 import { normalizeHubNodeName } from "@ryco/shared/nodeIdentity";
 import { readEnv } from "@ryco/shared/runtimeEnv";
@@ -1693,7 +1694,8 @@ function getSafeExternalUrl(rawUrl: unknown): string | null {
   }
 
   if (parsedUrl.protocol !== "https:" && parsedUrl.protocol !== "http:") {
-    return null;
+    // An editor's own SSH remote link for a thread on another machine, and nothing else of its scheme.
+    return isRemoteEditorLink(rawUrl) ? rawUrl : null;
   }
 
   return parsedUrl.toString();

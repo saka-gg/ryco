@@ -19,23 +19,60 @@ type EditorDefinition = {
   readonly platforms?: readonly ["darwin" | "linux" | "win32", ...("darwin" | "linux" | "win32")[]];
   readonly platformLauncher?: "file-manager" | "terminal";
   readonly workspaceOnly?: boolean;
+  /**
+   * URL scheme that opens a folder or file on another machine over SSH from
+   * this one: `<scheme>://vscode-remote/ssh-remote+…` for the VS Code family,
+   * `zed://ssh/…` for Zed. Absent for editors that cannot.
+   */
+  readonly remoteScheme?: string;
 };
 
 export const EDITORS = [
-  { id: "cursor", label: "Cursor", commands: ["cursor"], launchStyle: "goto" },
-  { id: "windsurf", label: "Windsurf", commands: ["windsurf"], launchStyle: "goto" },
+  {
+    id: "cursor",
+    label: "Cursor",
+    commands: ["cursor"],
+    launchStyle: "goto",
+    remoteScheme: "cursor",
+  },
+  {
+    id: "windsurf",
+    label: "Windsurf",
+    commands: ["windsurf"],
+    launchStyle: "goto",
+    remoteScheme: "windsurf",
+  },
   { id: "trae", label: "Trae", commands: ["trae"], launchStyle: "goto" },
   { id: "kiro", label: "Kiro", commands: ["kiro"], baseArgs: ["ide"], launchStyle: "goto" },
-  { id: "vscode", label: "VS Code", commands: ["code"], launchStyle: "goto" },
+  {
+    id: "vscode",
+    label: "VS Code",
+    commands: ["code"],
+    launchStyle: "goto",
+    remoteScheme: "vscode",
+  },
   {
     id: "vscode-insiders",
     label: "VS Code Insiders",
     commands: ["code-insiders"],
     launchStyle: "goto",
+    remoteScheme: "vscode-insiders",
   },
-  { id: "vscodium", label: "VSCodium", commands: ["codium"], launchStyle: "goto" },
+  {
+    id: "vscodium",
+    label: "VSCodium",
+    commands: ["codium"],
+    launchStyle: "goto",
+    remoteScheme: "vscodium",
+  },
   { id: "positron", label: "Positron", commands: ["positron"], launchStyle: "goto" },
-  { id: "zed", label: "Zed", commands: ["zed", "zeditor"], launchStyle: "direct-path" },
+  {
+    id: "zed",
+    label: "Zed",
+    commands: ["zed", "zeditor"],
+    launchStyle: "direct-path",
+    remoteScheme: "zed",
+  },
   { id: "sublime-text", label: "Sublime Text", commands: ["subl"], launchStyle: "direct-path" },
   {
     id: "nova",

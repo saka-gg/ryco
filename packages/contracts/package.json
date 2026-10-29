@@ -121,6 +121,11 @@
       "import": "./src/device.ts",
       "require": "./src/device.ts"
     },
+    "./editor": {
+      "types": "./src/editor.ts",
+      "import": "./src/editor.ts",
+      "require": "./src/editor.ts"
+    },
     "./environment": {
       "types": "./src/environment.ts",
       "import": "./src/environment.ts",

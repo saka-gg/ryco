@@ -43,7 +43,7 @@ import {
 } from "./chat/SkillInlineText";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "./ui/tooltip";
 import { stackedThreadToast, toastManager } from "./ui/toast";
-import { openInPreferredEditor } from "../editorPreferences";
+import { openPathInEditor } from "../editorPreferences";
 import { resolveDiffThemeName, type DiffThemeName } from "../lib/diffRendering";
 import {
   isClosedMermaidFence,
@@ -397,6 +397,8 @@ interface MarkdownFileLinkProps {
    * reach the editor only on Cmd/Ctrl-click or from the link's menu.
    */
   editorOnPlainClick?: boolean | undefined;
+  /** Where the thread runs: decides how Open in editor reaches the file. */
+  environmentId: EnvironmentId | undefined;
 }
 
 type MarkdownFileLinkAction = "open-ryco" | "open" | "copy-relative" | "copy-full";
@@ -504,6 +506,7 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
   theme,
   className,
   editorOnPlainClick = true,
+  environmentId,
 }: MarkdownFileLinkProps) {
   // Phone tier: long-press mirrors right-click, presenting the same file
   // actions through the shared bottom action sheet. Its file actions stay
@@ -528,16 +531,7 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
   );
 
   const handleOpen = useCallback(() => {
-    const api = readLocalApi();
-    if (!api) {
-      toastManager.add({
-        type: "error",
-        title: "Open in editor is unavailable",
-      });
-      return;
-    }
-
-    void openInPreferredEditor(api, targetPath).catch((error) => {
+    void openPathInEditor(environmentId, targetPath).catch((error) => {
       toastManager.add(
         stackedThreadToast({
           type: "error",
@@ -546,7 +540,7 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
         }),
       );
     });
-  }, [targetPath]);
+  }, [environmentId, targetPath]);
 
   const handleCopy = useCallback((value: string, title: string) => {
     if (typeof window === "undefined" || !navigator.clipboard?.writeText) {
@@ -716,7 +710,8 @@ function areMarkdownFileLinkPropsEqual(
     previous.label === next.label &&
     previous.theme === next.theme &&
     previous.className === next.className &&
-    previous.editorOnPlainClick === next.editorOnPlainClick
+    previous.editorOnPlainClick === next.editorOnPlainClick &&
+    previous.environmentId === next.environmentId
   );
 }
 
@@ -1004,6 +999,7 @@ const RenderedChatMarkdown = memo(function RenderedChatMarkdown({
             theme={resolvedTheme}
             className={props.className}
             {...(documentMode ? { editorOnPlainClick: false } : {})}
+            environmentId={environmentId}
           />
         );
       },

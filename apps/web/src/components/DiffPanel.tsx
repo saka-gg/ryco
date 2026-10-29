@@ -36,11 +36,10 @@ import {
   useRef,
   useState,
 } from "react";
-import { openInPreferredEditor } from "../editorPreferences";
+import { openPathInEditorWithToast } from "../editorPreferences";
 import { useGitStatus } from "~/lib/gitStatusState";
 import { useCheckpointDiff } from "~/rpc/useProvider";
 import { cn } from "~/lib/utils";
-import { readLocalApi } from "../localApi";
 import { parseDiffRouteSearch, stripDiffSearchParams } from "../diffRouteSearch";
 import { useDiffLayout } from "../hooks/useDiffLayout";
 import { useTheme } from "../hooks/useTheme";
@@ -707,10 +706,9 @@ function DiffPanelContent({ mode = "inline" }: DiffPanelProps) {
     renderableFiles,
   ]);
 
+  const diffEnvironmentId = activeThread?.environmentId;
   const openDiffFileInEditor = useCallback(
     (filePath: string, lineNumber?: number) => {
-      const api = readLocalApi();
-      if (!api) return;
       const workspacePath = repositoryPathToWorkspacePath(filePath, diffWorkspacePrefix);
       const target = resolveDiffOpenInEditorTarget({
         // A file outside the thread's folder resolves against the repository.
@@ -718,11 +716,9 @@ function DiffPanelContent({ mode = "inline" }: DiffPanelProps) {
         filePath: workspacePath ?? filePath,
         lineNumber,
       });
-      void openInPreferredEditor(api, target).catch((error) => {
-        console.warn("Failed to open diff in editor.", error);
-      });
+      openPathInEditorWithToast(diffEnvironmentId, target);
     },
-    [activeCwd, diffRepositoryRoot, diffWorkspacePrefix],
+    [activeCwd, diffEnvironmentId, diffRepositoryRoot, diffWorkspacePrefix],
   );
   const toggleDiffFileCollapsed = useCallback((fileKey: string) => {
     setCollapsedDiffFileKeys((current) => {

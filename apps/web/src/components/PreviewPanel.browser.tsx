@@ -320,7 +320,14 @@ vi.mock("../hooks/useChatsAvailability", () => ({
 
 // Rendered Markdown's file links reach for the editor only on request; never here.
 vi.mock("../localApi", () => ({ readLocalApi: () => undefined }));
-vi.mock("../editorPreferences", () => ({ openInPreferredEditor: vi.fn() }));
+vi.mock("../editorPreferences", () => ({
+  openInPreferredEditor: vi.fn(),
+  // Where a path opens (this machine, over SSH, or not at all) is `editorOpenRoute.test.ts`'s
+  // concern; here every path opens on this machine.
+  openPathInEditor: vi.fn(async () => "vscode"),
+  openPathInEditorWithToast: vi.fn(),
+  canOpenInEditor: () => true,
+}));
 
 vi.mock("../hooks/useTheme", () => ({
   useTheme: () => ({
