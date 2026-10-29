@@ -9074,6 +9074,194 @@ describe("ClaudeAdapterLive automatic compaction", () => {
       Effect.provide(harness.layer),
     );
   });
+
+  it.effect("leaves compaction to Claude Code when the instance says so", () => {
+    const harness = makeHarness({ claudeConfig: { autoCompact: "claudeCode" } });
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const log = yield* makeRuntimeEventLog(adapter);
+      const readPrompt = makePromptReader(harness);
+      yield* startCompactionSession(adapter, "auto-compact-claude-code");
+
+      // 84% of the window: past Ryco's threshold, and the turn still closes at its own result.
+      const fill = yield* runFullTurn(adapter, harness, log, { prompt: "fill" });
+      // No /compact either, and no warning, from a CLI that does not list it.
+      const next = yield* runFullTurn(adapter, harness, log, {
+        prompt: "next",
+        init: systemInitFrame(),
+      });
+      // Nor when Claude Code's own compaction fails: that warning is about Ryco's.
+      harness.query.emit(
+        systemStatusFrame(null, {
+          compact_result: "failed",
+          compact_error: "API Error: 529 overloaded",
+        }),
+      );
+      yield* settleFrames(harness, log, "after-own-compaction-failed");
+      yield* log.drain;
+
+      assert.equal(promptText(yield* readPrompt), "fill");
+      assert.equal(promptText(yield* readPrompt), "next");
+      const terminals = log.events.filter(isTurnTerminal);
+      assert.deepEqual(
+        terminals.map((event) => [event.turnId, terminalState(event)]),
+        [
+          [fill.turnId, "completed"],
+          [next.turnId, "completed"],
+        ],
+      );
+      assert.deepEqual(warnings(log.events), []);
+      // Ryco no longer compacts, but Claude Code still does.
+      const fillUsage = log.events.findLast(
+        (event) => isUsageEvent(event) && event.turnId === fill.turnId,
+      );
+      assert.isTrue(
+        fillUsage?.type === "thread.token-usage.updated" &&
+          fillUsage.payload.usage.compactsAutomatically,
+      );
+      assert.isUndefined(harness.getLastCreateQueryInput()?.options.settings);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("compacts at 80% of a configured window and starts Claude Code with it", () => {
+    const harness = makeHarness({ claudeConfig: { autoCompactWindow: "200,000" } });
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      yield* makeRuntimeEventLog(adapter);
+      const readPrompt = makePromptReader(harness);
+      yield* startCompactionSession(adapter, "auto-compact-window");
+
+      // 168,012 tokens of a 1M model: 17% of its window, 84% of the configured one.
+      yield* emitFullTurn(adapter, harness, {
+        prompt: "fill",
+        result: { contextWindow: 1_000_000 },
+      });
+      assert.deepEqual(harness.getLastCreateQueryInput()?.options.settings, {
+        autoCompactWindow: 200_000,
+      });
+      assert.equal(promptText(yield* readPrompt), "fill");
+      yield* readCompactionPrompt(readPrompt);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("starts Claude Code with a larger small window so Ryco's mark comes first", () => {
+    const harness = makeHarness({ claudeConfig: { autoCompactWindow: "150000" } });
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      yield* makeRuntimeEventLog(adapter);
+      const readPrompt = makePromptReader(harness);
+      yield* startCompactionSession(adapter, "auto-compact-small-window");
+
+      // 124,012 tokens of a 1M model: 83% of the configured window, 78% of Claude Code's.
+      yield* emitFullTurn(adapter, harness, {
+        prompt: "fill",
+        result: { contextWindow: 1_000_000 },
+        cacheReadTokens: 116_000,
+      });
+      // Claude Code compacts at 160,000 - 33,000 = 127,000, behind Ryco's 120,000; given 150,000
+      // it would compact at 117,000, in the middle of the turn that crosses it.
+      assert.deepEqual(harness.getLastCreateQueryInput()?.options.settings, {
+        autoCompactWindow: 160_000,
+      });
+      assert.equal(promptText(yield* readPrompt), "fill");
+      yield* readCompactionPrompt(readPrompt);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("passes a configured window as is when Claude Code decides", () => {
+    const harness = makeHarness({
+      claudeConfig: { autoCompact: "claudeCode", autoCompactWindow: "150000" },
+    });
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const log = yield* makeRuntimeEventLog(adapter);
+      yield* startCompactionSession(adapter, "auto-compact-claude-code-window");
+
+      yield* runFullTurn(adapter, harness, log, {
+        prompt: "fill",
+        result: { contextWindow: 1_000_000 },
+        cacheReadTokens: 360_000,
+      });
+
+      assert.deepEqual(harness.getLastCreateQueryInput()?.options.settings, {
+        autoCompactWindow: 150_000,
+      });
+      assert.deepEqual(warnings(log.events), []);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  for (const autoCompactWindow of ["abc", "50000"]) {
+    it.effect(`ignores the out-of-range window ${JSON.stringify(autoCompactWindow)}`, () => {
+      const harness = makeHarness({ claudeConfig: { autoCompact: "never", autoCompactWindow } });
+      const logLines: Array<ReadonlyArray<unknown>> = [];
+      const logs = Logger.layer([
+        Logger.make((options) => {
+          logLines.push(Array.isArray(options.message) ? options.message : [options.message]);
+        }),
+      ]);
+      return Effect.gen(function* () {
+        const adapter = yield* ClaudeAdapter;
+        const log = yield* makeRuntimeEventLog(adapter);
+        const readPrompt = makePromptReader(harness);
+        yield* startCompactionSession(adapter, `auto-compact-ignored-${autoCompactWindow}`);
+
+        // The model's 1M window stands: 168,012 tokens stay below 80%.
+        yield* runFullTurn(adapter, harness, log, {
+          prompt: "fill",
+          result: { contextWindow: 1_000_000 },
+        });
+        // An unknown mode is Ryco's: 84% of a 200k window compacts.
+        yield* emitFullTurn(adapter, harness, { prompt: "full" });
+
+        assert.isUndefined(harness.getLastCreateQueryInput()?.options.settings);
+        assert.equal(promptText(yield* readPrompt), "fill");
+        assert.equal(promptText(yield* readPrompt), "full");
+        yield* readCompactionPrompt(readPrompt);
+        assert.deepEqual(
+          logLines.filter((line) => line[0] === "claude.compaction.settingsIgnored"),
+          [
+            [
+              "claude.compaction.settingsIgnored",
+              { instanceId: "claudeAgent", autoCompact: "never", autoCompactWindow },
+            ],
+          ],
+        );
+      }).pipe(
+        Effect.provideService(Random.Random, makeDeterministicRandomService()),
+        // The adapter warns while it is built, so the logger comes first.
+        Effect.provide(harness.layer.pipe(Layer.provideMerge(logs))),
+      );
+    });
+  }
+
+  it.effect("starts Claude Code without a window by default", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      yield* startCompactionSession(adapter, "auto-compact-default-window");
+      yield* adapter.sendTurn({ threadId: THREAD_ID, input: "hello", attachments: [] });
+
+      const settings = harness.getLastCreateQueryInput()?.options.settings;
+      assert.isFalse(
+        settings !== undefined && typeof settings === "object" && "autoCompactWindow" in settings,
+      );
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
 });
 
 describe("ClaudeAdapterLive context meter across compaction", () => {

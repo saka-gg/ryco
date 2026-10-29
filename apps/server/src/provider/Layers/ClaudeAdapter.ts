@@ -65,6 +65,10 @@ import {
 } from "@anthropic-ai/claude-agent-sdk";
 import { parseCliArgs } from "@ryco/shared/cliArgs";
 import {
+  parseClaudeAutoCompactWindow,
+  resolveClaudeAutoCompactMode,
+} from "@ryco/shared/claudeAutoCompact";
+import {
   appendAttachmentPathLines,
   formatAttachmentPathLines,
   type AttachmentPathLineEntry,
@@ -153,6 +157,7 @@ import {
   disableContextCompaction,
   initialContextCompactionPolicyState,
   markContextCompactionStarted,
+  nativeAutoCompactWindowBehindTrigger,
   observeContextCompaction,
   recordContextCompactionRequest,
   settleContextCompaction,
@@ -2131,6 +2136,31 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
   const claudeEnvironment = yield* makeClaudeEnvironment(claudeSettings, options?.environment).pipe(
     Effect.provideService(Path.Path, path),
   );
+  // How this instance compacts. A value this node does not know falls back to the default, so a
+  // typo never makes the instance unavailable.
+  const autoCompactMode = resolveClaudeAutoCompactMode(claudeSettings.autoCompact);
+  const autoCompactWindow = parseClaudeAutoCompactWindow(claudeSettings.autoCompactWindow);
+  const ignoredAutoCompactSettings = {
+    ...(claudeSettings.autoCompact !== "" && claudeSettings.autoCompact !== autoCompactMode
+      ? { autoCompact: claudeSettings.autoCompact }
+      : {}),
+    ...(claudeSettings.autoCompactWindow !== "" && autoCompactWindow === undefined
+      ? { autoCompactWindow: claudeSettings.autoCompactWindow }
+      : {}),
+  };
+  if (Object.keys(ignoredAutoCompactSettings).length > 0) {
+    yield* Effect.logWarning("claude.compaction.settingsIgnored", {
+      instanceId: boundInstanceId,
+      ...ignoredAutoCompactSettings,
+    });
+  }
+  // The auto-compact window Claude Code starts with. Left to Claude Code it is the configured one.
+  // Under Ryco's policy Claude Code's own (mid-turn) compaction must not come before Ryco's
+  // between-turn 80% mark, so a small window is raised for Claude Code alone.
+  const nativeAutoCompactWindow =
+    autoCompactWindow === undefined || autoCompactMode === "claudeCode"
+      ? autoCompactWindow
+      : nativeAutoCompactWindowBehindTrigger(autoCompactWindow);
   const nativeEventLogger =
     options?.nativeEventLogger ??
     (options?.nativeEventLogPath !== undefined
@@ -2777,7 +2807,8 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
   const emitCompactionUnavailableWarning = Effect.fn("emitCompactionUnavailableWarning")(function* (
     context: ClaudeSessionContext,
   ) {
-    if (context.compactionUnavailableWarningEmitted) return;
+    // It reports Ryco's own compaction, which an instance left to Claude Code does not run.
+    if (autoCompactMode === "claudeCode" || context.compactionUnavailableWarningEmitted) return;
     context.compactionUnavailableWarningEmitted = true;
     yield* emitRuntimeWarning(
       context,
@@ -2812,6 +2843,8 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
    * thread's latest (a delegated task still returns its result). Returns `compacting` when the
    * turn now waits for its compaction, `unavailable` when it crossed the threshold with no way to
    * compact (the caller warns once the turn closed).
+   *
+   * An instance set to let Claude Code decide (`autoCompact: "claudeCode"`) never compacts here.
    */
   const maybeCompactBeforeClosing = Effect.fn("maybeCompactBeforeClosing")(function* (
     context: ClaudeSessionContext,
@@ -2820,6 +2853,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     usage: ThreadTokenUsageSnapshot | undefined,
   ): Effect.fn.Return<"compacting" | "unavailable" | "none"> {
     if (
+      autoCompactMode === "claudeCode" ||
       usage === undefined ||
       context.stopped ||
       sessions.get(context.session.threadId) !== context ||
@@ -2836,7 +2870,11 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     }
 
     const generation = context.generation;
-    const decision = observeContextCompaction(context.compactionPolicy, { generation, usage });
+    const decision = observeContextCompaction(context.compactionPolicy, {
+      generation,
+      usage,
+      windowTokens: autoCompactWindow,
+    });
     context.compactionPolicy = decision.state;
     if (!decision.trigger) return "none";
 
@@ -2877,6 +2915,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       turnId: turnState.turnId,
       usedTokens: usage.usedTokens,
       maxTokens: usage.maxTokens,
+      ...(autoCompactWindow !== undefined ? { windowTokens: autoCompactWindow } : {}),
     });
     return "compacting";
   });
@@ -6230,6 +6269,13 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       ...(typeof thinking === "boolean" ? { alwaysThinkingEnabled: thinking } : {}),
       ...(fastMode ? { fastMode: true } : {}),
       ...(ultracode ? { ultracode: true } : {}),
+      // Claude Code reads its auto-compact window only at start-up. A configured window applies
+      // in both modes, so its own mid-turn compaction is bounded by it too; without one, the
+      // user's own `/autocompact` choice stands. `autoCompactEnabled` is left to the user's
+      // Claude config: the window applies without it (claudeCompactionCliProbe.test.ts).
+      ...(nativeAutoCompactWindow !== undefined
+        ? { autoCompactWindow: nativeAutoCompactWindow }
+        : {}),
     };
     const tokenMode = input.tokenMode ?? DEFAULT_AGENT_TOKEN_MODE;
     const tokenReductionInstructions = yield* readTokenReductionInstructions(tokenMode);

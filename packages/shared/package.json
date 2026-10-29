@@ -24,6 +24,10 @@
       "types": "./src/claudeCacheReview.ts",
       "import": "./src/claudeCacheReview.ts"
     },
+    "./claudeAutoCompact": {
+      "types": "./src/claudeAutoCompact.ts",
+      "import": "./src/claudeAutoCompact.ts"
+    },
     "./claudeCredentialVariables": {
       "types": "./src/claudeCredentialVariables.ts",
       "import": "./src/claudeCredentialVariables.ts"

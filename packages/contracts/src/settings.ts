@@ -236,13 +236,32 @@ const makeBinaryPathSetting = (fallback: string) =>
     Schema.withDecodingDefault(Effect.succeed(fallback)),
   );
 
-export type ProviderSettingsFormControl = "text" | "password" | "textarea" | "switch";
+/**
+ * A text setting whose value its reader parses, and ignores when unusable. A JSON number or
+ * boolean written by hand decodes as its text and null as empty, so no scalar fails the decode.
+ */
+const makeLenientTextSetting = (fallback: string) =>
+  Schema.Union([Schema.String, Schema.Number, Schema.Boolean, Schema.Null]).pipe(
+    Schema.decodeTo(
+      Schema.String,
+      SchemaTransformation.transformEffect({
+        decode: (value) => Effect.succeed(value === null ? "" : String(value).trim()),
+        encode: (value) => Effect.succeed(value),
+      }),
+    ),
+    Schema.withDecodingDefault(Effect.succeed(fallback)),
+  );
+
+export type ProviderSettingsFormControl = "text" | "password" | "textarea" | "switch" | "select";
 
 export interface ProviderSettingsFormAnnotation {
   readonly control?: ProviderSettingsFormControl | undefined;
   readonly placeholder?: string | undefined;
   readonly hidden?: boolean | undefined;
+  /** `omit` drops the key when the value is empty (or, for a switch or select, its default). */
   readonly clearWhenEmpty?: "omit" | "persist" | undefined;
+  /** The choices of a `select`. */
+  readonly options?: ReadonlyArray<{ readonly value: string; readonly label: string }> | undefined;
 }
 
 export interface ProviderSettingsFormSchemaAnnotation {
@@ -361,9 +380,31 @@ export const ClaudeSettings = makeProviderSettingsSchema(
         },
       }),
     ),
+    // Text, not literals: a value this node does not know (or a typo) falls back to the
+    // default instead of failing the instance's decode (`@ryco/shared/claudeAutoCompact`).
+    // The form drops either key at its default (`clearWhenEmpty` defaults to `omit`).
+    autoCompact: makeLenientTextSetting("ryco").pipe(
+      Schema.annotateKey({
+        title: "Automatic compaction",
+        providerSettingsForm: {
+          control: "select",
+          options: [
+            { value: "ryco", label: "At 80% between turns (Ryco)" },
+            { value: "claudeCode", label: "When Claude Code decides" },
+          ],
+        },
+      }),
+    ),
+    autoCompactWindow: makeLenientTextSetting("").pipe(
+      Schema.annotateKey({
+        title: "Compact within (tokens)",
+        description:
+          "100,000 to 1,000,000. Compaction treats the context window as this size. Empty uses the model's window.",
+      }),
+    ),
   },
   {
-    order: ["binaryPath", "homePath", "launchArgs"],
+    order: ["binaryPath", "homePath", "autoCompact", "autoCompactWindow", "launchArgs"],
   },
 );
 export type ClaudeSettings = typeof ClaudeSettings.Type;
@@ -857,6 +898,8 @@ const ClaudeSettingsPatch = Schema.Struct({
   homePath: Schema.optionalKey(Schema.String),
   customModels: Schema.optionalKey(Schema.Array(Schema.String)),
   launchArgs: Schema.optionalKey(Schema.String),
+  autoCompact: Schema.optionalKey(Schema.String),
+  autoCompactWindow: Schema.optionalKey(Schema.String),
 });
 
 const CursorSettingsPatch = Schema.Struct({

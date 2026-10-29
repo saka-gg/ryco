@@ -7,6 +7,7 @@ import { ProviderInstanceId } from "./providerInstance.ts";
 import { CliProxyHubId } from "./cliProxy.ts";
 import { ChangeRequestTemplateListInput } from "./changeRequestReview.ts";
 import {
+  ClaudeSettings,
   ClientSettingsPatch,
   ClientSettingsSchema,
   DEFAULT_CHAT_WIDTH,
@@ -448,6 +449,33 @@ describe("ServerSettingsPatch.providers.grok", () => {
     expect(patch.providers?.grok).toEqual({
       binaryPath: "/opt/grok",
       customModels: ["grok-build"],
+    });
+  });
+});
+
+describe("ClaudeSettings compaction keys", () => {
+  const decodeClaudeSettings = Schema.decodeUnknownSync(ClaudeSettings);
+
+  it("defaults to Ryco's policy and the model's window", () => {
+    expect(decodeClaudeSettings({})).toMatchObject({ autoCompact: "ryco", autoCompactWindow: "" });
+  });
+
+  it("keeps any text for the adapter to parse", () => {
+    expect(
+      decodeClaudeSettings({ autoCompact: " never ", autoCompactWindow: "200,000" }),
+    ).toMatchObject({ autoCompact: "never", autoCompactWindow: "200,000" });
+  });
+
+  // Claude Code keeps its window as a number and auto-compact as a boolean, so a hand edit may
+  // write either; neither may make the instance unavailable.
+  it("decodes a hand-written number, boolean or null as text", () => {
+    expect(decodeClaudeSettings({ autoCompact: true, autoCompactWindow: 200_000 })).toMatchObject({
+      autoCompact: "true",
+      autoCompactWindow: "200000",
+    });
+    expect(decodeClaudeSettings({ autoCompact: null, autoCompactWindow: null })).toMatchObject({
+      autoCompact: "",
+      autoCompactWindow: "",
     });
   });
 });

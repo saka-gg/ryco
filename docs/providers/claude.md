@@ -362,8 +362,44 @@ unavailable and does not try again in that session; Claude Code's own auto-compa
 window still applies. After a compaction, or a stopped one, Ryco compacts again only once the
 context has dropped to 65% or below and climbed back to 80%.
 
-An opt-in probe checks this Claude Code behavior without inference (temporary home, fake API key,
-a local endpoint that rejects every request):
+### Choosing How An Instance Compacts
+
+Each Claude instance has two settings for this in Settings → Providers:
+
+- **Automatic compaction.** _At 80% between turns (Ryco)_, the default, is the behavior described
+  above. _When Claude Code decides_ turns Ryco's compaction off for the instance: Ryco never sends
+  `/compact` itself and never shows the unavailable warning, and Claude Code compacts on its own
+  shortly before the window is full, which can happen in the middle of a turn. If you turned
+  auto-compact off in your own Claude config, nothing compacts automatically in this mode. A value
+  Ryco does not know counts as the default.
+- **Compact within (tokens).** A whole number from 100,000 to 1,000,000 (commas are allowed). Ryco's
+  80% and 65% marks then apply to that window instead of the model's, and Ryco starts Claude Code
+  with it as its auto-compact window in both modes, so Claude Code's own compaction is bounded by
+  it too (with a small allowance below 200,000 tokens, described next). It replaces a window you
+  chose with `/autocompact`, but it does not turn auto-compact back on if you turned it off in your
+  Claude config. A window larger than the model's changes nothing; Ryco always uses the smaller of
+  the two. Empty, the default, uses the model's window and leaves your own `/autocompact` choice
+  alone.
+
+Claude Code compacts about 33,000 tokens below its window (it keeps room for a reply), in the
+middle of a turn if need be. With Ryco's policy and a window below 200,000 tokens, that would come
+before Ryco's 80% mark, so Ryco starts Claude Code with a somewhat larger window for its own
+compaction: one that keeps it at least 7,000 tokens above the mark, as on a 200,000-token model.
+For a 150,000-token window, Ryco compacts at 120,000 between turns, and Claude Code at about
+127,000 only when a single turn runs past that. When Claude Code decides, it gets the window as
+you set it.
+
+A value outside the range, or one that is not a number, is ignored: the instance keeps working with
+the default, and the server logs `claude.compaction.settingsIgnored` once when the instance starts.
+This also holds for a number, `true`/`false` or `null` written into the instance's settings by
+hand: a number counts as its digits typed into the field, and `null` as empty. The settings form
+shows such a value as empty until you enter one there.
+Claude Code reads its window only when a session starts. Saving an instance's settings restarts
+that instance, so its open chats pick up a change with their next message.
+
+An opt-in probe checks this Claude Code behavior, including how a window given at start-up combines
+with your own Claude settings, without inference (temporary home, fake API key, a local endpoint
+that rejects every request):
 
 ```sh
 RYCO_CLAUDE_NATIVE_PROBE=1 bun run --cwd apps/server test -- src/provider/claudeCompactionCliProbe.test.ts
