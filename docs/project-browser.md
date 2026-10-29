@@ -28,6 +28,24 @@ External browser profile/cookie import and password management are deferred; thi
 
 On web, the browser provides a sandboxed iframe preview and an external-open link. Sites may reject framing, and the sandbox can restrict login/storage-dependent features. Desktop discovery and agent control are unavailable through that fallback. Remote localhost addresses need an explicitly reachable or forwarded URL; no remote-browser streaming is introduced. The frozen phone web surface is unchanged. Locked use remains a future feature.
 
+## Point at page elements
+
+In a thread's **Browser** panel on desktop, **Pick element** lets you show the agent exactly which part of the page you mean. Hover the page: Chromium's own inspect overlay outlines the element under the pointer and shows the DevTools tooltip (tag, size, colours, accessible name and role). Click one, and it stays highlighted in purple while a note box opens above the page. Write what you want changed (optional) and choose **Add to chat** (⌘↵ / Ctrl↵): the element waits in the thread's composer as a chip (`button "Save changes"`) whose tooltip shows the page, selector, role, box and your note. **Cancel picking**, Escape (in the page or in Ryco) or **Cancel** in the note box stops without adding anything. Picking the same element again with the same note refreshes its chip; with another note it adds a second chip, so no note is ever replaced (the page's query and hash are not kept, so one URL can stand for several pages). A message carries up to 32 page elements next to its file references. The chips belong to the draft like file references: they survive reloads, go out with the next send, come back if it fails, and travel with queued and steered messages. A sent message shows them as chips on web and in the mobile app.
+
+The control is offered only in a thread's workspace Browser panel, while that thread's composer can take context, on a docked tab that loaded a page. It is not in the sidebar's **Live preview**, on the web iframe fallback (hosted web included), in popped-out windows, or on the frozen web phone layout.
+
+How it works: the desktop main process drives the pick over the tab's own CDP session, the one agent browser tools use. It turns on Chromium's inspect mode, and when you click it describes the element by running a fixed function in an isolated world of the page. There is still no preload and nothing a page script can see or call; the overlay and highlights are drawn by Chromium, not added to the page. The description is bounded and redacted twice, in the main process and again in the client whenever a chip is created, restored or read back from a sent message:
+
+- the page URL comes from the browser, never from the page, and keeps only its origin and path: credentials, the query and the hash are dropped, and path segments that look private (an email address, a token or JWT, a UUID, a long opaque id) or that follow a sensitive key such as `reset`, `invite`, `users` or `session` become `REDACTED`;
+- text and names are cut to their limits (text 280 characters, names and the page title 256, the selector 1,024) and collapsed to one line, bidirectional controls are removed, and a `<` that starts something tag-like (such as `</browser_context>`) becomes `‹`;
+- form values are never read: inputs, text areas, selects and editable regions (and containers holding a password or card field) carry no text, and names or text that look like credentials, email addresses or card numbers are dropped.
+
+The agent receives the element in a `<browser_context>` block of the prompt (see [Files and chat](files-to-chat.md#what-the-agent-receives)). The block says that its page values are untrusted page data that only identify the element.
+
+Agent precedence: while you pick, agent browser reads (tabs, observe, screenshot, wait, console, network) keep working and leave your pick alone, though a screenshot may show the overlay. An agent action that clicks, types, scrolls, navigates, reloads, closes, resizes or otherwise changes the tab ends your pick first, and the panel says **The agent used this tab, so picking stopped.** A pick does not start while the agent is acting on the tab. Navigation (**The page changed, so picking stopped.**), DevTools or another debugger taking over the page, two minutes without a click (**Picking timed out.**), switching tabs or panels, a covering Ryco dialog, and **Pop out** end a pick too.
+
+Limits: elements inside embedded frames cannot be picked. A click inside a frame picks the `<iframe>` element that holds it in the page; when a frame on the way cannot be reached, the panel says the element can't be picked. Hover-only UI (menus that open on hover) cannot be reached, because the inspect tool takes the hover, as in DevTools. The note box and the picking hint sit above the page in the panel, so the page gets a little shorter while they show and reflows; the highlight follows the element.
+
 ## Validation
 
 Focused checks:
@@ -35,8 +53,10 @@ Focused checks:
 ```sh
 bun run --cwd apps/desktop test src/browser src/computerUse
 bun run --cwd packages/shared test src/browserElementReference.test.ts
+bun run --cwd packages/client-runtime test src/state/composer
 bun run --cwd apps/web test src/browser/browserState.test.ts
-bun run --cwd apps/web test:browser src/browser/BrowserPanel.browser.tsx src/browser/browserElementPickScript.browser.tsx
+bun run --cwd apps/web test:browser src/browser/BrowserPanel.browser.tsx src/browser/browserElementPickScript.browser.tsx src/components/ChatView.BrowserElements.browser.tsx
+bun run --cwd apps/mobile test src/features/threads/ThreadMessage.test.tsx
 node apps/desktop/scripts/computer-use-smoke.mjs signin
 node apps/desktop/scripts/computer-use-smoke.mjs project
 node apps/desktop/scripts/computer-use-smoke.mjs picker

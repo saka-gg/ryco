@@ -16,6 +16,8 @@ import {
   type PersistedComposerImageAttachment,
 } from "./draftPersistence.ts";
 import type { ComposerDraftStorage } from "./draftSplitStorage.ts";
+import { createBrowserElementReference } from "./browserElementReference.ts";
+import { createFileReference } from "./fileReference.ts";
 
 function makeStorage(
   options: {
@@ -585,5 +587,70 @@ describe("composer draft persistence", () => {
       expect(indexOf(values).state.draftKeys).toContain(lateKey);
       expect(openTab(values).state().getComposerDraft(threadRef)?.prompt).toBe("late");
     });
+  });
+});
+
+describe("composer draft persistence of reference chips", () => {
+  const element = createBrowserElementReference({
+    url: "http://localhost:3000/settings",
+    pageTitle: "Settings",
+    selector: "#save",
+    tagName: "button",
+    role: "button",
+    name: "Save",
+    text: "Save",
+    box: { x: 1, y: 2, width: 3, height: 4 },
+    comment: "Make it primary",
+  })!;
+  const lines = createFileReference({
+    path: "src/app.ts",
+    lineStart: 1,
+    lineEnd: 1,
+    lines: ["const a = 1;"],
+  })!;
+  const createdAt = "2026-10-28T00:00:00.000Z";
+
+  it("keeps a picked page element through persist and hydrate, next to file lines", () => {
+    const writer = makeStorage();
+    const store = makeStore(writer.storage);
+    store.useComposerDraftStore.getState().setPrompt(threadRef, "Fix these");
+    store.useComposerDraftStore
+      .getState()
+      .addFileReference(threadRef, { ...element, id: "e1", createdAt });
+    store.useComposerDraftStore
+      .getState()
+      .addFileReference(threadRef, { ...lines, id: "f1", createdAt });
+    expect(entryOf(writer.values, threadRef).fileReferences).toHaveLength(2);
+
+    const reader = makeStore(makeStorage({ initial: Object.fromEntries(writer.values) }).storage);
+    const draft = reader.useComposerDraftStore.getState().getComposerDraft(threadRef);
+    expect(draft?.prompt).toBe("Fix these");
+    expect(draft?.fileReferences).toEqual([
+      { ...element, id: "e1", createdAt },
+      { ...lines, id: "f1", createdAt },
+    ]);
+  });
+
+  it("drops entries of an unknown kind or that no longer hold up, and keeps the prompt", () => {
+    const writer = makeStorage();
+    const store = makeStore(writer.storage);
+    store.useComposerDraftStore.getState().setPrompt(threadRef, "Kept");
+    store.useComposerDraftStore
+      .getState()
+      .addFileReference(threadRef, { ...element, id: "e1", createdAt });
+    const key = composerDraftEntryStorageKey(scopedThreadKey(threadRef));
+    const stored = entryOf(writer.values, threadRef);
+    // A newer client's chip kind, and an element whose URL is no longer http(s).
+    stored.fileReferences = [
+      { id: "x1", createdAt, kind: "region", rect: [0, 0, 1, 1] },
+      { ...stored.fileReferences[0], id: "e2", url: "file:///etc/passwd" },
+      ...stored.fileReferences,
+    ];
+    writer.values.set(key, JSON.stringify(stored));
+
+    const reader = makeStore(makeStorage({ initial: Object.fromEntries(writer.values) }).storage);
+    const draft = reader.useComposerDraftStore.getState().getComposerDraft(threadRef);
+    expect(draft?.prompt).toBe("Kept");
+    expect(draft?.fileReferences).toEqual([{ ...element, id: "e1", createdAt }]);
   });
 });

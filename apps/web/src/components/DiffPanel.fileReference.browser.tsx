@@ -342,7 +342,9 @@ describe("DiffPanel add to chat", () => {
       .getByRole("textbox", { name: "Note on src/app.ts lines 1-2 (new version)" })
       .fill("Here");
     await page.getByRole("button", { name: /Add to chat/u }).click();
-    expect(received.map((item) => item.reference.path)).toEqual(["src/app.ts"]);
+    expect(
+      received.map((item) => (item.kind === "file-reference" ? item.reference.path : null)),
+    ).toEqual(["src/app.ts"]);
     await mounted.unmount();
   });
 

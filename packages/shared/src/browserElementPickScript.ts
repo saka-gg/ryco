@@ -38,8 +38,9 @@ export const BROWSER_ELEMENT_DESCRIBE_FUNCTION: string = String.raw`function () 
   const MAX_NAME = ${BROWSER_ELEMENT_MAX_NAME_LENGTH};
   const MAX_TEXT = ${BROWSER_ELEMENT_MAX_TEXT_LENGTH};
   const WORD_CUT_LOOKBACK = 64;
-  // Ids with characters the trusted normalizer would rewrite are not used as anchors.
-  const UNSAFE_ID = /[\p{Cc}\uD800-\uDFFF]|(?! )\s/u;
+  // Ids with characters the trusted normalizer would rewrite are not used as anchors (CSS.escape
+  // keeps a letter after "<", so "<a" stays a tag's start in the selector).
+  const UNSAFE_ID = /[\p{Cc}\u202A-\u202E\u2066-\u2069\uD800-\uDFFF]|(?! )\s|<[A-Za-z]/u;
   // Every DOM read goes through the isolated world's own prototypes. Named properties win over
   // built-ins in every world: a document's named elements (<img name="documentElement">,
   // <form name="querySelectorAll">) and a form's named controls (<input name="id">,

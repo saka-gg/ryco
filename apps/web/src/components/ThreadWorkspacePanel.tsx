@@ -464,6 +464,7 @@ function WorkspaceBrowserPanel() {
     <LazyBrowserPanel
       environmentId={threadRef?.environmentId ?? null}
       cwd={serverThread?.worktreePath ?? draftThread?.worktreePath ?? project?.cwd ?? null}
+      thread={threadRef}
     />
   );
 }

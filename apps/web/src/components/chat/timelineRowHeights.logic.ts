@@ -684,7 +684,9 @@ function estimateUserMessage(row: MessageRow, layout: TimelineRowLayout): number
   const visibleText = displayed?.visibleText ?? text;
   const contexts = displayed?.contexts ?? [];
   const quotes = displayed?.quotes ?? [];
-  const fileReferences = displayed?.fileReferences ?? [];
+  // Picked page elements and file lines share one chip row.
+  const referenceChips =
+    (displayed?.fileReferences.length ?? 0) + (displayed?.browserElements.length ?? 0);
   const bubbleWidth = layout.rowWidthPx * USER_BUBBLE_WIDTH_RATIO;
   const textWidth = bubbleWidth - BUBBLE_PADDING_INLINE_REM * remPx;
   const proseFontPx = PROSE_FONT_REM * remPx;
@@ -711,7 +713,7 @@ function estimateUserMessage(row: MessageRow, layout: TimelineRowLayout): number
       content += (CHIP_ROW_REM + CHIP_ROW_GAP_REM) * remPx;
     }
   }
-  if (fileReferences.length > 0) {
+  if (referenceChips > 0) {
     content += CHIP_ROW_REM * remPx + (hasBody ? CHIP_ROW_GAP_REM * remPx : 0);
   }
   content += estimateAttachmentsHeight(row.message.attachments ?? [], "user", textWidth, remPx);

@@ -54,7 +54,16 @@ export function registerProjectBrowserIpc(
   );
   handle("capture", (input) => browser.capture(textArg({ tab: input }, "tab")));
   // A user action: only the Ryco window's main frame can start a pick (agents have no picker).
-  handle("pick", (input) => browser.pick(textArg({ tab: input }, "tab")));
+  // The click that picks lands in the page, whose view then holds the keyboard, and DOM focus in
+  // Ryco cannot take it back: hand it to Ryco so the note box that opens gets typing, ⌘↵ and Esc
+  // (like Cmd+L above). Only while the window is focused, so a pick never steals focus.
+  handle("pick", (input, window) =>
+    browser.pick(textArg({ tab: input }, "tab")).then((result) => {
+      if (result.kind === "picked" && !window.isDestroyed() && window.isFocused())
+        window.webContents.focus();
+      return result;
+    }),
+  );
   handle("discover", (input) =>
     discovery.discover(input === undefined ? undefined : textArg({ cwd: input }, "cwd", 8192)),
   );

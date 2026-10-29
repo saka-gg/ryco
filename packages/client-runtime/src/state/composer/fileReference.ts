@@ -55,7 +55,8 @@ const SIDE_LABEL: Record<FileReferenceSide, string> = {
   new: "new version",
 };
 
-function splitLines(text: string): string[] {
+/** `text` split into lines, with CRLF and CR read as LF. */
+export function splitLines(text: string): string[] {
   return text.replace(/\r\n?/gu, "\n").split("\n");
 }
 
@@ -98,7 +99,7 @@ function isReaderLineBreak(code: number): boolean {
  * Excerpt and note text with every `isReaderLineBreak` character replaced by
  * U+FFFD, so no reader sees a line of it end early (and, say, close the block).
  */
-function neutralizeReaderLineBreaks(text: string): string {
+export function neutralizeReaderLineBreaks(text: string): string {
   let result = "";
   let copied = 0;
   for (let index = 0; index < text.length; index += 1) {
@@ -131,7 +132,7 @@ function normalizeLineNumber(value: number): number | null {
 }
 
 /** Cuts at `length`, never between the halves of a surrogate pair. */
-function sliceCodeUnits(text: string, length: number): string {
+export function sliceCodeUnits(text: string, length: number): string {
   const cut = text.slice(0, length);
   const last = cut.charCodeAt(cut.length - 1);
   return last >= 0xd800 && last <= 0xdbff ? cut.slice(0, -1) : cut;
@@ -155,12 +156,20 @@ function boundSnippet(
   return { snippet: kept.join("\n"), truncated: kept.length < rangeLineCount };
 }
 
-function normalizeComment(comment: string | undefined): string | undefined {
+/**
+ * A reference's note as it is kept and sent: line endings unified, reader line
+ * breaks replaced, trimmed, and cut at `maxLength` with "…"; undefined when
+ * nothing is left. Idempotent, so a stored or parsed note comes back the same.
+ */
+export function normalizeReferenceComment(
+  comment: string | undefined,
+  maxLength: number,
+): string | undefined {
   if (comment === undefined) return undefined;
   const normalized = neutralizeReaderLineBreaks(splitLines(comment).join("\n")).trim();
   if (normalized.length === 0) return undefined;
-  return normalized.length > FILE_REFERENCE_COMMENT_MAX_LENGTH
-    ? `${sliceCodeUnits(normalized, FILE_REFERENCE_COMMENT_MAX_LENGTH - 1)}…`
+  return normalized.length > maxLength
+    ? `${sliceCodeUnits(normalized, maxLength - 1)}…`
     : normalized;
 }
 
@@ -182,7 +191,7 @@ export function createFileReference(input: FileReferenceInput): FileReference | 
     input.lines.length > 0 ? splitLines(neutralizeReaderLineBreaks(input.lines.join("\n"))) : [],
     lineEnd - lineStart + 1,
   );
-  const comment = normalizeComment(input.comment);
+  const comment = normalizeReferenceComment(input.comment, FILE_REFERENCE_COMMENT_MAX_LENGTH);
   return {
     path,
     lineStart,
@@ -261,53 +270,6 @@ export function decodeFileReferenceDraft(value: unknown): FileReferenceDraft | n
   }
   const reference = decodeFileReference(record);
   return reference ? { ...reference, id: record.id, createdAt: record.createdAt } : null;
-}
-
-/**
- * The references one draft keeps, in order: the first of any repeated id or
- * range, and no more than `FILE_REFERENCE_PROMPT_MAX_COUNT`.
- */
-export function normalizeFileReferenceDrafts(
-  references: ReadonlyArray<FileReferenceDraft>,
-): FileReferenceDraft[] {
-  const ids = new Set<string>();
-  const keys = new Set<string>();
-  const kept: FileReferenceDraft[] = [];
-  for (const reference of references) {
-    if (kept.length >= FILE_REFERENCE_PROMPT_MAX_COUNT) break;
-    const key = fileReferenceKey(reference);
-    if (ids.has(reference.id) || keys.has(key)) continue;
-    ids.add(reference.id);
-    keys.add(key);
-    kept.push(reference);
-  }
-  return kept;
-}
-
-/**
- * How adding a reference to a draft went: `updated` when the draft already
- * held those lines (the new excerpt and note replace the old), `full` at
- * `FILE_REFERENCE_PROMPT_MAX_COUNT`.
- */
-export type FileReferenceDraftAddOutcome = "added" | "updated" | "full";
-
-/** `references` with `reference` added, or the outcome that kept it out. */
-export function addFileReferenceDraft(
-  references: ReadonlyArray<FileReferenceDraft>,
-  reference: FileReferenceDraft,
-): { readonly outcome: FileReferenceDraftAddOutcome; readonly references: FileReferenceDraft[] } {
-  const key = fileReferenceKey(reference);
-  const index = references.findIndex((entry) => fileReferenceKey(entry) === key);
-  if (index >= 0) {
-    const next = [...references];
-    // The chip keeps its place and identity; what it carries is the latest pick.
-    next[index] = { ...reference, id: references[index]!.id };
-    return { outcome: "updated", references: next };
-  }
-  if (references.length >= FILE_REFERENCE_PROMPT_MAX_COUNT) {
-    return { outcome: "full", references: [...references] };
-  }
-  return { outcome: "added", references: [...references, reference] };
 }
 
 /** "line 12" / "lines 12-18", the same wording terminal contexts use. */

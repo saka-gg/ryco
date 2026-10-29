@@ -4,12 +4,15 @@ import {
 } from "@ryco/client-runtime/state/composer";
 import { useEffect, useRef, useState } from "react";
 
+import type { ReferenceAddResult } from "../../composerContextIntake";
 import { KeyHint } from "../pullRequests/primitives";
 import { CommentField, SUBMIT_SHORTCUT_LABEL } from "../pullRequests/threads/ReplyComposer";
 import { Button } from "../ui/button";
-import type { FileReferenceAddResult } from "./useFileReferencePicker";
 
-const ADD_ERRORS: Record<Exclude<FileReferenceAddResult, "added">, string> = {
+/** What the note row says when "Add to chat" did not add, by result. */
+export type ReferenceAddErrors = Readonly<Record<Exclude<ReferenceAddResult, "added">, string>>;
+
+const FILE_ADD_ERRORS: ReferenceAddErrors = {
   refused: "The chat can’t take these lines right now.",
   full: `This message already has ${FILE_REFERENCE_PROMPT_MAX_COUNT} file references. Remove one to add more.`,
   invalid: "These lines can’t be sent to the chat.",
@@ -17,21 +20,31 @@ const ADD_ERRORS: Record<Exclude<FileReferenceAddResult, "added">, string> = {
 
 /**
  * Opens under the last line of a range picked with the gutter `+` (drag for
- * more lines): an optional note, then "Add to chat" hands the lines and the
- * note to the thread's composer (⌘↵). Esc or Cancel drops the pick; a refusal
- * stays inline, with the note kept. The note lives with the panel
- * (`restoreComment` / `onCommentChange`), so a remount while the diff
- * scrolls keeps it. Key it by the pick's id: a new pick starts a fresh note.
+ * more lines), or above the page for an element picked in the Browser panel:
+ * an optional note, then "Add to chat" hands the pick and the note to the
+ * thread's composer (⌘↵). Esc or Cancel drops the pick; a refusal stays
+ * inline, with the note kept. A panel whose rows remount (the diff while it
+ * scrolls) keeps the note itself (`restoreComment` / `onCommentChange`). Key
+ * it by the pick's id: a new pick starts a fresh note. Plain in-flow markup,
+ * never a dialog, popover or menu, so it does not cover the browser's native
+ * page.
  */
 export function FileReferenceNoteComposer(props: {
   /** "src/app.ts lines 12-18": what is being added. */
   readonly title: string;
-  readonly restoreComment: () => string;
-  readonly onCommentChange: (comment: string) => void;
+  /** The note to start from, for a row that mounts again; empty by default. */
+  readonly restoreComment?: (() => string) | undefined;
+  readonly onCommentChange?: ((comment: string) => void) | undefined;
   readonly onCancel: () => void;
-  readonly onAdd: (comment: string) => FileReferenceAddResult;
+  readonly onAdd: (comment: string) => ReferenceAddResult;
+  /** How long the note may be; a file reference's limit by default. */
+  readonly maxLength?: number | undefined;
+  /** What a refusal says; the file-reference wording by default. */
+  readonly addErrors?: ReferenceAddErrors | undefined;
+  readonly placeholder?: string | undefined;
 }) {
-  const [comment, setComment] = useState(props.restoreComment);
+  const maxLength = props.maxLength ?? FILE_REFERENCE_COMMENT_MAX_LENGTH;
+  const [comment, setComment] = useState(() => props.restoreComment?.() ?? "");
   const [error, setError] = useState<string | null>(null);
   const fieldRef = useRef<HTMLTextAreaElement>(null);
   useEffect(() => {
@@ -40,7 +53,7 @@ export function FileReferenceNoteComposer(props: {
 
   const add = () => {
     const result = props.onAdd(comment.trim());
-    if (result !== "added") setError(ADD_ERRORS[result]);
+    if (result !== "added") setError((props.addErrors ?? FILE_ADD_ERRORS)[result]);
   };
 
   return (
@@ -56,13 +69,13 @@ export function FileReferenceNoteComposer(props: {
           textareaRef={fieldRef}
           value={comment}
           onChange={(next) => {
-            const bounded = next.slice(0, FILE_REFERENCE_COMMENT_MAX_LENGTH);
+            const bounded = next.slice(0, maxLength);
             setComment(bounded);
             setError(null);
-            props.onCommentChange(bounded);
+            props.onCommentChange?.(bounded);
           }}
           error={error}
-          placeholder="Add a note for the agent (optional)"
+          placeholder={props.placeholder ?? "Add a note for the agent (optional)"}
           ariaLabel={`Note on ${props.title}`}
           minHeightClassName="min-h-12"
           onSubmit={add}

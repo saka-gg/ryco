@@ -39,11 +39,11 @@ import {
   normalizeTerminalContextText,
 } from "./terminalContext.ts";
 import {
-  addFileReferenceDraft,
-  type FileReferenceDraft,
-  type FileReferenceDraftAddOutcome,
-  normalizeFileReferenceDrafts,
-} from "./fileReference.ts";
+  addComposerReferenceDraft,
+  type ComposerReferenceDraft,
+  type ComposerReferenceDraftAddOutcome,
+  normalizeComposerReferenceDrafts,
+} from "./composerReference.ts";
 import { create } from "zustand";
 import { persist } from "zustand/middleware";
 import { getDefaultServerModel } from "./providerModels.ts";
@@ -107,8 +107,13 @@ export interface ComposerThreadDraftState<TImage extends ComposerDraftImage = Co
    */
   persistedAttachmentsUnverified?: true | undefined;
   terminalContexts: TerminalContextDraft[];
-  /** Lines of workspace files handed in from the Review and Files panels, sent as a block. */
-  fileReferences: FileReferenceDraft[];
+  /**
+   * Reference chips: lines of workspace files handed in from the Review and
+   * Files panels, and page elements picked in the project browser, each kind
+   * sent as its own block. The name predates page elements and is kept, since
+   * persisted drafts store the list under it.
+   */
+  fileReferences: ComposerReferenceDraft[];
   /** Source-control contexts (issues / change requests) attached to this draft. Not persisted. */
   sourceControlContexts: ComposerSourceControlContext[];
   /**
@@ -430,18 +435,19 @@ export interface ComposerDraftStoreState<TImage extends ComposerDraftImage = Com
   removeTerminalContext: (threadRef: ComposerThreadTarget, contextId: string) => void;
   clearTerminalContexts: (threadRef: ComposerThreadTarget) => void;
   /**
-   * Adds a file reference; one for lines the draft already holds replaces it in
-   * place. `unavailable` when the target has no draft key.
+   * Adds a reference chip (file lines or a page element); one the draft
+   * already holds (the same lines, or the same element of the same page) is
+   * replaced in place. `unavailable` when the target has no draft key.
    */
   addFileReference: (
     threadRef: ComposerThreadTarget,
-    reference: FileReferenceDraft,
-  ) => FileReferenceDraftAddOutcome | "unavailable";
+    reference: ComposerReferenceDraft,
+  ) => ComposerReferenceDraftAddOutcome | "unavailable";
   removeFileReference: (threadRef: ComposerThreadTarget, referenceId: string) => void;
   /** Replaces the draft's references (a restored send), de-duplicated and capped. */
   setFileReferences: (
     threadRef: ComposerThreadTarget,
-    references: ReadonlyArray<FileReferenceDraft>,
+    references: ReadonlyArray<ComposerReferenceDraft>,
   ) => void;
   addSourceControlContext: (
     threadRef: ComposerThreadTarget,
@@ -505,7 +511,7 @@ const EMPTY_IMAGES: never[] = [];
 const EMPTY_IDS: string[] = [];
 const EMPTY_PERSISTED_ATTACHMENTS: PersistedComposerImageAttachment[] = [];
 const EMPTY_TERMINAL_CONTEXTS: TerminalContextDraft[] = [];
-const EMPTY_FILE_REFERENCES: FileReferenceDraft[] = [];
+const EMPTY_FILE_REFERENCES: ComposerReferenceDraft[] = [];
 const EMPTY_SOURCE_CONTROL_CONTEXTS: ComposerSourceControlContext[] = [];
 Object.freeze(EMPTY_IMAGES);
 Object.freeze(EMPTY_IDS);
@@ -2264,10 +2270,10 @@ export function createComposerDraftStore<TImage extends ComposerDraftImage>(
             if (threadKey.length === 0) {
               return "unavailable";
             }
-            let outcome: FileReferenceDraftAddOutcome = "full";
+            let outcome: ComposerReferenceDraftAddOutcome = "full";
             set((state) => {
               const existing = state.draftsByThreadKey[threadKey] ?? createEmptyThreadDraft();
-              const next = addFileReferenceDraft(existing.fileReferences, reference);
+              const next = addComposerReferenceDraft(existing.fileReferences, reference);
               outcome = next.outcome;
               if (next.outcome === "full") {
                 return state;
@@ -2311,7 +2317,7 @@ export function createComposerDraftStore<TImage extends ComposerDraftImage>(
             if (threadKey.length === 0) {
               return;
             }
-            const fileReferences = normalizeFileReferenceDrafts(references);
+            const fileReferences = normalizeComposerReferenceDrafts(references);
             set((state) => {
               const existing = state.draftsByThreadKey[threadKey];
               if (!existing && fileReferences.length === 0) {

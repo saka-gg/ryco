@@ -4,14 +4,16 @@ import { describe, expect, it } from "vite-plus/test";
 import { scopedThreadKey, scopeThreadRef } from "../../scoped.ts";
 import { composerDraftEntryStorageKey } from "./draftPersistence.ts";
 import type { ComposerDraftStorage } from "./draftSplitStorage.ts";
+import {
+  addComposerReferenceDraft as addFileReferenceDraft,
+  normalizeComposerReferenceDrafts as normalizeFileReferenceDrafts,
+} from "./composerReference.ts";
 import { createComposerDraftStore } from "./draftStore.ts";
 import {
-  addFileReferenceDraft,
   createFileReference,
   decodeFileReferenceDraft,
   FILE_REFERENCE_PROMPT_MAX_COUNT,
   type FileReferenceDraft,
-  normalizeFileReferenceDrafts,
 } from "./fileReference.ts";
 
 const threadRef = scopeThreadRef(EnvironmentId.make("environment"), ThreadId.make("thread"));

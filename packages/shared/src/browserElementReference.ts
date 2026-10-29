@@ -20,8 +20,11 @@ import {
   BROWSER_ELEMENT_MAX_TAG_LENGTH,
   BROWSER_ELEMENT_MAX_TEXT_LENGTH,
   BROWSER_ELEMENT_MAX_URL_LENGTH,
-  type ProjectBrowserElementBox,
-  type ProjectBrowserPickedElement,
+} from "@ryco/contracts/browser-element-limits";
+// Types only: the schemas stay out of the web app's startup bundle, which runs this too.
+import type {
+  ProjectBrowserElementBox,
+  ProjectBrowserPickedElement,
 } from "@ryco/contracts/project-browser";
 
 /** What a private-looking URL path segment becomes. */
@@ -41,6 +44,11 @@ const VALUE_TAGS = new Set(["input", "textarea", "select", "option"]);
 
 // Control characters (C0, DEL, C1) and the Unicode line and paragraph separators.
 const CONTROL_CHARACTERS = /[\p{Cc}\u2028\u2029]/gu;
+// Bidirectional embedding, override and isolate controls: they reorder how a chip's label reads.
+const BIDI_CONTROLS = /[\u202a-\u202e\u2066-\u2069]/gu;
+// The `<` of anything that reads as a tag, such as `</browser_context>` or `<file_context>`: page
+// text must not seem to close or open one of the prompt's blocks. It becomes U+2039 (‹).
+const TAG_START = /<(?=\s*\/?\s*[A-Za-z])/gu;
 // Without the `u` flag, so each half of a surrogate pair is seen on its own.
 const LONE_SURROGATE = /[\uD800-\uDBFF](?![\uDC00-\uDFFF])|(?<![\uD800-\uDBFF])[\uDC00-\uDFFF]/g;
 const EMAIL = /\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b/u;
@@ -173,8 +181,9 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 /**
- * One line: control characters and lone surrogates replaced, whitespace collapsed, trimmed. Null
- * for a non-string, an empty result, or a raw string over the raw-length bound for `cap`.
+ * One line: control characters and lone surrogates replaced, bidirectional controls dropped,
+ * whitespace collapsed, trimmed, and a tag's `<` broken. Null for a non-string, an empty result, or
+ * a raw string over the raw-length bound for `cap`.
  */
 function collapse(value: unknown, cap: number, lowercase = false): string | null {
   if (typeof value !== "string" || value.length > cap * RAW_LENGTH_FACTOR) return null;
@@ -182,8 +191,10 @@ function collapse(value: unknown, cap: number, lowercase = false): string | null
   return (
     cased
       .replace(CONTROL_CHARACTERS, " ")
+      .replace(BIDI_CONTROLS, "")
       .replace(LONE_SURROGATE, "\uFFFD")
       .replace(/\s+/gu, " ")
+      .replace(TAG_START, "\u2039")
       .trim() || null
   );
 }

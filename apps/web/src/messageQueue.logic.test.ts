@@ -122,6 +122,26 @@ describe("summarizeQueuedMessage", () => {
     ).toBe("2 file references");
   });
 
+  it("counts picked page elements apart from file references", () => {
+    const element = { kind: "browser-element" };
+    expect(
+      summarizeQueuedMessage(
+        makeMessage("a", {
+          fileReferences: [element] as NonNullable<QueuedMessage["composer"]["fileReferences"]>,
+        }),
+      ),
+    ).toBe("1 page element");
+    expect(
+      summarizeQueuedMessage(
+        makeMessage("a", {
+          fileReferences: [element, {}, element] as NonNullable<
+            QueuedMessage["composer"]["fileReferences"]
+          >,
+        }),
+      ),
+    ).toBe("1 file reference");
+  });
+
   it("falls back to a generic label", () => {
     expect(summarizeQueuedMessage(makeMessage("a"))).toBe("Queued message");
   });

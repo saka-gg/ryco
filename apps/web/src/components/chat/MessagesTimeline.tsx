@@ -130,11 +130,12 @@ import { usePendingQuoteHighlight } from "./usePendingQuoteHighlight";
 import type { NumberedQuoteCitation } from "@ryco/shared/quoteCitations";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import {
+  browserElementReferenceKey,
   deriveDisplayedUserMessageContext,
   fileReferenceKey,
   type ParsedTerminalContextEntry,
 } from "~/lib/terminalContext";
-import { FileReferenceChip } from "./FileReferenceChip";
+import { BrowserElementChip, FileReferenceChip } from "./FileReferenceChip";
 import { deriveDisplayedUserMessageForTier } from "~/lib/userMessageDisplay";
 import { cn } from "~/lib/utils";
 import { useUiStateStore } from "~/uiStateStore";
@@ -1556,6 +1557,7 @@ function TimelineRowContent({ row }: { row: TimelineRow }) {
           );
           const terminalContexts = displayedUserMessage.contexts;
           const fileReferences = displayedUserMessage.fileReferences;
+          const browserElements = displayedUserMessage.browserElements;
           const hasUserMessageBody =
             displayedUserMessage.visibleText.trim().length > 0 ||
             terminalContexts.length > 0 ||
@@ -1576,11 +1578,17 @@ function TimelineRowContent({ row }: { row: TimelineRow }) {
                     threadId={parseScopedThreadKey(ctx.routeThreadKey)?.threadId}
                     messageId={row.message.id}
                   />
-                  {fileReferences.length > 0 ? (
+                  {fileReferences.length > 0 || browserElements.length > 0 ? (
                     <div
                       className={cn("flex flex-wrap gap-1", hasUserMessageBody && "mb-1")}
                       data-user-message-file-references="true"
                     >
+                      {browserElements.map((element) => (
+                        <BrowserElementChip
+                          key={browserElementReferenceKey(element)}
+                          element={element}
+                        />
+                      ))}
                       {fileReferences.map((reference) => (
                         <FileReferenceChip
                           key={fileReferenceKey(reference)}

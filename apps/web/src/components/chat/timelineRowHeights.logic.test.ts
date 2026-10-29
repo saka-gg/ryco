@@ -1,3 +1,8 @@
+import {
+  composeOutgoingPrompt,
+  createBrowserElementReference,
+  createFileReference,
+} from "@ryco/client-runtime/state/composer";
 import { MessageId, TurnId } from "@ryco/contracts";
 import { htmlRenderFrameHeight } from "@ryco/shared/htmlRender";
 import { describe, expect, it } from "vite-plus/test";
@@ -307,6 +312,43 @@ describe("estimateTimelineRowHeight", () => {
     const plain = estimateTimelineRowHeight(message("user", "Why does this fail?"), LAYOUT);
     const height = estimateTimelineRowHeight(message("user", withContext), LAYOUT);
     expect(height).toBeLessThan(plain + 60);
+  });
+
+  it("gives picked page elements the chip row file lines get", () => {
+    const element = createBrowserElementReference({
+      url: "http://localhost:3000/settings",
+      pageTitle: "Settings",
+      selector: "#save",
+      tagName: "button",
+      role: "button",
+      name: "Save changes",
+      text: "Save changes",
+      box: { x: 10, y: 20, width: 120, height: 32 },
+    })!;
+    const file = createFileReference({
+      path: "src/app.ts",
+      lineStart: 3,
+      lineEnd: 3,
+      lines: ["const a = 1;"],
+    })!;
+    const height = (
+      fileReferences: Parameters<typeof composeOutgoingPrompt>[0]["fileReferences"],
+    ) =>
+      estimateTimelineRowHeight(
+        message("user", composeOutgoingPrompt({ prompt: "Restyle this", fileReferences })),
+        LAYOUT,
+      );
+    const plain = height([]);
+    const chipRow = (1.5 + 0.25) * LAYOUT.remPx;
+    expect(height([file])).toBe(plain + chipRow);
+    expect(height([element])).toBe(plain + chipRow);
+    expect(height([element, file])).toBe(plain + chipRow);
+    // The frozen phone tier keeps page elements as text, not chips.
+    const phone = { ...LAYOUT, tier: "phone" as const };
+    const sent = composeOutgoingPrompt({ prompt: "Restyle this", fileReferences: [element] });
+    expect(estimateTimelineRowHeight(message("user", sent), phone)).toBeGreaterThan(
+      estimateTimelineRowHeight(message("user", "Restyle this"), phone) + chipRow,
+    );
   });
 
   it("sizes a page row from its measured frame height", () => {

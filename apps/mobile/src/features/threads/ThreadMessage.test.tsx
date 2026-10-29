@@ -91,7 +91,11 @@ import {
   type ChatAttachment,
   type ChatMessage,
 } from "@ryco/client-runtime/state/threads";
-import { appendTerminalContextsToPrompt } from "@ryco/client-runtime/state/composer";
+import {
+  appendTerminalContextsToPrompt,
+  composeOutgoingPrompt,
+  createBrowserElementReference,
+} from "@ryco/client-runtime/state/composer";
 import { EnvironmentId, MessageId, ThreadId } from "@ryco/contracts";
 import { htmlRenderOfAttachment } from "@ryco/shared/htmlRender";
 import {
@@ -540,6 +544,42 @@ describe("ThreadMessage sent contexts", () => {
     const tree = renderMessage([], { text: sent });
     const copy = collectElements(tree, (element) => element.type === "CopyTextButton");
     expect(copy[0]?.props).toMatchObject({ text: sent });
+  });
+
+  it("shows a picked page element as a chip with its note", () => {
+    const element = createBrowserElementReference({
+      url: "http://localhost:3000/settings",
+      pageTitle: "Settings",
+      selector: "#save",
+      tagName: "button",
+      role: "button",
+      name: "Save changes",
+      text: "Save changes",
+      box: { x: 1, y: 2, width: 3, height: 4 },
+      comment: "Make it primary",
+    })!;
+    const text = composeOutgoingPrompt({ prompt: "Restyle this", fileReferences: [element] });
+    const tree = renderMessage([], { text });
+    const texts = textOf(tree);
+    expect(texts).toContain("Restyle this");
+    expect(texts).toContain('button "Save changes"');
+    expect(texts).toContain("Make it primary");
+    expect(texts.some((entry) => entry.includes("<browser_context>"))).toBe(false);
+    expect(
+      collectElements(
+        tree,
+        (element) =>
+          (element.props as { accessibilityLabel?: string }).accessibilityLabel ===
+          'button "Save changes" on localhost:3000/settings: Make it primary',
+      ),
+    ).toHaveLength(1);
+    expect(
+      collectElements(
+        tree,
+        (element) =>
+          element.type === "SymbolView" && (element.props as { name?: string }).name === "globe",
+      ),
+    ).toHaveLength(1);
   });
 
   it("leaves a block that does not parse as text, and an assistant's reply untouched", () => {

@@ -1,6 +1,11 @@
 import { getEnvironmentHttpBaseUrl } from "../environments/runtime";
 import { useEffect, useState, useRef, useCallback } from "react";
-import type { DiscoveredProjectSite, ProjectBrowserCommand, EnvironmentId } from "@ryco/contracts";
+import type {
+  DiscoveredProjectSite,
+  ProjectBrowserCommand,
+  EnvironmentId,
+  ScopedThreadRef,
+} from "@ryco/contracts";
 import {
   ArrowLeftIcon,
   ArrowRightIcon,
@@ -13,6 +18,8 @@ import {
   XIcon,
 } from "lucide-react";
 import { Button } from "../components/ui/button";
+import { useComposerContextIntakeAvailable } from "../composerContextIntake";
+import { useBrowserElementPicker } from "./BrowserElementPicker";
 import { BrowserSurface } from "./BrowserSurface";
 import {
   normalizeBrowserUrl,
@@ -24,8 +31,14 @@ import {
 export interface BrowserProject {
   environmentId: EnvironmentId | null;
   cwd: string | null;
+  /**
+   * The thread whose workspace shows the panel: "Pick element" hands page
+   * elements to its composer. Without one (the sidebar's live preview) the
+   * control is not offered.
+   */
+  thread?: ScopedThreadRef | null;
 }
-export function BrowserPanel({ environmentId, cwd }: BrowserProject) {
+export function BrowserPanel({ environmentId, cwd, thread = null }: BrowserProject) {
   const project = projectBrowserKey(environmentId, cwd);
   const { tabs, selected, api } = useProjectBrowserTabs(project);
   const addressInput = useRef<HTMLInputElement>(null);
@@ -49,6 +62,15 @@ export function BrowserPanel({ environmentId, cwd }: BrowserProject) {
   const [saved, setSaved] = useState<string[]>([]);
   const active = newTab ? null : selected;
   const empty = active === null;
+  const composerAvailable = useComposerContextIntakeAvailable(thread);
+  const picker = useBrowserElementPicker({
+    api,
+    tab: active,
+    thread,
+    project,
+    available: composerAvailable,
+    onError: setError,
+  });
   useEffect(
     () =>
       api?.onFocusAddress((tab) => {
@@ -320,6 +342,7 @@ export function BrowserPanel({ environmentId, cwd }: BrowserProject) {
                     ? "Cancel sign-in"
                     : "Allow sign-in popup"}
               </button>
+              {picker?.control}
               <button type="button" onClick={() => command("devtools")}>
                 DevTools
               </button>
@@ -368,6 +391,9 @@ export function BrowserPanel({ environmentId, cwd }: BrowserProject) {
           {error ?? active?.error}
         </p>
       ) : null}
+      {/* One slot, always here, so opening the note never moves or remounts the surface below:
+          a new surface owner would detach the page and end the pick. */}
+      {picker?.panel ?? null}
       {active ? (
         active.presentation === "window" ? (
           <div className="flex flex-1 flex-col items-center justify-center gap-3 text-sm">

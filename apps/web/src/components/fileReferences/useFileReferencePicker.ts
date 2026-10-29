@@ -4,7 +4,8 @@ import type { ScopedThreadRef } from "@ryco/contracts";
 import { useCallback, useMemo, useRef, useState } from "react";
 
 import {
-  composerContextIntake,
+  addReferenceToComposer,
+  type ReferenceAddResult,
   useComposerContextIntakeAvailable,
 } from "../../composerContextIntake";
 import type { FileLineSelection } from "./fileReferenceSelection";
@@ -17,14 +18,6 @@ export interface FileReferencePick {
   readonly selection: FileLineSelection;
 }
 
-/**
- * How "Add to chat" went: `invalid` when no reference could be made of the
- * lines and `full` when the message holds as many references as it carries
- * (retrying cannot help either), `refused` when the composer cannot take it
- * now.
- */
-export type FileReferenceAddResult = "added" | "refused" | "full" | "invalid";
-
 export interface FileReferencePicker {
   /** A composer takes context for this thread: offer the gutter `+`. */
   readonly available: boolean;
@@ -36,7 +29,7 @@ export interface FileReferencePicker {
    * Hands the reference to the thread's composer and closes the pick; the
    * pick stays open unless it was `added`.
    */
-  add(reference: FileReference | null): FileReferenceAddResult;
+  add(reference: FileReference | null): ReferenceAddResult;
   restoreComment(): string;
   rememberComment(comment: string): void;
 }
@@ -72,17 +65,15 @@ export function useFileReferencePicker(thread: ScopedThreadRef | null): FileRefe
   );
   const cancel = useCallback(() => setState(null), []);
   const add = useCallback(
-    (reference: FileReference | null): FileReferenceAddResult => {
+    (reference: FileReference | null): ReferenceAddResult => {
       if (!reference) return "invalid";
       if (environmentId === null || threadId === null) return "refused";
-      const delivery = composerContextIntake.deliver(
+      const result = addReferenceToComposer(
         { environmentId, threadId },
         { kind: "file-reference", reference },
       );
-      if (delivery === "full") return "full";
-      if (delivery !== "added") return "refused";
-      setState(null);
-      return "added";
+      if (result === "added") setState(null);
+      return result;
     },
     [environmentId, threadId],
   );

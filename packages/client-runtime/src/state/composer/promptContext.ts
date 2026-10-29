@@ -1,4 +1,11 @@
 import {
+  BROWSER_CONTEXT_CLOSE_TAG,
+  BROWSER_CONTEXT_DESCRIPTION,
+  type BrowserElementReference,
+  buildBrowserElementEntryLines,
+  createBrowserElementReference,
+} from "./browserElementReference.ts";
+import {
   createFileReference,
   FILE_CONTEXT_CLOSE_TAG,
   FILE_REFERENCE_TRUNCATION_MARKER,
@@ -14,10 +21,11 @@ import {
 
 /**
  * Where a sent prompt's context blocks are read back, the inverse of the send
- * engine's `composeOutgoingPrompt`: the user's text, then the `<file_context>`
- * block, then the `<terminal_context>` block, which stays last as it always
- * has. Apart from the writer because only lazily loaded views read: a module
- * the web shell shares with them is split into a chunk of its own.
+ * engine's `composeOutgoingPrompt`: the user's text, then the
+ * `<browser_context>` block, then the `<file_context>` block, then the
+ * `<terminal_context>` block, which stays last as it always has. Apart from
+ * the writer because only lazily loaded views read: a module the web shell
+ * shares with them is split into a chunk of its own.
  */
 
 const TERMINAL_CONTEXT_CLOSE_TAG = "</terminal_context>";
@@ -28,6 +36,12 @@ const ENTRY_HEADER_PATTERN =
 const COMMENT_LINE_PATTERN = /^ {2}comment:(?: (.*))?$/u;
 const SNIPPET_LINE_PATTERN = /^ {2}(\d+) \|(?: (.*))?$/u;
 const FILE_CONTEXT_OPEN_LINE_PATTERN = /(?:^|\n)<file_context>\n/gu;
+const BROWSER_CONTEXT_OPEN_LINE_PATTERN = /(?:^|\n)<browser_context>\n/gu;
+const BROWSER_ENTRY_HEADER_PATTERN = /^- .+:$/u;
+const BROWSER_FIELD_LINE_PATTERN = /^ {2}([a-z]+): (.+)$/u;
+const BROWSER_BOX_PATTERN = /^(\d+)x(\d+) at (-?\d+),(-?\d+)$/u;
+/** An entry's field names, in the order the writer puts them (the note's lines follow). */
+const BROWSER_FIELD_ORDER = ["url", "page", "selector", "tag", "role", "name", "text", "box"];
 
 export interface ExtractedFileReferences {
   readonly promptText: string;
@@ -122,8 +136,106 @@ export function extractTrailingFileReferences(prompt: string): ExtractedFileRefe
   };
 }
 
+export interface ExtractedBrowserElements {
+  readonly promptText: string;
+  readonly elements: ReadonlyArray<BrowserElementReference>;
+}
+
+/**
+ * One entry of a `<browser_context>` block, or null. Only what the writer
+ * would write for the element it names is accepted: the fields are read in
+ * their fixed order, the element is rebuilt through the normalizer every pick
+ * goes through, and its entry must come out line for line the same.
+ */
+function parseBrowserEntry(lines: ReadonlyArray<string>): BrowserElementReference | null {
+  if (!BROWSER_ENTRY_HEADER_PATTERN.test(lines[0] ?? "")) return null;
+  const fields = new Map<string, string>();
+  const comment: string[] = [];
+  let order = 0;
+  for (const line of lines.slice(1)) {
+    const commentLine = COMMENT_LINE_PATTERN.exec(line);
+    if (commentLine) {
+      comment.push(commentLine[1] ?? "");
+      continue;
+    }
+    // Every field comes before the note, once, in order.
+    if (comment.length > 0) return null;
+    const field = BROWSER_FIELD_LINE_PATTERN.exec(line);
+    const index = field ? BROWSER_FIELD_ORDER.indexOf(field[1]!, order) : -1;
+    if (!field || index < 0) return null;
+    order = index + 1;
+    fields.set(field[1]!, field[2]!);
+  }
+  const box = fields.has("box") ? BROWSER_BOX_PATTERN.exec(fields.get("box")!) : null;
+  if (fields.has("box") && !box) return null;
+  const reference = createBrowserElementReference({
+    url: fields.get("url") ?? "",
+    pageTitle: fields.get("page") ?? "",
+    selector: fields.get("selector") ?? "",
+    tagName: fields.get("tag") ?? "",
+    role: fields.get("role") ?? null,
+    name: fields.get("name") ?? null,
+    text: fields.get("text") ?? null,
+    box: box
+      ? { width: Number(box[1]), height: Number(box[2]), x: Number(box[3]), y: Number(box[4]) }
+      : null,
+    comment: comment.length > 0 ? comment.join("\n") : undefined,
+  });
+  // Only the canonical form round-trips: anything else was not written by us.
+  if (!reference) return null;
+  const written = buildBrowserElementEntryLines(reference);
+  return written.length === lines.length && written.every((line, index) => line === lines[index])
+    ? reference
+    : null;
+}
+
+/**
+ * Reads a trailing `<browser_context>` block back into page elements, so a
+ * sent prompt can show them as chips again. All or nothing, like
+ * `extractTrailingFileReferences`: the block must open with the exact
+ * description line and a blank line, and every entry must be exactly what the
+ * writer makes of the element it names. Anything else (typed by hand, or page
+ * text dressed up as a block) stays part of the text.
+ */
+export function extractTrailingBrowserElements(prompt: string): ExtractedBrowserElements {
+  const none = { promptText: prompt, elements: [] };
+  // `trimEnd` drops what `\s` matches, from the end only: most messages carry no block.
+  const text = prompt.trimEnd();
+  if (!text.endsWith(`\n${BROWSER_CONTEXT_CLOSE_TAG}`)) return none;
+  // Entry lines are always indented or start with "- ", so the last opening
+  // tag at a line start is the block's own.
+  let open: { readonly index: number; readonly length: number } | null = null;
+  for (const match of text.matchAll(BROWSER_CONTEXT_OPEN_LINE_PATTERN)) {
+    open = { index: match.index, length: match[0].length };
+  }
+  if (!open) return none;
+  const body = text
+    .slice(open.index + open.length, text.length - BROWSER_CONTEXT_CLOSE_TAG.length - 1)
+    .split("\n");
+  if (body[0] !== BROWSER_CONTEXT_DESCRIPTION || body[1] !== "" || body.length < 3) return none;
+  // Entries are separated by one blank line; no entry line is ever blank.
+  const entries: string[][] = [[]];
+  for (const line of body.slice(2)) {
+    const current = entries.at(-1)!;
+    if (line.length > 0) current.push(line);
+    else if (current.length > 0) entries.push([]);
+    else return none;
+  }
+  const elements: BrowserElementReference[] = [];
+  for (const entry of entries) {
+    const element = parseBrowserEntry(entry);
+    if (!element) return none;
+    elements.push(element);
+  }
+  return {
+    promptText: text.slice(0, open.index).replace(/\n+$/u, ""),
+    elements,
+  };
+}
+
 export interface ExtractedPromptContexts extends ExtractedTerminalContexts {
   readonly fileReferences: ReadonlyArray<FileReference>;
+  readonly browserElements: ReadonlyArray<BrowserElementReference>;
 }
 
 /**
@@ -150,18 +262,24 @@ function extractAnchoredTerminalContexts(prompt: string): ExtractedTerminalConte
 }
 
 /**
- * Reads a sent prompt back into its text, file references and terminal
- * contexts: the inverse of `composeOutgoingPrompt`. Blocks that do not parse
- * stay part of the text.
+ * Reads a sent prompt back into its text, picked page elements, file
+ * references and terminal contexts: the inverse of `composeOutgoingPrompt`,
+ * from the last block back. Blocks that do not parse stay part of the text.
  */
 export function extractTrailingPromptContexts(prompt: string): ExtractedPromptContexts {
   const terminal = extractAnchoredTerminalContexts(prompt);
   const files = extractTrailingFileReferences(terminal.promptText);
-  return { ...terminal, promptText: files.promptText, fileReferences: files.references };
+  const browser = extractTrailingBrowserElements(files.promptText);
+  return {
+    ...terminal,
+    promptText: browser.promptText,
+    fileReferences: files.references,
+    browserElements: browser.elements,
+  };
 }
 
 /**
- * The prompt a send started from, without what the send added: both context
+ * The prompt a send started from, without what the send added: its context
  * blocks and the inline labels that stood for its terminal contexts.
  */
 export function stripSentPromptContexts(prompt: string): string {
@@ -171,6 +289,7 @@ export function stripSentPromptContexts(prompt: string): string {
 
 export interface DisplayedUserMessageContext extends DisplayedUserMessageState {
   readonly fileReferences: ReadonlyArray<FileReference>;
+  readonly browserElements: ReadonlyArray<BrowserElementReference>;
 }
 
 /**
@@ -187,5 +306,6 @@ export function deriveDisplayedUserMessageContext(prompt: string): DisplayedUser
     previewTitle: extracted.previewTitle,
     contexts: extracted.contexts,
     fileReferences: extracted.fileReferences,
+    browserElements: extracted.browserElements,
   };
 }
