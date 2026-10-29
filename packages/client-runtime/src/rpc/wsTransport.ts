@@ -167,6 +167,18 @@ export function isRpcTransportFailure(error: unknown): boolean {
   );
 }
 
+/**
+ * The node refused the call to this session (an `AuthRpcError`: a method above
+ * its role). Read by tag, so callers need no contracts value import.
+ */
+export function isAuthRpcError(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    (error as { readonly _tag?: unknown })._tag === "AuthRpcError"
+  );
+}
+
 /** The response did not fit the largest message the connection carries (relay cap). */
 export function isResponseTooLargeError(error: unknown): boolean {
   return formatErrorMessage(error).includes(

@@ -138,6 +138,10 @@
       "types": "./src/state/nodeUpdate/index.ts",
       "import": "./src/state/nodeUpdate/index.ts"
     },
+    "./state/providerSignIn": {
+      "types": "./src/state/providerSignIn/index.ts",
+      "import": "./src/state/providerSignIn/index.ts"
+    },
     "./updates": {
       "types": "./src/updates/index.ts",
       "import": "./src/updates/index.ts"

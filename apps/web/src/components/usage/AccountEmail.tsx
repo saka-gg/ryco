@@ -3,7 +3,7 @@ import type { CliProxyAccount } from "@ryco/contracts";
 
 import { cn } from "~/lib/utils";
 
-import { RedactedSensitiveText } from "../settings/RedactedSensitiveText";
+import { RedactedEmail } from "../settings/RedactedSensitiveText";
 
 /** An account email, blurred until clicked. Shared by provider settings, limits, and the composer. */
 export function AccountEmail(props: {
@@ -19,14 +19,7 @@ export function AccountEmail(props: {
     <span className="inline-flex min-w-0 max-w-full items-center gap-1.5">
       {props.separator ? <span aria-hidden>·</span> : null}
       {props.prefix ? <span className="text-muted-foreground/80">{props.prefix}</span> : null}
-      {/* A long email wraps inside narrow containers instead of running past them. */}
-      <RedactedSensitiveText
-        value={trimmed}
-        ariaLabel="Toggle account email visibility"
-        revealTooltip="Click to reveal email"
-        hideTooltip="Click to hide email"
-        className={cn("wrap-anywhere", props.className)}
-      />
+      <RedactedEmail email={trimmed} className={props.className} />
     </span>
   );
 }

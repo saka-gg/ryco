@@ -391,6 +391,8 @@ interface ProviderInstanceCardProps {
   readonly liveProvider: ServerProvider | undefined;
   readonly isDefault: boolean;
   readonly usageAvailable?: boolean;
+  /** Signs the instance in on its node; renders nothing while it needs none. */
+  readonly signInNode?: ReactNode;
   readonly resetCreditsNode?: ReactNode;
   readonly onUpdate: (nextInstance: ProviderInstanceConfig) => void;
   /**
@@ -447,6 +449,7 @@ export function ProviderInstanceCard({
   liveProvider,
   isDefault,
   usageAvailable = false,
+  signInNode,
   resetCreditsNode,
   onUpdate,
   onDelete,
@@ -768,6 +771,7 @@ export function ProviderInstanceCard({
       </div>
 
       <div className="space-y-0">
+        {signInNode}
         {resetCreditsNode}
         {liveProvider?.rateLimits ? (
           <ProviderUsageLimitsSection

@@ -4,10 +4,16 @@ Desktop and browsers connected to a loopback Ryco server offer a short setup flo
 current workspace and client settings have loaded. It shows provider discovery and authentication
 status, opens the existing project picker, and introduces tasks, review, and Settings.
 
-Use **Provider settings** to configure an instance. Provider authentication remains with each
-provider's own CLI or existing settings workflow. Setup does not install a CLI, start a sign-in,
-change accounts, or enable/disable providers automatically. **Refresh discovery** explicitly
-rechecks status; unverified authentication remains labeled as such.
+Use **Provider settings** to configure an instance. Provider authentication uses each provider's
+own sign-in. **Sign in** on a provider's row opens it below the list, and it starts only when you
+click **Sign in** there: for Codex, Ryco runs its device-code login on this computer and shows the
+code to enter on the sign-in page. Other providers still sign in with their own CLI. A row offers
+**Sign in** only while its instance reports no sign-in and needs one: not for a Codex instance on a
+custom model provider, and never for a Claude instance whose environment uses other credentials,
+such as a CLIProxyAPI hub. The sign-in runs on this computer, not in the dialog, so skipping or
+closing setup does not stop it, and Provider settings keeps showing it. Setup does not install a
+CLI, change accounts, or enable or disable providers. **Refresh discovery** explicitly rechecks
+status; unverified authentication remains labeled as such.
 
 **Add project** opens the normal project picker. Closing the picker or Provider settings returns
 to the same setup step. Setup writes no project commands of its own. Connection loss disables
@@ -28,6 +34,9 @@ phone surface remain separate. No tour is offered on those surfaces or for a rem
 
 ```sh
 bun run --cwd apps/web test src/components/onboarding src/components/settings/settingsRestore.test.ts
-bun run --cwd apps/web test:browser src/components/onboarding/OnboardingCoordinator.browser.tsx
+bun run --cwd apps/web test:browser src/components/onboarding/OnboardingCoordinator.browser.tsx src/components/settings/ProviderSignInSection.browser.tsx
 bun run --cwd apps/desktop test src/clientPersistence.test.ts
 ```
+
+`src/components/onboarding` includes `onboardingSignIn.logic.test.ts`, which decides which
+providers setup offers **Sign in** for.
