@@ -181,6 +181,7 @@ import { AgentControlProposalServiceLive } from "./agentControl/Layers/AgentCont
 import { AgentControlProposalStoreLive } from "./agentControl/Layers/AgentControlProposalStore.ts";
 import { AgentControlSessionRegistryLive } from "./agentControl/Layers/AgentControlSessionRegistry.ts";
 import { AgentControlActionValidatorLive } from "./agentControl/Layers/AgentControlActionValidator.ts";
+import { AgentControlDelegationSlotsLive } from "./agentControl/Layers/AgentControlDelegationSlots.ts";
 import { AgentControlExecutionLive } from "./agentControl/Layers/AgentControlExecution.ts";
 import { AgentControlProjectPlansLive } from "./agentControl/Layers/AgentControlProjectPlans.ts";
 import { AgentControlExternalIntegrationServiceLive } from "./agentControl/Layers/AgentControlExternalIntegration.ts";
@@ -702,6 +703,11 @@ const RuntimeServicesLive = Layer.mergeAll(
   ),
   // Each thread's queued follow-ups, sent behind the same wake fence (its runtime loads lazily).
   ServerQueueDrainLive.pipe(
+    Layer.provideMerge(ServerRuntimeStartupLive),
+    Layer.provideMerge(OrchestrationCommandApplicationLive),
+  ),
+  // The next waiting task of a capped delegation request (its runtime loads lazily).
+  AgentControlDelegationSlotsLive.pipe(
     Layer.provideMerge(ServerRuntimeStartupLive),
     Layer.provideMerge(OrchestrationCommandApplicationLive),
   ),

@@ -23,6 +23,7 @@ import {
   type AgentControlOperationState,
   type AgentControlProposal,
   type AgentControlResultEnvelope,
+  type ChatAttachment,
   type ClientOrchestrationCommand,
   type OrchestrationThreadShell,
   type SourceControlSetPullRequestWatchResult,
@@ -37,6 +38,7 @@ import { GitWorkflowService, type GitWorkflowServiceShape } from "../../git/GitW
 import { OrchestrationCommandApplication } from "../../orchestration/Services/OrchestrationCommandApplication.ts";
 import { DeviceService } from "../../device/Services/DeviceService.ts";
 import { OrchestrationEngineService } from "../../orchestration/Services/OrchestrationEngine.ts";
+import { delegationSlotHold } from "../../orchestration/delegationSlotHold.ts";
 import { isThreadSessionWakeEvent } from "../../orchestration/threadWaitWakeEvents.ts";
 import {
   ProjectionSnapshotQuery,
@@ -1028,6 +1030,9 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
             },
           });
 
+          // Entries past the request's cap wait for a free slot; without a cap all start at once.
+          const maxConcurrent =
+            proposal.plan.kind === "createThreads" ? proposal.plan.maxConcurrent : undefined;
           // Provenance only (spec D4/D5): never authority; automation runs are not children.
           const delegatedParentThreadId =
             proposal.plan.kind === "createThreads" && proposal.principal.kind === "provider-session"
@@ -1322,6 +1327,40 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
               ...(threadReferences.length > 0 ? { threadReferences } : {}),
               createdAt,
             };
+            // Past the request's cap the same first message (same id, so a completion return
+            // still binds to it) waits, held, in the child's own follow-up queue, at the child's
+            // own modes; the slot runtime releases it when an earlier task stops working.
+            const sendFirstMessage = (attachments: ReadonlyArray<ChatAttachment>) =>
+              maxConcurrent !== undefined && index >= maxConcurrent
+                ? dispatch(`turn-queued:${index}`, {
+                    queued: {
+                      type: "thread.queue.add",
+                      // The turn start's id: a task's start ledger reads this command's receipt.
+                      commandId: turnStart.commandId,
+                      threadId,
+                      author: "agent",
+                      entry: {
+                        messageId: turnStart.message.messageId,
+                        text: entry.prompt,
+                        attachments,
+                        modelSelection: entry.modelSelection,
+                        runtimeMode: entry.runtimeMode,
+                        interactionMode: "default",
+                        tokenMode,
+                        ...(threadReferences.length > 0 ? { threadReferences } : {}),
+                      },
+                      hold: delegationSlotHold(proposal.proposalId, maxConcurrent),
+                      createdAt,
+                    },
+                  })
+                : dispatch(
+                    `turn-started:${index}`,
+                    attachments.length === 0
+                      ? turnStart
+                      : {
+                          stored: { ...turnStart, message: { ...turnStart.message, attachments } },
+                        },
+                  );
             if (localTaskId !== undefined) {
               // The chat starts as the task's: recorded under the task first (a replay after a
               // restart finds the same start), then given copies of the task's files.
@@ -1347,17 +1386,7 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
                 ),
                 Effect.mapError((error) => new Error(error.message)),
               );
-              yield* dispatch(
-                `turn-started:${index}`,
-                copies.attachments.length === 0
-                  ? turnStart
-                  : {
-                      stored: {
-                        ...turnStart,
-                        message: { ...turnStart.message, attachments: copies.attachments },
-                      },
-                    },
-              ).pipe(
+              yield* sendFirstMessage(copies.attachments).pipe(
                 Effect.tapError((error) =>
                   tasks
                     .markDelegationFailed(
@@ -1383,17 +1412,7 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
               yield* tasks.markDelegated(turnStart.commandId).pipe(Effect.ignore);
               continue;
             }
-            yield* dispatch(
-              `turn-started:${index}`,
-              handedOver.length === 0
-                ? turnStart
-                : {
-                    stored: {
-                      ...turnStart,
-                      message: { ...turnStart.message, attachments: handedOver },
-                    },
-                  },
-            );
+            yield* sendFirstMessage(handedOver);
           }
           return operation;
         }

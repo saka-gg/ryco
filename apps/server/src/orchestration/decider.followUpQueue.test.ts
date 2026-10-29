@@ -17,6 +17,7 @@ import { describe, expect, it } from "vite-plus/test";
 import { Effect } from "effect";
 
 import { decideOrchestrationCommand } from "./decider.ts";
+import { delegationSlotHold } from "./delegationSlotHold.ts";
 import { OrchestrationCommandInvariantError } from "./Errors.ts";
 import { projectEvent } from "./projector.ts";
 
@@ -232,6 +233,48 @@ describe("follow-up queue decider: add", () => {
       } as Partial<Extract<OrchestrationCommand, { type: "thread.queue.add" }>>),
     );
     expect(delegated.detail).toContain("reserved");
+  });
+
+  it("queues a capped task's first message with stored copies, held until its slot frees", async () => {
+    const copy = {
+      type: "file" as const,
+      id: "thread-queue-00000000-0000-4000-8000-000000000002",
+      name: "notes.md",
+      mimeType: "text/markdown",
+      sizeBytes: 6,
+      handoff: { threadId: ThreadId.make("thread-origin"), messageId: MessageId.make("render-1") },
+    };
+    const slot = delegationSlotHold("proposal-capped", 2);
+    const { events, model } = await apply(
+      modelWith(),
+      addCommand(
+        "message-agent-control-op-4-create-2",
+        { author: "agent", hold: slot } as Partial<
+          Extract<OrchestrationCommand, { type: "thread.queue.add" }>
+        >,
+        { attachments: [copy] },
+      ),
+    );
+    expect(types(events)).toEqual(["thread.queue-entry-added", "thread.queue-held"]);
+    expect(queueOf(model)?.entries[0]).toMatchObject({ author: "agent", attachments: [copy] });
+    expect(queueOf(model)?.hold).toMatchObject({ reason: "paused", causeKeys: slot.causeKeys });
+    // The person pauses too; the slot's release leaves that pause.
+    const paused = await apply(model, {
+      type: "thread.queue.hold",
+      commandId: nextCommandId("pause"),
+      threadId,
+      createdAt: at(2),
+    });
+    const release: OrchestrationCommand = {
+      type: "thread.queue.resume",
+      commandId: CommandId.make("delegation-slot-release:proposal-capped:thread-queue"),
+      threadId,
+      acknowledgeCauseKeys: slot.causeKeys,
+      createdAt: at(3),
+    };
+    const released = await apply(paused.model, release);
+    expect(queueOf(released.model)?.hold?.causeKeys).toEqual([`paused:${at(2)}`]);
+    expect(await decide(released.model, release)).toEqual([]);
   });
 
   it("keeps a device queue's failed entry failed and its hold, and a server author", async () => {

@@ -2690,6 +2690,147 @@ it.effect("tells the agent why a pull request cannot be watched, in the watch's 
   }),
 );
 
+const cappedPlan = (maxConcurrent?: number) => ({
+  kind: "createThreads" as const,
+  entries: [0, 1, 2, 3].map((index) => ({
+    projectId,
+    title: `Worker ${index}`,
+    prompt: `Task ${index}`,
+    envMode: "local" as const,
+    runtimeMode: "auto-accept-edits" as const,
+    modelSelection: target.modelSelection,
+  })),
+  ...(maxConcurrent === undefined ? {} : { maxConcurrent }),
+});
+
+const proposalFor = (plan: ReturnType<typeof cappedPlan>): AgentControlProposal => ({
+  ...approvedProposal,
+  plan,
+  planDigest: computeAgentControlPlanDigest(plan),
+});
+
+it.effect("with maxConcurrent, later entries wait in their own queue, held for a slot", () =>
+  Effect.gen(function* () {
+    const proposal = proposalFor(cappedPlan(2));
+    const { viaApply, viaApplyInternal, operation } =
+      yield* runCreateThreadsWithPrincipal(proposal);
+    const slug = operation.operationId.replaceAll(/[^a-zA-Z0-9-]/g, "-").slice(0, 24);
+    const threadOf = (index: number) => `thread-agent-control-${slug}-${index + 1}`;
+    const starts = viaApply.filter((command) => command.type === "thread.turn.start");
+    assert.deepEqual(
+      starts.map((command) => command.threadId),
+      [threadOf(0), threadOf(1)],
+    );
+    const adds = (viaApplyInternal as ReadonlyArray<{ readonly type: string }>).filter(
+      (command): command is ThreadQueueAddCommand => command.type === "thread.queue.add",
+    );
+    assert.deepEqual(
+      adds.map((add) => add.threadId),
+      [threadOf(2), threadOf(3)],
+    );
+    for (const [position, add] of adds.entries()) {
+      const index = position + 2;
+      // The turn start's ids: the completion return and a task's start ledger bind to them.
+      assert.strictEqual(
+        add.commandId,
+        `agent-control:${operation.operationId}:turn-start-${index}`,
+      );
+      assert.strictEqual(add.entry.messageId, `message-agent-control-${slug}-create-${index}`);
+      assert.strictEqual(add.author, "agent");
+      assert.strictEqual(add.entry.text, `Task ${index}`);
+      assert.deepEqual(add.entry.attachments, []);
+      // The child's own model and modes, never more.
+      assert.deepEqual(add.entry.modelSelection, target.modelSelection);
+      assert.strictEqual(add.entry.runtimeMode, "auto-accept-edits");
+      assert.strictEqual(add.entry.interactionMode, "default");
+      assert.deepEqual(add.hold, {
+        reason: "paused",
+        detail: "Waiting for a free slot: this request runs at most 2 tasks at once.",
+        causeKeys: [`delegation-slot:${proposal.proposalId}`],
+      });
+    }
+    // The turn starts use the same message ids for the first entries.
+    assert.deepEqual(
+      starts.map((command) =>
+        command.type === "thread.turn.start" ? String(command.message.messageId) : null,
+      ),
+      [`message-agent-control-${slug}-create-0`, `message-agent-control-${slug}-create-1`],
+    );
+    // In entry order: each child is created, then started or queued.
+    assert.deepEqual(
+      operation.state.commandReceipts.map((receipt) => receipt.commandType),
+      [
+        "thread.delegated.create",
+        "thread.turn.start",
+        "thread.delegated.create",
+        "thread.turn.start",
+        "thread.delegated.create",
+        "thread.queue.add",
+        "thread.delegated.create",
+        "thread.queue.add",
+      ],
+    );
+    assert.includeMembers(
+      [...operation.state.completedSteps],
+      ["turn-started:0", "turn-started:1", "turn-queued:2", "turn-queued:3"],
+    );
+    assert.notInclude(operation.state.completedSteps, "turn-started:2");
+  }),
+);
+
+it.effect("without maxConcurrent, or a cap above the batch, every entry starts at once", () =>
+  Effect.gen(function* () {
+    for (const cap of [undefined, 4, 8]) {
+      const { viaApply, viaApplyInternal } = yield* runCreateThreadsWithPrincipal(
+        proposalFor(cappedPlan(cap)),
+      );
+      assert.lengthOf(
+        viaApply.filter((command) => command.type === "thread.turn.start"),
+        4,
+      );
+      assert.isFalse(
+        (viaApplyInternal as ReadonlyArray<{ readonly type: string }>).some(
+          (command) => command.type === "thread.queue.add",
+        ),
+      );
+    }
+  }),
+);
+
+it.effect("a capped request retried concurrently queues and starts each task once", () =>
+  Effect.gen(function* () {
+    const proposal = proposalFor(cappedPlan(1));
+    const stores = yield* makeExecutionStores(proposal);
+    const dispatched: Array<{ readonly type: string; readonly commandId: string }> = [];
+    const record = (command: { readonly type: string; readonly commandId: string }) =>
+      Effect.sync(() => {
+        dispatched.push(command);
+        return { sequence: dispatched.length };
+      });
+    const executor = yield* makeTestExecution({
+      ...stores,
+      projections: {
+        getShellSnapshot: () =>
+          Effect.succeed({ projects: [{ id: projectId, workspaceRoot: "/workspace/project" }] }),
+        getThreadShellById: () => Effect.succeed(Option.none()),
+      },
+      commandApplication: { apply: record, applyInternal: record },
+    });
+    yield* Effect.all(
+      Array.from({ length: 12 }, () => executor.executeApproved(proposal.proposalId)),
+      { concurrency: "unbounded", discard: true },
+    );
+    assert.strictEqual((yield* Ref.get(stores.proposalRef)).status, "completed");
+    const ofType = (type: string) => dispatched.filter((command) => command.type === type);
+    assert.lengthOf(ofType("thread.turn.start"), 1);
+    assert.lengthOf(ofType("thread.queue.add"), 3);
+    assert.strictEqual(
+      new Set(dispatched.map((command) => command.commandId)).size,
+      dispatched.length,
+    );
+  }),
+);
+
 /** Recovers one interrupted watch stop whose operation state is `state`. */
 const recoverWatchStop = (state: AgentControlOperation["state"]) =>
   Effect.gen(function* () {
@@ -2937,3 +3078,136 @@ it("lets the delegating chat watch the pull request its delegated chat reported,
     await h.dispose();
   }
 });
+
+it.effect("a task waiting for a slot keeps the parent's handed-over copies on its message", () =>
+  Effect.gen(function* () {
+    const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), "agent-control-capped-handoff-"));
+    yield* Effect.addFinalizer(() =>
+      Effect.sync(() => fs.rmSync(baseDir, { recursive: true, force: true })),
+    );
+    const attachmentsDir = path.join(baseDir, "userdata", "attachments");
+    fs.mkdirSync(attachmentsDir, { recursive: true });
+    const parentThreadId = ThreadId.make("thread-origin");
+    const page: ChatFileAttachment = {
+      type: "file",
+      id: createFileAttachmentId(parentThreadId, "notes.md")!,
+      name: "notes.md",
+      mimeType: "text/markdown",
+      sizeBytes: 6,
+    };
+    fs.writeFileSync(resolveAttachmentPath({ attachmentsDir, attachment: page })!, "# note");
+    const base = cappedPlan(1);
+    const plan = {
+      ...base,
+      entries: [base.entries[0]!, { ...base.entries[1]!, artifacts: [`render-1:${page.id}`] }],
+    };
+    const proposal: AgentControlProposal = {
+      ...approvedProposal,
+      plan,
+      planDigest: computeAgentControlPlanDigest(plan),
+    };
+    const stores = yield* makeExecutionStores(proposal);
+    const internal: Array<{ readonly type: string }> = [];
+    const executor = yield* makeTestExecution({
+      ...stores,
+      baseDir,
+      projections: {
+        getShellSnapshot: () =>
+          Effect.succeed({ projects: [{ id: projectId, workspaceRoot: "/workspace/project" }] }),
+        getThreadShellById: () => Effect.succeed(Option.none()),
+        getThreadMessageById: (input: { threadId: ThreadId; messageId: MessageId }) =>
+          Effect.succeed(
+            input.threadId === parentThreadId && input.messageId === "render-1"
+              ? Option.some({
+                  id: input.messageId,
+                  role: "assistant",
+                  text: " ",
+                  attachments: [page],
+                  turnId: null,
+                  streaming: false,
+                  createdAt: now,
+                  updatedAt: now,
+                })
+              : Option.none(),
+          ),
+      },
+      commandApplication: {
+        apply: () => Effect.succeed({ sequence: 1 }),
+        applyInternal: (command: { readonly type: string }) =>
+          Effect.sync(() => {
+            internal.push(command);
+            return { sequence: internal.length };
+          }),
+      },
+    });
+    yield* executor.executeApproved(proposal.proposalId);
+    assert.strictEqual((yield* Ref.get(stores.proposalRef)).status, "completed");
+    const add = internal.find(
+      (command): command is ThreadQueueAddCommand => command.type === "thread.queue.add",
+    );
+    assert.isDefined(add);
+    const [copy] = add!.entry.attachments;
+    assert.deepInclude(copy, {
+      name: "notes.md",
+      sizeBytes: 6,
+      handoff: { threadId: parentThreadId, messageId: "render-1" as MessageId },
+    });
+    // The copy is the child's own, as a started child's would be.
+    assert.strictEqual(
+      parseThreadSegmentFromAttachmentId(copy!.id!),
+      toSafeThreadAttachmentSegment(add!.threadId),
+    );
+    assert.strictEqual(
+      fs.readFileSync(resolveAttachmentPath({ attachmentsDir, attachment: copy! })!, "utf8"),
+      "# note",
+    );
+  }).pipe(Effect.scoped),
+);
+
+it.effect("a waiting task's completion return binds to its queued first message", () =>
+  Effect.gen(function* () {
+    const returns = yield* CompletionReturnRepository;
+    const base = cappedPlan(1);
+    const plan = {
+      ...base,
+      entries: [
+        { ...base.entries[0]!, returnToOrigin: true },
+        { ...base.entries[1]!, returnToOrigin: true },
+      ],
+    };
+    const proposal: AgentControlProposal = {
+      ...approvedProposal,
+      principal: { ...approvedProposal.principal, turnId: TurnId.make("origin-turn") },
+      plan,
+      planDigest: computeAgentControlPlanDigest(plan),
+    } as AgentControlProposal;
+    const stores = yield* makeExecutionStores(proposal);
+    const queued: ThreadQueueAddCommand[] = [];
+    const executor = yield* makeTestExecution({
+      ...stores,
+      projections: {
+        getShellSnapshot: () =>
+          Effect.succeed({ projects: [{ id: projectId, workspaceRoot: "/workspace/project" }] }),
+        getThreadShellById: (id: ThreadId) =>
+          Effect.succeed(id === "thread-origin" ? Option.some({ ...target, id }) : Option.none()),
+      },
+      commandApplication: {
+        apply: (command: { readonly type: string }) =>
+          Effect.sync(() => {
+            if (command.type === "thread.queue.add") queued.push(command as ThreadQueueAddCommand);
+            return { sequence: 1 };
+          }),
+      },
+    });
+    yield* executor.executeApproved(proposal.proposalId);
+    assert.strictEqual((yield* Ref.get(stores.proposalRef)).status, "completed");
+    assert.lengthOf(queued, 1);
+    const saved = yield* returns.get(queued[0]!.threadId);
+    assert.strictEqual(saved?.initialMessageId, queued[0]!.entry.messageId);
+    assert.strictEqual(saved?.status, "waiting");
+  }).pipe(
+    Effect.provide(
+      CompletionReturnRepositoryLive.pipe(Layer.provideMerge(SqlitePersistenceMemory)),
+    ),
+  ),
+);

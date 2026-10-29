@@ -66,7 +66,12 @@ export const AgentControlTaskCancelInput = Schema.Struct({
 }).pipe(rejectExcessProperties);
 export type AgentControlTaskCancelInput = typeof AgentControlTaskCancelInput.Type;
 
+/**
+ * Only the node encodes this (for an agent's tool result); no client decodes it, so a new state
+ * reaches no older decoder. `waiting`: a capped request's task waiting for a free slot.
+ */
 export const AgentControlTaskRunState = Schema.Literals([
+  "waiting",
   "starting",
   "running",
   "needs-you",
@@ -88,6 +93,8 @@ export const AgentControlTaskStatusEntry = Schema.Struct({
   }),
   run: Schema.Struct({
     state: AgentControlTaskRunState,
+    /** Why the run waits, while it is `waiting`. */
+    detail: Schema.optional(Schema.String),
     sessionStatus: Schema.NullOr(OrchestrationSessionStatus),
     hasPendingApprovals: Schema.Boolean,
     hasPendingUserInput: Schema.Boolean,

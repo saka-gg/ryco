@@ -2,20 +2,22 @@
  * ServerQueueDrain - sends each thread's queued follow-ups (port batch 3, design §3.4).
  *
  * The boot path holds only this layer: it notes which queues held entries when the process
- * started (a restart never sends them without a Resume) and, once commands are admitted, loads
+ * started (a restart never sends them without a Resume; a task that waits only for a free slot of
+ * its delegation request is left to that request) and, once commands are admitted, loads
  * the drain itself (`serverQueueDrainRuntime.ts`) with `import()` and runs it. Until a client
  * queues a follow-up the runtime has nothing to send, so it stays off the boot closure
  * (serverBundleBoundaries.test.ts).
  *
  * @module ServerQueueDrain
  */
-import type { ThreadId } from "@ryco/contracts";
+import type { OrchestrationReadModel, ThreadId } from "@ryco/contracts";
 import { makeKeyedSerialWorker } from "@ryco/shared/KeyedSerialWorker";
 import { losslessBackpressureQueuePolicy } from "@ryco/shared/QueuePolicy";
 import { Cause, Context, Effect, Layer } from "effect";
 
 import { ServerRuntimeStartup } from "../../serverRuntimeStartup.ts";
 import { currentCommandReadModel } from "../currentCommandReadModel.ts";
+import { heldOnlyForDelegationSlot } from "../delegationSlotHold.ts";
 import { runtimeModePrivilegeRank, serverWakeGuard } from "../serverWake.ts";
 import { findThreadInArray } from "../threadIndex.ts";
 import { OrchestrationCommandApplication } from "../Services/OrchestrationCommandApplication.ts";
@@ -34,6 +36,19 @@ export class ServerQueueDrain extends Context.Service<ServerQueueDrain, ServerQu
 
 const loadRuntime = Effect.promise(() => import("../serverQueueDrainRuntime.ts"));
 
+/**
+ * The threads whose queue an earlier process left with entries. A task that waits only for a
+ * free slot of its delegation request is not among them: the node releases it, not a Resume.
+ */
+export const threadsQueuedAtBoot = (threads: OrchestrationReadModel["threads"]) =>
+  threads
+    .filter(
+      (thread) =>
+        (thread.followUpQueue?.entries.length ?? 0) > 0 &&
+        !heldOnlyForDelegationSlot(thread.followUpQueue?.hold),
+    )
+    .map((thread) => thread.id);
+
 export const ServerQueueDrainLive = Layer.effect(
   ServerQueueDrain,
   Effect.gen(function* () {
@@ -44,11 +59,9 @@ export const ServerQueueDrainLive = Layer.effect(
     const startup = yield* ServerRuntimeStartup;
     const readModel = currentCommandReadModel(engine, projections);
     // Read before any client command is admitted: these queues were left by an earlier process.
-    const queuedAtBoot = (yield* readModel.pipe(
-      Effect.catch(() => Effect.succeed({ threads: [] })),
-    )).threads
-      .filter((thread) => (thread.followUpQueue?.entries.length ?? 0) > 0)
-      .map((thread) => thread.id);
+    const queuedAtBoot = threadsQueuedAtBoot(
+      (yield* readModel.pipe(Effect.catch(() => Effect.succeed({ threads: [] })))).threads,
+    );
     yield* Effect.forkScoped(
       startup.awaitCommandReady.pipe(
         Effect.andThen(loadRuntime),

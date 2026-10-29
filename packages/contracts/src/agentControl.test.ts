@@ -260,6 +260,24 @@ describe("AgentControlActionPlan", () => {
     ).toThrow();
   });
 
+  it("takes an optional maxConcurrent of 1 to 8 on createThreads", () => {
+    const entry = createThreadsPlan.entries[0];
+    const decoded = decodePlan({ kind: "createThreads", entries: [entry], maxConcurrent: 2 });
+    expect(decoded.kind === "createThreads" ? decoded.maxConcurrent : null).toBe(2);
+    const plain = decodePlan(createThreadsPlan);
+    expect(plain.kind === "createThreads" && "maxConcurrent" in plain).toBe(false);
+    for (const maxConcurrent of [1, 8]) {
+      expect(() =>
+        decodePlan({ kind: "createThreads", entries: [entry], maxConcurrent }),
+      ).not.toThrow();
+    }
+    for (const maxConcurrent of [0, 9, 1.5, "2"]) {
+      expect(() =>
+        decodePlan({ kind: "createThreads", entries: [entry], maxConcurrent }),
+      ).toThrow();
+    }
+  });
+
   it("targets provider instances via ModelSelection, absorbing the legacy provider key", () => {
     const decoded = decodePlan({
       kind: "createThreads",
@@ -607,6 +625,20 @@ describe("Agent Control MCP contracts", () => {
         entries: [createThreadsPlan.entries[0]],
       }).entries,
     ).toHaveLength(1);
+    expect(
+      Schema.decodeUnknownSync(AgentControlMcpCreateThreadsInput)({
+        requestId: "request-create",
+        entries: [createThreadsPlan.entries[0]],
+        maxConcurrent: 3,
+      }).maxConcurrent,
+    ).toBe(3);
+    expect(() =>
+      Schema.decodeUnknownSync(AgentControlMcpCreateThreadsInput)({
+        requestId: "request-create",
+        entries: [createThreadsPlan.entries[0]],
+        maxConcurrent: 0,
+      }),
+    ).toThrow();
     expect(
       Schema.decodeUnknownSync(AgentControlMcpSendMessageInput)({
         requestId: "request-send",
