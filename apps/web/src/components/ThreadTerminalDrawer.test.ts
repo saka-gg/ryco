@@ -1,3 +1,7 @@
+import {
+  selectPendingTerminalEventEntries,
+  selectTerminalEventEntriesAfterSnapshot,
+} from "@ryco/client-runtime/state/terminal";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
@@ -5,8 +9,6 @@ import {
   groupHasRunningTerminal,
   resolveTabLabel,
   resolveTerminalSelectionActionPosition,
-  selectPendingTerminalEventEntries,
-  selectTerminalEventEntriesAfterSnapshot,
   shouldHandleTerminalSelectionMouseUp,
   terminalSelectionActionDelayForClickCount,
 } from "./ThreadTerminalDrawer";

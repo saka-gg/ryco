@@ -45,7 +45,7 @@ import { getMobileNativeE2eeEnrollmentCoordinator } from "./e2eeEnrollment";
  */
 export interface HostedPrimaryConnectionDeps extends Pick<
   OrchestrationHandlers,
-  "applyShellEvent" | "resetShellProjection"
+  "applyShellEvent" | "applyTerminalEvent" | "resetShellProjection"
 > {
   readonly syncShellSnapshot: EnvironmentConnectionSupervisor["syncShellSnapshot"];
   readonly pushSequenceMonitor: Parameters<
@@ -194,7 +194,11 @@ export function createHostedEnvironmentConnection(
       const ready = () => markHostedSessionReady(eventEnvironmentId, generation);
       input.syncShellSnapshot(snapshot, eventEnvironmentId, { onCurrent: ready, onReady: ready });
     },
-    // Terminal streaming is deferred, matching the direct plane.
-    applyTerminalEvent: () => undefined,
+    // A superseded generation publishes no started snapshot, output, activity,
+    // exit or error into the terminal store.
+    applyTerminalEvent: (event, eventEnvironmentId) => {
+      if (!acceptsEvent()) return;
+      input.applyTerminalEvent(event, eventEnvironmentId);
+    },
   });
 }

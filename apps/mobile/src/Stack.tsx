@@ -43,6 +43,7 @@ import {
   ThreadFileRouteScreen,
   ThreadFilesRouteScreen,
   ThreadRouteScreen,
+  ThreadTerminalRouteScreen,
 } from "./navigation/lazyRouteScreens";
 import {
   MVP_ROOT_ROUTES,
@@ -409,6 +410,11 @@ export const ROOT_STACK_SCREENS = {
     // The title is the file's basename, which only the screen knows; it sets it
     // through `navigation.setOptions` once the path param has been normalized.
     options: routeOptions("ThreadFile"),
+  }),
+  ThreadTerminal: createNativeStackScreen({
+    screen: ThreadTerminalRouteScreen,
+    linking: MVP_ROOT_ROUTES.ThreadTerminal.linking,
+    options: routeOptions("ThreadTerminal", { title: "Terminal" }),
   }),
   Connections: createNativeStackScreen({
     screen: ConnectionsRouteScreen,

@@ -40,6 +40,7 @@ import { subscribeNetworkPathChange } from "./networkPathChange";
 import { createMobileEnvironmentStateSink } from "./environmentStateSink";
 import type { MobileRemoteEnvironmentApi } from "./remoteApi";
 import { usableSavedSessionHint, type SavedSessionHints } from "./savedSessionHints";
+import { applyMobileTerminalEvent } from "./terminalEventSink";
 import {
   createThreadDetailEventApplier,
   type ThreadDetailEventApplier,
@@ -480,8 +481,7 @@ export function createMobileEnvironmentDriver(
         getSupervisor().applyShellEvent(event, environmentId),
       syncShellSnapshot: (snapshot, environmentId) =>
         getSupervisor().syncShellSnapshot(snapshot, environmentId),
-      // Terminal streaming is deferred to v1.1.
-      applyTerminalEvent: () => undefined,
+      applyTerminalEvent: (event, environmentId) => applyMobileTerminalEvent(event, environmentId),
       onDispose: () => stopRenewal(),
     });
 
@@ -579,6 +579,8 @@ export function createMobileEnvironmentDriver(
           getSupervisor().resetShellProjection(environmentId),
         applyShellEvent: (event, environmentId) =>
           getSupervisor().applyShellEvent(event, environmentId),
+        applyTerminalEvent: (event, environmentId) =>
+          applyMobileTerminalEvent(event, environmentId),
         syncShellSnapshot: (snapshot, environmentId, callbacks) =>
           getSupervisor().syncShellSnapshot(snapshot, environmentId, callbacks),
       });

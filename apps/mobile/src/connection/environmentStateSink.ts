@@ -2,14 +2,50 @@ import type {
   EnvironmentConnectionSupervisor,
   EnvironmentStateSink,
 } from "@ryco/client-runtime/connection";
-import { scopeThreadRef } from "@ryco/client-runtime/scoped";
+import { parseScopedThreadKey, scopedThreadKey, scopeThreadRef } from "@ryco/client-runtime/scoped";
+import { collectActiveTerminalThreadIds } from "@ryco/client-runtime/state/terminal";
 import type { EnvironmentId } from "@ryco/contracts";
 
 import { evictCheckpointDiffsForThread } from "../rpc/checkpointDiffAtoms";
 import { markPromotedDraftThreadByRef, useComposerDraftStore } from "../state/composerDraftStore";
 import { useTerminalStateStore } from "../state/terminalStateStore";
 import { isArchivedThreadStub } from "@ryco/client-runtime/state/threads";
-import { selectEnvironmentState, useStore } from "../state/threadsRuntime";
+import {
+  selectBootstrapCompleteForEnvironment,
+  selectEnvironmentState,
+  selectThreadShellsAcrossEnvironments,
+  useStore,
+} from "../state/threadsRuntime";
+
+/**
+ * Drop terminal state for threads the shells no longer list: archived, removed
+ * or never listed (catch-up admitted before a snapshot arrived). An environment
+ * whose shell has not arrived yet keeps what it has, since its threads are
+ * simply not listed yet.
+ */
+export function reconcileMobileTerminalState(): void {
+  const state = useStore.getState();
+  const active = collectActiveTerminalThreadIds({
+    snapshotThreads: selectThreadShellsAcrossEnvironments(state).map((thread) => ({
+      key: scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)),
+      deletedAt: null,
+      archivedAt: thread.archivedAt,
+    })),
+    draftThreadKeys: useComposerDraftStore.getState().listDraftThreadKeys(),
+  });
+  const terminals = useTerminalStateStore.getState();
+  const threadKeys = new Set([
+    ...Object.keys(terminals.terminalStateByThreadKey),
+    ...Object.keys(terminals.terminalEventEntriesByKey).map((key) => key.split("\u0000")[0] ?? key),
+  ]);
+  for (const threadKey of threadKeys) {
+    const ref = parseScopedThreadKey(threadKey);
+    if (ref && !selectBootstrapCompleteForEnvironment(state, ref.environmentId)) {
+      active.add(threadKey);
+    }
+  }
+  terminals.removeOrphanedTerminalStates(active);
+}
 
 // The supervisor methods the sink drives from live shell events (§4). Threaded in
 // as a getter (the supervisor is constructed after the sink), mirroring web's
@@ -126,8 +162,8 @@ export function createMobileEnvironmentStateSink(
       useStore.getState().applyLoadedThreadShells(threads, environmentId);
       projectionChanged(environmentId);
     },
-    // No mobile UI store and terminal GC is deferred (terminals are v1.1) — §3-5.
-    reconcileSnapshotDerivedState: () => undefined,
+    // No mobile UI store; terminal state follows the listed threads.
+    reconcileSnapshotDerivedState: () => reconcileMobileTerminalState(),
     syncProjects: () => undefined,
     syncThreads: () => undefined,
     clearThreadDraft: (ref) => useComposerDraftStore.getState().clearDraftThread(ref),

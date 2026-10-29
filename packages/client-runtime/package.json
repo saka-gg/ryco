@@ -190,6 +190,10 @@
       "types": "./src/state/terminal/index.ts",
       "import": "./src/state/terminal/index.ts"
     },
+    "./state/terminal/replayGate": {
+      "types": "./src/state/terminal/replayGate.ts",
+      "import": "./src/state/terminal/replayGate.ts"
+    },
     "./state/composer": {
       "types": "./src/state/composer/index.ts",
       "import": "./src/state/composer/index.ts"

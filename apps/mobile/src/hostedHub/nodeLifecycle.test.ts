@@ -67,6 +67,8 @@ vi.mock("../connection/hostedConnectionCoordinator", () => ({
     requestEnvironmentReconcile: fixture.reconcile,
   }),
 }));
+// The terminal store binding reaches the app's persistence modules.
+vi.mock("../connection/terminalEventSink", () => ({ applyMobileTerminalEvent: vi.fn() }));
 vi.mock("../state/threadsRuntime", () => ({
   useStore: { getState: () => ({ setActiveEnvironmentId: fixture.setActive }) },
 }));

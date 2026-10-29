@@ -1,5 +1,10 @@
 import type { TerminalCursor, TerminalEvent, TerminalSessionSnapshot } from "@ryco/contracts";
 
+interface TerminalEventEntryLike {
+  readonly id: number;
+  readonly event: TerminalEvent;
+}
+
 export function isTerminalEventAfterSnapshot(
   event: TerminalEvent,
   snapshot: Pick<TerminalSessionSnapshot, "updatedAt" | "cursor">,
@@ -12,6 +17,28 @@ export function isTerminalEventAfterSnapshot(
   }
   // Older servers cannot disambiguate events in the same millisecond.
   return event.createdAt > snapshot.updatedAt;
+}
+
+/** A surface's buffered entries a snapshot does not already account for, in entry order. */
+export function selectTerminalEventEntriesAfterSnapshot<Entry extends TerminalEventEntryLike>(
+  entries: ReadonlyArray<Entry>,
+  snapshotUpdatedAt: string,
+  cursor?: TerminalSessionSnapshot["cursor"],
+): ReadonlyArray<Entry> {
+  return entries.filter((entry) =>
+    isTerminalEventAfterSnapshot(entry.event, {
+      updatedAt: snapshotUpdatedAt,
+      ...(cursor ? { cursor } : {}),
+    }),
+  );
+}
+
+/** Entries newer than the last one a surface applied; entry ids are the store's local total order. */
+export function selectPendingTerminalEventEntries<Entry extends TerminalEventEntryLike>(
+  entries: ReadonlyArray<Entry>,
+  lastAppliedTerminalEventId: number,
+): ReadonlyArray<Entry> {
+  return entries.filter((entry) => entry.id > lastAppliedTerminalEventId);
 }
 
 /**

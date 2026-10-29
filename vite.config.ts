@@ -116,6 +116,10 @@ const rootConfig = {
       // (docs/relay-e2ee-protocol.md §16.1), so a formatter rewriting them would
       // put the two in permanent conflict.
       "packages/shared/fixtures/e2ee/v1/*.json",
+      // The terminal renderer document. `apps/mobile/scripts/build-terminal-renderer.mts`
+      // generates it, its CSP pins the inline script's hash, and a test compares
+      // it to a fresh build byte for byte.
+      "apps/mobile/src/features/terminal/renderer/terminal-renderer.html",
       // Reports, mockups and screenshots committed as finished artifacts. Several
       // are generated or minified HTML; formatting them is noise, and an
       // unformatted one failed Format, which also skipped Lint and Typecheck in CI.

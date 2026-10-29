@@ -3,10 +3,11 @@ import "@xterm/xterm/css/xterm.css";
 import {
   createTerminalEventReconciler,
   createTerminalReplayGate,
-  isTerminalEventAfterSnapshot,
   isTerminalReplayEvent,
   isTerminalSnapshotDeltaFor,
   bracketedTerminalSnippet,
+  selectPendingTerminalEventEntries,
+  selectTerminalEventEntriesAfterSnapshot,
   type TerminalReplayGate,
 } from "@ryco/client-runtime/state/terminal";
 import { terminalSnippetBroker } from "../terminalSnippetInsertion";
@@ -223,26 +224,6 @@ export function createTerminalOutputBatcher(options: {
     flush,
     dispose: flush,
   };
-}
-
-export function selectTerminalEventEntriesAfterSnapshot(
-  entries: ReadonlyArray<{ id: number; event: TerminalEvent }>,
-  snapshotUpdatedAt: string,
-  cursor?: TerminalSessionSnapshot["cursor"],
-): ReadonlyArray<{ id: number; event: TerminalEvent }> {
-  return entries.filter((entry) =>
-    isTerminalEventAfterSnapshot(entry.event, {
-      updatedAt: snapshotUpdatedAt,
-      ...(cursor ? { cursor } : {}),
-    }),
-  );
-}
-
-export function selectPendingTerminalEventEntries(
-  entries: ReadonlyArray<{ id: number; event: TerminalEvent }>,
-  lastAppliedTerminalEventId: number,
-): ReadonlyArray<{ id: number; event: TerminalEvent }> {
-  return entries.filter((entry) => entry.id > lastAppliedTerminalEventId);
 }
 
 export function resolveTabLabel(group: ThreadTerminalGroup, groupIndex: number): string {

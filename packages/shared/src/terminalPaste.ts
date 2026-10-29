@@ -1,5 +1,9 @@
 export const MAX_TERMINAL_SNIPPET_BYTES = 48 * 1024;
 
+/** The markers a program that turned on bracketed paste mode (DECSET 2004) reads around a paste. */
+export const BRACKETED_PASTE_START = "\x1b[200~";
+export const BRACKETED_PASTE_END = "\x1b[201~";
+
 export function isTerminalSnippetLanguage(language: string): boolean {
   return /^(shell|bash|sh|zsh)$/i.test(language);
 }
@@ -23,5 +27,25 @@ export function terminalSnippetError(source: string): string | null {
 export function bracketedTerminalSnippet(source: string): string {
   const error = terminalSnippetError(source);
   if (error) throw new Error(error);
-  return `\x1b[200~${source}\x1b[201~`;
+  return `${BRACKETED_PASTE_START}${source}${BRACKETED_PASTE_END}`;
+}
+
+/**
+ * Clipboard text as a terminal sends a paste, the way xterm.js does: line breaks
+ * become the carriage return Enter sends. While the program has bracketed paste
+ * mode on, the text is wrapped in the paste markers, and markers inside the text
+ * are removed first, so pasted bytes cannot end the paste early and run as typed
+ * commands. Unlike a snippet, a paste is any text the user chose to paste.
+ */
+export function encodeTerminalPaste(text: string, bracketed: boolean): string {
+  const normalized = text.replace(/\r?\n/g, "\r");
+  if (!bracketed) return normalized;
+  // Repeated until stable: removing one marker can join the bytes around it into another.
+  let contained = normalized;
+  for (let previous: string | null = null; previous !== contained;) {
+    previous = contained;
+    // oxlint-disable-next-line no-control-regex
+    contained = contained.replace(/\x1b\[20[01]~/g, "");
+  }
+  return `${BRACKETED_PASTE_START}${contained}${BRACKETED_PASTE_END}`;
 }

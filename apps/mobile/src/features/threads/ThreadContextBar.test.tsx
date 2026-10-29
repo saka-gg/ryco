@@ -43,6 +43,7 @@ function model(pullRequestWatch: ThreadHeaderModel["pullRequestWatch"]): ThreadH
     contextAccessibilityLabel: "",
     reviewVisible: false,
     filesVisible: true,
+    terminalVisible: false,
     moreActions: ["rename", "archive", "details"],
     changeRequest: {
       kind: "pull-request",
