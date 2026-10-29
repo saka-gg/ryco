@@ -110,6 +110,7 @@ function headerModel(input: {
       archivedAt: null,
       latestTurn: null,
       session: null,
+      activities: [],
       turnDiffSummaries: [],
       branch: "feat/ci",
       worktreePath: "/repo/.worktrees/ci",
@@ -166,6 +167,7 @@ function render(model: ThreadHeaderModel, mutationReady = true) {
     onToggleSettlement: () => undefined,
     onToggleArchive: () => undefined,
     onReview: () => undefined,
+    onCompact: () => undefined,
   });
   const section = elements(sheet).find((element) => element.type === PullRequestWatchSection);
   if (!section) return null;

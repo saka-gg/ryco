@@ -21,7 +21,11 @@ import {
   CompactComposerControlsMenu,
 } from "./CompactComposerControlsMenu";
 import { ContextPickerButton } from "./ContextPickerButton";
-import { type ContextWindowAccount, ContextWindowMeter } from "./ContextWindowMeter";
+import {
+  type ContextWindowAccount,
+  type ContextWindowCompactNow,
+  ContextWindowMeter,
+} from "./ContextWindowMeter";
 import type { ComposerExecutionTarget } from "./ExecutionTarget.logic";
 import { ExecutionTargetSelect } from "./ExecutionTargetSelect";
 import { ProviderModelPicker } from "./ProviderModelPicker";
@@ -416,6 +420,7 @@ export const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryA
   contextWindowRateLimitsCheckedAt?: string | undefined;
   contextWindowAccount?: ContextWindowAccount | undefined;
   claudeCacheObservation?: ClaudeCacheObservation | null | undefined;
+  compactNow?: ContextWindowCompactNow | undefined;
   isPreparingWorktree: boolean;
   pendingAction: {
     questionIndex: number;
@@ -449,6 +454,7 @@ export const ComposerFooterPrimaryActions = memo(function ComposerFooterPrimaryA
         available={!props.isEnvironmentUnavailable}
         claudeCache={props.claudeCacheObservation}
         account={props.contextWindowAccount}
+        compactNow={props.compactNow}
       />
       <ComposerPrimaryActions
         compact={props.compact}
@@ -551,6 +557,8 @@ export interface ComposerFooterProps {
   /** The selected instance and its login, for the context popup's account details. */
   contextWindowAccount?: ContextWindowAccount | undefined;
   claudeCacheObservation?: ClaudeCacheObservation | null | undefined;
+  /** Compact now in the context meter, for a thread whose provider can compact on request. */
+  compactNow?: ContextWindowCompactNow | undefined;
   pendingAction: {
     questionIndex: number;
     isLastQuestion: boolean;
@@ -761,6 +769,7 @@ export const ComposerFooter = memo(function ComposerFooter(props: ComposerFooter
           contextWindowRateLimitsCheckedAt={props.contextWindowRateLimitsCheckedAt}
           contextWindowAccount={props.contextWindowAccount}
           claudeCacheObservation={props.claudeCacheObservation}
+          compactNow={props.compactNow}
           pendingAction={props.pendingAction}
           isRunning={props.isRunning}
           showPlanFollowUpPrompt={props.showPlanFollowUpPrompt}

@@ -389,6 +389,131 @@ describe("ContextWindowMeter account details", () => {
     expect(readCliProxyHubs).not.toHaveBeenCalled();
   });
 
+  it("offers Compact now where the provider compacts on its own, and only there", async () => {
+    const onCompact = vi.fn(async () => {});
+    const usage = deriveContextWindowUsage([], "200k");
+    mounted = await render(
+      <ContextWindowMeter usage={usage} available compactNow={{ blocker: null, onCompact }} />,
+    );
+    await open();
+    // Usage that does not say the provider compacts on its own offers no action.
+    expect(document.body.textContent).not.toContain("Automatically compacts");
+    expect(document.body.textContent).not.toContain("Compact now");
+
+    await mounted.rerender(
+      <ContextWindowMeter
+        usage={{ ...usage, compactsAutomatically: true }}
+        available
+        compactNow={{ blocker: null, onCompact }}
+      />,
+    );
+    await expect.element(page.getByRole("button", { name: "Compact now" })).toBeEnabled();
+    await expect
+      .element(page.getByText("Summarizes older context. The summary request itself uses tokens."))
+      .toBeVisible();
+
+    await mounted.rerender(
+      <ContextWindowMeter usage={{ ...usage, compactsAutomatically: true }} available />,
+    );
+    await expect.element(page.getByRole("button", { name: "Compact now" })).not.toBeInTheDocument();
+    expect(onCompact).not.toHaveBeenCalled();
+  });
+
+  it("disables Compact now with the reason while it cannot run", async () => {
+    const onCompact = vi.fn(async () => {});
+    mounted = await render(
+      <ContextWindowMeter
+        usage={{ ...deriveContextWindowUsage([], "200k"), compactsAutomatically: true }}
+        available
+        compactNow={{
+          blocker: "Wait until the current turn finishes and the session is ready.",
+          onCompact,
+        }}
+      />,
+    );
+    await open();
+
+    await expect.element(page.getByRole("button", { name: "Compact now" })).toBeDisabled();
+    await expect
+      .element(page.getByText("Wait until the current turn finishes and the session is ready."))
+      .toBeVisible();
+    expect(onCompact).not.toHaveBeenCalled();
+  });
+
+  it("compacts once per click and shows it pending until the request settles", async () => {
+    let settle: () => void = () => undefined;
+    const onCompact = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          settle = resolve;
+        }),
+    );
+    mounted = await render(
+      <ContextWindowMeter
+        usage={{ ...deriveContextWindowUsage([], "200k"), compactsAutomatically: true }}
+        available
+        compactNow={{ blocker: null, onCompact }}
+      />,
+    );
+    await open();
+
+    await page.getByRole("button", { name: "Compact now" }).click();
+    const pending = page.getByRole("button", { name: "Compacting…" });
+    await expect.element(pending).toBeDisabled();
+    expect(onCompact).toHaveBeenCalledOnce();
+
+    // Reopening the popup while the request is in flight keeps it pending.
+    await reopen();
+    await expect.element(page.getByRole("button", { name: "Compacting…" })).toBeDisabled();
+
+    settle();
+    await expect.element(page.getByRole("button", { name: "Compact now" })).toBeEnabled();
+    expect(onCompact).toHaveBeenCalledOnce();
+  });
+
+  it("hands the pending state to the caller's reason once the request settles", async () => {
+    const busy = "Wait until the current turn finishes and the session is ready.";
+    const usage = { ...deriveContextWindowUsage([], "200k"), compactsAutomatically: true };
+    let settle: () => void = () => undefined;
+    const onCompact = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          settle = resolve;
+        }),
+    );
+    mounted = await render(
+      <ContextWindowMeter usage={usage} available compactNow={{ blocker: null, onCompact }} />,
+    );
+    await open();
+    await page.getByRole("button", { name: "Compact now" }).click();
+    // The caller holds the thread busy from the click until its session reports the turn.
+    await mounted.rerender(
+      <ContextWindowMeter usage={usage} available compactNow={{ blocker: busy, onCompact }} />,
+    );
+    await expect.element(page.getByRole("button", { name: "Compacting…" })).toBeDisabled();
+    expect(document.body.textContent).not.toContain(busy);
+
+    settle();
+    await expect.element(page.getByRole("button", { name: "Compact now" })).toBeDisabled();
+    await expect.element(page.getByText(busy)).toBeVisible();
+    expect(onCompact).toHaveBeenCalledOnce();
+  });
+
+  it("leaves Compact now out of the frozen phone tier", async () => {
+    await page.viewport(390, 844);
+    mounted = await render(
+      <ContextWindowMeter
+        usage={{ ...deriveContextWindowUsage([], "200k"), compactsAutomatically: true }}
+        available
+        compactNow={{ blocker: null, onCompact: vi.fn(async () => {}) }}
+      />,
+    );
+    await open();
+
+    await expect.element(page.getByText("Automatically compacts", { exact: false })).toBeVisible();
+    expect(document.body.textContent).not.toContain("Compact now");
+  });
+
   it("treats a session the node refuses hub reads as having no hubs", async () => {
     const readCliProxyHubs = serveHubs(async () => {
       throw new AuthRpcError({

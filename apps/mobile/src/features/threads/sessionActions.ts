@@ -1,3 +1,4 @@
+import { requestNativeCompaction } from "@ryco/client-runtime/state/composer";
 import {
   submitApprovalResponse,
   submitUserInputResponse,
@@ -14,6 +15,7 @@ import {
 
 import type { SidebarActionCommand } from "@ryco/client-runtime/state/threads";
 import { newCommandId } from "../../lib/ids";
+import { uuidv4 } from "../../lib/uuid";
 
 // §3-15: pure thread session-action dispatch wrappers, ported from
 // apps/web/src/hooks/chatSessionActions.ts. Each dispatches an orchestration
@@ -28,6 +30,19 @@ export async function interruptThreadTurn(api: EnvironmentApi, threadId: ThreadI
     threadId,
     createdAt: new Date().toISOString(),
   });
+}
+
+/**
+ * Compact now, shared with web's context meter: the thread's provider compacts its context in a
+ * turn of its own, on the thread's own model and modes as the node holds them. Rejects when the
+ * connection changed since `assertMutationReady` was captured or the node refuses it.
+ */
+export async function compactThreadNow(
+  api: EnvironmentApi,
+  threadId: ThreadId,
+  assertMutationReady: () => void,
+): Promise<void> {
+  await requestNativeCompaction({ api, threadId, assertMutationReady, newId: uuidv4 });
 }
 
 export async function renameThread(

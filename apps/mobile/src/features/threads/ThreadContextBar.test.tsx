@@ -51,6 +51,7 @@ function model(pullRequestWatch: ThreadHeaderModel["pullRequestWatch"]): ThreadH
       accessibilityLabel: "Pull request 42, open. Last known state.",
     },
     settlementAction: null,
+    compactAction: null,
     pullRequestWatch,
   };
 }

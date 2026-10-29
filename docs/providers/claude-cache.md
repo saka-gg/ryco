@@ -18,6 +18,16 @@ Readiness is checked against the connection owner's captured live-shell generati
 
 Final send command IDs derive from the original thread/message IDs independently of cache evidence. Concurrent submissions share one in-flight operation, and retries of an existing queued logical message retain the same command ID across reloads and lost acknowledgements. Compaction commands also use a stable ID. Accepted-command receipts provide server deduplication. A rejected guarded command can require restoring/editing the queued message as a new logical send; it must not silently replace an uncertain accepted request with a new identity.
 
+## Compact now
+
+The context meter popover offers **Compact now** on a Claude thread whose Claude Code advertises `/compact`, the same signal behind "Automatically compacts its context when needed". It sends Claude Code's native `/compact` as a turn of its own, on the thread's own model and modes as the node holds them, so nothing staged in the composer is applied by it. It does not wait for the result: the transcript shows the `/compact` turn and **Context compacted**, and the meter updates from the usage Claude reports after compaction. A message queued meanwhile is sent once that turn settles.
+
+Like **Compact then send**, it needs a ready, idle session with a runtime. While a turn runs or waits on an approval or answer, after a Stop, or after a failed turn, the button is disabled and says why. A failed turn leaves nothing to wait for, so it says to send a message first. Once the node accepts the request, the button stays disabled until the session reports the compaction turn, as the composer does after a send, so a second click cannot start a second `/compact`. The turn carries the same server guard as a reviewed resume (ready session, runtime, latest turn and model), so a conversation that changed after the action read it is refused: "The conversation changed. Try Compact now again." The gate is the thread's session, not the composer's selection, so a thread handed off to another provider does not offer it.
+
+Compaction summarizes older context, and its own request uses tokens. A `/compact` with nothing to summarize completes without a boundary. One that Claude reports as failed turns Ryco's automatic compaction off for that session with a single warning, as for a typed `/compact`. The frozen web phone tier does not show the action.
+
+The mobile app offers the same action as **Compact conversation** in the thread's Task details sheet. It uses the same shared gate, wording and guarded turn as the web meter, and it checks the connection when you tap it. If the connection changes before the turn is sent, the action is refused with "The connection changed. Reconnect and try again." The sheet closes once the node accepts the turn.
+
 ## Implementation references
 
 - [Claude Agent SDK usage accounting](https://code.claude.com/docs/en/agent-sdk/cost-tracking): main-loop versus whole-tree scope, duplicate assistant message IDs, and output placeholders.

@@ -6,6 +6,10 @@ import {
   subscribeCheckpointReverts,
   type CheckpointRevertMode,
 } from "@ryco/client-runtime/state/session";
+import {
+  captureReviewedSendReadiness,
+  requestNativeCompaction,
+} from "@ryco/client-runtime/state/composer";
 import type { ApprovalResponseIdentity } from "@ryco/contracts";
 import type { EnvironmentId } from "@ryco/contracts";
 import {
@@ -17,7 +21,8 @@ import { useCallback, useState, useSyncExternalStore } from "react";
 
 import { stackedThreadToast, toastManager } from "../components/ui/toast";
 import { readEnvironmentApi } from "../environmentApi";
-import { newCommandId } from "../lib/utils";
+import { readEnvironmentConnection } from "../environments/runtime";
+import { newCommandId, randomUUID } from "../lib/utils";
 import { holdMessageQueueForInterrupt } from "../messageQueueDrain";
 import { selectThreadByRef, useStore } from "../store";
 import {
@@ -82,6 +87,27 @@ export function useChatSessionActions(input: {
       held.undo();
       throw error;
     }
+  }, [activeThreadId, environmentId]);
+
+  /**
+   * Compact now: the thread's provider compacts its context in a turn of its own. Rejects when
+   * the node refuses it or the connection changes before it is sent.
+   */
+  const compactThreadNow = useCallback(async () => {
+    const api = readEnvironmentApi(environmentId);
+    if (!api || !activeThreadId) {
+      throw new Error("This environment is not connected.");
+    }
+    await requestNativeCompaction({
+      api,
+      threadId: activeThreadId,
+      assertMutationReady: captureReviewedSendReadiness(
+        environmentId,
+        () => readEnvironmentConnection(environmentId),
+        "The connection changed. Reconnect and try again.",
+      ),
+      newId: randomUUID,
+    });
   }, [activeThreadId, environmentId]);
 
   /**
@@ -230,6 +256,7 @@ export function useChatSessionActions(input: {
 
   return {
     interruptTurn,
+    compactThreadNow,
     respondToApproval,
     submitApprovalDecision,
     respondToUserInput,

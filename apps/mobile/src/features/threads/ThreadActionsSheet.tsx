@@ -156,6 +156,7 @@ export function ThreadActionsSheet(props: {
   readonly onClose: () => void;
   readonly onRename: (title: string) => void;
   readonly onStop: () => void;
+  readonly onCompact: () => void;
   readonly onToggleSettlement: () => void;
   readonly onToggleArchive: () => void;
   readonly onReview: () => void;
@@ -282,6 +283,15 @@ export function ThreadActionsSheet(props: {
               destructive
               disabled={props.busy}
               onPress={props.onStop}
+            />
+          ) : null}
+          {props.model.compactAction ? (
+            <ActionRow
+              icon="arrow.down.right.and.arrow.up.left"
+              label={props.model.compactAction.label}
+              detail={props.model.compactAction.detail}
+              disabled={props.busy || props.model.compactAction.disabled}
+              onPress={props.onCompact}
             />
           ) : null}
           {props.model.settlementAction ? (

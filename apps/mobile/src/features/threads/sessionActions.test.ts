@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from "vite-plus/test";
 vi.mock("expo-crypto", () => ({ randomUUID: () => `id-${Math.random().toString(16).slice(2)}` }));
 
 import {
+  compactThreadNow,
   interruptThreadTurn,
   renameThread,
   respondToThreadApproval,
@@ -36,6 +37,68 @@ describe("sessionActions", () => {
     expect(command.type).toBe("thread.turn.interrupt");
     expect(command.threadId).toBe(THREAD_ID);
     expect(command.commandId).toBeTruthy();
+  });
+
+  it("compacts on the thread's own model and modes, guarded to the turn it read", async () => {
+    const { api, dispatchCommand } = fakeApi();
+    const getThreadWindow = vi.fn(async () => ({
+      thread: {
+        modelSelection: { instanceId: "claude_work", model: "opus" },
+        runtimeMode: "approval-required",
+        interactionMode: "plan",
+        tokenMode: "aggressive",
+        latestTurn: { turnId: "turn-7" },
+        session: {
+          providerName: "claudeAgent",
+          status: "ready",
+          runtimeSessionId: "runtime-1",
+          activeTurnId: null,
+        },
+      },
+    }));
+    Object.assign(api.orchestration, { getThreadWindow });
+    const assertMutationReady = vi.fn();
+
+    await compactThreadNow(api, THREAD_ID, assertMutationReady);
+
+    // Before the read and again before the send.
+    expect(assertMutationReady).toHaveBeenCalledTimes(2);
+    expect(getThreadWindow).toHaveBeenCalledWith(expect.objectContaining({ threadId: THREAD_ID }));
+    const command = dispatchCommand.mock.calls[0]![0] as {
+      type: string;
+      commandId: string;
+      message: { messageId: string; text: string; attachments: unknown[] };
+    };
+    expect(command).toMatchObject({
+      type: "thread.turn.start",
+      threadId: THREAD_ID,
+      modelSelection: { instanceId: "claude_work", model: "opus" },
+      runtimeMode: "approval-required",
+      interactionMode: "plan",
+      tokenMode: "aggressive",
+      claudeResumeGuard: {
+        requireReady: true,
+        runtimeSessionId: "runtime-1",
+        latestTurnId: "turn-7",
+      },
+      message: { role: "user", text: "/compact", attachments: [] },
+    });
+    expect(command.commandId).toMatch(/^compact-now:/);
+    expect(command.message.messageId).toBe(command.commandId);
+  });
+
+  it("refuses to compact once the connection changed, without reading or sending", async () => {
+    const { api, dispatchCommand } = fakeApi();
+    const getThreadWindow = vi.fn();
+    Object.assign(api.orchestration, { getThreadWindow });
+
+    await expect(
+      compactThreadNow(api, THREAD_ID, () => {
+        throw new Error("The connection changed. Reconnect and try again.");
+      }),
+    ).rejects.toThrow("The connection changed.");
+    expect(getThreadWindow).not.toHaveBeenCalled();
+    expect(dispatchCommand).not.toHaveBeenCalled();
   });
 
   it("renames and archives through bounded thread commands", async () => {

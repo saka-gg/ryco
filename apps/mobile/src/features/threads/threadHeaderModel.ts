@@ -1,4 +1,10 @@
-import { CHAT_WORKSPACE_LABEL, projectDisplayLabel } from "@ryco/client-runtime/state/composer";
+import {
+  CHAT_WORKSPACE_LABEL,
+  describeNativeCompactionBlocker,
+  nativeCompactionAdvertised,
+  nativeCompactionBlockerForSession,
+  projectDisplayLabel,
+} from "@ryco/client-runtime/state/composer";
 import { resolveThreadWorkspaceRoot } from "@ryco/client-runtime/state/files";
 import {
   findPullRequestWatch,
@@ -68,6 +74,14 @@ export interface ThreadHeaderPullRequestWatch {
   readonly chip: ThreadPullRequestWatchChip | null;
 }
 
+/** Compact now, as web's context meter offers it: the provider summarizes older context. */
+export interface ThreadCompactActionModel {
+  readonly label: "Compact conversation";
+  /** Why it cannot run now, or what it does when it can. */
+  readonly detail: string;
+  readonly disabled: boolean;
+}
+
 export interface ThreadHeaderModel {
   readonly title: string;
   readonly nodeLabel: string;
@@ -96,6 +110,27 @@ export interface ThreadHeaderModel {
   readonly settlementAction: ThreadSettlementActionModel | null;
   /** Null on nodes without pull request watches, and when there is no pull request. */
   readonly pullRequestWatch: ThreadHeaderPullRequestWatch | null;
+  /**
+   * Null unless the thread's session belongs to a provider that compacts on request and its
+   * latest context usage says it can (for Claude, that its CLI lists `/compact`).
+   */
+  readonly compactAction: ThreadCompactActionModel | null;
+}
+
+function compactAction(
+  thread: Pick<Thread, "session" | "activities">,
+): ThreadCompactActionModel | null {
+  // The thread's session, not the composer's selection: after a handoff they differ.
+  const blocker = nativeCompactionBlockerForSession(thread.session);
+  if (blocker === "unsupported" || !nativeCompactionAdvertised(thread.activities)) return null;
+  return {
+    label: "Compact conversation",
+    detail:
+      blocker === null
+        ? "Summarize older context. The summary request itself uses tokens."
+        : describeNativeCompactionBlocker(blocker),
+    disabled: blocker !== null,
+  };
 }
 
 function settlementDisabledReason(input: {
@@ -215,6 +250,7 @@ export function buildThreadHeaderModel(input: {
     | "archivedAt"
     | "latestTurn"
     | "session"
+    | "activities"
     | "turnDiffSummaries"
     | "branch"
     | "worktreePath"
@@ -346,5 +382,6 @@ export function buildThreadHeaderModel(input: {
     changeRequest: buildChangeRequestBadge(input.worktree),
     settlementAction,
     pullRequestWatch,
+    compactAction: compactAction(input.thread),
   };
 }

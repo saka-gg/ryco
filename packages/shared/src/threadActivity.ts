@@ -11,6 +11,19 @@ import { isForkBaseItemId } from "./threadFork.ts";
 
 export const CONTEXT_COMPACTION_ACTIVITY_KIND = "context-compaction";
 
+/** The message a client sends to ask the thread's provider to compact its own context. */
+export const NATIVE_COMPACTION_COMMAND = "/compact";
+
+/** Only the exact command without attachments asks for compaction; anything else is a prompt. */
+export function isNativeCompactionCommand(message: {
+  readonly input?: string | undefined;
+  readonly attachments?: readonly unknown[] | undefined;
+}): boolean {
+  return (
+    message.input?.trim() === NATIVE_COMPACTION_COMMAND && (message.attachments?.length ?? 0) === 0
+  );
+}
+
 const decodeContextHandoffActivityPayload = Schema.decodeUnknownSync(ContextHandoffActivityPayload);
 
 export function isContextCompactionActivity(

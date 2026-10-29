@@ -180,6 +180,7 @@ import { PendingApprovalCard } from "./PendingApprovalCard";
 import { PendingUserInputCard } from "./PendingUserInputCard";
 import { sendThreadTurn } from "./sendThreadTurn";
 import {
+  compactThreadNow,
   interruptThreadTurn,
   renameThread,
   respondToThreadApproval,
@@ -2187,6 +2188,19 @@ export function ThreadDetailScreen(props: {
                 throw error;
               }
             });
+          }}
+          onCompact={() => {
+            if (!headerModel.compactAction || headerModel.compactAction.disabled) return;
+            // Readiness is captured at the tap, as for a send: a connection that changes
+            // before the turn is sent refuses it rather than compacting on another shell.
+            const assertMutationReady = captureReviewedSendReadiness(
+              environmentId,
+              () => createMobileConnectionRegistry().driver.supervisor.read(environmentId),
+              "The connection changed. Reconnect and try again.",
+            );
+            void runAction(() =>
+              compactThreadNow(ensureEnvironmentApi(environmentId), threadId, assertMutationReady),
+            );
           }}
           onToggleSettlement={() => {
             const action = headerModel.settlementAction;
