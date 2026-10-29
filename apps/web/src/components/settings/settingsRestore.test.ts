@@ -130,4 +130,13 @@ describe("settings reset ownership", () => {
     });
     expect(settingsRestorePlan(settings, "system", "client").patch).toEqual({});
   });
+  it("restores where pull request links open as a local preference", () => {
+    const settings = { ...DEFAULT_UNIFIED_SETTINGS, changeRequestLinkTarget: "browser" as const };
+    expect(settingsRestorePlan(settings, "system", "client")).toEqual({
+      labels: ["Pull request links"],
+      resetTheme: false,
+      patch: { changeRequestLinkTarget: "ryco" },
+    });
+    expect(settingsRestorePlan(settings, "system", "node").patch).toEqual({});
+  });
 });

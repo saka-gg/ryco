@@ -153,6 +153,25 @@ describe("ClientSettings.sendShortcut", () => {
   });
 });
 
+describe("ClientSettings.changeRequestLinkTarget", () => {
+  it("opens pull request links in Ryco for settings saved before the choice existed", () => {
+    expect(DEFAULT_CLIENT_SETTINGS.changeRequestLinkTarget).toBe("ryco");
+    expect(decodeClientSettings({ diffWordWrap: true }).changeRequestLinkTarget).toBe("ryco");
+  });
+
+  it("accepts each target and rejects unknown ones", () => {
+    for (const changeRequestLinkTarget of ["ryco", "browser"] as const) {
+      expect(decodeClientSettings({ changeRequestLinkTarget }).changeRequestLinkTarget).toBe(
+        changeRequestLinkTarget,
+      );
+      expect(decodeClientSettingsPatch({ changeRequestLinkTarget }).changeRequestLinkTarget).toBe(
+        changeRequestLinkTarget,
+      );
+    }
+    expect(() => decodeClientSettingsPatch({ changeRequestLinkTarget: "editor" })).toThrow();
+  });
+});
+
 describe("ClientSettings.chatWidth", () => {
   it("keeps the comfortable width for settings saved before the choice existed", () => {
     expect(DEFAULT_CHAT_WIDTH).toBe("comfortable");

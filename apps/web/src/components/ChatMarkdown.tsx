@@ -28,6 +28,7 @@ import {
   use,
   type ReactNode,
 } from "react";
+import { useRouter } from "@tanstack/react-router";
 import type { Components } from "react-markdown";
 import ReactMarkdown from "react-markdown";
 import { defaultUrlTransform } from "react-markdown";
@@ -53,8 +54,24 @@ import { MermaidDiagram } from "./MermaidDiagram";
 import { useTheme } from "../hooks/useTheme";
 import { useLongPress } from "../hooks/useLongPress";
 import { usePresentationTier } from "../hooks/usePresentationTier";
+import { useEvent } from "../hooks/useEvent";
+import { getClientSettings } from "../hooks/useSettings";
+import { getPresentationTier } from "../lib/presentationTier";
+import { readPrimaryEnvironmentDescriptor } from "../environments/primary";
+import { buildPullRequestLocation } from "../pullRequestsRoute";
+import { isSourceControlReadAdmitted } from "../rpc/sourceControlAtoms";
+import {
+  selectBootstrapCompleteForEnvironment,
+  selectProjectsAcrossEnvironments,
+  useStore,
+} from "../store";
+import { orderItemsByPreferredIds } from "./Sidebar.logic";
+import { getProjectOrderKey } from "../logicalProject";
+import { useUiStateStore } from "../uiStateStore";
 import { useSmoothStreamedText } from "../hooks/useSmoothStreamedText";
 import {
+  isPlainLinkClick,
+  resolveMarkdownChangeRequestCheckout,
   resolveMarkdownFileLinkMeta,
   resolveMarkdownThreadHref,
   rewriteMarkdownFileUriHref,
@@ -807,6 +824,38 @@ const RenderedChatMarkdown = memo(function RenderedChatMarkdown({
   // so its `@thread:` text stays text instead of a chip that opens one.
   const documentMode = documentFolder !== undefined;
   const inlineEnvironmentId = documentMode ? undefined : environmentId;
+  // Absent outside a router (isolated renders): links then keep opening the browser.
+  const router: ReturnType<typeof useRouter> | null | undefined = useRouter({ warn: false });
+  // A plain click on a pull request link opens it on the Pull requests page when one of the
+  // projects holds its repository. Everything is read at click time, so markdown never
+  // re-renders for project, settings or connection changes.
+  const handleChangeRequestLinkClick = useEvent(
+    (event: ReactMouseEvent<HTMLAnchorElement>, href: string | undefined) => {
+      if (!router || event.defaultPrevented || !isPlainLinkClick(event)) return;
+      if (getClientSettings().changeRequestLinkTarget === "browser") return;
+      // The frozen phone tier has no Pull requests page.
+      if (getPresentationTier() === "phone") return;
+      const state = useStore.getState();
+      const target = resolveMarkdownChangeRequestCheckout({
+        href,
+        // The sidebar's order, so a repository opens through the checkout the Pull requests
+        // page leads with.
+        projects: orderItemsByPreferredIds({
+          items: selectProjectsAcrossEnvironments(state),
+          preferredIds: useUiStateStore.getState().projectOrder,
+          getId: getProjectOrderKey,
+        }),
+        threadEnvironmentId: environmentId,
+        primaryEnvironmentId: readPrimaryEnvironmentDescriptor()?.environmentId ?? null,
+        isEnvironmentAvailable: (candidate) =>
+          selectBootstrapCompleteForEnvironment(state, candidate) &&
+          isSourceControlReadAdmitted(candidate),
+      });
+      if (target === null) return;
+      event.preventDefault();
+      void router.navigate(buildPullRequestLocation(target));
+    },
+  );
   const markdownComponents = useMemo<Components>(
     () => ({
       p({ node: _node, children, ...props }) {
@@ -913,7 +962,13 @@ const RenderedChatMarkdown = memo(function RenderedChatMarkdown({
         }
         if (!fileLinkMeta) {
           return (
-            <a {...props} href={href} target="_blank" rel="noopener noreferrer">
+            <a
+              {...props}
+              href={href}
+              target="_blank"
+              rel="noopener noreferrer"
+              onClick={(event) => handleChangeRequestLinkClick(event, href)}
+            >
               {renderSkillInlineMarkdownChildren(
                 props.children,
                 skills,
@@ -1078,6 +1133,7 @@ const RenderedChatMarkdown = memo(function RenderedChatMarkdown({
       skills,
       allowTerminalInsertion,
       rendersQuoteCitations,
+      handleChangeRequestLinkClick,
     ],
   );
 

@@ -158,6 +158,13 @@ export const SETTINGS_SEARCH_INDEX: ReadonlyArray<SettingsSearchEntry> = [
     keywords: "github actions checks ci polling refresh",
   },
   {
+    section: "source-control",
+    title: "Pull request links in chat",
+    owner: "client",
+    description: "Open pull request links on the Pull requests page or in the browser.",
+    keywords: "pr link url open browser github gitlab merge request",
+  },
+  {
     section: "general",
     title: "Response streaming",
     owner: "node",

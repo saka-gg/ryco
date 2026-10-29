@@ -282,6 +282,16 @@ function sourceControlClient(environmentId: EnvironmentId) {
   return requireEnvironmentConnection(environmentId).client.sourceControl;
 }
 
+/**
+ * Whether the environment's source-control reads are admitted now: always
+ * outside the hosted Hub, else once its own session allows them. A pull
+ * request link opens in the app only then, so it never lands on a page that
+ * cannot load.
+ */
+export function isSourceControlReadAdmitted(environmentId: EnvironmentId): boolean {
+  return sourceControlReadAdmission(environmentId).key !== null;
+}
+
 // ---------------------------------------------------------------------------
 // Superset lists
 //

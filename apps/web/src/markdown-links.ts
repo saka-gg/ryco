@@ -1,4 +1,12 @@
 import { resolveFileLinkReference } from "@ryco/client-runtime/state/files";
+import type { EnvironmentId, ProjectId, ProjectKind } from "@ryco/contracts";
+import {
+  checkoutRepositoryKey,
+  parseChangeRequestUrl,
+  repositoryKeysMatch,
+  type ChangeRequestUrlView,
+} from "@ryco/shared/git";
+import { isChatProject } from "@ryco/shared/projectKind";
 
 import { formatWorkspaceRelativePath } from "./filePathDisplay";
 
@@ -62,4 +70,89 @@ export function resolveMarkdownThreadHref(
   } catch {
     return null;
   }
+}
+
+/**
+ * A plain primary click. Any modifier (a new tab, window or download) or
+ * another button keeps the browser's own handling of a link.
+ */
+export function isPlainLinkClick(event: {
+  readonly button: number;
+  readonly metaKey: boolean;
+  readonly ctrlKey: boolean;
+  readonly shiftKey: boolean;
+  readonly altKey: boolean;
+}): boolean {
+  return event.button === 0 && !event.metaKey && !event.ctrlKey && !event.shiftKey && !event.altKey;
+}
+
+export interface MarkdownChangeRequestCheckoutProject {
+  readonly id: ProjectId;
+  readonly environmentId: EnvironmentId;
+  readonly kind?: ProjectKind | undefined;
+  readonly repositoryIdentity?:
+    | { readonly locator: { readonly remoteUrl: string } }
+    | null
+    | undefined;
+}
+
+export interface MarkdownChangeRequestCheckout {
+  readonly environmentId: EnvironmentId;
+  readonly projectId: ProjectId;
+  readonly number: number;
+  readonly tab?: ChangeRequestUrlView;
+}
+
+/**
+ * The checkout a pull request link in chat opens through: a project whose
+ * repository identity's remote matches the link's repository, on an
+ * environment that can be read now. It matches only the identity's remote
+ * (`upstream`, else `origin`, else the first by name), the one a number
+ * resolves in, so a fork's checkout never opens upstream's `#N` as its own.
+ * Order: the thread's own environment, then the primary one, then the order of
+ * `projects` (pass the sidebar's, whose first checkout the Pull requests page
+ * leads with). Null when the link is not one change request, points at one
+ * comment (only the host scrolls to it), or no available project holds its
+ * repository.
+ */
+export function resolveMarkdownChangeRequestCheckout(input: {
+  readonly href: string | undefined;
+  readonly projects: ReadonlyArray<MarkdownChangeRequestCheckoutProject>;
+  readonly threadEnvironmentId: EnvironmentId | undefined;
+  readonly primaryEnvironmentId: EnvironmentId | null;
+  /** Connected (its live snapshot is in) and, when hosted, admitted for reads. */
+  readonly isEnvironmentAvailable: (environmentId: EnvironmentId) => boolean;
+}): MarkdownChangeRequestCheckout | null {
+  if (!input.href) return null;
+  const link = parseChangeRequestUrl(input.href);
+  if (link === null || link.comment) return null;
+  const availability = new Map<EnvironmentId, boolean>();
+  const isAvailable = (environmentId: EnvironmentId) => {
+    let available = availability.get(environmentId);
+    if (available === undefined) {
+      available = input.isEnvironmentAvailable(environmentId);
+      availability.set(environmentId, available);
+    }
+    return available;
+  };
+  const matches = input.projects.filter((project) => {
+    if (isChatProject(project)) return false;
+    const key = checkoutRepositoryKey(project.repositoryIdentity?.locator.remoteUrl);
+    return (
+      key !== null &&
+      repositoryKeysMatch(key, link.repositoryKey) &&
+      isAvailable(project.environmentId)
+    );
+  });
+  const project =
+    matches.find((candidate) => candidate.environmentId === input.threadEnvironmentId) ??
+    matches.find((candidate) => candidate.environmentId === input.primaryEnvironmentId) ??
+    matches[0];
+  if (project === undefined) return null;
+  return {
+    environmentId: project.environmentId,
+    projectId: project.id,
+    number: link.number,
+    ...(link.view === undefined ? {} : { tab: link.view }),
+  };
 }

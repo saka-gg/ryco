@@ -6,6 +6,7 @@ const RESTORABLE_SETTINGS = {
   timestampFormat: "Time format",
   diffWordWrap: "Diff line wrapping",
   diffIgnoreWhitespace: "Diff whitespace changes",
+  changeRequestLinkTarget: "Pull request links",
   followUpBehavior: "Follow-up while working",
   sendShortcut: "Send shortcut",
   chatWidth: "Chat width",

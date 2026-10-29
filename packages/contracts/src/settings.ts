@@ -98,6 +98,14 @@ export const SendShortcut = Schema.Literals(["enter", "mod-enter-multiline", "mo
 export type SendShortcut = typeof SendShortcut.Type;
 export const DEFAULT_SEND_SHORTCUT: SendShortcut = "enter";
 
+/**
+ * Where a plain click on a pull request link in chat opens: `ryco` on the Pull requests page when
+ * the repository is one of the client's projects, `browser` always on the host.
+ */
+export const ChangeRequestLinkTarget = Schema.Literals(["ryco", "browser"]);
+export type ChangeRequestLinkTarget = typeof ChangeRequestLinkTarget.Type;
+export const DEFAULT_CHANGE_REQUEST_LINK_TARGET: ChangeRequestLinkTarget = "ryco";
+
 /** How wide the chat timeline and composer grow on large screens. */
 export const ChatWidth = Schema.Literals(["comfortable", "wide", "full"]);
 export type ChatWidth = typeof ChatWidth.Type;
@@ -122,6 +130,9 @@ export const ClientSettingsSchema = Schema.Struct({
   ),
   diffIgnoreWhitespace: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   diffWordWrap: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  changeRequestLinkTarget: ChangeRequestLinkTarget.pipe(
+    Schema.withDecodingDefault(Effect.succeed(DEFAULT_CHANGE_REQUEST_LINK_TARGET)),
+  ),
   followUpBehavior: FollowUpBehavior.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_FOLLOW_UP_BEHAVIOR)),
   ),
@@ -986,6 +997,7 @@ export const ClientSettingsPatch = Schema.Struct({
   confirmThreadUnpin: Schema.optionalKey(Schema.Boolean),
   diffIgnoreWhitespace: Schema.optionalKey(Schema.Boolean),
   diffWordWrap: Schema.optionalKey(Schema.Boolean),
+  changeRequestLinkTarget: Schema.optionalKey(ChangeRequestLinkTarget),
   followUpBehavior: Schema.optionalKey(FollowUpBehavior),
   sendShortcut: Schema.optionalKey(SendShortcut),
   chatWidth: Schema.optionalKey(ChatWidth),

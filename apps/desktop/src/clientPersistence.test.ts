@@ -57,6 +57,7 @@ const clientSettings: ClientSettings = {
   dismissedProviderUpdateNotificationKeys: [],
   diffIgnoreWhitespace: true,
   diffWordWrap: true,
+  changeRequestLinkTarget: "ryco",
   followUpBehavior: "queue",
   sendShortcut: "enter",
   chatWidth: "comfortable",

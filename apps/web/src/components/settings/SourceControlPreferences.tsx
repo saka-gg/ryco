@@ -1,5 +1,6 @@
 import {
   DEFAULT_UNIFIED_SETTINGS,
+  type ChangeRequestLinkTarget,
   type GitStatusPollIntervalMs,
   type SourceControlRefreshMode,
 } from "@ryco/contracts/settings";
@@ -32,6 +33,16 @@ const SOURCE_CONTROL_REFRESH_MODE_OPTIONS = [
   "manual",
 ] as const satisfies readonly SourceControlRefreshMode[];
 
+const CHANGE_REQUEST_LINK_TARGET_LABELS = {
+  ryco: "Ryco",
+  browser: "Browser",
+} satisfies Record<ChangeRequestLinkTarget, string>;
+
+const CHANGE_REQUEST_LINK_TARGET_OPTIONS = [
+  "ryco",
+  "browser",
+] as const satisfies readonly ChangeRequestLinkTarget[];
+
 function parseGitStatusPollInterval(value: string | null): GitStatusPollIntervalMs | null {
   if (value === null) return null;
   const parsed = Number.parseInt(value, 10);
@@ -42,6 +53,10 @@ function parseGitStatusPollInterval(value: string | null): GitStatusPollInterval
 
 function parseSourceControlRefreshMode(value: string | null): SourceControlRefreshMode | null {
   return SOURCE_CONTROL_REFRESH_MODE_OPTIONS.find((mode) => mode === value) ?? null;
+}
+
+function parseChangeRequestLinkTarget(value: string | null): ChangeRequestLinkTarget | null {
+  return CHANGE_REQUEST_LINK_TARGET_OPTIONS.find((target) => target === value) ?? null;
 }
 
 export function SourceControlPreferences() {
@@ -181,6 +196,47 @@ export function SourceControlPreferences() {
                 {SOURCE_CONTROL_REFRESH_MODE_OPTIONS.map((mode) => (
                   <SelectItem key={mode} hideIndicator value={mode}>
                     {SOURCE_CONTROL_REFRESH_MODE_LABELS[mode]}
+                  </SelectItem>
+                ))}
+              </SelectPopup>
+            </Select>
+          }
+        />
+
+        <SettingsRow
+          title="Pull request links in chat"
+          description="Open pull requests from repositories in Ryco on the Pull requests page. Cmd- or Ctrl-click always opens the browser."
+          scope={localScopeLabel}
+          resetAction={
+            settings.changeRequestLinkTarget !==
+            DEFAULT_UNIFIED_SETTINGS.changeRequestLinkTarget ? (
+              <SettingResetButton
+                label="pull request links"
+                onClick={() =>
+                  updateSettings({
+                    changeRequestLinkTarget: DEFAULT_UNIFIED_SETTINGS.changeRequestLinkTarget,
+                  })
+                }
+              />
+            ) : null
+          }
+          control={
+            <Select
+              value={settings.changeRequestLinkTarget}
+              onValueChange={(value) => {
+                const target = parseChangeRequestLinkTarget(value);
+                if (target !== null) updateSettings({ changeRequestLinkTarget: target });
+              }}
+            >
+              <SelectTrigger className="w-full sm:w-40" aria-label="Where pull request links open">
+                <SelectValue>
+                  {CHANGE_REQUEST_LINK_TARGET_LABELS[settings.changeRequestLinkTarget]}
+                </SelectValue>
+              </SelectTrigger>
+              <SelectPopup align="end" alignItemWithTrigger={false}>
+                {CHANGE_REQUEST_LINK_TARGET_OPTIONS.map((target) => (
+                  <SelectItem key={target} hideIndicator value={target}>
+                    {CHANGE_REQUEST_LINK_TARGET_LABELS[target]}
                   </SelectItem>
                 ))}
               </SelectPopup>
