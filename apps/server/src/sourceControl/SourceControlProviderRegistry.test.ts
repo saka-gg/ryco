@@ -639,6 +639,114 @@ describe("change request page forwarding", () => {
       assert.strictEqual(states.issues.get(9), "closed");
     }),
   );
+
+  describe("pull request watch fingerprint", () => {
+    const fingerprint = { status: "OPEN MERGEABLE abc123 SUCCESS:3 ", remarks: "2  0  0" };
+    const watchInput = {
+      cwd: "/repo",
+      number: 7,
+      url: "https://github.com/acme/repo/pull/7",
+    };
+
+    it.effect(
+      "forwards it through the lazy provider and answers null where the host has none",
+      () =>
+        Effect.gen(function* () {
+          const calls: Array<unknown> = [];
+          const github = yield* SourceControlProviderRegistry.makeLazyProvider(
+            "github",
+            Effect.succeed({
+              kind: "github",
+              getChangeRequestWatchFingerprint: (input: unknown) =>
+                Effect.sync(() => {
+                  calls.push(input);
+                  return fingerprint;
+                }),
+            } as unknown as SourceControlProvider.SourceControlProviderShape),
+          );
+          assert.deepStrictEqual(
+            yield* github.getChangeRequestWatchFingerprint!(watchInput),
+            fingerprint,
+          );
+          assert.deepStrictEqual(calls, [watchInput]);
+
+          // Unsupported is not a failure (and not a rate limit): the watch reads in full.
+          const gitlab = yield* SourceControlProviderRegistry.makeLazyProvider(
+            "gitlab",
+            Effect.succeed({
+              kind: "gitlab",
+            } as unknown as SourceControlProvider.SourceControlProviderShape),
+          );
+          assert.isNull(yield* gitlab.getChangeRequestWatchFingerprint!(watchInput));
+        }),
+    );
+
+    it.effect("binds the detected remote context into it", () =>
+      Effect.gen(function* () {
+        const calls: Array<{ readonly context?: unknown }> = [];
+        const bound = SourceControlProviderRegistry.bindProviderContext(
+          {
+            kind: "github",
+            getChangeRequestWatchFingerprint: (input: { readonly context?: unknown }) =>
+              Effect.sync(() => {
+                calls.push(input);
+                return fingerprint;
+              }),
+          } as unknown as SourceControlProvider.SourceControlProviderShape,
+          context,
+        );
+        yield* bound.getChangeRequestWatchFingerprint!(watchInput);
+        assert.deepStrictEqual(calls[0]?.context, context);
+
+        const unbound = SourceControlProviderRegistry.bindProviderContext(
+          { kind: "github" } as unknown as SourceControlProvider.SourceControlProviderShape,
+          context,
+        );
+        assert.strictEqual(unbound.getChangeRequestWatchFingerprint, undefined);
+      }),
+    );
+
+    it.effect("reads a GitHub pull request's fingerprint through a resolved registry handle", () =>
+      Effect.gen(function* () {
+        const asked: Array<unknown> = [];
+        const registry = yield* makeRegistry({
+          remotes: [{ name: "origin", url: "git@github.com:acme/repo.git" }],
+          githubCli: {
+            getPullRequestWatchFingerprint: (input) =>
+              Effect.sync(() => {
+                asked.push(input);
+                return fingerprint;
+              }),
+          },
+        });
+        const handle = yield* registry.resolveHandle({ cwd: "/repo" });
+        assert.strictEqual(handle.provider.kind, "github");
+        const read = handle.provider.getChangeRequestWatchFingerprint;
+        assert.ok(read, "the fingerprint must survive the lazy provider and the context binding");
+        assert.deepStrictEqual(yield* read(watchInput), fingerprint);
+        assert.deepStrictEqual(asked, [
+          { cwd: "/repo", host: "github.com", repository: "acme/repo", number: 7 },
+        ]);
+      }),
+    );
+
+    it.effect("answers null through a resolved handle for a host without one", () =>
+      Effect.gen(function* () {
+        const registry = yield* makeRegistry({
+          remotes: [{ name: "origin", url: "git@gitlab.com:group/project.git" }],
+        });
+        const handle = yield* registry.resolveHandle({ cwd: "/repo" });
+        assert.strictEqual(handle.provider.kind, "gitlab");
+        assert.isNull(
+          yield* handle.provider.getChangeRequestWatchFingerprint!({
+            cwd: "/repo",
+            number: 7,
+            url: "https://gitlab.com/group/project/-/merge_requests/7",
+          }),
+        );
+      }),
+    );
+  });
 });
 
 describe("unsupported change request options", () => {

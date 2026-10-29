@@ -2043,3 +2043,62 @@ it.effect("reads a linked issue's state alone, through the batched link read", (
     ]);
   }),
 );
+
+it.effect("reads a pull request's watch fingerprint from the repository its URL names", () =>
+  Effect.gen(function* () {
+    const asked: Array<{ host: string; repository: string; number: number; cwd: string }> = [];
+    const provider = yield* makeProvider({
+      getPullRequestWatchFingerprint: (input) =>
+        Effect.sync(() => {
+          asked.push(input);
+          return input.number === 404 ? null : { status: "OPEN", remarks: "0  0  0" };
+        }),
+    });
+    const fingerprint = provider.getChangeRequestWatchFingerprint;
+    assert.ok(fingerprint, "GitHub implements the watch fingerprint");
+
+    assert.deepStrictEqual(
+      yield* fingerprint({
+        cwd: "/repo",
+        number: 12,
+        url: "https://github.example.com/Acme/Widgets/pull/12",
+      }),
+      { status: "OPEN", remarks: "0  0  0" },
+    );
+    assert.isNull(
+      yield* fingerprint({
+        cwd: "/repo",
+        number: 404,
+        url: "https://github.com/acme/web/pull/404",
+      }),
+    );
+    // A URL that names no repository has no fingerprint: the watch reads it in full.
+    assert.isNull(yield* fingerprint({ cwd: "/repo", number: 5, url: "not a url" }));
+    assert.deepStrictEqual(asked, [
+      { cwd: "/repo", host: "github.example.com", repository: "Acme/Widgets", number: 12 },
+      { cwd: "/repo", host: "github.com", repository: "acme/web", number: 404 },
+    ]);
+  }),
+);
+
+it.effect("reports a failed watch fingerprint read as a provider error", () =>
+  Effect.gen(function* () {
+    const provider = yield* makeProvider({
+      getPullRequestWatchFingerprint: () =>
+        Effect.fail(
+          new GitHubCli.GitHubCliError({
+            operation: "getPullRequestWatchFingerprint",
+            detail: "GitHub API rate limit exceeded. Wait for the reset window and retry.",
+          }),
+        ),
+    });
+    const error = yield* provider.getChangeRequestWatchFingerprint!({
+      cwd: "/repo",
+      number: 12,
+      url: "https://github.com/acme/web/pull/12",
+    }).pipe(Effect.flip);
+    assert.equal(error.provider, "github");
+    assert.equal(error.operation, "getChangeRequestWatchFingerprint");
+    assert.include(error.detail, "rate limit");
+  }),
+);
