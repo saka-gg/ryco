@@ -41,6 +41,11 @@ export interface Preferences {
   readonly threadAlerts?: boolean;
   /** Thread alerts play the system sound. Unset means off. */
   readonly threadAlertSound?: boolean;
+  /**
+   * Review a send that resumes a large, idle Claude conversation first; "Don't ask
+   * again" turns it off. Unset means on.
+   */
+  readonly claudeResumeReview?: boolean;
 }
 
 export function sanitizePreferences(parsed: Preferences): Preferences {
@@ -60,6 +65,7 @@ export function sanitizePreferences(parsed: Preferences): Preferences {
     rememberThreadContent?: boolean;
     threadAlerts?: boolean;
     threadAlertSound?: boolean;
+    claudeResumeReview?: boolean;
   } = {};
 
   if (typeof parsed.liveActivitiesEnabled === "boolean") {
@@ -107,6 +113,9 @@ export function sanitizePreferences(parsed: Preferences): Preferences {
   if (typeof parsed.threadAlerts === "boolean") preferences.threadAlerts = parsed.threadAlerts;
   if (typeof parsed.threadAlertSound === "boolean") {
     preferences.threadAlertSound = parsed.threadAlertSound;
+  }
+  if (typeof parsed.claudeResumeReview === "boolean") {
+    preferences.claudeResumeReview = parsed.claudeResumeReview;
   }
   if (Array.isArray(parsed.favorites)) {
     const decode = Schema.decodeUnknownOption(ModelFavorite);
@@ -199,6 +208,14 @@ export function isPreferencesHydrated(): boolean {
  */
 export function isThreadContentCacheEnabled(preferences: Preferences = state.preferences): boolean {
   return preferences.rememberThreadContent !== false;
+}
+
+/**
+ * Whether sends from this device get the Claude resume review. On unless the user turned
+ * it off; read at each send, so a change applies to the next one.
+ */
+export function isClaudeResumeReviewEnabled(preferences: Preferences = state.preferences): boolean {
+  return preferences.claudeResumeReview !== false;
 }
 
 export function subscribePreferences(listener: Listener): () => void {

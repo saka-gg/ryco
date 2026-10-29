@@ -172,6 +172,21 @@ describe("ClientSettings.changeRequestLinkTarget", () => {
   });
 });
 
+describe("ClientSettings.claudeResumeReview", () => {
+  it("keeps the review on for settings saved before the choice existed", () => {
+    expect(DEFAULT_CLIENT_SETTINGS.claudeResumeReview).toBe(true);
+    expect(decodeClientSettings({ sendShortcut: "mod-enter" }).claudeResumeReview).toBe(true);
+  });
+
+  it("keeps a turned-off review off and patches it on its own", () => {
+    expect(decodeClientSettings({ claudeResumeReview: false }).claudeResumeReview).toBe(false);
+    expect(decodeClientSettingsPatch({ claudeResumeReview: false })).toEqual({
+      claudeResumeReview: false,
+    });
+    expect(() => decodeClientSettingsPatch({ claudeResumeReview: "off" })).toThrow();
+  });
+});
+
 describe("ClientSettings.chatWidth", () => {
   it("keeps the comfortable width for settings saved before the choice existed", () => {
     expect(DEFAULT_CHAT_WIDTH).toBe("comfortable");

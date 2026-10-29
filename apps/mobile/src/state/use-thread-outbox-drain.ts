@@ -36,6 +36,7 @@ import {
   trackThreadOutboxLiveCauses,
   type ThreadOutboxDrainState,
 } from "./threadOutbox";
+import { isClaudeResumeReviewEnabled } from "./preferencesStore";
 import { buildQueuedThreadMessageAttachments } from "./queuedThreadMessageAttachments";
 import type { QueuedThreadMessage } from "./threadOutboxModel";
 import {
@@ -77,6 +78,7 @@ export async function sendQueuedThreadMessage(
     // resume review can judge the subscribed state and skip the window read.
     readSubscribedClaudeReviewState: () =>
       selectSubscribedClaudeReviewState(useStore.getState(), threadRef),
+    skipClaudeResumeReview: () => !isClaudeResumeReviewEnabled(),
     sourceProviderDriver: selectThreadByRef(useStore.getState(), threadRef)?.session?.provider,
     providerDriver:
       readEnvironmentServerConfig(message.environmentId)?.providers.find(

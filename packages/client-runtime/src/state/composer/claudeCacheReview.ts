@@ -61,6 +61,8 @@ export async function reviewClaudeResumeBeforeSend(
     (input.sourceProviderDriver !== undefined && input.sourceProviderDriver !== "claudeAgent")
   )
     return undefined;
+  // Before the no-presentation refusal below, so queued and background sends proceed too.
+  if (input.skipClaudeResumeReview?.() === true) return undefined;
   const getWindow = input.api.orchestration.getThreadWindow;
   if (
     !input.isServerThread ||

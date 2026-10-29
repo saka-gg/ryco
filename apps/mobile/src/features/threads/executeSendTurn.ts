@@ -47,6 +47,8 @@ export interface ExecuteSendTurnInput {
    * `getThreadWindow` round trip; one it flags is re-read from the server.
    */
   readonly readSubscribedClaudeReviewState?: () => SubscribedClaudeReviewState | undefined;
+  /** True when this device turned the Claude resume review off ("Don't ask again"). */
+  readonly skipClaudeResumeReview?: CommitSendTurnDispatchInput["skipClaudeResumeReview"];
   readonly providerDriver?: ProviderDriverKind | null;
   readonly sourceProviderDriver?: ProviderDriverKind | null;
   readonly assertMutationReady?: () => void;
@@ -170,6 +172,9 @@ export async function executeSendTurn(input: ExecuteSendTurnInput): Promise<bool
         : {}),
       ...(input.readSubscribedClaudeReviewState
         ? { readSubscribedClaudeReviewState: input.readSubscribedClaudeReviewState }
+        : {}),
+      ...(input.skipClaudeResumeReview
+        ? { skipClaudeResumeReview: input.skipClaudeResumeReview }
         : {}),
       providerDriver: input.providerDriver,
       sourceProviderDriver: input.sourceProviderDriver,

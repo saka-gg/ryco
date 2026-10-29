@@ -16,6 +16,11 @@ import { readWorktreeLaunchRetry } from "../components/chat/worktreeLaunch/workt
 
 import { DraftId } from "../composerDraftStore";
 import {
+  __resetClientSettingsPersistenceForTests,
+  getClientSettingsSnapshot,
+  replaceClientSettingsSnapshot,
+} from "./clientSettingsStore";
+import {
   readAndRememberProjectPreferences,
   resetNewDraftDefaultsCacheForTests,
 } from "./newDraftDefaults";
@@ -1743,6 +1748,20 @@ describe("background send options", () => {
     background.input.claudeCacheReview = null;
     expect(await executeChatSendTurn(background.input)).toBe(true);
     expect(lastCommitInput()).not.toHaveProperty("claudeCacheReview");
+  });
+
+  it("reads this device's Claude resume review choice at send time, background sends included", async () => {
+    const background = makeSendInput();
+    background.input.claudeCacheReview = null;
+    expect(await executeChatSendTurn(background.input)).toBe(true);
+    const skip = lastCommitInput().skipClaudeResumeReview as () => boolean;
+    try {
+      expect(skip()).toBe(false);
+      replaceClientSettingsSnapshot({ ...getClientSettingsSnapshot(), claudeResumeReview: false });
+      expect(skip()).toBe(true);
+    } finally {
+      __resetClientSettingsPersistenceForTests();
+    }
   });
 
   it("forwards onBeforeTurnStart to run right before turn.start", async () => {

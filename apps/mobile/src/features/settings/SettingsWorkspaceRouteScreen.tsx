@@ -4,12 +4,19 @@ import {
 } from "@ryco/shared/worktreeSubmodules";
 import { useStore } from "../../state/threadsRuntime";
 import { useEnvironmentServerConfigs } from "../../state/environmentServerConfigs";
+import {
+  isClaudeResumeReviewEnabled,
+  updatePreferences,
+  useIsPreferencesHydrated,
+  usePreferences,
+} from "../../state/preferencesStore";
 import { NodeStorageSettings } from "./NodeStorageSettings";
 import { useNavigation } from "@react-navigation/native";
 import { ScrollView } from "react-native";
 
 import { SettingsRow } from "./components/SettingsRow";
 import { SettingsSection } from "./components/SettingsSection";
+import { SettingsSwitchRow } from "./components/SettingsSwitchRow";
 import { openMachinesFromSettings } from "./openMachinesFromSettings";
 
 export function SettingsWorkspaceRouteScreen() {
@@ -20,6 +27,8 @@ export function SettingsWorkspaceRouteScreen() {
   const supported = config?.environment.capabilities.worktreeSubmoduleSettings === true;
   const settings = supported ? config?.settings : undefined;
   const submoduleMode = settings ? selectWorktreeSubmodules({ settings }).mode : undefined;
+  const preferences = usePreferences();
+  const preferencesHydrated = useIsPreferencesHydrated();
 
   return (
     <ScrollView
@@ -55,6 +64,20 @@ export function SettingsWorkspaceRouteScreen() {
           }
         />
       </SettingsSection>
+
+      {/* Device-local. Shown once preferences load: a switch flipped before then would
+          save over the preferences this device already keeps. */}
+      {preferencesHydrated ? (
+        <SettingsSection title="Sending">
+          <SettingsSwitchRow
+            first
+            label="Review large Claude resumes"
+            detail="Before a send resumes a large Claude conversation that sat idle, ask whether to continue with full context or compact it first. Applies to this device."
+            value={isClaudeResumeReviewEnabled(preferences)}
+            onValueChange={(claudeResumeReview) => updatePreferences({ claudeResumeReview })}
+          />
+        </SettingsSection>
+      ) : null}
     </ScrollView>
   );
 }

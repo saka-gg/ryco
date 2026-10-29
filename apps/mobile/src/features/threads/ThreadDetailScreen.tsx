@@ -135,7 +135,7 @@ import { useAgentControlSync } from "../../state/agentControlSync";
 import { useEnvironmentServerConfigs } from "../../state/environmentServerConfigs";
 import { useHomeWorkspaceData } from "../../state/homeData";
 import { useMessageQueueStore } from "../../state/messageQueueStore";
-import { usePreferences } from "../../state/preferencesStore";
+import { isClaudeResumeReviewEnabled, usePreferences } from "../../state/preferencesStore";
 import {
   useWsConnectionStatusForEnvironment,
   wsUiStateForEnvironment,
@@ -1674,6 +1674,7 @@ export function ThreadDetailScreen(props: {
               providerDriver: threadProviderDriver,
               sourceProviderDriver: currentThread.session?.provider ?? null,
               claudeCacheReview: mobileClaudeCacheReview,
+              skipClaudeResumeReview: () => !isClaudeResumeReviewEnabled(),
               confirmStopBackgroundWork: mobileConfirmStopBackgroundWork,
               // The retained detail subscription already holds what the Claude
               // resume review reads; a send it clears skips the window read.

@@ -57,6 +57,15 @@ describe("settings reset ownership", () => {
     });
     expect(settingsRestorePlan(settings, "system", "node").patch).toEqual({});
   });
+  it("turns the Claude resume review back on as a local preference", () => {
+    const settings = { ...DEFAULT_UNIFIED_SETTINGS, claudeResumeReview: false };
+    expect(settingsRestorePlan(settings, "system", "client")).toEqual({
+      labels: ["Claude resume review"],
+      resetTheme: false,
+      patch: { claudeResumeReview: true },
+    });
+    expect(settingsRestorePlan(settings, "system", "node").patch).toEqual({});
+  });
   it("restores the thread alert switches as local preferences", () => {
     const settings = {
       ...DEFAULT_UNIFIED_SETTINGS,

@@ -38,6 +38,7 @@ export function buildUsageLimitResumeDispatch(input: {
   readonly api: EnvironmentApi;
   readonly thread: UsageLimitResumeThread;
   readonly claudeCacheReview?: ClaudeCacheReviewPresentation | undefined;
+  readonly skipClaudeResumeReview?: CommitSendTurnDispatchInput["skipClaudeResumeReview"];
   readonly assertMutationReady?: (() => void) | undefined;
   readonly createdAt: string;
   readonly newCommandId: () => CommandId;
@@ -48,6 +49,9 @@ export function buildUsageLimitResumeDispatch(input: {
   const sessionProvider = input.thread.session?.provider ?? null;
   return {
     ...(input.claudeCacheReview ? { claudeCacheReview: input.claudeCacheReview } : {}),
+    ...(input.skipClaudeResumeReview
+      ? { skipClaudeResumeReview: input.skipClaudeResumeReview }
+      : {}),
     ...(input.assertMutationReady ? { assertMutationReady: input.assertMutationReady } : {}),
     providerDriver: sessionProvider ?? limit.provider,
     sourceProviderDriver: sessionProvider,

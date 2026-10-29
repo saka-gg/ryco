@@ -7,6 +7,7 @@ import {
 } from "./newDraftDefaults";
 import { readNodeConfig, resolveNodeConfigSource } from "./nodeConfigSource";
 import { claudeCacheReviewPresentation } from "../components/chat/ClaudeCacheReview";
+import { isClaudeResumeReviewSkipped } from "./useSettings";
 import { confirmStopBackgroundWorkDialog } from "../components/chat/StopBackgroundWorkDialog";
 import type { ComputerTurnIntent } from "@ryco/contracts";
 import type { ClaudeCacheReviewPresentation } from "@ryco/client-runtime/state/composer";
@@ -882,6 +883,8 @@ export async function executeChatSendTurn(input: ExecuteChatSendTurnInput): Prom
         ? { readSubscribedClaudeReviewState: input.readSubscribedClaudeReviewState }
         : {}),
       ...(input.onBeforeTurnStart ? { onBeforeTurnStart: input.onBeforeTurnStart } : {}),
+      // "Don't ask again" on this device; background sends (no presentation) honour it too.
+      skipClaudeResumeReview: isClaudeResumeReviewSkipped,
       providerDriver: composer.selectedProvider,
       sourceProviderDriver: thread.sourceProviderDriver,
       assertMutationReady: captureReviewedSendReadiness(draft.environmentId, () =>
