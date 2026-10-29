@@ -223,6 +223,13 @@ type TextGenerationOp =
   | "answerSideQuestion"
   | "summarizeWorkspaceChanges";
 
+const MISSING_INSTANCE = "No provider instance registered for id";
+const DISABLED_INSTANCE = "is disabled in Ryco settings.";
+
+/** Whether an error detail is the router refusing a missing or disabled instance. */
+export const isTextGenerationInstanceUnavailable = (detail: string) =>
+  detail.startsWith(MISSING_INSTANCE) || detail.endsWith(DISABLED_INSTANCE);
+
 const resolveInstance = (
   registry: ProviderInstanceRegistryShape,
   operation: TextGenerationOp,
@@ -230,12 +237,14 @@ const resolveInstance = (
 ): Effect.Effect<ProviderInstance["textGeneration"], TextGenerationError> =>
   registry.getInstance(instanceId).pipe(
     Effect.flatMap((instance) =>
-      instance
+      instance?.enabled
         ? Effect.succeed(instance.textGeneration)
         : Effect.fail(
             new TextGenerationError({
               operation,
-              detail: `No provider instance registered for id '${instanceId}'.`,
+              detail: instance
+                ? `Provider instance '${instanceId}' ${DISABLED_INSTANCE}`
+                : `${MISSING_INSTANCE} '${instanceId}'.`,
             }),
           ),
     ),

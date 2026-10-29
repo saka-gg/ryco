@@ -2,7 +2,7 @@ import { it } from "@effect/vitest";
 import { Effect, PubSub, Result, Stream } from "effect";
 import { describe, expect } from "vite-plus/test";
 
-import { ProviderInstanceId } from "@ryco/contracts";
+import { type ModelSelection, ProviderInstanceId, TextGenerationError } from "@ryco/contracts";
 import { createModelSelection } from "@ryco/shared/model";
 import type { IssueContentGenerationResult } from "./TextGeneration.ts";
 
@@ -11,7 +11,10 @@ import type { ProviderInstanceRegistryShape } from "../provider/Services/Provide
 import type { TextGenerationShape } from "./TextGeneration.ts";
 import type { TextGenerationPolicy } from "./TextGenerationPolicy.ts";
 
-import { makeTextGenerationFromRegistry } from "./TextGeneration.ts";
+import {
+  isTextGenerationInstanceUnavailable,
+  makeTextGenerationFromRegistry,
+} from "./TextGeneration.ts";
 
 const makeStubTextGeneration = (overrides: Partial<TextGenerationShape>): TextGenerationShape => ({
   generateCommitMessage: () =>
@@ -29,6 +32,7 @@ const makeStubTextGeneration = (overrides: Partial<TextGenerationShape>): TextGe
 const makeStubInstance = (
   instanceId: ProviderInstanceId,
   textGeneration: TextGenerationShape,
+  enabled = true,
 ): ProviderInstance =>
   ({
     instanceId,
@@ -38,11 +42,58 @@ const makeStubInstance = (
       continuationKey: `${instanceId}:test`,
     },
     displayName: undefined,
-    enabled: true,
+    enabled,
     snapshot: {} as ProviderInstance["snapshot"],
     adapter: {} as ProviderInstance["adapter"],
     textGeneration,
   }) satisfies ProviderInstance;
+
+/** One call of every router operation, so a new operation cannot skip the enablement test. */
+const callEveryOperation = (
+  modelSelection: ModelSelection,
+): {
+  readonly [K in keyof TextGenerationShape]: (
+    tg: TextGenerationShape,
+  ) => Effect.Effect<object, TextGenerationError>;
+} => {
+  const cwd = process.cwd();
+  return {
+    generateCommitMessage: (tg) =>
+      tg.generateCommitMessage({
+        cwd,
+        branch: null,
+        stagedSummary: "",
+        stagedPatch: "",
+        modelSelection,
+      }),
+    generatePrContent: (tg) =>
+      tg.generatePrContent({
+        cwd,
+        baseBranch: "main",
+        headBranch: "feature",
+        commitSummary: "",
+        diffSummary: "",
+        diffPatch: "",
+        modelSelection,
+      }),
+    generateBranchName: (tg) => tg.generateBranchName({ cwd, message: "m", modelSelection }),
+    generateThreadTitle: (tg) => tg.generateThreadTitle({ cwd, message: "m", modelSelection }),
+    generateIssueContent: (tg) =>
+      tg.generateIssueContent({ cwd, mode: "title", body: "b", modelSelection }),
+    answerSideQuestion: (tg) =>
+      tg.answerSideQuestion({ cwd, context: "", question: "q", history: [], modelSelection }),
+    summarizeWorkspaceChanges: (tg) =>
+      tg.summarizeWorkspaceChanges({
+        cwd,
+        branch: null,
+        statusSummary: "",
+        diffPatch: "",
+        untrackedFiles: "",
+        unmergedLog: "",
+        modelSelection,
+      }),
+  };
+};
 
 const makeStubRegistry = (
   instances: ReadonlyArray<ProviderInstance>,

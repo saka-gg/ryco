@@ -66,7 +66,8 @@ editor of the node that recorded them with a row for that model ID. Coverage als
 counts the custom prices and mappings in effect, and Breakdown rows priced from a
 custom price say so.
 
-History includes disabled configured accounts. Codex and Claude instances resolve
+History includes disabled configured accounts (see
+[provider enablement](enablement.md)). Codex and Claude instances resolve
 stores with the same home and environment precedence as their runtime, including
 `CODEX_HOME`, `CLAUDE_CONFIG_DIR`, and `HOME`; shared stores count once.
 

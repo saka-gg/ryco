@@ -101,7 +101,10 @@ import type {
   ProviderAdapterCapabilities,
   ProviderAdapterShape,
 } from "../Services/ProviderAdapter.ts";
-import { ProviderAdapterRegistry } from "../Services/ProviderAdapterRegistry.ts";
+import {
+  ProviderAdapterRegistry,
+  type ProviderInstanceRoutingInfo,
+} from "../Services/ProviderAdapterRegistry.ts";
 import {
   ProviderService,
   type ProviderFreshSessionStartInput,
@@ -216,6 +219,17 @@ function toValidationError(
     ...(cause !== undefined ? { cause } : {}),
   });
 }
+
+/** Starting or resuming a runtime needs an enabled instance; adopting a live one does not. */
+const requireEnabledInstance = (operation: string, info: ProviderInstanceRoutingInfo) =>
+  info.enabled
+    ? Effect.void
+    : Effect.fail(
+        toValidationError(
+          operation,
+          `Provider instance '${info.instanceId}' is disabled in Ryco settings.`,
+        ),
+      );
 
 const decodeInputOrValidationError = <S extends Schema.Top>(input: {
   readonly operation: string;
@@ -1086,6 +1100,10 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           `Cannot recover thread '${input.binding.threadId}' because no provider resume state is persisted.`,
         );
       }
+      yield* requireEnabledInstance(
+        input.operation,
+        yield* registry.getInstanceInfo(bindingInstanceId),
+      );
 
       const resumeCwd = reachableConversationCwd({
         capabilities: adapter.capabilities,
@@ -1448,12 +1466,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           provider: resolvedProvider,
           runtimeSessionId,
         };
-        if (!instanceInfo.enabled) {
-          return yield* toValidationError(
-            "ProviderService.startSession",
-            `Provider instance '${resolvedInstanceId}' is disabled in Ryco settings.`,
-          );
-        }
+        yield* requireEnabledInstance("ProviderService.startSession", instanceInfo);
         const persistedBinding = Option.getOrUndefined(yield* directory.getBinding(threadId));
         const replacesPersistedRuntime =
           persistedBinding?.providerInstanceId === resolvedInstanceId &&
