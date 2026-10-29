@@ -209,6 +209,9 @@ describe("server boot import boundaries", () => {
       "apps/server/src/usage/usageDay.ts",
       "apps/server/src/usage/usageProtectedPaths.ts",
     ]);
+    // The ACP runtime loads with its drivers, the ACP Registry catalog with the first registry
+    // search or install.
+    expect(reached(/^apps\/server\/src\/provider\/acp\//u)).toEqual([]);
   });
 });
 
@@ -310,6 +313,8 @@ describe.skipIf(!hasCurrentBuild)("built server bundle", () => {
       expect(source).not.toMatch(/^\/\/#region src\/cliTrace\/traceSummary\.ts$/mu);
       // Loaded with the first usage summary (UsageServiceDeferred.ts).
       expect(source).not.toMatch(/^\/\/#region src\/usage\/UsageService\.ts$/mu);
+      // Loaded with the first ACP Registry search or install.
+      expect(source).not.toMatch(/^\/\/#region src\/provider\/acp\/AcpRegistryCatalog\.ts$/mu);
     }
   });
 });

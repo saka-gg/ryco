@@ -27,7 +27,10 @@ export interface ProviderOperationTimeouts {
 }
 
 export const DEFAULT_SESSION_START_TIMEOUT_MS = 120_000;
-/** The ACP registry driver may download its agent on first run. */
+/**
+ * The ACP registry driver never installs at session start, but it re-hashes every file of the
+ * installed agent before each spawn.
+ */
 export const DEFAULT_REGISTRY_SESSION_START_TIMEOUT_MS = 300_000;
 export const DEFAULT_TURN_ACCEPTANCE_TIMEOUT_MS = 90_000;
 export const DEFAULT_CONTROL_REQUEST_TIMEOUT_MS = 30_000;
