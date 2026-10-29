@@ -25,9 +25,11 @@ import {
   MessageId,
   type OrchestrationEvent,
   type OrchestrationThreadActivity,
+  type ServerWakeSource,
   type ThreadId,
 } from "@ryco/contracts";
 import { Option, Schema } from "effect";
+import { SERVER_WAKE_COPY } from "./serverWake.ts";
 
 export const PROVIDER_EFFECT_INTENT_KINDS = ["turn-start", "turn-steer", "session-stop"] as const;
 export type ProviderEffectIntentKind = (typeof PROVIDER_EFFECT_INTENT_KINDS)[number];
@@ -240,7 +242,8 @@ export const deliveryStateOf = (dispatchedAt: string | null): IntentDeliveryStat
 export const recoveryCopy = (input: {
   readonly kind: "turn-start" | "turn-steer";
   readonly deliveryState: IntentDeliveryState;
-  readonly delegatedReturn: boolean;
+  /** The server wake a turn start delivered (`serverWakeSource`), or null for a person's. */
+  readonly serverWake: ServerWakeSource | null;
 }): { readonly summary: string; readonly detail: string } => {
   const notSent = input.deliveryState === "not-sent";
   if (input.kind === "turn-steer") {
@@ -252,18 +255,9 @@ export const recoveryCopy = (input: {
         : "Ryco restarted while delivering this steer message. It may have reached the provider. Check the turn before sending it again.",
     };
   }
-  if (input.delegatedReturn) {
-    return notSent
-      ? {
-          summary: "Delegated return was not submitted",
-          detail:
-            "Ryco restarted before this delegated result reached the provider. Inspect the result before sending it manually.",
-        }
-      : {
-          summary: "Delegated return delivery unconfirmed",
-          detail:
-            "Ryco restarted while submitting this delegated result. It may have reached the provider. Inspect the parent thread before sending it manually.",
-        };
+  if (input.serverWake !== null) {
+    const copy = SERVER_WAKE_COPY[input.serverWake];
+    return notSent ? copy.notSent : copy.uncertain;
   }
   return notSent
     ? {

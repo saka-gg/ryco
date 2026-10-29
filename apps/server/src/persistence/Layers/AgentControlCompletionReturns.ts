@@ -18,8 +18,12 @@ import {
 import { Context, Effect, Layer, Schema } from "effect";
 import * as SqlClient from "effect/sql/SqlClient";
 import { toPersistenceSqlError } from "../Errors.ts";
-import { latestUserMessageIdQuery } from "../userMessageAnchors.ts";
-import { hasTurnStartEnded, hasTurnStartFailure } from "../delegatedRunStatus.ts";
+import { hasTurnStartFailure } from "../delegatedRunStatus.ts";
+import {
+  readLatestUserMessageId,
+  readPendingTurnStart,
+  readWakeStartState,
+} from "../serverWakeQueries.ts";
 
 /** Wake message ids carry this prefix; the turn they start is a delegation-wake turn. */
 export const DELEGATION_WAKE_MESSAGE_PREFIX = "delegation-result:";
@@ -307,12 +311,7 @@ export const makeCompletionReturnRepository = Effect.gen(function* () {
     WHERE thread_id = ${threadId} AND turn_id = ${turnId} LIMIT 1
   `.pipe(Effect.map((rows) => (rows[0]?.messageId ? MessageId.make(rows[0].messageId) : null))),
     );
-  const latestUserMessageId = (threadId: ThreadId) =>
-    safe(
-      latestUserMessageIdQuery(sql, threadId).pipe(
-        Effect.map((rows) => (rows[0] ? MessageId.make(rows[0].messageId) : null)),
-      ),
-    );
+  const latestUserMessageId = (threadId: ThreadId) => safe(readLatestUserMessageId(sql, threadId));
   // A completed message's whole text, wherever the projection keeps it.
   const messageText = sql.literal(
     "CASE WHEN m.text_json IS NULL THEN m.text ELSE json_extract(m.text_json, '$') END",
@@ -511,42 +510,10 @@ export const makeCompletionReturnRepository = Effect.gen(function* () {
     WHERE thread_id = ${threadId} AND turn_id = ${turnId} LIMIT 1
   `.pipe(Effect.map((rows) => rows[0] ?? null)),
     );
-  /**
-   * Newest unbound turn start of the thread and whether its start already ended
-   * without a turn (`startFailed`: it failed, or a Stop cancelled it).
-   */
-  const pendingTurnStart = (threadId: ThreadId) =>
-    safe(
-      Effect.gen(function* () {
-        const rows = yield* sql<{ messageId: string | null }>`
-    SELECT pending_message_id AS "messageId" FROM projection_turns
-    WHERE thread_id = ${threadId} AND turn_id IS NULL
-    ORDER BY row_id DESC LIMIT 1
-  `;
-        const row = rows[0];
-        if (!row) return null;
-        const messageId = row.messageId ?? "";
-        return {
-          messageId,
-          startFailed:
-            messageId.length > 0 && (yield* hasTurnStartEnded(sql, { threadId, messageId })),
-        };
-      }),
-    );
-  /** `failed`: the wake's start ended without a turn (it failed, or a Stop cancelled it). */
+  /** The shared server-wake reads (`serverWakeQueries.ts`); the fence takes the same ones. */
+  const pendingTurnStart = (threadId: ThreadId) => safe(readPendingTurnStart(sql, threadId));
   const wakeStartState = (threadId: ThreadId, messageId: MessageId) =>
-    safe(
-      Effect.gen(function* () {
-        const rows = yield* sql<{ turnId: string | null }>`
-    SELECT turn_id AS "turnId" FROM projection_turns
-    WHERE thread_id = ${threadId} AND pending_message_id = ${messageId}
-    ORDER BY row_id DESC LIMIT 1
-  `;
-        if (rows[0]?.turnId) return "bound" as const;
-        if (yield* hasTurnStartEnded(sql, { threadId, messageId })) return "failed" as const;
-        return rows[0] ? ("pending" as const) : ("absent" as const);
-      }),
-    );
+    safe(readWakeStartState(sql, { threadId, messageId }));
   const firstEventSequence = (threadId: ThreadId) =>
     safe(
       sql<{ sequence: number }>`

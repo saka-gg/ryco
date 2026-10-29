@@ -20,6 +20,7 @@ import {
   readScopedShellSnapshot,
 } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
 import { DeviceService, type DeviceServiceShape } from "../../device/Services/DeviceService.ts";
+import { runtimeModePrivilegeRank } from "../../orchestration/serverWake.ts";
 import type { ProjectionSnapshotQueryShape } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
 import { GitWorkflowService } from "../../git/GitWorkflowService.ts";
 import type { GitWorkflowServiceShape } from "../../git/GitWorkflowService.ts";
@@ -56,14 +57,6 @@ const handsOverArtifacts = (plan: AgentControlActionPlan) =>
 
 const startsLocalTaskChats = (plan: AgentControlActionPlan) =>
   plan.kind === "createThreads" && plan.entries.some((entry) => entry.localTaskId !== undefined);
-
-/** Privilege order of runtime modes: lower is less privileged. */
-export const agentControlRuntimeRank: Record<RuntimeMode, number> = {
-  "approval-required": 0,
-  "auto-accept-edits": 1,
-  auto: 2,
-  "full-access": 3,
-};
 
 const providerForSelection = (
   providers: ReadonlyArray<ServerProvider>,
@@ -319,8 +312,8 @@ const validatePlanAgainstSnapshot = (input: {
     const assertPrivilege = (target: OrchestrationThreadShell) =>
       Effect.gen(function* () {
         if (
-          agentControlRuntimeRank[target.runtimeMode] >
-          agentControlRuntimeRank[input.originRuntimeMode]
+          runtimeModePrivilegeRank[target.runtimeMode] >
+          runtimeModePrivilegeRank[input.originRuntimeMode]
         ) {
           return yield* fail(
             "privilege-escalation",
@@ -350,8 +343,8 @@ const validatePlanAgainstSnapshot = (input: {
           return yield* fail("project-unavailable", "The requested project is unavailable.");
         }
         if (
-          agentControlRuntimeRank[entry.runtimeMode] >
-          agentControlRuntimeRank[input.originRuntimeMode]
+          runtimeModePrivilegeRank[entry.runtimeMode] >
+          runtimeModePrivilegeRank[input.originRuntimeMode]
         ) {
           return yield* fail(
             "privilege-escalation",
@@ -410,8 +403,8 @@ const validatePlanAgainstSnapshot = (input: {
         yield* providerForSelection(input.providers, input.plan.modelSelection);
       if (
         input.plan.runtimeMode !== undefined &&
-        agentControlRuntimeRank[input.plan.runtimeMode] >
-          agentControlRuntimeRank[input.originRuntimeMode]
+        runtimeModePrivilegeRank[input.plan.runtimeMode] >
+          runtimeModePrivilegeRank[input.originRuntimeMode]
       ) {
         return yield* fail(
           "privilege-escalation",

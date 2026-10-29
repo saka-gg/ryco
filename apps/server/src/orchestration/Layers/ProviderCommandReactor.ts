@@ -37,6 +37,8 @@ import {
   recoveryCopy,
   type TrackedProviderIntentEvent,
 } from "../providerEffectIntents.ts";
+import { serverWakeCopy, serverWakeSource } from "../serverWake.ts";
+import type { ServerWakeSource } from "@ryco/contracts";
 import { matchesApprovalAttempt, questionAsCallback } from "../approvalResponses.ts";
 import { ProjectionPendingApprovalRepository } from "../../persistence/Services/ProjectionPendingApprovals.ts";
 import { ProjectionPendingApprovalRepositoryLive } from "../../persistence/Layers/ProjectionPendingApprovals.ts";
@@ -2200,17 +2202,18 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
       return yield* Effect.fail(new Error(REMOVED_PROJECT_MEMORY_MESSAGE));
     }
 
-    // A delegated wake is a normal queued turn start: ensureSessionForThread creates or
-    // resumes the session. The decider requires an unchanged model selection, so a handoff
-    // is unreachable here; keep the defensive check (never hand off on untrusted input).
+    // A server wake (delegated result, pull request update) is a normal queued turn start:
+    // ensureSessionForThread creates or resumes the session. The decider requires an
+    // unchanged model selection, so a handoff is unreachable here; keep the defensive check
+    // (never hand off on untrusted input).
     if (event.payload.delegationReturnGuard && event.payload.contextHandoff !== undefined) {
+      const refused = serverWakeCopy(event.payload.delegationReturnGuard).handoffRefused;
       yield* appendProviderFailureActivity({
         threadId: event.payload.threadId,
         kind: "provider.turn.start.failed",
         messageId: event.payload.messageId,
-        summary: "Delegated return was not submitted",
-        detail:
-          "A delegated result cannot start a model handoff. Inspect this result before sending it manually.",
+        summary: refused.summary,
+        detail: refused.detail,
         turnId: null,
         createdAt: event.payload.createdAt,
       });
@@ -3716,13 +3719,13 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
   const cancelTurnStart = (input: {
     readonly row: ProviderEffectIntentRow;
     readonly messageId: MessageId;
-    readonly delegatedReturn: boolean;
+    readonly serverWake: ServerWakeSource | null;
     readonly deliveryState: "not-sent" | "uncertain";
   }) => {
     const copy = recoveryCopy({
       kind: "turn-start",
       deliveryState: input.deliveryState,
-      delegatedReturn: input.delegatedReturn,
+      serverWake: input.serverWake,
     });
     return commitRecoveryOutcome(
       input.row,
@@ -3829,7 +3832,7 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
                 recoveryCopy({
                   kind: "turn-start",
                   deliveryState,
-                  delegatedReturn: handoffStart.payload.delegationReturnGuard !== undefined,
+                  serverWake: serverWakeSource(handoffStart.payload.delegationReturnGuard),
                 }).detail,
               );
               if (result === "owned") return yield* settleWithoutOutcome(row, "handoff-owned");
@@ -3844,7 +3847,7 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
             yield* cancelTurnStart({
               row,
               messageId,
-              delegatedReturn: turnStart?.payload.delegationReturnGuard !== undefined,
+              serverWake: serverWakeSource(turnStart?.payload.delegationReturnGuard),
               // An unreadable request cannot prove it was never sent.
               deliveryState: turnStart === undefined ? "uncertain" : deliveryState,
             });
@@ -3865,7 +3868,7 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
                 event,
                 {
                   status: "rejected",
-                  error: recoveryCopy({ kind: "turn-steer", deliveryState, delegatedReturn: false })
+                  error: recoveryCopy({ kind: "turn-steer", deliveryState, serverWake: null })
                     .detail,
                   // Only a steer that provably never reached the provider defers
                   // (stays queued, sent next). One that may have reached it fails
