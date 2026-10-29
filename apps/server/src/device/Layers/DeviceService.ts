@@ -13,7 +13,6 @@ import * as path from "node:path";
 
 import { makeBootOwnershipStore, NULL_BOOT_OWNERSHIP } from "../bootOwnership.ts";
 import { HostDeviceBackend } from "../HostDeviceBackend.ts";
-import { SshDeviceBackend } from "../SshDeviceBackend.ts";
 import { readDeviceHostConfig, sshDeviceHostId } from "../deviceHostConfig.ts";
 import { DeviceManager } from "../DeviceManager.ts";
 import { localDeviceHost } from "../localDeviceHost.ts";
@@ -55,13 +54,19 @@ export function makeDeviceServiceLayer(
         readDeviceHostConfig(options.hostsFile ?? process.env.RYCO_DEVICE_HOSTS_FILE),
       );
       const supported = ["darwin", "linux", "win32"].includes(platform) || hosts.length > 0;
-      const backend = new HostDeviceBackend([
-        localDeviceHost(platform),
-        ...hosts.map((config) => ({
-          host: { id: sshDeviceHostId(config), name: config.name, transport: "ssh" as const },
-          backend: new SshDeviceBackend(config),
-        })),
-      ]);
+      // Only nodes with a configured SSH device host load its backend and the
+      // host protocol; every other boot skips that code.
+      const sshHosts =
+        hosts.length === 0
+          ? []
+          : yield* Effect.promise(async () => {
+              const { SshDeviceBackend } = await import("../SshDeviceBackend.ts");
+              return hosts.map((config) => ({
+                host: { id: sshDeviceHostId(config), name: config.name, transport: "ssh" as const },
+                backend: new SshDeviceBackend(config),
+              }));
+            });
+      const backend = new HostDeviceBackend([localDeviceHost(platform), ...sshHosts]);
       // Local boots are recovered here; SSH workers recover their own boots on the Mac.
       const bootOwnership = supported
         ? makeBootOwnershipStore(options.bootOwnershipPath ?? defaultBootOwnershipPath())

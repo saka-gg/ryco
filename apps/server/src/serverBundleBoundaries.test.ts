@@ -177,6 +177,11 @@ describe("server boot import boundaries", () => {
     ).toEqual([]);
     expect(reached(/^packages\/shared\/src\/relayE2ee(?!Constants)/u)).toEqual([]);
     expect(graph.externals.filter((specifier) => specifier.startsWith("@noble/"))).toEqual([]);
+    // The SSH device backend and its host protocol load only when a node configures an SSH
+    // device host.
+    expect(
+      reached(/^apps\/server\/src\/device\/(?:SshDeviceBackend|deviceHostProtocol)\.ts$/u),
+    ).toEqual([]);
     // Source-control clients load with the provider that uses them (Forgejo answers
     // synchronous remote detection and stays eager).
     expect(

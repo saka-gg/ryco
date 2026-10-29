@@ -603,7 +603,13 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
           const run = async (): Promise<void> => {
             switch (plan.kind) {
               case "deviceBoot": {
-                const result = await service.manager.boot(plan.udid);
+                // Up while the thread's provider turn runs; an approval that
+                // lands after the turn ended holds nothing and the grace starts.
+                const result = await service.manager.holdForAgentTurn(
+                  plan.threadId,
+                  plan.udid,
+                  () => service.manager.boot(plan.udid),
+                );
                 if (result.kind === "boot-limit-reached") {
                   throw new AgentControlDeviceExecutionError(
                     AGENT_CONTROL_ERROR_CODES.deviceBootLimitReached,
@@ -614,7 +620,10 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
                 return;
               }
               case "deviceAttach":
-                await service.manager.attach(plan.threadId, plan.udid);
+                // The agent's attachment is metadata; its turn keeps the device up.
+                await service.manager.holdForAgentTurn(plan.threadId, plan.udid, () =>
+                  service.manager.attach(plan.threadId, plan.udid, "agent"),
+                );
                 service.manager.requestOpenPane(plan.threadId, plan.udid, "agent-tool");
                 return;
               case "deviceDetach":
@@ -703,7 +712,11 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
               plan.kind === "deviceDetach" ||
               plan.kind === "deviceShutdown"
                 ? action()
-                : service.manager.withAgentActivity(plan.threadId, action),
+                : // Approved actions may run after their turn: never join a later one.
+                  service.manager.withAgentActivity(plan.threadId, action, {
+                    udid: plan.udid,
+                    joinLateTurn: false,
+                  }),
             catch: (cause) =>
               cause instanceof AgentControlDeviceExecutionError
                 ? cause

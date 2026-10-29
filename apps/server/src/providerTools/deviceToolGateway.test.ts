@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 
-import { DeviceManager } from "../device/DeviceManager.ts";
+import { DEVICE_IDLE_SHUTDOWN_MS, DeviceManager } from "../device/DeviceManager.ts";
 import { FakeDeviceBackend } from "../device/FakeDeviceBackend.ts";
 import {
   DEVICE_TOOL_NAMES,
@@ -130,6 +130,49 @@ describe("device tool gateway", () => {
         (tool) => tool.name,
       ),
     ).toEqual(DEVICE_TOOL_NAMES);
+  });
+
+  it("holds a device an agent booted for its running turn, then lets it idle out", async () => {
+    const backend = new FakeDeviceBackend();
+    const timers = new Map<number, { readonly handler: () => void; readonly ms: number }>();
+    let nextTimer = 0;
+    manager = new DeviceManager({
+      backend,
+      attachDeadlineMs: 0,
+      setTimeout: (handler, ms) => {
+        nextTimer += 1;
+        timers.set(nextTimer, { handler, ms });
+        return nextTimer as unknown as NodeJS.Timeout;
+      },
+      clearTimeout: (handle) => {
+        timers.delete(handle as unknown as number);
+      },
+    });
+    const idleTimers = () =>
+      [...timers.values()].filter((timer) => timer.ms === DEVICE_IDLE_SHUTDOWN_MS);
+    gateway = await startDeviceToolGateway(manager);
+    const binding = gateway.createBinding({ threadId: "thread-a", isTurnActive: () => true });
+    manager.observeThreadTurn("thread-a", "turn-1");
+
+    const booted = await post(binding.url, binding.headers, "tools/call", {
+      name: "device_boot",
+      arguments: { udid: "FAKE-0001" },
+    });
+    expect((booted.body as { result: { isError?: boolean } }).result.isError).not.toBe(true);
+    expect(backend.callsOfKind("boot")).toHaveLength(1);
+    // Attached for the agent, and held only by the running turn.
+    expect((await manager.getThreadState("thread-a")).attachedDeviceUdid).toBe("FAKE-0001");
+    expect(idleTimers()).toHaveLength(0);
+
+    manager.observeThreadTurn("thread-a", null);
+    expect(idleTimers()).toHaveLength(1);
+    idleTimers()[0]!.handler();
+    for (let attempt = 0; attempt < 500; attempt += 1) {
+      if (backend.callsOfKind("shutdown").length > 0) break;
+      await new Promise((resolve) => setTimeout(resolve, 1));
+    }
+
+    expect(backend.callsOfKind("shutdown").map((call) => call.udid)).toEqual(["FAKE-0001"]);
   });
 
   it("keeps recoverable navigation misses out of the viewer error state", () => {

@@ -207,10 +207,23 @@ Ryco distinguishes two boot sources:
 
 At most three Ryco-owned simulators may be booted globally. A fourth boot returns a structured
 `boot-limit-reached` result with safe shutdown candidates; it is not a generic failure. Switching a
-thread away from an otherwise unused Ryco-owned device shuts that device down immediately. Plain
-detach or thread archive/deletion starts a ten-minute idle timer, rechecked before shutdown. Server
-disposal finalizes recordings, stops streams, and shuts down every Ryco-owned device. Any attachment
-from another thread prevents cleanup.
+thread away from an otherwise unused Ryco-owned device shuts that device down immediately; the old
+device's frame socket, which the switching pane closes only after the switch, does not count.
+
+Otherwise a Ryco-owned device stays up while anything still uses it: a boot in flight, a recording,
+an in-flight device call (pane input, an agent tool, an Agent Control action), a frame viewer, a
+thread a person attached, or an agent's hold for the provider turn that is still its thread's
+running turn (as the orchestration projection's `thread.session-set` reports it). An agent's
+attachment is metadata and does not count. When the last of these settles, a ten-minute idle grace
+starts; it is rechecked when it fires and again after the stream is torn down, and the shutdown is
+abandoned if anything arrived meanwhile; a refused simctl shutdown starts the grace over. Thread
+archive, trash and deletion end that thread's attachment and holds; unlike a detach, they leave a
+recording running while a person on another thread still watches the device. Input, attaches,
+viewers and recordings that arrive while an idle shutdown is already with simctl wait for it and
+then boot the device again, within the cap; an explicit shutdown waits for it instead of issuing a
+second one. An approved Agent Control action holds the device only for the turn running when it
+starts. Server disposal finalizes recordings, stops streams, and shuts down every Ryco-owned
+device.
 
 Owned UDIDs are written atomically with the owning server PID. On startup, Ryco reclaims only a
 still-booted UDID recorded by a process that is no longer alive. Missing, corrupt, ambiguous, or
