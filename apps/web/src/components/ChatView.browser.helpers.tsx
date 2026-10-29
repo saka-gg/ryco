@@ -39,6 +39,7 @@ import { RouterProvider, createMemoryHistory } from "@tanstack/react-router";
 import { Option } from "effect";
 import { HttpResponse, http, ws } from "msw";
 import { setupWorker } from "msw/browser";
+import { StrictMode } from "react";
 import { page, userEvent } from "vite-plus/test/browser";
 import { afterAll, afterEach, beforeAll, beforeEach, expect, vi } from "vite-plus/test";
 import { useMessageQueueStore } from "../messageQueueStore";
@@ -2402,6 +2403,8 @@ async function mountChatView(options: {
   configureFixture?: (fixture: TestFixture) => void;
   resolveRpc?: (body: NormalizedWsRpcRequestBody) => unknown | undefined;
   initialPath?: string;
+  /** Renders under StrictMode, as the dev app does, so effects run twice on mount. */
+  strictMode?: boolean;
 }): Promise<MountedChatView> {
   fixture = buildFixture(options.snapshot);
   options.configureFixture?.(fixture);
@@ -2437,14 +2440,14 @@ async function mountChatView(options: {
     }),
   );
 
-  const screen = await render(
+  const app = (
     <AppAtomRegistryProvider>
       <RouterProvider router={router} />
-    </AppAtomRegistryProvider>,
-    {
-      container: host,
-    },
+    </AppAtomRegistryProvider>
   );
+  const screen = await render(options.strictMode ? <StrictMode>{app}</StrictMode> : app, {
+    container: host,
+  });
 
   await waitForWsClient();
   await waitForAppBootstrap();

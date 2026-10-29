@@ -452,6 +452,8 @@ export const SETTINGS_SEARCH_INDEX: ReadonlyArray<SettingsSearchEntry> = [
     owner: "client",
     description: "Scan to open this backend on another device.",
     keywords: "qr code phone mobile",
+    // PAIRING_LINK_TARGET_ID: no heading reads "Pairing link", so it jumps to the Network access row.
+    targetId: "pairing-link",
   },
   {
     section: "connections",

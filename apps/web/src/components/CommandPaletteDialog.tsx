@@ -72,6 +72,7 @@ import {
   useEffect,
   useLayoutEffect,
   useMemo,
+  useRef,
   useState,
   type KeyboardEvent,
   type ReactNode,
@@ -1389,19 +1390,23 @@ function OpenCommandPaletteDialog() {
     [addProjectEnvironmentItems],
   );
 
+  /** False, after saying why, when the routed node does not let this client add projects. */
+  const ensureAddProjectAllowed = useCallback(() => {
+    if (addProjectCapability.allowed) return true;
+    toastManager.add(
+      stackedThreadToast({
+        type: "error",
+        title: "Unable to add project",
+        description:
+          hostedCapabilityCopy(addProjectCapability, routedNodeLabel) ??
+          "This action is unavailable.",
+      }),
+    );
+    return false;
+  }, [addProjectCapability, routedNodeLabel]);
+
   const openAddProjectFlow = useCallback(() => {
-    if (!addProjectCapability.allowed) {
-      toastManager.add(
-        stackedThreadToast({
-          type: "error",
-          title: "Unable to add project",
-          description:
-            hostedCapabilityCopy(addProjectCapability, routedNodeLabel) ??
-            "This action is unavailable.",
-        }),
-      );
-      return;
-    }
+    if (!ensureAddProjectAllowed()) return;
     if (addProjectEnvironmentOptions.length > 1) {
       pushPaletteView({
         addonIcon: <FolderPlusIcon className={ADDON_ICON_CLASS} />,
@@ -1424,16 +1429,16 @@ function OpenCommandPaletteDialog() {
 
     void startAddProjectSourceSelection(environmentId);
   }, [
-    addProjectCapability,
     addProjectEnvironmentGroups,
     addProjectEnvironmentOptions.length,
     defaultAddProjectEnvironmentId,
-    routedNodeLabel,
+    ensureAddProjectAllowed,
     startAddProjectSourceSelection,
   ]);
 
   useLayoutEffect(() => {
-    if (openIntent?.kind !== "add-project") {
+    // An intent with a path is added by the effect after `handleAddProject`.
+    if (openIntent?.kind !== "add-project" || openIntent.path !== undefined) {
       return;
     }
     clearOpenIntent();
@@ -1980,7 +1985,8 @@ function OpenCommandPaletteDialog() {
       rawCwd: string,
       target?: {
         readonly environmentId: EnvironmentId;
-        readonly api: EnvironmentApi;
+        /** Read for `environmentId` when absent. */
+        readonly api?: EnvironmentApi;
       },
     ) => {
       const environmentId = target?.environmentId ?? browseEnvironmentId;
@@ -2098,6 +2104,27 @@ function OpenCommandPaletteDialog() {
       threads,
     ],
   );
+
+  // A folder handed over with its path, as first-run setup does for a dropped
+  // one, skips the source list. Declared after `handleAddProject`, which the
+  // effect above `handleAddProject` could not reference.
+  //
+  // Unlike the other intents this one changes the node, so it runs once per
+  // intent: StrictMode replays a fresh palette's mount effects with the same
+  // intent, which would add the folder twice. Keyed by the intent itself, not
+  // its `requestId`, which starts over at 1 once the intent is cleared.
+  const addedFolderIntentRef = useRef<typeof openIntent>(null);
+  useLayoutEffect(() => {
+    if (openIntent?.kind !== "add-project" || openIntent.path === undefined) {
+      return;
+    }
+    if (addedFolderIntentRef.current === openIntent) return;
+    addedFolderIntentRef.current = openIntent;
+    clearOpenIntent();
+    if (!ensureAddProjectAllowed()) return;
+    const { path, environmentId } = openIntent;
+    void handleAddProject(path, environmentId ? { environmentId } : undefined);
+  }, [clearOpenIntent, ensureAddProjectAllowed, handleAddProject, openIntent]);
 
   const getDefaultCloneParentPath = useCallback(
     (environmentId: EnvironmentId): string =>

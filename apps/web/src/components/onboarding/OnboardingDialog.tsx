@@ -3,8 +3,10 @@ import {
   CheckIcon,
   FolderOpenIcon,
   MessageSquareIcon,
+  MonitorSmartphoneIcon,
   SettingsIcon,
   GitBranchIcon,
+  type LucideIcon,
 } from "lucide-react";
 import {
   WS_METHODS,
@@ -23,9 +25,11 @@ import {
 import { getWsConnectionStatusForEnvironment } from "../../rpc/wsConnectionState";
 import { applyProvidersUpdated, usePrimaryServerConfigSelector } from "../../rpc/serverState";
 import { useCommandPaletteStore } from "../../commandPaletteStore";
+import { cn } from "../../lib/utils";
 import { useSettingsDialogStore } from "../../settingsDialogStore";
 import { getProviderSummary } from "../settings/providerStatus";
 import { PROVIDER_CLIENT_DEFINITIONS } from "../settings/providerDriverMeta";
+import { PAIRING_LINK_TARGET_ID, requestSettingsReveal } from "../settings/settingsSearchReveal";
 import { Button } from "../ui/button";
 import {
   Dialog,
@@ -38,6 +42,7 @@ import {
 } from "../ui/dialog";
 import { notifySurfaceLoadFailure } from "../ui/surfaceLoadFailure";
 import { ONBOARDING_STEPS, type OnboardingOutcome, type OnboardingStep } from "./onboardingState";
+import { useWindowFolderDrop } from "./useWindowFolderDrop";
 
 const STEP_LABELS = { providers: "Providers", project: "Project", tour: "Quick tour" };
 const PROVIDER_GUIDES: Readonly<Record<string, string>> = {
@@ -64,6 +69,51 @@ function keepTerminalEscape(event: KeyboardEvent<HTMLElement>) {
   if (event.key === "Escape" && event.target instanceof Element && event.target.closest(".xterm")) {
     event.stopPropagation();
   }
+}
+
+interface TourItem {
+  readonly icon: LucideIcon;
+  readonly title: string;
+  readonly text: string;
+  /** Rows in Settings → Connections to reveal; setup links to them and adds no flow of its own. */
+  readonly actions?: readonly { readonly label: string; readonly reveal: string }[];
+}
+
+/** `desktop`: Connections shows the Hub section only in the desktop app. */
+function tourItems(desktop: boolean): readonly TourItem[] {
+  return [
+    {
+      icon: MessageSquareIcon,
+      title: "Start a task",
+      text: "Choose a project, open a new task, and pick your provider and model before sending a request.",
+    },
+    {
+      icon: GitBranchIcon,
+      title: "Review the work",
+      text: "Follow the conversation, answer approval requests, and inspect changes in the workspace panel.",
+    },
+    {
+      icon: SettingsIcon,
+      title: "Make it yours",
+      text: "Use Settings for providers and preferences. Replay this tour from This app or This browser → General.",
+    },
+    {
+      icon: MonitorSmartphoneIcon,
+      title: "Use Ryco on your other devices",
+      text: "Open this computer on your phone or another browser with a pairing link, or connect more computers.",
+      actions: [
+        { label: "Pairing link", reveal: PAIRING_LINK_TARGET_ID },
+        { label: "Connect a computer", reveal: "Remote environments" },
+        ...(desktop ? [{ label: "Ryco Hub", reveal: "Hub" }] : []),
+      ],
+    },
+  ];
+}
+
+/** Opens Settings → Connections on this app and scrolls to `target`. */
+function revealConnectionsSetting(target: string) {
+  useSettingsDialogStore.getState().openSettings("connections");
+  requestSettingsReveal(target);
 }
 
 export interface OnboardingDialogProps {
@@ -124,6 +174,20 @@ export function OnboardingDialog({
   const shownSignIn =
     signInProvider !== undefined && signInReady ? signInProvider.instanceId : null;
   usePreloadWhenIdle(ProviderSignInSection, anySignIn);
+  // Only Ryco Desktop can read a dropped folder's absolute path. Bound while
+  // the project step shows, so a drop with Settings or the picker open, or
+  // while reconnecting, is not taken.
+  const folderDropEnabled =
+    open &&
+    step === "project" &&
+    ready &&
+    projectCapability.allowed &&
+    window.desktopBridge?.getPathForFile !== undefined;
+  const folderDrop = useWindowFolderDrop({
+    enabled: folderDropEnabled,
+    // The palette's add-project path dedupes, creates and opens the project.
+    onFolder: (path) => useCommandPaletteStore.getState().openAddProject({ path, environmentId }),
+  });
 
   useEffect(() => {
     generation.current += 1;
@@ -186,7 +250,7 @@ export function OnboardingDialog({
       <DialogPopup className="max-w-2xl" bottomStickOnMobile={false}>
         <DialogHeader>
           <p className="text-xs font-medium tracking-wide text-muted-foreground">
-            WELCOME TO RYCO · {stepIndex + 1} OF 3
+            WELCOME TO RYCO · {stepIndex + 1} OF {ONBOARDING_STEPS.length}
           </p>
           <DialogTitle>
             {step === "providers"
@@ -353,12 +417,27 @@ export function OnboardingDialog({
             </>
           )}
           {step === "project" && (
-            <div className="space-y-5 py-5">
+            <div
+              className={cn(
+                "-mx-4 space-y-5 rounded-xl px-4 py-5",
+                folderDrop.dragging && "outline-2 outline-dashed outline-ring",
+              )}
+            >
               <FolderOpenIcon className="size-9 text-muted-foreground" aria-hidden />
               <p className="text-sm text-muted-foreground">
                 The project picker handles folders, Git repositories, and existing projects. Close
                 it to return here; your setup progress stays in place.
               </p>
+              {folderDropEnabled && (
+                <p className="text-sm text-muted-foreground">
+                  {folderDrop.dragging ? "Drop a folder to add it." : "Or drop a folder here."}
+                </p>
+              )}
+              {folderDrop.error && (
+                <p role="alert" className="text-sm text-destructive">
+                  {folderDrop.error}
+                </p>
+              )}
               {projectCount > 0 && (
                 <p role="status" className="flex items-center gap-2 text-sm">
                   <CheckIcon aria-hidden className="size-4" />
@@ -386,31 +465,32 @@ export function OnboardingDialog({
           )}
           {step === "tour" && (
             <ol className="divide-y">
-              {[
-                {
-                  icon: MessageSquareIcon,
-                  title: "Start a task",
-                  text: "Choose a project, open a new task, and pick your provider and model before sending a request.",
-                },
-                {
-                  icon: GitBranchIcon,
-                  title: "Review the work",
-                  text: "Follow the conversation, answer approval requests, and inspect changes in the workspace panel.",
-                },
-                {
-                  icon: SettingsIcon,
-                  title: "Make it yours",
-                  text: "Use Settings for providers and preferences. Replay this tour from This app or This browser → General.",
-                },
-              ].map(({ icon: Icon, title, text }) => (
-                <li key={title} className="flex gap-4 py-5">
-                  <Icon aria-hidden className="mt-0.5 size-5 shrink-0 text-muted-foreground" />
-                  <div>
-                    <h3 className="text-sm font-medium">{title}</h3>
-                    <p className="mt-1 text-sm text-muted-foreground">{text}</p>
-                  </div>
-                </li>
-              ))}
+              {tourItems(window.desktopBridge !== undefined).map(
+                ({ icon: Icon, title, text, actions }) => (
+                  <li key={title} className="flex gap-4 py-5">
+                    <Icon aria-hidden className="mt-0.5 size-5 shrink-0 text-muted-foreground" />
+                    <div>
+                      <h3 className="text-sm font-medium">{title}</h3>
+                      <p className="mt-1 text-sm text-muted-foreground">{text}</p>
+                      {actions && (
+                        <div className="mt-3 flex flex-wrap gap-2">
+                          {actions.map((action) => (
+                            <Button
+                              key={action.label}
+                              size="xs"
+                              variant="outline"
+                              disabled={!ready}
+                              onClick={() => revealConnectionsSetting(action.reveal)}
+                            >
+                              {action.label}
+                            </Button>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  </li>
+                ),
+              )}
             </ol>
           )}
         </DialogPanel>

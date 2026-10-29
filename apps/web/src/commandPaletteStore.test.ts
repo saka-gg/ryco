@@ -1,5 +1,7 @@
 import { afterEach, describe, expect, it } from "vite-plus/test";
 
+import { EnvironmentId } from "@ryco/contracts";
+
 import { useCommandPaletteStore } from "./commandPaletteStore";
 
 const initialState = useCommandPaletteStore.getState();
@@ -59,5 +61,29 @@ describe("workspace search mode", () => {
       workspaceSearchMode: null,
       openIntent: { kind: "search", query: "deploy" },
     });
+  });
+});
+
+describe("add-project intent", () => {
+  it("carries a dropped folder's path and environment", () => {
+    state().openAddProject();
+    const environmentId = EnvironmentId.make("environment-local");
+    state().openAddProject({ path: "/repo/dropped", environmentId });
+    expect(state()).toMatchObject({
+      open: true,
+      openIntent: { kind: "add-project", requestId: 2, path: "/repo/dropped", environmentId },
+    });
+  });
+
+  it("stores neither without a folder", () => {
+    state().openAddProject();
+    expect(state().openIntent).toEqual({ kind: "add-project", requestId: 1 });
+  });
+
+  it("ignores a click event passed as the folder", () => {
+    // Sidebar buttons hand the action to `onClick` as it is.
+    const onClick = state().openAddProject as (event: unknown) => void;
+    onClick({ type: "click", target: null, nativeEvent: {} });
+    expect(state().openIntent).toEqual({ kind: "add-project", requestId: 1 });
   });
 });

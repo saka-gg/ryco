@@ -1305,6 +1305,76 @@ describe("ChatView Navigation (full app)", () => {
     }
   });
 
+  it("adds a folder handed over with its path once, without showing the source list", async () => {
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot: createSnapshotWithSecondaryProject(),
+      resolveRpc: (body) =>
+        body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand
+          ? { sequence: fixture.snapshot.snapshotSequence + 1 }
+          : undefined,
+      // The dev app replays the palette's mount effects; the folder is still added once.
+      strictMode: true,
+    });
+    const projectCreates = () =>
+      wsRequests.filter(
+        (request) =>
+          request._tag === ORCHESTRATION_WS_METHODS.dispatchCommand &&
+          request.type === "project.create",
+      );
+
+    // The palette mounts for the flow, but never shows the add-project sources.
+    let sawSourceList = false;
+    const observer = new MutationObserver(() => {
+      sawSourceList ||=
+        document
+          .querySelector('[data-testid="command-palette"]')
+          ?.textContent?.includes("Local folder") === true;
+    });
+    observer.observe(document.body, { childList: true, subtree: true, characterData: true });
+
+    try {
+      await waitForServerConfigToApply();
+      // A folder that already is a project opens it instead of adding it again.
+      useCommandPaletteStore.getState().openAddProject({
+        path: "/repo/clients/docs-portal",
+        environmentId: LOCAL_ENVIRONMENT_ID,
+      });
+      await waitForURL(
+        mounted.router,
+        (path) => path === serverThreadPath("thread-secondary-project" as ThreadId),
+        "Route should have changed to the existing project's latest thread.",
+      );
+      await vi.waitFor(() => expect(useCommandPaletteStore.getState().open).toBe(false));
+      expect(projectCreates()).toHaveLength(0);
+
+      useCommandPaletteStore.getState().openAddProject({ path: "/repo/new" });
+      await vi.waitFor(
+        () => {
+          expect(projectCreates()).toEqual([
+            expect.objectContaining({
+              workspaceRoot: "/repo/new",
+              projectMetadataDir: ".ryco",
+              title: "new",
+            }),
+          ]);
+        },
+        { timeout: 8_000, interval: 16 },
+      );
+      await waitForURL(
+        mounted.router,
+        (path) => UUID_ROUTE_RE.test(path),
+        "Route should have changed to a new draft thread after adding the folder.",
+      );
+      await vi.waitFor(() => expect(useCommandPaletteStore.getState().open).toBe(false));
+      expect(projectCreates()).toHaveLength(1);
+      expect(sawSourceList).toBe(false);
+    } finally {
+      observer.disconnect();
+      await mounted.cleanup();
+    }
+  });
+
   it("shows clone destination controls after resolving an add project repository", async () => {
     const mounted = await mountChatView({
       viewport: DEFAULT_VIEWPORT,

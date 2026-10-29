@@ -1,8 +1,22 @@
 import type { ThreadLifecycleAction } from "@ryco/client-runtime/state/threads";
+import type { EnvironmentId } from "@ryco/contracts";
 import { create } from "zustand";
 
+/** A folder to add straight away, such as one dropped on first-run setup. */
+interface AddProjectFolder {
+  readonly path?: string;
+  /** Defaults to the palette's own add-project environment. */
+  readonly environmentId?: EnvironmentId;
+}
+
 type CommandPaletteOpenIntent =
-  | { kind: "add-project" | "split-thread" | "snooze-thread"; requestId: number }
+  | {
+      kind: "add-project";
+      requestId: number;
+      path?: string;
+      environmentId?: EnvironmentId | undefined;
+    }
+  | { kind: "split-thread" | "snooze-thread"; requestId: number }
   /** Opens with `query` already typed, e.g. the sidebar field's "Search everywhere". */
   | { kind: "search"; query: string; requestId: number };
 
@@ -63,7 +77,8 @@ interface CommandPaletteStore {
   setOpen: (open: boolean) => void;
   /** Opens or closes the palette; from a workspace search it shows the command list. */
   toggleOpen: () => void;
-  openAddProject: () => void;
+  /** Opens the add-project flow; with a `path`, adds that folder without the source list. */
+  openAddProject: (folder?: AddProjectFolder) => void;
   /** Opens straight into the thread picker for a new split pane. */
   openSplitThread: () => void;
   /** Opens straight into the snooze times for the open thread. */
@@ -87,13 +102,15 @@ export const useCommandPaletteStore = create<CommandPaletteStore>((set) => ({
       if (state.open && state.workspaceSearchMode !== null) return { workspaceSearchMode: null };
       return { open: !state.open, ...(state.open ? { openIntent: null } : {}) };
     }),
-  openAddProject: () =>
+  openAddProject: (folder) =>
     set((state) => ({
       open: true,
       workspaceSearchMode: null,
       openIntent: {
         kind: "add-project",
         requestId: (state.openIntent?.requestId ?? 0) + 1,
+        // Picked, not spread: buttons pass this as their click handler, event and all.
+        ...(folder?.path ? { path: folder.path, environmentId: folder.environmentId } : {}),
       },
     })),
   openSplitThread: () =>

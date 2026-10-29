@@ -1,6 +1,7 @@
 import "../../index.css";
 import { useSyncExternalStore } from "react";
 import {
+  type DesktopBridge,
   EnvironmentId,
   ProviderDriverKind,
   ProviderInstanceId,
@@ -13,9 +14,13 @@ import { page, userEvent } from "vite-plus/test/browser";
 import { render } from "vitest-browser-react";
 import { useSettingsDialogStore } from "../../settingsDialogStore";
 import { useCommandPaletteStore } from "../../commandPaletteStore";
+import {
+  PAIRING_LINK_TARGET_ID,
+  useSettingsSearchRevealStore,
+} from "../settings/settingsSearchReveal";
 import { OnboardingCoordinator } from "./OnboardingCoordinator";
 import { OnboardingReplaySetting } from "./OnboardingReplaySetting";
-import { useOnboardingReplayStore } from "./onboardingState";
+import { ONBOARDING_STEPS, useOnboardingReplayStore } from "./onboardingState";
 import type { ProviderSignInSectionProps } from "../settings/ProviderSignInSection";
 
 interface FixtureConfig {
@@ -42,6 +47,7 @@ const fixture = vi.hoisted(() => ({
   updateSettings: vi.fn(),
   refresh: vi.fn<() => Promise<{ providers: readonly ServerProvider[] }>>(),
   apply: vi.fn(),
+  getPathForFile: vi.fn<(file: File) => Promise<string | null>>(),
 }));
 function useFixtureRevision() {
   useSyncExternalStore(
@@ -150,6 +156,13 @@ vi.mock("../settings/ProviderSignInSection", () => {
   };
 });
 
+vi.mock("../../localApi", () => ({
+  readLocalApi: () => ({ shell: { getPathForFile: fixture.getPathForFile } }),
+  ensureLocalApi: vi.fn(),
+  createLocalApi: vi.fn(),
+  __resetLocalApiForTests: vi.fn(),
+}));
+
 let mounted: Awaited<ReturnType<typeof render>> | undefined;
 const provider = (
   id: string,
@@ -202,6 +215,26 @@ async function update() {
 }
 const dialog = () => page.getByRole("dialog");
 const continueButton = () => page.getByRole("button", { name: "Continue", exact: true });
+const droppedFolder = new File([], "dropped");
+const droppedFile = new File(["notes"], "notes.txt", { type: "text/plain" });
+/** A file drag as Chromium dispatches it, with the drag items a drop reads. */
+function fileDragEvent(type: "dragenter" | "dragleave" | "drop", files: readonly File[] = []) {
+  const event = new Event(type, { bubbles: true, cancelable: true });
+  Object.defineProperty(event, "dataTransfer", {
+    value: {
+      types: ["Files"],
+      dropEffect: "none",
+      files,
+      items: files.map((file) => ({
+        kind: "file",
+        getAsFile: () => file,
+        webkitGetAsEntry: () => ({ isDirectory: file === droppedFolder }),
+      })),
+    },
+  });
+  window.dispatchEvent(event);
+  return event;
+}
 
 beforeEach(async () => {
   fixture.id = `onboarding-${crypto.randomUUID()}`;
@@ -220,8 +253,10 @@ beforeEach(async () => {
   fixture.apply.mockReset();
   fixture.refresh.mockReset();
   fixture.refresh.mockResolvedValue({ providers: [provider("Refreshed")] });
+  fixture.getPathForFile.mockReset().mockResolvedValue("/repo/dropped");
   useOnboardingReplayStore.getState().consume();
   useSettingsDialogStore.getState().closeSettings();
+  useSettingsSearchRevealStore.setState({ request: null });
   useCommandPaletteStore.getState().setOpen(false);
   await page.viewport(1100, 720);
 });
@@ -355,6 +390,128 @@ describe("local first-run onboarding", () => {
     expect(fixture.settings.localOnboardingCompletedEnvironmentIds.includes(fixture.id)).toBe(
       false,
     );
+  });
+
+  it("links the tour to Connections and returns to the tour when Settings closes", async () => {
+    await mount();
+    await continueButton().click();
+    await continueButton().click();
+    await expect
+      .element(page.getByText(`WELCOME TO RYCO · 3 OF ${ONBOARDING_STEPS.length}`))
+      .toBeVisible();
+    // Connections shows the Hub section only in the desktop app, and so does the tour.
+    expect(page.getByRole("button", { name: "Ryco Hub" }).elements()).toHaveLength(0);
+    await page.getByRole("button", { name: "Pairing link" }).click();
+    expect(useSettingsDialogStore.getState()).toMatchObject({
+      open: true,
+      section: "connections",
+      editingScope: "client",
+      targetEnvironmentId: null,
+    });
+    expect(useSettingsSearchRevealStore.getState().request?.targetId).toBe(PAIRING_LINK_TARGET_ID);
+    expect(fixture.settings.localOnboardingCompletedEnvironmentIds.includes(fixture.id)).toBe(
+      false,
+    );
+    await expect.element(dialog()).not.toBeInTheDocument();
+    await page.getByRole("button", { name: "Close fixture settings" }).click();
+    await expect
+      .element(page.getByRole("heading", { name: "Your first task, in three moves" }))
+      .toBeVisible();
+    await expect
+      .element(page.getByText(`WELCOME TO RYCO · 3 OF ${ONBOARDING_STEPS.length}`))
+      .toBeVisible();
+    await page.getByRole("button", { name: "Connect a computer" }).click();
+    expect(useSettingsSearchRevealStore.getState().request?.targetId).toBe("Remote environments");
+  });
+
+  it("links the desktop app's tour to its Hub section", async () => {
+    window.desktopBridge = {} as DesktopBridge;
+    try {
+      await mount();
+      await continueButton().click();
+      await continueButton().click();
+      await page.getByRole("button", { name: "Ryco Hub" }).click();
+      expect(useSettingsDialogStore.getState()).toMatchObject({
+        open: true,
+        section: "connections",
+        editingScope: "client",
+      });
+      expect(useSettingsSearchRevealStore.getState().request?.targetId).toBe("Hub");
+    } finally {
+      Reflect.deleteProperty(window, "desktopBridge");
+    }
+  });
+
+  it("disables the Connections links while the machine reconnects", async () => {
+    await mount();
+    await continueButton().click();
+    await continueButton().click();
+    fixture.connection.phase = "disconnected";
+    await update();
+    for (const name of ["Pairing link", "Connect a computer"]) {
+      await expect.element(page.getByRole("button", { name })).toBeDisabled();
+    }
+  });
+
+  it("adds a folder dropped anywhere on the desktop app's project step", async () => {
+    window.desktopBridge = { getPathForFile: () => "/repo/dropped" } as unknown as DesktopBridge;
+    try {
+      await mount();
+      await expect
+        .element(page.getByRole("heading", { name: "Bring your coding agent" }))
+        .toBeVisible();
+      // Only the project step takes drops.
+      expect(fileDragEvent("drop", [droppedFolder]).defaultPrevented).toBe(false);
+      await continueButton().click();
+      await expect.element(page.getByText("Or drop a folder here.")).toBeVisible();
+      fileDragEvent("dragenter");
+      await expect.element(page.getByText("Drop a folder to add it.")).toBeVisible();
+      fileDragEvent("dragleave");
+      await expect.element(page.getByText("Or drop a folder here.")).toBeVisible();
+
+      expect(fileDragEvent("drop", [droppedFile]).defaultPrevented).toBe(true);
+      await expect.element(page.getByRole("alert")).toHaveTextContent("Drop a folder, not a file.");
+      fixture.getPathForFile.mockResolvedValueOnce(null);
+      fileDragEvent("drop", [droppedFolder]);
+      await expect
+        .element(page.getByRole("alert"))
+        .toHaveTextContent("Could not read the folder's path. Use Add project instead.");
+      expect(useCommandPaletteStore.getState().openIntent).toBeNull();
+
+      // Of several dropped items, only the first is read.
+      fileDragEvent("drop", [droppedFolder, droppedFile]);
+      await expect
+        .poll(() => useCommandPaletteStore.getState().openIntent)
+        .toMatchObject({ kind: "add-project", path: "/repo/dropped", environmentId: fixture.id });
+      expect(fixture.getPathForFile).toHaveBeenLastCalledWith(droppedFolder);
+      // The project picker adds it; setup waits behind it on the same step.
+      await expect.element(dialog()).not.toBeInTheDocument();
+      expect(fileDragEvent("drop", [droppedFolder]).defaultPrevented).toBe(false);
+      await page.getByRole("button", { name: "Close fixture project picker" }).click();
+      await expect
+        .element(page.getByRole("heading", { name: "Choose a place to work" }))
+        .toBeVisible();
+      expect(page.getByRole("alert").elements()).toHaveLength(0);
+
+      fixture.connection.phase = "disconnected";
+      await update();
+      await expect.element(page.getByText("Or drop a folder here.")).not.toBeInTheDocument();
+      expect(fileDragEvent("drop", [droppedFolder]).defaultPrevented).toBe(false);
+    } finally {
+      Reflect.deleteProperty(window, "desktopBridge");
+    }
+  });
+
+  it("offers no folder drop in a browser, which cannot read a folder's path", async () => {
+    await mount();
+    await continueButton().click();
+    await expect
+      .element(page.getByRole("heading", { name: "Choose a place to work" }))
+      .toBeVisible();
+    expect(page.getByText("Or drop a folder here.").elements()).toHaveLength(0);
+    expect(fileDragEvent("drop", [droppedFolder]).defaultPrevented).toBe(false);
+    expect(fixture.getPathForFile).not.toHaveBeenCalled();
+    expect(useCommandPaletteStore.getState().openIntent).toBeNull();
   });
 
   it("suspends startup while another setup surface is open", async () => {

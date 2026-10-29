@@ -16,6 +16,7 @@ import {
 import { DESKTOP_KEEP_AWAKE_ROW_ID } from "./desktopKeepAwake.logic";
 import { KEYBINDING_SEARCH_ENTRIES } from "./keybindingSearchEntries";
 import { SETTINGS_SEARCH_INDEX } from "./settingsSearchIndex";
+import { PAIRING_LINK_TARGET_ID } from "./settingsSearchReveal";
 import {
   DESKTOP_ONLY_SETTINGS_SECTIONS,
   settingsSectionInDestination,
@@ -264,6 +265,16 @@ describe("keep-awake search", () => {
     for (const query of ["sleep", "awake", "agents", "plugged in"]) {
       expect(text).toContain(query);
     }
+  });
+});
+
+describe("pairing link search", () => {
+  it("jumps to the row first-run setup links to, since no heading reads its title", () => {
+    expect(SETTINGS_SEARCH_INDEX.find((entry) => entry.title === "Pairing link")).toMatchObject({
+      section: "connections",
+      owner: "client",
+      targetId: PAIRING_LINK_TARGET_ID,
+    });
   });
 });
 

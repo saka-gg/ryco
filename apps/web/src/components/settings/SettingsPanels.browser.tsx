@@ -44,6 +44,8 @@ import { WorktreeSubmoduleEditor } from "./WorktreeSubmoduleSettings";
 import { WorktreeRootEditor } from "./WorktreeRootSettings";
 import { ProjectScopeSelect } from "./ProjectDefaultsSection";
 import { GeneralSettingsPanel } from "./SettingsPanels";
+import { PAIRING_LINK_TARGET_ID, type SettingsSearchTarget } from "./settingsSearchReveal";
+import { useSettingsSubsections } from "./useSettingsSubsections";
 import { desktopRelaunchScheduler } from "./useDesktopRelaunchGuard";
 import { useStore } from "../../store";
 import { SourceControlSettingsPanel } from "./SourceControlSettings";
@@ -861,6 +863,10 @@ describe("GeneralSettingsPanel observability", () => {
     await expect
       .element(page.getByRole("heading", { name: "Remote environments", exact: true }))
       .toBeInTheDocument();
+    // "Pairing link" in search and first-run setup lands on the row that says why it cannot pair.
+    expect(document.getElementById(PAIRING_LINK_TARGET_ID)?.querySelector("h3")?.textContent).toBe(
+      "Network access",
+    );
   });
 
   it("hides advertised endpoint rows when desktop network access is disabled", async () => {
@@ -2618,6 +2624,16 @@ describe("SourceControlSettingsPanel discovery states", () => {
   });
 });
 
+/** Connections under the settings page's reveal, as the palette and first-run setup reach it. */
+function RevealingConnectionsSettings({ target }: { target: SettingsSearchTarget }) {
+  const { contentRef } = useSettingsSubsections("connections", false, target);
+  return (
+    <div ref={contentRef}>
+      <ConnectionsSettings />
+    </div>
+  );
+}
+
 describe("ConnectionsSettings Hub section", () => {
   let mounted:
     | (Awaited<ReturnType<typeof render>> & {
@@ -2689,6 +2705,7 @@ describe("ConnectionsSettings Hub section", () => {
   const renderHub = async (
     hubConfig?: Partial<Awaited<ReturnType<DesktopBridge["getHubLaunchConfig"]>>>,
     bridgeOverrides?: Parameters<typeof createDesktopBridgeStub>[0],
+    revealTarget?: SettingsSearchTarget,
   ) => {
     window.desktopBridge = createDesktopBridgeStub({
       serverExposureState: {
@@ -2712,7 +2729,11 @@ describe("ConnectionsSettings Hub section", () => {
     setServerConfigSnapshot(createBaseServerConfig());
     mounted = await render(
       <AppAtomRegistryProvider>
-        <ConnectionsSettings />
+        {revealTarget ? (
+          <RevealingConnectionsSettings target={revealTarget} />
+        ) : (
+          <ConnectionsSettings />
+        )}
       </AppAtomRegistryProvider>,
     );
   };
@@ -2740,6 +2761,23 @@ describe("ConnectionsSettings Hub section", () => {
     await expect.element(page.getByRole("button", { name: "Enable" })).toBeInTheDocument();
     // Nothing enrolled, so the address is editable.
     await expect.element(page.getByPlaceholder("https://…")).toBeEnabled();
+  });
+
+  // First-run setup's tour links here, and the "Pairing link" search result jumps by id.
+  it.each([
+    [PAIRING_LINK_TARGET_ID, "Network access"],
+    ["Remote environments", "Remote environments"],
+    ["Hub", "Hub"],
+  ])("reveals the %s target that setup links to", async (targetId, heading) => {
+    stubHubFetch({
+      status: { ...baseStatus, state: "disabled" },
+      identity: { enrolled: "none" },
+    });
+    await renderHub(undefined, undefined, { targetId });
+
+    await vi.waitFor(() =>
+      expect(document.activeElement?.querySelector("h2, h3")?.textContent).toBe(heading),
+    );
   });
 
   it("uses account setup instead of a second manual enrollment on Desktop", async () => {
