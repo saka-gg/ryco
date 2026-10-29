@@ -10,6 +10,7 @@ import {
   type OrchestrationThread,
 } from "@ryco/contracts";
 import {
+  Deferred,
   Effect,
   Exit,
   FileSystem,
@@ -23,6 +24,7 @@ import {
   Scope,
   Stream,
 } from "effect";
+import type { ChildProcessSpawner } from "effect/process";
 
 import { CheckpointStoreLive } from "../src/checkpointing/Layers/CheckpointStore.ts";
 import { CheckpointStore } from "../src/checkpointing/Services/CheckpointStore.ts";
@@ -42,6 +44,11 @@ import {
   type KindAdapterMap,
 } from "../src/provider/testUtils/providerAdapterRegistryMock.ts";
 import { ProviderAdapterRegistry } from "../src/provider/Services/ProviderAdapterRegistry.ts";
+import type { ProviderAdapterShape } from "../src/provider/Services/ProviderAdapter.ts";
+import type { ProviderAdapterError } from "../src/provider/Errors.ts";
+import type { ReplayGate } from "../src/provider/testUtils/replay/replayGate.ts";
+import type { ReplayError } from "../src/provider/testUtils/replay/replayMatch.ts";
+import { raceReplayFailure } from "../src/provider/testUtils/replay/replayPeer.ts";
 import { ProviderSessionDirectoryLive } from "../src/provider/Layers/ProviderSessionDirectory.ts";
 import { ServerSettingsService } from "../src/serverSettings.ts";
 import { makeProviderServiceLive } from "../src/provider/Layers/ProviderService.ts";
@@ -131,25 +138,34 @@ export function gitShowFileAtRef(cwd: string, ref: string, filePath: string): st
 
 class WaitForTimeoutError extends Schema.TaggedError<WaitForTimeoutError>()("WaitForTimeoutError", {
   description: Schema.String,
-}) {}
+}) {
+  override get message(): string {
+    return `Timed out waiting for ${this.description}`;
+  }
+}
+
+/** Read when the wait times out, so it can say where a replay stands then. */
+type WaitForDescription = string | (() => string);
+
+const DEFAULT_WAIT_TIMEOUT_MS = 40_000;
 
 function waitFor<A, E>(
   read: Effect.Effect<A, E>,
   predicate: (value: A) => boolean,
-  description: string,
+  description: WaitForDescription,
   timeoutMs?: number,
 ): Effect.Effect<A, never>;
 function waitFor<A, B extends A, E>(
   read: Effect.Effect<A, E>,
   predicate: (value: A) => value is B,
-  description: string,
+  description: WaitForDescription,
   timeoutMs?: number,
 ): Effect.Effect<B, never>;
 function waitFor<A, E>(
   read: Effect.Effect<A, E>,
   predicate: (value: A) => boolean,
-  description: string,
-  timeoutMs = 40_000,
+  description: WaitForDescription,
+  timeoutMs = DEFAULT_WAIT_TIMEOUT_MS,
 ): Effect.Effect<A, never> {
   const RETRY_SIGNAL = "wait_for_retry";
   const retryIntervalMs = 10;
@@ -164,7 +180,11 @@ function waitFor<A, E>(
       while: (error) => error === RETRY_SIGNAL,
     }),
     Effect.mapError((error) =>
-      error === RETRY_SIGNAL ? new WaitForTimeoutError({ description }) : error,
+      error === RETRY_SIGNAL
+        ? new WaitForTimeoutError({
+            description: typeof description === "string" ? description : description(),
+          })
+        : error,
     ),
     Effect.orDie,
   );
@@ -233,13 +253,80 @@ export interface OrchestrationIntegrationHarness {
       timeoutMs?: number,
     ): Effect.Effect<Receipt, never>;
   };
+  /**
+   * Waits until a replay is parked at (or past) the gate `label`. Like the other waits, it fails
+   * at once with a replay failure and times out naming where each replay stands.
+   */
+  readonly waitForReplayGate: (
+    gate: ReplayGate,
+    label: string,
+    timeoutMs?: number,
+  ) => Effect.Effect<void, never>;
+  /** Replays behind the factory-built adapters; tests `assertConsumed` them before dispose. */
+  readonly replays: ReadonlyArray<IntegrationAdapterReplay>;
+  /** Releases replay gates, then shuts down. Never fails on an incomplete replay. */
   readonly dispose: Effect.Effect<void, never>;
+  /**
+   * Fails with the first replay failure. Run it after `dispose`: frames the adapter writes while
+   * stopping are matched too (against trailing optional entries), and nothing else reports them.
+   */
+  readonly assertNoLateReplayFrames: Effect.Effect<void, ReplayError>;
 }
+
+/** A replayed provider behind a factory-built adapter. */
+export interface IntegrationAdapterReplay {
+  /** Completed with the first replay failure; every harness wait fails with it at once. */
+  readonly failure: Deferred.Deferred<ReplayError>;
+  readonly assertConsumed: Effect.Effect<void, ReplayError>;
+  /** Where the replay stands, for wait timeouts. */
+  readonly describePosition: () => string;
+  /** Releases parked gates; disposal runs it. */
+  readonly releaseAll?: Effect.Effect<void>;
+}
+
+export interface IntegrationAdapter {
+  readonly adapter: ProviderAdapterShape<ProviderAdapterError>;
+  readonly replay?: IntegrationAdapterReplay;
+}
+
+/**
+ * Builds the adapter for one driver kind inside the harness runtime, in place of the fake test
+ * adapter: the real adapter over a replay transport, or (for `realCodex`) over the real CLI.
+ * `kind` is known up front, so the harness fakes only the kinds no factory covers.
+ */
+export interface IntegrationAdapterFactory {
+  readonly kind: ProviderDriverKind;
+  readonly make: (context: {
+    readonly rootDir: string;
+    readonly workspaceDir: string;
+  }) => Effect.Effect<
+    IntegrationAdapter,
+    never,
+    | Scope.Scope
+    | ServerConfig
+    | FileSystem.FileSystem
+    | Path.Path
+    | ChildProcessSpawner.ChildProcessSpawner
+    | ServerSettingsService
+  >;
+}
+
+/** The real Codex adapter with default settings: it spawns the `codex` on PATH. */
+export const realCodexAdapterFactory: IntegrationAdapterFactory = {
+  kind: ProviderDriverKind.make("codex"),
+  make: () =>
+    makeCodexAdapter(Schema.decodeSync(CodexSettings)({})).pipe(
+      Effect.map((adapter) => ({ adapter })),
+    ),
+};
 
 interface MakeOrchestrationIntegrationHarnessOptions {
   readonly provider?: ProviderDriverKind;
   readonly providers?: ReadonlyArray<ProviderDriverKind>;
+  /** Shorthand for `adapterFactories: [realCodexAdapterFactory]`. */
   readonly realCodex?: boolean;
+  /** Real adapters for these kinds; every other requested kind keeps a fake test adapter. */
+  readonly adapterFactories?: ReadonlyArray<IntegrationAdapterFactory>;
   /** Reopen an existing database file (a restart), instead of a fresh one. */
   readonly databasePath?: string;
 }
@@ -253,24 +340,21 @@ export const makeOrchestrationIntegrationHarness = (
 
     const provider =
       options?.provider ?? options?.providers?.[0] ?? ProviderDriverKind.make("codex");
-    const useRealCodex = options?.realCodex === true;
-    const adapterHarnesses = useRealCodex
-      ? []
-      : yield* Effect.forEach(options?.providers ?? [provider], (driverKind) =>
-          makeTestProviderAdapterHarness({
-            provider: driverKind,
-            ...(options?.providers ? { turnIdPrefix: String(driverKind) } : {}),
-          }),
-        );
+    const adapterFactories = [
+      ...(options?.realCodex === true ? [realCodexAdapterFactory] : []),
+      ...(options?.adapterFactories ?? []),
+    ];
+    const factoryKinds = new Set(adapterFactories.map((factory) => factory.kind));
+    const adapterHarnesses = yield* Effect.forEach(
+      (options?.providers ?? [provider]).filter((driverKind) => !factoryKinds.has(driverKind)),
+      (driverKind) =>
+        makeTestProviderAdapterHarness({
+          provider: driverKind,
+          ...(options?.providers ? { turnIdPrefix: String(driverKind) } : {}),
+        }),
+    );
     const adapterHarness = adapterHarnesses[0] ?? null;
-    const adapterMap: KindAdapterMap = {};
-    for (const harness of adapterHarnesses) {
-      adapterMap[harness.provider] = harness.adapter;
-    }
-    const fakeRegistry =
-      adapterHarnesses.length > 0
-        ? Layer.succeed(ProviderAdapterRegistry, makeAdapterRegistryMock(adapterMap))
-        : null;
+    const replays: Array<IntegrationAdapterReplay> = [];
     const rootDir = yield* fileSystem.makeTempDirectoryScoped({
       prefix: "ryco-orchestration-integration-",
     });
@@ -299,34 +383,29 @@ export const makeOrchestrationIntegrationHarness = (
     const providerSessionDirectoryLayer = ProviderSessionDirectoryLive.pipe(
       Layer.provide(ProviderSessionRuntimeRepositoryLive),
     );
-    const realCodexRegistry = Layer.effect(
+    // Factory adapters build with the runtime, so they live as long as it does.
+    const adapterRegistryLayer = Layer.effect(
       ProviderAdapterRegistry,
       Effect.gen(function* () {
-        const codexSettings = Schema.decodeSync(CodexSettings)({});
-        const codexAdapter = yield* makeCodexAdapter(codexSettings);
-        return makeAdapterRegistryMock({
-          [ProviderDriverKind.make("codex")]: codexAdapter,
-        });
+        const adapterMap: KindAdapterMap = {};
+        for (const harness of adapterHarnesses) {
+          adapterMap[harness.provider] = harness.adapter;
+        }
+        for (const factory of adapterFactories) {
+          const built = yield* factory.make({ rootDir, workspaceDir });
+          adapterMap[factory.kind] = built.adapter;
+          if (built.replay) replays.push(built.replay);
+        }
+        return makeAdapterRegistryMock(adapterMap);
       }),
-    ).pipe(
-      Layer.provideMerge(ServerConfig.layerTest(workspaceDir, rootDir)),
-      Layer.provideMerge(NodeServices.layer),
-      Layer.provideMerge(providerSessionDirectoryLayer),
     );
     const providerEventLoggersLayer = Layer.succeed(ProviderEventLoggers, NoOpProviderEventLoggers);
-    const providerLayer = useRealCodex
-      ? makeProviderServiceLive().pipe(
-          Layer.provide(providerSessionDirectoryLayer),
-          Layer.provide(realCodexRegistry),
-          Layer.provide(AnalyticsService.layerTest),
-          Layer.provide(providerEventLoggersLayer),
-        )
-      : makeProviderServiceLive().pipe(
-          Layer.provide(providerSessionDirectoryLayer),
-          Layer.provide(fakeRegistry!),
-          Layer.provide(AnalyticsService.layerTest),
-          Layer.provide(providerEventLoggersLayer),
-        );
+    const providerLayer = makeProviderServiceLive().pipe(
+      Layer.provide(providerSessionDirectoryLayer),
+      Layer.provide(adapterRegistryLayer),
+      Layer.provide(AnalyticsService.layerTest),
+      Layer.provide(providerEventLoggersLayer),
+    );
 
     const checkpointStoreLayer = CheckpointStoreLive.pipe(Layer.provide(VcsDriverRegistry.layer));
     const projectionSnapshotQueryLayer = OrchestrationProjectionSnapshotQueryLive;
@@ -483,6 +562,19 @@ export const makeOrchestrationIntegrationHarness = (
     ).pipe(Effect.forkIn(scope));
     yield* Effect.sleep(10);
 
+    /** A replay mismatch fails a wait at once, with the diff, instead of after its timeout. */
+    const raceReplays = <A>(wait: Effect.Effect<A, never>): Effect.Effect<A, never> =>
+      replays
+        .reduce<Effect.Effect<A, ReplayError>>(
+          (current, replay) => current.pipe(raceReplayFailure(replay.failure)),
+          wait,
+        )
+        .pipe(Effect.orDie);
+    const withReplayPositions = (description: string) => () =>
+      replays.length === 0
+        ? description
+        : `${description}; ${replays.map((replay) => replay.describePosition()).join("; ")}`;
+
     const waitForThread: OrchestrationIntegrationHarness["waitForThread"] = (
       threadId,
       predicate,
@@ -497,9 +589,9 @@ export const makeOrchestrationIntegrationHarness = (
             ),
           ),
         (thread): thread is OrchestrationThread => thread !== null && predicate(thread),
-        `projected thread '${threadId}'`,
+        withReplayPositions(`projected thread '${threadId}'`),
         timeoutMs,
-      ) as Effect.Effect<OrchestrationThread, never>;
+      ).pipe(raceReplays) as Effect.Effect<OrchestrationThread, never>;
 
     const waitForDomainEvent: OrchestrationIntegrationHarness["waitForDomainEvent"] = (
       predicate,
@@ -510,9 +602,9 @@ export const makeOrchestrationIntegrationHarness = (
           Effect.map((chunk): ReadonlyArray<OrchestrationEvent> => Array.from(chunk)),
         ),
         (events) => events.some(predicate),
-        "domain event",
+        withReplayPositions("domain event"),
         timeoutMs,
-      );
+      ).pipe(raceReplays);
 
     const waitForPendingApproval: OrchestrationIntegrationHarness["waitForPendingApproval"] = (
       threadId,
@@ -542,9 +634,9 @@ export const makeOrchestrationIntegrationHarness = (
           readonly decision: "accept" | "acceptForSession" | "decline" | "cancel" | null;
           readonly resolvedAt: string | null;
         } => row !== null && predicate(row),
-        `pending approval '${requestId}'`,
+        withReplayPositions(`pending approval '${requestId}'`),
         timeoutMs,
-      ) as Effect.Effect<
+      ).pipe(raceReplays) as Effect.Effect<
         {
           readonly status: "pending" | "resolved";
           readonly decision: "accept" | "acceptForSession" | "decline" | "cancel" | null;
@@ -572,10 +664,39 @@ export const makeOrchestrationIntegrationHarness = (
       return waitFor(
         readMatchingReceipt,
         (receipt): receipt is OrchestrationRuntimeReceipt => receipt !== undefined,
-        "runtime receipt",
+        withReplayPositions("runtime receipt"),
         timeoutMs,
-      );
+      ).pipe(raceReplays);
     }
+
+    const waitForReplayGate: OrchestrationIntegrationHarness["waitForReplayGate"] = (
+      gate,
+      label,
+      timeoutMs = DEFAULT_WAIT_TIMEOUT_MS,
+    ) =>
+      gate.reached(label).pipe(
+        Effect.timeoutOrElse({
+          duration: timeoutMs,
+          orElse: () =>
+            Effect.die(
+              new WaitForTimeoutError({
+                description: withReplayPositions(`replay gate '${label}'`)(),
+              }),
+            ),
+        }),
+        raceReplays,
+      );
+
+    const assertNoLateReplayFrames = Effect.forEach(
+      replays,
+      (replay) =>
+        Deferred.poll(replay.failure).pipe(
+          Effect.flatMap((failed) =>
+            Option.isSome(failed) ? Effect.flatMap(failed.value, Effect.fail) : Effect.void,
+          ),
+        ),
+      { discard: true },
+    );
 
     let disposed = false;
     const dispose = Effect.gen(function* () {
@@ -583,6 +704,10 @@ export const makeOrchestrationIntegrationHarness = (
         return;
       }
       disposed = true;
+      // A replay parked at a gate must not hold up shutdown.
+      yield* Effect.forEach(replays, (replay) => replay.releaseAll ?? Effect.void, {
+        discard: true,
+      });
 
       const shutdown = Effect.gen(function* () {
         const closeScopeExit = yield* Effect.exit(Scope.close(scope, Exit.void));
@@ -619,6 +744,9 @@ export const makeOrchestrationIntegrationHarness = (
       waitForDomainEvent,
       waitForPendingApproval,
       waitForReceipt,
+      waitForReplayGate,
+      replays,
       dispose,
+      assertNoLateReplayFrames,
     } satisfies OrchestrationIntegrationHarness;
   });

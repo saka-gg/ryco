@@ -568,6 +568,15 @@ it.live.skipIf(!process.env.CODEX_BINARY_PATH)(
         );
         assert.equal(firstThread.session?.threadId, "thread-1");
 
+        // The mode is a thread setting: a turn's own runtimeMode is not applied. The replay twin
+        // (replay/codexReplay.integration.test.ts, runtime_mode_switch) pins this flow.
+        yield* harness.engine.dispatch({
+          type: "thread.runtime-mode.set",
+          commandId: CommandId.make("cmd-runtime-mode-set-real-codex"),
+          threadId: THREAD_ID,
+          runtimeMode: "approval-required",
+          createdAt: nowIso(),
+        });
         yield* harness.engine.dispatch({
           type: "thread.turn.start",
           commandId: CommandId.make("cmd-turn-start-real-codex-2"),

@@ -19,6 +19,10 @@ against OpenCode 2.0.18) are copied from
 `apps/server/src/orchestration-v2/testkit/fixtures/opencode2_*/opencode_transcript.ndjson` at
 commit `91992bd5d464d6a01b2a5c1e7926e68ad09ea40e`, under the same copyright and license.
 
+The provider replay test helpers in `apps/server/src/provider/testUtils/replay/` adapt
+upstream's replay testkit at commit `91992bd5d464d6a01b2a5c1e7926e68ad09ea40e`, under the same
+copyright and license.
+
 ### MIT License
 
 Copyright (c) 2026 T3 Tools Inc.
