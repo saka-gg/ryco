@@ -354,14 +354,22 @@ export const SETTINGS_SEARCH_INDEX: ReadonlyArray<SettingsSearchEntry> = [
     keywords: "color mode dark light",
   },
   {
-    section: "providers",
+    section: "source-control",
+    title: "Writing style",
+    owner: "node",
+    description:
+      "Write commit messages and pull requests like the repository or as Conventional Commits.",
+    keywords: "git commit message pr title conventional commits repository style writing",
+  },
+  {
+    section: "source-control",
     title: "Commit message instructions",
     owner: "node",
     description: "Guide the style of generated commit messages.",
     keywords: "git writing prompt text generation conventional commits custom",
   },
   {
-    section: "providers",
+    section: "source-control",
     title: "Pull request instructions",
     owner: "node",
     description: "Guide generated pull request titles and descriptions.",

@@ -9,6 +9,7 @@ import {
   Duration,
   Effect,
   Exit,
+  Fiber,
   FileSystem,
   Layer,
   Option,
@@ -51,7 +52,6 @@ import {
 import { GitManagerError } from "@ryco/contracts";
 import { TextGeneration } from "../textGeneration/TextGeneration.ts";
 import type { TextGenerationPolicy } from "../textGeneration/TextGenerationPolicy.ts";
-import { gitWritingPolicyFromSettings } from "../textGeneration/TextGenerationPresets.ts";
 import { ProjectSetupScriptRunner } from "../project/Services/ProjectSetupScriptRunner.ts";
 import { ProjectionSnapshotQuery } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 import { resolveProjectPreferences } from "../project/projectPreferences.ts";
@@ -86,6 +86,12 @@ export interface GitActionProgressReporter {
 export interface GitRunStackedActionOptions {
   readonly actionId?: string;
   readonly progressReporter?: GitActionProgressReporter;
+  /**
+   * The project the checkout belongs to, resolved by the server from `cwd` (never client
+   * input). Read only when the action generates text, for the project's writing style.
+   * Absent: the node's writing style applies.
+   */
+  readonly checkoutProjectId?: Effect.Effect<string | null>;
 }
 
 /** Server-only creation snapshot; RPC callers cannot supply settings or project authority. */
@@ -509,10 +515,33 @@ function sanitizeProgressText(value: string): string | null {
   return trimmed.slice(0, MAX_PROGRESS_TEXT_LENGTH).trimEnd();
 }
 
-/** The model and the user's instructions for generated commit and pull request text. */
+/** The model and the writing policy for generated commit and pull request text. */
 interface GitWriting {
   readonly modelSelection: ModelSelection;
-  readonly policy: TextGenerationPolicy | undefined;
+  /**
+   * The writing style, the user's instructions and the repository's examples. Resolved on
+   * first use and at most once per action, so only generated text pays for its reads.
+   */
+  readonly policy: Effect.Effect<TextGenerationPolicy | undefined>;
+}
+
+/**
+ * The user's commit and pull request instructions without a style, or nothing when none are
+ * set: the policy when the writing style module cannot load. Built here, not from the presets,
+ * so boot still loads none of the writing style code.
+ */
+function instructionsOnlyWritingPolicy(
+  settings: Pick<ServerSettings, "commitMessageInstructions" | "pullRequestInstructions">,
+): TextGenerationPolicy | undefined {
+  const commitInstructions = settings.commitMessageInstructions.trim();
+  const changeRequestInstructions = settings.pullRequestInstructions.trim();
+  if (!commitInstructions && !changeRequestInstructions) return undefined;
+  return {
+    kind: "custom",
+    inferRepositoryConventions: false,
+    ...(commitInstructions ? { commitInstructions } : {}),
+    ...(changeRequestInstructions ? { changeRequestInstructions } : {}),
+  };
 }
 
 interface CommitAndBranchSuggestion {
@@ -671,7 +700,14 @@ function toPullRequestHeadRemoteInfo(pr: {
   };
 }
 
-export const makeGitManager = Effect.fn("makeGitManager")(function* () {
+export interface MakeGitManagerOptions {
+  /** Loads the writing style module; tests replace it with a load that fails. */
+  readonly importGitWritingPolicy?: () => Promise<typeof import("./gitWritingPolicy.ts")>;
+}
+
+export const makeGitManager = Effect.fn("makeGitManager")(function* (
+  managerOptions?: MakeGitManagerOptions,
+) {
   const gitCore = yield* GitVcsDriver;
   const sourceControlProviders = yield* SourceControlProviderRegistry;
   const textGeneration = yield* TextGeneration;
@@ -1212,6 +1248,43 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
 
   const repositoryListCache = makeRepositoryListCache();
 
+  // The writing style code (presets, example reader) loads with the first generated text. No
+  // result is kept here: the module system holds the loaded module, and a load that failed is
+  // attempted again by the next action rather than failing every later one until a restart.
+  const importGitWritingPolicy =
+    managerOptions?.importGitWritingPolicy ?? (() => import("./gitWritingPolicy.ts"));
+
+  /**
+   * Example reads that fail or time out leave the examples out; they never fail the action.
+   * When the module cannot load (an update replaced the running server's files), the style is
+   * left out as well and the user's own instructions apply alone, as before writing styles.
+   */
+  const resolveWritingPolicy = (
+    cwd: string,
+    settings: ServerSettings,
+    checkoutProjectId: Effect.Effect<string | null> | undefined,
+  ): Effect.Effect<TextGenerationPolicy | undefined> =>
+    Effect.tryPromise(() => importGitWritingPolicy()).pipe(
+      Effect.matchEffect({
+        onFailure: (error) =>
+          Effect.logWarning("writing style failed to load; using the instructions alone", {
+            cause: error.cause,
+          }).pipe(Effect.as(instructionsOnlyWritingPolicy(settings))),
+        onSuccess: ({ resolveGitWritingPolicy }) =>
+          resolveGitWritingPolicy({
+            cwd,
+            settings,
+            projectId: checkoutProjectId ?? Effect.succeed(null),
+            git: gitCore,
+            peekChangeRequestListings: resolvePullRequestIndexTarget(cwd).pipe(
+              Effect.flatMap((target) =>
+                target === null ? Effect.succeed([]) : pullRequestIndex.peek(target.repository),
+              ),
+            ),
+          }),
+      }),
+    );
+
   const invalidatePullRequestIndex = (cwd: string) =>
     resolvePullRequestIndexTarget(cwd).pipe(
       Effect.flatMap((target) =>
@@ -1478,16 +1551,22 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
       writing: GitWriting;
     }) {
       const stagedOnly = input.selection.stagedOnly;
+      const readContext = stagedOnly
+        ? gitCore.prepareStagedCommitContext(input.cwd, stagedOnly.expectedRevision)
+        : gitCore.prepareCommitContext(input.cwd, input.selection.filePaths);
+      const customCommit = parseCustomCommitMessage(input.commitMessage ?? "");
+      // A generated message's writing policy (repository reads included) overlaps the context
+      // read; a custom message needs neither the policy nor its reads. With nothing to commit
+      // the policy is not awaited: a later pull request step joins the same cached run, and
+      // the action's end stops it otherwise.
+      const policyFiber = customCommit ? null : yield* Effect.forkChild(input.writing.policy);
       const context: (GitPreparedCommitContext & { stagedIndex?: GitStagedIndexGuard }) | null =
-        stagedOnly
-          ? yield* gitCore.prepareStagedCommitContext(input.cwd, stagedOnly.expectedRevision)
-          : yield* gitCore.prepareCommitContext(input.cwd, input.selection.filePaths);
+        yield* readContext;
       if (!context) {
         return null;
       }
       const stagedIndex = context.stagedIndex ? { stagedIndex: context.stagedIndex } : {};
 
-      const customCommit = parseCustomCommitMessage(input.commitMessage ?? "");
       if (customCommit) {
         return {
           subject: customCommit.subject,
@@ -1500,6 +1579,7 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
         };
       }
 
+      const policy = policyFiber ? yield* Fiber.join(policyFiber) : undefined;
       const generated = yield* textGeneration
         .generateCommitMessage({
           cwd: input.cwd,
@@ -1508,7 +1588,7 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
           stagedPatch: limitContext(context.stagedPatch, 50_000),
           ...(input.includeBranch ? { includeBranch: true } : {}),
           modelSelection: input.writing.modelSelection,
-          policy: input.writing.policy,
+          policy,
         })
         .pipe(Effect.map((result) => sanitizeCommitMessage(result)));
 
@@ -1686,10 +1766,17 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
       phase: "pr",
       label: `Generating ${terms.shortLabel} content...`,
     });
-    const rangeContext = yield* gitCore.readRangeContext(cwd, baseBranch, {
-      // A fork's head remote must not supply the target repository's base.
-      remoteName: headContext.isCrossRepository ? "origin" : headContext.remoteName,
-    });
+    // The writing policy (cached when the commit step resolved it) overlaps the range read.
+    const [rangeContext, policy] = yield* Effect.all(
+      [
+        gitCore.readRangeContext(cwd, baseBranch, {
+          // A fork's head remote must not supply the target repository's base.
+          remoteName: headContext.isCrossRepository ? "origin" : headContext.remoteName,
+        }),
+        writing.policy,
+      ],
+      { concurrency: 2 },
+    );
 
     const generated = yield* textGeneration.generatePrContent({
       cwd,
@@ -1699,7 +1786,7 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
       diffSummary: limitContext(rangeContext.diffSummary, 20_000),
       diffPatch: limitContext(rangeContext.diffPatch, 60_000),
       modelSelection: writing.modelSelection,
-      policy: writing.policy,
+      policy,
     });
     const body = appendClosingIssueReferences(generated.body, linkedIssueNumbers);
 
@@ -2326,15 +2413,17 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* () {
         let commitMessageForStep = input.commitMessage;
         let preResolvedCommitSuggestion: CommitAndBranchSuggestion | undefined = undefined;
 
-        const writing: GitWriting = yield* serverSettingsService.getSettings.pipe(
-          Effect.map((settings) => ({
-            modelSelection: settings.textGenerationModelSelection,
-            policy: gitWritingPolicyFromSettings(settings),
-          })),
+        const settings = yield* serverSettingsService.getSettings.pipe(
           Effect.mapError((cause) =>
             gitManagerError("runStackedAction", "Failed to get server settings.", cause),
           ),
         );
+        const writing: GitWriting = {
+          modelSelection: settings.textGenerationModelSelection,
+          policy: yield* Effect.cached(
+            resolveWritingPolicy(input.cwd, settings, options?.checkoutProjectId),
+          ),
+        };
 
         if (input.featureBranch) {
           yield* Ref.set(currentPhase, Option.some("branch"));

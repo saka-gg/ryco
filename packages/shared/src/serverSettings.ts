@@ -104,6 +104,24 @@ function mergeModelSelectionOptionsById(input: {
 }
 
 /**
+ * Patches a per-project override map entry by entry, so edits to different projects never
+ * collide: a null entry (or one `keeps` rejects) removes the project's override, which then
+ * inherits again; any other entry replaces it. Project ids are data, prototype names included.
+ */
+function patchProjectOverrides<Value, PatchValue extends Value>(
+  current: Readonly<Record<string, Value>>,
+  patch: Readonly<Record<string, PatchValue | null>>,
+  keeps: (value: PatchValue) => boolean = () => true,
+): Record<string, Value> {
+  const overrides = new Map<string, Value>(Object.entries(current));
+  for (const [projectId, value] of Object.entries(patch)) {
+    if (value === null || !keeps(value)) overrides.delete(projectId);
+    else overrides.set(projectId, value);
+  }
+  return Object.fromEntries(overrides);
+}
+
+/**
  * Applies a server settings patch while treating textGenerationModelSelection as
  * replace-on-provider/model updates. This prevents stale nested options from
  * surviving a reset patch that intentionally omits options.
@@ -175,38 +193,48 @@ export function applyServerSettingsPatch(
     }
     next = { ...next, projectPreferences: Object.fromEntries(projects) };
   }
-  if (patch.projectWorktreeSubmodules !== undefined) {
-    const modes = new Map(Object.entries(current.projectWorktreeSubmodules));
-    for (const [projectId, mode] of Object.entries(patch.projectWorktreeSubmodules)) {
-      if (mode === null) modes.delete(projectId);
-      else modes.set(projectId, mode);
-    }
-    next = { ...next, projectWorktreeSubmodules: Object.fromEntries(modes) };
-  }
-  if (patch.projectWorktreeRoots !== undefined) {
-    const roots = new Map(Object.entries(current.projectWorktreeRoots));
-    for (const [projectId, root] of Object.entries(patch.projectWorktreeRoots)) {
-      if (root === null || root === "") roots.delete(projectId);
-      else roots.set(projectId, root);
-    }
-    next = { ...next, projectWorktreeRoots: Object.fromEntries(roots) };
-  }
-  if (patch.projectStorageRetention !== undefined) {
-    const policies = new Map(Object.entries(current.projectStorageRetention));
-    for (const [projectId, policy] of Object.entries(patch.projectStorageRetention)) {
-      if (policy === null) policies.delete(projectId);
-      else policies.set(projectId, policy);
-    }
-    next = { ...next, projectStorageRetention: Object.fromEntries(policies) };
-  }
-  if (patch.projectLifecycleSuggestions !== undefined) {
-    const policies = new Map(Object.entries(current.projectLifecycleSuggestions));
-    for (const [projectId, policy] of Object.entries(patch.projectLifecycleSuggestions)) {
-      if (policy === null) policies.delete(projectId);
-      else policies.set(projectId, policy);
-    }
-    next = { ...next, projectLifecycleSuggestions: Object.fromEntries(policies) };
-  }
+  if (patch.projectWorktreeSubmodules !== undefined)
+    next = {
+      ...next,
+      projectWorktreeSubmodules: patchProjectOverrides(
+        current.projectWorktreeSubmodules,
+        patch.projectWorktreeSubmodules,
+      ),
+    };
+  if (patch.projectGitWritingStyle !== undefined)
+    next = {
+      ...next,
+      projectGitWritingStyle: patchProjectOverrides(
+        current.projectGitWritingStyle,
+        patch.projectGitWritingStyle,
+      ),
+    };
+  if (patch.projectWorktreeRoots !== undefined)
+    next = {
+      ...next,
+      // An empty root inherits too.
+      projectWorktreeRoots: patchProjectOverrides(
+        current.projectWorktreeRoots,
+        patch.projectWorktreeRoots,
+        (root) => root !== "",
+      ),
+    };
+  if (patch.projectStorageRetention !== undefined)
+    next = {
+      ...next,
+      projectStorageRetention: patchProjectOverrides(
+        current.projectStorageRetention,
+        patch.projectStorageRetention,
+      ),
+    };
+  if (patch.projectLifecycleSuggestions !== undefined)
+    next = {
+      ...next,
+      projectLifecycleSuggestions: patchProjectOverrides(
+        current.projectLifecycleSuggestions,
+        patch.projectLifecycleSuggestions,
+      ),
+    };
   if (patch.cliProxyHubs !== undefined) {
     const hubs = new Map(Object.entries(current.cliProxyHubs));
     for (const [hubId, hub] of Object.entries(patch.cliProxyHubs)) {

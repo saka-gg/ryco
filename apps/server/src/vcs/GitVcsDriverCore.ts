@@ -97,7 +97,7 @@ const STATUS_UPSTREAM_REFRESH_ENV = Object.freeze({
   GIT_TERMINAL_PROMPT: "0",
   SSH_ASKPASS_REQUIRE: "never",
 } satisfies NodeJS.ProcessEnv);
-const DEFAULT_BASE_BRANCH_CANDIDATES = ["main", "master"] as const;
+export const DEFAULT_BASE_BRANCH_CANDIDATES = ["main", "master"] as const;
 const CONFIG_SNAPSHOT_CACHE_CAPACITY = 2_048;
 const CONFIG_SNAPSHOT_CACHE_TTL = Duration.seconds(5);
 const BRANCH_LISTING_CACHE_CAPACITY = 256;

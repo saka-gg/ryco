@@ -11,6 +11,8 @@ import { Button } from "../../ui/button";
 import { rovingRadioGroup } from "../../ui/roving-radio-group";
 import { stackedThreadToast, toastManager } from "../../ui/toast";
 import { ProjectSection, useSavedFlash } from "./ProjectSection";
+import { GitWritingStyleSettings } from "../../settings/GitWritingStyleSettings";
+import { ProjectNodeSettingsScope, useEnvironmentProjectChoices } from "./ProjectNodeSettingsScope";
 import type { ProjectSectionProps } from "./projectSectionTypes";
 
 /** "Auto-detect" in the radio group; git remote names are never empty. */
@@ -41,8 +43,9 @@ function RadioDot(props: { readonly checked: boolean }) {
  * pull requests page and links use it. Auto-detect follows the server's
  * choice (upstream, then origin, then the first).
  */
-export function ProjectRepositorySection({ member, canEdit }: ProjectSectionProps) {
+export function ProjectRepositorySection({ member, canEdit, canManageNode }: ProjectSectionProps) {
   const saved = useSavedFlash();
+  const projects = useEnvironmentProjectChoices(member.environmentId);
   const identity = member.repositoryIdentity ?? null;
   const remotes = identity?.remotes ?? [];
   const autoRemoteName = identity?.locator.remoteName ?? null;
@@ -214,6 +217,11 @@ export function ProjectRepositorySection({ member, canEdit }: ProjectSectionProp
           })}
         </div>
       )}
+      {canManageNode && !notARepository ? (
+        <ProjectNodeSettingsScope environmentId={member.environmentId}>
+          <GitWritingStyleSettings projectId={member.id} projects={projects} />
+        </ProjectNodeSettingsScope>
+      ) : null}
     </ProjectSection>
   );
 }

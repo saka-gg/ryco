@@ -64,6 +64,8 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
    */
   nodeAutoSettlement: Schema.optionalKey(Schema.Boolean),
   worktreeSubmoduleSettings: Schema.optionalKey(Schema.Boolean),
+  /** `gitWritingStyle` and `projectGitWritingStyle`; absent on older servers, which drop the keys. */
+  gitWritingStyle: Schema.optionalKey(Schema.Boolean),
   /** Usage-limit settings and the resume/snooze worker; absent on older servers. */
   usageLimitRecovery: Schema.optionalKey(Schema.Boolean),
   /**

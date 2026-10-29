@@ -689,3 +689,33 @@ describe("ServerSettingsPatch strict entries", () => {
     });
   });
 });
+
+describe("git writing style settings", () => {
+  it("decodes old settings to the repository style with no project overrides", () => {
+    expect(decodeServerSettings({})).toMatchObject({
+      gitWritingStyle: "repository",
+      projectGitWritingStyle: {},
+    });
+    expect(decodeServerSettingsPatch({})).not.toHaveProperty("gitWritingStyle");
+  });
+  it.each(["default", "repository", "conventional"])(
+    "accepts %s for the node and a project",
+    (style) => {
+      expect(
+        decodeServerSettingsPatch({
+          gitWritingStyle: style,
+          projectGitWritingStyle: { a: style, b: null },
+        }),
+      ).toEqual({ gitWritingStyle: style, projectGitWritingStyle: { a: style, b: null } });
+    },
+  );
+  it.each(["custom", "Conventional", "", false, null, {}])(
+    "rejects the invalid style %j",
+    (style) => {
+      expect(() => decodeServerSettings({ gitWritingStyle: style })).toThrow();
+      expect(() => decodeServerSettingsPatch({ gitWritingStyle: style })).toThrow();
+      if (style !== null)
+        expect(() => decodeServerSettingsPatch({ projectGitWritingStyle: { a: style } })).toThrow();
+    },
+  );
+});

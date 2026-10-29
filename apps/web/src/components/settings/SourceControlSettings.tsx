@@ -1,4 +1,5 @@
 import { SourceControlPreferences } from "./SourceControlPreferences";
+import { GitWritingSettingsSection } from "./GitWritingStyleSettings";
 import { KeyRoundIcon, RefreshCwIcon, Trash2Icon } from "lucide-react";
 import { Option } from "effect";
 import { type FormEvent, type ReactNode, useState } from "react";
@@ -738,6 +739,8 @@ function NodeSourceControlSettingsPanel() {
       <SettingsPageContainer>
         <SourceControlSectionSkeleton title="Version control" headerAction={scanButton} />
         <SourceControlSectionSkeleton title="Hosting providers" />
+        {/* Node settings, not discovery results: never wait for the scan. */}
+        <GitWritingSettingsSection />
       </SettingsPageContainer>
     );
   }
@@ -791,6 +794,8 @@ function NodeSourceControlSettingsPanel() {
           )}
         </SettingsSection>
       ) : null}
+
+      <GitWritingSettingsSection />
 
       <AtlassianConfiguration environmentId={environmentId} />
     </SettingsPageContainer>

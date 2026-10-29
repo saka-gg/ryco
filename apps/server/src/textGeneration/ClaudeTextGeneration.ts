@@ -490,6 +490,8 @@ export const makeClaudeTextGeneration = Effect.fn("makeClaudeTextGeneration")(fu
   });
 
   return {
+    // Commit and pull request runs pass `--tools ""` and an empty, strict MCP configuration.
+    gitWritingToolFree: true,
     generateCommitMessage,
     generatePrContent,
     generateBranchName,

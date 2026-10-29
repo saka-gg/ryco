@@ -567,6 +567,13 @@ export const WorktreeRoot = TrimmedString.check(Schema.isMaxLength(4096));
 /** Free-form guidance appended to a generated Git text prompt. Empty adds nothing. */
 export const GitWritingInstructions = TrimmedString.check(Schema.isMaxLength(4_000));
 
+/**
+ * How generated commit messages and pull request text are written: like the repository's
+ * recent history, as Conventional Commits, or in Ryco's standard style.
+ */
+export const GitWritingStyle = Schema.Literals(["default", "repository", "conventional"]);
+export type GitWritingStyle = typeof GitWritingStyle.Type;
+
 /** Initialization applies only to newly created Git worktree checkouts. */
 export const WorktreeSubmodules = Schema.Literals(["recursive", "top-level", "none"]);
 export type WorktreeSubmodules = typeof WorktreeSubmodules.Type;
@@ -735,6 +742,14 @@ export const ServerSettings = Schema.Struct({
   ),
   pullRequestInstructions: GitWritingInstructions.pipe(
     Schema.withDecodingDefault(Effect.succeed("")),
+  ),
+  // The style of generated commit messages and pull request text; the instructions above take
+  // precedence. Null entries of the project map inherit; entries are patched independently.
+  gitWritingStyle: GitWritingStyle.pipe(
+    Schema.withDecodingDefault(Effect.succeed("repository" as const)),
+  ),
+  projectGitWritingStyle: Schema.Record(Schema.String, Schema.NullOr(GitWritingStyle)).pipe(
+    Schema.withDecodingDefault(Effect.succeed({})),
   ),
   // The node's automatic settlement rule, the same on every client that lists its threads.
   // Absent until someone sets it (the shared default applies); null turns it off. Named apart
@@ -909,6 +924,10 @@ export const ServerSettingsPatch = Schema.Struct({
   textGenerationModelSelection: Schema.optionalKey(ModelSelectionPatch),
   commitMessageInstructions: Schema.optionalKey(GitWritingInstructions),
   pullRequestInstructions: Schema.optionalKey(GitWritingInstructions),
+  gitWritingStyle: Schema.optionalKey(GitWritingStyle),
+  projectGitWritingStyle: Schema.optionalKey(
+    Schema.Record(Schema.String, Schema.NullOr(GitWritingStyle)),
+  ),
   threadAutoSettleAfterDays: Schema.optionalKey(SidebarAutoSettleAfterDays),
   /**
    * Applies the patch only while the node's rule is still this (`"absent"`: never set), so of

@@ -51,6 +51,7 @@ describe("pre-auth server environment descriptor", () => {
       "conversationRevert",
       "environmentIcon",
       "fileAttachments",
+      "gitWritingStyle",
       "localTasks",
       "nodeAutoSettlement",
       "nodeSelfUpdate",
