@@ -112,7 +112,7 @@ export interface ThreadHeaderModel {
   readonly pullRequestWatch: ThreadHeaderPullRequestWatch | null;
   /**
    * Null unless the thread's session belongs to a provider that compacts on request and its
-   * latest context usage says it can (for Claude, that its CLI lists `/compact`).
+   * latest context usage says the node can (for Claude, that its CLI lists `/compact`).
    */
   readonly compactAction: ThreadCompactActionModel | null;
 }
@@ -122,7 +122,12 @@ function compactAction(
 ): ThreadCompactActionModel | null {
   // The thread's session, not the composer's selection: after a handoff they differ.
   const blocker = nativeCompactionBlockerForSession(thread.session);
-  if (blocker === "unsupported" || !nativeCompactionAdvertised(thread.activities)) return null;
+  if (
+    blocker === "unsupported" ||
+    !nativeCompactionAdvertised(thread.activities, thread.session?.provider)
+  ) {
+    return null;
+  }
   return {
     label: "Compact conversation",
     detail:

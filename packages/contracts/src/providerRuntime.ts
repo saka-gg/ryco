@@ -375,6 +375,12 @@ export const ThreadTokenUsageSnapshot = Schema.Struct({
   toolUses: Schema.optional(NonNegativeInt),
   durationMs: Schema.optional(NonNegativeInt),
   compactsAutomatically: Schema.optional(Schema.Boolean),
+  /**
+   * The node compacts this session when sent `/compact`, rather than passing it to the model.
+   * Claude Code's sessions always have when they compact automatically; for any other provider
+   * only a node that sets this does.
+   */
+  compactsOnRequest: Schema.optional(Schema.Boolean),
 });
 export type ThreadTokenUsageSnapshot = typeof ThreadTokenUsageSnapshot.Type;
 

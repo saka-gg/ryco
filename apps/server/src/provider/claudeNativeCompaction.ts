@@ -1,20 +1,8 @@
 import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
+import { NATIVE_COMPACTION_COMMAND } from "@ryco/shared/threadActivity";
 
-const CLAUDE_NATIVE_COMPACTION_COMMAND_NAME = "compact";
-
-/** Claude Code's own command that compacts the conversation. */
-export const CLAUDE_NATIVE_COMPACTION_COMMAND = `/${CLAUDE_NATIVE_COMPACTION_COMMAND_NAME}`;
-
-/** Only an attachment-free exact native command bypasses prompt decoration. */
-export function isClaudeNativeCompaction(input: {
-  readonly input?: string | undefined;
-  readonly attachments?: readonly unknown[] | undefined;
-}): boolean {
-  return (
-    input.input?.trim() === CLAUDE_NATIVE_COMPACTION_COMMAND &&
-    (input.attachments?.length ?? 0) === 0
-  );
-}
+// Claude Code lists its slash commands by name, without the slash.
+const CLAUDE_NATIVE_COMPACTION_COMMAND_NAME = NATIVE_COMPACTION_COMMAND.slice(1);
 
 /** Whether a system/init frame lists the native compaction command among its slash commands. */
 export function claudeInitAdvertisesNativeCompaction(initMessage: SDKMessage): boolean {

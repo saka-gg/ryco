@@ -38,7 +38,9 @@ import { buildAgentTokenModeInstructions } from "../../tokenReduction.ts";
 import { ProviderAdapterValidationError } from "../Errors.ts";
 import type { CodexAdapterShape } from "../Services/CodexAdapter.ts";
 import { ProviderSessionDirectory } from "../Services/ProviderSessionDirectory.ts";
+import type { CodexStoredThreadReader } from "./CodexStoredThreadReader.ts";
 import {
+  CodexSessionRuntimeCompactionNotStartedError,
   CodexStartupPhaseTimeout,
   type CodexSessionRuntimeOptions,
   type CodexSessionRuntimeSendTurnInput,
@@ -82,6 +84,15 @@ class FakeCodexRuntime implements CodexSessionRuntimeShape {
         turnId: asTurnId("turn-1"),
       }),
   );
+
+  public readonly compactThreadImpl = vi.fn((): Promise<ProviderTurnStartResult> =>
+    Promise.resolve({
+      threadId: this.options.threadId,
+      turnId: asTurnId("turn-compact"),
+    }),
+  );
+  /** When set, compaction runs this instead of resolving `compactThreadImpl`. */
+  public compactThreadEffect: ReturnType<CodexSessionRuntimeShape["compactThread"]> | null = null;
 
   public readonly steerTurnImpl = vi.fn(
     (input: CodexSessionRuntimeSteerTurnInput): Promise<ProviderTurnSteerResult> =>
@@ -149,6 +160,10 @@ class FakeCodexRuntime implements CodexSessionRuntimeShape {
 
   sendTurn(input: CodexSessionRuntimeSendTurnInput) {
     return Effect.promise(() => this.sendTurnImpl(input));
+  }
+
+  compactThread() {
+    return this.compactThreadEffect ?? Effect.promise(() => this.compactThreadImpl());
   }
 
   public steerTurnEffect: ReturnType<CodexSessionRuntimeShape["steerTurn"]> | null = null;
@@ -474,6 +489,131 @@ sessionErrorLayer("CodexAdapterLive session errors", (it) => {
       });
     }),
   );
+
+  it.effect("runs /compact as Codex's own compaction instead of a prompt", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      const threadId = asThreadId("sess-compact");
+      yield* adapter.startSession({
+        runtimeSessionId: RuntimeSessionId.make("test-codexadapter-compact"),
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+      const runtime = sessionRuntimeFactory.lastRuntime;
+      assert.ok(runtime);
+      runtime.sendTurnImpl.mockClear();
+
+      const result = yield* adapter.sendTurn({
+        threadId,
+        input: " /compact\n",
+        modelSelection: createModelSelection(ProviderInstanceId.make("codex"), "gpt-5.3-codex"),
+        attachments: [],
+      });
+
+      assert.equal(result.turnId, asTurnId("turn-compact"));
+      assert.equal(runtime.compactThreadImpl.mock.calls.length, 1);
+      assert.equal(runtime.sendTurnImpl.mock.calls.length, 0);
+    }),
+  );
+
+  it.effect("sends anything but the bare /compact as a prompt through turn/start", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      const threadId = asThreadId("sess-compact-prompt");
+      yield* adapter.startSession({
+        runtimeSessionId: RuntimeSessionId.make("test-codexadapter-compact-prompt"),
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+      const runtime = sessionRuntimeFactory.lastRuntime;
+      assert.ok(runtime);
+      runtime.sendTurnImpl.mockClear();
+
+      yield* adapter.sendTurn({ threadId, input: "/compact the logs", attachments: [] });
+      yield* adapter.sendTurn({
+        threadId,
+        input: "/compact",
+        attachments: [{ type: "file", name: "notes.txt", mimeType: "text/plain", sizeBytes: 3 }],
+      });
+
+      assert.deepStrictEqual(
+        runtime.sendTurnImpl.mock.calls.map((call) => call[0].input),
+        ["/compact the logs", "/compact\n\n[Attached file] notes.txt (text/plain, 3 bytes)"],
+      );
+      assert.equal(runtime.compactThreadImpl.mock.calls.length, 0);
+    }),
+  );
+
+  it.effect("reports a compaction Codex did not start as a request error", () =>
+    Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      const threadId = asThreadId("sess-compact-failed");
+      yield* adapter.startSession({
+        runtimeSessionId: RuntimeSessionId.make("test-codexadapter-compact-failed"),
+        provider: ProviderDriverKind.make("codex"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+      const runtime = sessionRuntimeFactory.lastRuntime;
+      assert.ok(runtime);
+      runtime.compactThreadEffect = Effect.fail(
+        new CodexSessionRuntimeCompactionNotStartedError({
+          threadId,
+          detail: "Method not found",
+        }),
+      );
+
+      const failure = yield* Effect.flip(
+        adapter.sendTurn({ threadId, input: "/compact", attachments: [] }),
+      );
+      runtime.compactThreadEffect = null;
+
+      assert.equal(failure._tag, "ProviderAdapterRequestError");
+      if (failure._tag !== "ProviderAdapterRequestError") return;
+      assert.equal(failure.method, "thread/compact/start");
+      assert.equal(failure.detail, "Codex did not start compaction: Method not found");
+    }),
+  );
+
+  it.effect("offers /compact among a project's Codex commands", () => {
+    const skillsList = vi.fn((_method: string, _params: unknown) => Effect.succeed({ data: [] }));
+    const storedThreadReader = {
+      withClient: <A>(use: (client: never, session: never) => Effect.Effect<A, never>) =>
+        use({ request: skillsList } as never, {} as never),
+      retireIfBinaryChanged: Effect.void,
+      starts: () => 0,
+      isRunning: () => false,
+    } as unknown as CodexStoredThreadReader;
+    const layer = Layer.effect(
+      CodexAdapter,
+      Effect.gen(function* () {
+        const codexConfig = Schema.decodeSync(CodexSettings)({});
+        return yield* makeCodexAdapter(codexConfig, {
+          makeRuntime: makeRuntimeFactory().factory,
+          storedThreadReader,
+        });
+      }),
+    ).pipe(
+      Layer.provideMerge(ServerConfig.layerTest(process.cwd(), process.cwd())),
+      Layer.provideMerge(ServerSettingsService.layerTest()),
+      Layer.provideMerge(providerSessionDirectoryTestLayer),
+      Layer.provideMerge(NodeServices.layer),
+    );
+
+    return Effect.gen(function* () {
+      const adapter = yield* CodexAdapter;
+      const commands = yield* adapter.readProjectCommands!("/repo");
+      assert.deepStrictEqual(skillsList.mock.calls, [["skills/list", { cwds: ["/repo"] }]]);
+      assert.deepStrictEqual(commands, {
+        skills: [],
+        slashCommands: [
+          { name: "compact", description: "Summarize the conversation to free context" },
+        ],
+      });
+    }).pipe(Effect.provide(layer));
+  });
 
   it.effect("steers the exact active Codex turn with the stable message id", () =>
     Effect.gen(function* () {
@@ -1989,6 +2129,7 @@ lifecycleLayer("CodexAdapterLive lifecycle", (it) => {
         lastOutputTokens: 6,
         lastReasoningOutputTokens: 0,
         compactsAutomatically: true,
+        compactsOnRequest: true,
       });
     }),
   );

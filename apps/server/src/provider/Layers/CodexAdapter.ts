@@ -28,6 +28,7 @@ import {
   RuntimeRequestId,
   RuntimeTaskId,
   type RuntimeTaskUsage,
+  type ServerProviderSlashCommand,
   ProviderApprovalDecision,
   ThreadId,
   TurnId,
@@ -67,6 +68,7 @@ import {
   type AttachmentPathLineEntry,
 } from "@ryco/shared/attachmentPrompt";
 import { formatSourceControlContextsForAgent } from "@ryco/shared/sourceControlContextFormatter";
+import { isNativeCompactionCommand, NATIVE_COMPACTION_COMMAND } from "@ryco/shared/threadActivity";
 import {
   resolveHtmlRenderToolPresentation,
   withoutHtmlRenderMarkup,
@@ -122,6 +124,12 @@ import { makeCodexUsageLimitTracker } from "./codexUsageLimits.ts";
 const PROVIDER = ProviderDriverKind.make("codex");
 const PROVIDER_SEND_TURN_MAX_ATTACHMENT_TOTAL_BYTES =
   PROVIDER_SEND_TURN_MAX_ATTACHMENTS * PROVIDER_SEND_TURN_MAX_IMAGE_BYTES;
+
+/** Codex's compaction, offered as a command: `sendTurn` runs it as `thread/compact/start`. */
+const CODEX_COMPACT_SLASH_COMMAND = {
+  name: NATIVE_COMPACTION_COMMAND.slice(1),
+  description: "Summarize the conversation to free context",
+} satisfies ServerProviderSlashCommand;
 
 /**
  * Narrow Agent Control surface the adapter consumes: lease issuance at
@@ -339,6 +347,9 @@ function normalizeCodexTokenUsage(
       ? { lastReasoningOutputTokens: reasoningOutputTokens }
       : {}),
     compactsAutomatically: true,
+    // `sendTurn` runs `/compact` as `thread/compact/start`. Clients offer Compact now only on
+    // usage that says so: an older node sends the command to the model.
+    compactsOnRequest: true,
   };
 }
 
@@ -2367,7 +2378,33 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
     };
   });
 
+  const bindAgentControlTurn = (session: CodexAdapterSessionContext, turnId: TurnId) =>
+    session.agentControl
+      ? session.agentControl.bindTurn(turnId).pipe(
+          Effect.catchCause((cause) =>
+            Effect.logWarning("failed to bind Agent Control turn authority", {
+              threadId: session.threadId,
+              turnId,
+              cause,
+            }),
+          ),
+        )
+      : Effect.void;
+
   const sendTurn: CodexAdapterShape["sendTurn"] = Effect.fn("sendTurn")(function* (input) {
+    // Codex compacts through its own request: sent as a prompt, `/compact` reaches the model.
+    if (isNativeCompactionCommand(input)) {
+      const session = yield* requireSession(input.threadId);
+      const result = yield* session.runtime
+        .compactThread()
+        .pipe(
+          Effect.mapError((cause) =>
+            mapCodexRuntimeError(input.threadId, "thread/compact/start", cause),
+          ),
+        );
+      yield* bindAgentControlTurn(session, result.turnId);
+      return result;
+    }
     const { native, pathLines } = yield* preflightAttachments(input, "turn/start");
     const codexAttachments = yield* Effect.forEach(
       native,
@@ -2408,17 +2445,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
         ...(codexAttachments.length > 0 ? { attachments: codexAttachments } : {}),
       })
       .pipe(Effect.mapError((cause) => mapCodexRuntimeError(input.threadId, "turn/start", cause)));
-    if (session.agentControl) {
-      yield* session.agentControl.bindTurn(result.turnId).pipe(
-        Effect.catchCause((cause) =>
-          Effect.logWarning("failed to bind Agent Control turn authority", {
-            threadId: input.threadId,
-            turnId: result.turnId,
-            cause,
-          }),
-        ),
-      );
-    }
+    yield* bindAgentControlTurn(session, result.turnId);
     return result;
   });
 
@@ -2574,7 +2601,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
       .pipe(
         Effect.map((response) => ({
           skills: parseCodexSkillsListResponse(response, cwd),
-          slashCommands: [],
+          slashCommands: [CODEX_COMPACT_SLASH_COMMAND],
         })),
         Effect.mapError(
           (cause) =>

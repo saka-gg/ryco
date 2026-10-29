@@ -25,10 +25,8 @@ import {
 } from "@anthropic-ai/claude-agent-sdk";
 import { afterAll, beforeAll, describe, expect, it } from "vite-plus/test";
 
-import {
-  CLAUDE_NATIVE_COMPACTION_COMMAND,
-  claudeInitAdvertisesNativeCompaction,
-} from "./claudeNativeCompaction.ts";
+import { NATIVE_COMPACTION_COMMAND } from "@ryco/shared/threadActivity";
+import { claudeInitAdvertisesNativeCompaction } from "./claudeNativeCompaction.ts";
 import { claudeEchoedPromptUuids } from "./claudeSteering.ts";
 import { CONTEXT_COMPACTION_TRIGGER_RATIO } from "./contextCompactionPolicy.ts";
 
@@ -175,7 +173,7 @@ describe.runIf(process.env.RYCO_CLAUDE_NATIVE_PROBE === "1")("Claude Code compac
       const promptUuid = crypto.randomUUID();
       session.send({
         type: "user",
-        message: { role: "user", content: CLAUDE_NATIVE_COMPACTION_COMMAND },
+        message: { role: "user", content: NATIVE_COMPACTION_COMMAND },
         parent_tool_use_id: null,
         uuid: promptUuid,
         session_id: "",

@@ -7,6 +7,7 @@ import {
   compareThreadActivities,
   compareThreadActivitiesInLifecycleOrder,
   compareThreadActivitySequence,
+  compactsOnRequest,
   derivePendingThreadRequestState,
   derivePendingThreadRequests,
   isContextCompactionActivity,
@@ -84,6 +85,14 @@ describe("threadActivity", () => {
     expect(isNativeCompactionCommand({ input: "/compact now" })).toBe(false);
     expect(isNativeCompactionCommand({ input: "please /compact" })).toBe(false);
     expect(isNativeCompactionCommand({})).toBe(false);
+  });
+
+  it("knows which drivers compact on request", () => {
+    expect(compactsOnRequest("claudeAgent")).toBe(true);
+    expect(compactsOnRequest("codex")).toBe(true);
+    expect(compactsOnRequest("opencode")).toBe(false);
+    expect(compactsOnRequest(null)).toBe(false);
+    expect(compactsOnRequest(undefined)).toBe(false);
   });
 
   it("identifies only terminal, schema-valid context handoffs as milestones", () => {

@@ -14,6 +14,15 @@ export const CONTEXT_COMPACTION_ACTIVITY_KIND = "context-compaction";
 /** The message a client sends to ask the thread's provider to compact its own context. */
 export const NATIVE_COMPACTION_COMMAND = "/compact";
 
+/**
+ * Whether a session of this driver compacts its context when sent `NATIVE_COMPACTION_COMMAND`:
+ * Claude Code runs its own `/compact`, Codex runs `thread/compact/start`. To others the command
+ * is plain text for the model.
+ */
+export function compactsOnRequest(driver: string | null | undefined): boolean {
+  return driver === "claudeAgent" || driver === "codex";
+}
+
 /** Only the exact command without attachments asks for compaction; anything else is a prompt. */
 export function isNativeCompactionCommand(message: {
   readonly input?: string | undefined;
