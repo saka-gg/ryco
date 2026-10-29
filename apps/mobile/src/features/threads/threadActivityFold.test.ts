@@ -145,6 +145,20 @@ describe("thread activity folds", () => {
     expect(folds(build([work("b")]))[0]?.rows[0]?.heading).toBe("Tool call");
   });
 
+  it("names a command the way web does, without wrappers, and keeps the raw command", () => {
+    const rows = build([
+      work("a", { toolTitle: "Bash", command: "rtk git status" }),
+      work("b", { command: "rtk proxy cat src/App.tsx", completed: false }),
+      work("c", { command: "rtk gain" }),
+    ]);
+    const [ran, reading, own] = folds(rows)[0]!.rows;
+    expect(ran?.heading).toBe("Checked git status");
+    expect(ran?.command).toBe("rtk git status");
+    expect(reading?.heading).toBe("Reading src/App.tsx");
+    // RTK's own subcommand is not a wrapped command.
+    expect(own?.heading).toBe("Ran rtk gain");
+  });
+
   it("surfaces the detail the old row threw away", () => {
     const rows = build([
       work("a", {

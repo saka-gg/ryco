@@ -1,5 +1,6 @@
 import {
   collectTurnHtmlRenders,
+  deriveReadableCommandDisplay,
   deriveTerminalAssistantMessageIds,
   formatDuration,
   isBlankSettledReply,
@@ -90,12 +91,23 @@ function firstLine(value: string | undefined): string | null {
   return line?.trim() || null;
 }
 
+/**
+ * A shell command reads as web's "verb + target" sentence ("Ran git status", "Read
+ * App.tsx"), from the shared command labels; the raw command stays on the row below.
+ */
+function commandHeading(entry: WorkLogEntry): string | null {
+  const command = entry.command ?? entry.rawCommand;
+  if (!command?.trim()) return null;
+  const readable = deriveReadableCommandDisplay(command, entry.completed === false);
+  return readable.target ? `${readable.verb} ${readable.target}` : readable.verb;
+}
+
 function toRow(entry: WorkLogEntry): ActivityRow {
   return {
     id: entry.id,
     // `toolTitle` is the tool's own name; `label` is the generic fallback
     // ("Tool call") that used to be the ONLY thing rendered.
-    heading: entry.toolTitle?.trim() || entry.label,
+    heading: commandHeading(entry) ?? (entry.toolTitle?.trim() || entry.label),
     detail: entry.detail?.trim() || null,
     command: firstLine(entry.command ?? entry.rawCommand),
     output: entry.output?.trim() || null,
