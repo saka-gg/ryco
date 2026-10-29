@@ -11,6 +11,7 @@ import {
   usePreferences,
 } from "../../state/preferencesStore";
 import { NodeStorageSettings } from "./NodeStorageSettings";
+import { NodeUpdatesSettings } from "./updates/NodeUpdatesSettings";
 import { useNavigation } from "@react-navigation/native";
 import { ScrollView } from "react-native";
 
@@ -47,6 +48,7 @@ export function SettingsWorkspaceRouteScreen() {
       </SettingsSection>
 
       <NodeStorageSettings />
+      <NodeUpdatesSettings />
 
       <SettingsSection title="New tasks">
         <SettingsRow first label="Provider and model" value="Project default" />

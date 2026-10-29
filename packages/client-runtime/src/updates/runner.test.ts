@@ -3,19 +3,16 @@ import type {
   UpdateEverythingIo,
   UpdateEverythingLocalApp,
   UpdateEverythingResultDescription,
-} from "@ryco/client-runtime/updates";
+} from "./index.ts";
 import {
   EnvironmentId,
   type NodeUpdateInput,
   type ServerProviderUpdatedPayload,
 } from "@ryco/contracts";
-import { describe, expect, it, vi } from "vitest";
+import { describe, expect, it, vi } from "vite-plus/test";
 
-import { nodeUpdateState, updatableProvider } from "./testing/updateFixtures";
-import {
-  createUpdateEverythingRunner,
-  type UpdateEverythingRunnerDeps,
-} from "./updateEverythingRunner";
+import { nodeUpdateState, updatableProvider } from "../../test/nodeUpdateFixtures.ts";
+import { createUpdateEverythingRunner, type UpdateEverythingRunnerDeps } from "./runner.ts";
 
 const LOCAL = EnvironmentId.make("env-local");
 const SERVER = EnvironmentId.make("env-server");

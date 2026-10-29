@@ -1,4 +1,4 @@
-import type { NodeUpdateClient, NodeUpdateStore } from "@ryco/client-runtime/state/nodeUpdate";
+import type { NodeUpdateClient, NodeUpdateStore } from "../state/nodeUpdate/store.ts";
 import type { EnvironmentId } from "@ryco/contracts";
 
 /** A connection the environment runtime owns; the wiring only reads it. */

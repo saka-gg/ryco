@@ -17,6 +17,7 @@ export * from "./waitForThreadShell.ts";
 export * from "./types.ts";
 export * from "./threadActivityStatus.ts";
 export * from "./threadBranchAdoption.ts";
+export * from "./interruptibleTurns.ts";
 export * from "./threadAttention.ts";
 export * from "./threadFailure.ts";
 

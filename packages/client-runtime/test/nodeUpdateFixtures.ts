@@ -1,8 +1,11 @@
 import {
+  DEFAULT_SERVER_SETTINGS,
   EnvironmentId,
   ServerProvider,
+  type DesktopUpdateState,
   type NodeUpdateRun,
   type NodeUpdateState,
+  type ServerConfig,
 } from "@ryco/contracts";
 import { Schema } from "effect";
 
@@ -93,6 +96,51 @@ export function updateEverythingEnvironment(
     busyProviderInstanceIds: [],
     runningChatCount: 0,
     continueThreadsAfterRestart: true,
+    ...overrides,
+  };
+}
+
+/** Only the parts of a node's config "Update everything" reads. */
+export function nodeServerConfig(input: {
+  readonly environmentId: string;
+  readonly label?: string;
+  readonly serverVersion?: string;
+  readonly nodeSelfUpdate?: boolean;
+  readonly providers?: ReadonlyArray<ServerProvider>;
+  readonly continueThreadsAfterRestart?: boolean;
+}): ServerConfig {
+  return {
+    environment: {
+      environmentId: EnvironmentId.make(input.environmentId),
+      label: input.label ?? "Node",
+      serverVersion: input.serverVersion ?? "0.1.35",
+      capabilities:
+        input.nodeSelfUpdate === undefined ? {} : { nodeSelfUpdate: input.nodeSelfUpdate },
+    },
+    providers: input.providers ?? [],
+    settings: {
+      ...DEFAULT_SERVER_SETTINGS,
+      continueThreadsAfterRestart: input.continueThreadsAfterRestart ?? false,
+    },
+  } as unknown as ServerConfig;
+}
+
+/** This desktop app's updater with 0.1.36 found and not yet downloaded. */
+export function desktopUpdateState(
+  overrides: Partial<DesktopUpdateState> = {},
+): DesktopUpdateState {
+  return {
+    enabled: true,
+    status: "available",
+    channel: "latest",
+    currentVersion: "0.1.35",
+    availableVersion: "0.1.36",
+    downloadedVersion: null,
+    downloadPercent: null,
+    checkedAt: "2026-10-21T00:00:00.000Z",
+    message: null,
+    errorContext: null,
+    canRetry: false,
     ...overrides,
   };
 }

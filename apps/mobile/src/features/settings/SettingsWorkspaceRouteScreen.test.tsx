@@ -28,6 +28,7 @@ vi.mock("./components/SettingsRow", () => ({ SettingsRow: "SettingsRow" }));
 vi.mock("./components/SettingsSwitchRow", () => ({ SettingsSwitchRow: "SettingsSwitchRow" }));
 vi.mock("./components/SettingsSection", () => ({ SettingsSection: "SettingsSection" }));
 vi.mock("./NodeStorageSettings", () => ({ NodeStorageSettings: "NodeStorageSettings" }));
+vi.mock("./updates/NodeUpdatesSettings", () => ({ NodeUpdatesSettings: "NodeUpdatesSettings" }));
 vi.mock("./openMachinesFromSettings", () => ({ openMachinesFromSettings: vi.fn() }));
 import { SettingsWorkspaceRouteScreen } from "./SettingsWorkspaceRouteScreen";
 

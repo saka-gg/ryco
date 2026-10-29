@@ -1,8 +1,8 @@
-import type { NodeUpdateClient } from "@ryco/client-runtime/state/nodeUpdate";
+import type { NodeUpdateClient } from "../state/nodeUpdate/store.ts";
 import { EnvironmentId } from "@ryco/contracts";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "vite-plus/test";
 
-import { createNodeUpdateWiring, type NodeUpdateWiringConnection } from "./nodeUpdateWiring";
+import { createNodeUpdateWiring, type NodeUpdateWiringConnection } from "./wiring.ts";
 
 const A = EnvironmentId.make("env-a");
 const B = EnvironmentId.make("env-b");

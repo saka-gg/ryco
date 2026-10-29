@@ -1,18 +1,22 @@
-import {
-  buildUpdateEverythingPlan,
-  describeUpdateEverythingResult,
-  runUpdateEverything,
-  type UpdateEverythingEnvironmentInput,
-  type UpdateEverythingIo,
-  type UpdateEverythingLocalApp,
-  type UpdateEverythingPlan,
-  type UpdateEverythingResult,
-  type UpdateEverythingResultDescription,
-  type UpdateEverythingRunState,
-} from "@ryco/client-runtime/updates";
 import type { EnvironmentId } from "@ryco/contracts";
 
-import { selectUpdateEverythingEnvironments } from "./updateEverythingInputs";
+import {
+  describeUpdateEverythingResult,
+  type UpdateEverythingResultDescription,
+} from "./describe.ts";
+import { selectUpdateEverythingEnvironments } from "./inputs.ts";
+import {
+  buildUpdateEverythingPlan,
+  type UpdateEverythingEnvironmentInput,
+  type UpdateEverythingLocalApp,
+  type UpdateEverythingPlan,
+} from "./plan.ts";
+import {
+  runUpdateEverything,
+  type UpdateEverythingIo,
+  type UpdateEverythingResult,
+  type UpdateEverythingRunState,
+} from "./run.ts";
 
 export interface UpdateEverythingRunSnapshot {
   /** The active run, or the finished one until it is dismissed. */

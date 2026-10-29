@@ -14,8 +14,12 @@ import {
 } from "@ryco/client-runtime/rpc";
 import type { SidebarThreadOrStub } from "@ryco/client-runtime/state/threads";
 import {
+  assembleUpdateEverythingInputs,
   buildUpdateEverythingPlan,
+  sameUpdateEverythingPlan,
+  selectUpdateEverythingLocalApp,
   type UpdateEverythingEnvironmentInput,
+  type UpdateEverythingEnvironmentSource,
   type UpdateEverythingLocalApp,
   type UpdateEverythingPlan,
 } from "@ryco/client-runtime/updates";
@@ -48,12 +52,6 @@ import {
 } from "../store";
 import { canMutateNodeUpdates, subscribeNodeMethodPermissions } from "./nodeUpdatePermissions";
 import { nodeUpdateStore } from "./nodeUpdateStore";
-import {
-  assembleUpdateEverythingInputs,
-  sameUpdateEverythingPlan,
-  selectUpdateEverythingLocalApp,
-  type UpdateEverythingEnvironmentSource,
-} from "./updateEverythingInputs";
 
 let activityCache: {
   readonly threads: ReadonlyArray<SidebarThreadOrStub>;

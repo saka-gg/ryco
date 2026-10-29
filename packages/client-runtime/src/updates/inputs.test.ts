@@ -1,14 +1,14 @@
-import { buildUpdateEverythingPlan } from "@ryco/client-runtime/updates";
+import { buildUpdateEverythingPlan } from "./index.ts";
 import { EnvironmentId, ProviderInstanceId } from "@ryco/contracts";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it } from "vite-plus/test";
 
-import type { EnvironmentTurnActivity } from "../desktopRelaunchGuard.logic";
+import type { EnvironmentTurnActivity } from "../state/threads/interruptibleTurns.ts";
 import {
   desktopUpdateState,
   nodeServerConfig,
   nodeUpdateState,
   updatableProvider,
-} from "./testing/updateFixtures";
+} from "../../test/nodeUpdateFixtures.ts";
 import {
   assembleUpdateEverythingInputs,
   sameUpdateEverythingPlan,
@@ -16,7 +16,7 @@ import {
   selectUpdateEverythingLocalApp,
   UNNAMED_NODE_LABEL,
   type UpdateEverythingEnvironmentSource,
-} from "./updateEverythingInputs";
+} from "./inputs.ts";
 
 const LOCAL = EnvironmentId.make("env-local");
 const REMOTE = EnvironmentId.make("env-remote");
