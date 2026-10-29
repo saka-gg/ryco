@@ -30,7 +30,7 @@ import { type AppSymbolName, SymbolView } from "./AppSymbol";
 import { AppText as Text } from "./AppText";
 import { OverlayPortal } from "./OverlayPortal";
 import { useSafeAreaInsets } from "react-native-safe-area-context";
-import { filterAnchoredMenuActions } from "./anchoredMenuModel";
+import { filterAnchoredMenuActions, resolveAnchoredMenuParent } from "./anchoredMenuModel";
 
 const MENU_WIDTH = 250;
 const SCREEN_MARGIN = 12;
@@ -306,10 +306,7 @@ export function AnchoredMenu(props: AnchoredMenuProps) {
     return () => subscription.remove();
   }, [anchor, close, submenuDepth, navigate, path]);
 
-  const pathParent = path.length > 0 ? path[path.length - 1] : null;
-  const parent = pathParent
-    ? (props.actions.find((action) => action.id === pathParent.id) ?? pathParent)
-    : null;
+  const parent = resolveAnchoredMenuParent(props.actions, path);
   const levelActions = filterAnchoredMenuActions(props.actions, parent?.subactions, query);
   const menuWidth = Math.min(
     (parent ? props.submenuWidth : undefined) ?? props.menuWidth ?? MENU_WIDTH,
@@ -388,6 +385,9 @@ export function AnchoredMenu(props: AnchoredMenuProps) {
         return;
       }
       if (closeOnSelect) close();
+      // A nested submenu folds part of its parent's list, so a pick that keeps
+      // the menu open returns to that list, where the choice now shows.
+      else if (path.length > 1) navigate(path.slice(0, -1), -1);
       if (action.id !== undefined) {
         onPressAction?.({
           nativeEvent: { event: action.id },

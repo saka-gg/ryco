@@ -11,6 +11,7 @@ import type {
   RuntimeMode,
   ModelSelection,
   ProviderInteractionMode,
+  ServerProvider,
 } from "@ryco/contracts";
 import { Pressable, TextInput, View } from "react-native";
 import { IconGitBranch, IconGitFork } from "../../components/icons";
@@ -66,6 +67,8 @@ export function NewTaskComposer(props: {
   readonly onOpenWorkspace: () => void;
   readonly onSelectEnvironment: (environmentId: EnvironmentId) => void;
   readonly modelOptions: ReadonlyArray<ModelOption>;
+  /** The node's provider snapshots, for the notices naming the update a model needs. */
+  readonly providers: ReadonlyArray<ServerProvider> | undefined;
   readonly modelSelection: ModelSelection;
   readonly onSelectModel: (selection: ModelSelection) => void;
   readonly onChangeRuntimeMode: (mode: RuntimeMode) => void;
@@ -232,6 +235,7 @@ export function NewTaskComposer(props: {
             <ComposerModelMenu
               model={buildModelPickerModelFromOptions({
                 modelOptions: props.modelOptions,
+                providers: props.providers,
                 currentSelection: props.modelSelection,
               })}
               selection={props.modelSelection}

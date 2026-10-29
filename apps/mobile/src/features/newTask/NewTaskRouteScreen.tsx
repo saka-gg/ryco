@@ -690,6 +690,7 @@ function NewTaskContent(props: NewTaskRouteScreenProps) {
             onOpenWorkspace={() => setWorkspacePickerVisible(true)}
             onSelectEnvironment={selectEnvironment}
             modelOptions={modelOptions}
+            providers={serverConfig?.providers}
             modelSelection={modelSelection}
             onSelectModel={(selection) => {
               modelEdited.current = true;

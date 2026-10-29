@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { Pressable, ScrollView, TextInput, View } from "react-native";
 import Animated, {
   FadeIn,
@@ -15,7 +16,12 @@ import { OverlayPortal } from "../../components/OverlayPortal";
 import { ProviderIcon } from "../../components/ProviderIcon";
 import { cn } from "../../lib/cn";
 import { useThemeColor } from "../../lib/useThemeColor";
-import type { ModelOptionControl, ModelPickerModel } from "./modelPickerModel";
+import type {
+  ModelOptionControl,
+  ModelPickerEntry,
+  ModelPickerGroup,
+  ModelPickerModel,
+} from "./modelPickerModel";
 
 // Grouped model picker, one section per provider instance, with the provider's
 // brand mark on the section header. Like the policy sheet it goes through
@@ -100,6 +106,124 @@ function OptionRail(props: {
             </Pressable>
           ))}
         </View>
+      ) : null}
+    </View>
+  );
+}
+
+function ModelPickerRow(props: {
+  readonly entry: ModelPickerEntry;
+  readonly divided: boolean;
+  readonly checkColor: string;
+  readonly onSelect: (key: string) => void;
+}) {
+  const { entry } = props;
+  return (
+    <Pressable
+      accessibilityRole="radio"
+      accessibilityState={{ checked: entry.selected, disabled: entry.disabled }}
+      accessibilityLabel={
+        entry.disabled && entry.disabledReason
+          ? `${entry.label}. ${entry.disabledReason}`
+          : entry.label
+      }
+      disabled={entry.disabled}
+      onPress={() => props.onSelect(entry.key)}
+      className={cn(
+        "min-h-11 flex-row items-center justify-between gap-3 px-3.5 py-2.5 active:bg-card-alt",
+        props.divided && "border-t border-border-subtle",
+        entry.disabled && "opacity-40",
+      )}
+    >
+      <Text
+        className={cn(
+          "shrink text-sm",
+          entry.selected ? "font-ryco-bold text-foreground" : "font-ryco-medium text-foreground",
+        )}
+        numberOfLines={1}
+      >
+        {entry.label}
+      </Text>
+      {entry.selected ? (
+        <SymbolView name="checkmark" size={14} tintColor={props.checkColor} type="monochrome" />
+      ) : null}
+    </Pressable>
+  );
+}
+
+/**
+ * One provider instance: its current models, its legacy ones folded under a
+ * row that expands in place, and the notice naming the CLI update that unlocks
+ * models it can't run yet. The fold state lives here, so every open of the
+ * sheet starts collapsed.
+ */
+function ModelPickerGroupSection(props: {
+  readonly group: ModelPickerGroup;
+  readonly onSelect: (key: string) => void;
+}) {
+  const checkColor = useThemeColor("--color-icon") as string;
+  const chevronColor = useThemeColor("--color-icon-muted") as string;
+  const [legacyExpanded, setLegacyExpanded] = useState(false);
+  const { group } = props;
+  const legacyCount = group.legacyEntries.length;
+
+  return (
+    <View className="gap-1.5">
+      <View className="flex-row items-center gap-2 px-1">
+        <ProviderIcon provider={group.providerDriver} size={14} />
+        <Text className="text-xs font-ryco-bold uppercase tracking-wide text-foreground-tertiary">
+          {group.providerLabel}
+        </Text>
+      </View>
+      {group.entries.length > 0 ? (
+        <View className="overflow-hidden rounded-2xl bg-subtle">
+          {group.entries.map((entry, index) => (
+            <ModelPickerRow
+              key={entry.key}
+              entry={entry}
+              divided={index > 0}
+              checkColor={checkColor}
+              onSelect={props.onSelect}
+            />
+          ))}
+          {legacyCount > 0 ? (
+            <Pressable
+              accessibilityRole="button"
+              accessibilityLabel={`Legacy models, ${legacyCount} ${
+                legacyCount === 1 ? "model" : "models"
+              }`}
+              accessibilityState={{ expanded: legacyExpanded }}
+              onPress={() => setLegacyExpanded((expanded) => !expanded)}
+              className="min-h-11 flex-row items-center justify-between gap-3 border-t border-border-subtle px-3.5 py-2.5 active:bg-card-alt"
+            >
+              <Text className="shrink text-sm font-ryco-medium text-foreground-muted">
+                Legacy models · {legacyCount}
+              </Text>
+              <SymbolView
+                name={legacyExpanded ? "chevron.down" : "chevron.right"}
+                size={13}
+                tintColor={chevronColor}
+                type="monochrome"
+              />
+            </Pressable>
+          ) : null}
+          {legacyExpanded
+            ? group.legacyEntries.map((entry) => (
+                <ModelPickerRow
+                  key={entry.key}
+                  entry={entry}
+                  divided
+                  checkColor={checkColor}
+                  onSelect={props.onSelect}
+                />
+              ))
+            : null}
+        </View>
+      ) : null}
+      {group.updateRequiredNotice ? (
+        <Text className="px-1 text-xs leading-snug text-foreground-muted">
+          {group.updateRequiredNotice}
+        </Text>
       ) : null}
     </View>
   );
@@ -200,64 +324,24 @@ export function ModelPickerSheet(props: {
                 <Text className="px-1 py-6 text-center text-sm text-foreground-muted">
                   Loading models from the node…
                 </Text>
-              ) : props.model.groups.length === 0 ? (
-                <Text className="px-1 py-6 text-center text-sm text-foreground-muted">
-                  {props.model.emptyForQuery
-                    ? "No models match that search."
-                    : "This node has no available models."}
-                </Text>
               ) : (
-                props.model.groups.map((group) => (
-                  <View key={group.providerKey} className="gap-1.5">
-                    <View className="flex-row items-center gap-2 px-1">
-                      <ProviderIcon provider={group.providerDriver} size={14} />
-                      <Text className="text-xs font-ryco-bold uppercase tracking-wide text-foreground-tertiary">
-                        {group.providerLabel}
-                      </Text>
-                    </View>
-                    <View className="overflow-hidden rounded-2xl bg-subtle">
-                      {group.entries.map((entry, index) => (
-                        <Pressable
-                          key={entry.key}
-                          accessibilityRole="radio"
-                          accessibilityState={{ checked: entry.selected, disabled: entry.disabled }}
-                          accessibilityLabel={
-                            entry.disabled && entry.disabledReason
-                              ? `${entry.label}. ${entry.disabledReason}`
-                              : entry.label
-                          }
-                          disabled={entry.disabled}
-                          onPress={() => props.onSelect(entry.key)}
-                          className={cn(
-                            "min-h-11 flex-row items-center justify-between gap-3 px-3.5 py-2.5 active:bg-card-alt",
-                            index > 0 && "border-t border-border-subtle",
-                            entry.disabled && "opacity-40",
-                          )}
-                        >
-                          <Text
-                            className={cn(
-                              "shrink text-sm",
-                              entry.selected
-                                ? "font-ryco-bold text-foreground"
-                                : "font-ryco-medium text-foreground",
-                            )}
-                            numberOfLines={1}
-                          >
-                            {entry.label}
-                          </Text>
-                          {entry.selected ? (
-                            <SymbolView
-                              name="checkmark"
-                              size={14}
-                              tintColor={iconColor as string}
-                              type="monochrome"
-                            />
-                          ) : null}
-                        </Pressable>
-                      ))}
-                    </View>
-                  </View>
-                ))
+                <>
+                  {/* A search can match no model yet keep a group for its update notice. */}
+                  {props.model.groups.length === 0 || props.model.emptyForQuery ? (
+                    <Text className="px-1 py-6 text-center text-sm text-foreground-muted">
+                      {props.model.emptyForQuery
+                        ? "No models match that search."
+                        : "This node has no available models."}
+                    </Text>
+                  ) : null}
+                  {props.model.groups.map((group) => (
+                    <ModelPickerGroupSection
+                      key={group.providerKey}
+                      group={group}
+                      onSelect={props.onSelect}
+                    />
+                  ))}
+                </>
               )}
             </ScrollView>
             {props.model.hasOptionRail ? (

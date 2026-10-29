@@ -1,8 +1,11 @@
+import { splitLegacyModels } from "@ryco/client-runtime/state/composer/legacyModelFold";
+import { formatProviderUpdateRequiredNotice } from "@ryco/client-runtime/state/composer/providerUpdateRequiredNotice";
 import type {
   ModelSelection,
   ProviderOptionDescriptor,
   ProviderOptionSelectionValue,
   ServerConfig,
+  ServerProvider,
 } from "@ryco/contracts";
 import type { FastModeNotice } from "@ryco/client-runtime/state/session";
 import {
@@ -44,7 +47,16 @@ export interface ModelPickerGroup {
   readonly providerKey: string;
   readonly providerLabel: string;
   readonly providerDriver: string;
+  /** Empty only while searching, when the group stays for its notice alone. */
   readonly entries: ReadonlyArray<ModelPickerEntry>;
+  /**
+   * Models the manifest marks legacy, folded under a collapsed "Legacy models"
+   * row after `entries`. The selected model and custom models never fold, and
+   * a search lists matching legacy models in `entries` instead.
+   */
+  readonly legacyEntries: ReadonlyArray<ModelPickerEntry>;
+  /** Which CLI update unlocks models this instance can't run yet, if any match. */
+  readonly updateRequiredNotice: string | null;
 }
 
 /**
@@ -96,7 +108,10 @@ export interface ModelPickerModel {
   /** Set when the thread is pinned to one provider. */
   readonly lockedProviderKey: string | null;
   readonly lockNotice: string | null;
-  /** True when a query matched nothing — distinct from having no models. */
+  /**
+   * True when a query matched no model — distinct from having no models. Groups
+   * can remain for their update notices.
+   */
   readonly emptyForQuery: boolean;
 }
 
@@ -110,6 +125,8 @@ export interface ModelPickerInput {
   /** @deprecated Compatibility for New Task and older pure-model callers. */
   readonly providerLocked?: boolean;
   readonly query?: string;
+  /** Provider snapshots, for the notices naming the update a model needs. */
+  readonly providers?: ReadonlyArray<ServerProvider> | undefined;
 }
 
 const LOCK_NOTICE = "Wait for this task to become idle before switching providers.";
@@ -123,6 +140,7 @@ export function buildModelPickerModel(input: ModelPickerInput): ModelPickerModel
   return buildModelPickerModelFromOptions({
     ...input,
     modelOptions: buildModelOptions(input.serverConfig, input.currentSelection),
+    providers: input.serverConfig?.providers,
     loading: input.serverConfig === null || input.serverConfig === undefined,
   });
 }
@@ -148,29 +166,47 @@ export function buildModelPickerModelFromOptions(
 
   const controls = buildModelOptionControls(input.currentSelection, selectedOption?.capabilities);
 
-  const groups = groupByProvider(options)
-    .map((group) => {
-      const locked = lockedProviderKey !== null && group.providerKey !== lockedProviderKey;
-      return {
+  const providers = new Map<string, ServerProvider>(
+    (input.providers ?? []).map((provider) => [provider.instanceId, provider]),
+  );
+
+  const groups = groupByProvider(options).flatMap((group): ReadonlyArray<ModelPickerGroup> => {
+    const locked = lockedProviderKey !== null && group.providerKey !== lockedProviderKey;
+    const toEntry = (option: ModelOption): ModelPickerEntry => ({
+      key: option.key,
+      label: option.label,
+      providerKey: option.providerKey,
+      providerDriver: option.providerDriver,
+      selection: option.selection,
+      capabilities: option.capabilities,
+      selected: option.key === selectedKey,
+      disabled: locked,
+      disabledReason: locked ? lockNotice : null,
+    });
+    const matching = group.models.filter((option) => matches(option, query));
+    // A search lists matching legacy models inline. The selected model stays
+    // in view even when it is legacy, as Claude's text-generation default is.
+    const { current, legacy } = query
+      ? { current: matching, legacy: [] }
+      : splitLegacyModels(matching, (option) => option.key === selectedKey);
+    const provider = providers.get(group.providerKey);
+    const updateRequiredNotice = provider
+      ? formatProviderUpdateRequiredNotice(provider, query)
+      : null;
+    // A search for a model the CLI is too old to run keeps its group, so the
+    // notice can say which update unlocks it.
+    if (current.length === 0 && updateRequiredNotice === null) return [];
+    return [
+      {
         providerKey: group.providerKey,
         providerLabel: group.providerLabel,
         providerDriver: group.models[0]?.providerDriver ?? "",
-        entries: group.models
-          .filter((option) => matches(option, query))
-          .map((option) => ({
-            key: option.key,
-            label: option.label,
-            providerKey: option.providerKey,
-            providerDriver: option.providerDriver,
-            selection: option.selection,
-            capabilities: option.capabilities,
-            selected: option.key === selectedKey,
-            disabled: locked,
-            disabledReason: locked ? lockNotice : null,
-          })),
-      };
-    })
-    .filter((group) => group.entries.length > 0);
+        entries: current.map(toEntry),
+        legacyEntries: legacy.map(toEntry),
+        updateRequiredNotice,
+      },
+    ];
+  });
 
   const reasoning = controls.find((control) => control.kind === "select");
   // By id: a model's first on/off option can be another one, such as Haiku's thinking.
@@ -206,7 +242,7 @@ export function buildModelPickerModelFromOptions(
     loading,
     lockedProviderKey,
     lockNotice: lockedProviderKey !== null ? lockNotice : null,
-    emptyForQuery: query.length > 0 && groups.length === 0,
+    emptyForQuery: query.length > 0 && groups.every((group) => group.entries.length === 0),
   };
 }
 
@@ -335,16 +371,19 @@ export function applyModelOption(
   return options ? { ...selection, options } : selection;
 }
 
+/** Every model the picker offers, folded legacy ones included. */
+export function listModelPickerEntries(
+  model: Pick<ModelPickerModel, "groups">,
+): ReadonlyArray<ModelPickerEntry> {
+  return model.groups.flatMap((group) => [...group.entries, ...group.legacyEntries]);
+}
+
 /** The selection a tap should produce, or null when the tap must be ignored. */
 export function resolveModelPickerSelection(
   model: ModelPickerModel,
   key: string,
 ): ModelSelection | null {
-  for (const group of model.groups) {
-    const entry = group.entries.find((candidate) => candidate.key === key);
-    if (!entry) continue;
-    if (entry.disabled || entry.selected) return null;
-    return entry.selection;
-  }
-  return null;
+  const entry = listModelPickerEntries(model).find((candidate) => candidate.key === key);
+  if (!entry || entry.disabled || entry.selected) return null;
+  return entry.selection;
 }
