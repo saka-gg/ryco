@@ -225,8 +225,26 @@ type ClaudeCapabilitiesProbe = {
   readonly email: string | undefined;
   readonly subscriptionType: string | undefined;
   readonly tokenSource: string | undefined;
+  /** Where an API key comes from (`ANTHROPIC_API_KEY`, `apiKeyHelper`, ...), when one is used. */
+  readonly apiKeySource?: string | undefined;
+  /** The API backend; Anthropic credentials only apply to `firstParty`. */
+  readonly apiProvider?: string | undefined;
   readonly slashCommands: ReadonlyArray<ServerProviderSlashCommand>;
 };
+
+/**
+ * Whether Claude Code reported no credential at all. A signed-out CLI still
+ * initializes (with `tokenSource: "none"` and no API key source), so a probe
+ * that answers proves nothing about authentication. Third-party backends
+ * (Bedrock, Vertex, a gateway) authenticate outside these fields.
+ */
+function claudeProbeSignedOut(probe: ClaudeCapabilitiesProbe): boolean {
+  return (
+    probe.tokenSource === "none" &&
+    (probe.apiKeySource === undefined || probe.apiKeySource === "none") &&
+    (probe.apiProvider === undefined || probe.apiProvider === "firstParty")
+  );
+}
 
 type ResolveClaudeCapabilities = (
   claudeSettings: ClaudeSettings,
@@ -370,12 +388,16 @@ const probeClaudeCapabilities = (
             readonly email?: string;
             readonly subscriptionType?: string;
             readonly tokenSource?: string;
+            readonly apiKeySource?: string;
+            readonly apiProvider?: string;
           }
         | undefined;
       return {
         email: account?.email,
         subscriptionType: account?.subscriptionType,
         tokenSource: account?.tokenSource,
+        apiKeySource: account?.apiKeySource,
+        apiProvider: account?.apiProvider,
         slashCommands: parseClaudeSlashCommands(init.commands),
       } satisfies ClaudeCapabilitiesProbe;
     });
@@ -544,6 +566,23 @@ export const checkClaudeProviderStatus = Effect.fn("checkClaudeProviderStatus")(
     });
   }
 
+  if (claudeProbeSignedOut(capabilities)) {
+    return buildServerProvider({
+      presentation: CLAUDE_PRESENTATION,
+      enabled: claudeSettings.enabled,
+      checkedAt,
+      models,
+      slashCommands: dedupedSlashCommands,
+      probe: {
+        installed: true,
+        version: parsedVersion,
+        status: "error",
+        auth: { status: "unauthenticated" },
+        message: "Claude Code is not signed in. Run `claude auth login` and try again.",
+      },
+    });
+  }
+
   // Usage is read only from the store of the claude.ai login this instance's Claude Code reports
   // using; without that report, or under any other authentication, no login's usage is shown.
   const credentialStore = resolveClaudeLoginStore(
@@ -659,4 +698,4 @@ export const makePendingClaudeProvider = (claudeSettings: ClaudeSettings): Serve
   });
 };
 
-export { probeClaudeCapabilities };
+export { claudeProbeSignedOut, probeClaudeCapabilities };

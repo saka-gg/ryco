@@ -228,6 +228,8 @@ type TestClaudeCapabilities = {
   readonly email: string | undefined;
   readonly subscriptionType: string | undefined;
   readonly tokenSource: string | undefined;
+  readonly apiKeySource?: string | undefined;
+  readonly apiProvider?: string | undefined;
   readonly slashCommands: ReadonlyArray<ServerProviderSlashCommand>;
 };
 
@@ -2250,6 +2252,37 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
           assert.deepStrictEqual(usage.stores, []);
         }).pipe(Effect.provide(claudeVersionSpawnerLayer));
       });
+
+      it.effect("reports a signed-out Claude Code as not authenticated", () =>
+        Effect.gen(function* () {
+          // What Claude Code 2.1 answers with no login and no API key.
+          const status = yield* checkClaudeProviderStatus(
+            defaultClaudeSettings,
+            claudeCapabilities({ tokenSource: "none", apiProvider: "firstParty" }),
+          );
+          assert.strictEqual(status.status, "error");
+          assert.strictEqual(status.auth.status, "unauthenticated");
+          assert.include(status.message ?? "", "claude auth login");
+        }).pipe(Effect.provide(claudeVersionSpawnerLayer)),
+      );
+
+      it.effect("keeps API keys, tokens and third-party backends authenticated", () =>
+        Effect.gen(function* () {
+          for (const account of [
+            { tokenSource: "none", apiKeySource: "ANTHROPIC_API_KEY", apiProvider: "firstParty" },
+            { tokenSource: "ANTHROPIC_AUTH_TOKEN", apiProvider: "firstParty" },
+            { tokenSource: "apiKeyHelper", apiKeySource: "apiKeyHelper" },
+            { tokenSource: "none", apiProvider: "bedrock" },
+            {},
+          ]) {
+            const status = yield* checkClaudeProviderStatus(
+              defaultClaudeSettings,
+              claudeCapabilities(account),
+            );
+            assert.strictEqual(status.auth.status, "authenticated", JSON.stringify(account));
+          }
+        }).pipe(Effect.provide(claudeVersionSpawnerLayer)),
+      );
 
       it.effect(
         "includes Claude Opus 4.7 with fast mode and xhigh as the default effort on supported versions",
