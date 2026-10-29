@@ -236,6 +236,9 @@ describe("server boot import boundaries", () => {
     expect(
       reached(/^apps\/server\/src\/storage\/(?:cacheFolders|quarantineRemoval)\.ts$/u),
     ).toEqual([]);
+    // Merge proofs for checkout removal (squash-merged pull requests, the remote default
+    // branch) load with the first checkout whose branch the project HEAD lacks.
+    expect(reached(/^apps\/server\/src\/sourceControl\/checkoutMergeProver\.ts$/u)).toEqual([]);
     // The heap snapshot writer loads with the first SIGUSR2, the event-loop stall history reader
     // with the first Diagnostics snapshot.
     expect(

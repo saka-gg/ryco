@@ -28,6 +28,11 @@ import {
   type ProjectionSnapshotQueryShape,
 } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 import { GitVcsDriver, type GitVcsDriverShape } from "../vcs/GitVcsDriver.ts";
+import {
+  type CheckoutMergeProof,
+  CheckoutMergeProver,
+  type CheckoutMergeProverShape,
+} from "../sourceControl/checkoutMergeProof.ts";
 import { WorkspaceAccessPolicyLayer } from "../workspace/Layers/WorkspaceAccessPolicy.ts";
 import {
   AgentControlWorkspaces,
@@ -119,6 +124,14 @@ function fixture() {
   };
   const commands: Parameters<GitVcsDriverShape["execute"]>[0][] = [];
   let truncateStatus = false;
+  /** What the fake prover answers for any unmerged commit (asked with the link it was given). */
+  let proof:
+    | ((input: Parameters<CheckoutMergeProverShape["prove"]>[0]) => CheckoutMergeProof | null)
+    | null = null;
+  const prover: CheckoutMergeProverShape = {
+    prove: (input) => Effect.sync(() => proof?.(input) ?? null),
+    remoteDefaultBranches: () => Effect.succeed(null),
+  };
   const driver = {
     execute: (input: Parameters<GitVcsDriverShape["execute"]>[0]) =>
       Effect.sync(() => {
@@ -140,6 +153,7 @@ function fixture() {
       } as unknown as ProjectionSnapshotQueryShape),
     ),
     Layer.provide(Layer.succeed(GitVcsDriver, driver)),
+    Layer.provide(Layer.succeed(CheckoutMergeProver, prover)),
     Layer.provide(WorkspaceAccessPolicyLayer(root)),
     Layer.provide(NodeServices.layer),
   );
@@ -180,6 +194,9 @@ function fixture() {
     commands,
     truncateStatus: () => {
       truncateStatus = true;
+    },
+    setProof: (answer: typeof proof) => {
+      proof = answer;
     },
   };
 }
@@ -296,6 +313,52 @@ describe("governed workspace preflight", () => {
     expect(
       workspacePlanBlockers(await f.plan({ checkoutMode: "record-only" })).length,
     ).toBeGreaterThan(0);
+  });
+  it("counts a branch its pull request squash-merged as merged, like workspace management", async () => {
+    const f = fixture();
+    f.snapshot = {
+      ...f.snapshot,
+      worktrees: f.snapshot.worktrees?.map((row) =>
+        row.worktreeId === "topic" ? { ...row, prNumber: 7, prState: "merged" } : row,
+      ),
+    };
+    f.git(
+      f.checkout,
+      "-c",
+      "user.name=Fixture",
+      "-c",
+      "user.email=fixture@example.invalid",
+      "commit",
+      "--allow-empty",
+      "-m",
+      "squash-merged work",
+    );
+    expect((await f.read()).unmerged).toBe(true);
+    const asked: Parameters<CheckoutMergeProverShape["prove"]>[0][] = [];
+    f.setProof((input) => {
+      asked.push(input);
+      return input.pullRequest?.state === "merged"
+        ? {
+            kind: "pull-request",
+            head: input.head,
+            number: input.pullRequest.number,
+            baseRefName: "main",
+          }
+        : null;
+    });
+    const plan = await f.plan({ deleteBranch: true });
+    expect(plan.expected.unmerged).toBe(false);
+    expect(plan.expected).not.toHaveProperty("mergedBy");
+    expect(asked[0]).toMatchObject({
+      head: f.git(f.checkout, "rev-parse", "HEAD").trim(),
+      branch: "topic",
+      pullRequest: { number: 7, state: "merged" },
+    });
+    expect(workspacePlanBlockers(plan)).toEqual([]);
+    await f.run((s) => s.revalidate(plan, callerId));
+    // Without a proof the same branch stays unmerged, and the approved plan no longer matches.
+    f.setProof(null);
+    await expect(f.run((s) => s.revalidate(plan, callerId))).rejects.toThrow("changed");
   });
   it("plans recreating a checkout whose missing path Git still registers, unless it is locked", async () => {
     const f = fixture();

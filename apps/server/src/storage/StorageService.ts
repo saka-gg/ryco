@@ -14,6 +14,7 @@ import {
   StorageCleanupResult,
   StorageError,
   type GitCommandError,
+  type PullRequestState,
   StorageSnapshot,
   type StorageEntry,
   type StorageRetentionPolicy,
@@ -40,6 +41,17 @@ import {
   type WorkspaceAccessPolicyShape,
 } from "../workspace/Services/WorkspaceAccessPolicy.ts";
 import { GitWorkflowService, type GitWorkflowServiceShape } from "../git/GitWorkflowService.ts";
+import {
+  type CheckoutMergeProof,
+  CheckoutMergeProver,
+  type CheckoutMergeProverShape,
+  describeMergeProof,
+  listingMergeProofReads,
+  type MergeProofReads,
+  mergeProofReads,
+  reviewMergeProofReads,
+  workspacePullRequestLink,
+} from "../sourceControl/checkoutMergeProof.ts";
 import {
   assertCanonicalPath,
   cacheCheckBudget,
@@ -149,6 +161,11 @@ export function makeStorageService(deps: {
   readDatabase?: Effect.Effect<DatabaseStorageReport>;
   /** Starts work that outlives the request (the cache purge after a manual batch). */
   runInBackground?: (work: Effect.Effect<void, StorageError>) => Effect.Effect<void>;
+  /**
+   * Proves a checkout merged when the project HEAD lacks its commits (squash or rebase merges,
+   * the remote default branch). Absent: only the project HEAD counts.
+   */
+  mergeProof?: CheckoutMergeProverShape;
 }) {
   const { sql, config, settings, snapshots, providers, terminals, policy, git } = deps;
   const resolveProtectedSources = (
@@ -320,6 +337,8 @@ export function makeStorageService(deps: {
         readonly caches: readonly string[];
         /** The folders whose contents were checked, by identity; null when only by identity. */
         readonly checkedCaches: readonly CheckedCacheFolder[] | null;
+        /** What proved the branch merged when the project HEAD lacks its commits. */
+        readonly mergedBy: CheckoutMergeProof | null;
       }
     | Refusal;
   /**
@@ -332,6 +351,17 @@ export function makeStorageService(deps: {
   type CacheCheck =
     | { readonly budget: ScanBudget; readonly sizing: ScanBudget | null }
     | "identity-only";
+  /**
+   * How `verify` treats commits the project HEAD lacks: prove them merged with at most `reads`
+   * forge reads (one scan page or retention pass shares them), or, for the revalidation under
+   * the settings lease, accept only the commit `pinned` proved moments before, asking nothing
+   * again (the proof is a network read; the lease stays short).
+   */
+  type MergeCheck =
+    | { readonly reads: MergeProofReads | null }
+    | { readonly pinned: CheckoutMergeProof | null };
+  /** One previewed or removed entry's forge reads for its merge proof. */
+  const entryMergeReads = () => ({ reads: reviewMergeProofReads() });
   /** Cache folder bytes the last scan counted, per ledger id: preview shows them (display only). */
   const scannedCacheBytes = new Map<string, number>();
   type Classification =
@@ -344,6 +374,11 @@ export function makeStorageService(deps: {
         readonly associated: boolean;
         /** When the retention clock starts. */
         readonly completedAt: string;
+        /** The workspace's current pull request link, for a merge proof. */
+        readonly pullRequest: {
+          readonly number: number;
+          readonly state: PullRequestState | null;
+        } | null;
       };
   const UNKNOWN_SIZE: MeasuredSize = { bytes: null, sizeStatus: "unknown", unsafe: true };
   const UNAVAILABLE = "Path is unavailable or unreadable; size and safety are unknown.";
@@ -510,12 +545,14 @@ export function makeStorageService(deps: {
       if (!completedAt) return protect("Temporary staging has not been explicitly completed.");
       if (associated.length === 0 && Date.now() - Date.parse(row.created_at) < 86_400_000)
         return protect("New abandoned checkouts have a 24-hour safety grace period.");
+      const workspace = associatedRows[0]?.worktree;
       return {
         kind: "candidate",
         base,
         project,
         associated: associated.length > 0,
         completedAt,
+        pullRequest: workspace ? workspacePullRequestLink(workspace) : null,
       } satisfies Classification;
     });
 
@@ -528,13 +565,18 @@ export function makeStorageService(deps: {
 
   /**
    * Ownership, Git and filesystem checks that must hold right before a row is removed; the
-   * checkout's cache folders (`node_modules`, `.venv`), relative to it.
+   * checkout's cache folders (`node_modules`, `.venv`), relative to it, and what proved its
+   * branch merged when the project HEAD lacks its commits (see `MergeCheck`). `waited` learns
+   * how long the merge proof took (forge reads), which the caller's I/O budgets do not pay for.
    */
   const safetyChecks = (
     row: OwnedStorageRow,
-    project: Extract<Classification, { kind: "candidate" }>["project"],
+    candidate: Extract<Classification, { kind: "candidate" }>,
+    merge: MergeCheck,
+    waited: (ms: number) => void,
   ) =>
     Effect.gen(function* () {
+      const { project } = candidate;
       yield* policy.assertExistingPath({ path: row.path, operation: "storage.cleanup" });
       yield* policy.assertExistingPath({
         path: project.workspaceRoot,
@@ -554,9 +596,31 @@ export function makeStorageService(deps: {
           return yield* new StorageError({
             detail: "Git no longer registers this exact checkout.",
           });
-        const { assertRemovableWorktree } = yield* loadRemoval;
-        return (yield* attempt(() => assertRemovableWorktree(row.path, row.repository_path!)))
-          .cacheFolders;
+        const { checkRemovableWorktree, UNMERGED_CHECKOUT_REASON } = yield* loadRemoval;
+        const checked = yield* attempt(() =>
+          checkRemovableWorktree(row.path, row.repository_path!),
+        );
+        if (checked.inProjectHead) return { caches: checked.cacheFolders, mergedBy: null };
+        // After the ownership, registration and status checks: a dirty checkout never asks.
+        let mergedBy: CheckoutMergeProof | null = null;
+        if ("pinned" in merge) mergedBy = merge.pinned;
+        else if (deps.mergeProof) {
+          const started = Date.now();
+          mergedBy = yield* deps.mergeProof.prove({
+            projectRoot: project.workspaceRoot,
+            head: checked.head,
+            pullRequest: candidate.pullRequest,
+            reads: merge.reads,
+          });
+          waited(Date.now() - started);
+        }
+        if (mergedBy?.head !== checked.head)
+          return yield* new StorageError({
+            detail: mergedBy
+              ? "The branch moved after its merge was verified; review again."
+              : UNMERGED_CHECKOUT_REASON,
+          });
+        return { caches: checked.cacheFolders, mergedBy };
       } else {
         const temporaryRoot = yield* attempt(() =>
           assertCanonicalPath(path.join(config.stateDir, "storage-temporary")),
@@ -578,7 +642,7 @@ export function makeStorageService(deps: {
           return yield* new StorageError({
             detail: "Temporary directory contains a repository; protected.",
           });
-        return [] as readonly string[];
+        return { caches: [] as readonly string[], mergedBy: null };
       }
     });
 
@@ -608,8 +672,9 @@ export function makeStorageService(deps: {
 
   /**
    * Whether a candidate can be removed now. The checks that need no traversal (ownership,
-   * Git registration, the classified Git status, merge state) run first, so a checkout they
-   * protect is never walked; then the tree outside its cache folders is measured within
+   * Git registration, the classified Git status, merge state, then a merge proof when the
+   * project HEAD lacks the branch's commits) run first, so a checkout they protect is never
+   * walked; then the tree outside its cache folders is measured within
    * `budget` and must be complete, link-free (tracked links aside) and small enough for one
    * quarantined removal; then the cache folders' contents are checked (`cacheCheck`). A spent
    * `budget` (a scan's shared one) refuses before any Git process starts, so it bounds those
@@ -620,6 +685,7 @@ export function makeStorageService(deps: {
     candidate: Extract<Classification, { kind: "candidate" }>,
     budget: ScanBudget,
     cacheCheck: CacheCheck,
+    merge: MergeCheck,
   ) =>
     Effect.gen(function* () {
       const refuse = (reason: string, size: MeasuredSize | null = null): Refusal => ({
@@ -635,14 +701,22 @@ export function makeStorageService(deps: {
         );
       if (!present) return refuse(UNAVAILABLE, UNKNOWN_SIZE);
       if (budget.remaining <= 0 || Date.now() >= budget.deadline) return refuse(INCOMPLETE);
-      const checked = yield* safetyChecks(row, candidate.project).pipe(
+      // Waiting for the forge (a merge proof) is not node I/O: the budgets bound the walks, so
+      // their deadlines move by that wait, for this row and the scan page's later ones.
+      const waited = (ms: number) => {
+        budget.deadline += ms;
+        if (cacheCheck === "identity-only") return;
+        cacheCheck.budget.deadline += ms;
+        if (cacheCheck.sizing) cacheCheck.sizing.deadline += ms;
+      };
+      const checked = yield* safetyChecks(row, candidate, merge, waited).pipe(
         Effect.match({
-          onSuccess: (caches) => ({ caches, unsafe: null }),
-          onFailure: (cause) => ({ caches: [], unsafe: detail(cause) }),
+          onSuccess: (safe) => ({ ...safe, unsafe: null }),
+          onFailure: (cause) => ({ caches: [], mergedBy: null, unsafe: detail(cause) }),
         }),
       );
       if (checked.unsafe) return refuse(checked.unsafe);
-      const caches = checked.caches;
+      const { caches, mergedBy } = checked;
       const size = yield* attempt(() =>
         row.category === "temporary"
           ? measureDirectory(row.path, budget, new Set(), true)
@@ -702,6 +776,7 @@ export function makeStorageService(deps: {
         eligible: true,
         caches,
         checkedCaches,
+        mergedBy,
         entry: {
           ...candidate.base,
           bytes: size.bytes === null ? null : size.bytes + (cacheBytes ?? countedBytes),
@@ -711,6 +786,7 @@ export function makeStorageService(deps: {
             (candidate.associated
               ? "Archived, stopped session; owned and clean checkout."
               : "Abandoned Ryco-owned data; no session references this path.") +
+            (mergedBy ? ` Its branch is ${describeMergeProof(mergedBy)}.` : "") +
             (caches.length > 0
               ? ` Its cache folders (${shown.join(", ")}${caches.length > 3 ? ` and ${caches.length - 3} more` : ""}) go with it.`
               : ""),
@@ -755,6 +831,7 @@ export function makeStorageService(deps: {
     row: OwnedStorageRow,
     context: InventoryContext,
     cacheCheck: "contents" | "identity-only" = "contents",
+    merge: MergeCheck = entryMergeReads(),
   ) =>
     Effect.gen(function* () {
       const classified = yield* classify(row, context);
@@ -767,12 +844,14 @@ export function makeStorageService(deps: {
               cacheCheck === "contents"
                 ? { budget: cacheCheckBudget(), sizing: null }
                 : "identity-only",
+              merge,
             )
           : classified.refusal;
       return {
         entry: yield* presentEntry(row, classified.base, verdict, null),
         caches: verdict.eligible ? verdict.caches : [],
         checkedCaches: verdict.eligible ? verdict.checkedCaches : null,
+        mergedBy: verdict.eligible ? verdict.mergedBy : null,
       };
     });
 
@@ -799,11 +878,14 @@ export function makeStorageService(deps: {
           budget: cacheCheckBudget(),
           sizing: { remaining: 1_000_000, deadline: Date.now() + 10_000 },
         };
+        // A few forge reads per page prove squash-merged branches; answers are kept, so the next
+        // scans continue where this one stopped.
+        const merge = { reads: listingMergeProofReads() };
         const verdicts: Verification[] = [];
         for (const { row, classification } of classified)
           verdicts.push(
             classification.kind === "candidate"
-              ? yield* verify(row, classification, budget, cacheCheck)
+              ? yield* verify(row, classification, budget, cacheCheck, merge)
               : classification.refusal,
           );
         for (const [index, { row, classification }] of classified.entries())
@@ -1014,8 +1096,10 @@ export function makeStorageService(deps: {
         yield* sql<OwnedStorageRow>`SELECT * FROM storage_owned_entries WHERE ${sql.in("id", entryIds)}`;
       const entries: StorageEntry[] = [];
       // Each entry gets its own budget, as at removal: entries selected from different scan
-      // pages each fit their page's budget, not necessarily one shared one.
-      for (const row of rows) entries.push((yield* inspect(row, context)).entry);
+      // pages each fit their page's budget, not necessarily one shared one. Their merge proofs
+      // share a few forge reads (the scan that listed them normally answered them already).
+      const merge = { reads: mergeProofReads(3, 15_000) };
+      for (const row of rows) entries.push((yield* inspect(row, context, "contents", merge)).entry);
       if (
         new Set(entryIds).size !== entryIds.length ||
         entries.length !== entryIds.length ||
@@ -1129,8 +1213,11 @@ export function makeStorageService(deps: {
       // Normal turn/bootstrap/editor/terminal admissions all refuse this path until completion.
       const finalContext = yield* inventory();
       // Under the settings lease: cache folders by identity only (their contents were checked
-      // moments ago, and the purge checks them again before deleting anything).
-      const revalidation = yield* inspect(row, finalContext, "identity-only");
+      // moments ago, and the purge checks them again before deleting anything), and only the
+      // commit the merge proof above covered (no forge read while the lease is held).
+      const revalidation = yield* inspect(row, finalContext, "identity-only", {
+        pinned: checked.mergedBy,
+      });
       const revalidated = revalidation.entry;
       const deletionManifest =
         row.category === "worktree"
@@ -1221,7 +1308,8 @@ export function makeStorageService(deps: {
         device,
         inode,
       }));
-      const proof = removalProofIdentity(identity, quarantine, caches);
+      const mergedHead = revalidation.mergedBy?.head ?? null;
+      const proof = removalProofIdentity(identity, quarantine, caches, mergedHead);
       // Persist recovery location (and cache folder destinations) before either category is
       // moved. Original path refusal survives restart; no interrupted batch repeats unknown
       // deletion: a purge still `planned` after a restart is an interrupted removal.
@@ -1236,6 +1324,7 @@ export function makeStorageService(deps: {
               fingerprint: deletionManifest!.fingerprint!,
               identity,
               caches,
+              mergedHead,
               lease: settingsLease!,
             })
           : null;
@@ -1251,6 +1340,7 @@ export function makeStorageService(deps: {
                 identity,
                 claim: cleanupClaim!,
                 caches,
+                mergedHead,
                 assertAdmission: () => settingsLease!.assertValid(),
               },
             })
@@ -1420,6 +1510,8 @@ export function makeStorageService(deps: {
     let cursor = retentionCursor;
     let verified = 0;
     let removals = 0;
+    // Forge reads for merge proofs, shared by the pass; answers are kept for the next ones.
+    const merge = { reads: mergeProofReads(8, 60_000) };
     // 8 pages of 256 rows: the ledger accounting bound (2,048 rows) per pass.
     for (let page = 0; page < 8; page++) {
       const rows = yield* ownedRows(undefined, cursor);
@@ -1437,7 +1529,13 @@ export function makeStorageService(deps: {
         if (!retentionDue(retention, row.category, candidate.completedAt, Date.now())) continue;
         // Cache folders by identity only here: `remove` checks their contents (once, with its
         // own budget) before it claims anything, so a due checkout is walked once, not twice.
-        const verdict = yield* verify(row, candidate, measurementBudget(), "identity-only").pipe(
+        const verdict = yield* verify(
+          row,
+          candidate,
+          measurementBudget(),
+          "identity-only",
+          merge,
+        ).pipe(
           Effect.tapError((cause) =>
             Effect.logWarning("storage retention could not verify an entry", cause),
           ),
@@ -1581,6 +1679,7 @@ export const StorageServiceLive = Layer.effect(
       terminals: yield* TerminalManager,
       policy: yield* WorkspaceAccessPolicy,
       git: yield* GitWorkflowService,
+      mergeProof: yield* CheckoutMergeProver,
     });
     // An approved removal whose cache folders were still being deleted when the node stopped
     // finishes 5 minutes after start, without waiting for the first retention pass.

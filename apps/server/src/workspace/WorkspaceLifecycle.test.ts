@@ -26,6 +26,10 @@ import {
   layer as GitVcsDriverLayer,
   type GitVcsDriverShape,
 } from "../vcs/GitVcsDriver.ts";
+import type {
+  CheckoutMergeProof,
+  CheckoutMergeProverShape,
+} from "../sourceControl/checkoutMergeProof.ts";
 import { makeWorkspaceAccessPolicy } from "./Layers/WorkspaceAccessPolicy.ts";
 import type { CheckoutFence, CheckoutFenceClaim } from "./checkoutFence.ts";
 import {
@@ -162,6 +166,8 @@ function fixture() {
     gitCalls: [] as string[],
     /** Replaces the fake Git workflow's worktree creation (the real driver, for instance). */
     createWorktree: null as WorkspaceLifecycleDeps["git"]["createWorktree"] | null,
+    /** The merge prover the service gets; null: none (only the project HEAD counts). */
+    mergeProof: null as CheckoutMergeProverShape | null,
   };
 
   const updateWorktree = (id: WorktreeId, patch: Record<string, unknown>) => {
@@ -364,6 +370,7 @@ function fixture() {
     },
     fence,
     now: () => NOW_MS,
+    ...(state.mergeProof ? { mergeProof: state.mergeProof } : {}),
   });
 
   const run = <A, E>(
@@ -411,6 +418,33 @@ function fixture() {
 
 const neverDeletesConversations = (types: ReadonlyArray<string>) =>
   expect(types.filter((type) => type === "thread.delete" || type === "thread.trash")).toEqual([]);
+
+/**
+ * The topic branch gets a commit the project's main lacks, its workspace links pull request #7
+ * as merged, and the prover proves that pull request at exactly that commit (while `proven`).
+ */
+function squashMerged(f: ReturnType<typeof fixture>) {
+  f.commit(f.checkout, "squash-merged work");
+  const head = f.git(f.checkout, "rev-parse", "HEAD").trim();
+  f.updateWorktree(topicId, { prNumber: 7, prState: "merged" });
+  const calls: Parameters<CheckoutMergeProverShape["prove"]>[0][] = [];
+  const control = { proven: true, calls, head };
+  f.state.mergeProof = {
+    prove: (input) =>
+      Effect.sync((): CheckoutMergeProof | null => {
+        calls.push(input);
+        return control.proven &&
+          input.head === head &&
+          input.pullRequest?.number === 7 &&
+          input.pullRequest.state === "merged"
+          ? { kind: "pull-request", head, number: 7, baseRefName: "main" }
+          : null;
+      }),
+    remoteDefaultBranches: () =>
+      Effect.succeed({ ref: "origin/main", branch: "main", outside: new Set(["topic"]) }),
+  };
+  return control;
+}
 
 describe("workspace lifecycle service", () => {
   it("archives a workspace without touching its checkout, branch or conversations", async () => {
@@ -1158,6 +1192,98 @@ describe("workspace lifecycle service", () => {
     // Nothing is left to restore now.
     const again = await f.run((s) => s.preview({ worktreeId: topicId, action: "restore" }));
     expect(again.blockers.join(" ")).toContain("Branch topic no longer exists");
+  });
+
+  it("removes a squash-merged checkout and its branch once its pull request proves the merge", async () => {
+    const f = fixture();
+    f.commit(f.checkout, "unmerged without a proof");
+    const unproven = await f.run((s) =>
+      s.preview({ worktreeId: topicId, action: "remove-checkout", deleteBranch: true }),
+    );
+    expect(unproven.blockers.join(" ")).toContain(
+      "The branch has commits that the project HEAD does not contain.",
+    );
+    f.git(f.checkout, "reset", "--hard", "HEAD~1");
+
+    const merged = squashMerged(f);
+    const { preview, result } = await f.previewAndApply({
+      worktreeId: topicId,
+      action: "remove-checkout",
+      deleteBranch: true,
+    });
+    expect(preview.blockers).toEqual([]);
+    expect(preview.workspace).toMatchObject({
+      unmerged: false,
+      mergedBy: { kind: "pull-request", pullRequestNumber: 7 },
+    });
+    expect(preview.details).toContain("The branch is merged through pull request #7.");
+    expect(preview.summary).toContain("delete merged branch topic");
+    // The review may read the forge once; it asked with the workspace's own link.
+    expect(merged.calls[0]).toMatchObject({
+      head: merged.head,
+      branch: "topic",
+      pullRequest: { number: 7, state: "merged" },
+      reads: { remaining: 1 },
+    });
+    expect(result.outcome).toBe("completed");
+    expect(existsSync(f.checkout)).toBe(false);
+    expect(f.branchExists("topic")).toBe(false);
+    expect(result.steps.map((step) => step.detail)).toContain("Deleted merged branch topic.");
+  });
+
+  it("deleting a squash-merged workspace loses no work, and the review is bound to the proof", async () => {
+    const f = fixture();
+    const merged = squashMerged(f);
+    const request = {
+      worktreeId: topicId,
+      action: "remove-checkout" as const,
+      discard: true,
+    };
+    const preview = await f.run((s) => s.preview(request));
+    expect(preview.effects.discardsWork).toBe(false);
+    expect(preview.details).toContain("The branch is merged through pull request #7.");
+    expect(preview.details.join(" ")).toContain("Deletes the merged branch topic");
+    // The proof went away (the forge no longer confirms it): the reviewed state changed.
+    merged.proven = false;
+    const result = await f.run((s) =>
+      s.apply({ ...preview.request, expectedFingerprint: preview.fingerprint }),
+    );
+    expect(result.outcome).toBe("blocked");
+    expect(existsSync(f.checkout)).toBe(true);
+    expect(f.branchExists("topic")).toBe(true);
+  });
+
+  it("reads the forge for a merge proof only when reviewing a checkout removal", async () => {
+    const f = fixture();
+    const merged = squashMerged(f);
+    await f.run((s) => s.preview({ worktreeId: topicId, action: "archive" }));
+    const archived = await f.previewAndApply({ worktreeId: topicId, action: "archive" });
+    expect(archived.result.outcome).toBe("completed");
+    await f.run((s) => s.preview({ worktreeId: topicId, action: "restore" }));
+    // Archiving and restoring use only what is already known: no forge read to wait on.
+    expect(merged.calls.length).toBeGreaterThan(0);
+    expect(merged.calls.map((call) => call.reads)).toEqual(merged.calls.map(() => null));
+    merged.calls.length = 0;
+    await f.run((s) => s.preview({ worktreeId: topicId, action: "remove-checkout" }));
+    expect(merged.calls[0]?.reads).toMatchObject({ remaining: 1 });
+  });
+
+  it("suggests removing an archived squash-merged checkout", async () => {
+    const f = fixture();
+    f.updateThread(activeId, { session: null, archivedAt: iso(10) });
+    f.updateThread(pristineId, { archivedAt: iso(9) });
+    f.commit(f.checkout, "unmerged without a proof");
+    expect((await f.run((s) => s.suggestions())).checkouts).toEqual([]);
+    f.git(f.checkout, "reset", "--hard", "HEAD~1");
+    const merged = squashMerged(f);
+    const suggestions = await f.run((s) => s.suggestions());
+    expect(suggestions.checkouts.map((c) => c.worktreeId)).toEqual([topicId]);
+    // A listing reads the remote default branch once and shares its forge reads.
+    expect(merged.calls[0]?.remoteDefault).toMatchObject({ ref: "origin/main" });
+    expect(merged.calls[0]?.reads?.remaining).toBeLessThanOrEqual(3);
+    // Still only a suggestion: nothing was removed.
+    expect(f.state.commands).toEqual([]);
+    expect(existsSync(f.checkout)).toBe(true);
   });
 
   it("suggests only eligible conversations and finished checkouts", async () => {

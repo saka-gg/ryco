@@ -4,6 +4,7 @@ import * as Schema from "effect/Schema";
 import {
   IsoDateTime,
   NonNegativeInt,
+  PositiveInt,
   ProjectId,
   ThreadId,
   TrimmedNonEmptyString,
@@ -67,6 +68,18 @@ export const WorkspaceActionAvailability = Schema.Struct({
 });
 export type WorkspaceActionAvailability = typeof WorkspaceActionAvailability.Type;
 
+/**
+ * What shows a branch merged although the project HEAD lacks its commits: the remote default
+ * branch (`ref`, e.g. `origin/main`) contains them, or its pull request merged into the default
+ * branch at exactly the branch's commit (a squash or rebase merge).
+ */
+export const WorkspaceMergeProof = Schema.Struct({
+  kind: Schema.Literals(["default-branch", "pull-request"]),
+  ref: Schema.optionalKey(TrimmedNonEmptyString),
+  pullRequestNumber: Schema.optionalKey(PositiveInt),
+});
+export type WorkspaceMergeProof = typeof WorkspaceMergeProof.Type;
+
 export const WorkspaceLifecycleSummary = Schema.Struct({
   worktreeId: WorktreeId,
   projectId: ProjectId,
@@ -81,8 +94,13 @@ export const WorkspaceLifecycleSummary = Schema.Struct({
   checkout: WorkspaceCheckoutState,
   gitRegistered: Schema.NullOr(Schema.Boolean),
   branchExists: Schema.NullOr(Schema.Boolean),
-  /** Commits on the branch that the project HEAD does not contain. */
+  /**
+   * Commits on the branch that exist nowhere else: the project HEAD does not contain them and
+   * no merge proof (`mergedBy`) covers them.
+   */
   unmerged: Schema.NullOr(Schema.Boolean),
+  /** Why the branch counts as merged although the project HEAD lacks its commits. Absent from older nodes. */
+  mergedBy: Schema.optionalKey(Schema.NullOr(WorkspaceMergeProof)),
   changes: Schema.NullOr(WorkspaceChangeSummary),
   conversations: WorkspaceConversationCounts,
   activeWork: Schema.Array(Schema.String),

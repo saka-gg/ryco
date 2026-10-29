@@ -349,7 +349,9 @@ Archiving a thread alone does not remove this workspace record. Synthetic groups
 no record to archive/delete; the tool reports that limitation without deleting history.
 
 Checkout removal never uses force. It requires a registered checkout with no tracked,
-untracked, or ignored changes and a branch merged into the project's current HEAD.
+untracked, or ignored changes and a branch merged into the project's current HEAD, or
+proven merged the way workspace management proves it (the remote default branch contains
+it, or its pull request merged at exactly its commit; see `docs/storage-management.md`).
 Branch deletion uses the approved commit as an atomic compare-and-delete guard. Main,
 current, overlapping, locked, active, or unverifiable workspaces are blocked. Restore
 requires an archived record, an absent checkout, and a retained branch. A Git registration
