@@ -25,7 +25,11 @@ import {
 import { deriveServerPaths, ServerConfig } from "../config.ts";
 import { WorkspaceAccessPolicyLayer } from "../workspace/Layers/WorkspaceAccessPolicy.ts";
 import { WorkspacePathsLive } from "../workspace/Layers/WorkspacePaths.ts";
-import { normalizeDispatchCommand, withChatAttachmentAdoption } from "./Normalizer.ts";
+import {
+  normalizeDispatchCommand,
+  refuseServerMintedMessageId,
+  withChatAttachmentAdoption,
+} from "./Normalizer.ts";
 import {
   ProjectionSnapshotQuery,
   type ProjectionSnapshotQueryShape,
@@ -769,4 +773,29 @@ it.effect("keeps a committed overlapping replay when the first attempt later fai
       expect(result._tag).toBe("Failure");
     }),
   ),
+);
+
+it.effect("refuses a client's turn start or steer that uses an id the server mints", () =>
+  Effect.gen(function* () {
+    const start = (messageId: string) =>
+      ({
+        type: "thread.turn.start",
+        commandId: "cmd-1",
+        threadId: "thread-1",
+        message: { messageId, role: "user", text: "Hi", attachments: [] },
+        runtimeMode: "full-access",
+        interactionMode: "default",
+        createdAt: "2026-10-29T00:00:00.000Z",
+      }) as unknown as Parameters<typeof refuseServerMintedMessageId>[0];
+    for (const id of ["delegation-result:child", "message-agent-control-op-send-message"]) {
+      const refused = yield* Effect.flip(refuseServerMintedMessageId(start(id)));
+      expect(refused.message).toBe("This message id is reserved for messages Ryco sends.");
+    }
+    yield* refuseServerMintedMessageId(start("a1b2c3"));
+    yield* refuseServerMintedMessageId({
+      type: "thread.archive",
+      commandId: "cmd-2",
+      threadId: "thread-1",
+    } as unknown as Parameters<typeof refuseServerMintedMessageId>[0]);
+  }),
 );

@@ -1,4 +1,5 @@
 import {
+  agentMessageFoldOf,
   type BrowserElementReference,
   browserElementReferenceKey,
   deriveDisplayedUserMessageContext,
@@ -28,7 +29,7 @@ import { quoteCitationsToPlainText } from "@ryco/shared/quoteCitations";
 import { useVideoPlayer, VideoView } from "expo-video";
 import { useEvent } from "expo";
 import * as Linking from "expo-linking";
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import { Image, Pressable, ScrollView, Share, View } from "react-native";
 
 import { SymbolView } from "../../components/AppSymbol";
@@ -286,6 +287,9 @@ export function ThreadMessage(props: {
   readonly onEditFromHere?: (() => void) | undefined;
 }) {
   const isUser = props.message.role === "user";
+  // A delegated result or another agent's message reads as one line until opened.
+  const agentFold = agentMessageFoldOf(props.message);
+  const [agentFoldOpen, setAgentFoldOpen] = useState(false);
   const sentAt = isUser ? Date.parse(props.message.createdAt) : Number.NaN;
   const sentLabel = Number.isFinite(sentAt) ? sentTimeFormatter.format(sentAt) : null;
   const presentation = threadMessagePresentation(isUser ? "user" : "assistant");
@@ -374,8 +378,51 @@ export function ThreadMessage(props: {
   // a blank line above the attachment.
   const showText = text.trim().length > 0 || (attachments.length === 0 && sentContextCount === 0);
 
+  if (agentFold && !agentFoldOpen) {
+    return (
+      <View className="items-end px-4 py-2">
+        <Pressable
+          accessibilityRole="button"
+          accessibilityState={{ expanded: false }}
+          accessibilityLabel={`${agentFold.label}${agentFold.summary ? `: ${agentFold.summary}` : ""}`}
+          onPress={() => setAgentFoldOpen(true)}
+          className="max-w-[88%] flex-row items-center gap-2 rounded-2xl border border-border px-3 py-2 active:opacity-70"
+        >
+          <Text className="text-xs font-ryco-medium text-foreground-muted">{agentFold.label}</Text>
+          {agentFold.summary ? (
+            <Text className="shrink text-xs text-foreground-tertiary" numberOfLines={1}>
+              {agentFold.summary}
+            </Text>
+          ) : null}
+          <SymbolView
+            name="chevron.down"
+            size={10}
+            tintColor={metadataColor as string}
+            type="monochrome"
+          />
+        </Pressable>
+      </View>
+    );
+  }
+
   return (
     <View className={`px-4 py-2 ${isUser ? "items-end" : "items-start"}`}>
+      {agentFold ? (
+        <Pressable
+          accessibilityRole="button"
+          accessibilityState={{ expanded: true }}
+          onPress={() => setAgentFoldOpen(false)}
+          className="mb-1 flex-row items-center gap-1 active:opacity-70"
+        >
+          <Text className="text-2xs font-ryco-medium text-foreground-muted">{agentFold.label}</Text>
+          <SymbolView
+            name="chevron.up"
+            size={10}
+            tintColor={metadataColor as string}
+            type="monochrome"
+          />
+        </Pressable>
+      ) : null}
       <View
         className={
           isUser

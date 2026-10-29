@@ -3,7 +3,7 @@ import { ProjectSetupScriptRunner } from "../../project/Services/ProjectSetupScr
 import { CompletionReturnRepository } from "../../persistence/Layers/AgentControlCompletionReturns.ts";
 import { WorkspaceLifecycle } from "../../workspace/WorkspaceLifecycle.ts";
 import { workspacePlanLifecycleAction } from "../workspaceLifecycle.ts";
-import { DEFAULT_SERVER_SETTINGS } from "@ryco/contracts";
+import { AGENT_CONTROL_MESSAGE_ID_PREFIX, DEFAULT_SERVER_SETTINGS } from "@ryco/contracts";
 import { buildGeneratedWorktreeBranchName } from "@ryco/shared/git";
 import { setupProjectScript } from "@ryco/shared/projectScripts";
 import { ServerSettingsService } from "../../serverSettings.ts";
@@ -178,7 +178,7 @@ const branchFor = (operationId: AgentControlOperationId, index: number, prefix: 
   );
 
 const messageIdFor = (operationId: AgentControlOperationId, step: string): MessageId =>
-  MessageId.make(`message-agent-control-${operationSlug(operationId)}-${step}`);
+  MessageId.make(`${AGENT_CONTROL_MESSAGE_ID_PREFIX}${operationSlug(operationId)}-${step}`);
 
 export const preflightAgentControlWorktreeCheckout = (input: {
   readonly cwd: string;
