@@ -1,0 +1,37 @@
+{
+  "construction": "ryco-push-seal-v1",
+  "vectors": [
+    {
+      "name": "completed",
+      "recipientSecretKey": "01080f161d242b323940474e555c636a71787f868d949ba2a9b0b7bec5ccd3da",
+      "recipientPublicKey": "c8feca81be196cdf2cadeabf13c4903d7632dce4955aa68b6e5d9adef54e2616",
+      "ephemeralSecretKey": "656c737a81888f969da4abb2b9c0c7ced5dce3eaf1f8ff060d141b222930373e",
+      "environmentId": "env_n0de-HubEnvironment00",
+      "sequence": 418,
+      "enrollmentId": "enr_Device0000000000000000",
+      "associatedData": "7279636f2d707573682d76310a656e765f6e3064652d487562456e7669726f6e6d656e7430300a3431380a656e725f44657669636530303030303030303030303030303030",
+      "plaintext": "{\"v\":1,\"k\":\"completed\",\"t\":\"Fix the login race\",\"e\":\"env_n0de-HubEnvironment00\",\"th\":\"thread-1\",\"tu\":\"turn-7\",\"q\":418,\"at\":1793234112000}",
+      "sealed": "ARW2CZOGTeluigErANSuWygfkX5dDnb2pNirjtP4Magaa1ACDqv6mx_EpGsYt-W5MZeLIemQ3CqXyp-L_JaCKyABSkDyccXtCyRceZWoT7thGthYKCOvkmlDpFWqWE6CRXuTBc_bV7D7_nNx_DwGVbuVF1_8hLWvebLNAdTJI-DbG1d9BtViqSE3IsYW6mrU7VVqBCO2DkhJq-LNk2bTjm1-4sxGfRZ-XQ2ocZ8AUkZ-fqu5SD_3N-63",
+      "keyId": "DEQhCHjLCTVmDnk--WkGOQ",
+      "collapseSalt": "c9d0d7dee5ecf3fa01080f161d242b323940474e555c636a71787f868d949ba2",
+      "threadId": "thread-1",
+      "collapseId": "-YdpUtCCx5ISjSv_9SkYjQ"
+    },
+    {
+      "name": "approval-unicode-title",
+      "recipientSecretKey": "333a41484f565d646b727980878e959ca3aab1b8bfc6cdd4dbe2e9f0f7fe050c",
+      "recipientPublicKey": "739034ca47db791ad25277c619601febfaac6119c5acd16301017ee7de058255",
+      "ephemeralSecretKey": "979ea5acb3bac1c8cfd6dde4ebf2f900070e151c232a31383f464d545b626970",
+      "environmentId": "env_n0de-HubEnvironment00",
+      "sequence": 9007199254740991,
+      "enrollmentId": "enr_Device1111111111111111",
+      "associatedData": "7279636f2d707573682d76310a656e765f6e3064652d487562456e7669726f6e6d656e7430300a393030373139393235343734303939310a656e725f44657669636531313131313131313131313131313131",
+      "plaintext": "{\"v\":1,\"k\":\"approval\",\"t\":\"Überprüfe die Änderungen ✓\",\"e\":\"env_n0de-HubEnvironment00\",\"th\":\"thread-2\",\"tu\":null,\"q\":9007199254740991,\"at\":0}",
+      "sealed": "AVu94TVfotWt2E43sx6pcSlIdj-mU7QTwgpzyULsQDtbcuz5B0K0P2hvDXUvVW-xZmFYApHmq_ol0mlHyjNB5Mg_1emAVwbmi2SukxQGX3FzQBZZTrGTJBZtmLxEt261WJKvKvfn1F4EASRA9yTumNDaqmcFWejb4HlCRBdJuUapz_aolmqSJ9RA5EM1rE5zBCJAJs5xt5Vo8bdAl209jz62DlB-9pfMjNvdHBoKVFHpJgZumCUghCEnLL7vChTnjLOA",
+      "keyId": "o38V8zY-vf3s5zaphBnywA",
+      "collapseSalt": "cad1d8dfe6edf4fb020910171e252c333a41484f565d646b727980878e959ca3",
+      "threadId": "thread-2",
+      "collapseId": "l2Efgea1gjXhuu47cqc1AA"
+    }
+  ]
+}

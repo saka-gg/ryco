@@ -74,6 +74,7 @@ appears in a reconnect snapshot stays silent, and one still buffered when the co
 dropped can be too. Only connected environments alert. A hosted browser tab that has
 been hidden for a while releases the connections no open view holds and takes fresh
 snapshots when it returns, so while it is hidden it alerts only for the nodes it keeps
-connected. Remote push, durable notification history, and Live Activities are not built.
+connected. Remote push runs on the node instead, over the same projector: see
+[push alerts](./push-alerts.md). Durable notification history and Live Activities are not built.
 The opaque generation token is local runtime metadata and must not be serialized into a
 push payload. Titles are user data; platform adapters own lock-screen privacy preferences.

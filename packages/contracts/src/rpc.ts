@@ -125,6 +125,14 @@ import {
   AuthRpcError,
 } from "./auth.ts";
 import {
+  PushDeviceStatus,
+  PushRegisterDeviceInput,
+  PushRpcError,
+  PushSetPresenceInput,
+  PushUnregisterDeviceInput,
+  PushUnregisterDeviceResult,
+} from "./push.ts";
+import {
   DiagnosticsError,
   DiagnosticsSnapshot,
   DiagnosticsSignalProcessInput,
@@ -680,6 +688,11 @@ export const WS_METHODS = {
   subscribeServerLifecycle: "subscribeServerLifecycle",
   subscribeAuthAccess: "subscribeAuthAccess",
   authIssueLinkedDirectAccess: "auth.issueLinkedDirectAccess",
+
+  // Push alerts for native devices (docs/push-alerts.md)
+  pushRegisterDevice: "push.registerDevice",
+  pushUnregisterDevice: "push.unregisterDevice",
+  pushSetPresence: "push.setPresence",
 } as const;
 
 export const GitCreateWorktreeForProjectInput = Schema.Struct({
@@ -2425,6 +2438,24 @@ export const WsAuthIssueLinkedDirectAccessRpc = Rpc.make(WS_METHODS.authIssueLin
   error: AuthRpcError,
 });
 
+export const WsPushRegisterDeviceRpc = Rpc.make(WS_METHODS.pushRegisterDevice, {
+  payload: PushRegisterDeviceInput,
+  success: PushDeviceStatus,
+  error: Schema.Union([PushRpcError, AuthRpcError]),
+});
+
+export const WsPushUnregisterDeviceRpc = Rpc.make(WS_METHODS.pushUnregisterDevice, {
+  payload: PushUnregisterDeviceInput,
+  success: PushUnregisterDeviceResult,
+  error: Schema.Union([PushRpcError, AuthRpcError]),
+});
+
+export const WsPushSetPresenceRpc = Rpc.make(WS_METHODS.pushSetPresence, {
+  payload: PushSetPresenceInput,
+  success: Schema.Struct({}),
+  error: Schema.Union([PushRpcError, AuthRpcError]),
+});
+
 export const WsSubscribeAuthAccessRpc = Rpc.make(WS_METHODS.subscribeAuthAccess, {
   payload: Schema.Struct({}),
   success: AuthAccessStreamEvent,
@@ -2591,6 +2622,9 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   | typeof WsServerGetConfigRpc
   | typeof WsServerGetAdvertisedEndpointsRpc
   | typeof WsAuthIssueLinkedDirectAccessRpc
+  | typeof WsPushRegisterDeviceRpc
+  | typeof WsPushUnregisterDeviceRpc
+  | typeof WsPushSetPresenceRpc
   | typeof WsServerGetDiagnosticsMetricsRpc
   | typeof WsServerGetStatisticsRpc
   | typeof WsServerGetUsageSummaryRpc
@@ -2821,6 +2855,9 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   WsServerGetConfigRpc,
   WsServerGetAdvertisedEndpointsRpc,
   WsAuthIssueLinkedDirectAccessRpc,
+  WsPushRegisterDeviceRpc,
+  WsPushUnregisterDeviceRpc,
+  WsPushSetPresenceRpc,
   WsServerGetDiagnosticsMetricsRpc,
   WsServerGetStatisticsRpc,
   WsServerGetUsageSummaryRpc,

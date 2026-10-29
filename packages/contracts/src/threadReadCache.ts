@@ -1,7 +1,7 @@
 import * as Schema from "effect/Schema";
 
 import { IsoDateTime, MessageId, ThreadId, TurnId } from "./baseSchemas.ts";
-import { RelayNodeId } from "./relay.ts";
+import { NodeHubProof } from "./nodeProof.ts";
 import { OrchestrationMessageRole, OrchestrationShellSnapshot } from "./orchestration.ts";
 
 export const THREAD_READ_CACHE_MESSAGE_LIMIT = 150;
@@ -69,14 +69,8 @@ export const ThreadReadCacheThreadResponse = Schema.Struct({
 export type ThreadReadCacheThreadResponse = typeof ThreadReadCacheThreadResponse.Type;
 
 /** Fresh node-identity challenge proof; signatures are verified by the Hub. */
-export const ThreadReadCacheProof = Schema.Struct({
-  nodeId: RelayNodeId,
-  protocolMajor: SafeCounter,
-  protocolMinor: SafeCounter,
-  nonce: Schema.String.check(Schema.isPattern(/^[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048]$/)),
-  signature: Schema.String.check(Schema.isPattern(/^[A-Za-z0-9_-]{85}[AQgw]$/)),
-});
-export type ThreadReadCacheProof = typeof ThreadReadCacheProof.Type;
+export const ThreadReadCacheProof = NodeHubProof;
+export type ThreadReadCacheProof = NodeHubProof;
 
 export const ThreadReadCacheBeginInput = Schema.Struct({ proof: ThreadReadCacheProof });
 export type ThreadReadCacheBeginInput = typeof ThreadReadCacheBeginInput.Type;

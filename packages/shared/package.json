@@ -132,6 +132,10 @@
       "types": "./src/relayE2eeNoise.ts",
       "import": "./src/relayE2eeNoise.ts"
     },
+    "./pushSeal": {
+      "types": "./src/pushSeal.ts",
+      "import": "./src/pushSeal.ts"
+    },
     "./relayE2eeKeys": {
       "types": "./src/relayE2eeKeys.ts",
       "import": "./src/relayE2eeKeys.ts"

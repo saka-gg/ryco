@@ -56,12 +56,18 @@ import {
 } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 import { OrchestrationEngineService } from "../orchestration/Services/OrchestrationEngine.ts";
 import { startThreadReadCacheSync } from "./ThreadReadCacheSync.ts";
+import { startNodeAttentionPublisher } from "../push/attentionPublisherLive.ts";
 import { ServerSettingsService } from "../serverSettings.ts";
 import {
   nodeAutoSettleAfterDays,
   shellSettlementPolicy,
 } from "../orchestration/threadSettlementInput.ts";
 import { HubConnectorService, type HubConnectorServiceShape } from "./HubConnectorService.ts";
+import { NodePushRegistry } from "../push/NodePushRegistry.ts";
+import {
+  makeNodePushRegistry,
+  PUSH_REGISTRATION_FILE_NAME,
+} from "../push/nodePushRegistryStore.ts";
 
 export {
   awaitHubConnector,
@@ -419,6 +425,14 @@ const makeHubConnectorService = (dependencies: HubConnectorLiveDependencies) =>
               ),
             ),
           );
+    // Push alert registrations: offered to every relay channel's RPCs, read by the publisher.
+    const pushRegistry = yield* makeNodePushRegistry({
+      filePath: join(dirname(config.hubIdentityStatePath), PUSH_REGISTRATION_FILE_NAME),
+    });
+    const pushRegistryLayer = Layer.succeed(NodePushRegistry, pushRegistry);
+    // A revoked device stops getting alerts at once, not when the Hub says so next.
+    const forgetPushEnrollment = (enrollmentId: string) =>
+      runPromise(pushRegistry.removeEnrollments([enrollmentId]));
     const runtimeContext = yield* Effect.context<never>();
     const runPromise = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
       Effect.runPromiseWith(runtimeContext as Context.Context<R>)(effect);
@@ -662,7 +676,7 @@ const makeHubConnectorService = (dependencies: HubConnectorLiveDependencies) =>
                   relayRpcPrincipal(effectiveRole, channelId, () =>
                     e2ee.mode() === "e2ee" ? channelAuthority : { trustSource: "none" },
                   ),
-                ),
+                ).pipe(Layer.provide(pushRegistryLayer)),
                 makeDeviceWsRpcLayer(relayRpcPrincipal(effectiveRole, channelId)),
               ),
               // A refused response is a value carrying its reason, not a defect,
@@ -740,6 +754,7 @@ const makeHubConnectorService = (dependencies: HubConnectorLiveDependencies) =>
       onE2eeEnrollmentRevoked: async (frame) => {
         await sessionDirectory.revokeEnrollment(frame);
         await revokeLinkedSessions({ enrollmentId: frame.enrollmentId });
+        await forgetPushEnrollment(frame.enrollmentId);
       },
       processLock,
       // Only a lock actually held: past an unusable one the connector asks
@@ -765,6 +780,15 @@ const makeHubConnectorService = (dependencies: HubConnectorLiveDependencies) =>
           await identity.stopE2eeInstrumentation();
         }),
     );
+    // Push alerts: the node decides, seals per device, and signals its Hub.
+    if (connectorConfig.enabled && connectorConfig.origin) {
+      yield* startNodeAttentionPublisher({
+        hubOrigin: connectorConfig.origin,
+        identity,
+        connector,
+        registry: pushRegistry,
+      });
+    }
     const cloudHistoryEnabled = yield* Config.Boolean("RYCO_HUB_THREAD_CACHE_ENABLED").pipe(
       Config.withDefault(false),
     );
@@ -834,7 +858,12 @@ const makeHubConnectorService = (dependencies: HubConnectorLiveDependencies) =>
       enroll: () => connector.enroll(),
       readEnrollment: () => connector.readEnrollment(),
       identitySummary: (options) => connector.identitySummary(options),
-      leave: () => connector.leave(),
+      // Registrations are Hub-scoped, like the approved-client records: leaving erases them.
+      leave: async () => {
+        const status = await connector.leave();
+        await runPromise(pushRegistry.clear);
+        return status;
+      },
       cancelEnrollment: () => connector.cancelEnrollment(),
       stop: () => connector.stop(),
       // Both commit what the identity's owner relies on — an approved client,

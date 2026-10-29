@@ -1,3 +1,4 @@
+import * as NodeServices from "@effect/platform-node/NodeServices";
 import { dirname, join } from "node:path";
 
 import { EnvironmentId } from "@ryco/contracts";
@@ -137,6 +138,7 @@ async function withHubConnectorLive(
         yieldToHub: Effect.void,
       }),
     ),
+    Layer.provide(NodeServices.layer),
   );
   await Effect.runPromise(
     Effect.gen(function* () {
