@@ -21,6 +21,8 @@ import {
   type DeviceFrameListener,
   type DeviceKeyEvent,
   type DeviceListOptions,
+  type DeviceLogQuery,
+  type DeviceLogResult,
   type DeviceSwipeGesture,
 } from "./DeviceBackend.ts";
 
@@ -635,6 +637,13 @@ export class AndroidEmulatorBackend implements DeviceBackend {
   testing(_input: DeviceTestingInput): Promise<void> {
     return Promise.reject(
       new DeviceBackendError("Simulator testing controls require an iOS simulator."),
+    );
+  }
+  readLogs(_udid: string, _query: DeviceLogQuery): Promise<DeviceLogResult> {
+    return Promise.reject(
+      new DeviceBackendError(
+        "Device logs are available for iOS simulators on this node; on Android read adb logcat from a shell.",
+      ),
     );
   }
   startRecording(_udid: string): Promise<DeviceStartRecordingResult> {

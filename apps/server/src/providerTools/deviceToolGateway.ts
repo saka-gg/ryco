@@ -6,21 +6,38 @@
  * served once over a loopback-only, bearer-bound Streamable HTTP endpoint.
  * Each binding belongs to one Ryco thread and is accepted only while that
  * provider reports an active turn.
+ *
+ * What each tool does lives in `deviceToolActions.ts`, loaded with the first
+ * call; inputs return the settled screen as evidence, and the first
+ * successful result of a binding carries the driving guide.
  */
 import { randomUUID } from "node:crypto";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 
-import {
-  DEVICE_SCROLL_MAX_SWIPES,
-  DEVICE_SCROLL_MIN_SWIPES,
-  DEVICE_SWIPE_DURATION_MAX_MS,
-  DEVICE_SWIPE_DURATION_MIN_MS,
-  type DeviceHardwareButton,
-  type DeviceOpenPaneReason,
-} from "@ryco/contracts";
+import { DeviceRpcError } from "@ryco/contracts";
+import { Schema } from "effect";
 
 import type { DeviceManager } from "../device/DeviceManager.ts";
-import { readTapRequest } from "../device/uiTreeTargeting.ts";
+import type { DeviceSettleTiming, DeviceToolContent } from "../device/deviceObservation.ts";
+
+export type { DeviceToolContent } from "../device/deviceObservation.ts";
+
+/** One cached `import()`; a failed load is retried on the next call. */
+function lazyModule<A>(load: () => Promise<A>): () => Promise<A> {
+  let pending: Promise<A> | null = null;
+  return () =>
+    (pending ??= load().catch((error: unknown) => {
+      pending = null;
+      throw error;
+    }));
+}
+
+// What each tool does (with settling and evidence) and the driving guide load
+// with the first device tool call, the catalogue with the first `tools/list`.
+// The gateway starts with every server, so they stay off its boot graph.
+const loadActions = lazyModule(() => import("./deviceToolActions.ts"));
+const loadGuidance = lazyModule(() => import("./deviceToolGuidance.ts"));
+const loadDefinitions = lazyModule(() => import("./deviceToolDefinitions.ts"));
 
 export const DEVICE_TOOL_NAMES = [
   "device_list",
@@ -35,6 +52,9 @@ export const DEVICE_TOOL_NAMES = [
   "device_screenshot",
   "device_describe_ui",
   "device_scroll_to_element",
+  "device_wait",
+  "device_logs",
+  "device_configure",
 ] as const;
 
 export type DeviceToolName = (typeof DEVICE_TOOL_NAMES)[number];
@@ -49,6 +69,7 @@ const APPROVAL_REQUIRED = new Set<DeviceToolName>([
   "device_type",
   "device_press_button",
   "device_scroll_to_element",
+  "device_configure",
 ]);
 
 const AGENT_CONTROL_SAFE_LEGACY_TOOLS = new Set<DeviceToolName>(["device_list"]);
@@ -86,6 +107,8 @@ export function deviceToolRequiresApproval(name: string): boolean {
   return APPROVAL_REQUIRED.has(name as DeviceToolName);
 }
 
+const isDeviceRpcError = Schema.is(DeviceRpcError);
+
 const RECOVERABLE_AGENT_ERRORS = [
   /appears to be at its end/iu,
   /no element (?:matching|labelled|labeled)/iu,
@@ -93,7 +116,18 @@ const RECOVERABLE_AGENT_ERRORS = [
   /is not visible on screen/iu,
   /out of reach/iu,
   /scrolling stopped moving/iu,
+  // Transport bounds and platform refusals: the device itself is fine.
+  /too large/iu,
+  /needs the accessibility tree/iu,
+  /unavailable on SSH hosts/iu,
+  /require an iOS simulator|available for iOS simulators on this node/iu,
+  /is not installed on this simulator/iu,
 ] as const;
+
+/** A malformed tool argument: the agent's to fix, never a device failure. */
+export class DeviceToolArgumentError extends Error {
+  override readonly name = "DeviceToolArgumentError";
+}
 
 /**
  * Tool-local navigation misses belong in the agent's tool result. Persisting
@@ -101,418 +135,91 @@ const RECOVERABLE_AGENT_ERRORS = [
  * error state just because an accessibility lookup needs another attempt.
  */
 export function isViewerFacingDeviceToolError(error: unknown): boolean {
+  if (error instanceof DeviceToolArgumentError) return false;
+  // A backend refusing malformed input (a simulator setting it cannot plan)
+  // says nothing about the device's health either.
+  if (isDeviceRpcError(error) && error.code === "invalid-input") return false;
   const message = error instanceof Error ? error.message : String(error);
   return !RECOVERABLE_AGENT_ERRORS.some((pattern) => pattern.test(message));
 }
-
-const READ_ONLY = { readOnlyHint: true, destructiveHint: false, openWorldHint: false } as const;
-const WRITE = { readOnlyHint: false, destructiveHint: false, openWorldHint: false } as const;
-const UDID = { type: "string", description: "Device udid from device_list." } as const;
-const BUTTONS: readonly DeviceHardwareButton[] = [
-  "home",
-  "back",
-  "recents",
-  "lock",
-  "volume-up",
-  "volume-down",
-];
-
-export interface DeviceToolDefinition {
-  readonly name: DeviceToolName;
-  readonly description: string;
-  readonly inputSchema: Record<string, unknown>;
-  readonly annotations: Record<string, unknown>;
-}
-
-export const DEVICE_TOOL_DEFINITIONS: readonly DeviceToolDefinition[] = [
-  {
-    name: "device_list",
-    description:
-      "List iOS simulators and Android emulators Ryco can drive, including runtime, boot state, and boot ownership. Call this before another device tool to get a udid.",
-    inputSchema: {
-      type: "object",
-      properties: { includeShutdown: { type: "boolean" } },
-      additionalProperties: false,
-    },
-    annotations: { title: "List devices", ...READ_ONLY },
-  },
-  {
-    name: "device_boot",
-    description:
-      "Boot an iOS simulator or Android emulator. Ryco caps its own boots; boot-limit-reached is a user decision, not something to retry.",
-    inputSchema: {
-      type: "object",
-      properties: { udid: UDID },
-      required: ["udid"],
-      additionalProperties: false,
-    },
-    annotations: { title: "Boot device", ...WRITE },
-  },
-  {
-    name: "device_install",
-    description:
-      "Install a built iOS .app bundle or Android .apk on a booted device. Build the app first and pass its absolute path.",
-    inputSchema: {
-      type: "object",
-      properties: { udid: UDID, appPath: { type: "string" } },
-      required: ["udid", "appPath"],
-      additionalProperties: false,
-    },
-    annotations: { title: "Install app", ...WRITE },
-  },
-  {
-    name: "device_launch",
-    description: "Launch an installed app by bundle id on a booted simulator.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        udid: UDID,
-        bundleId: { type: "string" },
-        arguments: { type: "array", items: { type: "string" } },
-      },
-      required: ["udid", "bundleId"],
-      additionalProperties: false,
-    },
-    annotations: { title: "Launch app", ...WRITE },
-  },
-  {
-    name: "device_open_url",
-    description: "Open a URL or deep link on the simulator. This is an open-world action.",
-    inputSchema: {
-      type: "object",
-      properties: { udid: UDID, url: { type: "string" } },
-      required: ["udid", "url"],
-      additionalProperties: false,
-    },
-    annotations: { title: "Open URL", ...WRITE, openWorldHint: true },
-  },
-  {
-    name: "device_tap",
-    description:
-      "Tap by accessibility label or raw device-point coordinates. Prefer label; Ryco resolves the element activation point and scrolls it into view.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        udid: UDID,
-        label: { type: "string" },
-        role: { type: "string" },
-        x: { type: "number", minimum: 0, maximum: 20_000 },
-        y: { type: "number", minimum: 0, maximum: 20_000 },
-      },
-      required: ["udid"],
-      additionalProperties: false,
-    },
-    annotations: { title: "Tap", ...WRITE },
-  },
-  {
-    name: "device_swipe",
-    description: "Swipe between two points on the simulator screen, measured in device points.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        udid: UDID,
-        fromX: { type: "number", minimum: 0, maximum: 20_000 },
-        fromY: { type: "number", minimum: 0, maximum: 20_000 },
-        toX: { type: "number", minimum: 0, maximum: 20_000 },
-        toY: { type: "number", minimum: 0, maximum: 20_000 },
-        durationMs: {
-          type: "integer",
-          minimum: DEVICE_SWIPE_DURATION_MIN_MS,
-          maximum: DEVICE_SWIPE_DURATION_MAX_MS,
-        },
-      },
-      required: ["udid", "fromX", "fromY", "toX", "toY"],
-      additionalProperties: false,
-    },
-    annotations: { title: "Swipe", ...WRITE },
-  },
-  {
-    name: "device_type",
-    description: "Type text into the focused field. Tap the field first.",
-    inputSchema: {
-      type: "object",
-      properties: { udid: UDID, text: { type: "string" } },
-      required: ["udid", "text"],
-      additionalProperties: false,
-    },
-    annotations: { title: "Type text", ...WRITE },
-  },
-  {
-    name: "device_press_button",
-    description: "Press home, lock, volume-up, volume-down, or Android back/recents.",
-    inputSchema: {
-      type: "object",
-      properties: { udid: UDID, button: { type: "string", enum: [...BUTTONS] } },
-      required: ["udid", "button"],
-      additionalProperties: false,
-    },
-    annotations: { title: "Press hardware button", ...WRITE },
-  },
-  {
-    name: "device_screenshot",
-    description:
-      "Capture the simulator screen as a PNG. Prefer device_describe_ui for locating controls.",
-    inputSchema: {
-      type: "object",
-      properties: { udid: UDID },
-      required: ["udid"],
-      additionalProperties: false,
-    },
-    annotations: { title: "Screenshot device", ...READ_ONLY },
-  },
-  {
-    name: "device_describe_ui",
-    description:
-      "Read the accessibility tree with roles, labels, values, frames, and activation points. This is the canonical way to locate controls before tapping.",
-    inputSchema: {
-      type: "object",
-      properties: { udid: UDID },
-      required: ["udid"],
-      additionalProperties: false,
-    },
-    annotations: { title: "Describe device UI", ...READ_ONLY },
-  },
-  {
-    name: "device_scroll_to_element",
-    description:
-      "Scroll a labelled accessibility element into the tappable region and return its tap point.",
-    inputSchema: {
-      type: "object",
-      properties: {
-        udid: UDID,
-        label: { type: "string" },
-        role: { type: "string" },
-        maxSwipes: {
-          type: "integer",
-          minimum: DEVICE_SCROLL_MIN_SWIPES,
-          maximum: DEVICE_SCROLL_MAX_SWIPES,
-        },
-      },
-      required: ["udid", "label"],
-      additionalProperties: false,
-    },
-    annotations: { title: "Scroll to element", ...WRITE },
-  },
-];
 
 type JsonRecord = Record<string, unknown>;
 
 function asRecord(value: unknown): JsonRecord {
   if (!value || typeof value !== "object" || Array.isArray(value)) {
-    throw new Error("Tool arguments must be a JSON object.");
+    throw new DeviceToolArgumentError("Tool arguments must be a JSON object.");
   }
   return value as JsonRecord;
 }
 
-/** What a required string argument must be; shared so the device a call holds is the one it uses. */
-function isNonEmptyString(value: unknown): value is string {
-  return typeof value === "string" && value.trim().length > 0;
-}
-
-function stringArg(args: JsonRecord, name: string, required = true): string | undefined {
-  const value = args[name];
-  if (value === undefined && !required) return undefined;
-  if (typeof value !== "string" || (required && !isNonEmptyString(value))) {
-    throw new Error(
-      `Argument ${JSON.stringify(name)} must be a${required ? " non-empty" : ""} string.`,
-    );
-  }
-  return value;
-}
-
-function numberArg(args: JsonRecord, name: string): number {
-  const value = args[name];
-  if (typeof value !== "number" || !Number.isFinite(value) || value < 0 || value > 20_000) {
-    throw new Error(`Argument ${JSON.stringify(name)} must be a device point from 0 to 20000.`);
-  }
-  return value;
-}
-
-function boundedInteger(
-  args: JsonRecord,
-  name: string,
-  minimum: number,
-  maximum: number,
-): number | undefined {
-  const value = args[name];
-  if (value === undefined) return undefined;
-  if (!Number.isInteger(value) || (value as number) < minimum || (value as number) > maximum) {
-    throw new Error(
-      `Argument ${JSON.stringify(name)} must be an integer from ${minimum} to ${maximum}.`,
-    );
-  }
-  return value as number;
-}
-
-async function executeDeviceTool(input: {
+export interface DeviceToolCallInput {
   readonly manager: DeviceManager;
   readonly threadId: string;
   readonly name: DeviceToolName;
-  readonly args: JsonRecord;
-}): Promise<unknown> {
-  const { manager, threadId, name, args } = input;
-  const udid = () => stringArg(args, "udid")!;
-  const surface = async (reason: DeviceOpenPaneReason = "agent-tool") =>
-    manager.surfaceDeviceForAgent(threadId, udid(), reason);
-  const interaction = async <A>(run: () => Promise<A>): Promise<A> => {
-    const result = await run();
-    await surface();
-    return result;
-  };
+  readonly args: Record<string, unknown>;
+  /** Aborts every settle loop when the caller goes away. */
+  readonly signal?: AbortSignal | undefined;
+  /** Largest base64 image the transport carries; defaults to the gateway's 4 MiB of PNG. */
+  readonly maxImageBase64Chars?: number | undefined;
+  /** Tests shrink the settle windows. */
+  readonly timing?: Partial<DeviceSettleTiming> | undefined;
+}
 
-  const run = async (): Promise<unknown> => {
-    switch (name) {
-      case "device_list":
-        return manager.list({ includeShutdown: args.includeShutdown === true });
-      case "device_boot": {
-        const result = await manager.boot(udid());
-        if (result.kind === "booted") {
-          await manager.ensureThreadAttached(threadId, udid()).catch(() => undefined);
-        }
-        return result;
-      }
-      case "device_install": {
-        const result = await manager.install(udid(), stringArg(args, "appPath")!);
-        await surface("agent-install");
-        return result;
-      }
-      case "device_launch": {
-        const launchArguments = args.arguments;
-        if (
-          launchArguments !== undefined &&
-          (!Array.isArray(launchArguments) ||
-            launchArguments.some((value) => typeof value !== "string"))
-        ) {
-          throw new Error('Argument "arguments" must be an array of strings.');
-        }
-        const result = await manager.launch(
-          udid(),
-          stringArg(args, "bundleId")!,
-          launchArguments as string[] | undefined,
-        );
-        await surface("agent-launch");
-        return result;
-      }
-      case "device_open_url":
-        return interaction(async () => {
-          await manager.openUrl(udid(), stringArg(args, "url")!);
-          return { udid: udid(), opened: true };
-        });
-      case "device_tap":
-        return interaction(async () => {
-          const request = readTapRequest({
-            ...(args.x !== undefined ? { x: numberArg(args, "x") } : {}),
-            ...(args.y !== undefined ? { y: numberArg(args, "y") } : {}),
-            ...(args.label !== undefined ? { label: stringArg(args, "label") } : {}),
-            ...(args.role !== undefined ? { role: stringArg(args, "role") } : {}),
-          });
-          if (request.kind === "point") {
-            await manager.tap(udid(), request.x, request.y);
-            return { udid: udid(), x: request.x, y: request.y };
-          }
-          const match = await manager.tapElement(udid(), request.target);
-          return {
-            udid: udid(),
-            x: match.point.x,
-            y: match.point.y,
-            element: {
-              role: match.node.role,
-              subrole: match.node.subrole,
-              label: match.node.label,
-              valueBeforeTap: match.node.value,
-            },
-          };
-        });
-      case "device_swipe":
-        return interaction(async () => {
-          const gesture = {
-            fromX: numberArg(args, "fromX"),
-            fromY: numberArg(args, "fromY"),
-            toX: numberArg(args, "toX"),
-            toY: numberArg(args, "toY"),
-            durationMs:
-              boundedInteger(
-                args,
-                "durationMs",
-                DEVICE_SWIPE_DURATION_MIN_MS,
-                DEVICE_SWIPE_DURATION_MAX_MS,
-              ) ?? 300,
-          };
-          await manager.swipe(udid(), gesture);
-          return { udid: udid(), ...gesture };
-        });
-      case "device_type":
-        return interaction(async () => {
-          const text = stringArg(args, "text", false) ?? "";
-          await manager.typeText(udid(), text);
-          return { udid: udid(), length: text.length };
-        });
-      case "device_press_button":
-        return interaction(async () => {
-          const button = stringArg(args, "button")!;
-          if (!BUTTONS.includes(button as DeviceHardwareButton)) {
-            throw new Error(`Argument "button" must be one of: ${BUTTONS.join(", ")}.`);
-          }
-          await manager.pressButton(udid(), button as DeviceHardwareButton);
-          return { udid: udid(), button };
-        });
-      case "device_screenshot": {
-        const shot = await manager.screenshot(udid());
-        await surface();
-        const { bytesBase64, ...metadata } = shot;
-        return {
-          _mcpContent: [
-            { type: "text", text: JSON.stringify(metadata, null, 2) },
-            { type: "image", data: bytesBase64, mimeType: shot.mimeType },
-          ],
-        };
-      }
-      case "device_describe_ui":
-        return interaction(() => manager.describeUi(udid()));
-      case "device_scroll_to_element":
-        return interaction(async () => {
-          const match = await manager.scrollToElement(
-            udid(),
-            {
-              label: stringArg(args, "label")!,
-              ...(args.role !== undefined ? { role: stringArg(args, "role") } : {}),
-            },
-            {
-              maxScrolls: boundedInteger(
-                args,
-                "maxSwipes",
-                DEVICE_SCROLL_MIN_SWIPES,
-                DEVICE_SCROLL_MAX_SWIPES,
-              ),
-            },
-          );
-          return {
-            udid: udid(),
-            element: {
-              role: match.node.role,
-              subrole: match.node.subrole,
-              label: match.node.label,
-              value: match.node.value,
-              frame: match.node.frame,
-            },
-            tapPoint: match.point,
-          };
-        });
-    }
-  };
-
+/**
+ * Run one device tool and return its MCP content. Inputs wait for the screen
+ * to settle and return it as evidence. Errors throw; `callDeviceTool` turns
+ * them into tool results.
+ */
+export async function executeDeviceTool(
+  input: DeviceToolCallInput,
+): Promise<readonly DeviceToolContent[]> {
+  const { runDeviceTool } = await loadActions();
+  const udid = input.args.udid;
   // The device the call names is held while it runs and, after it, for the
   // thread's running provider turn; `device_list` names none.
-  return manager.withAgentActivity(
-    threadId,
-    run,
-    isNonEmptyString(args.udid) ? { udid: args.udid } : undefined,
+  return input.manager.withAgentActivity(
+    input.threadId,
+    async () => {
+      input.signal?.throwIfAborted();
+      return await runDeviceTool(input);
+    },
+    typeof udid === "string" && udid.trim().length > 0 ? { udid } : undefined,
   );
+}
+
+/**
+ * `executeDeviceTool` plus the error mapping every transport shares: failures
+ * become tool results, and only real device trouble reaches the pane's error
+ * state (never a call the caller abandoned).
+ */
+export async function callDeviceTool(
+  input: DeviceToolCallInput,
+): Promise<{ readonly content: readonly DeviceToolContent[]; readonly isError?: true }> {
+  try {
+    return { content: await executeDeviceTool(input) };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    if (input.signal?.aborted !== true && isViewerFacingDeviceToolError(error)) {
+      await input.manager.recordThreadError(input.threadId, message).catch(() => undefined);
+    }
+    return { content: [{ type: "text", text: message }], isError: true };
+  }
 }
 
 interface BindingRecord {
   readonly threadId: string;
   readonly isTurnActive: () => boolean;
+  /** Set once the driving guide went out with a successful result. */
+  guided: boolean;
+  /** Running `tools/call`s by JSON-RPC id, so `notifications/cancelled` can stop one. */
+  readonly inFlight: Map<string, AbortController>;
+}
+
+/** A JSON-RPC request id as a map key; ids are strings or numbers, kept apart. */
+function requestKey(id: unknown): string | null {
+  if (typeof id === "string") return `s:${id}`;
+  if (typeof id === "number" && Number.isFinite(id)) return `n:${id}`;
+  return null;
 }
 
 export interface DeviceToolBinding {
@@ -580,8 +287,13 @@ function mcpError(id: unknown, code: number, message: string): JsonRecord {
   return { jsonrpc: "2.0", id: id ?? null, error: { code, message } };
 }
 
-export async function startDeviceToolGateway(manager: DeviceManager): Promise<DeviceToolGateway> {
+export async function startDeviceToolGateway(
+  manager: DeviceManager,
+  options: { readonly timing?: Partial<DeviceSettleTiming> | undefined } = {},
+): Promise<DeviceToolGateway> {
   const bindings = new Map<string, BindingRecord>();
+  /** Every running `tools/call`, so closing the gateway can stop them all. */
+  const running = new Set<AbortController>();
   let baseUrl = "";
 
   const server: Server = createServer((request, response) => {
@@ -612,9 +324,18 @@ export async function startDeviceToolGateway(manager: DeviceManager): Promise<De
       if (typeof method !== "string")
         return json(response, 400, mcpError(id, -32600, "Missing method."));
 
-      if (method === "notifications/initialized" || method === "notifications/cancelled") {
+      if (method === "notifications/cancelled") {
+        // A client that cancels without dropping its connection (Streamable
+        // HTTP allows both) must stop the call's settle or wait as well.
+        const params = message.params;
+        const key =
+          params && typeof params === "object" && !Array.isArray(params)
+            ? requestKey((params as JsonRecord).requestId)
+            : null;
+        if (key !== null) binding.inFlight.get(key)?.abort();
         return empty(response, 202);
       }
+      if (method === "notifications/initialized") return empty(response, 202);
       if (method === "initialize") {
         const requested = asRecord(message.params ?? {}).protocolVersion;
         return json(
@@ -629,6 +350,7 @@ export async function startDeviceToolGateway(manager: DeviceManager): Promise<De
       }
       if (method === "ping") return json(response, 200, mcpSuccess(id, {}));
       if (method === "tools/list") {
+        const { DEVICE_TOOL_DEFINITIONS } = await loadDefinitions();
         const tools =
           (agentControlLocksByThread.get(binding.threadId)?.size ?? 0) > 0
             ? DEVICE_TOOL_DEFINITIONS.filter((tool) =>
@@ -677,28 +399,62 @@ export async function startDeviceToolGateway(manager: DeviceManager): Promise<De
           }),
         );
       }
+      let args: JsonRecord;
       try {
-        const value = await executeDeviceTool({
+        args = asRecord(params.arguments ?? {});
+      } catch (error) {
+        return json(
+          response,
+          200,
+          mcpSuccess(id, {
+            isError: true,
+            content: [
+              { type: "text", text: error instanceof Error ? error.message : String(error) },
+            ],
+          }),
+        );
+      }
+      // A provider that drops the request (Stop, a crash, its own timeout) or
+      // cancels it, or the gateway closing, must not leave a settle loop
+      // polling the device after nobody is listening.
+      const controller = new AbortController();
+      const onClose = () => {
+        if (!response.writableEnded) controller.abort();
+      };
+      response.once("close", onClose);
+      const key = requestKey(id);
+      if (key !== null) binding.inFlight.set(key, controller);
+      running.add(controller);
+      try {
+        const result = await callDeviceTool({
           manager,
           threadId: binding.threadId,
           name: name as DeviceToolName,
-          args: asRecord(params.arguments ?? {}),
+          args,
+          signal: controller.signal,
+          timing: options.timing,
         });
-        const content =
-          value && typeof value === "object" && "_mcpContent" in value
-            ? (value as { _mcpContent: unknown })._mcpContent
-            : [{ type: "text", text: JSON.stringify(value, null, 2) }];
-        return json(response, 200, mcpSuccess(id, { content }));
-      } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
-        if (isViewerFacingDeviceToolError(error)) {
-          await manager.recordThreadError(binding.threadId, message).catch(() => undefined);
+        let content = result.content;
+        if (result.isError !== true && !binding.guided) {
+          // Claimed before the await, so concurrent first calls send it once.
+          binding.guided = true;
+          const guidance = await loadGuidance().catch(() => null);
+          if (guidance !== null) {
+            content = [
+              { type: "text", text: guidance.deviceDrivingGuide(guidance.GATEWAY_GUIDE_NAMES) },
+              ...content,
+            ];
+          }
         }
         return json(
           response,
           200,
-          mcpSuccess(id, { isError: true, content: [{ type: "text", text: message }] }),
+          mcpSuccess(id, { content, ...(result.isError === true ? { isError: true } : {}) }),
         );
+      } finally {
+        response.off("close", onClose);
+        running.delete(controller);
+        if (key !== null && binding.inFlight.get(key) === controller) binding.inFlight.delete(key);
       }
     })().catch((error) => {
       if (!response.headersSent) json(response, 500, mcpError(null, -32603, String(error)));
@@ -723,7 +479,7 @@ export async function startDeviceToolGateway(manager: DeviceManager): Promise<De
   return {
     createBinding: ({ threadId, isTurnActive }) => {
       const token = randomUUID();
-      bindings.set(token, { threadId, isTurnActive });
+      bindings.set(token, { threadId, isTurnActive, guided: false, inFlight: new Map() });
       return {
         url: baseUrl,
         headers: { Authorization: `Bearer ${token}` },
@@ -734,9 +490,17 @@ export async function startDeviceToolGateway(manager: DeviceManager): Promise<De
     },
     close: async () => {
       bindings.clear();
-      await new Promise<void>((resolve, reject) =>
+      // A wait (up to 30 s), a launch settle or a log read in flight would
+      // otherwise hold shutdown, and the device manager's disposal of the
+      // simulators Ryco booted behind it, past the desktop's kill grace.
+      // Settles and waits stop at their next poll; a log read's simctl runs
+      // out its own bound in the background, but no longer holds the close.
+      for (const controller of running) controller.abort();
+      const closed = new Promise<void>((resolve, reject) =>
         server.close((error) => (error ? reject(error) : resolve())),
       );
+      server.closeAllConnections();
+      await closed;
     },
   };
 }

@@ -217,6 +217,13 @@ describe("server boot import boundaries", () => {
     // The ACP runtime loads with its drivers, the ACP Registry catalog with the first registry
     // search or install.
     expect(reached(/^apps\/server\/src\/provider\/acp\//u)).toEqual([]);
+    // Agent device tool actions, evidence, waits, logs and the driving guide load with the first
+    // device tool call, the tool catalogue with the first `tools/list`.
+    expect(
+      reached(
+        /^apps\/server\/src\/(?:device\/(?:deviceObservation|deviceUiSnapshot|deviceLogs)|providerTools\/deviceTool(?:Actions|Guidance|Definitions))\.ts$/u,
+      ),
+    ).toEqual([]);
   });
 });
 
