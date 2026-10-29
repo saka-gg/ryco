@@ -4,9 +4,9 @@ import {
   constrainAuxiliaryPaneWidth,
   constrainPrimarySidebarWidth,
   deriveCenteredContentHorizontalPadding,
-  deriveFileInspectorPaneLayout,
   deriveLayout,
   deriveStableFormSheetDetent,
+  deriveThreadWorkspaceInspectorPaneLayout,
   deriveWorkspacePaneLayout,
   SPLIT_LAYOUT_MIN_HEIGHT,
   SPLIT_LAYOUT_MIN_WIDTH,
@@ -228,7 +228,7 @@ describe("deriveWorkspacePaneLayout", () => {
   it("keeps file navigation on the native stack below the inspector breakpoint", () => {
     const layout = deriveLayout({ width: 744, height: 1_133 });
 
-    expect(deriveFileInspectorPaneLayout({ layout, viewportWidth: 744 })).toEqual({
+    expect(deriveThreadWorkspaceInspectorPaneLayout({ layout, viewportWidth: 744 })).toEqual({
       supported: false,
       width: null,
     });
