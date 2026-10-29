@@ -243,6 +243,7 @@ export class FakeWebContentsView {
     this.options = options;
     this.webContents = new FakeWebContents(options.webPreferences);
     fakeElectronState.views.push(this);
+    fakeElectronState.onView?.(this);
   }
 
   getBounds(): Bounds {
@@ -345,6 +346,8 @@ export const fakeElectronState = {
   views: [] as FakeWebContentsView[],
   windows: [] as FakeBrowserWindow[],
   fromPartition: vi.fn((_partition: string) => fakeSession),
+  /** Called with every new view before the code under test uses it (e.g. to hold its load open). */
+  onView: null as ((view: FakeWebContentsView) => void) | null,
 };
 
 export const fakeElectronModule = {
@@ -357,6 +360,7 @@ export const fakeElectronModule = {
 export function resetFakeElectron(): void {
   fakeElectronState.views.length = 0;
   fakeElectronState.windows.length = 0;
+  fakeElectronState.onView = null;
   fakeElectronState.fromPartition.mockClear();
   fakeSession.setPermissionRequestHandler.mockClear();
   fakeSession.setPermissionCheckHandler.mockClear();

@@ -7,7 +7,16 @@ export interface BrowserTab {
   id: string;
   title: string;
   url: string;
+  /** The Ryco browser unloaded the page to save memory; using the tab reloads it. */
+  suspended?: boolean;
 }
+/**
+ * A tab's reload since the agent's last command (BrowserTransport.wake). "now": this wake revived
+ * the suspended tab or waited for its reload, so the page was just loaded from its address and has
+ * no history. "earlier": the user or the thumbnail preview revived it and that load had finished;
+ * the page may have moved on since. null: the page the agent last used is still there.
+ */
+export type BrowserTabRevival = "now" | "earlier" | null;
 export interface BrowserTransport {
   tabs(signal: AbortSignal): Promise<BrowserTab[]>;
   open(url: string, visible: boolean, signal: AbortSignal): Promise<BrowserTab>;
@@ -28,6 +37,11 @@ export interface BrowserTransport {
    * the driver ignores its errors, so they never replace the action's result or error.
    */
   beginAgentMutation?(tab: string, signal: AbortSignal): Promise<() => void>;
+  /**
+   * Makes a suspended tab live before CDP use. Reports each suspension once (BrowserTabRevival):
+   * the page state the agent saw, its observations included, is gone.
+   */
+  wake?(tab: string, signal: AbortSignal): Promise<BrowserTabRevival>;
 }
 
 /**
@@ -50,6 +64,24 @@ export const BROWSER_MUTATING_ACTIONS: ReadonlySet<string> = new Set([
   "key",
   "close",
 ]);
+
+/** Actions that act on an observed element or the focused one: a reloaded page needs a new observation first. */
+const BROWSER_INTERACTIONS: ReadonlySet<string> = new Set([
+  "click",
+  "fill",
+  "select",
+  "hover",
+  "scroll",
+  "type",
+  "key",
+]);
+export const REVIVED_TAB_NOTE =
+  "This Ryco tab had been suspended to save memory and was reloaded from its address. Page state such as form input and history was reset.";
+export const REVIVED_TAB_ERROR = `${REVIVED_TAB_NOTE} Observe it again before interacting.`;
+const withRevivedNote = (output: ComputerUseResult): ComputerUseResult => ({
+  ...output,
+  content: [...output.content, { type: "text", text: REVIVED_TAB_NOTE }],
+});
 
 export function browserUrl(value: string): string {
   const url = new URL(value);
@@ -215,7 +247,21 @@ export class BrowserComputerDriver {
         this.observations.delete(`${browser}:${tab}`);
         return result({ closed: true });
       }
-      return await this.act(context, browser, transport, tab, target, action);
+      // A tab the Ryco browser suspended reloads first; the page state the agent saw is gone.
+      const revival = transport.wake ? await transport.wake(tab, context.signal) : null;
+      if (transport.wake) context.check(); // The reload may have waited.
+      if (revival) {
+        this.observations.delete(`${browser}:${tab}`);
+        // Only a page loaded just now makes a reload redundant and has no history to go to; one
+        // the user revived earlier may have reloaded stale content or built new history since.
+        if (revival === "now") {
+          if (action === "reload") return withRevivedNote(result({ reloaded: true }));
+          if (action === "back" || action === "forward") throw new Error(REVIVED_TAB_ERROR);
+        }
+        if (BROWSER_INTERACTIONS.has(action)) throw new Error(REVIVED_TAB_ERROR);
+      }
+      const output = await this.act(context, browser, transport, tab, target, action);
+      return revival ? withRevivedNote(output) : output;
     } finally {
       try {
         endMutation?.();

@@ -1,5 +1,11 @@
 import { expect, it, vi } from "vitest";
-import { BrowserComputerDriver, type BrowserTransport } from "./browser.ts";
+import {
+  BrowserComputerDriver,
+  REVIVED_TAB_ERROR,
+  REVIVED_TAB_NOTE,
+  type BrowserTabRevival,
+  type BrowserTransport,
+} from "./browser.ts";
 import type { ComputerOperationContext } from "./policy.ts";
 
 it("requires a new observation when a replacement browser reuses tab and document ids", async () => {
@@ -318,4 +324,124 @@ it("never lets the bracket's end replace the action's result or error", async ()
     content: [{ type: "text", text: JSON.stringify({ closed: true }) }],
   });
   expect(end).toHaveBeenCalledTimes(3);
+});
+
+it("reports a revived Ryco tab and requires a fresh observation", async () => {
+  const tab = { id: "1", url: "https://example.com/", title: "Test" };
+  const note = { type: "text", text: REVIVED_TAB_NOTE };
+  const log: string[] = [];
+  let reload: BrowserTabRevival = null;
+  const transport: BrowserTransport = {
+    tabs: vi.fn(async () => [tab]),
+    open: vi.fn(),
+    show: vi.fn(async () => {}),
+    close: vi.fn(async () => {}),
+    stop: vi.fn(),
+    send: vi.fn(async (_tab, method) => {
+      log.push(method);
+      if (method === "Page.getFrameTree")
+        return { frameTree: { frame: { id: "frame", loaderId: "doc" } } };
+      if (method === "Page.createIsolatedWorld") return { executionContextId: 1 };
+      if (method === "Runtime.evaluate") return { result: { value: { x: 10, y: 20 } } };
+      if (method === "Page.getNavigationHistory")
+        return {
+          currentIndex: 1,
+          entries: [
+            { id: 1, url: "https://example.com/" },
+            { id: 2, url: "https://example.com/next" },
+          ],
+        };
+      return { frameId: "frame" };
+    }),
+    // The tab was suspended (and reloaded) when `reload` is set, reported once.
+    wake: vi.fn(async () => {
+      log.push("wake");
+      const revival = reload;
+      reload = null;
+      return revival;
+    }),
+  };
+  const context: ComputerOperationContext = {
+    request: { sessionId: "s", threadId: "t", turnId: "u", tool: "browser", args: {} },
+    signal: new AbortController().signal,
+    check: vi.fn(),
+    authorizeApp: vi.fn(),
+    authorizeForeground: vi.fn(),
+    claim: vi.fn(),
+    activity: vi.fn(),
+  };
+  const driver = new BrowserComputerDriver(new Map([["ryco", transport]]));
+  const run = (args: Record<string, unknown>) => {
+    log.length = 0;
+    return driver.execute(
+      { ...context, request: { ...context.request, args: { tab: "1", ...args } } },
+      "ryco",
+    );
+  };
+
+  // A revived tab's observation ends with the note; the wake runs before any command.
+  reload = "now";
+  const observed = await run({ action: "observe" });
+  expect(observed.content.at(-1)).toEqual(note);
+  expect(observed.content).toHaveLength(2);
+  expect(log[0]).toBe("wake");
+  expect(transport.wake).toHaveBeenCalledWith("1", context.signal);
+  // A live tab's results carry no note.
+  expect((await run({ action: "observe" })).content).not.toContainEqual(note);
+  // Interactions after a reload need a new observation: refused before any input.
+  reload = "now";
+  await expect(run({ action: "click", ref: "e1" })).rejects.toThrow(REVIVED_TAB_ERROR);
+  expect(log).toEqual(["wake"]);
+  await expect(run({ action: "click", ref: "e1" })).rejects.toThrow("Observe this document");
+  expect(log).not.toContain("Input.dispatchMouseEvent");
+  // A page loaded just now has no history.
+  reload = "now";
+  await expect(run({ action: "back" })).rejects.toThrow("Observe it again");
+  expect(log).toEqual(["wake"]);
+  // A reload is not repeated.
+  reload = "now";
+  await expect(run({ action: "reload" })).resolves.toEqual({
+    content: [{ type: "text", text: JSON.stringify({ reloaded: true }) }, note],
+  });
+  expect(log).toEqual(["wake"]);
+  // A tab the user revived earlier may have reloaded stale content or built new history since:
+  // reload and history go ahead (with the note), interactions still need a new observation.
+  reload = "earlier";
+  await expect(run({ action: "reload" })).resolves.toEqual({
+    content: [{ type: "text", text: JSON.stringify({ frameId: "frame" }) }, note],
+  });
+  expect(log).toEqual(["wake", "Page.reload"]);
+  reload = "earlier";
+  await expect(run({ action: "back" })).resolves.toEqual({
+    content: [{ type: "text", text: JSON.stringify({ frameId: "frame" }) }, note],
+  });
+  expect(log).toEqual(["wake", "Page.getNavigationHistory", "Page.navigateToHistoryEntry"]);
+  await run({ action: "observe" });
+  reload = "earlier";
+  await expect(run({ action: "click", ref: "e1" })).rejects.toThrow(REVIVED_TAB_ERROR);
+  expect(log).toEqual(["wake"]);
+  // Navigation goes ahead and says so.
+  reload = "now";
+  const navigated = await run({ action: "navigate", url: "https://example.org/" });
+  expect(navigated.content).toEqual([
+    { type: "text", text: JSON.stringify({ frameId: "frame" }) },
+    note,
+  ]);
+  // tabs, show and close never wake a tab.
+  await run({ action: "show" });
+  await run({ action: "close" });
+  await driver.execute(
+    { ...context, request: { ...context.request, args: { action: "tabs" } } },
+    "ryco",
+  );
+  expect(transport.wake).toHaveBeenCalledTimes(11);
+
+  // A transport without wake behaves as before.
+  const { wake: _wake, ...plain } = transport;
+  const plainDriver = new BrowserComputerDriver(new Map([["ryco", plain]]));
+  const plainResult = await plainDriver.execute(
+    { ...context, request: { ...context.request, args: { tab: "1", action: "observe" } } },
+    "ryco",
+  );
+  expect(plainResult.content).toHaveLength(1);
 });

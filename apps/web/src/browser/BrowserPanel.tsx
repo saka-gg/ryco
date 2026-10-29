@@ -153,7 +153,10 @@ export function BrowserPanel({ environmentId, cwd }: BrowserProject) {
               type="button"
               role="tab"
               aria-selected={active?.id === tab.id}
-              className="flex min-w-0 items-center gap-1.5 px-2 py-1.5 text-xs"
+              title={
+                tab.suspended ? "Suspended to save memory. Reloads when you open it." : undefined
+              }
+              className={`flex min-w-0 items-center gap-1.5 px-2 py-1.5 text-xs${tab.suspended ? " text-muted-foreground" : ""}`}
               onClick={() => {
                 useBrowserUi.getState().select(project, tab.id);
                 setNewTab(false);
@@ -165,6 +168,7 @@ export function BrowserPanel({ environmentId, cwd }: BrowserProject) {
                 <GlobeIcon className="size-3 shrink-0" />
               )}
               <span className="truncate">{tab.title || tab.url || "Loading…"}</span>
+              {tab.suspended ? <span className="sr-only">, suspended</span> : null}
             </button>
             <button
               type="button"
