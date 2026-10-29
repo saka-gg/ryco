@@ -113,7 +113,6 @@ function writePrimary(target: HostedHubNode): void {
     capabilities: {
       repositoryIdentity: false,
       threadSettlement: false,
-      threadPriorityRanking: false,
     },
   });
 }

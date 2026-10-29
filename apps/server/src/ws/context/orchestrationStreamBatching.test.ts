@@ -68,8 +68,6 @@ interface Harness {
 }
 
 const makeHarnessWith = (options: {
-  readonly threadPriorityChanges?: Stream.Stream<void>;
-  readonly listThreadPriorities?: ProjectionSnapshotQueryShape["listThreadPriorities"];
   readonly getProjectShellById?: ProjectionSnapshotQueryShape["getProjectShellById"];
   /** Serve thread replay through the stream index, counting reads in `streamPageReads`. */
   readonly streamPages?: boolean;
@@ -105,9 +103,6 @@ const makeHarnessWith = (options: {
         }),
       getProjectShellById: options.getProjectShellById ?? (() => Effect.succeed(Option.none())),
       getWorktreeShellById: () => Effect.succeed(Option.none()),
-      ...(options.listThreadPriorities === undefined
-        ? {}
-        : { listThreadPriorities: options.listThreadPriorities }),
     } as unknown as ProjectionSnapshotQueryShape;
     const helpers = makeOrchestrationStreamHelpers({
       orchestrationEngine,
@@ -137,9 +132,6 @@ const makeHarnessWith = (options: {
               }),
           }
         : {}),
-      ...(options.threadPriorityChanges === undefined
-        ? {}
-        : { threadPriorityChanges: options.threadPriorityChanges }),
     });
     return { harness, helpers };
   });
@@ -377,217 +369,6 @@ describe("resume decisions", () => {
         1,
       );
       assert.deepEqual(chunks[0], [{ kind: "snapshot", snapshot }]);
-    }),
-  );
-});
-
-describe("thread-priority snapshots", () => {
-  const shellSnapshot = (snapshotSequence: number) => ({
-    snapshotSequence,
-    projects: [],
-    threads: [],
-    updatedAt: "2026-10-01T00:00:00.000Z",
-  });
-
-  it.live("subscribers woken by one ranking share one snapshot load", () =>
-    Effect.gen(function* () {
-      const changes = yield* PubSub.unbounded<void>();
-      const { helpers } = yield* makeHarnessWith({
-        threadPriorityChanges: Stream.fromPubSub(changes),
-      });
-      let loads = 0;
-      const snapshot = Effect.sync(() => {
-        loads += 1;
-        return shellSnapshot(100 + loads);
-      });
-      const subscribe = () =>
-        collectChunks(
-          helpers.makeReplayableShellStream(snapshot, { resumeFromSequence: 10 }),
-          2,
-        ).pipe(Effect.forkChild);
-      const first = yield* subscribe();
-      const second = yield* subscribe();
-      yield* Effect.sleep("20 millis");
-      yield* PubSub.publish(changes, undefined);
-
-      const received = [yield* Fiber.join(first), yield* Fiber.join(second)].map((chunks) =>
-        chunks.flat().at(-1),
-      );
-      assert.equal(loads, 1);
-      assert.deepEqual(received, [
-        { kind: "snapshot", snapshot: shellSnapshot(101) },
-        { kind: "snapshot", snapshot: shellSnapshot(101) },
-      ]);
-    }),
-  );
-
-  it.live("a ranking heard after a shared load began reading loads again", () =>
-    Effect.gen(function* () {
-      const changes = yield* PubSub.unbounded<void>();
-      const { helpers } = yield* makeHarnessWith({
-        threadPriorityChanges: Stream.fromPubSub(changes),
-      });
-      const firstLoadGate = yield* Deferred.make<void>();
-      let loads = 0;
-      const snapshot = Effect.gen(function* () {
-        loads += 1;
-        const load = loads;
-        if (load === 1) yield* Deferred.await(firstLoadGate);
-        return shellSnapshot(100 + load);
-      });
-      const subscribe = () =>
-        collectChunks(
-          helpers.makeReplayableShellStream(snapshot, { resumeFromSequence: 10 }),
-          2,
-        ).pipe(Effect.forkChild);
-      const early = yield* subscribe();
-      yield* Effect.sleep("20 millis");
-      yield* PubSub.publish(changes, undefined);
-      // The first ranking's load is reading (held at the gate) when a
-      // subscriber that connected since hears the second ranking.
-      yield* Effect.sleep("20 millis");
-      const late = yield* subscribe();
-      yield* Effect.sleep("20 millis");
-      yield* PubSub.publish(changes, undefined);
-
-      const lateChunks = yield* Fiber.join(late);
-      assert.deepEqual(lateChunks.flat().at(-1), {
-        kind: "snapshot",
-        snapshot: shellSnapshot(102),
-      });
-      yield* Deferred.succeed(firstLoadGate, undefined);
-      const earlyChunks = yield* Fiber.join(early);
-      assert.deepEqual(earlyChunks.flat().at(-1), {
-        kind: "snapshot",
-        snapshot: shellSnapshot(101),
-      });
-      assert.equal(loads, 2);
-    }),
-  );
-});
-
-describe("thread-priority deltas", () => {
-  const priorities = [
-    {
-      threadId: ThreadId.make("thread-ranked"),
-      priority: {
-        tier: "now" as const,
-        confidence: "high" as const,
-        reason: "Waiting on you",
-        inputFingerprint: "fingerprint" as never,
-        batchId: "batch-1" as never,
-        modelSelection: { instanceId: "codex" as never, model: "gpt-5-codex" },
-        rankedAt: "2026-10-12T00:00:00.000Z",
-        usableUntil: "2026-10-12T01:00:00.000Z",
-      },
-    },
-  ];
-
-  it.live("a client that takes deltas gets the rankings alone, from one shared load", () =>
-    Effect.gen(function* () {
-      const changes = yield* PubSub.unbounded<void>();
-      let loads = 0;
-      const { helpers } = yield* makeHarnessWith({
-        threadPriorityChanges: Stream.fromPubSub(changes),
-        listThreadPriorities: () =>
-          Effect.sync(() => {
-            loads += 1;
-            return priorities;
-          }),
-      });
-      const subscribe = () =>
-        collectChunks(
-          helpers.makeReplayableShellStream(
-            Effect.die("a ranking must not reload the shell for a delta client"),
-            { resumeFromSequence: 10, threadPriorities: "delta" },
-          ),
-          3,
-        ).pipe(Effect.forkChild);
-      const first = yield* subscribe();
-      const second = yield* subscribe();
-      yield* Effect.sleep("20 millis");
-      // Each resume read the current rankings once.
-      assert.equal(loads, 2);
-      yield* PubSub.publish(changes, undefined);
-
-      const received = [yield* Fiber.join(first), yield* Fiber.join(second)].map((chunks) =>
-        chunks.flat(),
-      );
-      // The ranking itself is one load shared by both subscribers.
-      assert.equal(loads, 3);
-      for (const items of received) {
-        assert.deepEqual(items, [
-          { kind: "resumed", fromSequence: 10 },
-          { kind: "thread-priorities", priorities },
-          { kind: "thread-priorities", priorities },
-        ]);
-      }
-    }),
-  );
-
-  it.effect("a resumed delta client gets the current rankings right after the marker", () =>
-    Effect.gen(function* () {
-      const { harness, helpers } = yield* makeHarnessWith({
-        listThreadPriorities: () => Effect.succeed(priorities),
-      });
-      harness.stored.push(messageEvent(11, THREAD));
-
-      const chunks = yield* collectChunks(
-        helpers.makeReplayableShellStream(neverSnapshot, {
-          resumeFromSequence: 10,
-          threadPriorities: "delta",
-        }),
-        3,
-      );
-      assert.deepEqual(
-        chunks.flat().map((item) => item.kind),
-        ["resumed", "thread-priorities", "thread-upserted"],
-      );
-    }),
-  );
-
-  it.effect("a failed ranking read never fails a resumed shell", () =>
-    Effect.gen(function* () {
-      const { harness, helpers } = yield* makeHarnessWith({
-        listThreadPriorities: () => Effect.fail(new Error("locked") as never),
-      });
-      harness.stored.push(messageEvent(11, THREAD));
-
-      const chunks = yield* collectChunks(
-        helpers.makeReplayableShellStream(neverSnapshot, {
-          resumeFromSequence: 10,
-          threadPriorities: "delta",
-        }),
-        2,
-      );
-      assert.deepEqual(
-        chunks.flat().map((item) => item.kind),
-        ["resumed", "thread-upserted"],
-      );
-    }),
-  );
-
-  it.live("a client that did not ask for deltas still gets a snapshot", () =>
-    Effect.gen(function* () {
-      const changes = yield* PubSub.unbounded<void>();
-      const { helpers } = yield* makeHarnessWith({
-        threadPriorityChanges: Stream.fromPubSub(changes),
-        listThreadPriorities: () => Effect.die("an older client cannot decode a delta"),
-      });
-      const snapshot = {
-        snapshotSequence: 11,
-        projects: [],
-        threads: [],
-        updatedAt: "2026-10-12T00:00:00.000Z",
-      };
-      const fiber = yield* collectChunks(
-        helpers.makeReplayableShellStream(Effect.succeed(snapshot), { resumeFromSequence: 10 }),
-        2,
-      ).pipe(Effect.forkChild);
-      yield* Effect.sleep("20 millis");
-      yield* PubSub.publish(changes, undefined);
-      const chunks = yield* Fiber.join(fiber);
-      assert.deepEqual(chunks.flat().at(-1), { kind: "snapshot", snapshot });
     }),
   );
 });

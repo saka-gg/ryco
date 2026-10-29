@@ -18,7 +18,6 @@ it.effect(
         capabilities: {
           repositoryIdentity: true,
           threadSettlement: true,
-          threadPriorityRanking: false,
         },
       };
 

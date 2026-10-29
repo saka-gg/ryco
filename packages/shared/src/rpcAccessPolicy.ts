@@ -230,7 +230,6 @@ export const RPC_ACCESS_POLICY = {
   [WS_METHODS.textGenerationCancelSideQuestion]: "operator",
   [WS_METHODS.textGenerationGenerateBranchName]: "operator",
   [WS_METHODS.textGenerationGenerateIssueContent]: "operator",
-  [WS_METHODS.threadPriorityEnsureCurrent]: "operator",
   [WS_METHODS.searchThreadMessages]: "owner",
   [WS_METHODS.threadsSetManualBucket]: "operator",
   [WS_METHODS.threadsSetManualPosition]: "operator",
@@ -498,8 +497,6 @@ export const RPC_DELIVERY_EFFECT_POLICY = {
   [WS_METHODS.textGenerationCancelSideQuestion]: "mutation",
   [WS_METHODS.textGenerationGenerateBranchName]: "read",
   [WS_METHODS.textGenerationGenerateIssueContent]: "read",
-  // Recomputes the derived inbox ranking; nothing the user issued.
-  [WS_METHODS.threadPriorityEnsureCurrent]: "read",
   [WS_METHODS.searchThreadMessages]: "read",
   [WS_METHODS.threadsSetManualBucket]: "mutation",
   [WS_METHODS.threadsSetManualPosition]: "mutation",

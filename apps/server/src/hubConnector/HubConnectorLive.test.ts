@@ -127,7 +127,6 @@ async function withHubConnectorLive(
           capabilities: {
             repositoryIdentity: false,
             threadSettlement: false,
-            threadPriorityRanking: false,
           },
         }),
       }),

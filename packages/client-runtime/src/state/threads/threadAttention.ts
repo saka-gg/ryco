@@ -66,24 +66,17 @@ export function resolveThreadAttentionReason(
 export interface ThreadAttentionCandidate {
   readonly key: string;
   readonly reason: ThreadNotificationKind;
-  /** The row's place in AI Focus, or null when it is not in Focus. */
-  readonly focusIndex: number | null;
   /** Newest first; a value that is not finite sorts last. */
   readonly recencyMs: number;
 }
 
-/** By reason, then in Focus order, then newest first, then by key. */
+/** By reason, then newest first, then by key. */
 export function compareThreadAttention(
   left: ThreadAttentionCandidate,
   right: ThreadAttentionCandidate,
 ): number {
   const byReason = REASON_RANK[left.reason] - REASON_RANK[right.reason];
   if (byReason !== 0) return byReason;
-  if (left.focusIndex !== right.focusIndex) {
-    if (left.focusIndex === null) return 1;
-    if (right.focusIndex === null) return -1;
-    return left.focusIndex - right.focusIndex;
-  }
   const leftMs = Number.isFinite(left.recencyMs) ? left.recencyMs : Number.NEGATIVE_INFINITY;
   const rightMs = Number.isFinite(right.recencyMs) ? right.recencyMs : Number.NEGATIVE_INFINITY;
   if (leftMs !== rightMs) return rightMs > leftMs ? 1 : -1;

@@ -25,7 +25,6 @@ const queryLayer = OrchestrationProjectionSnapshotQueryLive.pipe(
 const MODEL = '{"instanceId":"codex","model":"gpt-5-codex"}';
 const PROJECT_ID = "project-memo";
 const THREAD_IDS = ["thread-a", "thread-b", "thread-c"] as const;
-const USABLE_UNTIL = "2099-01-01T00:00:00.000Z";
 
 /** When the event at `sequence` happened: every event moves the times it touches. */
 const eventTime = (sequence: number) =>
@@ -101,35 +100,6 @@ const projectRename = (sequence: number, threadId: string, title: string) =>
           WHERE thread_id = ${threadId}
         `;
         yield* recordProgress(sequence);
-      }),
-    );
-  });
-
-/** Replace the priority batch (one slot) with `batchId` ranking `threadIds`, or with nothing. */
-const rankThreads = (batchId: string | null, threadIds: ReadonlyArray<string>, rankedAt: string) =>
-  Effect.gen(function* () {
-    const sql = yield* SqlClient.SqlClient;
-    yield* sql.withTransaction(
-      Effect.gen(function* () {
-        yield* sql`DELETE FROM thread_priority_rankings`;
-        yield* sql`DELETE FROM thread_priority_batches`;
-        if (batchId === null) return;
-        yield* sql`
-          INSERT INTO thread_priority_batches (
-            slot, batch_id, input_fingerprint, model_selection_json, model_fingerprint,
-            prompt_version, ranked_at, usable_until, checked_at
-          ) VALUES (
-            1, ${batchId}, 'fingerprint', ${MODEL}, 'model', 'v1', ${rankedAt}, ${USABLE_UNTIL},
-            ${rankedAt}
-          )
-        `;
-        for (const threadId of threadIds) {
-          yield* sql`
-            INSERT INTO thread_priority_rankings (
-              thread_id, batch_id, tier, confidence, reason, input_fingerprint
-            ) VALUES (${threadId}, ${batchId}, 'now', 'high', 'Waiting on you', 'thread-fp')
-          `;
-        }
       }),
     );
   });
@@ -268,37 +238,6 @@ describe("shell memo", () => {
     }).pipe(Effect.provide(queryLayer), Effect.withTracer(counter.tracer));
   });
 
-  it.effect("builds again after the priority batch changes", () => {
-    const counter = makeBuildCounter();
-    return Effect.gen(function* () {
-      yield* seedProjection(1);
-      yield* readShell("stubbed");
-
-      yield* rankThreads("batch-1", ["thread-b"], eventTime(10));
-      const ranked = yield* readShell("stubbed");
-      assert.equal(counter.builds(), 2);
-      assert.equal(
-        ranked.threads.find((thread) => thread.id === "thread-b")?.priority?.batchId,
-        "batch-1",
-      );
-
-      // A re-rank of the same threads is a new batch.
-      yield* rankThreads("batch-2", ["thread-b"], eventTime(11));
-      const reranked = yield* readShell("stubbed");
-      assert.equal(counter.builds(), 3);
-      assert.equal(
-        reranked.threads.find((thread) => thread.id === "thread-b")?.priority?.batchId,
-        "batch-2",
-      );
-
-      yield* rankThreads(null, [], eventTime(12));
-      const unranked = yield* readShell("stubbed");
-      assert.equal(counter.builds(), 4);
-      assert.isUndefined(unranked.threads.find((thread) => thread.id === "thread-b")?.priority);
-      assert.deepStrictEqual(unranked, yield* buildShell("stubbed"));
-    }).pipe(Effect.provide(queryLayer), Effect.withTracer(counter.tracer));
-  });
-
   it.effect("builds again after background liveness changes", () => {
     const counter = makeBuildCounter();
     return Effect.gen(function* () {
@@ -393,7 +332,6 @@ describe("shell memo", () => {
     const counter = makeBuildCounter();
     return Effect.gen(function* () {
       yield* seedProjection(1);
-      yield* rankThreads("batch-1", ["thread-a"], eventTime(10));
       yield* startBackgroundWork("thread-b", "task-1");
       const served = yield* readShell("stubbed");
       const asBuilt = structuredClone(served);
@@ -557,7 +495,6 @@ describe("shell memo under random interleavings", () => {
         const liveness = yield* ThreadBackgroundLivenessService;
         // Never reused across runs, so no run can meet another run's version.
         let sequence = 0;
-        let batch = 0;
         let task = 0;
         let identity = 0;
         let hits = 0;
@@ -570,8 +507,6 @@ describe("shell memo under random interleavings", () => {
           for (let run = 0; run < RUNS_PER_SEED; run += 1) {
             const at = `seed ${seed.toString(16)} run ${run}`;
             // A new projection, past any memo the previous run left.
-            yield* sql`DELETE FROM thread_priority_rankings`;
-            yield* sql`DELETE FROM thread_priority_batches`;
             yield* sql`DELETE FROM projection_threads`;
             yield* sql`DELETE FROM projection_projects`;
             for (const threadId of THREAD_IDS) liveness.clearThreadLiveness(threadId);
@@ -593,14 +528,6 @@ describe("shell memo under random interleavings", () => {
                 yield* projectRename(sequence, threadId, title);
                 events.push({ sequence, threadId, title });
                 titles[threadId] = title;
-              } else if (action < 0.37) {
-                batch += 1;
-                const ranked = THREAD_IDS.filter(() => random() < 0.5);
-                yield* rankThreads(
-                  random() < 0.2 ? null : `batch-${batch}`,
-                  ranked,
-                  eventTime(batch),
-                );
               } else if (action < 0.49) {
                 const threadId = pick(THREAD_IDS);
                 const running = working.get(threadId);

@@ -61,8 +61,6 @@ export interface ResumableSubscriptionOptions extends StreamSubscriptionOptions 
   readonly resumeFromSequence?: () => number | null;
 }
 export interface ShellSubscriptionOptions extends ResumableSubscriptionOptions {
-  /** Ask for small `thread-priorities` items instead of a snapshot per ranking. */
-  readonly threadPriorities?: "delta";
   /**
    * Ask for archived threads as stubs (`snapshot.archivedThreadStubs`). Only
    * for a listener whose store keeps stubs; older servers ignore it.
@@ -518,9 +516,6 @@ export interface WsRpcClient {
       listener: (event: OrchestrationThreadWindowStreamItem) => void,
       options?: ThreadSubscriptionOptions,
     ) => () => void;
-  };
-  readonly threadPriority: {
-    readonly ensureCurrent: RpcUnaryMethod<typeof WS_METHODS.threadPriorityEnsureCurrent>;
   };
   readonly contextHandoff: {
     readonly getInspectionSummary: RpcUnaryMethod<
@@ -1151,9 +1146,6 @@ export function createWsRpcClient(transport: WsTransport, device?: DeviceRpcClie
             assembler.reset();
             return client[ORCHESTRATION_WS_METHODS.subscribeShell]({
               ...resumeInput(options),
-              ...(options?.threadPriorities === undefined
-                ? {}
-                : { threadPriorities: options.threadPriorities }),
               // Bounded messages: a large shell stays under the relay's
               // message cap. Older servers ignore this and send one item.
               snapshotDelivery: "paged",
@@ -1189,10 +1181,6 @@ export function createWsRpcClient(transport: WsTransport, device?: DeviceRpcClie
           listener,
           transportSubscribeOptions(options, ORCHESTRATION_WS_METHODS.subscribeThreadWindow),
         ),
-    },
-    threadPriority: {
-      ensureCurrent: (input) =>
-        transport.request((client) => client[WS_METHODS.threadPriorityEnsureCurrent](input)),
     },
     contextHandoff: {
       getInspectionSummary: (input) =>

@@ -191,8 +191,6 @@ export const SEED_TABLE_POLICY: Readonly<Record<string, SeedTablePolicy>> = {
   local_task_delegations: "clear",
   // Holds a dispatch owner's pid and runtime.
   project_memory_settings: "clear",
-  thread_priority_batches: "clear",
-  thread_priority_rankings: "clear",
 };
 
 /** The FTS5 index of message text and its shadow tables: maintained by triggers. */

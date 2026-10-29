@@ -2,10 +2,8 @@ import * as Schema from "effect/Schema";
 import { ModelFavorite } from "@ryco/contracts/settings";
 import { uniqueModelFavorites } from "@ryco/client-runtime/state/composer";
 import { useSyncExternalStore } from "react";
-import { AI_FOCUS_REFRESH_INTERVAL_OPTIONS } from "@ryco/shared/aiFocusSettings";
 import {
   SIDEBAR_AUTO_SETTLE_DAY_OPTIONS,
-  type AiFocusRefreshIntervalMs,
   type SidebarAutoSettleAfterDays,
 } from "@ryco/contracts/settings";
 
@@ -33,8 +31,6 @@ export interface Preferences {
   readonly collapsedProjectGroups?: readonly string[];
   readonly projectGroupingEnabled?: boolean;
   readonly threadListV2Enabled?: boolean;
-  readonly aiFocusEnabled?: boolean;
-  readonly aiFocusRefreshIntervalMs?: AiFocusRefreshIntervalMs;
   readonly sidebarAutoSettleAfterDays?: SidebarAutoSettleAfterDays;
   /**
    * Keep bounded recent conversation text on this device so a thread opens with
@@ -60,8 +56,6 @@ export function sanitizePreferences(parsed: Preferences): Preferences {
     collapsedProjectGroups?: readonly string[];
     projectGroupingEnabled?: boolean;
     threadListV2Enabled?: boolean;
-    aiFocusEnabled?: boolean;
-    aiFocusRefreshIntervalMs?: AiFocusRefreshIntervalMs;
     sidebarAutoSettleAfterDays?: SidebarAutoSettleAfterDays;
     rememberThreadContent?: boolean;
     threadAlerts?: boolean;
@@ -97,18 +91,6 @@ export function sanitizePreferences(parsed: Preferences): Preferences {
   }
   if (typeof parsed.threadListV2Enabled === "boolean") {
     preferences.threadListV2Enabled = parsed.threadListV2Enabled;
-  }
-  if (typeof parsed.aiFocusEnabled === "boolean") {
-    preferences.aiFocusEnabled = parsed.aiFocusEnabled;
-  }
-  if (
-    typeof parsed.aiFocusRefreshIntervalMs === "number" &&
-    AI_FOCUS_REFRESH_INTERVAL_OPTIONS.some(
-      (option) => option.value === parsed.aiFocusRefreshIntervalMs,
-    )
-  ) {
-    preferences.aiFocusRefreshIntervalMs =
-      parsed.aiFocusRefreshIntervalMs as AiFocusRefreshIntervalMs;
   }
   if (
     parsed.sidebarAutoSettleAfterDays === null ||

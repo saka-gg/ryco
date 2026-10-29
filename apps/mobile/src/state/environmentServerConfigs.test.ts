@@ -19,13 +19,13 @@ describe("environment server config snapshots", () => {
       providers: [],
       settings: {
         responseStreamingMode: "turn",
-        inboxPriorityModelSelection: null,
+        textGenerationModelSelection: { instanceId: "codex", model: "gpt-5.4" },
       },
     } as unknown as ServerConfig;
     writeEnvironmentServerConfig(ENVIRONMENT_ID, config);
 
     patchEnvironmentServerSettings(ENVIRONMENT_ID, {
-      inboxPriorityModelSelection: {
+      textGenerationModelSelection: {
         instanceId: "codex" as never,
         model: "gpt-5.6",
       },
@@ -33,7 +33,7 @@ describe("environment server config snapshots", () => {
 
     expect(readEnvironmentServerConfig(ENVIRONMENT_ID)?.settings).toMatchObject({
       responseStreamingMode: "turn",
-      inboxPriorityModelSelection: { model: "gpt-5.6" },
+      textGenerationModelSelection: { model: "gpt-5.6" },
     });
     expect(readEnvironmentServerConfig(EnvironmentId.make("node-b"))).toBeNull();
   });

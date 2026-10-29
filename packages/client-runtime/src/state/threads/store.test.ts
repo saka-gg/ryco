@@ -28,7 +28,6 @@ import {
   applyOrchestrationEvent,
   applyOrchestrationEvents,
   applyShellEvent,
-  applyThreadPriorities,
   createShellEventCoalescer,
   demoteEnvironmentStateToCachedSnapshot,
   evictThreadBodies,
@@ -2770,85 +2769,6 @@ describe("shell push coalescing", () => {
     expect(committedEnv.sidebarThreadSummaryById[threadB]).toEqual(
       referenceEnv.sidebarThreadSummaryById[threadB],
     );
-  });
-
-  it("applies a thread-priorities item as a replacement, keeping unchanged rows", () => {
-    const threadA = ThreadId.make("thread-a");
-    const threadB = ThreadId.make("thread-b");
-    const ranking = (tier: "now" | "later", batchId: string) => ({
-      tier,
-      confidence: "high" as const,
-      reason: "Needs a reply",
-      inputFingerprint: "fp" as never,
-      batchId: batchId as never,
-      modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5-codex" },
-      rankedAt: "2026-10-12T00:00:00.000Z",
-      usableUntil: "2026-10-12T01:00:00.000Z",
-    });
-    const base = foldShellEvents(makeEmptyState(), [
-      makeThreadShellUpsertEvent({
-        threadId: threadA,
-        sequence: 1,
-        title: "A",
-        updatedAt: "2026-10-12T00:00:00.000Z",
-        turnState: "completed",
-      }),
-      makeThreadShellUpsertEvent({
-        threadId: threadB,
-        sequence: 2,
-        title: "B",
-        updatedAt: "2026-10-12T00:00:00.000Z",
-        turnState: "completed",
-      }),
-    ]);
-    const ranked = applyThreadPriorities(
-      base,
-      {
-        kind: "thread-priorities",
-        priorities: [
-          { threadId: threadA, priority: ranking("now", "batch-1") },
-          { threadId: threadB, priority: ranking("later", "batch-1") },
-        ],
-      },
-      localEnvironmentId,
-    );
-    const rankedEnv = selectEnvironmentState(ranked, localEnvironmentId);
-    expect(fullThreadEntry(rankedEnv.sidebarThreadSummaryById[threadA])?.priority?.tier).toBe(
-      "now",
-    );
-    expect(fullThreadEntry(rankedEnv.sidebarThreadSummaryById[threadB])?.priority?.tier).toBe(
-      "later",
-    );
-
-    // A later ranking that leaves thread A out clears its priority; thread B's
-    // unchanged row keeps its identity.
-    const reranked = applyThreadPriorities(
-      ranked,
-      {
-        kind: "thread-priorities",
-        priorities: [{ threadId: threadB, priority: ranking("later", "batch-1") }],
-      },
-      localEnvironmentId,
-    );
-    const rerankedEnv = selectEnvironmentState(reranked, localEnvironmentId);
-    expect(
-      fullThreadEntry(rerankedEnv.sidebarThreadSummaryById[threadA])?.priority,
-    ).toBeUndefined();
-    expect(rerankedEnv.sidebarThreadSummaryById[threadB]).toBe(
-      rankedEnv.sidebarThreadSummaryById[threadB],
-    );
-
-    // Nothing changed: the state itself is returned.
-    expect(
-      applyThreadPriorities(
-        reranked,
-        {
-          kind: "thread-priorities",
-          priorities: [{ threadId: threadB, priority: ranking("later", "batch-1") }],
-        },
-        localEnvironmentId,
-      ),
-    ).toBe(reranked);
   });
 
   it("commits a batch of shell updates at once, preparing each against the state before it", () => {
