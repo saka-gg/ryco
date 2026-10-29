@@ -15,6 +15,7 @@ import { useEffect, useMemo, useState } from "react";
 
 import { readEnvironmentApi } from "../../environmentApi";
 import { readEnvironmentConnection } from "../../environments/runtime";
+import { isClaudeResumeReviewSkipped } from "../../hooks/useSettings";
 import { newCommandId } from "../../lib/utils";
 import { Button } from "../ui/button";
 import { claudeCacheReviewPresentation } from "./ClaudeCacheReview";
@@ -141,6 +142,7 @@ export function useUsageLimitBannerItem(input: {
         api: requireApi(),
         thread,
         claudeCacheReview: claudeCacheReviewPresentation,
+        skipClaudeResumeReview: isClaudeResumeReviewSkipped,
         assertMutationReady: captureReviewedSendReadiness(environmentId, () =>
           readEnvironmentConnection(environmentId),
         ),

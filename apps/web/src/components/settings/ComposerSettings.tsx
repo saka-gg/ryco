@@ -46,6 +46,7 @@ export function ComposerSettings() {
   const setAlwaysUseBuildMode = useUiStateStore((state) => state.setAlwaysUseBuildMode);
   const followUpBehavior = useSettings((settings) => settings.followUpBehavior);
   const sendShortcut = useSettings((settings) => settings.sendShortcut);
+  const claudeResumeReview = useSettings((settings) => settings.claudeResumeReview);
   const { updateSettings } = useUpdateSettings();
   return (
     <SettingsSection title="Composer controls">
@@ -104,6 +105,29 @@ export function ComposerSettings() {
               ))}
             </SelectPopup>
           </Select>
+        }
+      />
+      <SettingsRow
+        title="Review large Claude resumes"
+        description="Before a send resumes a large Claude conversation that sat idle, ask whether to continue with full context or compact it first. Applies to this device."
+        resetAction={
+          claudeResumeReview !== DEFAULT_UNIFIED_SETTINGS.claudeResumeReview ? (
+            <SettingResetButton
+              label="Claude resume review"
+              onClick={() =>
+                updateSettings({
+                  claudeResumeReview: DEFAULT_UNIFIED_SETTINGS.claudeResumeReview,
+                })
+              }
+            />
+          ) : null
+        }
+        control={
+          <Switch
+            checked={claudeResumeReview}
+            onCheckedChange={(checked) => updateSettings({ claudeResumeReview: Boolean(checked) })}
+            aria-label="Review large Claude resumes"
+          />
         }
       />
       <SettingsRow

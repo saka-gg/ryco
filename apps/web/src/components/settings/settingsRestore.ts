@@ -9,6 +9,7 @@ const RESTORABLE_SETTINGS = {
   changeRequestLinkTarget: "Pull request links",
   followUpBehavior: "Follow-up while working",
   sendShortcut: "Send shortcut",
+  claudeResumeReview: "Claude resume review",
   chatWidth: "Chat width",
   gitStatusPollIntervalMs: "Remote Git status",
   sourceControlRefreshMode: "PR & workflow updates",

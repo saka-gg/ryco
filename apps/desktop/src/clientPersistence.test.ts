@@ -60,6 +60,7 @@ const clientSettings: ClientSettings = {
   changeRequestLinkTarget: "ryco",
   followUpBehavior: "queue",
   sendShortcut: "enter",
+  claudeResumeReview: false,
   chatWidth: "comfortable",
   favorites: [],
   providerModelPreferences: {},

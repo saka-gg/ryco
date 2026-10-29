@@ -139,6 +139,10 @@ export const ClientSettingsSchema = Schema.Struct({
   sendShortcut: SendShortcut.pipe(
     Schema.withDecodingDefault(Effect.succeed(DEFAULT_SEND_SHORTCUT)),
   ),
+  // The review before a send resumes a large, idle Claude conversation. Off ("Don't ask
+  // again") sends from this device continue with full context, unreviewed; the node's
+  // restart continuation still leaves such threads for a person to resume.
+  claudeResumeReview: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   chatWidth: ChatWidth.pipe(Schema.withDecodingDefault(Effect.succeed(DEFAULT_CHAT_WIDTH))),
   // Model favorites. Historically keyed by provider kind, now
   // widened to `ProviderInstanceId` so users can favorite a specific model
@@ -1000,6 +1004,7 @@ export const ClientSettingsPatch = Schema.Struct({
   changeRequestLinkTarget: Schema.optionalKey(ChangeRequestLinkTarget),
   followUpBehavior: Schema.optionalKey(FollowUpBehavior),
   sendShortcut: Schema.optionalKey(SendShortcut),
+  claudeResumeReview: Schema.optionalKey(Schema.Boolean),
   chatWidth: Schema.optionalKey(ChatWidth),
   favorites: Schema.optionalKey(Schema.Array(ModelFavorite)),
   providerModelPreferences: Schema.optionalKey(

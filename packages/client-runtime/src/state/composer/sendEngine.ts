@@ -364,6 +364,12 @@ export interface CommitSendTurnDispatchInput {
    * review then skips the review's thread read.
    */
   readonly readSubscribedClaudeReviewState?: () => SubscribedClaudeReviewState | undefined;
+  /**
+   * True when the user turned the Claude resume review off on this device ("Don't ask
+   * again"): the send continues unguarded, like one the review cleared, even without a
+   * presentation. Read when the review would run, so a change applies to the next send.
+   */
+  readonly skipClaudeResumeReview?: (() => boolean) | undefined;
   readonly providerDriver?: ProviderDriverKind | null;
   /** Known source session; null means no session, undefined means unavailable. */
   readonly sourceProviderDriver?: ProviderDriverKind | null | undefined;

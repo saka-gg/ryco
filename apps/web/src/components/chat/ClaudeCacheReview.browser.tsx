@@ -1,9 +1,16 @@
 import "../../index.css";
 import { page } from "vite-plus/test/browser";
-import { describe, expect, it, vi } from "vite-plus/test";
+import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import { render } from "vitest-browser-react";
 import { ProviderInstanceId, RuntimeSessionId } from "@ryco/contracts";
+import {
+  __resetClientSettingsPersistenceForTests,
+  getClientSettings,
+  isClaudeResumeReviewSkipped,
+} from "../../hooks/useSettings";
 import { deriveContextWindowUsage } from "../../lib/contextWindow";
+import { syncDocumentPresentationTier } from "../../lib/presentationTier";
+import { ensureLocalApi } from "../../localApi";
 import { ClaudeCacheEvidence, claudeCacheReviewPresentation } from "./ClaudeCacheReview";
 import { ContextWindowMeter } from "./ContextWindowMeter";
 
@@ -19,6 +26,10 @@ const observation = {
   cacheWriteInputTokens: 2_000,
 };
 describe("Claude cache review", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    __resetClientSettingsPersistenceForTests();
+  });
   it("labels evidence and unknown lifetime without promising future hits", async () => {
     const screen = await render(<ClaudeCacheEvidence observation={observation} />);
     await expect.element(screen.getByText("Cache reads", { exact: true })).toBeVisible();
@@ -55,6 +66,45 @@ describe("Claude cache review", () => {
     await page.getByRole("button", { name: label, exact: true }).click();
     expect(await decision).toBe(choice);
     await expect.element(page.getByRole("dialog")).not.toBeInTheDocument();
+  });
+  it("continues and turns the review off on this device with Don't ask again", async () => {
+    await page.viewport(1200, 900);
+    syncDocumentPresentationTier();
+    const persist = vi.spyOn(ensureLocalApi().persistence, "setClientSettings");
+    const decision = claudeCacheReviewPresentation.review({
+      observation,
+      promptTokens: 52_100,
+      reason: "Large idle conversation.",
+      compactUnavailableReason: null,
+    });
+    await expect.element(page.getByText(/Turn the review back on in Settings/)).toBeVisible();
+    expect(isClaudeResumeReviewSkipped()).toBe(false);
+    await page.getByRole("button", { name: "Don't ask again", exact: true }).click();
+    expect(await decision).toBe("continue");
+    await expect.element(page.getByRole("dialog")).not.toBeInTheDocument();
+    expect(getClientSettings().claudeResumeReview).toBe(false);
+    expect(isClaudeResumeReviewSkipped()).toBe(true);
+    expect(persist).toHaveBeenCalledWith(expect.objectContaining({ claudeResumeReview: false }));
+  });
+  it("does not offer Don't ask again on the frozen phone tier", async () => {
+    await page.viewport(414, 896);
+    syncDocumentPresentationTier();
+    const decision = claudeCacheReviewPresentation.review({
+      observation,
+      promptTokens: 52_100,
+      reason: "Large idle conversation.",
+      compactUnavailableReason: null,
+    });
+    await expect
+      .element(page.getByRole("button", { name: "Continue with full context", exact: true }))
+      .toBeVisible();
+    // Hidden, so it is out of the accessibility tree.
+    await expect
+      .element(page.getByRole("button", { name: "Don't ask again", exact: true }))
+      .not.toBeInTheDocument();
+    await page.getByRole("button", { name: "Cancel", exact: true }).click();
+    expect(await decision).toBe("cancel");
+    expect(getClientSettings().claudeResumeReview).toBe(true);
   });
   it("offers only continuing when the session cannot compact, and says why", async () => {
     const decision = claudeCacheReviewPresentation.review({

@@ -158,6 +158,19 @@ export function updateClientAutoSettleAfterDays(
   persistClientSettings({ ...getClientSettingsSnapshot(), sidebarAutoSettleAfterDays: value });
 }
 
+/** The Claude resume review on this device, written by the review's "Don't ask again". */
+export function updateClientClaudeResumeReview(enabled: boolean): void {
+  persistClientSettings({ ...getClientSettingsSnapshot(), claudeResumeReview: enabled });
+}
+
+/**
+ * `CommitSendTurnDispatchInput.skipClaudeResumeReview` for this device's sends: read at
+ * each send, so turning the review back on applies to the next one.
+ */
+export function isClaudeResumeReviewSkipped(): boolean {
+  return !getClientSettingsSnapshot().claudeResumeReview;
+}
+
 /**
  * Non-hook accessor for the current merged client settings snapshot.
  * Used by non-React code paths (e.g. runtime services) that need the latest

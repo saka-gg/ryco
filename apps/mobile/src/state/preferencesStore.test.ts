@@ -13,6 +13,7 @@ vi.mock("expo-sqlite/kv-store", () => ({
 import {
   getPreferencesSnapshot,
   hydratePreferences,
+  isClaudeResumeReviewEnabled,
   isPreferencesHydrated,
   isThreadContentCacheEnabled,
   resetPreferencesStoreForTests,
@@ -133,6 +134,31 @@ describe("thread alert preferences", () => {
       expect(
         sanitizePreferences({ threadAlerts: stored as never, threadAlertSound: stored as never }),
       ).toEqual({});
+    }
+  });
+});
+
+describe("the Claude resume review on this device", () => {
+  it("is on until turned off, and the choice survives a restart", async () => {
+    expect(isClaudeResumeReviewEnabled()).toBe(true);
+    expect(isClaudeResumeReviewEnabled({ claudeResumeReview: true })).toBe(true);
+    updatePreferences({ baseFontSize: 17 });
+    updatePreferences({ claudeResumeReview: false });
+    expect(isClaudeResumeReviewEnabled()).toBe(false);
+    await flush();
+
+    resetPreferencesStoreForTests();
+    hydratePreferences();
+    await flush();
+    expect(getPreferencesSnapshot()).toMatchObject({ baseFontSize: 17, claudeResumeReview: false });
+    expect(isClaudeResumeReviewEnabled()).toBe(false);
+  });
+
+  it("drops a stored value that is not a boolean, which leaves the review on", () => {
+    for (const stored of ["no", 0, null, {}]) {
+      const preferences = sanitizePreferences({ claudeResumeReview: stored as never });
+      expect(preferences).toEqual({});
+      expect(isClaudeResumeReviewEnabled(preferences)).toBe(true);
     }
   });
 });

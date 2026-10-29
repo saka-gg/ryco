@@ -1625,6 +1625,35 @@ describe("GeneralSettingsPanel observability", () => {
     });
   });
 
+  it("turns the Claude resume review off and back on for this device", async () => {
+    const setClientSettings = vi
+      .fn<LocalApi["persistence"]["setClientSettings"]>()
+      .mockResolvedValue(undefined);
+    installSettingsNativeApi({ setClientSettings, clientSettings: DEFAULT_CLIENT_SETTINGS });
+    setServerConfigSnapshot(createBaseServerConfig());
+
+    mounted = await render(
+      <AppAtomRegistryProvider>
+        <ComposerSettings />
+      </AppAtomRegistryProvider>,
+    );
+
+    const review = page.getByRole("switch", { name: "Review large Claude resumes" });
+    await expect.element(review).toBeChecked();
+    await review.click();
+    await vi.waitFor(() => {
+      expect(setClientSettings).toHaveBeenLastCalledWith({
+        ...DEFAULT_CLIENT_SETTINGS,
+        claudeResumeReview: false,
+      });
+    });
+    await page.getByRole("button", { name: "Reset Claude resume review to default" }).click();
+    await vi.waitFor(() => {
+      expect(setClientSettings).toHaveBeenLastCalledWith(DEFAULT_CLIENT_SETTINGS);
+    });
+    await expect.element(review).toBeChecked();
+  });
+
   it("chooses thread alerts in the browser and asks for notification permission", async () => {
     useTierOverrideStore.setState({ override: "desktop" });
     syncDocumentPresentationTier();

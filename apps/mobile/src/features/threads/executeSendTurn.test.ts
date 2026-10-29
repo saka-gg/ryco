@@ -225,6 +225,18 @@ describe("executeSendTurn", () => {
       expect(await executeSendTurn(input)).toBe(true);
       expect(getThreadWindow).toHaveBeenCalledOnce();
     });
+
+    it("forwards this device's choice to skip the review", async () => {
+      const skipClaudeResumeReview = vi.fn(() => true);
+      const { input, dispatchCommand, getThreadWindow } = claudeInput(() => undefined);
+      expect(await executeSendTurn({ ...input, skipClaudeResumeReview })).toBe(true);
+      expect(skipClaudeResumeReview).toHaveBeenCalledOnce();
+      expect(getThreadWindow).not.toHaveBeenCalled();
+      const start = dispatchCommand.mock.calls.find(
+        (call) => (call[0] as { type: string }).type === "thread.turn.start",
+      )![0];
+      expect(start).not.toHaveProperty("claudeResumeGuard");
+    });
   });
 
   describe("a model switch held back by background tasks", () => {

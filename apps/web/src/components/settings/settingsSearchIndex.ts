@@ -334,6 +334,13 @@ export const SETTINGS_SEARCH_INDEX: ReadonlyArray<SettingsSearchEntry> = [
   },
   {
     section: "general",
+    title: "Review large Claude resumes",
+    owner: "client",
+    description: "Ask before a send resumes a large Claude conversation that sat idle.",
+    keywords: "claude cache prompt compact compaction resume idle tokens cost don't ask again",
+  },
+  {
+    section: "general",
     title: "Auto-collapse wide composer labels",
     owner: "client",
     description: "Show long composer mode labels only on hover or focus.",

@@ -55,6 +55,7 @@ import {
   sendQueuedThreadMessage,
 } from "./use-thread-outbox-drain";
 import { writeEnvironmentServerConfig } from "./environmentServerConfigs";
+import { resetPreferencesStoreForTests, updatePreferences } from "./preferencesStore";
 
 const ENV_A = "env-node-a" as EnvironmentId;
 const ENV_B = "env-node-b" as EnvironmentId;
@@ -563,5 +564,40 @@ describe("queued Claude send", () => {
     expect(
       fakeApi.dispatchCommand.mock.calls.map((call) => (call[0] as { type: string }).type),
     ).toEqual(["thread.turn.start"]);
+  });
+
+  it("sends without a review once this device turned the review off", async () => {
+    const environmentId = "env-claude-off" as EnvironmentId;
+    const modelSelection = { instanceId: "claude-1", model: "claude-opus" } as never;
+    writeEnvironmentServerConfig(environmentId, {
+      providers: [{ instanceId: "claude-1", driver: "claudeAgent" }],
+    } as never);
+    // No subscribed thread state, so a review would have to read the thread first.
+    const message = {
+      ...queuedFor(environmentId),
+      threadId: "t-unsubscribed" as ThreadId,
+      modelSelection,
+      runtimeMode: "full-access",
+      interactionMode: "default",
+    } as QueuedThreadMessage;
+    const hooks = { onBeforeTurnStart: () => undefined } as never;
+    fakeApi.dispatchCommand.mockClear();
+    fakeApi.getThreadWindow.mockClear();
+    try {
+      await expect(sendQueuedThreadMessage(message, hooks)).rejects.toThrow();
+      expect(fakeApi.dispatchCommand).not.toHaveBeenCalled();
+
+      updatePreferences({ claudeResumeReview: false });
+      await sendQueuedThreadMessage(message, hooks);
+    } finally {
+      resetPreferencesStoreForTests();
+    }
+
+    expect(fakeApi.getThreadWindow).not.toHaveBeenCalled();
+    expect(fakeApi.dispatchCommand.mock.calls[0]?.[0]).toMatchObject({
+      type: "thread.turn.start",
+      message: { messageId: message.messageId, text: message.text },
+    });
+    expect(fakeApi.dispatchCommand.mock.calls[0]?.[0]).not.toHaveProperty("claudeResumeGuard");
   });
 });
