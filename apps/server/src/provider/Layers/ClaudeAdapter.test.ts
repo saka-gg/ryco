@@ -8093,6 +8093,180 @@ describe("ClaudeAdapterLive", () => {
   );
 });
 
+describe("ClaudeAdapterLive Fast mode state", () => {
+  const FAST_SDK_SESSION = "sdk-session-fast-mode";
+  const FAST_MODEL = "claude-opus-4-6";
+
+  const fastFrame = (value: Record<string, unknown>) =>
+    ({ session_id: FAST_SDK_SESSION, ...value }) as unknown as SDKMessage;
+  const fastInit = (uuid: string, fast: Record<string, unknown>) =>
+    fastFrame({
+      type: "system",
+      subtype: "init",
+      apiKeySource: "none",
+      claude_code_version: "test",
+      cwd: "/tmp/claude-adapter-test",
+      tools: [],
+      mcp_servers: [],
+      model: FAST_MODEL,
+      permissionMode: "bypassPermissions",
+      slash_commands: [],
+      output_style: "default",
+      skills: [],
+      plugins: [],
+      uuid,
+      ...fast,
+    });
+  const fastResult = (uuid: string, fast: Record<string, unknown>) =>
+    fastFrame({ type: "result", subtype: "success", is_error: false, errors: [], uuid, ...fast });
+
+  /** The `session.configured` events that carry Ryco's Fast mode report, in order. */
+  const fastModeReports = (events: ReadonlyArray<ProviderRuntimeEvent>) =>
+    events.flatMap((event) =>
+      event.type === "session.configured" && event.payload.config.fastModeState !== undefined
+        ? [event]
+        : [],
+    );
+
+  const waitUntil = (predicate: () => boolean) =>
+    Effect.gen(function* () {
+      for (let attempt = 0; attempt < 500; attempt++) {
+        if (predicate()) return;
+        yield* Effect.promise(() => new Promise<void>((resolve) => setTimeout(resolve, 1)));
+      }
+      throw new Error("Timed out waiting for the Claude adapter.");
+    });
+
+  /** Starts a session and returns a turn runner that emits each turn's frames. */
+  const startFastModeSession = (harness: ReturnType<typeof makeHarness>, fastMode = true) =>
+    Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const events: Array<ProviderRuntimeEvent> = [];
+      yield* Stream.runForEach(adapter.streamEvents, (event) =>
+        Effect.sync(() => events.push(event)),
+      ).pipe(Effect.forkChild);
+      yield* adapter.startSession({
+        runtimeSessionId: RuntimeSessionId.make("test-claudeadapter-fast-mode"),
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        modelSelection: createModelSelection(ProviderInstanceId.make("claudeAgent"), FAST_MODEL, [
+          { id: "fastMode", value: fastMode },
+        ]),
+        runtimeMode: "full-access",
+      });
+      const runTurn = (frames: ReadonlyArray<SDKMessage>) =>
+        Effect.gen(function* () {
+          const turn = yield* adapter.sendTurn({
+            threadId: THREAD_ID,
+            input: "hello",
+            attachments: [],
+          });
+          for (const frame of frames) harness.query.emit(frame);
+          yield* waitUntil(() =>
+            events.some((event) => event.type === "turn.completed" && event.turnId === turn.turnId),
+          );
+        });
+      return { events, runTurn };
+    });
+
+  it.effect("publishes the fast mode state once while it holds, and again when it moves", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const { events, runTurn } = yield* startFastModeSession(harness);
+      const init = fastInit("init-1", { fast_mode_state: "on" });
+      yield* runTurn([init, fastResult("result-1", { fast_mode_state: "on" })]);
+
+      const reports = fastModeReports(events);
+      assert.equal(reports.length, 1);
+      assert.deepEqual(reports[0]?.payload.config, {
+        fastModeState: { state: "on", model: FAST_MODEL, requested: true },
+      });
+      assert.equal(reports[0]?.turnId, undefined);
+      // The raw init is still forwarded whole, with its snake_case fields.
+      const rawInit = events.find(
+        (event) => event.type === "session.configured" && event.payload.config.type === "system",
+      );
+      assert.deepEqual(
+        rawInit?.type === "session.configured" ? rawInit.payload.config : null,
+        init,
+      );
+
+      yield* runTurn([fastResult("result-2", { fast_mode_state: "cooldown" })]);
+      const afterCooldown = fastModeReports(events);
+      assert.equal(afterCooldown.length, 2);
+      assert.deepEqual(afterCooldown[1]?.payload.config, {
+        fastModeState: { state: "cooldown", model: FAST_MODEL, requested: true },
+      });
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("republishes a refused fast mode on every result", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const { events, runTurn } = yield* startFastModeSession(harness);
+      const refused = { fast_mode_state: "off", fast_mode_disabled_reason: "not_first_party" };
+      yield* runTurn([fastResult("result-1", refused)]);
+      yield* runTurn([fastResult("result-2", refused)]);
+
+      const reports = fastModeReports(events);
+      assert.equal(reports.length, 2);
+      for (const report of reports) {
+        assert.deepEqual(report.payload.config, {
+          fastModeState: {
+            state: "off",
+            disabledReason: "not_first_party",
+            model: FAST_MODEL,
+            requested: true,
+          },
+        });
+      }
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("republishes fast mode that Claude Code's own settings turned on", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const { events, runTurn } = yield* startFastModeSession(harness, false);
+      const serving = { fast_mode_state: "on" };
+      yield* runTurn([fastInit("init-1", serving), fastResult("result-1", serving)]);
+      yield* runTurn([fastInit("init-2", serving), fastResult("result-2", serving)]);
+
+      // The first init, then each result: Ryco did not ask for Fast mode, and says so.
+      const reports = fastModeReports(events);
+      assert.equal(reports.length, 3);
+      for (const report of reports) {
+        assert.deepEqual(report.payload.config, {
+          fastModeState: { state: "on", model: FAST_MODEL, requested: false },
+        });
+      }
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("publishes no fast mode state for frames without one", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const { events, runTurn } = yield* startFastModeSession(harness);
+      yield* runTurn([fastInit("init-1", {}), fastResult("result-1", {})]);
+
+      assert.equal(fastModeReports(events).length, 0);
+      // The start options and the raw init still arrive as before.
+      assert.equal(events.filter((event) => event.type === "session.configured").length, 2);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+});
+
 const GAUGE_MODEL = "claude-sonnet-4-6";
 const GAUGE_SDK_SESSION = "sdk-session-gauge";
 

@@ -50,12 +50,17 @@ import {
   scanAssistantText,
   splitBufferedAssistantText,
 } from "@ryco/shared/assistantStreaming";
+import {
+  FAST_MODE_STATE_ACTIVITY_KIND,
+  parseClaudeFastModeReport,
+} from "@ryco/shared/claudeFastMode";
 import { makeDrainableWorker } from "@ryco/shared/DrainableWorker";
 import { losslessBackpressureQueuePolicy } from "@ryco/shared/QueuePolicy";
 import {
   LATEST_STATE_ACTIVITY_GROUPS,
   type LatestStateActivityGroup,
   claudeContextUsageActivityId,
+  claudeFastModeActivityId,
   subagentMessageActivityId,
   taskProgressActivityId,
   taskUsageActivityId,
@@ -1206,6 +1211,29 @@ export function runtimeEventToActivities(
             ...(event.payload.detail !== undefined ? { detail: event.payload.detail } : {}),
           },
           turnId: toTurnId(event.turnId) ?? null,
+          ...maybeSequence,
+        },
+      ];
+    }
+
+    case "session.configured": {
+      // Only Claude's Fast mode report; the raw init config carries snake_case keys.
+      const report = parseClaudeFastModeReport(event.payload.config.fastModeState);
+      if (report === undefined) return [];
+      return [
+        {
+          id: claudeFastModeActivityId(event.threadId),
+          createdAt: event.createdAt,
+          tone: "info",
+          kind: FAST_MODE_STATE_ACTIVITY_KIND,
+          summary: "Fast mode state",
+          payload: {
+            ...report,
+            ...(event.providerInstanceId !== undefined
+              ? { instanceId: event.providerInstanceId }
+              : {}),
+          },
+          turnId: null,
           ...maybeSequence,
         },
       ];

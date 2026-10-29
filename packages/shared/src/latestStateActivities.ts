@@ -83,6 +83,16 @@ export const LATEST_STATE_ACTIVITY_GROUPS = {
     // Statistics read every sample from the event log.
     logCompaction: false,
   },
+  "fast-mode": {
+    // `FAST_MODE_STATE_ACTIVITY_KIND` (`claudeFastMode`), spelled out: importing that module here
+    // made the server bundler split it into a boot chunk of its own.
+    kind: "fast-mode.state",
+    // Claude's own Fast mode report, one per thread; every version is a full upsert.
+    idPrefixes: ["claude-fast-mode:"],
+    writeIntervalMs: null,
+    liveCoalescing: "always",
+    logCompaction: true,
+  },
 } as const satisfies Record<string, LatestStateActivityGroupDefinition>;
 
 export type LatestStateActivityGroup = keyof typeof LATEST_STATE_ACTIVITY_GROUPS;
@@ -146,6 +156,11 @@ export function reasoningActivityId(
 /** Claude's context-window gauge, one per thread (never compacted, see the module comment). */
 export function claudeContextUsageActivityId(threadId: string): EventId {
   return EventId.make(`claude-context-usage:${threadId}`);
+}
+
+/** Claude's Fast mode serving state, one per thread. */
+export function claudeFastModeActivityId(threadId: string): EventId {
+  return EventId.make(`claude-fast-mode:${threadId}:state`);
 }
 
 // ---------------------------------------------------------------------------

@@ -28,6 +28,10 @@
       "types": "./src/claudeCredentialVariables.ts",
       "import": "./src/claudeCredentialVariables.ts"
     },
+    "./claudeFastMode": {
+      "types": "./src/claudeFastMode.ts",
+      "import": "./src/claudeFastMode.ts"
+    },
     "./restartContinuation": {
       "types": "./src/restartContinuation.ts",
       "import": "./src/restartContinuation.ts"

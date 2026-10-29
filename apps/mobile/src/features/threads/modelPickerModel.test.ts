@@ -6,6 +6,7 @@ import {
   buildModelOptionControls,
   applyModelOption,
   resolveModelPickerSelection,
+  resolveModelPillFastMode,
   shortChoiceLabel,
 } from "./modelPickerModel";
 
@@ -345,5 +346,102 @@ describe("capability-driven reasoning and Fast mode", () => {
       { id: "reasoning", value: "low" },
       { id: "fast", value: false },
     ]);
+  });
+});
+
+describe("model pill Fast mode notice", () => {
+  const capabilities = {
+    optionDescriptors: [
+      {
+        id: "effort",
+        label: "Effort",
+        type: "select",
+        options: [{ id: "high", label: "High", isDefault: true }],
+      },
+      { id: "fastMode", label: "Fast Mode", type: "boolean" },
+    ],
+  } as unknown as ModelCapabilities;
+  const claude = {
+    ...CLAUDE,
+    models: [{ slug: "opus-5", name: "Opus 5", capabilities }],
+  } as unknown as ReturnType<typeof provider>;
+  const pill = (fast: boolean) =>
+    buildModelPickerModel({
+      serverConfig: config(claude),
+      currentSelection: {
+        ...selection("claude-1", "opus-5"),
+        options: [{ id: "fastMode", value: fast }],
+      } as ModelSelection,
+    });
+
+  it("does not read another on/off option as Fast", () => {
+    const thinkingOnly = {
+      ...CLAUDE,
+      models: [
+        {
+          slug: "haiku-4-5",
+          name: "Haiku 4.5",
+          capabilities: {
+            optionDescriptors: [{ id: "thinking", label: "Thinking", type: "boolean" }],
+          },
+        },
+      ],
+    } as unknown as ReturnType<typeof provider>;
+    const model = buildModelPickerModel({
+      serverConfig: config(thinkingOnly),
+      currentSelection: {
+        ...selection("claude-1", "haiku-4-5"),
+        options: [{ id: "thinking", value: true }],
+      } as ModelSelection,
+    });
+    expect(model.pillFastEnabled).toBe(false);
+    expect(model.pillAccessibilityLabel).not.toContain("Thinking on.");
+  });
+
+  it("keeps the filled bolt and the plain label without a notice", () => {
+    const model = pill(true);
+    expect(resolveModelPillFastMode(model, null)).toEqual({
+      icon: "bolt.fill",
+      muted: false,
+      accessibilityLabel: model.pillAccessibilityLabel,
+    });
+    expect(resolveModelPillFastMode(pill(false), undefined).icon).toBeUndefined();
+  });
+
+  it("strikes the bolt through and says why when Claude Code pauses or refuses Fast", () => {
+    const model = pill(true);
+    expect(model.pillAccessibilityLabel).toContain("Fast Mode on.");
+    const blocked = resolveModelPillFastMode(model, {
+      kind: "blocked",
+      label: "Fast unavailable",
+      detail: "Claude Code only serves Fast mode on a direct Anthropic connection.",
+    });
+    expect(blocked.icon).toBe("bolt.slash");
+    expect(blocked.muted).toBe(true);
+    expect(blocked.accessibilityLabel).toBe(
+      `${model.pillAccessibilityLabel} Fast unavailable. Claude Code only serves Fast mode on a direct Anthropic connection.`,
+    );
+    const cooldown = resolveModelPillFastMode(model, {
+      kind: "cooldown",
+      label: "Fast paused",
+      detail: "A rate limit paused Fast mode for now.",
+    });
+    expect(cooldown).toMatchObject({ icon: "bolt.slash", muted: true });
+    expect(cooldown.accessibilityLabel).toContain("Fast paused.");
+  });
+
+  it("shows an outline bolt when Claude Code's own settings turned Fast on", () => {
+    const model = pill(false);
+    expect(model.pillAccessibilityLabel).not.toContain("Fast Mode on.");
+    const external = resolveModelPillFastMode(model, {
+      kind: "external",
+      label: "Fast on",
+      detail: "Claude Code's own settings turned Fast mode on.",
+    });
+    expect(external).toEqual({
+      icon: "bolt",
+      muted: false,
+      accessibilityLabel: `${model.pillAccessibilityLabel} Fast on. Claude Code's own settings turned Fast mode on.`,
+    });
   });
 });

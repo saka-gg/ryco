@@ -5,6 +5,7 @@ import {
   TurnId,
   type OrchestrationThreadActivity,
 } from "@ryco/contracts";
+import { FAST_MODE_STATE_ACTIVITY_KIND } from "@ryco/shared/claudeFastMode";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
@@ -2191,6 +2192,23 @@ describe("deriveWorkLogEntries context window handling", () => {
 
     expect(entries).toHaveLength(1);
     expect(entries[0]?.label).toBe("Ran command");
+  });
+
+  it("never turns a Fast mode state into a work log row", () => {
+    const fastModeState = makeActivity({
+      id: "claude-fast-mode:thread-1:state",
+      kind: FAST_MODE_STATE_ACTIVITY_KIND,
+      summary: "Fast mode state",
+      tone: "info",
+      payload: { state: "off", disabledReason: "not_first_party" },
+    });
+    // A fresh thread: no turn yet, so turn-less activities are not filtered by turn.
+    expect(deriveWorkLogEntries([fastModeState], undefined)).toEqual([]);
+    expect(
+      deriveWorkLogEntries([fastModeState], undefined, { agentTimeline: true }).map(
+        (entry) => entry.id,
+      ),
+    ).toEqual([]);
   });
 
   it("excludes context compaction activities from the work log", () => {

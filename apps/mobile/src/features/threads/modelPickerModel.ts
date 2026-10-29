@@ -4,6 +4,7 @@ import type {
   ProviderOptionSelectionValue,
   ServerConfig,
 } from "@ryco/contracts";
+import type { FastModeNotice } from "@ryco/client-runtime/state/session";
 import {
   buildProviderOptionSelectionsFromDescriptors,
   getModelSelectionOptionDescriptors,
@@ -172,7 +173,10 @@ export function buildModelPickerModelFromOptions(
     .filter((group) => group.entries.length > 0);
 
   const reasoning = controls.find((control) => control.kind === "select");
-  const fastControl = controls.find((control) => control.kind === "boolean");
+  // By id: a model's first on/off option can be another one, such as Haiku's thinking.
+  const fastControl = controls.find(
+    (control) => control.kind === "boolean" && control.id === "fastMode",
+  );
 
   return {
     options: controls,
@@ -203,6 +207,40 @@ export function buildModelPickerModelFromOptions(
     lockedProviderKey,
     lockNotice: lockedProviderKey !== null ? lockNotice : null,
     emptyForQuery: query.length > 0 && groups.length === 0,
+  };
+}
+
+export interface ModelPillFastMode {
+  /** The pill's trailing glyph; undefined shows none. */
+  readonly icon: "bolt.fill" | "bolt.slash" | "bolt" | undefined;
+  /** The bolt stands for Fast that is not serving, so it takes the subtle tone. */
+  readonly muted: boolean;
+  readonly accessibilityLabel: string;
+}
+
+/**
+ * The pill's Fast bolt and spoken label with Claude Code's own report folded in: the notice comes
+ * from `deriveClaudeFastModeNotice`, asked with `pillFastEnabled` as the request, so it is applied
+ * to a built model rather than rebuilding every group on each thread activity. Paused or refused
+ * Fast strikes the bolt through; Fast that Claude Code's own settings turned on shows an outline.
+ * The spoken label says which and why, since the glyph alone cannot.
+ */
+export function resolveModelPillFastMode(
+  model: Pick<ModelPickerModel, "pillFastEnabled" | "pillAccessibilityLabel">,
+  fastModeNotice: FastModeNotice | null | undefined,
+): ModelPillFastMode {
+  if (!fastModeNotice) {
+    return {
+      icon: model.pillFastEnabled ? "bolt.fill" : undefined,
+      muted: false,
+      accessibilityLabel: model.pillAccessibilityLabel,
+    };
+  }
+  const external = fastModeNotice.kind === "external";
+  return {
+    icon: external ? "bolt" : "bolt.slash",
+    muted: !external,
+    accessibilityLabel: `${model.pillAccessibilityLabel} ${fastModeNotice.label}. ${fastModeNotice.detail}`,
   };
 }
 

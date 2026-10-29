@@ -8,19 +8,21 @@ import { SpeedTierIcon, speedToneClassName } from "./SpeedTierIcon";
 /**
  * The tuning readout inside the composer's model pill: effort in its tone, a
  * bolt while Fast is on (two for Ultrafast), and the context window when the model lets you
- * pick one. Each part rolls in the direction it changed.
+ * pick one. Each part rolls in the direction it changed. When Claude Code reports a Fast mode
+ * other than the requested one, the bolt is an outline, muted while Fast is paused or refused,
+ * and names the notice.
  */
 export const ModelTriggerTraits = memo(function ModelTriggerTraits(props: {
   summary: ModelTuningSummary;
   /** Narrow footers drop the context tag; the picker still shows it. */
   compact?: boolean;
 }) {
-  const { level, speed, contextWindowLabel } = props.summary;
+  const { level, speed, contextWindowLabel, speedNotice } = props.summary;
   const tone = reasoningTone(level?.id);
   const levelDirection = useTravelDirection(level?.index ?? -1);
   const contextDirection = useTravelDirection(contextWindowRank(contextWindowLabel));
   const showContext = !props.compact && contextWindowLabel !== null;
-  if (!level && speed === "standard" && !showContext) return null;
+  if (!level && speed === "standard" && !speedNotice && !showContext) return null;
   return (
     <span className="flex shrink-0 items-center gap-1.5" data-slot="model-trigger-traits">
       {level ? (
@@ -35,7 +37,17 @@ export const ModelTriggerTraits = memo(function ModelTriggerTraits(props: {
           />
         </span>
       ) : null}
-      {speed !== "standard" ? (
+      {speedNotice ? (
+        <span
+          role="img"
+          aria-label={`${speedNotice.label}. ${speedNotice.detail}`}
+          title={`${speedNotice.label}. ${speedNotice.detail}`}
+          data-fast-mode-notice={speedNotice.kind}
+          className={`model-trigger-pop flex shrink-0 ${speedNotice.kind === "external" ? "text-(--fast-mode-tone)" : "text-muted-foreground"}`}
+        >
+          <SpeedTierIcon tier="fast" className="size-3" />
+        </span>
+      ) : speed !== "standard" ? (
         <SpeedTierIcon
           key={speed}
           tier={speed}

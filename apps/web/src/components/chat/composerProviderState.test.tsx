@@ -1,8 +1,10 @@
 import { describe, expect, it } from "vite-plus/test";
 import { isValidElement, type ReactElement } from "react";
 import {
+  EventId,
   ProviderDriverKind,
   ProviderInstanceId,
+  type OrchestrationThreadActivity,
   type ProviderOptionDescriptor,
   type ProviderOptionSelection,
   type ServerProviderModel,
@@ -324,5 +326,66 @@ describe("provider traits render guards", () => {
       speed: "standard",
       contextWindowLabel: "1M",
     });
+  });
+});
+
+describe("getProviderModelTuningSummary Fast mode notice", () => {
+  const CLAUDE = ProviderDriverKind.make("claudeAgent");
+  const CLAUDE_INSTANCE = "claude-hub";
+  const models = modelWith([booleanDescriptor("fastMode")]);
+  const report = (payload: Record<string, unknown>): OrchestrationThreadActivity => ({
+    id: EventId.make("claude-fast-mode:thread-1:state"),
+    kind: "fast-mode.state",
+    tone: "info",
+    summary: "Fast mode state",
+    payload: { instanceId: CLAUDE_INSTANCE, model: MODEL, ...payload },
+    turnId: null,
+    createdAt: "2026-10-28T00:00:00.000Z",
+  });
+  const summarize = (input: {
+    provider?: ProviderDriverKind;
+    fast: boolean;
+    activities?: ReadonlyArray<OrchestrationThreadActivity>;
+  }) =>
+    getProviderModelTuningSummary({
+      provider: input.provider ?? CLAUDE,
+      model: MODEL,
+      models,
+      modelOptions: selections(["fastMode", input.fast]),
+      prompt: "",
+      instanceId: CLAUDE_INSTANCE,
+      ...(input.activities ? { activities: input.activities } : {}),
+    });
+
+  it("carries the notice when Claude Code serves another speed than the requested one", () => {
+    expect(
+      summarize({ fast: true, activities: [report({ state: "cooldown" })] })?.speedNotice,
+    ).toMatchObject({ kind: "cooldown", label: "Fast paused" });
+    expect(
+      summarize({
+        fast: true,
+        activities: [report({ state: "off", disabledReason: "not_first_party" })],
+      })?.speedNotice,
+    ).toMatchObject({ kind: "blocked", label: "Fast unavailable" });
+    expect(
+      summarize({ fast: false, activities: [report({ state: "on", requested: false })] })
+        ?.speedNotice,
+    ).toMatchObject({ kind: "external", label: "Fast on" });
+    // Fast mode the session served because Ryco asked for it is not Claude Code's own doing.
+    expect(
+      summarize({ fast: false, activities: [report({ state: "on", requested: true })] })
+        ?.speedNotice,
+    ).toBeUndefined();
+  });
+
+  it("leaves the summary alone when the report agrees, is missing, or is not Claude's", () => {
+    const serving = summarize({ fast: true, activities: [report({ state: "on" })] });
+    expect(serving).toEqual({ level: null, speed: "fast", contextWindowLabel: null });
+    expect(summarize({ fast: true })?.speedNotice).toBeUndefined();
+    // Only Claude threads read the report, so another driver never shows it.
+    expect(
+      summarize({ provider: PROVIDER, fast: true, activities: [report({ state: "cooldown" })] })
+        ?.speedNotice,
+    ).toBeUndefined();
   });
 });

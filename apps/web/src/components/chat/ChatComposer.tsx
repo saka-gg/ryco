@@ -1354,6 +1354,8 @@ export const ChatComposer = memo(
       models: selectedProviderModels,
       modelOptions: composerModelOptions?.[selectedInstanceId],
       prompt,
+      activities: activeThreadActivities,
+      instanceId: selectedInstanceId,
     });
     const pendingPrimaryAction = useMemo(
       () =>

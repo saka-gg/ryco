@@ -257,6 +257,29 @@ Settings → Providers → CLIProxyAPI hubs to see each subscription's usage on 
 See [CLIProxyAPI hubs](./cliproxyapi.md). A Claude provider routed through the hub offers no sign-in
 from Settings: its accounts sign in on the hub.
 
+## Fast Mode
+
+Fast mode is a model option on the Claude models whose manifest entry offers it. Claude Code
+reports on each turn whether Fast mode actually serves requests, and Ryco keeps the latest report
+per thread. When it differs from what the composer asks for, the bolt in the composer's model pill
+says so. On the web it turns into an outline, muted while Fast mode is paused or unavailable, and
+its tooltip and accessible name give the notice. In the iOS app a paused or unavailable Fast mode
+strikes the bolt through, Fast mode turned on elsewhere shows an outline bolt, and VoiceOver reads
+the notice with the model:
+
+- **Fast paused**: a rate limit paused Fast mode, so requests run at standard speed for now.
+- **Fast unavailable**: Claude Code refused Fast mode, for example because the plan does not
+  include it, usage credits are off, or the model does not support it. Claude Code may also serve
+  Fast mode only on a direct Anthropic connection; a provider routed through a proxy such as
+  CLIProxyAPI then shows this notice while its Fast option is on.
+- **Fast on**: the composer asks for standard speed, but Claude Code's own settings (for example
+  `fastMode` in the Claude HOME's settings) turned Fast mode on.
+
+A report belongs to the provider instance and model of the session that sent it, and records
+whether Ryco asked that session for Fast mode. After you switch the instance or the model, or turn
+off a Fast mode the session was asked for, the composer shows the requested option until the new
+session reports. Turning Fast mode on still shows a paused or unavailable notice in advance.
+
 ## I Want Different Claude Settings, Not A Different Account
 
 Create another Claude provider with the same account if you want a named preset.

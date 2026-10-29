@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 
 import {
   claudeContextUsageActivityId,
+  claudeFastModeActivityId,
   LATEST_STATE_ACTIVITY_GROUPS,
   latestStateCompactionKey,
   type LatestStateCarry,
@@ -16,20 +17,23 @@ import {
   taskUsageActivityId,
   toolProgressActivityId,
 } from "./latestStateActivities.ts";
+import { FAST_MODE_STATE_ACTIVITY_KIND } from "./claudeFastMode.ts";
 import { inheritedItemId } from "./threadFork.ts";
 
 const THREAD = "thread-a";
 const OTHER = "thread-b";
 
 describe("latest-state groups", () => {
-  it("compacts exactly the four replace-by-id kinds, never the context-window gauge", () => {
+  it("compacts exactly the five replace-by-id kinds, never the context-window gauge", () => {
     expect(LOG_COMPACTION_ACTIVITY_KINDS).toEqual([
       "task.progress",
       "tool.progress",
       "agent.message",
       "reasoning",
+      "fast-mode.state",
     ]);
     expect(LATEST_STATE_ACTIVITY_GROUPS["context-window"].logCompaction).toBe(false);
+    expect(LATEST_STATE_ACTIVITY_GROUPS["fast-mode"].kind).toBe(FAST_MODE_STATE_ACTIVITY_KIND);
   });
 
   it("classifies every writer's id into its stream, and nothing else", () => {
@@ -47,6 +51,7 @@ describe("latest-state groups", () => {
       },
       { kind: "reasoning", id: reasoningActivityId(THREAD, "turn-1", "segment-1") },
       { kind: "reasoning", id: reasoningActivityId(THREAD, null, "segment-1") },
+      { kind: "fast-mode.state", id: claudeFastModeActivityId(THREAD) },
     ] as const;
     for (const activity of cases) {
       expect(latestStateCompactionKey(THREAD, activity)).toBe(`${THREAD}\u0000${activity.id}`);
@@ -86,6 +91,14 @@ describe("latest-state groups", () => {
     expect(latestStateCompactionKey(THREAD, { kind: "task.progress", id: "imported-1" })).toBe(
       null,
     );
+    // A Fast mode report under a runtime event id, or under another thread's id.
+    expect(latestStateCompactionKey(THREAD, { kind: "fast-mode.state", id: "event-1" })).toBeNull();
+    expect(
+      latestStateCompactionKey(THREAD, {
+        kind: "fast-mode.state",
+        id: claudeFastModeActivityId(OTHER),
+      }),
+    ).toBeNull();
     expect(latestStateCompactionKey(THREAD, { kind: null, id: "x" })).toBeNull();
     expect(latestStateCompactionKey(THREAD, { kind: "task.progress", id: null })).toBeNull();
     // A thread id that only shares a prefix with the stream is not the stream.
@@ -108,6 +121,7 @@ describe("liveCoalescingActivityKey", () => {
       { kind: "agent.message", id: "m", payload: {}, expected: null },
       { kind: "agent.message", id: "m", payload: null, expected: null },
       { kind: "context-window.updated", id: "event-1", payload: {}, expected: "event-1" },
+      { kind: "fast-mode.state", id: "fast-1", payload: {}, expected: "fast-1" },
       { kind: "reasoning", id: "r", payload: {}, expected: null },
       { kind: "tool.started", id: "t", payload: {}, expected: null },
     ] as const;

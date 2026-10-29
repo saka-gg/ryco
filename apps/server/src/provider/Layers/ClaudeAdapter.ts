@@ -10,6 +10,10 @@ import { appendClaudeStderrTail, prepareClaudeCodeSpawn } from "../claudeCodeSpa
 import { observeClaudeCache, readClaudeCacheCounts } from "../claudeCacheObservation.ts";
 import { claudePostCompactionUsage, selectClaudeResultUsageGauge } from "../claudeContextUsage.ts";
 import {
+  decideClaudeFastModePublish,
+  readClaudeFastModeFrame,
+} from "../claudeFastModeObservation.ts";
+import {
   CLAUDE_CLI_CAPABILITY_INTERRUPT_CANCEL_QUEUED,
   CLAUDE_CLI_CAPABILITY_INTERRUPT_RECEIPT,
   claudeEchoNamesTurn,
@@ -545,6 +549,10 @@ interface ClaudeSessionContext {
   compactionPolicy: ContextCompactionPolicyState;
   /** The CLI's latest init frame lists `/compact`, which the compaction policy sends. */
   supportsAutomaticCompaction: boolean;
+  /** Ryco started this runtime with Fast mode on. */
+  readonly fastModeRequested: boolean;
+  /** `state:reason` of the Fast mode report last seen on this runtime; undefined before one. */
+  lastFastModeSignature: string | undefined;
   compactionUnavailableWarningEmitted: boolean;
   lastAssistantUuid: string | undefined;
   lastThreadStartedId: string | undefined;
@@ -5376,6 +5384,49 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     return true;
   });
 
+  /**
+   * Publishes Claude Code's Fast mode serving state as a turn-less `session.configured` whose
+   * camelCase `fastModeState` key never matches the raw init forwarded with snake_case fields.
+   */
+  const observeClaudeFastModeState = Effect.fnUntraced(function* (
+    context: ClaudeSessionContext,
+    message: SDKMessage,
+  ) {
+    const report = readClaudeFastModeFrame(message);
+    if (report === undefined) return;
+    const decision = decideClaudeFastModePublish({
+      previousSignature: context.lastFastModeSignature,
+      report,
+      isResult: message.type === "result",
+      fastRequested: context.fastModeRequested,
+    });
+    context.lastFastModeSignature = decision.signature;
+    if (!decision.publish) return;
+    const model = context.session.model;
+    const stamp = yield* makeEventStamp();
+    yield* offerRuntimeEventForContext(context, {
+      type: "session.configured",
+      eventId: stamp.eventId,
+      provider: PROVIDER,
+      createdAt: stamp.createdAt,
+      threadId: context.session.threadId,
+      payload: {
+        config: {
+          fastModeState: {
+            state: report.state,
+            ...(report.disabledReason !== undefined
+              ? { disabledReason: report.disabledReason }
+              : {}),
+            ...(model !== undefined ? { model } : {}),
+            // Lets a client tell Fast mode it no longer requests from Fast mode set elsewhere.
+            requested: context.fastModeRequested,
+          },
+        },
+      },
+      providerRefs: {},
+    });
+  });
+
   // Untraced, like the other helpers that run once per SDK message (every stream delta
   // included): a span each made them a large share of the server trace.
   const handleSdkMessage = Effect.fnUntraced(function* (
@@ -5384,6 +5435,13 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
   ) {
     yield* logNativeSdkMessage(context, message);
     yield* ensureThreadId(context, message);
+    // Before steer routing: a dropped steer turn's result still reports the session's Fast mode.
+    if (
+      !context.probing &&
+      (message.type === "result" || (message.type === "system" && message.subtype === "init"))
+    ) {
+      yield* observeClaudeFastModeState(context, message);
+    }
     if (yield* routeSteerFrame(context, message)) return;
     // After steer routing (dropped steer frames never move it), before dispatch: completing the turn records this as the turn's transcript head.
     const chainUuid = claudeMainChainUuid(message);
@@ -6361,6 +6419,8 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       cacheModelSelection: modelSelection,
       compactionPolicy: initialContextCompactionPolicyState(generation),
       supportsAutomaticCompaction: false,
+      fastModeRequested: fastMode,
+      lastFastModeSignature: undefined,
       compactionUnavailableWarningEmitted: false,
       lastAssistantUuid: resumeState?.resumeSessionAt,
       lastThreadStartedId: undefined,

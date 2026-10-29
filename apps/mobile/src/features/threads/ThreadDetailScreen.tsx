@@ -59,6 +59,7 @@ import {
 } from "@ryco/client-runtime/state/composer";
 import { scopeProjectRef, scopeThreadRef, scopedThreadKey } from "@ryco/client-runtime/scoped";
 import {
+  deriveClaudeFastModeNotice,
   deriveRevertTurnCountByUserMessageId,
   inferCheckpointTurnCountByTurnId,
   readCheckpointRevertPhase,
@@ -873,6 +874,19 @@ export function ThreadDetailScreen(props: {
     ],
   );
   const threadActivities = thread?.activities;
+  const pillFastEnabled = modelPicker?.pillFastEnabled === true;
+  const fastModeNotice = useMemo(
+    () =>
+      threadProviderDriver === "claudeAgent" && selectedModelSelection
+        ? deriveClaudeFastModeNotice({
+            activities: threadActivities ?? [],
+            instanceId: selectedModelSelection.instanceId,
+            model: selectedModelSelection.model,
+            fastRequested: pillFastEnabled,
+          })
+        : null,
+    [pillFastEnabled, selectedModelSelection, threadActivities, threadProviderDriver],
+  );
   const pendingHandoff = useMemo(
     () =>
       derivePendingComposerHandoff({
@@ -2091,6 +2105,7 @@ export function ThreadDetailScreen(props: {
         policyDisabled={policyBusy || cachedView.actionsDisabled}
         modelPicker={modelPicker}
         modelSelection={selectedModelSelection}
+        fastModeNotice={fastModeNotice}
         onSelectModel={(selection) => {
           if (policyBusy || cachedView.actionsDisabled) return;
           const entry = modelPicker?.groups
