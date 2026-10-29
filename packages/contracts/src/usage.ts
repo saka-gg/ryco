@@ -86,6 +86,8 @@ export const UsageDailyBucket = Schema.Struct({
   costBreakdown: Schema.optional(UsageCostBreakdown),
   pricedTokenCount: NonNegativeFinite,
   unpricedTokenCount: NonNegativeFinite,
+  /** Part of `pricedTokenCount` priced from the node's custom model prices. Absent = 0. */
+  customPricedTokenCount: Schema.optional(NonNegativeFinite),
   costSource: UsageCostSource,
 });
 export type UsageDailyBucket = typeof UsageDailyBucket.Type;
@@ -117,6 +119,9 @@ export const UsagePricingStatus = Schema.Struct({
   cacheAgeMs: Schema.optional(NonNegativeInt),
   recognizedModelCount: NonNegativeInt,
   unrecognizedModelCount: NonNegativeInt,
+  /** Custom model prices and model mappings in effect on the node. Absent = none. */
+  customPriceCount: Schema.optional(NonNegativeInt),
+  mappedModelCount: Schema.optional(NonNegativeInt),
 });
 export type UsagePricingStatus = typeof UsagePricingStatus.Type;
 

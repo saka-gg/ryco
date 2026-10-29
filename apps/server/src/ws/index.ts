@@ -103,18 +103,24 @@ type HandlerMapServices<Handlers> = {
     : never;
 }[keyof Handlers];
 
-export const makeWsRpcLayer = (principal: RpcPrincipal) => {
+type WsRpcHandlersBuild = ReturnType<typeof makeWsRpcHandlers>;
+
+/**
+ * Named, so the layer's type is written by reference: inlined, it outgrew what the compiler
+ * serializes for an inferred export (TS7056).
+ */
+type WsRpcLayer = Layer.Layer<
+  Rpc.ToHandler<RpcGroup.Rpcs<typeof WsRpcGroup>>,
+  Effect.Error<WsRpcHandlersBuild>,
+  Exclude<
+    Effect.Services<WsRpcHandlersBuild> | HandlerMapServices<Effect.Success<WsRpcHandlersBuild>>,
+    Scope.Scope
+  >
+>;
+
+export const makeWsRpcLayer = (principal: RpcPrincipal): WsRpcLayer => {
   const build = makeWsRpcHandlers(principal);
   // `WsRpcGroup.of` in `makeWsRpcHandlers` already checks every RPC has its handler.
-  const toLayer = WsRpcGroup.toLayer as unknown as (
-    handlers: typeof build,
-  ) => Layer.Layer<
-    Rpc.ToHandler<RpcGroup.Rpcs<typeof WsRpcGroup>>,
-    Effect.Error<typeof build>,
-    Exclude<
-      Effect.Services<typeof build> | HandlerMapServices<Effect.Success<typeof build>>,
-      Scope.Scope
-    >
-  >;
+  const toLayer = WsRpcGroup.toLayer as unknown as (handlers: WsRpcHandlersBuild) => WsRpcLayer;
   return toLayer.call(WsRpcGroup, build);
 };

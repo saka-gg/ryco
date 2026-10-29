@@ -11,6 +11,7 @@ import {
   ProviderDriverKind,
   USAGE_CONTRACT_VERSION,
   type ServerSettings,
+  type UsageSummary,
 } from "@ryco/contracts";
 import { Duration, Effect, Fiber, Layer, Stream } from "effect";
 import { HttpClient, HttpClientResponse } from "effect/http";
@@ -34,7 +35,7 @@ afterEach(async () => {
 });
 function testLayer(
   root: string,
-  settings: ServerSettings,
+  settings: ServerSettings | (() => ServerSettings),
   document: unknown = {},
   respond: (
     request: Parameters<Parameters<typeof HttpClient.make>[0]>[0],
@@ -51,8 +52,9 @@ function testLayer(
           withSettingsSnapshot: (effect) => effect,
           start: Effect.void,
           ready: Effect.void,
-          getSettings: Effect.succeed(settings),
-          updateSettings: () => Effect.succeed(settings),
+          getSettings: Effect.sync(() => (typeof settings === "function" ? settings() : settings)),
+          updateSettings: () =>
+            Effect.sync(() => (typeof settings === "function" ? settings() : settings)),
           streamChanges: Stream.empty,
         }),
         Layer.succeed(ServerEnvironment, {
@@ -867,4 +869,97 @@ it("releases the in-memory scan cache only after usage has been idle", async () 
       Effect.scoped,
     ),
   );
+});
+
+/** $0.50 per input and $1 per output token: half of `rateDocument`'s price for claudeLine(). */
+const halfPrice = {
+  "claude-test": { price: { inputUsdPerMillion: 500_000, outputUsdPerMillion: 1_000_000 } },
+};
+
+it("reprices a memoized source when custom prices or mappings change, without reading its files", async () => {
+  const root = await FS.mkdtemp(join(tmpdir(), "ryco-overrides-summary-"));
+  roots.push(root);
+  const claudeHome = join(root, "claude");
+  const projects = join(claudeHome, "projects");
+  await FS.mkdir(projects, { recursive: true });
+  await FS.writeFile(join(projects, "a.jsonl"), claudeLine("a"));
+  await FS.writeFile(join(projects, "b.jsonl"), claudeLine("b"));
+  const published = claudeSettings(claudeHome, root);
+  let settings = published;
+  const claude = (summary: UsageSummary) =>
+    summary.sources.find((source) => source.provider === "claude");
+  await Effect.runPromise(
+    Effect.gen(function* () {
+      const service = yield* UsageService;
+      const first = yield* service.readSummary(summaryRequest);
+      expect(first.buckets[0]?.estimatedCostUsd).toBe(16);
+      expect(claude(first)?.parsedFileCount).toBe(2);
+      expect(first.pricing.customPriceCount).toBeUndefined();
+
+      settings = { ...published, usagePriceOverrides: halfPrice };
+      const custom = yield* service.readSummary(summaryRequest);
+      expect(custom.buckets[0]).toMatchObject({
+        model: "claude-test",
+        estimatedCostUsd: 8,
+        customPricedTokenCount: 10,
+        costSource: "litellm",
+      });
+      expect(custom.pricing).toMatchObject({ customPriceCount: 1, recognizedModelCount: 1 });
+      expect(claude(custom)).toMatchObject({ parsedFileCount: 0, reusedCacheFileCount: 2 });
+
+      settings = { ...published, usagePriceOverrides: { "Claude-Test": { mapTo: "claude-next" } } };
+      const mapped = yield* service.readSummary(summaryRequest);
+      expect(mapped.buckets).toHaveLength(1);
+      expect(mapped.buckets[0]).toMatchObject({ model: "claude-next", costSource: "unpriced" });
+      expect(mapped.pricing).toMatchObject({ mappedModelCount: 1, unrecognizedModelCount: 1 });
+      expect(claude(mapped)).toMatchObject({ parsedFileCount: 0, reusedCacheFileCount: 2 });
+
+      settings = published;
+      const restored = yield* service.readSummary(summaryRequest);
+      expect(restored.buckets).toEqual(first.buckets);
+      expect(claude(restored)?.parsedFileCount).toBe(0);
+    }).pipe(Effect.provide(testLayer(root, () => settings, rateDocument)), Effect.scoped),
+  );
+});
+
+it("never shares an in-flight scan between summaries priced under different overrides", async () => {
+  const root = await FS.mkdtemp(join(tmpdir(), "ryco-overrides-flight-"));
+  roots.push(root);
+  const claudeHome = join(root, "claude");
+  await FS.mkdir(join(claudeHome, "projects"), { recursive: true });
+  await FS.writeFile(join(claudeHome, "projects", "a.jsonl"), claudeLine("a"));
+  let settings = claudeSettings(claudeHome, root);
+  let release: (() => void) | undefined;
+  let entered: (() => void) | undefined;
+  const firstScanEntered = new Promise<void>((resolve) => (entered = resolve));
+  const original = TranscriptReader.listUsageTranscriptFiles;
+  const listing = vi
+    .spyOn(TranscriptReader, "listUsageTranscriptFiles")
+    .mockImplementation(async (...args) => {
+      // The first scan waits until a caller under other overrides has asked too.
+      if (release === undefined) {
+        const held = new Promise<void>((resolve) => (release = resolve));
+        entered?.();
+        await held;
+      }
+      return original(...args);
+    });
+  try {
+    await Effect.runPromise(
+      Effect.gen(function* () {
+        const service = yield* UsageService;
+        const published = yield* Effect.forkChild(service.readSummary(summaryRequest));
+        yield* Effect.promise(() => firstScanEntered);
+        settings = { ...settings, usagePriceOverrides: halfPrice };
+        const custom = yield* Effect.forkChild(service.readSummary(summaryRequest));
+        yield* Effect.sleep("20 millis");
+        release?.();
+        expect((yield* Fiber.join(published)).buckets[0]?.estimatedCostUsd).toBe(8);
+        expect((yield* Fiber.join(custom)).buckets[0]?.estimatedCostUsd).toBe(4);
+        expect(listing).toHaveBeenCalledTimes(2);
+      }).pipe(Effect.provide(testLayer(root, () => settings, rateDocument)), Effect.scoped),
+    );
+  } finally {
+    listing.mockRestore();
+  }
 });

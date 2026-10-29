@@ -14,6 +14,7 @@ import { QuitShortcutSetting } from "./QuitShortcutSetting";
 import { ThreadNotificationSettings } from "./ThreadNotificationSettings";
 import { WindowCaptureSettings } from "./WindowCaptureSettings";
 import { UsageLimitSettings } from "./UsageLimitSettings";
+import { UsagePriceSettings } from "./UsagePriceSettings";
 import { ResponseStreamingSettings } from "./ResponseStreamingSettings";
 import { ArchiveIcon, ArchiveX, MessageCircleDashedIcon } from "lucide-react";
 import { useCallback, useMemo, useState } from "react";
@@ -641,6 +642,7 @@ export function GeneralSettingsPanel() {
         </SettingsSection>
       )}
       {!isPhoneTier && <UsageLimitSettings />}
+      {!isPhoneTier && <UsagePriceSettings />}
       {!isPhoneTier && editingScope !== "node" && <ComposerSettings />}
       {!isPhoneTier && <ProjectDefaultsSection />}
       {!isPhoneTier && <StorageSettings />}

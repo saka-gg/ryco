@@ -1,4 +1,17 @@
-import type { UsageCostBreakdown, UsageTokenTotals } from "@ryco/contracts";
+import type {
+  UsageCostBreakdown,
+  UsageModelPrice,
+  UsagePriceOverrides,
+  UsageTokenTotals,
+} from "@ryco/contracts";
+import {
+  indexUsagePriceOverrides,
+  isSyntheticUsageModel,
+  matchUsageModelKey,
+  normalizeUsageModelKey,
+  resolveUsageModelMappings,
+  usageModelBaseKey,
+} from "@ryco/shared/usagePriceOverrides";
 
 import type { UsageRecordPrice } from "./usageAggregation.ts";
 import type { UsageRecord, UsageSpeed } from "./usageRecord.ts";
@@ -123,28 +136,104 @@ export function encodeUsageRateTable(rates: UsageRateTable): Readonly<Record<str
   );
 }
 
-const UNPRICEABLE_MODEL_NAMES = new Set([
-  "",
-  "<synthetic>",
-  "synthetic",
-  "opus",
-  "sonnet",
-  "haiku",
-  "fable",
-]);
+/** Model families without a generation: no published rate can be assumed for them. */
+const AMBIGUOUS_MODEL_NAMES = new Set(["", "opus", "sonnet", "haiku", "fable"]);
 
 export function lookupUsageModelRate(rates: UsageRateTable, model: string): UsageModelRate | null {
-  const key = model
-    .trim()
-    .toLowerCase()
-    .replace(/\[[^\]]*\]$/, "");
+  const key = usageModelBaseKey(model);
   const bare = normalizeUsageModelName(key);
-  if (UNPRICEABLE_MODEL_NAMES.has(bare)) return null;
+  if (AMBIGUOUS_MODEL_NAMES.has(bare) || isSyntheticUsageModel(bare)) return null;
   // Native provider prefixes describe the same API model. Arbitrary gateways
   // retain their own rates and must never fall back to a different provider.
   return (
     rates.get(key) ?? (/^(openai|anthropic)\//.test(key) ? rates.get(bare) : undefined) ?? null
   );
+}
+
+/** A custom price as a rate at every speed: no fast tier, so no speed premium. */
+function customUsageModelRate(price: UsageModelPrice): UsageModelRate {
+  const input = price.inputUsdPerMillion / 1e6;
+  return {
+    inputCostPerToken: input,
+    outputCostPerToken: price.outputUsdPerMillion / 1e6,
+    cacheReadCostPerToken: (price.cacheReadUsdPerMillion ?? price.inputUsdPerMillion) / 1e6,
+    cacheCreationCostPerToken: (price.cacheWriteUsdPerMillion ?? price.inputUsdPerMillion) / 1e6,
+    fast: null,
+    ultrafast: null,
+  };
+}
+
+/** The settings' custom prices and resolved mappings, by normalized model key. */
+export interface UsagePriceOverrideTables {
+  readonly prices: ReadonlyMap<string, UsageModelRate>;
+  readonly mappings: ReadonlyMap<string, string>;
+  /** The keys of both: a model's own entry of either kind shadows its base model's. */
+  readonly keys: ReadonlySet<string>;
+}
+
+export function compileUsagePriceOverrides(
+  overrides: UsagePriceOverrides,
+): UsagePriceOverrideTables {
+  const index = indexUsagePriceOverrides(Object.entries(overrides));
+  const prices = new Map<string, UsageModelRate>();
+  for (const [key, override] of index)
+    if (override.price !== undefined) prices.set(key, customUsageModelRate(override.price));
+  const mappings = resolveUsageModelMappings(index);
+  return { prices, mappings, keys: new Set([...prices.keys(), ...mappings.keys()]) };
+}
+
+/** How a recorded model ID is reported and priced. */
+export interface UsageModelResolution {
+  /** The model the usage is reported under: a mapping's target as typed, else the recorded ID. */
+  readonly model: string;
+  readonly rate: UsageModelRate | null;
+  /** The rate is a custom price: it replaces provider-reported cost. */
+  readonly custom: boolean;
+}
+
+/** Rates and the node's overrides, captured once per summary so that every source prices alike. */
+export interface UsagePricingPolicy extends UsagePriceOverrideTables {
+  readonly rates: UsageRateTable;
+  /** Resolutions by recorded model ID, filled on first use. */
+  readonly resolved: Map<string, UsageModelResolution>;
+}
+
+export function makeUsagePricingPolicy(
+  rates: UsageRateTable,
+  overrides: UsagePriceOverrideTables = { prices: new Map(), mappings: new Map(), keys: new Set() },
+): UsagePricingPolicy {
+  return { ...overrides, rates, resolved: new Map() };
+}
+
+/**
+ * The model's own entry applies, else that of its base model without a `[..]` context suffix:
+ * a mapping prices the model like its target (the target's custom price, else its published
+ * rate), a custom price replaces the published rate. Explicit entries also price model families
+ * that published rates leave unpriced, but never synthetic placeholders.
+ */
+export function resolveUsageModel(
+  policy: UsagePricingPolicy,
+  recordedModel: string,
+): UsageModelResolution {
+  let resolution = policy.resolved.get(recordedModel);
+  if (resolution === undefined) {
+    const entryKey = (model: string) =>
+      isSyntheticUsageModel(model) ? undefined : matchUsageModelKey(policy.keys, model);
+    const own = entryKey(recordedModel);
+    const mapTo = own === undefined ? undefined : policy.mappings.get(own);
+    // Keys match without case, so a mapped model reports under its target's key: a target typed
+    // in another case than history records shares that model's bucket instead of splitting it.
+    const model = mapTo === undefined ? recordedModel : normalizeUsageModelKey(mapTo);
+    // A mapping's target ends its chain: its entry, if any, is a custom price.
+    const priceKey = mapTo === undefined ? own : entryKey(mapTo);
+    const price = priceKey === undefined ? undefined : policy.prices.get(priceKey);
+    resolution =
+      price === undefined
+        ? { model, rate: lookupUsageModelRate(policy.rates, model), custom: false }
+        : { model, rate: price, custom: true };
+    policy.resolved.set(recordedModel, resolution);
+  }
+  return resolution;
 }
 
 type UsageTokenCounts = Pick<
@@ -242,14 +331,19 @@ function estimateSlotCacheSavings(rate: UsageTokenRate, totals: UsageSlotTotals)
   );
 }
 
-/** Provider-reported cost takes precedence; a known rate still prices savings and the split. */
+/**
+ * Provider-reported cost takes precedence over published rates (a known rate still prices
+ * savings and the split); a custom price replaces it.
+ */
 function priceUsageTokens<Totals extends UsageTokenCounts & { readonly totalTokens: number }>(
-  standard: UsageModelRate | null,
+  resolution: UsageModelResolution,
   speed: UsageSpeed | undefined,
   totals: Totals,
-  reportedCostUsd: number | null,
+  reported: number | null,
   cacheSavings: (rate: UsageTokenRate, totals: Totals) => number | null,
 ): UsageRecordPrice {
+  const standard = resolution.rate;
+  const reportedCostUsd = resolution.custom ? null : reported;
   if (standard === null) {
     return reportedCostUsd === null
       ? {
@@ -258,6 +352,7 @@ function priceUsageTokens<Totals extends UsageTokenCounts & { readonly totalToke
           listCostBreakdown: null,
           pricedTokenCount: 0,
           unpricedTokenCount: totals.totalTokens,
+          customPricedTokenCount: 0,
           costSource: "unpriced",
         }
       : {
@@ -266,6 +361,7 @@ function priceUsageTokens<Totals extends UsageTokenCounts & { readonly totalToke
           listCostBreakdown: null,
           pricedTokenCount: totals.totalTokens,
           unpricedTokenCount: 0,
+          customPricedTokenCount: 0,
           costSource: "provider-reported",
         };
   }
@@ -277,13 +373,18 @@ function priceUsageTokens<Totals extends UsageTokenCounts & { readonly totalToke
     listCostBreakdown,
     pricedTokenCount: totals.totalTokens,
     unpricedTokenCount: 0,
+    customPricedTokenCount: resolution.custom ? totals.totalTokens : 0,
+    // Custom prices are rate-based estimates too.
     costSource: reportedCostUsd === null ? "litellm" : "provider-reported",
   };
 }
 
-export function priceUsageRecord(rates: UsageRateTable, record: UsageRecord): UsageRecordPrice {
+export function priceUsageRecord(
+  resolution: UsageModelResolution,
+  record: UsageRecord,
+): UsageRecordPrice {
   return priceUsageTokens(
-    lookupUsageModelRate(rates, record.model),
+    resolution,
     record.speed,
     record.totals,
     record.reportedCostUsd,
@@ -296,16 +397,12 @@ export function priceUsageRecord(rates: UsageRateTable, record: UsageRecord): Us
  * the same model, speed and cost kind, and per-response pricing is linear in its tokens.
  */
 export function priceUsageSlot(
-  rates: UsageRateTable,
-  slot: {
-    readonly model: string;
-    readonly speed: UsageSpeed | undefined;
-    readonly reported: boolean;
-  },
+  resolution: UsageModelResolution,
+  slot: { readonly speed: UsageSpeed | undefined; readonly reported: boolean },
   totals: UsageSlotTotals,
 ): UsageRecordPrice {
   return priceUsageTokens(
-    lookupUsageModelRate(rates, slot.model),
+    resolution,
     slot.speed,
     totals,
     slot.reported ? totals.reportedCostUsd : null,

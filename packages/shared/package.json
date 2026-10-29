@@ -392,6 +392,10 @@
       "types": "./src/usageLimit.ts",
       "import": "./src/usageLimit.ts"
     },
+    "./usagePriceOverrides": {
+      "types": "./src/usagePriceOverrides.ts",
+      "import": "./src/usagePriceOverrides.ts"
+    },
     "./threadSettlement": {
       "types": "./src/threadSettlement.ts",
       "import": "./src/threadSettlement.ts"

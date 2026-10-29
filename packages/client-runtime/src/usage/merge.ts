@@ -130,6 +130,7 @@ interface MutableMergedBucket {
   hasCostBreakdown: boolean;
   pricedTokenCount: number;
   unpricedTokenCount: number;
+  customPricedTokenCount: number;
   costSources: Set<UsageCostSource>;
   sourceIds: Set<string>;
 }
@@ -227,6 +228,7 @@ export function mergeUsageEnvironmentResults(
           hasCostBreakdown: false,
           pricedTokenCount: 0,
           unpricedTokenCount: 0,
+          customPricedTokenCount: 0,
           costSources: new Set(),
           sourceIds: new Set(),
         };
@@ -252,6 +254,7 @@ export function mergeUsageEnvironmentResults(
       }
       merged.pricedTokenCount += bucket.pricedTokenCount;
       merged.unpricedTokenCount += bucket.unpricedTokenCount;
+      merged.customPricedTokenCount += bucket.customPricedTokenCount ?? 0;
       merged.costSources.add(bucket.costSource);
       merged.sourceIds.add(bucket.sourceId);
     }
@@ -279,6 +282,9 @@ export function mergeUsageEnvironmentResults(
         bucket.hasCost ? { estimatedCostUsd: bucket.estimatedCostUsd } : {},
         bucket.hasCacheSavings ? { estimatedCacheSavingsUsd: bucket.estimatedCacheSavingsUsd } : {},
         bucket.hasCostBreakdown ? { costBreakdown: finishCostBreakdown(bucket.costBreakdown) } : {},
+        bucket.customPricedTokenCount > 0
+          ? { customPricedTokenCount: bucket.customPricedTokenCount }
+          : {},
       ),
     )
     .toSorted(

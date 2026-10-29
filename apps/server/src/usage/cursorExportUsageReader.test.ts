@@ -10,7 +10,13 @@ import {
   CURSOR_EXPORT_LIMITS,
   type CursorExportSource,
 } from "./cursorExportUsageReader.ts";
-import { priceUsageRecord } from "./usagePricing.ts";
+import { makeUsagePricingPolicy, priceUsageRecord, resolveUsageModel } from "./usagePricing.ts";
+import type { UsageRecord } from "./usageRecord.ts";
+
+/** Prices a record without any published rates or custom prices. */
+const priceWithoutRates = (record: UsageRecord) =>
+  priceUsageRecord(resolveUsageModel(makeUsagePricingPolicy(new Map()), record.model), record);
+
 const roots: string[] = [];
 afterEach(async () => {
   for (const root of roots.splice(0)) await rm(root, { recursive: true, force: true });
@@ -39,7 +45,7 @@ describe("saved public Cursor Admin API exports", () => {
       totalTokens: 18652,
     });
     expect(result.records[0]?.reportedCostUsd).toBeCloseTo(0.2018232);
-    expect(priceUsageRecord(new Map(), result.records[0]!)).toMatchObject({
+    expect(priceWithoutRates(result.records[0]!)).toMatchObject({
       costSource: "provider-reported",
       estimatedCostUsd: 0.2018232,
     });
@@ -97,7 +103,7 @@ describe("saved public Cursor Admin API exports", () => {
     const result = await readCursorExportUsage(input);
     expect(result.records).toHaveLength(1);
     expect(result.records[0]?.model).toBe("unknown-model");
-    expect(priceUsageRecord(new Map(), result.records[0]!)).toMatchObject({
+    expect(priceWithoutRates(result.records[0]!)).toMatchObject({
       estimatedCostUsd: null,
       unpricedTokenCount: 1000,
     });

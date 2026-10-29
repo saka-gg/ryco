@@ -338,3 +338,57 @@ describe("worktree root override patches", () => {
     });
   });
 });
+
+describe("usage price override patches", () => {
+  const price = (input: number) => ({
+    price: { inputUsdPerMillion: input, outputUsdPerMillion: input * 5 },
+  });
+
+  it("patches individual models, removes them with null and leaves other settings alone", () => {
+    const first = applyServerSettingsPatch(DEFAULT_SERVER_SETTINGS, {
+      usagePriceOverrides: { "kimi-k3": price(1), preview: { mapTo: "claude-opus-5" } },
+    });
+    const second = applyServerSettingsPatch(first, {
+      usagePriceOverrides: { "kimi-k3": price(2), other: price(3) },
+    });
+    expect(second.usagePriceOverrides).toEqual({
+      "kimi-k3": price(2),
+      preview: { mapTo: "claude-opus-5" },
+      other: price(3),
+    });
+    // An entry is replaced whole: a mapping does not keep the price it replaces.
+    const remapped = applyServerSettingsPatch(second, {
+      usagePriceOverrides: { "kimi-k3": { mapTo: "kimi-k2" }, preview: null },
+    });
+    expect(remapped.usagePriceOverrides).toEqual({
+      "kimi-k3": { mapTo: "kimi-k2" },
+      other: price(3),
+    });
+    expect({ ...remapped, usagePriceOverrides: {} }).toEqual(DEFAULT_SERVER_SETTINGS);
+    expect(
+      applyServerSettingsPatch(remapped, { enableProviderUpdateChecks: false }).usagePriceOverrides,
+    ).toBe(remapped.usagePriceOverrides);
+  });
+
+  it("renames a model ID, its case included, by removing the old key", () => {
+    const saved = applyServerSettingsPatch(DEFAULT_SERVER_SETTINGS, {
+      usagePriceOverrides: { "Kimi-K3": price(1) },
+    });
+    expect(
+      applyServerSettingsPatch(saved, {
+        usagePriceOverrides: { "kimi-k3": price(2), "Kimi-K3": null },
+      }).usagePriceOverrides,
+    ).toEqual({ "kimi-k3": price(2) });
+  });
+
+  it("treats model IDs as data, including object prototype property names", () => {
+    const settings = applyServerSettingsPatch(DEFAULT_SERVER_SETTINGS, {
+      usagePriceOverrides: Object.fromEntries([
+        ["__proto__", price(1)],
+        ["constructor", price(2)],
+      ]),
+    });
+    expect(Object.hasOwn(settings.usagePriceOverrides, "__proto__")).toBe(true);
+    expect(settings.usagePriceOverrides.constructor).toEqual(price(2));
+  });
+});

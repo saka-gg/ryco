@@ -1,10 +1,18 @@
 import "../../../index.css";
 import { useState } from "react";
-import { EnvironmentId, type UsageCostBreakdown, type UsageImportedMetric } from "@ryco/contracts";
+import {
+  EnvironmentId,
+  USAGE_CONTRACT_VERSION,
+  type UsageCostBreakdown,
+  type UsageImportedMetric,
+} from "@ryco/contracts";
 import type { MergedUsageBucket, MergedUsageSummary } from "@ryco/client-runtime/usage";
 import { describe, expect, it, vi } from "vite-plus/test";
 import { page } from "vite-plus/test/browser";
 import { render } from "vitest-browser-react";
+import { useSettingsSearchRevealStore } from "../../settings/settingsSearchReveal";
+import { useUsagePriceRowRequestStore } from "../../settings/usagePriceSettingsRequest";
+import { useSettingsDialogStore } from "../../../settingsDialogStore";
 import { parseStatisticsSearch } from "../statisticsSearch";
 import { UsageView } from "./UsageView";
 const state = vi.hoisted(() => ({
@@ -173,6 +181,66 @@ function modelFixture(): MergedUsageSummary {
     ],
   };
 }
+
+/** A custom-priced model and an unpriced preview model on one node with custom prices. */
+function pricingFixture(): MergedUsageSummary {
+  const base = costFixture();
+  const priced = {
+    ...costBucket("2026-08-09", "claude-opus-4-1", 8),
+    costSource: "litellm" as const,
+    customPricedTokenCount: 5_500,
+  };
+  const { estimatedCostUsd: _cost, ...unpricedBase } = costBucket(
+    "2026-08-10",
+    "claude-preview-y",
+    0,
+  );
+  const unpriced = {
+    ...unpricedBase,
+    pricedTokenCount: 0,
+    unpricedTokenCount: 5_500,
+    costSource: "unpriced" as const,
+  };
+  const { sourceIds: _ids, ...rawPriced } = priced;
+  const { sourceIds: _unpricedIds, ...rawUnpriced } = unpriced;
+  const {
+    environmentId: _environmentId,
+    environmentLabel: _label,
+    included: _included,
+    ...source
+  } = base.sources[0]!;
+  return {
+    ...base,
+    buckets: [priced, unpriced],
+    environments: [
+      {
+        environmentId: EnvironmentId.make("fixture"),
+        label: "Synthetic node",
+        status: "complete",
+        summary: {
+          contractVersion: USAGE_CONTRACT_VERSION,
+          startDate: "2026-08-01",
+          endDate: "2026-08-10",
+          timeZone: "UTC",
+          generatedAt: "2026-08-10T12:00:00.000Z",
+          scanDurationMs: 0,
+          buckets: [
+            { ...rawPriced, sourceId: "claude-home" },
+            { ...rawUnpriced, sourceId: "claude-home" },
+          ],
+          sources: [source],
+          pricing: {
+            state: "cached",
+            recognizedModelCount: 1,
+            unrecognizedModelCount: 1,
+            customPriceCount: 2,
+            mappedModelCount: 1,
+          },
+        },
+      },
+    ],
+  };
+}
 function Harness() {
   const [search, setSearch] = useState(parseStatisticsSearch({}));
   return (
@@ -292,6 +360,30 @@ describe("usage provider history", () => {
     await expect.element(page.getByText("8 responses", { exact: true })).toBeVisible();
     await expect.element(page.getByRole("button", { name: /Opus/u })).not.toBeInTheDocument();
     expect(document.querySelectorAll('[aria-haspopup="dialog"]')).toHaveLength(0);
+  });
+  it("lists unpriced models with a way to price them on their node, and marks custom prices", async () => {
+    state.merged = pricingFixture();
+    await render(<Harness />);
+    const unpriced = page.getByRole("list", { name: "Unpriced models" });
+    await expect
+      .element(unpriced)
+      .toMatchTextContent(/claude-preview-y\s*· Claude · 5\.5K tokens/u);
+    await expect.element(page.getByText("custom price", { exact: true })).toBeVisible();
+    await expect.element(page.getByText(/2 custom prices · 1 mapped model/u)).toBeVisible();
+
+    await unpriced.getByRole("button", { name: "Set prices for claude-preview-y" }).click();
+    expect(useSettingsDialogStore.getState()).toMatchObject({
+      open: true,
+      section: "general",
+      editingScope: "node",
+      targetEnvironmentId: "fixture",
+    });
+    expect(useUsagePriceRowRequestStore.getState().request).toMatchObject({
+      environmentId: "fixture",
+      model: "claude-preview-y",
+    });
+    expect(useSettingsSearchRevealStore.getState().request).toEqual({ targetId: "Model prices" });
+    useSettingsDialogStore.getState().closeSettings();
   });
   it("paginates billed metadata separately and applies Cursor filters without inventing token buckets", async () => {
     state.merged = fixture(

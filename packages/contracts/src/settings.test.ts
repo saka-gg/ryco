@@ -19,6 +19,7 @@ import {
   SidebarAutoSettleAfterDays,
   ServerSettings,
   ServerSettingsPatch,
+  USAGE_PRICE_OVERRIDE_LIMIT,
 } from "./settings.ts";
 
 const decodeServerSettings = Schema.decodeUnknownSync(ServerSettings);
@@ -802,5 +803,80 @@ describe("pull request template settings and listing input", () => {
     for (const base of [":/fix", "main:docs", "main@{1}", "@{-1}", "-x", "a..b", "a b", "main^"]) {
       expect(() => decodeListInput({ cwd: "/repo", baseRefName: base })).toThrow();
     }
+  });
+});
+
+describe("ServerSettings.usagePriceOverrides", () => {
+  const decode = Schema.decodeUnknownExit(ServerSettings);
+  const decodePatch = Schema.decodeUnknownExit(ServerSettingsPatch);
+  const price = { inputUsdPerMillion: 3, outputUsdPerMillion: 15 };
+
+  it("defaults to no overrides and keeps prices, optional cache prices and mappings", () => {
+    expect(DEFAULT_SERVER_SETTINGS.usagePriceOverrides).toEqual({});
+    const overrides = {
+      "kimi-k3": { price: { ...price, cacheReadUsdPerMillion: 0, cacheWriteUsdPerMillion: 3.75 } },
+      "claude-preview": { mapTo: "claude-opus-5" },
+      free: { price: { inputUsdPerMillion: 0, outputUsdPerMillion: 0 } },
+    };
+    expect(decodeServerSettings({ usagePriceOverrides: overrides }).usagePriceOverrides).toEqual(
+      overrides,
+    );
+    expect(
+      decodeServerSettings({ usagePriceOverrides: { " padded ": { mapTo: " target " } } })
+        .usagePriceOverrides,
+    ).toEqual({ padded: { mapTo: "target" } });
+  });
+
+  it("rejects prices out of bounds", () => {
+    for (const bad of [
+      { ...price, inputUsdPerMillion: -1 },
+      { ...price, outputUsdPerMillion: 1_000_001 },
+      { ...price, cacheReadUsdPerMillion: Number.NaN },
+      { inputUsdPerMillion: 3 },
+    ])
+      expect(decode({ usagePriceOverrides: { model: { price: bad } } })._tag).toBe("Failure");
+    expect(
+      decode({ usagePriceOverrides: { model: { price: { ...price, inputUsdPerMillion: 1e6 } } } })
+        ._tag,
+    ).toBe("Success");
+  });
+
+  it("needs exactly one of a price and a mapping", () => {
+    expect(decode({ usagePriceOverrides: { model: {} } })._tag).toBe("Failure");
+    expect(decode({ usagePriceOverrides: { model: { price, mapTo: "other" } } })._tag).toBe(
+      "Failure",
+    );
+    expect(decode({ usagePriceOverrides: { model: { mapTo: " " } } })._tag).toBe("Failure");
+    expect(decodePatch({ usagePriceOverrides: { model: { price, mapTo: "other" } } })._tag).toBe(
+      "Failure",
+    );
+  });
+
+  it("rejects a model mapped to itself, in any case", () => {
+    expect(decode({ usagePriceOverrides: { Model: { mapTo: "model" } } })._tag).toBe("Failure");
+    expect(decode({ usagePriceOverrides: { model: { mapTo: "model[1m]" } } })._tag).toBe("Success");
+  });
+
+  it(`keeps at most ${USAGE_PRICE_OVERRIDE_LIMIT} entries`, () => {
+    const entries = (count: number) =>
+      Object.fromEntries(
+        Array.from({ length: count }, (_, index) => [`model-${index}`, { price }]),
+      );
+    expect(decode({ usagePriceOverrides: entries(USAGE_PRICE_OVERRIDE_LIMIT) })._tag).toBe(
+      "Success",
+    );
+    expect(decode({ usagePriceOverrides: entries(USAGE_PRICE_OVERRIDE_LIMIT + 1) })._tag).toBe(
+      "Failure",
+    );
+  });
+
+  it("patches single entries and removes them with null", () => {
+    const patch = decodeServerSettingsPatch({
+      usagePriceOverrides: { "kimi-k3": { price }, preview: null },
+    });
+    expect(patch.usagePriceOverrides).toEqual({ "kimi-k3": { price }, preview: null });
+    expect(
+      decodePatch({ usagePriceOverrides: { model: { price: { inputUsdPerMillion: 1 } } } })._tag,
+    ).toBe("Failure");
   });
 });

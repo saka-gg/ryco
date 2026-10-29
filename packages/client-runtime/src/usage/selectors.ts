@@ -37,6 +37,8 @@ export interface UsageBreakdownRow {
   readonly tokens: number;
   readonly costUsd: number | null;
   readonly unpricedTokens: number;
+  /** Part of the priced tokens priced from a node's custom model prices. */
+  readonly customPricedTokens: number;
   readonly responses: number;
 }
 
@@ -204,6 +206,7 @@ export function buildUsageBreakdown(
       tokens: 0,
       costUsd: null,
       unpricedTokens: 0,
+      customPricedTokens: 0,
       responses: 0,
     };
     rows.set(key, {
@@ -214,6 +217,7 @@ export function buildUsageBreakdown(
           ? current.costUsd
           : (current.costUsd ?? 0) + bucket.estimatedCostUsd,
       unpricedTokens: current.unpricedTokens + bucket.unpricedTokenCount,
+      customPricedTokens: current.customPricedTokens + (bucket.customPricedTokenCount ?? 0),
       responses: current.responses + bucket.responseCount,
     });
   }
