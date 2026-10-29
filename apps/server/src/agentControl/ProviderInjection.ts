@@ -170,15 +170,21 @@ const grantedCapabilities = [
   AGENT_CONTROL_CAPABILITIES.manageLocalTasks,
 ] as const;
 
+const grantsDeviceControl = (capabilities: ReadonlyArray<string>): boolean =>
+  capabilities.includes(AGENT_CONTROL_CAPABILITIES.controlDevices);
+
 const lifecycle = (input: {
   readonly bridge: AgentControlProviderBridge;
   readonly threadId: ThreadId;
   readonly sessionId: string;
   readonly injectionMode: AgentControlInjectionMode;
+  /** The lease offers `ryco_device`, so the gateway's refusal can point there. */
+  readonly grantsDeviceControl: boolean;
 }): AgentControlRuntimeLease => {
   const releaseLegacyDeviceTools = blockProcessDeviceToolsForAgentControl(
     input.threadId,
     input.sessionId,
+    { agentControlDevices: input.grantsDeviceControl },
   );
   const revoke = (reason: AgentControlLeaseRevocationReason) =>
     input.bridge
@@ -210,31 +216,28 @@ export const installAgentControlNativeHttp = (
   },
 ): Effect.Effect<Option.Option<AgentControlNativeHttpInjection>> => {
   if (!bridge) return Effect.succeed(Option.none());
-  return bridge
-    .issueLease({
-      ...input,
-      capabilities: input.computerOnly
-        ? [AGENT_CONTROL_CAPABILITIES.controlComputer]
-        : grantedCapabilities,
-    })
-    .pipe(
-      Effect.map(
-        Option.map((lease) => ({
-          ...lifecycle({
-            bridge,
-            threadId: input.threadId,
-            sessionId: lease.sessionId,
-            injectionMode: input.injectionMode,
-          }),
-          mcpServer: {
-            type: "http" as const,
-            url: lease.endpointUrl,
-            headers: { Authorization: `Bearer ${Redacted.value(lease.credential)}` },
-          },
-          credential: lease.credential,
-        })),
-      ),
-    );
+  const capabilities = input.computerOnly
+    ? [AGENT_CONTROL_CAPABILITIES.controlComputer]
+    : grantedCapabilities;
+  return bridge.issueLease({ ...input, capabilities }).pipe(
+    Effect.map(
+      Option.map((lease) => ({
+        ...lifecycle({
+          bridge,
+          threadId: input.threadId,
+          sessionId: lease.sessionId,
+          injectionMode: input.injectionMode,
+          grantsDeviceControl: grantsDeviceControl(capabilities),
+        }),
+        mcpServer: {
+          type: "http" as const,
+          url: lease.endpointUrl,
+          headers: { Authorization: `Bearer ${Redacted.value(lease.credential)}` },
+        },
+        credential: lease.credential,
+      })),
+    ),
+  );
 };
 
 export const installAgentControlAcp = (
@@ -257,6 +260,7 @@ export const installAgentControlAcp = (
               threadId: input.threadId,
               sessionId: lease.sessionId,
               injectionMode: "acp-http",
+              grantsDeviceControl: grantsDeviceControl(grantedCapabilities),
             }),
             mcpServer: {
               type: "http" as const,
@@ -285,6 +289,7 @@ export const installAgentControlAcp = (
             threadId: input.threadId,
             sessionId: bootstrap.sessionId,
             injectionMode: "acp-stdio-proxy",
+            grantsDeviceControl: grantsDeviceControl(grantedCapabilities),
           }),
           mcpServer: {
             name: AGENT_CONTROL_INTERNAL_SERVER_NAME,

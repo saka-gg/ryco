@@ -589,6 +589,45 @@ enabledLayer("AgentControlProposalStore", (it) => {
       }
     }),
   );
+
+  it.effect("records a device consent in audit rows by its udid and ids only", () =>
+    Effect.gen(function* () {
+      const store = yield* AgentControlProposalStore;
+      const audit = yield* AgentControlAuditRepository;
+      const { proposal } = yield* store.submit({
+        principal,
+        requestId: AgentControlRequestId.make("request-device-consent"),
+        plan: {
+          kind: "deviceControlConsent",
+          threadId: ThreadId.make("thread-1"),
+          projectId: ProjectId.make("project-1"),
+          providerInstanceId: ProviderInstanceId.make("codex"),
+          udid: "FAKE-0001" as never,
+        },
+        riskTags: [AgentControlRiskTag.make("device-mutation")],
+        promptSummary: "Allow routine input on device FAKE-0001 for this task",
+        expiresAt: "2026-08-17T01:00:00.000Z",
+        now: "2026-08-17T00:00:00.000Z",
+      });
+      const [submitted] = yield* audit.listByProposalId({ proposalId: proposal.proposalId });
+      // Exactly these keys: a later change that spreads the plan or adds a field fails here.
+      assert.deepStrictEqual(submitted?.metadata, {
+        requestId: "request-device-consent",
+        actionKind: "deviceControlConsent",
+        planDigest: proposal.planDigest,
+        principalKind: "provider-session",
+        expiresAt: "2026-08-17T01:00:00.000Z",
+        deviceUdid: "FAKE-0001",
+        projectId: "project-1",
+        providerInstanceId: "codex",
+        deviceThreadId: "thread-1",
+        riskClass: "device-control",
+        sensitivePayloadsExcluded: "true",
+        threadId: "thread-1",
+        authorization: "user-approval-required",
+      });
+    }),
+  );
 });
 
 enabledLayer("private routine authorization", (it) => {

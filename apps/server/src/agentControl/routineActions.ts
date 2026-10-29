@@ -23,6 +23,8 @@ export const isRoutineAgentControlAction = (
         plan.after.customSystemPrompt === plan.before.customSystemPrompt
       );
     default:
+      // Includes `deviceControlConsent`: the user grants routine device input for a task,
+      // never the agent itself.
       return false;
   }
 };

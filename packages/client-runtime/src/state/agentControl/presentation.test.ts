@@ -428,6 +428,44 @@ it("asks before deleting a task, naming it and what stays", () => {
   expect(model.detailSections[0]?.lines.join("\n")).toContain("chats started from it are kept");
 });
 
+it("asks once per task for routine device input, saying what it opens up", () => {
+  const model = buildAgentControlProposalCardModel(
+    makeProposal({
+      plan: {
+        kind: "deviceControlConsent",
+        threadId: ThreadId.make("thread-caller-1234"),
+        projectId: ProjectId.make("project-1"),
+        providerInstanceId: ProviderInstanceId.make("codex"),
+        udid: "FAKE-0001" as never,
+      },
+      riskTags: ["device-mutation" as never],
+      promptSummary: "Allow routine input on device FAKE-0001 for this task",
+    }),
+    () => "Coordinator",
+  );
+  expect(model.actionLabel).toBe("Allow Device for this task");
+  expect(model.targetLabel).toBe("device FAKE-0001");
+  expect(model.runtimeLabel).toBe("this task only");
+  expect(model.isPending).toBe(true);
+  expect(model.isDestructive).toBe(false);
+  expect(model.detailSections).toEqual([
+    {
+      heading: "Routine device actions until this response ends",
+      lines: [
+        "The agent may tap, swipe, type, press hardware buttons, scroll, launch installed apps and change simulator settings on this device.",
+        "It can type into any app on the device, including its web browser.",
+        "Installing apps, opening links directly, booting, attaching and shutting down still ask each time.",
+        "Use Stop in chat to end the task. Messages sent while the agent is working continue it; the next task asks again.",
+        "Device UDID: FAKE-0001",
+        "Thread: thread-caller-1234",
+        "Project: project-1",
+        "Provider instance: codex",
+        "Nothing the agent types or taps is stored with this request.",
+      ],
+    },
+  ]);
+});
+
 it("says which created thread starts a task's chat", () => {
   const model = buildAgentControlProposalCardModel(
     makeProposal({

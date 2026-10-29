@@ -3,7 +3,9 @@
 Agent Control lets coding agents inspect Ryco and operate threads. Private Ryco sessions execute
 routine actions through the durable operation queue. Archiving, runtime permission changes,
 project linking/unlinking or workspace changes, executable project scripts, system prompts, and
-device lifecycle changes still require user approval. Standalone integrations remain approval-only.
+device lifecycle changes still require user approval. Routine input on the device attached to a
+thread needs one approval per task (see `ryco_device` below). Standalone integrations remain
+approval-only.
 
 Agent Control also gives agents visual replies: with it on, they can answer with inline HTML pages
 such as charts, tables, diagrams and mockups, shown in the thread above their written reply (see
@@ -41,6 +43,15 @@ called. This matters for clients such as Codex that cache the initial MCP catalo
   allowlist. Provider credentials, connection settings and Agent Control policy are excluded.
 - `ryco_browser`, `ryco_computer`: browser tabs and native app interaction when the desktop bridge
   and the corresponding user permissions are available. Browser `open` accepts `visible: true`.
+- `ryco_device`: tap, swipe, type, hardware buttons, scroll to an element, launch an installed app
+  and simulator settings on the simulator or emulator attached to the caller's thread (and to no
+  other thread), plus describe, wait and app logs. Inputs return the settled screen as text. The
+  first input of each task asks the user once with an "Allow Device for this task" card in the chat;
+  the tool answers `pending` with a `proposalId` to wait on. An approved or declined card holds
+  for the rest of the task, messages sent into it while the agent works included; Stop ends the
+  task. Full-access threads skip the card. Boot, attach, install, URLs, recording and
+  shutdown stay `ryco_propose_device_*` approvals. Not available to OpenCode sessions, whose Agent
+  Control lease covers Computer Use only.
 - `ryco_task_status`, `ryco_task_cancel`: status, results and cancel for tasks this chat delegated
   with `returnToOrigin` (see [Delegated tasks](#delegated-tasks)).
 - `ryco_list_local_tasks`, `ryco_read_local_task`, `ryco_create_local_task`,

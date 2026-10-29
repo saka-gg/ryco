@@ -274,6 +274,7 @@ export const AgentControlActionKind = Schema.Literals([
   "deviceStartRecording",
   "deviceStopRecording",
   "deviceShutdown",
+  "deviceControlConsent",
   "deleteLocalTask",
 ]);
 export type AgentControlActionKind = typeof AgentControlActionKind.Type;
@@ -324,6 +325,7 @@ export const AGENT_CONTROL_ACTION_CAPABILITIES: Record<
   deviceStartRecording: AGENT_CONTROL_CAPABILITIES.controlDevices,
   deviceStopRecording: AGENT_CONTROL_CAPABILITIES.controlDevices,
   deviceShutdown: AGENT_CONTROL_CAPABILITIES.controlDevices,
+  deviceControlConsent: AGENT_CONTROL_CAPABILITIES.controlDevices,
   deleteLocalTask: AGENT_CONTROL_CAPABILITIES.manageLocalTasks,
 };
 
@@ -844,6 +846,22 @@ export const AgentControlDeviceActionPlan = Schema.Union([
 export type AgentControlDeviceActionPlan = typeof AgentControlDeviceActionPlan.Type;
 
 /**
+ * One user consent for routine input (tap, swipe, type, hardware buttons, scroll to
+ * element, launch, simulator settings) on the device attached to the requesting
+ * thread, for the exact provider turn that asked. Carries no coordinates, text,
+ * labels or bundle ids: the actions it allows run directly and are never persisted.
+ * Not a device action plan: approving it changes nothing on the device.
+ */
+export const AgentControlDeviceControlConsentPlan = Schema.Struct({
+  kind: Schema.Literal("deviceControlConsent"),
+  threadId: ThreadId,
+  projectId: ProjectId,
+  providerInstanceId: ProviderInstanceId,
+  udid: DeviceUdid,
+}).pipe(rejectExcessProperties);
+export type AgentControlDeviceControlConsentPlan = typeof AgentControlDeviceControlConsentPlan.Type;
+
+/**
  * Deletes one of the node's Tasks with its files and its record of started chats
  * (the chats themselves stay). Always approved by the user.
  */
@@ -872,6 +890,7 @@ export const AgentControlActionPlan = Schema.Union([
   AgentControlCancelAutomationPlan,
   AgentControlAutomationRunPlan,
   AgentControlDeviceActionPlan,
+  AgentControlDeviceControlConsentPlan,
   AgentControlDeleteLocalTaskPlan,
 ]);
 export type AgentControlActionPlan = typeof AgentControlActionPlan.Type;

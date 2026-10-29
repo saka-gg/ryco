@@ -334,6 +334,155 @@ it.effect("rejects a boot plan for a device deliberately attached to another thr
   }),
 );
 
+it.effect("binds a device consent to the caller's scope and to the task that asked", () =>
+  Effect.gen(function* () {
+    const snapshot = yield* Ref.make(makeSnapshot());
+    const providers = yield* Ref.make<ReadonlyArray<typeof provider>>([provider]);
+    const backend = new FakeDeviceBackend();
+    backend.bootExternally("FAKE-0001");
+    const manager = new DeviceManager({ backend });
+    yield* Effect.promise(() => manager.attach(callerThreadId, "FAKE-0001"));
+    const plan = {
+      kind: "deviceControlConsent" as const,
+      threadId: callerThreadId,
+      projectId,
+      providerInstanceId,
+      udid: "FAKE-0001" as never,
+    };
+    const validator = makeValidator(snapshot, providers, [], undefined, undefined, undefined, {
+      supported: true,
+      manager,
+    });
+
+    const principal = yield* validator.validateSubmission({ session, authority, plan });
+    assert.deepInclude(principal, { kind: "provider-session", turnId, runtimeSessionId });
+    for (const outOfScope of [
+      { ...plan, threadId: targetThreadId },
+      { ...plan, projectId: ProjectId.make("project-other") },
+      { ...plan, providerInstanceId: ProviderInstanceId.make("other") },
+    ]) {
+      const refused = yield* Effect.flip(
+        validator.validateSubmission({ session, authority, plan: outOfScope }),
+      );
+      assert.strictEqual(refused.reason, "project-scope");
+    }
+    const unsupported = yield* Effect.flip(
+      makeValidator(snapshot, providers).validateSubmission({ session, authority, plan }),
+    );
+    assert.strictEqual(unsupported.reason, "invalid-plan");
+
+    const integration: AgentControlExternalIntegration = {
+      integrationId: AgentControlIntegrationId.make("integration-device-consent"),
+      displayName: "External Codex",
+      clientKind: "codex",
+      projectScope: { kind: "all" },
+      capabilities: Object.values(AGENT_CONTROL_CAPABILITIES),
+      rateLimitPerMinute: 60,
+      activeTaskLimit: 1,
+      activeTaskCount: 0,
+      expiresAt: null,
+      revokedAt: null,
+      pairingState: "paired",
+      pairingCodeExpiresAt: null,
+      pairedAt: now,
+      createdAt: now,
+      updatedAt: now,
+      lastUsedAt: null,
+    };
+    const external = yield* Effect.flip(
+      validator.validateExternalSubmission({ integration, plan }),
+    );
+    assert.strictEqual(external.reason, "privilege-escalation");
+    assert.strictEqual(external.detail, "External integrations cannot control devices.");
+
+    const proposal: AgentControlProposal = {
+      proposalId: AgentControlProposalId.make("proposal-device-consent"),
+      requestId: AgentControlRequestId.make("request-device-consent"),
+      principal,
+      planVersion: 1,
+      plan,
+      planDigest: "c".repeat(64),
+      riskTags: [],
+      promptSummary: null,
+      status: "approved",
+      createdAt: now,
+      updatedAt: now,
+      expiresAt: "2099-01-01T00:00:00.000Z",
+      decidedAt: now,
+      result: null,
+    };
+    yield* validator.revalidateExecution(proposal);
+
+    // An external principal can never carry one, even as an approved proposal.
+    const externalProposal = yield* Effect.flip(
+      makeValidator(
+        snapshot,
+        providers,
+        [],
+        () => Effect.succeed(integration),
+        undefined,
+        undefined,
+        {
+          supported: true,
+          manager,
+        },
+      ).revalidateExecution({
+        ...proposal,
+        principal: {
+          kind: "external-integration",
+          integrationId: integration.integrationId,
+          projectId,
+          runtimeMode: "approval-required",
+          envMode: "worktree",
+        },
+      }),
+    );
+    assert.strictEqual(externalProposal.reason, "privilege-escalation");
+
+    // The task that asked has ended: a later approval grants nothing.
+    const nextTurn = thread({
+      id: callerThreadId,
+      runtimeMode: "approval-required",
+      envMode: "worktree",
+      running: true,
+    });
+    yield* Ref.set(
+      snapshot,
+      makeSnapshot({
+        ...nextTurn,
+        session: { ...nextTurn.session!, activeTurnId: TurnId.make("turn-next") },
+      }),
+    );
+    const ended = yield* Effect.flip(validator.revalidateExecution(proposal));
+    assert.strictEqual(ended.reason, "caller-stale");
+    assert.strictEqual(ended.detail, "The task that asked has ended.");
+    yield* Ref.set(
+      snapshot,
+      makeSnapshot({
+        ...nextTurn,
+        session: { ...nextTurn.session!, runtimeSessionId: RuntimeSessionId.make("runtime-next") },
+      }),
+    );
+    assert.strictEqual(
+      (yield* Effect.flip(validator.revalidateExecution(proposal))).reason,
+      "caller-stale",
+    );
+    yield* Ref.set(snapshot, makeSnapshot());
+
+    // The device is watched from a second thread, or no longer attached here.
+    yield* Effect.promise(() => manager.attach(targetThreadId, "FAKE-0001"));
+    const shared = yield* Effect.flip(validator.revalidateExecution(proposal));
+    assert.strictEqual(shared.reason, "thread-stale");
+    assert.strictEqual(shared.detail, "The device is no longer attached to this thread only.");
+    yield* Effect.promise(() => manager.detach(targetThreadId));
+    yield* validator.revalidateExecution(proposal);
+    yield* Effect.promise(() => manager.detach(callerThreadId));
+    const detached = yield* Effect.flip(validator.revalidateExecution(proposal));
+    assert.strictEqual(detached.reason, "thread-stale");
+    yield* Effect.promise(() => manager.dispose());
+  }),
+);
+
 it.effect("scopes project mutations and allows closed non-secret settings plans", () =>
   Effect.gen(function* () {
     const snapshot = yield* Ref.make(makeSnapshot());

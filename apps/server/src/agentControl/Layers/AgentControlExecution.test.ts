@@ -530,6 +530,65 @@ it.effect("holds an approved boot and attach for the running turn, not past it",
   }),
 );
 
+it.effect("an accepted device consent completes without touching the device", () =>
+  Effect.gen(function* () {
+    const backend = new FakeDeviceBackend();
+    backend.bootExternally("FAKE-0001");
+    const manager = new DeviceManager({ backend });
+    yield* Effect.promise(() => manager.attach(ThreadId.make("thread-origin"), "FAKE-0001"));
+    const callsBefore = backend.calls.length;
+    const consentPlan = {
+      kind: "deviceControlConsent" as const,
+      threadId: ThreadId.make("thread-origin"),
+      projectId,
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      udid: "FAKE-0001" as never,
+    };
+    const proposal: AgentControlProposal = {
+      ...approvedProposal,
+      proposalId: AgentControlProposalId.make("proposal-device-consent"),
+      requestId: AgentControlRequestId.make("request-device-consent"),
+      plan: consentPlan,
+      planDigest: computeAgentControlPlanDigest(consentPlan),
+    };
+    const stores = yield* makeExecutionStores(proposal);
+    let revalidations = 0;
+    const execution = yield* makeTestExecution({
+      proposalStore: stores.proposalStore,
+      operationStore: stores.operationStore,
+      commandApplication: {},
+      projections: {},
+      deviceService: { supported: true, manager },
+      validator: {
+        validateSubmission: () => Effect.die("unused"),
+        validateExternalSubmission: () => Effect.die("unused"),
+        revalidateExecution: () => Effect.sync(() => void (revalidations += 1)),
+      },
+    });
+
+    yield* execution.executeApproved(proposal.proposalId);
+    yield* execution.executeApproved(proposal.proposalId);
+
+    // The consent itself changes nothing on the device.
+    assert.deepStrictEqual(backend.calls.slice(callsBefore), []);
+    assert.isAtLeast(revalidations, 2);
+    const settled = yield* Ref.get(stores.proposalRef);
+    assert.strictEqual(settled.status, "completed");
+    if (settled.result?.outcome === "completed") {
+      assert.deepStrictEqual(settled.result.execution?.device, {
+        actionKind: "deviceControlConsent",
+        threadId: "thread-origin",
+        projectId: "project-1",
+        providerInstanceId: "codex",
+        udid: "FAKE-0001",
+      });
+    } else assert.fail("expected a completed consent");
+    const operation = yield* Ref.get(stores.operationRef);
+    assert.include(Option.getOrThrow(operation).state.completedSteps, "device-consent-granted");
+    yield* Effect.promise(() => manager.dispose());
+  }),
+);
+
 it.effect("does not hold an approved action for a turn that starts while it runs", () =>
   Effect.gen(function* () {
     // Approvals wait for a person, so the proposing turn may be over; a turn
@@ -566,6 +625,52 @@ it.effect("does not hold an approved action for a turn that starts while it runs
     });
     assert.lengthOf(idleTimers(), 1);
     yield* Effect.promise(() => manager.dispose());
+  }),
+);
+
+it.effect("a device consent approved after its task ended fails with the reason", () =>
+  Effect.gen(function* () {
+    const consentPlan = {
+      kind: "deviceControlConsent" as const,
+      threadId: ThreadId.make("thread-origin"),
+      projectId,
+      providerInstanceId: ProviderInstanceId.make("codex"),
+      udid: "FAKE-0001" as never,
+    };
+    const proposal: AgentControlProposal = {
+      ...approvedProposal,
+      proposalId: AgentControlProposalId.make("proposal-stale-consent"),
+      requestId: AgentControlRequestId.make("request-stale-consent"),
+      plan: consentPlan,
+      planDigest: computeAgentControlPlanDigest(consentPlan),
+    };
+    const stores = yield* makeExecutionStores(proposal);
+    const execution = yield* makeTestExecution({
+      proposalStore: stores.proposalStore,
+      operationStore: stores.operationStore,
+      commandApplication: {},
+      projections: {},
+      deviceService: { supported: true, manager: {} },
+      validator: {
+        validateSubmission: () => Effect.die("unused"),
+        validateExternalSubmission: () => Effect.die("unused"),
+        revalidateExecution: () =>
+          Effect.fail(
+            new AgentControlPlanValidationError({
+              reason: "caller-stale",
+              detail: "The task that asked has ended.",
+            }),
+          ),
+      },
+    });
+
+    yield* execution.executeApproved(proposal.proposalId);
+    const settled = yield* Ref.get(stores.proposalRef);
+    assert.strictEqual(settled.status, "failed");
+    if (settled.result?.outcome === "failed") {
+      assert.strictEqual(settled.result.error.code, "device.stale-state");
+      assert.include(settled.result.error.message, "The task that asked has ended.");
+    } else assert.fail("expected a failed consent");
   }),
 );
 

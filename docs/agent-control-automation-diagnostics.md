@@ -43,16 +43,21 @@ ephemeral MCP content for the exact current thread attachment: they are never co
 structured results, proposals, audit rows, diagnostics, or server logs. External integrations
 receive neither device metadata nor device content.
 
-Every device mutation is a separate immutable proposal and only the shared accepted-proposal
-executor can invoke `DeviceService`. Audit and diagnostic records retain safe identifiers, action
-kind, lifecycle expectations, decisions, outcomes, and typed error codes; they omit screenshots,
-frames, UI-tree contents, raw URLs, artifact paths, recording paths, helper payloads, and typed
-text. Legacy direct device mutation/content tools are suppressed while an Agent Control provider
-lease exists, preventing selection of the older gateway as an approval bypass.
-Coordinate taps, swipes, and hardware buttons are proposal-safe. Text typing, label-targeted taps,
-and scroll-to-element remain unavailable because their exact inputs can contain accessibility or
-user content that the durable proposal model must not persist. Launch arguments are unavailable
-for the same reason.
+Lifecycle, install, URL and recording changes stay one immutable proposal each, and only the shared
+accepted-proposal executor can invoke `DeviceService` for them. Routine input (tap, swipe, type,
+hardware buttons, scroll to element, launch, simulator settings) runs directly through `ryco_device`
+after one approved `deviceControlConsent` per task (full-access threads skip it), and only on the
+device attached to the caller's thread and to no other thread; `ryco_device` never attaches,
+boots or shuts down a device. The consent plan carries only the thread, project, provider instance
+and device. Typed text, labels, coordinates, bundle ids and launch arguments never enter proposals,
+audit rows or diagnostics; the provider's own transcript of a tool call still shows its arguments,
+as for every tool. Typing into the device's browser can reach the web, so the `open_url` approval is
+not a network boundary. Audit and diagnostic records retain safe identifiers, action kind, lifecycle
+expectations, decisions, outcomes, and typed error codes; they omit screenshots, frames, UI-tree
+contents, raw URLs, artifact paths, recording paths, helper payloads, and typed text. Legacy direct
+device mutation/content tools are suppressed while an Agent Control provider lease exists,
+preventing selection of the older gateway as an approval bypass; their refusal points to
+`ryco_device` when the lease grants device control.
 
 Automation templates still contain no browser, device, shell, command, RPC, URL, webhook, script,
 or callback field. Browser/CDP/web-page control remains out of scope.

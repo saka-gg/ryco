@@ -5,6 +5,8 @@ import { withInspectionTools } from "../Mcp/inspectionTools.ts";
 import { withArtifactTools } from "../Mcp/artifactTools.ts";
 import { withDelegationTools } from "../Mcp/delegationTools.ts";
 import { withLocalTaskTools } from "../Mcp/localTaskTools.ts";
+import { withLazyAgentControlTools } from "../Mcp/lazyTools.ts";
+import { AGENT_CONTROL_DEVICE_TOOL } from "../../providerTools/deviceToolGateway.ts";
 import { LocalTaskService } from "../../tasks/LocalTaskService.ts";
 import { makeDelegatedTaskControl } from "../delegatedTaskControl.ts";
 import { CompletionReturnRepository } from "../../persistence/Layers/AgentControlCompletionReturns.ts";
@@ -29,6 +31,7 @@ import { TerminalManager } from "../../terminal/Services/Manager.ts";
  *
  * @module AgentControlMcpServer
  */
+import { AGENT_CONTROL_CAPABILITIES } from "@ryco/contracts";
 import { Effect, Exit, Layer, Option, Scope, Stream } from "effect";
 import { ServerConfig } from "../../config.ts";
 import { withComputerUseTools } from "../Mcp/computerTools.ts";
@@ -45,7 +48,12 @@ import { ProviderRegistry } from "../../provider/Services/ProviderRegistry.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { WorkspaceAccessPolicy } from "../../workspace/Services/WorkspaceAccessPolicy.ts";
 import { makeAgentControlMcpListener } from "../Mcp/listener.ts";
-import { makeAgentControlMcpTools, withCompleteAgentControlCatalog } from "../Mcp/tools.ts";
+import {
+  AGENT_CONTROL_DEVICE_IMAGE_MAX_BASE64_CHARS,
+  makeAgentControlMcpTools,
+  submitAgentControlMutation,
+  withCompleteAgentControlCatalog,
+} from "../Mcp/tools.ts";
 import { AgentControlPolicy } from "../Services/AgentControlPolicy.ts";
 import { AgentControlActionValidator } from "../Services/AgentControlActionValidator.ts";
 import { AgentControlAutomationService } from "../Services/AgentControlAutomation.ts";
@@ -188,7 +196,38 @@ const makeAgentControlMcpServer = Effect.gen(function* () {
         ...(Option.isSome(config) ? { taskFilesDir: config.value.taskFilesDir } : {}),
       })
     : computerTools;
-  const tools = withCompleteAgentControlCatalog(taskTools);
+  // Routine device input under per-task consent, where devices exist. Its
+  // module (consent index, driving guide) loads the first time a session that
+  // may drive devices lists or calls tools, never at boot.
+  const deviceTools =
+    Option.isSome(deviceService) && deviceService.value.supported
+      ? withLazyAgentControlTools(taskTools, {
+          names: [AGENT_CONTROL_DEVICE_TOOL],
+          writeNames: [AGENT_CONTROL_DEVICE_TOOL],
+          mayUse: (session) =>
+            session.grantedCapabilities.includes(AGENT_CONTROL_CAPABILITIES.controlDevices),
+          load: () =>
+            import("../Mcp/deviceRoutineTools.ts").then((module) =>
+              module.withDeviceRoutineTools(taskTools, {
+                policy,
+                registry,
+                proposals,
+                submitMutation: (input) =>
+                  submitAgentControlMutation(
+                    {
+                      proposals,
+                      ...(Option.isSome(validator) ? { validator: validator.value } : {}),
+                    },
+                    input,
+                  ),
+                projections,
+                deviceService: deviceService.value,
+                maxImageBase64Chars: AGENT_CONTROL_DEVICE_IMAGE_MAX_BASE64_CHARS,
+              }),
+            ),
+        })
+      : taskTools;
+  const tools = withCompleteAgentControlCatalog(deviceTools);
 
   // Start/stop transitions are serialized so a rapid settings flip cannot
   // interleave a start with a teardown. `shuttingDown` latches inside the

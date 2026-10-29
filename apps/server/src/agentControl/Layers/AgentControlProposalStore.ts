@@ -158,6 +158,16 @@ const auditMetadataForProposal = (proposal: AgentControlProposal): AgentControlA
           riskClass: proposal.plan.riskClass,
           sensitivePayloadsExcluded: "true",
         };
+      case "deviceControlConsent":
+        // What the consent allows runs directly and is never recorded here.
+        return {
+          deviceUdid: proposal.plan.udid,
+          projectId: proposal.plan.projectId,
+          providerInstanceId: proposal.plan.providerInstanceId,
+          deviceThreadId: proposal.plan.threadId,
+          riskClass: "device-control",
+          sensitivePayloadsExcluded: "true",
+        };
       default:
         return {};
     }

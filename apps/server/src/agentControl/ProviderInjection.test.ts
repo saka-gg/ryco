@@ -13,6 +13,7 @@ import type { AgentControlProviderBridge } from "./ProviderInjection.ts";
 import { RYCO_AGENT_CONTROL_MCP_SERVER_NAMES } from "@ryco/shared/htmlRenderToolPresentation";
 
 import { CODEX_AGENT_CONTROL_SERVER_NAME } from "../provider/Layers/CodexSessionRuntime.ts";
+import { agentControlDeviceLockFor } from "../providerTools/deviceToolGateway.ts";
 import { AGENT_CONTROL_HTML_RENDER_INSTRUCTIONS } from "./htmlRenderInstructions.ts";
 import { AGENT_CONTROL_MCP_INITIALIZE_INSTRUCTIONS } from "./Mcp/listener.ts";
 import {
@@ -235,6 +236,53 @@ it.effect("grants HTML renders to full provider leases but not to computer-only 
     assert.include(full, AGENT_CONTROL_CAPABILITIES.renderHtml);
     assert.include(full, AGENT_CONTROL_CAPABILITIES.attachFile);
     assert.deepStrictEqual(computerOnly, [AGENT_CONTROL_CAPABILITIES.controlComputer]);
+  }),
+);
+
+it.effect("locks the device gateway, saying whether the lease drives devices itself", () =>
+  Effect.gen(function* () {
+    const lockedThread = ThreadId.make("thread-device-lock");
+    const state = makeBridge();
+    const full = yield* installAgentControlNativeHttp(state.bridge, {
+      threadId: lockedThread,
+      providerInstanceId,
+      runtimeSessionId: RuntimeSessionId.make("runtime-full"),
+      injectionMode: "claude-http",
+    });
+    assert.deepStrictEqual(agentControlDeviceLockFor(lockedThread), {
+      leaseId: "lease-runtime-full",
+      agentControlDevices: true,
+    });
+
+    // OpenCode's Computer Use lease offers no ryco_device, yet still holds the gateway.
+    const computerOnly = yield* installAgentControlNativeHttp(state.bridge, {
+      threadId: lockedThread,
+      providerInstanceId,
+      runtimeSessionId: RuntimeSessionId.make("runtime-computer"),
+      injectionMode: "opencode-http",
+      computerOnly: true,
+    });
+    assert.deepStrictEqual(agentControlDeviceLockFor(lockedThread), {
+      leaseId: "lease-runtime-computer",
+      agentControlDevices: false,
+    });
+    // The superseded lease's release leaves its successor's lock alone.
+    if (Option.isSome(full)) yield* full.value.revoke("runtime-replaced");
+    assert.isFalse(agentControlDeviceLockFor(lockedThread)?.agentControlDevices ?? true);
+    if (Option.isSome(computerOnly)) yield* computerOnly.value.revoke("session-stopped");
+    assert.isNull(agentControlDeviceLockFor(lockedThread));
+
+    const acp = yield* installAgentControlAcp(state.bridge, {
+      threadId: lockedThread,
+      providerInstanceId,
+      runtimeSessionId: RuntimeSessionId.make("runtime-acp"),
+      initializeResult: { protocolVersion: 1, agentCapabilities: {} },
+      proxyCommand: "/usr/bin/node",
+      proxyEntryPoint: "/opt/ryco/bin.mjs",
+    });
+    assert.isTrue(agentControlDeviceLockFor(lockedThread)?.agentControlDevices);
+    if (Option.isSome(acp)) yield* acp.value.revoke("session-stopped");
+    assert.isNull(agentControlDeviceLockFor(lockedThread));
   }),
 );
 

@@ -218,10 +218,11 @@ describe("server boot import boundaries", () => {
     // search or install.
     expect(reached(/^apps\/server\/src\/provider\/acp\//u)).toEqual([]);
     // Agent device tool actions, evidence, waits, logs and the driving guide load with the first
-    // device tool call, the tool catalogue with the first `tools/list`.
+    // device tool call, the tool catalogue with the first `tools/list`; Agent Control's
+    // ryco_device and its consent index where devices exist.
     expect(
       reached(
-        /^apps\/server\/src\/(?:device\/(?:deviceObservation|deviceUiSnapshot|deviceLogs)|providerTools\/deviceTool(?:Actions|Guidance|Definitions))\.ts$/u,
+        /^apps\/server\/src\/(?:device\/(?:deviceObservation|deviceUiSnapshot|deviceLogs)|providerTools\/deviceTool(?:Actions|Guidance|Definitions)|agentControl\/(?:Mcp\/deviceRoutineTools|deviceControlConsent))\.ts$/u,
       ),
     ).toEqual([]);
   });

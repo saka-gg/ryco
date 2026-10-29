@@ -73,35 +73,57 @@ const APPROVAL_REQUIRED = new Set<DeviceToolName>([
 ]);
 
 const AGENT_CONTROL_SAFE_LEGACY_TOOLS = new Set<DeviceToolName>(["device_list"]);
-const agentControlLocksByThread = new Map<string, Set<string>>();
+
+/** An Agent Control lease holding a thread's gateway tools. */
+export interface AgentControlDeviceLock {
+  readonly leaseId: string;
+  /** The lease grants Agent Control device control, so the session has `ryco_device`. */
+  readonly agentControlDevices: boolean;
+}
+
+const agentControlLocksByThread = new Map<string, AgentControlDeviceLock>();
+
+/** Agent Control's own device tool (`agentControl/Mcp/deviceRoutineTools.ts`). */
+export const AGENT_CONTROL_DEVICE_TOOL = "ryco_device";
+
+/** Added to `device_list` while Agent Control drives this session's devices. */
+export const AGENT_CONTROL_DEVICE_POINTER = `Agent Control is on for this session: drive the attached device with ${AGENT_CONTROL_DEVICE_TOOL} and request boot, attach, install, URLs or shutdown with ryco_propose_device_*.`;
+
+const agentControlRefusal = (lock: AgentControlDeviceLock): string =>
+  lock.agentControlDevices
+    ? `Agent Control drives devices in this session: use ${AGENT_CONTROL_DEVICE_TOOL} for input on the device attached to this thread (it asks the user once per task) and ryco_propose_device_* for boot, attach, install, URLs and shutdown.`
+    : // A Computer Use lease (OpenCode) offers no device tools at all.
+      "Device tools are unavailable in this session while Agent Control runs Computer Use.";
 
 /**
  * Suppress the legacy direct device catalog while the same thread owns an
- * Agent Control session. The returned release is idempotent and lease-scoped.
+ * Agent Control session. `agentControlDevices` says whether that session can
+ * drive devices itself, which decides where the refusal points. The returned
+ * release is idempotent and lease-scoped.
  */
 export function blockProcessDeviceToolsForAgentControl(
   threadId: string,
   leaseId: string,
+  options: { readonly agentControlDevices: boolean },
 ): () => void {
-  const locks = agentControlLocksByThread.get(threadId) ?? new Set<string>();
   // A thread has one authoritative provider runtime. Installing its successor
-  // supersedes any lock whose registry lease was synchronously revoked.
-  locks.clear();
-  locks.add(leaseId);
-  agentControlLocksByThread.set(threadId, locks);
-  let released = false;
+  // supersedes any lock whose registry lease was synchronously revoked, and
+  // its grant replaces the old one.
+  const lock: AgentControlDeviceLock = {
+    leaseId,
+    agentControlDevices: options.agentControlDevices,
+  };
+  agentControlLocksByThread.set(threadId, lock);
   return () => {
-    if (released) return;
-    released = true;
-    const current = agentControlLocksByThread.get(threadId);
-    current?.delete(leaseId);
-    if (current?.size === 0) agentControlLocksByThread.delete(threadId);
+    if (agentControlLocksByThread.get(threadId) === lock)
+      agentControlLocksByThread.delete(threadId);
   };
 }
 
-const agentControlBlocksLegacyTool = (threadId: string, name: DeviceToolName): boolean =>
-  (agentControlLocksByThread.get(threadId)?.size ?? 0) > 0 &&
-  !AGENT_CONTROL_SAFE_LEGACY_TOOLS.has(name);
+/** The Agent Control lease holding this thread's gateway tools, if any. */
+export function agentControlDeviceLockFor(threadId: string): AgentControlDeviceLock | null {
+  return agentControlLocksByThread.get(threadId) ?? null;
+}
 
 export function deviceToolRequiresApproval(name: string): boolean {
   return APPROVAL_REQUIRED.has(name as DeviceToolName);
@@ -130,12 +152,21 @@ export class DeviceToolArgumentError extends Error {
 }
 
 /**
+ * "require-attached" refused the device: it is not (or no longer) attached to
+ * this thread alone. Nothing reached it, and nothing is wrong with it.
+ */
+export class DeviceAttachmentFenceError extends Error {
+  override readonly name = "DeviceAttachmentFenceError";
+}
+
+/**
  * Tool-local navigation misses belong in the agent's tool result. Persisting
  * them as pane failures would replace a still-healthy simulator with a red
  * error state just because an accessibility lookup needs another attempt.
  */
 export function isViewerFacingDeviceToolError(error: unknown): boolean {
-  if (error instanceof DeviceToolArgumentError) return false;
+  if (error instanceof DeviceToolArgumentError || error instanceof DeviceAttachmentFenceError)
+    return false;
   // A backend refusing malformed input (a simulator setting it cannot plan)
   // says nothing about the device's health either.
   if (isDeviceRpcError(error) && error.code === "invalid-input") return false;
@@ -157,6 +188,15 @@ export interface DeviceToolCallInput {
   readonly threadId: string;
   readonly name: DeviceToolName;
   readonly args: Record<string, unknown>;
+  /**
+   * "attach-if-free" (the gateway's default) attaches the thread to the
+   * device it drives when the thread has none. "require-attached" (Agent
+   * Control) never attaches, and drives a device only while this thread
+   * alone has it attached: checked when the call starts and again right
+   * before every input, so a detach (or another thread attaching) during
+   * the call stops it with a `DeviceAttachmentFenceError`.
+   */
+  readonly attachment?: "attach-if-free" | "require-attached" | undefined;
   /** Aborts every settle loop when the caller goes away. */
   readonly signal?: AbortSignal | undefined;
   /** Largest base64 image the transport carries; defaults to the gateway's 4 MiB of PNG. */
@@ -352,7 +392,7 @@ export async function startDeviceToolGateway(
       if (method === "tools/list") {
         const { DEVICE_TOOL_DEFINITIONS } = await loadDefinitions();
         const tools =
-          (agentControlLocksByThread.get(binding.threadId)?.size ?? 0) > 0
+          agentControlDeviceLockFor(binding.threadId) !== null
             ? DEVICE_TOOL_DEFINITIONS.filter((tool) =>
                 AGENT_CONTROL_SAFE_LEGACY_TOOLS.has(tool.name),
               )
@@ -384,18 +424,14 @@ export async function startDeviceToolGateway(
       if (typeof name !== "string" || !DEVICE_TOOL_NAMES.includes(name as DeviceToolName)) {
         return json(response, 200, mcpError(id, -32602, "Unknown device tool."));
       }
-      if (agentControlBlocksLegacyTool(binding.threadId, name as DeviceToolName)) {
+      const lock = agentControlDeviceLockFor(binding.threadId);
+      if (lock !== null && !AGENT_CONTROL_SAFE_LEGACY_TOOLS.has(name as DeviceToolName)) {
         return json(
           response,
           200,
           mcpSuccess(id, {
             isError: true,
-            content: [
-              {
-                type: "text",
-                text: "Use the Ryco Agent Control device tools for this provider session.",
-              },
-            ],
+            content: [{ type: "text", text: agentControlRefusal(lock) }],
           }),
         );
       }
@@ -435,7 +471,14 @@ export async function startDeviceToolGateway(
           timing: options.timing,
         });
         let content = result.content;
-        if (result.isError !== true && !binding.guided) {
+        const lockAfter = agentControlDeviceLockFor(binding.threadId);
+        if (lockAfter !== null) {
+          // Agent Control holds the thread: its own tools drive the device, so the
+          // gateway's guide (which names tools hidden here) stays back.
+          if (lockAfter.agentControlDevices && result.isError !== true) {
+            content = [...content, { type: "text", text: AGENT_CONTROL_DEVICE_POINTER }];
+          }
+        } else if (result.isError !== true && !binding.guided) {
           // Claimed before the await, so concurrent first calls send it once.
           binding.guided = true;
           const guidance = await loadGuidance().catch(() => null);

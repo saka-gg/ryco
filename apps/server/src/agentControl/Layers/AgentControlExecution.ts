@@ -572,7 +572,10 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
             return result;
           });
 
-        if (isAgentControlDevicePlan(proposal.plan)) {
+        if (
+          isAgentControlDevicePlan(proposal.plan) ||
+          proposal.plan.kind === "deviceControlConsent"
+        ) {
           const plan = proposal.plan;
           if (Option.isNone(deviceService)) {
             return yield* Effect.fail(
@@ -599,6 +602,12 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
             },
           });
           yield* validator.revalidateExecution(proposal);
+          if (plan.kind === "deviceControlConsent") {
+            // The user's consent is the whole effect: the routine input it allows
+            // runs directly through ryco_device. Nothing touches the device here.
+            yield* checkpoint(appendStep(operation.state, "device-consent-granted"));
+            return operation;
+          }
 
           const run = async (): Promise<void> => {
             switch (plan.kind) {
@@ -1589,6 +1598,7 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
               isProjectAction(executing) ||
               executing.plan.kind === "changeSettings" ||
               executing.plan.kind === "deleteLocalTask" ||
+              executing.plan.kind === "deviceControlConsent" ||
               executing.plan.kind === "createAutomation" ||
               executing.plan.kind === "updateAutomation" ||
               executing.plan.kind === "cancelAutomation"
@@ -1598,7 +1608,8 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
                   )
                 : "The approved plan no longer passes current server validation.",
             retryable: true,
-            ...(isAgentControlDevicePlan(executing.plan)
+            ...(isAgentControlDevicePlan(executing.plan) ||
+            executing.plan.kind === "deviceControlConsent"
               ? { code: deviceRevalidationErrorCode(validation.cause) }
               : {}),
           });
@@ -1614,9 +1625,11 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
             executing.plan.kind === "workspaceLifecycle"
               ? durable
               : yield* compensate(durable).pipe(Effect.catch(() => Effect.succeed(durable)));
-          const deviceFailure = isAgentControlDevicePlan(executing.plan)
-            ? Cause.squash(outcome.cause)
-            : null;
+          const deviceFailure =
+            isAgentControlDevicePlan(executing.plan) ||
+            executing.plan.kind === "deviceControlConsent"
+              ? Cause.squash(outcome.cause)
+              : null;
           yield* settleProposalFailure(executing, compensated, {
             revalidation: false,
             message: isProjectAction(executing)

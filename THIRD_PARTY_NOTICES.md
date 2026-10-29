@@ -51,7 +51,8 @@ from Synara commit `dd88d9272f97e4dda5735281e73ce14de388ad25` under the same lic
 The idle release of Ryco-owned simulators after their last consumer settles was adapted from Synara
 commit `d419d5d40` (#1966) under the same license. Agent device tool evidence (screen settling, the
 compact screen snapshot), device_wait and the simulator log reader were adapted from Synara commit
-`74e0b3654` (#1924) under the same license.
+`74e0b3654` (#1924) under the same license. The per-task consent for agent device input and its
+"Allow Device for this task" wording follow Synara commit `299fd573b` under the same license.
 
 ### MIT License
 

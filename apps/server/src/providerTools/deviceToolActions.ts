@@ -28,7 +28,8 @@ import {
 } from "@ryco/contracts";
 import { Schema } from "effect";
 
-import type { DeviceLogQuery } from "../device/DeviceBackend.ts";
+import type { DeviceLogQuery, DeviceLogResult } from "../device/DeviceBackend.ts";
+import type { DeviceManager } from "../device/DeviceManager.ts";
 import {
   DEVICE_GATEWAY_IMAGE_MAX_BASE64_CHARS,
   DEVICE_LAUNCH_SETTLE_TIMEOUT_MS,
@@ -45,6 +46,7 @@ import {
   type DeviceObservation,
   type DeviceToolContent,
 } from "../device/deviceObservation.ts";
+import { clippedElementText } from "../device/deviceUiSnapshot.ts";
 import { planIosTestingAction } from "../device/iosTestingActions.ts";
 import {
   DeviceUiTargetError,
@@ -56,7 +58,11 @@ import {
   DEVICE_TOOL_BUTTONS,
   DEVICE_TOOL_LOG_LEVELS,
 } from "./deviceToolDefinitions.ts";
-import { DeviceToolArgumentError, type DeviceToolCallInput } from "./deviceToolGateway.ts";
+import {
+  DeviceAttachmentFenceError,
+  DeviceToolArgumentError,
+  type DeviceToolCallInput,
+} from "./deviceToolGateway.ts";
 
 type JsonRecord = Record<string, unknown>;
 
@@ -64,8 +70,62 @@ const LOG_DEFAULT_SECONDS = 300;
 const LOG_DEFAULT_LIMIT = 100;
 /** Reverse-DNS bundle ids only: they reach simctl as an argument. */
 const LOG_BUNDLE_ID = /^[A-Za-z0-9][A-Za-z0-9.-]{0,255}$/u;
-/** A JSON tree past this cannot ride beside its metadata in Agent Control's response cap. */
-const UI_TREE_MAX_CHARS = 400_000;
+/**
+ * A JSON tree past this many bytes, as it travels (escaped, UTF-8, inside the
+ * result's JSON), cannot ride beside its metadata in Agent Control's 512 KiB
+ * response cap.
+ */
+const UI_TREE_MAX_BYTES = 400_000;
+/** The same bound for a log read: older lines are left out until it fits. */
+const LOG_RESULT_MAX_BYTES = UI_TREE_MAX_BYTES;
+const LOG_FIT_NOTE =
+  " Older lines were left out to fit the response; ask for fewer or filter with contains.";
+
+/** Bytes of `value` as `jsonContent` sends it: pretty-printed, escaped inside the result's JSON, in UTF-8. */
+const travelingBytes = (value: unknown): number =>
+  Buffer.byteLength(JSON.stringify(JSON.stringify(value, null, 2)), "utf8");
+
+/** Drops the oldest log lines until the read fits the response cap (non-Latin text runs large). */
+function fitLogResult(result: DeviceLogResult): DeviceLogResult {
+  if (travelingBytes(result) <= LOG_RESULT_MAX_BYTES) return result;
+  // The fewest dropped lines that fit: the result shrinks as lines go.
+  let low = 1;
+  let high = result.log.length;
+  const fitted = (dropped: number): DeviceLogResult => ({
+    ...result,
+    log: result.log.slice(dropped),
+    omitted: result.omitted + dropped,
+    note: `${result.note}${LOG_FIT_NOTE}`,
+  });
+  while (low < high) {
+    const middle = Math.floor((low + high) / 2);
+    if (travelingBytes(fitted(middle)) <= LOG_RESULT_MAX_BYTES) high = middle;
+    else low = middle + 1;
+  }
+  return fitted(low);
+}
+
+/** "require-attached" refusals; the first names the fix, the second who holds the device. */
+export const DEVICE_NOT_ATTACHED_TEXT =
+  "Device control is limited to the device attached to this thread. Attach it with ryco_propose_device_attach, or ask the user to pick it in this thread's device pane.";
+export const DEVICE_SHARED_TEXT =
+  "Another thread also has this device attached, and device control needs it attached to this thread only. Ask the user to detach it in the other thread's device pane; an attach request cannot take it from another thread.";
+
+/** Why `threadId` may not drive `udid` under "require-attached", or null when it may. */
+export function attachmentFenceRefusal(
+  manager: Pick<DeviceManager, "exclusiveAttachment">,
+  threadId: string,
+  udid: string,
+): string | null {
+  switch (manager.exclusiveAttachment(threadId, udid)) {
+    case "exclusive":
+      return null;
+    case "unattached":
+      return DEVICE_NOT_ATTACHED_TEXT;
+    case "shared":
+      return DEVICE_SHARED_TEXT;
+  }
+}
 
 function stringArg(args: JsonRecord, name: string, required = true): string | undefined {
   const value = args[name];
@@ -205,8 +265,30 @@ export async function runDeviceTool(
 ): Promise<readonly DeviceToolContent[]> {
   const { manager, threadId, name, args, signal, timing } = input;
   const udid = () => stringArg(args, "udid")!;
-  const surface = async (reason: DeviceOpenPaneReason = "agent-tool") =>
-    manager.surfaceDeviceForAgent(threadId, udid(), reason);
+  const requireAttached = input.attachment === "require-attached";
+  /**
+   * "require-attached": only while this thread alone has the device attached.
+   * Synchronous, so nothing can detach it between this check and the input
+   * that follows it.
+   */
+  const fence = () => {
+    if (!requireAttached) return;
+    const refusal = attachmentFenceRefusal(manager, threadId, udid());
+    if (refusal !== null) throw new DeviceAttachmentFenceError(refusal);
+  };
+  /**
+   * Checked before every scroll and the final tap of a label tap or scroll, which
+   * run as one manager call: an aborted call (Stop, the turn ending, a timeout)
+   * sends nothing more, and the fence holds at each step.
+   */
+  const stepGuard = () => {
+    signal?.throwIfAborted();
+    fence();
+  };
+  const surface = async (reason: DeviceOpenPaneReason = "agent-tool") => {
+    if (requireAttached) manager.surfaceAttachedDeviceForAgent(threadId, udid(), reason);
+    else await manager.surfaceDeviceForAgent(threadId, udid(), reason);
+  };
   const observeArg = booleanArg(args, "observe");
   const screenshotArg = booleanArg(args, "screenshot");
 
@@ -249,6 +331,7 @@ export async function runDeviceTool(
     } = {},
   ): Promise<readonly DeviceToolContent[]> => {
     const act = async () => {
+      fence();
       await action();
       await surface(options.reason);
     };
@@ -269,18 +352,23 @@ export async function runDeviceTool(
     return await evidence(observation, fields());
   };
 
+  // Every tool but the list names a device: fenced before anything reaches it,
+  // and again right before each input below.
+  if (name !== "device_list") fence();
   switch (name) {
     case "device_list":
       return jsonContent(await manager.list({ includeShutdown: args.includeShutdown === true }));
     case "device_boot": {
       const result = await manager.boot(udid());
-      if (result.kind === "booted") {
+      if (result.kind === "booted" && !requireAttached) {
         await manager.ensureThreadAttached(threadId, udid()).catch(() => undefined);
       }
       return jsonContent(result);
     }
     case "device_install": {
-      const result = await manager.install(udid(), stringArg(args, "appPath")!);
+      const appPath = stringArg(args, "appPath")!;
+      fence();
+      const result = await manager.install(udid(), appPath);
       await surface("agent-install");
       return jsonContent(result);
     }
@@ -328,10 +416,12 @@ export async function runDeviceTool(
       let match: DeviceUiTargetMatch | null = null;
       return observed(
         async () => {
-          match = await manager.tapElement(udid(), request.target);
+          // Fenced, and stopped if aborted, before every scroll and the tap itself.
+          match = await manager.tapElement(udid(), request.target, { guard: stepGuard });
         },
         () => {
           const tapped = match!;
+          const text = clippedElementText(tapped.node);
           return {
             udid: udid(),
             x: tapped.point.x,
@@ -339,8 +429,8 @@ export async function runDeviceTool(
             element: {
               role: tapped.node.role,
               subrole: tapped.node.subrole,
-              label: tapped.node.label,
-              valueBeforeTap: tapped.node.value,
+              label: text.label,
+              valueBeforeTap: text.value,
             },
           };
         },
@@ -425,7 +515,8 @@ export async function runDeviceTool(
         return [{ type: "text", text: formatUiSnapshot(tree.root) }];
       }
       const text = JSON.stringify(tree, null, 2);
-      if (text.length > UI_TREE_MAX_CHARS) {
+      // Measured as it travels: escaped inside the result's JSON, in UTF-8.
+      if (Buffer.byteLength(JSON.stringify(text), "utf8") > UI_TREE_MAX_BYTES) {
         throw new Error('UI tree is too large; use format "compact".');
       }
       return [{ type: "text", text }];
@@ -441,15 +532,14 @@ export async function runDeviceTool(
         DEVICE_SCROLL_MIN_SWIPES,
         DEVICE_SCROLL_MAX_SWIPES,
       );
-      const match = await manager.scrollToElement(udid(), target, { maxScrolls });
+      const match = await manager.scrollToElement(udid(), target, { maxScrolls, guard: stepGuard });
       await surface();
       const fields = {
         udid: udid(),
         element: {
           role: match.node.role,
           subrole: match.node.subrole,
-          label: match.node.label,
-          value: match.node.value,
+          ...clippedElementText(match.node),
           frame: match.node.frame,
         },
         tapPoint: match.point,
@@ -519,10 +609,11 @@ export async function runDeviceTool(
           boundedInteger(args, "limit", 1, DEVICE_TOOL_BOUNDS.logMaxLimit) ?? LOG_DEFAULT_LIMIT,
         ...(contains === undefined || contains.length === 0 ? {} : { contains }),
       };
-      return jsonContent(await manager.readLogs(udid(), query));
+      return jsonContent(fitLogResult(await manager.readLogs(udid(), query)));
     }
     case "device_configure": {
       const testing = readSetting(udid(), args);
+      fence();
       await manager.testing(testing);
       await surface();
       return jsonContent({ udid: udid(), applied: testing.action.type });
