@@ -755,6 +755,44 @@ describe("makeManagedServerProvider", () => {
     ).pipe(Effect.provide(TestClock.layer())),
   );
 
+  it.effect("re-reads the usage of an adopted snapshot that was saved without any", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const checkCalls = yield* Ref.make(0);
+        const usageReads = yield* Ref.make(0);
+        const provider = yield* makeManagedServerProvider<TestSettings>({
+          maintenanceCapabilities,
+          getSettings: Effect.succeed({ enabled: true }),
+          streamSettings: Stream.empty,
+          haveSettingsChanged: () => false,
+          initialSnapshot: () => initialSnapshot,
+          checkProvider: Ref.update(checkCalls, (count) => count + 1).pipe(
+            Effect.as(refreshedSnapshotSecond),
+          ),
+          refreshUsage: (snapshot) =>
+            Ref.update(usageReads, (count) => count + 1).pipe(
+              Effect.as({ ...snapshot, rateLimits: { primary: { usedPercent: 12 } } }),
+            ),
+          refreshInterval: null,
+          snapshotFreshness: Duration.minutes(5),
+          persistedSnapshotFreshness: Duration.hours(6),
+        });
+        yield* Effect.yieldNow;
+
+        yield* TestClock.adjust(Duration.hours(1));
+        // Probed an hour ago when the usage read found nothing.
+        yield* provider.adoptPersistedSnapshot!({ snapshot: refreshedSnapshot, checkedAtMs: 0 });
+        assert.strictEqual(yield* provider.isFresh!, false);
+        assert.strictEqual(yield* provider.isProbeFresh!, true);
+
+        const revalidated = yield* provider.revalidate;
+        assert.deepStrictEqual(revalidated.rateLimits, { primary: { usedPercent: 12 } });
+        assert.strictEqual(yield* Ref.get(usageReads), 1);
+        assert.strictEqual(yield* Ref.get(checkCalls), 0);
+      }),
+    ).pipe(Effect.provide(TestClock.layer())),
+  );
+
   it.effect("keeps re-reading usage after a read found none, instead of trusting its absence", () =>
     Effect.scoped(
       Effect.gen(function* () {

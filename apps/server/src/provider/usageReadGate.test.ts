@@ -4,7 +4,9 @@ import { Duration, Effect } from "effect";
 import { TestClock } from "effect/testing";
 
 import {
+  credentialUsageReadPlan,
   makeUsageReadGate,
+  parseCredentialExpiresAtMs,
   parseRetryAfterMs,
   requestUsage,
   usageAccountKey,
@@ -340,6 +342,58 @@ describe("requestUsage", () => {
       );
       assert.deepEqual(yield* outcome(async () => new Response("not json")), FAILED);
       assert.deepEqual(yield* outcome(async () => Response.json(null)), FAILED);
+    }),
+  );
+});
+
+describe("parseCredentialExpiresAtMs", () => {
+  it("reads ISO dates and epoch seconds or milliseconds", () => {
+    assert.equal(parseCredentialExpiresAtMs(START), START_MS);
+    assert.equal(parseCredentialExpiresAtMs(epochSeconds(START_MS)), START_MS);
+    assert.equal(parseCredentialExpiresAtMs(String(epochSeconds(START_MS))), START_MS);
+    assert.equal(parseCredentialExpiresAtMs(START_MS), START_MS);
+    assert.equal(parseCredentialExpiresAtMs(String(START_MS)), START_MS);
+  });
+
+  it("has no expiry for absent or unreadable values", () => {
+    for (const value of [undefined, null, "", "  ", "soon", Number.NaN, Infinity, {}]) {
+      assert.equal(parseCredentialExpiresAtMs(value), undefined, String(value));
+    }
+  });
+});
+
+describe("credentialUsageReadPlan", () => {
+  const plannedOutcome = (expiresAtMs: number | undefined) =>
+    Effect.gen(function* () {
+      yield* TestClock.setTime(START_MS);
+      let requests = 0;
+      const request = Effect.sync((): UsageReadOutcome => {
+        requests += 1;
+        return read(USAGE);
+      });
+      const plan = yield* credentialUsageReadPlan("account", expiresAtMs, request);
+      assert.equal(plan.accountKey, "account");
+      return { outcome: yield* plan.fetch, requests };
+    });
+
+  it.effect(
+    "reads with a credential that is valid for more than a minute or of unknown expiry",
+    () =>
+      Effect.gen(function* () {
+        for (const expiresAtMs of [undefined, START_MS + minutes(1), START_MS + minutes(60)]) {
+          assert.deepEqual(yield* plannedOutcome(expiresAtMs), {
+            outcome: read(USAGE),
+            requests: 1,
+          });
+        }
+      }),
+  );
+
+  it.effect("clears usage without a request once the credential expires within a minute", () =>
+    Effect.gen(function* () {
+      for (const expiresAtMs of [START_MS + minutes(1) - 1, START_MS, START_MS - minutes(60)]) {
+        assert.deepEqual(yield* plannedOutcome(expiresAtMs), { outcome: CLEARED, requests: 0 });
+      }
     }),
   );
 });

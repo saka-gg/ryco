@@ -34,7 +34,13 @@ windows such as **Weekly · Opus**, and its cloud session credits; older nodes r
 5-hour and weekly windows. Ryco re-reads usage between full provider checks, so pace is judged
 at the time the usage was read, not at the provider's last check.
 
-When Claude or OpenCode Go throttles a usage read (HTTP 429) or the read fails, Ryco keeps
+A Grok account signed in with `grok login` shows one window, the share of its billing period's
+credits that is used, labelled **Weekly** or **Monthly** after the period Grok reports, or
+**Credits** when Grok reports no period. Ryco reads it with the Grok CLI's own login, read-only,
+and skips API-key instances and custom auth or endpoint setups (see [Grok](./grok.md#credit-usage)).
+Grok accounts are listed under Grok, apart from a hub's xAI accounts.
+
+When Claude, OpenCode Go or Grok throttles a usage read (HTTP 429) or the read fails, Ryco keeps
 showing the last good numbers with the time they were read and a note that they are not current.
 It does not ask that provider again until the cooldown ends: the provider's `Retry-After`, kept
 between 1 and 15 minutes (5 without one), or 1 minute after a failure. Numbers older than an hour

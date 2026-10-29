@@ -167,7 +167,7 @@ export type ServerProviderRateLimitCredits = typeof ServerProviderRateLimitCredi
 
 /**
  * Account-scoped rate-limit snapshot attached to a provider. Populated by the
- * drivers that can surface usage limits (Codex, Claude, and OpenCode Go);
+ * drivers that can surface usage limits (Codex, Claude, OpenCode Go and Grok);
  * each instance yields one snapshot since accounts differ per instance.
  * Other drivers leave it absent. The primary/secondary/tertiary slots hold
  * the account-wide windows older clients render; `windows` lists every
@@ -317,7 +317,7 @@ export const ServerProvider = Schema.Struct({
   ),
   skills: Schema.Array(ServerProviderSkill).pipe(Schema.withDecodingDefault(Effect.succeed([]))),
   // Optional and provider-driven. Populated only when the driver knows
-  // how to surface usage limits (Codex, Claude, OpenCode Go today).
+  // how to surface usage limits (Codex, Claude, OpenCode Go and Grok today).
   // Consumers must treat an absent value as "no live data", not "no
   // limits configured". Its `observedAt` may be newer than `checkedAt`:
   // usage is re-read without a full probe.

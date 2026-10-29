@@ -3,6 +3,7 @@ import {
   type ModelCapabilities,
   ProviderDriverKind,
   type ServerProvider,
+  type ServerProviderAuth,
   type ServerProviderModel,
   type ServerProviderSlashCommand,
 } from "@ryco/contracts";
@@ -25,6 +26,7 @@ import {
   providerModelsFromSettings,
   spawnAndCollect,
   type ServerProviderDraft,
+  withProviderRateLimits,
 } from "../providerSnapshot.ts";
 import {
   enrichProviderSnapshotWithVersionAdvisory,
@@ -34,9 +36,11 @@ import {
   GROK_HIDDEN_SLASH_COMMANDS,
   makeGrokAcpRuntime,
   resolveGrokAcpBaseModelId,
+  usesGrokApiKey,
 } from "../acp/GrokAcpSupport.ts";
 import { acpAvailableCommandsToSlashCommands } from "../providerSlashCommands.ts";
 import { ServerSettingsService, type ServerSettingsShape } from "../../serverSettings.ts";
+import type { GrokAccount } from "./GrokUsage.ts";
 
 const GROK_PRESENTATION = {
   displayName: "Grok",
@@ -187,6 +191,8 @@ const runGrokVersionCommand = (
 export const checkGrokProviderStatus = Effect.fn("checkGrokProviderStatus")(function* (
   grokSettings: GrokSettings,
   environment: NodeJS.ProcessEnv = process.env,
+  // The instance's account read (`GrokDriver` passes its gated one); used only once ready.
+  resolveAccount?: (environment: NodeJS.ProcessEnv) => Effect.Effect<GrokAccount>,
 ): Effect.fn.Return<ServerProviderDraft, never, ChildProcessSpawner.ChildProcessSpawner> {
   const checkedAt = DateTime.formatIso(yield* DateTime.now);
   const fallbackModels = grokModelsFromSettings(grokSettings.customModels);
@@ -318,6 +324,17 @@ export const checkGrokProviderStatus = Effect.fn("checkGrokProviderStatus")(func
     discoveredModels.length > 0
       ? grokModelsFromSettings(grokSettings.customModels, discoveredModels)
       : fallbackModels;
+  // ACP startup authenticated, and the CLI may have renewed its token meanwhile, so the login it
+  // keeps is now the one to read. Reading it never fails the probe.
+  const account = resolveAccount
+    ? yield* resolveAccount(environment).pipe(
+        Effect.catchCause((cause) =>
+          Effect.logWarning("Grok account read failed", { cause: Cause.pretty(cause) }).pipe(
+            Effect.as<GrokAccount>({}),
+          ),
+        ),
+      )
+    : {};
 
   return buildServerProvider({
     presentation: GROK_PRESENTATION,
@@ -325,14 +342,40 @@ export const checkGrokProviderStatus = Effect.fn("checkGrokProviderStatus")(func
     checkedAt,
     models,
     slashCommands,
+    ...(account.rateLimits ? { rateLimits: account.rateLimits } : {}),
     probe: {
       installed: true,
       version,
       status: "ready",
-      auth: { status: "unknown" },
+      auth: grokAccountAuth(environment, account),
     },
   });
 });
+
+/**
+ * How a Grok instance that started an ACP session is signed in: with its xAI API key, or with the
+ * CLI login (named by its email when the login could be read).
+ */
+function grokAccountAuth(environment: NodeJS.ProcessEnv, account: GrokAccount): ServerProviderAuth {
+  return usesGrokApiKey(environment)
+    ? { status: "authenticated", type: "apiKey", label: "xAI API key" }
+    : { status: "authenticated", ...(account.email ? { email: account.email } : {}) };
+}
+
+/**
+ * A ready `snapshot` with a newer read of its account: its credit usage, and the email of the login
+ * those credits belong to. The ACP start that made it ready still vouches for the sign-in.
+ */
+export function withGrokAccount(
+  snapshot: ServerProvider,
+  environment: NodeJS.ProcessEnv,
+  account: GrokAccount,
+): ServerProvider {
+  return {
+    ...withProviderRateLimits(snapshot, account.rateLimits),
+    auth: grokAccountAuth(environment, account),
+  };
+}
 
 export const enrichGrokSnapshot = (input: {
   readonly snapshot: ServerProvider;

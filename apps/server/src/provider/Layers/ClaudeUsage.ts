@@ -6,14 +6,15 @@ import * as NodePath from "node:path";
 
 import type { ServerProviderRateLimits } from "@ryco/contracts";
 import { claudeNonLoginCredentialSource } from "@ryco/shared/claudeCredentialVariables";
-import { Cache, Clock, type Duration, Effect } from "effect";
+import { Cache, type Duration, Effect } from "effect";
 
 import { parseProviderSourcePaths } from "../ProviderSourcePaths.ts";
 import {
+  credentialUsageReadPlan,
+  parseCredentialExpiresAtMs,
   requestUsage,
   usageAccountKey,
   type UsageReadGate,
-  type UsageReadOutcome,
   type UsageReadPlan,
 } from "../usageReadGate.ts";
 import {
@@ -29,7 +30,6 @@ import {
  */
 const KEYCHAIN_SERVICE_NAME = "Claude Code-credentials";
 const KEYCHAIN_FALLBACK_ACCOUNT = "claude-code-user";
-const TOKEN_EXPIRY_SKEW_MS = 60_000;
 const USAGE_REQUEST_TIMEOUT_MS = 10_000;
 
 interface ClaudeCredentials {
@@ -169,21 +169,6 @@ async function readClaudeCredentials(store: ClaudeCredentialStore): Promise<{
   return credentials ? { credentials, keychain: undefined } : null;
 }
 
-function parseExpiresAtMs(value: string | number | undefined): number | undefined {
-  if (typeof value === "number" && Number.isFinite(value)) {
-    return value < 1_000_000_000_000 ? value * 1000 : value;
-  }
-  if (typeof value !== "string" || value.trim().length === 0) {
-    return undefined;
-  }
-  const numeric = Number(value);
-  if (Number.isFinite(numeric)) {
-    return numeric < 1_000_000_000_000 ? numeric * 1000 : numeric;
-  }
-  const parsed = Date.parse(value);
-  return Number.isFinite(parsed) ? parsed : undefined;
-}
-
 function claudeUsageUserAgent(version: string | null): string {
   return version ? `claude-code/${version}` : "claude-code";
 }
@@ -267,20 +252,15 @@ export const planClaudeUsageRead = Effect.fn("planClaudeUsageRead")(function* (
     store.keychain?.service ?? "",
     oauth.refreshToken ?? accessToken,
   );
-  const nowMs = yield* Clock.currentTimeMillis;
-  const expiresAt = parseExpiresAtMs(oauth.expiresAt);
-  if (expiresAt !== undefined && nowMs > expiresAt - TOKEN_EXPIRY_SKEW_MS) {
-    return { accountKey, fetch: Effect.succeed<UsageReadOutcome>({ _tag: "Cleared" }) };
-  }
-
   const plan = oauth.subscriptionType ?? oauth.rateLimitTier ?? null;
-  return {
+  return yield* credentialUsageReadPlan(
     accountKey,
-    fetch: requestUsage(
+    parseCredentialExpiresAtMs(oauth.expiresAt),
+    requestUsage(
       () => callUsageApi(fetchImpl, accessToken, version),
       (body, nowMs) => parseClaudeUsageRateLimits(body, plan, nowMs),
     ),
-  };
+  );
 });
 
 /**

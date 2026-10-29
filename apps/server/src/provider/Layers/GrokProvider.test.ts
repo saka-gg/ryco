@@ -1,3 +1,6 @@
+import * as NodePath from "node:path";
+import { fileURLToPath } from "node:url";
+
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as Effect from "effect/Effect";
 import * as FileSystem from "effect/FileSystem";
@@ -5,15 +8,59 @@ import * as Path from "effect/Path";
 import * as Schema from "effect/Schema";
 import { describe, expect, it } from "vite-plus/test";
 import { ChildProcessSpawner } from "effect/process";
-import { GrokSettings } from "@ryco/contracts";
+import { GrokSettings, type ServerProviderRateLimits } from "@ryco/contracts";
 
+import { makeUsageReadGate } from "../usageReadGate.ts";
 import {
   buildInitialGrokProviderSnapshot,
   checkGrokProviderStatus,
   grokSlashCommandsFromInitialize,
 } from "./GrokProvider.ts";
+import { resolveGrokAccount, type GrokAccount } from "./GrokUsage.ts";
 
 const decodeGrokSettings = Schema.decodeSync(GrokSettings);
+
+const mockAgentPath = NodePath.join(
+  NodePath.dirname(fileURLToPath(import.meta.url)),
+  "../../../scripts/acp-mock-agent.ts",
+);
+
+/**
+ * A `grok` that answers `--version` and serves the ACP mock agent for `grok agent stdio`, so the
+ * probe reaches its ready branch without the real CLI or account.
+ */
+const makeReadyGrokBinary = Effect.gen(function* () {
+  const fs = yield* FileSystem.FileSystem;
+  const path = yield* Path.Path;
+  const dir = yield* fs.makeTempDirectoryScoped({ prefix: "ryco-grok-ready-" });
+  const grokPath = path.join(dir, "grok");
+  yield* fs.writeFileString(
+    grokPath,
+    [
+      "#!/bin/sh",
+      'if [ "$1" = "--version" ]; then printf "grok-cli 0.0.99\\n"; exit 0; fi',
+      `exec ${JSON.stringify(process.execPath)} ${JSON.stringify(mockAgentPath)} "$@"`,
+      "",
+    ].join("\n"),
+  );
+  yield* fs.chmod(grokPath, 0o755);
+  return grokPath;
+});
+
+/** The test runner's environment without an xAI API key, so the CLI login is what counts. */
+function loginEnvironment(overrides: NodeJS.ProcessEnv = {}): NodeJS.ProcessEnv {
+  const { XAI_API_KEY: _apiKey, ...environment } = process.env;
+  return { ...environment, ...overrides };
+}
+
+const CREDITS: ServerProviderRateLimits = {
+  limitId: "grok-credits",
+  secondary: { usedPercent: 37, resetsAt: 1_789_701_030, windowDurationMins: 10_080 },
+  windows: [
+    { id: "credits", usedPercent: 37, resetsAt: 1_789_701_030, windowDurationMins: 10_080 },
+  ],
+  observedAt: "2026-09-16T00:00:00.000Z",
+};
 
 const runNode = <A, E>(
   effect: Effect.Effect<
@@ -112,6 +159,85 @@ describe("checkGrokProviderStatus", () => {
     expect(snapshot.installed).toBe(true);
     expect(snapshot.models.map((model) => model.slug)).toEqual(["grok-build"]);
     expect(snapshot.message).toContain("ACP startup failed");
+  });
+});
+
+describe("checkGrokProviderStatus account", () => {
+  it("reports a ready probe as signed in, naming the login and carrying its credits", async () => {
+    const environment = loginEnvironment({ GROK_HOME: "/definitely/not/a/grok-home" });
+    const reads: Array<NodeJS.ProcessEnv> = [];
+    const snapshot = await runNode(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const grokPath = yield* makeReadyGrokBinary;
+          return yield* checkGrokProviderStatus(
+            decodeGrokSettings({ enabled: true, binaryPath: grokPath }),
+            environment,
+            (readEnvironment) =>
+              Effect.sync((): GrokAccount => {
+                reads.push(readEnvironment);
+                return { email: "someone@example.com", rateLimits: CREDITS };
+              }),
+          );
+        }),
+      ),
+    );
+
+    expect(snapshot.status).toBe("ready");
+    expect(snapshot.models.map((model) => model.slug)).toContain("grok-build");
+    expect(snapshot.auth).toEqual({ status: "authenticated", email: "someone@example.com" });
+    expect(snapshot.rateLimits).toEqual(CREDITS);
+    expect(reads).toEqual([environment]);
+  });
+
+  it("reports an API-key instance as signed in with its key, without reading credits", async () => {
+    const requests: Array<string> = [];
+    const fetchImpl = (async (url: string | URL | Request) => {
+      requests.push(String(url));
+      throw new Error("An API-key instance must not read the CLI login's credits.");
+    }) as unknown as typeof globalThis.fetch;
+    const snapshot = await runNode(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const grokPath = yield* makeReadyGrokBinary;
+          const gate = yield* makeUsageReadGate();
+          return yield* checkGrokProviderStatus(
+            decodeGrokSettings({ enabled: true, binaryPath: grokPath }),
+            loginEnvironment({ XAI_API_KEY: "xai-test-key" }),
+            (readEnvironment) => resolveGrokAccount(readEnvironment, gate, { fetchImpl }),
+          );
+        }),
+      ),
+    );
+
+    expect(snapshot.status).toBe("ready");
+    expect(snapshot.auth).toEqual({
+      status: "authenticated",
+      type: "apiKey",
+      label: "xAI API key",
+    });
+    expect(snapshot.rateLimits).toBeUndefined();
+    expect(requests).toEqual([]);
+  });
+
+  it("stays ready when the account cannot be read", async () => {
+    const snapshot = await runNode(
+      Effect.scoped(
+        Effect.gen(function* () {
+          const grokPath = yield* makeReadyGrokBinary;
+          return yield* checkGrokProviderStatus(
+            decodeGrokSettings({ enabled: true, binaryPath: grokPath }),
+            loginEnvironment({ GROK_HOME: "/definitely/not/a/grok-home" }),
+            () => Effect.die(new Error("account read failed")),
+          );
+        }),
+      ),
+    );
+
+    expect(snapshot.status).toBe("ready");
+    // The ACP start authenticated; only the email and credits are unknown.
+    expect(snapshot.auth).toEqual({ status: "authenticated" });
+    expect(snapshot.rateLimits).toBeUndefined();
   });
 });
 
