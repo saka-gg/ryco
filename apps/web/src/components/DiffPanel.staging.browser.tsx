@@ -8,21 +8,38 @@ const fixture = vi.hoisted(() => ({
   read: vi.fn(),
   apply: vi.fn(),
   commit: vi.fn(),
+  cancel: vi.fn(),
   stagedOnlyCommit: true,
 }));
-vi.mock("../environmentApi", () => ({
-  ensureEnvironmentApi: () => ({
+vi.mock("../environmentApi", () => {
+  const api = () => ({
     vcs: { readLocalChanges: fixture.read, applyIndexPatch: fixture.apply },
-    git: { runStackedAction: fixture.commit },
-  }),
-}));
+    git: { runStackedAction: fixture.commit, cancelStackedAction: fixture.cancel },
+  });
+  return { ensureEnvironmentApi: api, readEnvironmentApi: api };
+});
 vi.mock("../rpc/useGit", () => ({
   GIT_USER_ACTION_KIND: { runStackedAction: "run-stacked-action" },
   gitMutationTrackingKey: (kind: string, environmentId: string, cwd: string) =>
     `${kind}:${environmentId}:${cwd}`,
 }));
-const reporter = vi.hoisted(() => ({ running: vi.fn(), succeeded: vi.fn(), failed: vi.fn() }));
-vi.mock("../gitActionNotices", () => ({ createGitActionReporter: () => reporter }));
+const reporter = vi.hoisted(() => ({
+  running: vi.fn(),
+  succeeded: vi.fn(),
+  failed: vi.fn(),
+  rejected: vi.fn(() => false),
+  onProgress: vi.fn(),
+  onRecoveryState: vi.fn(),
+}));
+const reporterInputs = vi.hoisted(
+  () => [] as Array<{ readonly id: string; readonly stop?: () => unknown }>,
+);
+vi.mock("../gitActionNotices", () => ({
+  createGitActionReporter: (input: { readonly id: string; readonly stop?: () => unknown }) => {
+    reporterInputs.push(input);
+    return reporter;
+  },
+}));
 vi.mock("../hooks/useChatsAvailability", () => ({
   useEnvironmentServerConfigSelector: (
     _environmentId: unknown,
@@ -287,6 +304,31 @@ describe("staged and unstaged review", () => {
         stagedOnly: { expectedRevision: "d".repeat(64) },
       });
     expect(fixture.commit.mock.calls[0]?.[0]).not.toHaveProperty("filePaths");
+    // Like the git controls' commits, it outlives a dropped connection and its notice offers Stop.
+    expect(fixture.commit.mock.calls[0]?.[1]).toMatchObject({
+      recoverable: true,
+      onRecoveryState: reporter.onRecoveryState,
+    });
+    const { actionId } = fixture.commit.mock.calls[0]?.[0] as { actionId: string };
+    expect(reporterInputs.at(-1)?.id).toBe(actionId);
+    reporterInputs.at(-1)?.stop?.();
+    expect(fixture.cancel).toHaveBeenCalledExactlyOnceWith({ actionId });
+    // A finished hook hands the notice back to its step.
+    const { onProgress } = fixture.commit.mock.calls[0]?.[1] as {
+      onProgress: (event: object) => void;
+    };
+    const event = { actionId, cwd: "/repo", action: "commit" } as const;
+    onProgress({ ...event, kind: "phase_started", phase: "commit", label: "Committing..." });
+    onProgress({ ...event, kind: "hook_started", hookName: "pre-commit" });
+    expect(reporter.running).toHaveBeenLastCalledWith("Running pre-commit...");
+    onProgress({
+      ...event,
+      kind: "hook_finished",
+      hookName: "pre-commit",
+      exitCode: 0,
+      durationMs: 5,
+    });
+    expect(reporter.running).toHaveBeenLastCalledWith("Committing...");
     await expect
       .poll(() => reporter.succeeded.mock.calls[0]?.[0])
       .toEqual({ title: "Committed 89abcde", description: "Commit the staged edit" });
@@ -301,10 +343,10 @@ describe("staged and unstaged review", () => {
     await screen.getByRole("button", { name: "Commit staged" }).click();
     await expect.element(screen.getByRole("alert")).toMatchTextContent(/moved since your review/);
     expect(fixture.commit).toHaveBeenCalledTimes(2);
-    expect(reporter.failed).toHaveBeenCalledWith({
-      title: "Commit failed",
-      description: "The staged changes, HEAD or branch moved since your review.",
-    });
+    expect(reporter.rejected).toHaveBeenCalledWith(
+      new Error("The staged changes, HEAD or branch moved since your review."),
+      "Commit failed",
+    );
     await expect.element(screen.getByRole("button", { name: "Commit staged" })).toBeDisabled();
     await screen.unmount();
   });

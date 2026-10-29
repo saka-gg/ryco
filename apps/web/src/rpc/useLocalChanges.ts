@@ -5,7 +5,7 @@ import {
 import type { EnvironmentId, ServerConfig } from "@ryco/contracts";
 import { useCallback, useMemo, useSyncExternalStore } from "react";
 import type { ThreadToastData } from "../components/ui/toast";
-import { ensureEnvironmentApi } from "../environmentApi";
+import { ensureEnvironmentApi, readEnvironmentApi } from "../environmentApi";
 import { createGitActionReporter } from "../gitActionNotices";
 import { useEnvironmentServerConfigSelector } from "../hooks/useChatsAvailability";
 import { randomUUID } from "../lib/utils";
@@ -24,7 +24,8 @@ const selectStagedOnlyCommit = (config: ServerConfig | null): boolean =>
 
 /**
  * Commits exactly the reviewed index, reported like the git controls' commits:
- * on the checkout's crown or a toast, and as its running git action.
+ * on the checkout's crown or a toast, and as its running git action. Like
+ * them, the commit outlives a dropped connection and its notice offers Stop.
  */
 async function commitStagedChanges(
   environmentId: EnvironmentId,
@@ -38,8 +39,10 @@ async function commitStagedChanges(
     environmentId,
     cwd: commit.cwd,
     toastData,
+    stop: () => readEnvironmentApi(environmentId)?.git.cancelStackedAction?.({ actionId }),
   });
-  reporter.running("Committing staged changes...");
+  let stepTitle = "Committing staged changes...";
+  reporter.running(stepTitle);
   const trackingKey = gitMutationTrackingKey(
     GIT_USER_ACTION_KIND.runStackedAction,
     environmentId,
@@ -56,18 +59,26 @@ async function commitStagedChanges(
         ...(commit.commitMessage ? { commitMessage: commit.commitMessage } : {}),
       },
       {
+        recoverable: true,
+        onRecoveryState: reporter.onRecoveryState,
         onProgress: (event) => {
-          if (event.kind === "phase_started") reporter.running(event.label);
-          else if (event.kind === "hook_started") reporter.running(`Running ${event.hookName}...`);
+          reporter.onProgress(event);
+          if (event.kind === "phase_started") {
+            stepTitle = event.label;
+            reporter.running(stepTitle);
+          } else if (event.kind === "hook_started") {
+            reporter.running(`Running ${event.hookName}...`);
+          } else if (event.kind === "hook_finished") {
+            // Back to the step (also when a resume replays a hook that finished meanwhile).
+            reporter.running(stepTitle);
+          }
         },
       },
     );
     reporter.succeeded({ title: result.toast.title, description: result.toast.description });
   } catch (error) {
-    reporter.failed({
-      title: "Commit failed",
-      description: error instanceof Error ? error.message : "An error occurred.",
-    });
+    // Stopped or unconfirmed: the commit may exist, so other reads of the checkout go stale.
+    if (reporter.rejected(error, "Commit failed")) invalidateScopes([gitScopeKey(commit.cwd)]);
     throw error;
   } finally {
     endMutationTracking(trackingKey);

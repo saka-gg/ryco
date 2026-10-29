@@ -1,5 +1,11 @@
 import type { ToastManagerAddOptions } from "@base-ui/react/toast";
-import type { GitStackedAction } from "@ryco/contracts";
+import { hasErrorTag } from "@ryco/client-runtime/rpc";
+import type {
+  GitActionProgressEvent,
+  GitActionRecoveryState,
+  GitCancelStackedActionResult,
+  GitStackedAction,
+} from "@ryco/contracts";
 import { useEffect, useState } from "react";
 
 import { stackedThreadToast, toastManager, type ThreadToastData } from "./components/ui/toast";
@@ -12,7 +18,10 @@ import { stackedThreadToast, toastManager, type ThreadToastData } from "./compon
  */
 
 export type GitActionNoticeKind = "pull" | "commit" | "push" | "pr";
-/** `cancelled`: stopped before anything ran (the Ship button's grace period). */
+/**
+ * `cancelled`: stopped before anything ran (the Ship button's grace period), or
+ * stopped by the user while it ran.
+ */
 export type GitActionNoticeStatus = "running" | "success" | "error" | "cancelled";
 
 export interface GitActionNoticeAction {
@@ -27,9 +36,16 @@ export interface GitActionNotice {
   readonly status: GitActionNoticeStatus;
   readonly title: string;
   readonly description?: string | undefined;
-  /** A follow-up offered with a result ("View PR", "Create PR"). */
+  /**
+   * A follow-up offered with a result ("View PR", "Create PR"), or Stop while an
+   * action that outlives its connection runs. Stop acts in place: the notice
+   * stays until the run reports its result.
+   */
   readonly action?: GitActionNoticeAction | undefined;
 }
+
+/** Shown while a recoverable action waits for a connection that can follow it again. */
+export const GIT_ACTION_RECONNECTING_DESCRIPTION = "Reconnecting... It keeps running on the node.";
 
 /** What a stacked action announces itself as: its last step decides. */
 export function gitActionNoticeKind(action: GitStackedAction): GitActionNoticeKind {
@@ -96,6 +112,10 @@ export function useGitActionNotice(
 }
 
 export interface GitActionReporter {
+  /**
+   * The run's current step and progress line. While the run reconnects, or a
+   * Stop is under way, the notice says so in place of the progress line.
+   */
   readonly running: (title: string, description?: string) => void;
   readonly succeeded: (result: {
     readonly title: string;
@@ -103,14 +123,59 @@ export interface GitActionReporter {
     readonly action?: GitActionNoticeAction | undefined;
   }) => void;
   readonly failed: (failure: { readonly title: string; readonly description?: string }) => void;
-  /** Ends the run before it did anything. */
+  /** Ends the run before it did anything, or after the user stopped it. */
   readonly cancelled: (result: { readonly title: string; readonly description?: string }) => void;
   /** Drops this run's toast without a result, when a follow-up run reports in its place. */
   readonly dismiss: () => void;
+  /**
+   * `git.runStackedAction`'s `onRecoveryState`: a run that outlives its
+   * connection offers Stop (when the reporter has `stop`) and says while it
+   * reconnects.
+   */
+  readonly onRecoveryState: (state: GitActionRecoveryState) => void;
+  /**
+   * Sees each progress event of the run. Stop shows once the node reported the
+   * run, so it never races the start, and goes away once the action reported
+   * its end: a Stop then could only skip the bookkeeping after it.
+   */
+  readonly onProgress: (event: GitActionProgressEvent) => void;
+  /**
+   * Ends the run with its rejection: "Stopped", "Couldn't confirm" when the
+   * client lost track of the action, otherwise `failureTitle` with the error's
+   * message. True when the checkout may have changed without a reported result
+   * (stopped or unconfirmed), so the caller reads it again.
+   */
+  readonly rejected: (error: unknown, failureTitle: string) => boolean;
 }
 
 /** Results stay up this long once seen (toasts only; the crown keeps its own dwell). */
 const RESULT_TOAST_VISIBLE_MS = 10_000;
+
+const STOPPING_DESCRIPTION = "Stopping...";
+const NOTHING_TO_STOP_DESCRIPTION = "Nothing left to stop. Waiting for the result...";
+const NOT_CONNECTED_TO_STOP = "Not connected to the node. Try again once it reconnects.";
+
+/** Where the user's Stop of a run stands. A failed one leaves Stop offered, with its reason. */
+type StopState =
+  | { readonly kind: "idle" }
+  | { readonly kind: "stopping" }
+  | { readonly kind: "nothing-to-stop" }
+  | { readonly kind: "failed"; readonly message: string };
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : "An error occurred.";
+}
+
+function stoppedDescription(error: unknown): string {
+  const revoked =
+    typeof error === "object" &&
+    error !== null &&
+    "reason" in error &&
+    error.reason === "access-revoked";
+  return revoked
+    ? "Access to this node was revoked. Steps that already finished stay done."
+    : "Steps that already finished stay done.";
+}
 
 export function createGitActionReporter(input: {
   readonly id: string;
@@ -118,9 +183,24 @@ export function createGitActionReporter(input: {
   readonly environmentId: string | null;
   readonly cwd: string | null;
   readonly toastData?: ThreadToastData | undefined;
+  /**
+   * Stops the run's action on the node (`git.cancelStackedAction` through the
+   * environment's current connection); undefined while no connection can take
+   * it. Offered as Stop only while a recoverable run is under way.
+   */
+  readonly stop?: (() => Promise<GitCancelStackedActionResult> | undefined) | undefined;
 }): GitActionReporter {
   const { toastData } = input;
   let toastId: ReturnType<typeof toastManager.add> | null = null;
+  /** The caller's latest running report; null once the run reported a result. */
+  let shown: { readonly title: string; readonly description: string | undefined } | null = null;
+  let recoverable = false;
+  /** The node reported the run, so a Stop reaches it. */
+  let reported = false;
+  /** The action reported its end (`action_finished` / `action_failed`). */
+  let ending = false;
+  let reconnecting = false;
+  let stopState: StopState = { kind: "idle" };
 
   const report = (
     notice: Omit<GitActionNotice, "id" | "kind">,
@@ -135,19 +215,82 @@ export function createGitActionReporter(input: {
     }
     const options = toast();
     if (toastId === null) toastId = toastManager.add(options);
-    else toastManager.update(toastId, options);
+    // An update merges into the shown toast: a report without a line or an action drops the
+    // running one's ("Running for 24s", Stop) instead of keeping it under its result.
+    else
+      toastManager.update(toastId, { description: undefined, actionProps: undefined, ...options });
   };
 
-  return {
-    running: (title, description) =>
-      report({ status: "running", title, description }, () => ({
-        type: "loading",
-        title,
-        ...(description !== undefined ? { description } : {}),
-        timeout: 0,
-        ...(toastData !== undefined ? { data: toastData } : {}),
-      })),
-    succeeded: ({ title, description, action }) =>
+  const canStop = () =>
+    input.stop !== undefined &&
+    recoverable &&
+    reported &&
+    !ending &&
+    (stopState.kind === "idle" || stopState.kind === "failed");
+
+  function renderRunning() {
+    if (shown === null) return;
+    const { title } = shown;
+    // A Stop under way or answered says so first; a failed one's reason gives way to
+    // "Reconnecting...", which usually explains it.
+    const description =
+      stopState.kind === "stopping"
+        ? STOPPING_DESCRIPTION
+        : stopState.kind === "nothing-to-stop"
+          ? NOTHING_TO_STOP_DESCRIPTION
+          : reconnecting
+            ? GIT_ACTION_RECONNECTING_DESCRIPTION
+            : stopState.kind === "failed"
+              ? `Couldn't stop: ${stopState.message}`
+              : shown.description;
+    const action = canStop() ? stopAction : undefined;
+    report({ status: "running", title, description, action }, () => ({
+      type: "loading",
+      title,
+      ...(description !== undefined ? { description } : {}),
+      ...(action ? { actionProps: { children: action.label, onClick: action.onClick } } : {}),
+      timeout: 0,
+      ...(toastData !== undefined ? { data: toastData } : {}),
+    }));
+  }
+
+  function requestStop() {
+    const stop = input.stop;
+    if (!stop || !canStop()) return;
+    stopState = { kind: "stopping" };
+    renderRunning();
+    new Promise<GitCancelStackedActionResult>((resolve, reject) => {
+      const request = stop();
+      if (request) request.then(resolve, reject);
+      else reject(new Error(NOT_CONNECTED_TO_STOP));
+    }).then(
+      ({ cancelled }) => {
+        // Stopped: "Stopping..." holds until the run's result replaces it.
+        if (cancelled || stopState.kind !== "stopping") return;
+        stopState = { kind: "nothing-to-stop" };
+        renderRunning();
+      },
+      (error: unknown) => {
+        if (stopState.kind !== "stopping") return;
+        stopState = { kind: "failed", message: errorMessage(error) };
+        renderRunning();
+      },
+    );
+  }
+
+  const stopAction: GitActionNoticeAction = { label: "Stop", onClick: requestStop };
+
+  const reporter: GitActionReporter = {
+    running: (title, description) => {
+      // A failed Stop's reason shows until the run moves on to another step.
+      if (stopState.kind === "failed" && shown !== null && shown.title !== title) {
+        stopState = { kind: "idle" };
+      }
+      shown = { title, description };
+      renderRunning();
+    },
+    succeeded: ({ title, description, action }) => {
+      shown = null;
       report({ status: "success", title, description, action }, () => {
         const data = { ...toastData, dismissAfterVisibleMs: RESULT_TOAST_VISIBLE_MS };
         return action
@@ -173,8 +316,10 @@ export function createGitActionReporter(input: {
               timeout: 0,
               data,
             };
-      }),
-    failed: ({ title, description }) =>
+      });
+    },
+    failed: ({ title, description }) => {
+      shown = null;
       report({ status: "error", title, description }, () =>
         stackedThreadToast({
           type: "error",
@@ -182,17 +327,56 @@ export function createGitActionReporter(input: {
           ...(description !== undefined ? { description } : {}),
           ...(toastData !== undefined ? { data: toastData } : {}),
         }),
-      ),
-    cancelled: ({ title, description }) =>
+      );
+    },
+    cancelled: ({ title, description }) => {
+      shown = null;
+      // Goes like a success once seen, rather than keeping the running toast's `timeout: 0`.
       report({ status: "cancelled", title, description }, () => ({
         type: "info",
         title,
         ...(description !== undefined ? { description } : {}),
-        ...(toastData !== undefined ? { data: toastData } : {}),
-      })),
+        timeout: 0,
+        data: { ...toastData, dismissAfterVisibleMs: RESULT_TOAST_VISIBLE_MS },
+      }));
+    },
     dismiss: () => {
+      shown = null;
       if (toastId !== null) toastManager.close(toastId);
       toastId = null;
     },
+    onRecoveryState: (state) => {
+      if (state.kind === "started") {
+        // Stop waits for the run's first progress (`onProgress`).
+        recoverable = state.recoverable;
+        return;
+      }
+      reconnecting = state.kind === "reconnecting";
+      // A Stop that failed on the connection that dropped says nothing about the next one.
+      if (stopState.kind === "failed") stopState = { kind: "idle" };
+      renderRunning();
+    },
+    onProgress: (event) => {
+      const offered = canStop();
+      reported = true;
+      if (event.kind === "action_finished" || event.kind === "action_failed") ending = true;
+      if (canStop() !== offered) renderRunning();
+    },
+    rejected: (error, failureTitle) => {
+      if (hasErrorTag(error, "GitActionStoppedError")) {
+        reporter.cancelled({ title: "Stopped", description: stoppedDescription(error) });
+        return true;
+      }
+      if (hasErrorTag(error, "GitActionResultUnavailableError")) {
+        reporter.failed({
+          title: "Couldn't confirm the Git action",
+          description: "Check the repository status before trying again.",
+        });
+        return true;
+      }
+      reporter.failed({ title: failureTitle, description: errorMessage(error) });
+      return false;
+    },
   };
+  return reporter;
 }

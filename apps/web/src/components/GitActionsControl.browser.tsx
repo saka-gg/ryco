@@ -3,8 +3,13 @@ import "../index.css";
 import { scopeThreadRef } from "@ryco/client-runtime/scoped";
 import {
   EnvironmentId,
+  GitActionResultUnavailableError,
+  GitActionStoppedError,
   ProjectId,
   ThreadId,
+  type EnvironmentApi,
+  type GitActionProgressEvent,
+  type GitActionRecoveryState,
   type ServerConfig,
   type VcsStatusResult,
 } from "@ryco/contracts";
@@ -46,6 +51,7 @@ const {
   serverThreadWorktreePathRef,
   refreshGitStatusSpy,
   runStackedActionMutateAsyncSpy,
+  runStackedActionMutationRef,
   setDraftThreadContextSpy,
   setThreadBranchSpy,
   toastAddSpy,
@@ -66,12 +72,19 @@ const {
   serverThreadWorktreePathRef: { current: null as string | null },
   refreshGitStatusSpy: vi.fn(() => Promise.resolve(null)),
   runStackedActionMutateAsyncSpy: vi.fn(() => activeRunStackedActionDeferredRef.current.promise),
+  /** The runner's stacked-action mutation, as handed to `useGitMutation`. */
+  runStackedActionMutationRef: { current: null as MockGitMutationOptions | null },
   setDraftThreadContextSpy: vi.fn(),
   setThreadBranchSpy: vi.fn(),
   toastAddSpy: vi.fn(() => "toast-1"),
   toastCloseSpy: vi.fn(),
   toastUpdateSpy: vi.fn(),
 }));
+
+interface MockGitMutationOptions {
+  readonly trackingKey?: string | null;
+  readonly mutationFn: (args: unknown) => Promise<unknown>;
+}
 
 vi.mock("~/rpc/serverState", async (importOriginal) => ({
   ...(await importOriginal<typeof import("~/rpc/serverState")>()),
@@ -103,9 +116,10 @@ vi.mock("~/rpc/useGit", () => ({
   invalidateScopes: vi.fn(),
   useGitActionActivity: vi.fn(() => gitActionActivityRef.current),
   useIsGitMutating: vi.fn(() => false),
-  useGitMutation: vi.fn((options: { trackingKey?: string | null }) => {
+  useGitMutation: vi.fn((options: MockGitMutationOptions) => {
     const trackingKey = options.trackingKey ?? "";
     if (typeof trackingKey === "string" && trackingKey.includes("run-stacked-action")) {
+      runStackedActionMutationRef.current = options;
       return {
         mutate: vi.fn(),
         mutateAsync: runStackedActionMutateAsyncSpy,
@@ -305,7 +319,15 @@ function setEnvironmentConfig(environmentId: EnvironmentId, prefix: string | nul
 import GitActionsControl, { GitThreadSync } from "./GitActionsControl";
 import { CROWN_SHIP_GRACE_MS, useCrownShipBinding } from "./chat/useCrownShipBinding";
 import type { CrownShipBinding } from "./overview/crown/crownTypes";
-import { presentGitActionNotices, type GitActionNotice } from "~/gitActionNotices";
+import {
+  __resetEnvironmentApiOverridesForTests,
+  __setEnvironmentApiOverrideForTests,
+} from "~/environmentApi";
+import {
+  GIT_ACTION_RECONNECTING_DESCRIPTION,
+  presentGitActionNotices,
+  type GitActionNotice,
+} from "~/gitActionNotices";
 
 /**
  * Ends the git action a test left running and hands the next test a fresh
@@ -906,5 +928,235 @@ describe("useCrownShipBinding", () => {
     await mountShip(dirty);
     expect(shipRef.current?.steps).toEqual([]);
     expect(shipRef.current?.disabledReason).toBe("Git action in progress.");
+  });
+});
+
+describe("git actions that outlive their connection", () => {
+  interface RunArgs {
+    readonly actionId: string;
+    readonly onProgress: (event: GitActionProgressEvent) => void;
+    readonly onRecoveryState: (state: GitActionRecoveryState) => void;
+  }
+  interface ShownToast {
+    readonly type?: string;
+    readonly title?: string;
+    readonly description?: string;
+    readonly actionProps?: { readonly children: string; readonly onClick: () => void };
+  }
+
+  const mounted: Array<() => Promise<void>> = [];
+  const cancelStackedAction = vi.fn((_input: { actionId: string }) =>
+    Promise.resolve({ cancelled: true }),
+  );
+
+  beforeEach(() => {
+    writePrimaryEnvironmentDescriptor({
+      environmentId: ENVIRONMENT_A,
+      label: "Local environment",
+      platform: { os: "darwin", arch: "arm64" },
+      serverVersion: "0.0.0-test",
+      capabilities: {
+        repositoryIdentity: true,
+        threadSettlement: false,
+      },
+    });
+    setEnvironmentConfig(ENVIRONMENT_A, "ryco");
+    liveBranchRef.current = BRANCH_NAME;
+    __setEnvironmentApiOverrideForTests(ENVIRONMENT_A, {
+      git: { cancelStackedAction },
+    } as unknown as EnvironmentApi);
+  });
+
+  afterEach(async () => {
+    vi.useRealTimers();
+    for (const unmount of mounted.splice(0)) await unmount();
+    await settleRunningStackedAction();
+    vi.clearAllMocks();
+    __resetEnvironmentApiOverridesForTests();
+    primaryServerConfigRef.current = null;
+    resetPrimaryEnvironmentDescriptorForTests();
+    liveBranchRef.current = "";
+    document.body.innerHTML = "";
+  });
+
+  /** Clicks the quick action ("Push & create PR") and returns what the runner sent. */
+  async function startQuickAction(): Promise<RunArgs> {
+    const host = document.createElement("div");
+    document.body.append(host);
+    const screen = await render(<Harness />, { container: host });
+    mounted.push(async () => {
+      await screen.unmount();
+      host.remove();
+    });
+    findButtonByText("Push & create PR")?.click();
+    await vi.waitFor(() => expect(runStackedActionMutateAsyncSpy).toHaveBeenCalledTimes(1));
+    const [args] = runStackedActionMutateAsyncSpy.mock.calls[0] as unknown as [RunArgs];
+    return args;
+  }
+
+  function lastToast(): ShownToast {
+    const update = toastUpdateSpy.mock.calls.at(-1) as unknown as [string, ShownToast] | undefined;
+    if (update) return update[1];
+    const added = toastAddSpy.mock.calls.at(-1) as unknown as [ShownToast] | undefined;
+    return added?.[0] ?? {};
+  }
+
+  const progress = {
+    started: (actionId: string): GitActionProgressEvent => ({
+      kind: "action_started",
+      actionId,
+      cwd: GIT_CWD,
+      action: "create_pr",
+      phases: ["push", "pr"],
+    }),
+    pushing: (actionId: string): GitActionProgressEvent => ({
+      kind: "phase_started",
+      actionId,
+      cwd: GIT_CWD,
+      action: "create_pr",
+      phase: "push",
+      label: "Pushing...",
+    }),
+  };
+
+  it("asks the node to keep the action running when the connection drops", async () => {
+    const runStackedAction = vi.fn(() => new Promise<never>(() => undefined));
+    __setEnvironmentApiOverrideForTests(ENVIRONMENT_A, {
+      git: { runStackedAction, cancelStackedAction },
+    } as unknown as EnvironmentApi);
+    const screen = await render(
+      <GitActionsControl
+        gitCwd={GIT_CWD}
+        activeThreadRef={scopeThreadRef(ENVIRONMENT_A, SHARED_THREAD_ID)}
+      />,
+    );
+    mounted.push(() => screen.unmount());
+    const onProgress = vi.fn();
+    const onRecoveryState = vi.fn();
+    void runStackedActionMutationRef.current?.mutationFn({
+      actionId: "action-1",
+      action: "push",
+      onProgress,
+      onRecoveryState,
+    });
+    expect(runStackedAction).toHaveBeenCalledWith(
+      { action: "push", actionId: "action-1", cwd: GIT_CWD },
+      { recoverable: true, onProgress, onRecoveryState },
+    );
+  });
+
+  it("offers Stop on the running toast and stops the action through its own id", async () => {
+    const args = await startQuickAction();
+    args.onRecoveryState({ kind: "started", recoverable: true });
+    args.onProgress(progress.started(args.actionId));
+    await vi.waitFor(() =>
+      expect(lastToast()).toMatchObject({ type: "loading", actionProps: { children: "Stop" } }),
+    );
+
+    lastToast().actionProps?.onClick();
+    expect(cancelStackedAction).toHaveBeenCalledExactlyOnceWith({ actionId: args.actionId });
+    expect(lastToast()).toMatchObject({ description: "Stopping...", actionProps: undefined });
+
+    activeRunStackedActionDeferredRef.current.reject(
+      new GitActionStoppedError({ actionId: args.actionId, phase: "push", reason: "requested" }),
+    );
+    await vi.waitFor(() =>
+      expect(lastToast()).toMatchObject({
+        type: "info",
+        title: "Stopped",
+        description: "Steps that already finished stay done.",
+        actionProps: undefined,
+      }),
+    );
+    // Some steps may have run: the checkout is read again.
+    expect(refreshGitStatusSpy).toHaveBeenCalledWith({
+      environmentId: ENVIRONMENT_A,
+      cwd: GIT_CWD,
+    });
+  });
+
+  it("offers no Stop when the node keeps request-owned actions", async () => {
+    const args = await startQuickAction();
+    args.onRecoveryState({ kind: "started", recoverable: false });
+    args.onProgress(progress.started(args.actionId));
+    args.onProgress(progress.pushing(args.actionId));
+    await vi.waitFor(() => expect(lastToast()).toMatchObject({ title: "Pushing..." }));
+    expect(lastToast().actionProps).toBeUndefined();
+  });
+
+  it("says it is reconnecting, and keeps the step's clock when the node replays it", async () => {
+    vi.useFakeTimers();
+    const args = await startQuickAction();
+    args.onRecoveryState({ kind: "started", recoverable: true });
+    args.onProgress(progress.started(args.actionId));
+    args.onProgress(progress.pushing(args.actionId));
+    await vi.advanceTimersByTimeAsync(5_000);
+    const elapsedSeconds = () =>
+      Number(/^Running for (\d+)s$/.exec(lastToast().description ?? "")?.[1]);
+    const beforeDrop = elapsedSeconds();
+    expect(beforeDrop).toBeGreaterThanOrEqual(4);
+    expect(lastToast()).toMatchObject({ title: "Pushing..." });
+
+    args.onRecoveryState({ kind: "reconnecting" });
+    await vi.advanceTimersByTimeAsync(3_000);
+    expect(lastToast()).toMatchObject({
+      title: "Pushing...",
+      description: GIT_ACTION_RECONNECTING_DESCRIPTION,
+      actionProps: { children: "Stop" },
+    });
+
+    // Re-attached: the node replays the start and the current phase first.
+    args.onRecoveryState({ kind: "reattached" });
+    args.onProgress(progress.started(args.actionId));
+    args.onProgress(progress.pushing(args.actionId));
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(lastToast()).toMatchObject({ title: "Pushing..." });
+    expect(elapsedSeconds()).toBe(beforeDrop + 4);
+  });
+
+  it("asks to check the repository when the result is unavailable", async () => {
+    const args = await startQuickAction();
+    args.onRecoveryState({ kind: "started", recoverable: true });
+    activeRunStackedActionDeferredRef.current.reject(
+      new GitActionResultUnavailableError({ actionId: args.actionId, reason: "missing" }),
+    );
+    await vi.waitFor(() =>
+      expect(lastToast()).toMatchObject({
+        type: "error",
+        title: "Couldn't confirm the Git action",
+        description: "Check the repository status before trying again.",
+      }),
+    );
+    expect(refreshGitStatusSpy).toHaveBeenCalledWith({
+      environmentId: ENVIRONMENT_A,
+      cwd: GIT_CWD,
+    });
+  });
+
+  it("keeps the crown's live notice and its Stop when a Stop fails", async () => {
+    const notices: GitActionNotice[] = [];
+    const release = presentGitActionNotices(ENVIRONMENT_A, GIT_CWD, (notice) =>
+      notices.push(notice),
+    );
+    mounted.push(() => Promise.resolve(release()));
+    cancelStackedAction.mockRejectedValueOnce(new Error("Request timed out."));
+    const args = await startQuickAction();
+    args.onRecoveryState({ kind: "started", recoverable: true });
+    args.onProgress(progress.started(args.actionId));
+    args.onProgress(progress.pushing(args.actionId));
+    await vi.waitFor(() => expect(notices.at(-1)?.action?.label).toBe("Stop"));
+
+    notices.at(-1)?.action?.onClick();
+    expect(cancelStackedAction).toHaveBeenCalledExactlyOnceWith({ actionId: args.actionId });
+    await vi.waitFor(() =>
+      expect(notices.at(-1)).toMatchObject({
+        id: args.actionId,
+        status: "running",
+        title: "Pushing...",
+        description: "Couldn't stop: Request timed out.",
+        action: { label: "Stop" },
+      }),
+    );
+    expect(toastAddSpy).not.toHaveBeenCalled();
   });
 });
