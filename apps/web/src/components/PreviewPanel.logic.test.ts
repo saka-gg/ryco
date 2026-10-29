@@ -1,3 +1,4 @@
+import type { ServerConfig } from "@ryco/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
@@ -6,8 +7,10 @@ import {
   filterPreviewProjectEntries,
   inferPreviewLanguage,
   isInertRasterImageMimeType,
+  isMarkdownPreviewPath,
   previewSvgDataUrl,
   resolvePreviewImageSource,
+  selectServerReadsFileChunks,
 } from "./PreviewPanel.logic";
 
 describe("detectPreviewFileKind", () => {
@@ -33,11 +36,49 @@ describe("detectPreviewFileKind", () => {
     ).toBe("text");
   });
 
+  it("detects PDFs by extension and MIME type", () => {
+    expect(detectPreviewFileKind({ filePath: "docs/sample.pdf" })).toBe("pdf");
+    expect(detectPreviewFileKind({ filePath: "docs/SAMPLE.PDF" })).toBe("pdf");
+    expect(detectPreviewFileKind({ filePath: "download", mimeType: "application/pdf" })).toBe(
+      "pdf",
+    );
+  });
+
+  it("treats every Markdown extension as editable text", () => {
+    for (const filePath of ["README.md", "guide.markdown", "notes.mdown", "page.mdx"]) {
+      expect(detectPreviewFileKind({ filePath })).toBe("text");
+      expect(inferPreviewLanguage(filePath)).toBe("markdown");
+    }
+  });
+
   it("falls back to binary for unknown file types", () => {
     expect(detectPreviewFileKind({ filePath: "dist/app.bin" })).toBe("binary");
     expect(
       detectPreviewFileKind({ filePath: "archive", mimeType: "application/octet-stream" }),
     ).toBe("binary");
+  });
+});
+
+describe("isMarkdownPreviewPath", () => {
+  it("matches the Markdown extensions the shared classifier knows", () => {
+    for (const filePath of ["README.md", "docs/guide.markdown", "notes.mdown", "page.MDX"]) {
+      expect(isMarkdownPreviewPath(filePath)).toBe(true);
+    }
+    for (const filePath of ["src/app.ts", "docs/sample.pdf", "md", "notes.txt"]) {
+      expect(isMarkdownPreviewPath(filePath)).toBe(false);
+    }
+  });
+});
+
+describe("selectServerReadsFileChunks", () => {
+  const configWith = (capabilities: Record<string, unknown>) =>
+    ({ environment: { capabilities } }) as unknown as ServerConfig;
+
+  it("is unknown until the config arrives, then follows the advertised capability", () => {
+    expect(selectServerReadsFileChunks(null)).toBeNull();
+    expect(selectServerReadsFileChunks(configWith({}))).toBe(false);
+    expect(selectServerReadsFileChunks(configWith({ projectReadFileChunk: false }))).toBe(false);
+    expect(selectServerReadsFileChunks(configWith({ projectReadFileChunk: true }))).toBe(true);
   });
 });
 

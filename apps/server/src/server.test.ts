@@ -4325,6 +4325,36 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
+  it.effect("routes websocket rpc workspace read errors with one wording", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const workspaceDir = yield* fs.makeTempDirectoryScoped({ prefix: "ryco-ws-project-read-" });
+
+      yield* buildAppUnderTest();
+
+      const wsUrl = yield* getWsServerUrl("/ws");
+      const failures = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) => {
+          const input = { cwd: workspaceDir, relativePath: "../escape.pdf" };
+          return Effect.all([
+            client[WS_METHODS.projectsReadFile](input).pipe(Effect.flip),
+            client[WS_METHODS.projectsReadFileBinary](input).pipe(Effect.flip),
+            client[WS_METHODS.projectsReadFileChunk]({ ...input, offset: 0 }).pipe(Effect.flip),
+          ]);
+        }),
+      );
+
+      assert.deepEqual(
+        failures.map((failure) => [failure._tag, failure.message]),
+        [
+          ["ProjectReadFileError", "Workspace file path must stay within the project root."],
+          ["ProjectReadFileBinaryError", "Workspace file path must stay within the project root."],
+          ["ProjectReadFileChunkError", "Workspace file path must stay within the project root."],
+        ],
+      );
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
   it.effect("routes websocket rpc shell.openInEditor", () =>
     Effect.gen(function* () {
       let openedInput: { cwd: string; editor: EditorId } | null = null;

@@ -2,7 +2,14 @@ import { recordWsConnectionOpened } from "@ryco/client-runtime/rpc";
 import { resetPreviewFileSessionsForTests } from "./previewFileSessions";
 import "../index.css";
 
-import { EnvironmentId, ProjectId, ThreadId } from "@ryco/contracts";
+import {
+  EnvironmentId,
+  ProjectId,
+  ThreadId,
+  type ProjectReadFileChunkInput,
+  type ProjectReadFileChunkResult,
+  type ServerConfig,
+} from "@ryco/contracts";
 import { page } from "vite-plus/test/browser";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { render } from "vitest-browser-react";
@@ -13,7 +20,9 @@ import { AppAtomRegistryProvider, resetAppAtomRegistryForTests } from "../rpc/at
 import { resetProjectPreviewAtomsForTests } from "../rpc/projectPreviewAtoms";
 import { composerContextIntake } from "../composerContextIntake";
 import { readWorkspaceFileDragSource, WORKSPACE_FILE_DRAG_TYPE } from "../workspaceFileDrag";
+import { pdfFixture } from "./chat/pdfTestFixtures";
 import PreviewPanel from "./PreviewPanel";
+import { PREVIEW_MARKDOWN_RENDER_DEFAULT_MAX_CHARS } from "./PreviewPanel.logic";
 
 type PreviewWriteFileInput = {
   readonly cwd: string;
@@ -56,6 +65,17 @@ const previewHarness = vi.hoisted(() => {
     readonly mimeType: string;
     readonly sizeBytes: number;
   };
+  /** A file the chunked read serves, as the node sniffed it. */
+  type ChunkFile = { readonly bytes: string; readonly mimeType: string };
+  type ChunkRead = {
+    readonly relativePath: string;
+    readonly offset: number;
+    readonly expectedFingerprint?: string;
+  };
+  /** The live server config; a capable node unless a test says otherwise. */
+  const capableConfig = {
+    environment: { capabilities: { projectReadFileChunk: true } },
+  } as unknown;
 
   return {
     entries: [] as Entry[],
@@ -64,6 +84,16 @@ const previewHarness = vi.hoisted(() => {
     readFailures: new Map<string, string>(),
     readAttempts: [] as string[],
     binaryReadAttempts: [] as string[],
+    chunkFiles: new Map<string, ChunkFile>(),
+    chunkReads: [] as ChunkRead[],
+    /** Bytes per chunk the mock node serves. */
+    chunkBytes: 128,
+    /** When set, every chunk after the first waits for it. */
+    chunkGate: null as Promise<void> | null,
+    /** The next read of this chunk fails once with this message. */
+    chunkFailure: null as { readonly offset: number; readonly message: string } | null,
+    capableConfig,
+    serverConfig: capableConfig as unknown,
     writeAttempts: [] as PreviewWriteFileInput[],
     writeFailure: null as { readonly reason: string; readonly message: string } | null,
     savedVersion: 0,
@@ -83,6 +113,12 @@ const previewHarness = vi.hoisted(() => {
       this.readFailures = new Map();
       this.readAttempts = [];
       this.binaryReadAttempts = [];
+      this.chunkFiles = new Map();
+      this.chunkReads = [];
+      this.chunkBytes = 128;
+      this.chunkGate = null;
+      this.chunkFailure = null;
+      this.serverConfig = capableConfig;
       this.writeAttempts = [];
       this.writeFailure = null;
       this.savedVersion = 0;
@@ -161,6 +197,9 @@ vi.mock("@tanstack/react-router", () => ({
     const search = previewHarness.search;
     return options?.select ? options.select(search) : search;
   }),
+  // File links in rendered Markdown look for the router; off a real one they cannot open.
+  useRouter: () => null,
+  Link: (props: { children?: ReactNode }) => <a href="#thread">{props.children}</a>,
   useBlocker: vi.fn(() => ({
     status: "idle",
     current: undefined,
@@ -175,8 +214,8 @@ vi.mock("../hostedHub/hostedConnectionCoordinator", () => ({
   readHostedNodeMutationLease: () => null,
 }));
 
-vi.mock("../environmentApi", () => ({
-  ensureEnvironmentApi: () => ({
+vi.mock("../environmentApi", () => {
+  const api = {
     projects: {
       listEntries: vi.fn().mockImplementation(() =>
         Promise.resolve({
@@ -223,10 +262,59 @@ vi.mock("../environmentApi", () => ({
         });
         return Promise.resolve({ relativePath: input.relativePath, version });
       }),
+      readFileChunk: vi
+        .fn()
+        .mockImplementation(
+          async (input: ProjectReadFileChunkInput): Promise<ProjectReadFileChunkResult> => {
+            previewHarness.chunkReads.push({
+              relativePath: input.relativePath,
+              offset: input.offset,
+              ...(input.expectedFingerprint !== undefined
+                ? { expectedFingerprint: input.expectedFingerprint }
+                : {}),
+            });
+            if (input.offset > 0 && previewHarness.chunkGate) await previewHarness.chunkGate;
+            const failure = previewHarness.chunkFailure;
+            if (failure?.offset === input.offset) {
+              previewHarness.chunkFailure = null;
+              throw new Error(failure.message);
+            }
+            const file = previewHarness.chunkFiles.get(input.relativePath);
+            if (!file) throw new Error("Not a supported preview file.");
+            return {
+              relativePath: input.relativePath,
+              offset: input.offset,
+              totalBytes: file.bytes.length,
+              dataBase64: btoa(
+                file.bytes.slice(input.offset, input.offset + previewHarness.chunkBytes),
+              ),
+              mimeType: file.mimeType,
+              fingerprint: `stat:${input.relativePath}`,
+            };
+          },
+        ),
       stageFileReference: vi.fn(),
     },
-  }),
+  };
+  // One API object, as a live connection has: a chunked read pins its transport.
+  return { ensureEnvironmentApi: () => api, readEnvironmentApi: () => api };
+});
+
+vi.mock("../hooks/useChatsAvailability", () => ({
+  useEnvironmentServerConfig: () => previewHarness.serverConfig,
+  useEnvironmentServerConfigSelector: (
+    _environmentId: unknown,
+    select: (config: unknown) => unknown,
+  ) => select(previewHarness.serverConfig),
+  readEnvironmentServerConfig: () => previewHarness.serverConfig,
+  useEnvironmentChatsAvailable: () => null,
+  chatsAvailabilityForTier: (availability: unknown) => availability,
+  useChatsAvailability: () => ({ available: false, reason: "unsupported", message: "" }),
 }));
+
+// Rendered Markdown's file links reach for the editor only on request; never here.
+vi.mock("../localApi", () => ({ readLocalApi: () => undefined }));
+vi.mock("../editorPreferences", () => ({ openInPreferredEditor: vi.fn() }));
 
 vi.mock("../hooks/useTheme", () => ({
   useTheme: () => ({
@@ -258,6 +346,9 @@ vi.mock("../store", () => ({
   selectProjectByRef: () => ({
     cwd: "/repo",
   }),
+  // Rendered Markdown's thread chips and quote links read these.
+  selectSidebarThreadSummaryByRef: () => undefined,
+  selectThreadAvailabilityByRef: () => undefined,
   useStore: (selector: (store: Record<string, never>) => unknown) => selector({}),
 }));
 
@@ -310,6 +401,9 @@ async function waitForLayout(): Promise<void> {
     await new Promise<void>((resolve) => window.requestAnimationFrame(() => resolve()));
   }
 }
+
+/** A node without `projects.readFileChunk`. */
+const OLDER_NODE_CONFIG = { environment: { capabilities: {} } } as unknown as ServerConfig;
 
 const PREVIEW_THREAD = {
   environmentId: EnvironmentId.make("environment-local"),
@@ -383,13 +477,13 @@ describe("PreviewPanel", () => {
   it("drops a deep link's line when its file is left or never opened", async () => {
     previewHarness.entries = [
       { path: "src/app.ts", kind: "file" },
-      { path: "README.md", kind: "file" },
+      { path: "NOTES.txt", kind: "file" },
     ];
     previewHarness.readFiles.set("src/app.ts", {
       relativePath: "src/app.ts",
       contents: "one\ntwo\nthree",
     });
-    previewHarness.readFiles.set("README.md", { relativePath: "README.md", contents: "# Ryco" });
+    previewHarness.readFiles.set("NOTES.txt", { relativePath: "NOTES.txt", contents: "# Ryco" });
     const selectedLines = () =>
       document
         .querySelector("[data-test-selected-lines]")
@@ -403,9 +497,9 @@ describe("PreviewPanel", () => {
     mounted = await renderPreviewPanel({ reveal: { path: "src/app.ts", line: 2 } });
     await vi.waitFor(() => expect(selectedLines()).toBe("2-2"));
     // Leaving the file drops the mark; coming back does not bring it back.
-    await page.getByRole("button", { name: "README.md" }).click();
+    await page.getByRole("button", { name: "NOTES.txt" }).click();
     await expect
-      .element(page.getByRole("textbox", { name: "Edit README.md" }))
+      .element(page.getByRole("textbox", { name: "Edit NOTES.txt" }))
       .toHaveValue("# Ryco");
     await page.getByRole("button", { name: "src/app.ts" }).click();
     await expect
@@ -414,8 +508,8 @@ describe("PreviewPanel", () => {
     expect(selectedLines()).toBe("");
 
     // A link whose file the unsaved-draft prompt kept from opening leaves nothing armed.
-    await page.getByRole("button", { name: "README.md" }).click();
-    await page.getByRole("textbox", { name: "Edit README.md" }).fill("# Draft");
+    await page.getByRole("button", { name: "NOTES.txt" }).click();
+    await page.getByRole("textbox", { name: "Edit NOTES.txt" }).fill("# Draft");
     previewHarness.writeFailure = { reason: "conflict", message: "External edit" };
     await mounted.rerender(panel({ path: "src/app.ts", line: 3 }));
     await expect
@@ -423,7 +517,7 @@ describe("PreviewPanel", () => {
       .toBeInTheDocument();
     await page.getByRole("button", { name: "Cancel" }).click();
     await expect
-      .element(page.getByRole("textbox", { name: "Edit README.md" }))
+      .element(page.getByRole("textbox", { name: "Edit NOTES.txt" }))
       .toHaveValue("# Draft");
     await page.getByRole("button", { name: "src/app.ts" }).click();
     await page.getByRole("button", { name: "Discard & Open" }).click();
@@ -712,30 +806,39 @@ describe("PreviewPanel", () => {
     });
   });
 
-  it("renders raster image previews from the binary read without a text read", async () => {
-    previewHarness.entries = [{ path: "assets/logo.png", kind: "file" }];
-    previewHarness.binaryFiles.set("assets/logo.png", {
-      relativePath: "assets/logo.png",
-      dataBase64:
-        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=",
-      mimeType: "image/png",
-      sizeBytes: 70,
-    });
+  // Older nodes, and a node whose config has not arrived, take the single binary read.
+  for (const [node, config] of [
+    ["an older node", OLDER_NODE_CONFIG],
+    ["a node whose config is unknown", null],
+  ] as const) {
+    it(`renders raster image previews from the binary read on ${node}`, async () => {
+      previewHarness.serverConfig = config;
+      previewHarness.entries = [{ path: "assets/logo.png", kind: "file" }];
+      previewHarness.binaryFiles.set("assets/logo.png", {
+        relativePath: "assets/logo.png",
+        dataBase64:
+          "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=",
+        mimeType: "image/png",
+        sizeBytes: 70,
+      });
 
-    mounted = await renderPreviewPanel();
-    await page.getByRole("button", { name: "assets/logo.png" }).click();
+      mounted = await renderPreviewPanel();
+      await page.getByRole("button", { name: "assets/logo.png" }).click();
 
-    const image = page.getByRole("img", { name: "assets/logo.png" });
-    await expect.element(image).toBeInTheDocument();
-    await expect.element(image).toHaveAttribute("src", expect.stringMatching(/^blob:/));
-    await vi.waitFor(() => {
-      expect((image.element() as HTMLImageElement).naturalWidth).toBe(1);
+      const image = page.getByRole("img", { name: "assets/logo.png" });
+      await expect.element(image).toBeInTheDocument();
+      await expect.element(image).toHaveAttribute("src", expect.stringMatching(/^blob:/));
+      await vi.waitFor(() => {
+        expect((image.element() as HTMLImageElement).naturalWidth).toBe(1);
+      });
+      expect(previewHarness.binaryReadAttempts).toEqual(["assets/logo.png"]);
+      expect(previewHarness.chunkReads).toEqual([]);
+      expect(previewHarness.readAttempts).not.toContain("assets/logo.png");
     });
-    expect(previewHarness.binaryReadAttempts).toEqual(["assets/logo.png"]);
-    expect(previewHarness.readAttempts).not.toContain("assets/logo.png");
-  });
+  }
 
   it("refuses binary reads that report a scriptable type", async () => {
+    previewHarness.serverConfig = OLDER_NODE_CONFIG;
     previewHarness.entries = [{ path: "assets/logo.png", kind: "file" }];
     previewHarness.binaryFiles.set("assets/logo.png", {
       relativePath: "assets/logo.png",
@@ -751,6 +854,60 @@ describe("PreviewPanel", () => {
     await expect
       .element(page.getByRole("img", { name: "assets/logo.png" }))
       .not.toBeInTheDocument();
+  });
+
+  it("reads raster images in chunks on nodes that support it", async () => {
+    const png = atob(
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=",
+    );
+    previewHarness.chunkBytes = 32;
+    previewHarness.entries = [
+      { path: "assets/logo.png", kind: "file" },
+      { path: "assets/trick.png", kind: "file" },
+    ];
+    previewHarness.chunkFiles.set("assets/logo.png", { bytes: png, mimeType: "image/png" });
+    previewHarness.chunkFiles.set("assets/trick.png", {
+      bytes: "<svg xmlns='http://www.w3.org/2000/svg'><script>alert(1)</script></svg>",
+      mimeType: "image/svg+xml",
+    });
+
+    mounted = await renderPreviewPanel();
+    await page.getByRole("button", { name: "assets/logo.png" }).click();
+
+    const image = page.getByRole("img", { name: "assets/logo.png" });
+    await expect.element(image).toHaveAttribute("src", expect.stringMatching(/^blob:/));
+    await vi.waitFor(() => {
+      expect((image.element() as HTMLImageElement).naturalWidth).toBe(1);
+    });
+    expect(previewHarness.chunkReads.map((read) => read.offset)).toEqual([0, 32, 64]);
+    expect(previewHarness.binaryReadAttempts).toEqual([]);
+
+    // A node reporting a scriptable type is refused over chunks too.
+    await page.getByRole("button", { name: "assets/trick.png" }).click();
+    await expect.element(page.getByText("Not a supported image.")).toBeInTheDocument();
+    await expect
+      .element(page.getByRole("img", { name: "assets/trick.png" }))
+      .not.toBeInTheDocument();
+    expect(previewHarness.binaryReadAttempts).toEqual([]);
+  });
+
+  it("offers to read an image again after a failed chunked read", async () => {
+    const png = atob(
+      "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=",
+    );
+    previewHarness.chunkBytes = 32;
+    previewHarness.entries = [{ path: "assets/logo.png", kind: "file" }];
+    previewHarness.chunkFiles.set("assets/logo.png", { bytes: png, mimeType: "image/png" });
+    previewHarness.chunkFailure = { offset: 32, message: "File connection changed." };
+
+    mounted = await renderPreviewPanel();
+    await page.getByRole("button", { name: "assets/logo.png" }).click();
+
+    await expect.element(page.getByText("File connection changed.")).toBeInTheDocument();
+    await page.getByRole("button", { name: "Try again" }).click();
+    const image = page.getByRole("img", { name: "assets/logo.png" });
+    await expect.element(image).toHaveAttribute("src", expect.stringMatching(/^blob:/));
+    expect(previewHarness.chunkReads.map((read) => read.offset)).toEqual([0, 32, 0, 32, 64]);
   });
 
   it("renders SVG previews from the text read", async () => {
@@ -828,14 +985,14 @@ describe("PreviewPanel", () => {
   it("guards file switching with cancel and discard choices", async () => {
     previewHarness.entries = [
       { path: "src/app.ts", kind: "file", sizeBytes: 64 },
-      { path: "README.md", kind: "file", sizeBytes: 64 },
+      { path: "NOTES.txt", kind: "file", sizeBytes: 64 },
     ];
     previewHarness.readFiles.set("src/app.ts", {
       relativePath: "src/app.ts",
       contents: "const answer = 41;",
     });
-    previewHarness.readFiles.set("README.md", {
-      relativePath: "README.md",
+    previewHarness.readFiles.set("NOTES.txt", {
+      relativePath: "NOTES.txt",
       contents: "# Ryco",
     });
 
@@ -843,7 +1000,7 @@ describe("PreviewPanel", () => {
     await page.getByRole("button", { name: "src/app.ts" }).click();
     await page.getByRole("textbox", { name: "Edit src/app.ts" }).fill("const answer = 42;");
     previewHarness.writeFailure = { reason: "conflict", message: "External edit" };
-    await page.getByRole("button", { name: "README.md" }).click();
+    await page.getByRole("button", { name: "NOTES.txt" }).click();
 
     await expect
       .element(page.getByRole("heading", { name: "Save changes before continuing?" }))
@@ -853,10 +1010,10 @@ describe("PreviewPanel", () => {
       .element(page.getByRole("textbox", { name: "Edit src/app.ts" }))
       .toHaveValue("const answer = 42;");
 
-    await page.getByRole("button", { name: "README.md" }).click();
+    await page.getByRole("button", { name: "NOTES.txt" }).click();
     await page.getByRole("button", { name: "Discard & Open" }).click();
     await expect
-      .element(page.getByRole("textbox", { name: "Edit README.md" }))
+      .element(page.getByRole("textbox", { name: "Edit NOTES.txt" }))
       .toHaveValue("# Ryco");
     expect(previewHarness.writeAttempts).toHaveLength(1);
   });
@@ -864,21 +1021,21 @@ describe("PreviewPanel", () => {
   it("autosaves and drains before switching files without a discard dialog", async () => {
     previewHarness.entries = [
       { path: "src/app.ts", kind: "file" },
-      { path: "README.md", kind: "file" },
+      { path: "NOTES.txt", kind: "file" },
     ];
     previewHarness.readFiles.set("src/app.ts", {
       relativePath: "src/app.ts",
       contents: "original",
     });
-    previewHarness.readFiles.set("README.md", { relativePath: "README.md", contents: "readme" });
+    previewHarness.readFiles.set("NOTES.txt", { relativePath: "NOTES.txt", contents: "readme" });
     mounted = await renderPreviewPanel();
     await page.getByRole("button", { name: "src/app.ts" }).click();
     await page.getByRole("textbox", { name: "Edit src/app.ts" }).fill("autosaved");
     await vi.waitFor(() => expect(previewHarness.writeAttempts).toHaveLength(1));
     await page.getByRole("textbox", { name: "Edit src/app.ts" }).fill("drained before switch");
-    await page.getByRole("button", { name: "README.md" }).click();
+    await page.getByRole("button", { name: "NOTES.txt" }).click();
     await expect
-      .element(page.getByRole("textbox", { name: "Edit README.md" }))
+      .element(page.getByRole("textbox", { name: "Edit NOTES.txt" }))
       .toHaveValue("readme");
     expect(previewHarness.writeAttempts.at(-1)?.contents).toBe("drained before switch");
     await expect
@@ -1115,5 +1272,319 @@ describe("PreviewPanel", () => {
     await page.getByRole("button", { name: "src/app.ts" }).click();
 
     await expect.element(page.getByText("const draft = true;")).toBeInTheDocument();
+  });
+
+  describe("PDF previews", () => {
+    it("previews a workspace PDF from chunked reads without a text read", async () => {
+      const pdf = pdfFixture();
+      previewHarness.entries = [{ path: "docs/sample.pdf", kind: "file" }];
+      previewHarness.chunkFiles.set("docs/sample.pdf", { bytes: pdf, mimeType: "application/pdf" });
+
+      mounted = await renderPreviewPanel();
+      await page.getByRole("button", { name: "docs/sample.pdf" }).click();
+
+      await expect
+        .element(page.getByRole("img", { name: "docs/sample.pdf, page 1" }))
+        .toBeVisible();
+      const offsets = Array.from(
+        { length: Math.ceil(pdf.length / previewHarness.chunkBytes) },
+        (_, index) => index * previewHarness.chunkBytes,
+      );
+      expect(previewHarness.chunkReads.map((read) => read.offset)).toEqual(offsets);
+      expect(previewHarness.chunkReads[0]?.expectedFingerprint).toBeUndefined();
+      for (const read of previewHarness.chunkReads.slice(1)) {
+        expect(read.expectedFingerprint).toBe("stat:docs/sample.pdf");
+      }
+      await page.getByRole("button", { name: "Next page" }).click();
+      await expect
+        .element(page.getByRole("img", { name: "docs/sample.pdf, page 2" }))
+        .toBeVisible();
+      expect(previewHarness.readAttempts).not.toContain("docs/sample.pdf");
+      expect(previewHarness.binaryReadAttempts).toEqual([]);
+    });
+
+    it("asks to update an older node instead of reading a PDF", async () => {
+      previewHarness.serverConfig = OLDER_NODE_CONFIG;
+      previewHarness.entries = [{ path: "docs/sample.pdf", kind: "file" }];
+
+      mounted = await renderPreviewPanel();
+      await page.getByRole("button", { name: "docs/sample.pdf" }).click();
+
+      await expect
+        .element(page.getByText("Update Ryco on this node to preview PDFs."))
+        .toBeInTheDocument();
+      expect(previewHarness.chunkReads).toEqual([]);
+      expect(previewHarness.readAttempts).toEqual([]);
+      expect(previewHarness.binaryReadAttempts).toEqual([]);
+    });
+
+    it("waits for the node's config before choosing a PDF path", async () => {
+      previewHarness.serverConfig = null;
+      previewHarness.entries = [{ path: "docs/sample.pdf", kind: "file" }];
+      previewHarness.chunkFiles.set("docs/sample.pdf", {
+        bytes: pdfFixture(),
+        mimeType: "application/pdf",
+      });
+
+      mounted = await renderPreviewPanel();
+      await page.getByRole("button", { name: "docs/sample.pdf" }).click();
+
+      await expect
+        .element(page.getByRole("status", { name: "Loading PDF..." }))
+        .toBeInTheDocument();
+      await waitForLayout();
+      expect(document.body.textContent).not.toContain("Update Ryco");
+      expect(previewHarness.chunkReads).toEqual([]);
+      expect(previewHarness.readAttempts).toEqual([]);
+
+      previewHarness.serverConfig = previewHarness.capableConfig;
+      await mounted.rerender(
+        <AppAtomRegistryProvider>
+          <PreviewPanel mode="sheet" />
+        </AppAtomRegistryProvider>,
+      );
+      await expect
+        .element(page.getByRole("img", { name: "docs/sample.pdf, page 1" }))
+        .toBeVisible();
+      expect(previewHarness.chunkReads[0]).toEqual({ relativePath: "docs/sample.pdf", offset: 0 });
+      expect(previewHarness.readAttempts).toEqual([]);
+    });
+
+    it("stops reading a PDF when another file opens", async () => {
+      let release!: () => void;
+      previewHarness.chunkGate = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      previewHarness.entries = [
+        { path: "docs/sample.pdf", kind: "file" },
+        { path: "src/app.ts", kind: "file" },
+      ];
+      previewHarness.chunkFiles.set("docs/sample.pdf", {
+        bytes: pdfFixture(),
+        mimeType: "application/pdf",
+      });
+      previewHarness.readFiles.set("src/app.ts", { relativePath: "src/app.ts", contents: "one" });
+
+      mounted = await renderPreviewPanel();
+      await page.getByRole("button", { name: "docs/sample.pdf" }).click();
+      // The first chunk arrived; the second is in flight.
+      await vi.waitFor(() => expect(previewHarness.chunkReads).toHaveLength(2));
+      await expect
+        .element(page.getByRole("status", { name: /^Loading PDF… / }))
+        .toBeInTheDocument();
+
+      await page.getByRole("button", { name: "src/app.ts" }).click();
+      await expect
+        .element(page.getByRole("textbox", { name: "Edit src/app.ts" }))
+        .toHaveValue("one");
+      release();
+      await waitForLayout();
+      expect(previewHarness.chunkReads.map((read) => read.offset)).toEqual([
+        0,
+        previewHarness.chunkBytes,
+      ]);
+    });
+
+    it("offers to read a PDF again after a read fails mid-way", async () => {
+      previewHarness.entries = [{ path: "docs/sample.pdf", kind: "file" }];
+      previewHarness.chunkFiles.set("docs/sample.pdf", {
+        bytes: pdfFixture(),
+        mimeType: "application/pdf",
+      });
+      previewHarness.chunkFailure = {
+        offset: previewHarness.chunkBytes,
+        message: "File changed while it was being read. Try again.",
+      };
+
+      mounted = await renderPreviewPanel();
+      await page.getByRole("button", { name: "docs/sample.pdf" }).click();
+
+      await expect
+        .element(page.getByText("File changed while it was being read. Try again."))
+        .toBeInTheDocument();
+      // Opening the same file again does nothing; the retry reads it anew in place.
+      await page.getByRole("button", { name: "Try again" }).click();
+      await expect
+        .element(page.getByRole("img", { name: "docs/sample.pdf, page 1" }))
+        .toBeVisible();
+      expect(previewHarness.chunkReads.filter((read) => read.offset === 0)).toHaveLength(2);
+    });
+  });
+
+  describe("Markdown previews", () => {
+    const GUIDE = [
+      "# Guide",
+      "",
+      "| Step | Result |",
+      "| --- | --- |",
+      "| Build | Done |",
+      "",
+      "![Diagram](../assets/diagram.png)",
+      "",
+      "[Jump](#usage)",
+    ].join("\n");
+    const DIAGRAM = {
+      relativePath: "assets/diagram.png",
+      dataBase64:
+        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+/p9sAAAAASUVORK5CYII=",
+      mimeType: "image/png",
+      sizeBytes: 70,
+    };
+
+    beforeEach(() => {
+      previewHarness.entries = [
+        { path: "docs/guide.md", kind: "file" },
+        { path: "docs/other.md", kind: "file" },
+        { path: "assets/diagram.png", kind: "file" },
+      ];
+      previewHarness.readFiles.set("docs/guide.md", {
+        relativePath: "docs/guide.md",
+        contents: GUIDE,
+      });
+      previewHarness.readFiles.set("docs/other.md", {
+        relativePath: "docs/other.md",
+        contents: "# Other\n\nline two\nline three",
+      });
+      previewHarness.binaryFiles.set("assets/diagram.png", DIAGRAM);
+    });
+
+    it("renders Markdown with images from its own folder", async () => {
+      mounted = await renderPreviewPanel();
+      await page.getByRole("button", { name: "docs/guide.md" }).click();
+
+      await expect.element(page.getByRole("heading", { name: "Guide" })).toBeInTheDocument();
+      await expect.element(page.getByRole("cell", { name: "Build" })).toBeInTheDocument();
+      await expect
+        .element(page.getByRole("button", { name: "Show rendered Markdown" }))
+        .toHaveAttribute("aria-pressed", "true");
+      await vi.waitFor(() =>
+        expect(previewHarness.binaryReadAttempts).toEqual(["assets/diagram.png"]),
+      );
+      await expect
+        .element(page.getByRole("img", { name: "Diagram" }))
+        .toHaveAttribute("src", `data:image/png;base64,${DIAGRAM.dataBase64}`);
+      // An in-page anchor in a document does nothing.
+      expect(page.getByRole("link", { name: "Jump" }).query()).toBeNull();
+      expect(page.getByRole("textbox", { name: "Edit docs/guide.md" }).query()).toBeNull();
+    });
+
+    it("switches Markdown to source and back, per file", async () => {
+      mounted = await renderPreviewPanel();
+      await page.getByRole("button", { name: "docs/guide.md" }).click();
+      await expect.element(page.getByRole("heading", { name: "Guide" })).toBeInTheDocument();
+
+      await page.getByRole("button", { name: "Show Markdown source" }).click();
+      await expect
+        .element(page.getByRole("textbox", { name: "Edit docs/guide.md" }))
+        .toHaveValue(GUIDE);
+      await expect.element(page.getByRole("heading", { name: "Guide" })).not.toBeInTheDocument();
+
+      // Another file opens in its own default, and takes its own choice.
+      await page.getByRole("button", { name: "docs/other.md" }).click();
+      await expect.element(page.getByRole("heading", { name: "Other" })).toBeInTheDocument();
+      await page.getByRole("button", { name: "Show Markdown source" }).click();
+      await expect
+        .element(page.getByRole("textbox", { name: "Edit docs/other.md" }))
+        .toBeInTheDocument();
+      // Coming back keeps the choice made for this file.
+      await page.getByRole("button", { name: "docs/guide.md" }).click();
+      await expect
+        .element(page.getByRole("textbox", { name: "Edit docs/guide.md" }))
+        .toHaveValue(GUIDE);
+
+      await page.getByRole("button", { name: "Show rendered Markdown" }).click();
+      await expect.element(page.getByRole("heading", { name: "Guide" })).toBeInTheDocument();
+      await page.getByRole("button", { name: "docs/other.md" }).click();
+      await expect
+        .element(page.getByRole("textbox", { name: "Edit docs/other.md" }))
+        .toBeInTheDocument();
+    });
+
+    it("keeps the view a Markdown file opened in while it is edited past the size default", async () => {
+      const big = `# Big\n\n${"x".repeat(PREVIEW_MARKDOWN_RENDER_DEFAULT_MAX_CHARS)}`;
+      previewHarness.entries = [{ path: "docs/big.md", kind: "file" }];
+      previewHarness.readFiles.set("docs/big.md", { relativePath: "docs/big.md", contents: big });
+
+      mounted = await renderPreviewPanel();
+      await page.getByRole("button", { name: "docs/big.md" }).click();
+      const editor = page.getByRole("textbox", { name: "Edit docs/big.md" });
+      await expect.element(editor).toHaveValue(big);
+      await expect
+        .element(page.getByRole("button", { name: "Show Markdown source" }))
+        .toHaveAttribute("aria-pressed", "true");
+
+      // Now under the size default: the editor stays, nothing renders mid-edit.
+      await editor.fill("# Big\n\nshort");
+      await vi.waitFor(() => expect(previewHarness.writeAttempts).toHaveLength(1));
+      await waitForLayout();
+      await expect.element(editor).toHaveValue("# Big\n\nshort");
+      expect(page.getByRole("heading", { name: "Big" }).query()).toBeNull();
+    });
+
+    it("leaves every file's view alone when the draft prompt holds a Markdown link back", async () => {
+      mounted = await renderPreviewPanel();
+      await page.getByRole("button", { name: "docs/guide.md" }).click();
+      await page.getByRole("button", { name: "Show Markdown source" }).click();
+      await page.getByRole("textbox", { name: "Edit docs/guide.md" }).fill("# Draft");
+      previewHarness.writeFailure = { reason: "conflict", message: "External edit" };
+
+      await mounted.rerender(
+        <AppAtomRegistryProvider>
+          <PreviewPanel
+            mode="sheet"
+            reveal={{ path: "docs/other.md", line: 3 }}
+            onRevealHandled={() => undefined}
+          />
+        </AppAtomRegistryProvider>,
+      );
+      await expect
+        .element(page.getByRole("heading", { name: "Save changes before continuing?" }))
+        .toBeInTheDocument();
+      await page.getByRole("button", { name: "Cancel" }).click();
+      // The open file keeps its Source view and the draft.
+      await expect
+        .element(page.getByRole("textbox", { name: "Edit docs/guide.md" }))
+        .toHaveValue("# Draft");
+
+      // The cancelled link left no Source choice behind for its file.
+      await page.getByRole("button", { name: "docs/other.md" }).click();
+      await page.getByRole("button", { name: "Discard & Open" }).click();
+      await expect.element(page.getByRole("heading", { name: "Other" })).toBeInTheDocument();
+      expect(page.getByRole("textbox", { name: "Edit docs/other.md" }).query()).toBeNull();
+    });
+
+    it("opens a Markdown deep link with a line in source, marked", async () => {
+      mounted = await renderPreviewPanel({
+        reveal: { path: "docs/other.md", line: 3 },
+        onRevealHandled: () => undefined,
+      });
+
+      await expect
+        .element(page.getByRole("textbox", { name: "Edit docs/other.md" }))
+        .toHaveValue("# Other\n\nline two\nline three");
+      await expect
+        .element(page.getByRole("button", { name: "Show Markdown source" }))
+        .toHaveAttribute("aria-pressed", "true");
+      await vi.waitFor(() =>
+        expect(
+          document
+            .querySelector("[data-test-selected-lines]")
+            ?.getAttribute("data-test-selected-lines"),
+        ).toBe("3-3"),
+      );
+    });
+
+    it("keeps Markdown as source on the phone surface", async () => {
+      mounted = await render(
+        <AppAtomRegistryProvider>
+          <PreviewPanel mode="phone" />
+        </AppAtomRegistryProvider>,
+      );
+      await page.getByRole("button", { name: "docs/other.md" }).click();
+
+      await expect.element(page.getByText(/line three/)).toBeInTheDocument();
+      expect(page.getByRole("button", { name: "Show rendered Markdown" }).query()).toBeNull();
+      expect(page.getByRole("heading", { name: "Other" }).query()).toBeNull();
+    });
   });
 });

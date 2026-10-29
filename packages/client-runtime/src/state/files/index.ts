@@ -1,4 +1,5 @@
 export * from "./contentSearch.ts";
+export * from "./fileLinks.ts";
 export * from "./fileTree.ts";
 export * from "./highlight.ts";
 export * from "./paths.ts";

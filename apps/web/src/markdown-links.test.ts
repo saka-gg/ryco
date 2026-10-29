@@ -86,6 +86,20 @@ describe("resolveMarkdownFileLinkTarget", () => {
   it("does not treat app routes as file links", () => {
     expect(resolveMarkdownFileLinkTarget("/chat/settings")).toBeNull();
   });
+
+  it("resolves relative links from a base directory and displays them relative to cwd", () => {
+    expect(resolveMarkdownFileLinkMeta("../notes.md:4", "/repo", "/repo/docs")).toMatchObject({
+      filePath: "/repo/docs/../notes.md",
+      line: 4,
+    });
+    expect(resolveMarkdownFileLinkMeta("./guide.md", "/repo", "/repo/docs")).toMatchObject({
+      filePath: "/repo/docs/./guide.md",
+      basename: "guide.md",
+    });
+    expect(resolveMarkdownFileLinkMeta("guide.md", "/repo")).toMatchObject({
+      filePath: "/repo/guide.md",
+    });
+  });
 });
 
 it("resolves only bounded, well-formed thread references in the current environment", async () => {

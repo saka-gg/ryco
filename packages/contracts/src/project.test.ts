@@ -2,6 +2,10 @@ import { describe, expect, it } from "vite-plus/test";
 import { Schema } from "effect";
 
 import {
+  PROJECT_READ_FILE_CHUNK_BYTES,
+  PROJECT_READ_FILE_CHUNKED_MAX_BYTES,
+  ProjectReadFileChunkInput,
+  ProjectReadFileChunkResult,
   ProjectReadFileResult,
   ProjectSearchContentError,
   ProjectSearchContentInput,
@@ -167,5 +171,71 @@ describe("workspace content search contracts", () => {
         message: "Failed to search workspace contents.",
       }).reason,
     ).toBeUndefined();
+  });
+});
+
+describe("workspace file chunk read contracts", () => {
+  const decodeChunkInput = Schema.decodeUnknownSync(ProjectReadFileChunkInput);
+  const decodeChunkResult = Schema.decodeUnknownSync(ProjectReadFileChunkResult);
+  const fingerprint = `stat:${"c".repeat(32)}`;
+
+  it("bounds the offset below the preview cap and the path length", () => {
+    expect(decodeChunkInput({ cwd: "/repo", relativePath: "docs/a.pdf", offset: 0 })).toEqual({
+      cwd: "/repo",
+      relativePath: "docs/a.pdf",
+      offset: 0,
+    });
+    expect(
+      decodeChunkInput({
+        cwd: "/repo",
+        relativePath: "docs/a.pdf",
+        offset: PROJECT_READ_FILE_CHUNKED_MAX_BYTES - 1,
+        expectedFingerprint: fingerprint,
+      }).expectedFingerprint,
+    ).toBe(fingerprint);
+    expect(() =>
+      decodeChunkInput({
+        cwd: "/repo",
+        relativePath: "docs/a.pdf",
+        offset: PROJECT_READ_FILE_CHUNKED_MAX_BYTES,
+      }),
+    ).toThrow();
+    expect(() =>
+      decodeChunkInput({ cwd: "/repo", relativePath: "docs/a.pdf", offset: -1 }),
+    ).toThrow();
+    expect(() =>
+      decodeChunkInput({ cwd: "/repo", relativePath: `${"a".repeat(509)}.pdf`, offset: 0 }),
+    ).toThrow();
+    expect(() =>
+      decodeChunkInput({
+        cwd: "/repo",
+        relativePath: "docs/a.pdf",
+        offset: 0,
+        expectedFingerprint: "x".repeat(129),
+      }),
+    ).toThrow();
+  });
+
+  it("bounds each chunk and the total size", () => {
+    const chunk = {
+      relativePath: "docs/a.pdf",
+      offset: 0,
+      totalBytes: 10,
+      dataBase64: "JVBERi0xLjcK",
+      mimeType: "application/pdf",
+      fingerprint,
+    };
+    expect(decodeChunkResult(chunk)).toEqual(chunk);
+    const maxEncodedLength = 4 * Math.ceil(PROJECT_READ_FILE_CHUNK_BYTES / 3);
+    expect(decodeChunkResult({ ...chunk, dataBase64: "A".repeat(maxEncodedLength) }).offset).toBe(
+      0,
+    );
+    expect(() =>
+      decodeChunkResult({ ...chunk, dataBase64: "A".repeat(maxEncodedLength + 1) }),
+    ).toThrow();
+    expect(() =>
+      decodeChunkResult({ ...chunk, totalBytes: PROJECT_READ_FILE_CHUNKED_MAX_BYTES + 1 }),
+    ).toThrow();
+    expect(() => decodeChunkResult({ ...chunk, totalBytes: 0 })).toThrow();
   });
 });

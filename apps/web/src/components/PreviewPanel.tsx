@@ -5,6 +5,11 @@ import {
   formatFileReferenceTitle,
   normalizeFileReferencePath,
 } from "@ryco/client-runtime/state/composer";
+import {
+  resolveWorkspaceFileViewMode,
+  workspaceFileFolder,
+  type WorkspaceFileViewMode,
+} from "@ryco/client-runtime/state/files";
 import { useSearch } from "@tanstack/react-router";
 import { Schema } from "effect";
 import {
@@ -40,6 +45,7 @@ import {
   resolveDiffThemeName,
   SYNTAX_TOKENIZE_MAX_LINE_LENGTH,
 } from "../lib/diffRendering";
+import { useEnvironmentServerConfigSelector } from "../hooks/useChatsAvailability";
 import { useSettings } from "../hooks/useSettings";
 import { useTheme } from "../hooks/useTheme";
 import { getLocalStorageItem, setLocalStorageItem } from "../hooks/useLocalStorage";
@@ -48,6 +54,7 @@ import { useEvent } from "../hooks/useEvent";
 import { useRouteWorkspaceTarget } from "../hooks/useRouteWorkspaceTarget";
 import { endWorkspaceFileDrag, startWorkspaceFileDrag } from "../workspaceFileDrag";
 import type { WorkspaceFileReveal } from "../workspaceRouteSearch";
+import ChatMarkdown from "./ChatMarkdown";
 import { ChangedFilesTree } from "./chat/ChangedFilesTree";
 import { DiffPanelLoadingState, DiffPanelShell, type DiffPanelMode } from "./DiffPanelShell";
 import { DiffWorkerPoolProvider } from "./DiffWorkerPoolProvider";
@@ -71,6 +78,7 @@ import { Badge } from "./ui/badge";
 import { Alert, AlertDescription, AlertTitle } from "./ui/alert";
 import { Button } from "./ui/button";
 import { Toggle } from "./ui/toggle";
+import { ToggleGroup, ToggleGroupItem } from "./ui/toggle-group";
 import {
   AlertDialog,
   AlertDialogDescription,
@@ -84,10 +92,15 @@ import {
   detectPreviewFileKind,
   filterPreviewProjectEntries,
   inferPreviewLanguage,
+  isMarkdownPreviewPath,
+  PREVIEW_MARKDOWN_RENDER_DEFAULT_MAX_CHARS,
   resolvePreviewImageSource,
+  selectServerReadsFileChunks,
 } from "./PreviewPanel.logic";
 import { PreviewImage } from "./PreviewImage";
+import { PreviewPdf } from "./PreviewPdf";
 
+const NO_MARKDOWN_VIEW_MODES: ReadonlyMap<string, WorkspaceFileViewMode> = new Map();
 const subscribeNoSession = () => () => {};
 const readNoSession = () => null;
 
@@ -312,6 +325,19 @@ export default function PreviewPanel({
   } | null>(null);
   const pendingFilePath = pendingNavigation?.path ?? null;
   const [fileFilterQuery, setFileFilterQuery] = useState("");
+  // Preview or Source per Markdown file while the panel shows this thread: a
+  // toggle, a deep link's line (Source), or the default pinned when it opens,
+  // so editing or an agent resizing the file never flips the view.
+  const [markdownViewModes, setMarkdownViewModes] = useState(NO_MARKDOWN_VIEW_MODES);
+  const rememberMarkdownViewMode = useCallback(
+    (filePath: string, mode: WorkspaceFileViewMode, options?: { readonly ifUnset?: boolean }) =>
+      setMarkdownViewModes((current) =>
+        current.get(filePath) === mode || (options?.ifUnset && current.has(filePath))
+          ? current
+          : new Map(current).set(filePath, mode),
+      ),
+    [],
+  );
   const [isTreeVisible, setIsTreeVisible] = useState(true);
   // Same readability rationale as the phone diff surface: 320-430px columns
   // are unreadable with horizontal code scroll, so wrap defaults on for the
@@ -356,6 +382,7 @@ export default function PreviewPanel({
     setLineReveal(null);
     setPendingNavigation(null);
     setRecoveryAction(null);
+    setMarkdownViewModes(NO_MARKDOWN_VIEW_MODES);
     setIsTreeVisible(true);
     linkedFilePathRef.current = null;
     setSelectionScope(selectionScopeKey);
@@ -461,6 +488,24 @@ export default function PreviewPanel({
   // rejected for them. Oversized files are refused by the server with a
   // message, since workspace entries carry no size metadata.
   const selectedImageSource = selectedFilePath ? resolvePreviewImageSource(selectedFilePath) : null;
+  const selectedFileKind = selectedFilePath
+    ? detectPreviewFileKind({ filePath: selectedFilePath })
+    : "text";
+  // PDFs read in bounded chunks on nodes that serve them, never through the
+  // text read. Null while the node's config is unknown: the PDF waits rather
+  // than flashing an update message. The frozen phone tier keeps today's view.
+  const readsFileChunks = useEnvironmentServerConfigSelector(
+    activeEnvironmentId,
+    selectServerReadsFileChunks,
+  );
+  const pdfPreview =
+    selectedFileKind !== "pdf" || isPhonePresentation
+      ? "off"
+      : readsFileChunks === null
+        ? "pending"
+        : readsFileChunks
+          ? "chunked"
+          : "outdated-node";
 
   const selectedFileQuery = useProjectReadFile({
     environmentId: activeThread?.environmentId ?? null,
@@ -471,14 +516,12 @@ export default function PreviewPanel({
       activeCwd &&
       selectedFilePath &&
       previewSearch.preview === "1" &&
-      selectedImageSource !== "raster",
+      selectedImageSource !== "raster" &&
+      !(selectedFileKind === "pdf" && pdfPreview !== "off"),
     ),
   });
   const selectedFileData =
     selectedFileQuery.data?.relativePath === selectedFilePath ? selectedFileQuery.data : null;
-  const selectedFileKind = selectedFilePath
-    ? detectPreviewFileKind({ filePath: selectedFilePath })
-    : "text";
   const selectedFileError =
     selectedFileQuery.error instanceof Error
       ? selectedFileQuery.error.message
@@ -550,6 +593,36 @@ export default function PreviewPanel({
     currentEditSession.lineEnding !== "mixed" &&
     currentEditSession.diskState === "known",
   );
+  // Markdown opens rendered (a link to a line opens Source); unsaved edits render too.
+  const isMarkdownFile =
+    selectedFilePath !== null && !isPhonePresentation && isMarkdownPreviewPath(selectedFilePath);
+  const markdownContents = isMarkdownFile
+    ? (currentEditSession?.contents ?? selectedFileData?.contents)
+    : undefined;
+  const markdownViewChoice =
+    selectedFilePath !== null ? markdownViewModes.get(selectedFilePath) : undefined;
+  const markdownViewMode =
+    isMarkdownFile && markdownContents !== undefined
+      ? resolveWorkspaceFileViewMode({
+          path: selectedFilePath,
+          kind: "markdown",
+          markdownRendererAvailable:
+            markdownContents.length <= PREVIEW_MARKDOWN_RENDER_DEFAULT_MAX_CHARS,
+          override:
+            markdownViewChoice === undefined
+              ? null
+              : { path: selectedFilePath, mode: markdownViewChoice },
+        })
+      : "source";
+  const showRenderedMarkdown = markdownViewMode === "preview";
+  // The size default holds for the whole visit: pinned once the file's contents arrive.
+  const markdownDefaultViewPending =
+    isMarkdownFile && markdownContents !== undefined && markdownViewChoice === undefined;
+  useEffect(() => {
+    if (markdownDefaultViewPending && selectedFilePath !== null) {
+      rememberMarkdownViewMode(selectedFilePath, markdownViewMode, { ifUnset: true });
+    }
+  }, [markdownDefaultViewPending, markdownViewMode, rememberMarkdownViewMode, selectedFilePath]);
   const selectionGeneration = useRef(0);
   useEffect(() => {
     selectionGeneration.current++;
@@ -558,12 +631,25 @@ export default function PreviewPanel({
     };
   }, [sessionOwner]);
 
+  // Shows a file, with the line a deep link asked for. A linked line is marked
+  // in the source, so a Markdown file opens there; only a file that actually
+  // opens takes that choice, never one the unsaved-draft prompt held back.
+  const selectFile = useCallback(
+    (filePath: string, nextLineReveal: PreviewLineReveal | null) => {
+      setSelectedFilePath(filePath);
+      setLineReveal(nextLineReveal);
+      if (nextLineReveal !== null && isMarkdownPreviewPath(filePath)) {
+        rememberMarkdownViewMode(filePath, "source");
+      }
+    },
+    [rememberMarkdownViewMode],
+  );
   // Opens a file the way a tree click does: an unsaved draft asks first. A
   // deep link's line is marked only once its file is the one open.
   const openFile = useCallback(
     async (filePath: string, nextLineReveal: PreviewLineReveal | null) => {
       if (filePath === selectedFilePath) {
-        setLineReveal(nextLineReveal);
+        selectFile(filePath, nextLineReveal);
         return;
       }
       const generation = ++selectionGeneration.current;
@@ -574,10 +660,9 @@ export default function PreviewPanel({
         return;
       }
       if (generation !== selectionGeneration.current) return;
-      setSelectedFilePath(filePath);
-      setLineReveal(nextLineReveal);
+      selectFile(filePath, nextLineReveal);
     },
-    [selectedFilePath, sessionOwner],
+    [selectFile, selectedFilePath, sessionOwner],
   );
   // Every other open drops the mark, so coming back does not replay the link.
   const onSelectFile = useCallback((filePath: string) => openFile(filePath, null), [openFile]);
@@ -699,7 +784,8 @@ export default function PreviewPanel({
   const canPickLines =
     fileReferencePicker.available &&
     selectedFilePath !== null &&
-    normalizeFileReferencePath(selectedFilePath) !== null;
+    normalizeFileReferencePath(selectedFilePath) !== null &&
+    !showRenderedMarkdown;
   // Stable, so the renderer's options change only when the `+` comes or goes.
   const onGutterPick = useEvent((range: SelectedLineRange) => {
     if (!selectedFilePath) return;
@@ -760,7 +846,8 @@ export default function PreviewPanel({
     ) : null;
 
   // Scroll a deep link's line into view once its file has rendered.
-  const fileViewReady = previewTextFile !== null || isSelectedFileEditable;
+  const fileViewReady =
+    (previewTextFile !== null || isSelectedFileEditable) && !showRenderedMarkdown;
   const revealedTokenRef = useRef<number | null>(null);
   useEffect(() => {
     const card = fileCardRef.current;
@@ -861,10 +948,13 @@ export default function PreviewPanel({
   const unsavedDialogOpen = pendingFilePath !== null;
   const cancelUnsavedNavigation = useCallback(() => setPendingNavigation(null), []);
   const finishUnsavedNavigation = useCallback(() => {
-    setSelectedFilePath(pendingNavigation?.path ?? null);
-    setLineReveal(pendingNavigation?.lineReveal ?? null);
+    if (pendingNavigation) selectFile(pendingNavigation.path, pendingNavigation.lineReveal);
+    else {
+      setSelectedFilePath(null);
+      setLineReveal(null);
+    }
     setPendingNavigation(null);
-  }, [pendingNavigation]);
+  }, [pendingNavigation, selectFile]);
   const continueUnsavedNavigation = useCallback(async () => {
     const generation = selectionGeneration.current;
     if (sessionOwner && !(await sessionOwner.discard())) return;
@@ -1001,6 +1091,27 @@ export default function PreviewPanel({
                 </span>
               ) : null}
             </div>
+            {isMarkdownFile && markdownContents !== undefined ? (
+              <ToggleGroup
+                className="shrink-0"
+                variant="outline"
+                size="xs"
+                value={[markdownViewMode]}
+                onValueChange={(value) => {
+                  const mode = value[0];
+                  if (selectedFilePath && (mode === "preview" || mode === "source")) {
+                    rememberMarkdownViewMode(selectedFilePath, mode);
+                  }
+                }}
+              >
+                <ToggleGroupItem aria-label="Show rendered Markdown" value="preview">
+                  Preview
+                </ToggleGroupItem>
+                <ToggleGroupItem aria-label="Show Markdown source" value="source">
+                  Source
+                </ToggleGroupItem>
+              </ToggleGroup>
+            ) : null}
             {!isPhonePresentation &&
             currentEditSession &&
             (isSelectedFileEditable || sessionOwner?.unsaved) ? (
@@ -1103,6 +1214,33 @@ export default function PreviewPanel({
               svgContents={selectedFileData?.contents}
               refreshKey={latestSelectedFileRefreshKey}
             />
+          ) : selectedFileKind === "pdf" && pdfPreview === "chunked" && selectedFilePath ? (
+            <PreviewPdf
+              environmentId={activeEnvironmentId}
+              cwd={activeCwd}
+              relativePath={selectedFilePath}
+              refreshKey={latestSelectedFileRefreshKey}
+            />
+          ) : selectedFileKind === "pdf" && pdfPreview === "pending" ? (
+            <DiffPanelLoadingState label="Loading PDF..." />
+          ) : selectedFileKind === "pdf" && pdfPreview === "outdated-node" ? (
+            <div className="flex flex-1 items-center justify-center px-5 text-center text-xs text-muted-foreground/70">
+              Update Ryco on this node to preview PDFs.
+            </div>
+          ) : showRenderedMarkdown &&
+            markdownContents !== undefined &&
+            activeCwd &&
+            selectedFilePath &&
+            currentEditSession?.diskState !== "unknown" ? (
+            <div className="min-h-0 flex-1 overflow-auto px-5 py-4" data-preview-markdown>
+              <ChatMarkdown
+                text={markdownContents}
+                cwd={activeCwd}
+                documentFolder={workspaceFileFolder(activeCwd, selectedFilePath)}
+                {...(activeEnvironmentId ? { environmentId: activeEnvironmentId } : {})}
+                smoothStreaming={false}
+              />
+            </div>
           ) : isSelectedFileEditable && currentEditSession ? (
             <PreviewFileEditor
               cacheKey={currentEditSession.key}

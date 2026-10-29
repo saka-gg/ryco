@@ -93,6 +93,7 @@ describe("hosted session admission", () => {
     const ready = { sessionStatus: "ready", sessionRecoveredAfterUnknown: false } as const;
     expect(hostedSessionAdmits(ready, WS_METHODS.terminalWrite)).toBe(true);
     expect(hostedSessionAdmits(ready, WS_METHODS.projectsReadFile)).toBe(true);
+    expect(hostedSessionAdmits(ready, WS_METHODS.projectsReadFileChunk)).toBe(true);
   });
 
   it("admits only reads after recovering with unconfirmed delivery", () => {
@@ -101,6 +102,7 @@ describe("hosted session admission", () => {
       sessionRecoveredAfterUnknown: true,
     } as const;
     expect(hostedSessionAdmits(recovered, WS_METHODS.projectsReadFile)).toBe(true);
+    expect(hostedSessionAdmits(recovered, WS_METHODS.projectsReadFileChunk)).toBe(true);
     expect(hostedSessionAdmits(recovered, WS_METHODS.vcsReadLocalChanges)).toBe(true);
     expect(hostedSessionAdmits(recovered, ORCHESTRATION_WS_METHODS.getThreadWindow)).toBe(true);
     expect(hostedSessionAdmits(recovered, WS_METHODS.terminalWrite)).toBe(false);
@@ -186,6 +188,17 @@ describe("hosted reads before the snapshot", () => {
         }
       }
     }
+  });
+
+  it("keeps chunked previews out of early reads, like binary reads", () => {
+    // A PDF opened during a reconnect waits for the shell snapshot.
+    expect(hostedAdmitsReadBeforeSnapshot(catchingUp, WS_METHODS.projectsReadFile)).toBe(true);
+    expect(hostedAdmitsReadBeforeSnapshot(catchingUp, WS_METHODS.projectsReadFileChunk)).toBe(
+      false,
+    );
+    expect(hostedAdmitsReadBeforeSnapshot(catchingUp, WS_METHODS.projectsReadFileBinary)).toBe(
+      false,
+    );
   });
 
   it("never admits a read that changes or reaches out, though it is classified as a read", () => {

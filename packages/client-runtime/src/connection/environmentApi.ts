@@ -73,6 +73,7 @@ export function createEnvironmentApi(rpcClient: WsRpcClient): EnvironmentApi {
       readFile: rpcClient.projects.readFile,
       readIcon: rpcClient.projects.readIcon,
       readFileBinary: rpcClient.projects.readFileBinary,
+      readFileChunk: rpcClient.projects.readFileChunk,
       searchEntries: rpcClient.projects.searchEntries,
       searchContent: rpcClient.projects.searchContent,
       writeFile: rpcClient.projects.writeFile,

@@ -143,6 +143,7 @@ describe("shared RPC access policy", () => {
     // Operator-tier reads are still reads: the tier is not an effect.
     for (const method of [
       WS_METHODS.projectsReadFile,
+      WS_METHODS.projectsReadFileChunk,
       WS_METHODS.vcsReadLocalChanges,
       WS_METHODS.vcsReadComparison,
       WS_METHODS.sourceControlListChangeRequests,
@@ -151,6 +152,9 @@ describe("shared RPC access policy", () => {
       expect(rpcAccessFor(method)).toBe("operator");
       expect(rpcDeliveryEffectFor(method)).toBe("read");
     }
+    // Chunked previews read workspace bytes, which a viewer may not.
+    expect(hostedRoleAllows("viewer", WS_METHODS.projectsReadFileChunk)).toBe(false);
+    expect(hostedRoleAllows("operator", WS_METHODS.projectsReadFileChunk)).toBe(true);
     // Long-lived read streams outside the session-sync set.
     expect(rpcDeliveryEffectFor(AGENT_CONTROL_WS_METHODS.subscribeProposals)).toBe("read");
     expect(rpcDeliveryEffectFor(DEVICE_WS_METHODS.subscribeEvents)).toBe("read");

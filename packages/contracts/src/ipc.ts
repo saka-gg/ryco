@@ -186,6 +186,8 @@ import type {
   ProjectReadIconResult,
   ProjectReadFileBinaryInput,
   ProjectReadFileBinaryResult,
+  ProjectReadFileChunkInput,
+  ProjectReadFileChunkResult,
   ProjectReadFileInput,
   ProjectReadFileResult,
   ProjectStageFileReferenceInput,
@@ -1435,6 +1437,12 @@ export interface EnvironmentApi {
     readFile: (input: ProjectReadFileInput) => Promise<ProjectReadFileResult>;
     readIcon: (input: ProjectReadIconInput) => Promise<ProjectReadIconResult>;
     readFileBinary: (input: ProjectReadFileBinaryInput) => Promise<ProjectReadFileBinaryResult>;
+    /**
+     * PDFs and raster images in bounded chunks (`projects.readFileChunk`). Optional so
+     * test fakes need not supply it; clients call it only when the node's config
+     * advertises `projectReadFileChunk`.
+     */
+    readFileChunk?: (input: ProjectReadFileChunkInput) => Promise<ProjectReadFileChunkResult>;
     searchEntries: (input: ProjectSearchEntriesInput) => Promise<ProjectSearchEntriesResult>;
     /**
      * Only for nodes that advertise `projectContentSearch`. Aborting `signal` withdraws the

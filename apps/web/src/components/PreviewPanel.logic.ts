@@ -1,4 +1,7 @@
-export type PreviewFileKind = "image" | "text" | "binary";
+import { classifyWorkspaceFilePath } from "@ryco/client-runtime/state/files";
+import type { ServerConfig } from "@ryco/contracts";
+
+export type PreviewFileKind = "image" | "text" | "pdf" | "binary";
 
 const IMAGE_EXTENSIONS = new Set(["gif", "jpeg", "jpg", "png", "svg", "webp"]);
 const TEXT_EXTENSIONS = new Set([
@@ -21,7 +24,9 @@ const TEXT_EXTENSIONS = new Set([
   "json",
   "jsx",
   "log",
+  "markdown",
   "md",
+  "mdown",
   "mdx",
   "py",
   "rs",
@@ -43,7 +48,9 @@ const LANGUAGE_BY_EXTENSION = new Map<string, string>([
   ["js", "js"],
   ["json", "json"],
   ["jsx", "jsx"],
+  ["markdown", "markdown"],
   ["md", "markdown"],
+  ["mdown", "markdown"],
   ["mdx", "markdown"],
   ["py", "python"],
   ["rs", "rust"],
@@ -97,15 +104,38 @@ export function detectPreviewFileKind(input: {
   readonly mimeType?: string | null;
 }): PreviewFileKind {
   const mimeType = input.mimeType?.toLowerCase().split(";", 1)[0]?.trim();
+  const extension = getPreviewExtension(input.filePath);
+  if (mimeType === "application/pdf" || extension === "pdf") return "pdf";
   if (mimeType?.startsWith("image/")) return "image";
   if (mimeType && (mimeType.startsWith("text/") || TEXT_MIME_TYPES.has(mimeType))) {
     return "text";
   }
 
-  const extension = getPreviewExtension(input.filePath);
   if (IMAGE_EXTENSIONS.has(extension)) return "image";
   if (TEXT_EXTENSIONS.has(extension)) return "text";
   return "binary";
+}
+
+/** Markdown the Files panel can render (the extensions the shared classifier knows). */
+export function isMarkdownPreviewPath(filePath: string): boolean {
+  return classifyWorkspaceFilePath(filePath) === "markdown";
+}
+
+/**
+ * Markdown longer than this opens as Source; the toggle still renders it on
+ * request (one render of a large document costs main-thread time).
+ */
+export const PREVIEW_MARKDOWN_RENDER_DEFAULT_MAX_CHARS = 256 * 1024;
+
+/**
+ * Whether the environment's live server config says it serves
+ * `projects.readFileChunk`: null while the config is unknown, so a PDF waits
+ * instead of flashing an "update" message. Read from the server config, not the
+ * environment descriptor: hosted nodes get a synthetic descriptor without it.
+ */
+export function selectServerReadsFileChunks(config: ServerConfig | null): boolean | null {
+  if (config === null) return null;
+  return config.environment.capabilities.projectReadFileChunk === true;
 }
 
 /**

@@ -757,3 +757,224 @@ describe("file links open in Ryco", () => {
     }
   });
 });
+
+describe("document mode", () => {
+  let stopTier: () => void;
+  beforeEach(async () => {
+    await page.viewport(1024, 768);
+    stopTier = syncDocumentPresentationTier();
+    workspaceFileOpenerMock.canOpen.mockReturnValue(true);
+  });
+  afterEach(() => {
+    stopTier();
+    openInPreferredEditorMock.mockClear();
+    contextMenuShowMock.mockClear();
+    readFileBinaryMock.mockClear();
+    workspaceFileOpenerMock.canOpen.mockReset().mockReturnValue(false);
+    workspaceFileOpenerMock.open.mockReset().mockReturnValue(true);
+    document.body.innerHTML = "";
+  });
+
+  const renderDocument = (text: string) =>
+    render(
+      <ChatMarkdown
+        text={text}
+        cwd="/repo"
+        documentFolder="/repo/docs"
+        environmentId={EnvironmentId.make("local")}
+      />,
+    );
+
+  it("opens workspace files from the document's own folder in the Files panel", async () => {
+    const screen = await renderDocument("See [n](../notes.md) and [g](./guide.md#L4).");
+
+    try {
+      await page.getByRole("link", { name: "notes.md" }).click();
+      expect(workspaceFileOpenerMock.open).toHaveBeenCalledWith({
+        path: "notes.md",
+        line: undefined,
+      });
+      await page.getByRole("link", { name: "guide.md · L4" }).click();
+      expect(workspaceFileOpenerMock.open).toHaveBeenLastCalledWith({
+        path: "docs/guide.md",
+        line: 4,
+      });
+      expect(openInPreferredEditorMock).not.toHaveBeenCalled();
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it("reads images relative to the document's folder, inside the workspace", async () => {
+    const screen = await renderDocument("![Diagram](../assets/a.png)");
+
+    try {
+      await vi.waitFor(() =>
+        expect(readFileBinaryMock).toHaveBeenCalledWith({
+          cwd: "/repo",
+          relativePath: "assets/a.png",
+        }),
+      );
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it("never opens the editor on a plain click outside the workspace", async () => {
+    const screen = await renderDocument("[x](/etc/hosts) and [y](../../x.md)");
+
+    try {
+      await page.getByRole("link", { name: "hosts" }).click();
+      await page.getByRole("link", { name: "x.md" }).click();
+      await nextFrame();
+      expect(workspaceFileOpenerMock.open).not.toHaveBeenCalled();
+      expect(openInPreferredEditorMock).not.toHaveBeenCalled();
+
+      // Cmd/Ctrl-click is an explicit choice, as in a reply.
+      await page.getByRole("link", { name: "hosts" }).click({ modifiers: ["ControlOrMeta"] });
+      await vi.waitFor(() =>
+        expect(openInPreferredEditorMock).toHaveBeenCalledWith(expect.anything(), "/etc/hosts"),
+      );
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it("renders anchors, other relative links and thread references inert", async () => {
+    const location = window.location.href;
+    const open = vi.spyOn(window, "open");
+    const screen = await renderDocument(
+      "[toc](#install) [l](LICENSE) [d](docs/) [t](/ryco/thread/abc) [j](javascript:alert(1))",
+    );
+
+    try {
+      for (const name of ["toc", "l", "d", "t", "j"]) {
+        await expect.element(page.getByText(name, { exact: true })).toBeInTheDocument();
+        expect(page.getByRole("link", { name, exact: true }).query()).toBeNull();
+        await page.getByText(name, { exact: true }).click();
+      }
+      expect(document.querySelectorAll(".chat-markdown a")).toHaveLength(0);
+      expect(window.location.href).toBe(location);
+      expect(open).not.toHaveBeenCalled();
+      expect(workspaceFileOpenerMock.open).not.toHaveBeenCalled();
+      expect(openInPreferredEditorMock).not.toHaveBeenCalled();
+    } finally {
+      open.mockRestore();
+      await screen.unmount();
+    }
+  });
+
+  it("keeps @thread mentions as text, in paragraphs, lists and tables", async () => {
+    const screen = await renderDocument(
+      [
+        "See @thread:abc123 here.",
+        "",
+        "- also @thread:def456",
+        "",
+        "| Thread |",
+        "| --- |",
+        "| @thread:ghi789 |",
+      ].join("\n"),
+    );
+
+    try {
+      for (const id of ["abc123", "def456", "ghi789"]) {
+        await expect.element(page.getByText(`@thread:${id}`, { exact: false })).toBeInTheDocument();
+      }
+      expect(document.querySelectorAll("[data-thread-mention-chip]")).toHaveLength(0);
+      expect(document.querySelectorAll(".chat-markdown a")).toHaveLength(0);
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it("opens reference-style and linked-image file links in the Files panel", async () => {
+    const screen = await renderDocument(
+      [
+        "See the [contributing guide][contrib].",
+        "",
+        "[![Logo](../assets/logo.png)](./guide.md)",
+        "",
+        "[contrib]: ../CONTRIBUTING.md",
+      ].join("\n"),
+    );
+
+    try {
+      await page.getByRole("link", { name: "CONTRIBUTING.md" }).click();
+      expect(workspaceFileOpenerMock.open).toHaveBeenLastCalledWith({
+        path: "CONTRIBUTING.md",
+        line: undefined,
+      });
+      await page.getByRole("link", { name: "guide.md" }).click();
+      expect(workspaceFileOpenerMock.open).toHaveBeenLastCalledWith({
+        path: "docs/guide.md",
+        line: undefined,
+      });
+      expect(openInPreferredEditorMock).not.toHaveBeenCalled();
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it("keeps a middle click on a file link from opening its raw href", async () => {
+    const screen = await renderDocument("[n](../notes.md) and [x](/etc/hosts)");
+
+    try {
+      for (const name of ["notes.md", "hosts"]) {
+        const link = page.getByRole("link", { name }).element();
+        const middleClick = new MouseEvent("auxclick", {
+          bubbles: true,
+          button: 1,
+          cancelable: true,
+        });
+        link.dispatchEvent(middleClick);
+        expect(middleClick.defaultPrevented).toBe(true);
+      }
+      expect(workspaceFileOpenerMock.open).not.toHaveBeenCalled();
+      expect(openInPreferredEditorMock).not.toHaveBeenCalled();
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it("keeps web and mail links as links that leave the app", async () => {
+    const screen = await renderDocument(
+      "[s](https://example.com/docs) [m](mailto:team@example.com)",
+    );
+
+    try {
+      for (const [name, href] of [
+        ["s", "https://example.com/docs"],
+        ["m", "mailto:team@example.com"],
+      ] as const) {
+        const link = page.getByRole("link", { name, exact: true });
+        await expect.element(link).toHaveAttribute("href", href);
+        await expect.element(link).toHaveAttribute("target", "_blank");
+        await expect.element(link).toHaveAttribute("rel", "noopener noreferrer");
+      }
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it("leaves replies as they were: an anchor in a reply is still a link", async () => {
+    const screen = await render(
+      <ChatMarkdown
+        text="[toc](#install) [t](/ryco/thread/abc)"
+        cwd="/repo"
+        environmentId={EnvironmentId.make("local")}
+      />,
+    );
+
+    try {
+      await expect
+        .element(page.getByRole("link", { name: "toc", exact: true }))
+        .toHaveAttribute("href", "#install");
+      await expect
+        .element(page.getByRole("link", { name: "t", exact: true }))
+        .toHaveAttribute("href", "/local/abc");
+    } finally {
+      await screen.unmount();
+    }
+  });
+});

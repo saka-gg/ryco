@@ -151,6 +151,11 @@
       "import": "./src/browserElementLimits.ts",
       "require": "./src/browserElementLimits.ts"
     },
+    "./project": {
+      "types": "./src/project.ts",
+      "import": "./src/project.ts",
+      "require": "./src/project.ts"
+    },
     "./project-browser": {
       "types": "./src/projectBrowser.ts",
       "import": "./src/projectBrowser.ts",
