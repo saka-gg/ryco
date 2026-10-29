@@ -25,8 +25,10 @@ replaces the local document. Ordinary edits cannot overwrite an unreadable docum
 
 Every Ryco version in a browser profile or desktop installation shares this document, so it is
 read one entry at a time. Entries this version cannot use, such as shortcuts for commands added
-by a newer version, are ignored here and written back unchanged when you save. Rebinding or
-unbinding a command here replaces its unusable entries; **Restore defaults** removes them all.
+by a newer version, are ignored here and written back unchanged when you save. So are fields
+this version doesn't know on a shortcut it does use, for as long as you leave that shortcut as it
+is. Rebinding or unbinding a command here replaces its unusable entries; changing a shortcut here
+writes it without the fields this version doesn't know; **Restore defaults** removes them all.
 
 ## Import existing node bindings
 

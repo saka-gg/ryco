@@ -78,34 +78,64 @@ export const APP_KEYBINDINGS_STORAGE_KEY = "ryco:app-keybindings:v1";
 
 type RetainedKeybindingRule = Readonly<Record<string, unknown>> & { readonly command: string };
 
+/** A saved rule this version uses, as saved, when it carries fields this version doesn't know. */
+interface SavedKeybindingRule {
+  /** The rule's compiled form, so a respelled key or `when` still matches it. */
+  readonly compiled: string;
+  readonly entry: RetainedKeybindingRule;
+}
+
 /**
  * Saved entries this version cannot use: rules for unknown commands or with keys it cannot
  * compile, unknown disabled commands and unknown document fields. They stay inactive here and are
- * written back unchanged, so shortcuts saved by a newer Ryco survive edits made in this one.
+ * written back unchanged, so shortcuts saved by a newer Ryco survive edits made in this one. The
+ * same holds for fields this version doesn't know on rules it does use (`savedRules`).
  */
 interface RetainedAppKeybindings {
   readonly otherFields: Readonly<Record<string, unknown>>;
   readonly rules: readonly RetainedKeybindingRule[];
   readonly disabledCommands: readonly string[];
+  readonly savedRules: readonly SavedKeybindingRule[];
 }
 
 const NO_RETAINED_APP_KEYBINDINGS: RetainedAppKeybindings = {
   otherFields: {},
   rules: [],
   disabledCommands: [],
+  savedRules: [],
 };
 
 const decodeKeybindingRule = Schema.decodeUnknownOption(KeybindingRuleSchema);
 const isKeybindingCommand = Schema.is(KeybindingCommandSchema);
+const KNOWN_RULE_FIELDS: ReadonlySet<string> = new Set(["key", "command", "when"]);
+
+const compiledRule = (rule: KeybindingRule) => JSON.stringify(compileResolvedKeybindingRule(rule));
+
+/**
+ * The saved form of each rule, aligned with `rules`, for rules saved with fields this version
+ * doesn't know. Each saved rule pairs with at most one equal rule, so a duplicate the user adds
+ * does not copy its fields.
+ */
+function savedFormsOf(
+  rules: readonly KeybindingRule[],
+  savedRules: readonly SavedKeybindingRule[],
+): readonly (SavedKeybindingRule | undefined)[] {
+  const unpaired = [...savedRules];
+  return rules.map((rule) => {
+    if (unpaired.length === 0) return undefined;
+    const compiled = compiledRule(rule);
+    const index = unpaired.findIndex((saved) => saved.compiled === compiled);
+    return index === -1 ? undefined : unpaired.splice(index, 1)[0];
+  });
+}
 
 /**
  * Decodes the saved document one entry at a time. Persisted data is otherwise decoded strictly,
  * but this document is shared by every build that runs in the profile or installation: an
  * outdated tab or a downgraded app must keep the shortcuts it knows when a newer one saved more.
  * What it cannot use is retained, except entries without a command, which no version can use.
- * A rule it can use is written back in its decoded form, so a field added to rules later would
- * be lost here and needs its own handling. A document without both lists still fails, and
- * writes stay strict through `validateAppKeybindings`.
+ * A rule it can use keeps its saved form for as long as the rule stays as it is. A document
+ * without both lists still fails, and writes stay strict through `validateAppKeybindings`.
  */
 function decodePersistedAppKeybindings(input: unknown): {
   readonly preferences: AppKeybindings;
@@ -124,6 +154,7 @@ function decodePersistedAppKeybindings(input: unknown): {
     otherFields,
     rules: [] as RetainedKeybindingRule[],
     disabledCommands: [] as string[],
+    savedRules: [] as SavedKeybindingRule[],
   };
   for (const entry of rules.slice(-MAX_KEYBINDINGS_COUNT)) {
     // An entry without a command is corrupt: no version can use it.
@@ -131,6 +162,12 @@ function decodePersistedAppKeybindings(input: unknown): {
     const rule = Option.getOrUndefined(decodeKeybindingRule(entry));
     if (rule && compileResolvedKeybindingRule(rule) && !rule.command.startsWith("script.")) {
       preferences.rules.push(rule);
+      if (Object.keys(entry).some((field) => !KNOWN_RULE_FIELDS.has(field))) {
+        retained.savedRules.push({
+          compiled: compiledRule(rule),
+          entry: entry as RetainedKeybindingRule,
+        });
+      }
     } else {
       retained.rules.push(entry as RetainedKeybindingRule);
     }
@@ -144,7 +181,8 @@ function decodePersistedAppKeybindings(input: unknown): {
 
 /**
  * A retained rule goes once its command is edited here, so the latest intent wins. Retained
- * entries make room first when the document is full.
+ * entries make room first when the document is full. A rule's saved form goes with the rule:
+ * once it is changed or removed here, it is written as this version knows it.
  */
 function retainedAfterEdit(
   retained: RetainedAppKeybindings,
@@ -169,6 +207,7 @@ function retainedAfterEdit(
       0,
       Math.max(0, MAX_KEYBINDINGS_COUNT - next.disabledCommands.length),
     ),
+    savedRules: savedFormsOf(next.rules, retained.savedRules).filter(Predicate.isNotUndefined),
   };
 }
 
@@ -177,9 +216,17 @@ function serializeAppKeybindings(
   preferences: AppKeybindings,
   retained: RetainedAppKeybindings,
 ): string {
+  const savedForms = savedFormsOf(preferences.rules, retained.savedRules);
   return JSON.stringify({
     ...retained.otherFields,
-    rules: [...retained.rules, ...preferences.rules],
+    rules: [
+      ...retained.rules,
+      ...preferences.rules.map((rule, index) => {
+        const saved = savedForms[index];
+        // The decoded fields win, so the rule is written as this version uses it.
+        return saved ? { ...saved.entry, ...rule } : rule;
+      }),
+    ],
     disabledCommands: [...preferences.disabledCommands, ...retained.disabledCommands],
   });
 }
