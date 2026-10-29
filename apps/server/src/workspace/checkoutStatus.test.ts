@@ -9,6 +9,7 @@ import {
   checkoutChangeBlockers,
   checkoutHasBlockingChanges,
   ignoredCacheDirectories,
+  splitUnattendedCacheFolders,
   withoutEmptyIgnoredDirectories,
   withRegenerableByOwnNameOnly,
 } from "./checkoutStatus.ts";
@@ -128,6 +129,36 @@ describe("checkout status", () => {
       ...parsed,
       protectedIgnored: ["archive/"],
       regenerableIgnored: ["node_modules/"],
+    });
+  });
+  it("lets storage cleanup take dependency and tool caches, not build output", () => {
+    expect(
+      splitUnattendedCacheFolders([
+        "node_modules/",
+        "apps/web/node_modules/",
+        ".venv/",
+        "packages/a/.turbo/",
+        "dist/",
+        "build/",
+        "target/",
+        "coverage/",
+        ".cache/",
+        "src/__pycache__/",
+      ]),
+    ).toEqual({
+      unattended: [
+        ".venv",
+        "apps/web/node_modules",
+        "node_modules",
+        "packages/a/.turbo",
+        "src/__pycache__",
+      ],
+      reviewedOnly: ["dist/", "build/", "target/", "coverage/", ".cache/"],
+    });
+    // Only names the shared rule calls regenerable, and only plain relative paths.
+    expect(splitUnattendedCacheFolders(["../node_modules/", "a//node_modules/"])).toEqual({
+      unattended: [],
+      reviewedOnly: ["../node_modules/", "a//node_modules/"],
     });
   });
 });

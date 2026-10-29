@@ -3,7 +3,7 @@ import path from "node:path";
 import { Effect } from "effect";
 import { PROJECT_RELOCATION_PENDING_MESSAGE, StorageError } from "@ryco/contracts";
 import type * as SqlClient from "effect/sql/SqlClient";
-import { captureWorktreeIdentity } from "./filesystem.ts";
+import { captureWorktreeIdentity, readRemovalRecord } from "./filesystem.ts";
 import { makeReadWriteLockUnsafe } from "./readWriteLock.ts";
 
 /**
@@ -54,16 +54,11 @@ const removingPaths = (row: { path: string; identity_json: string }): readonly s
   } catch {
     return [path.parse(row.path).root];
   }
-  const quarantine = identity?.quarantinePath;
-  if (quarantine === undefined) return [row.path];
-  if (
-    typeof quarantine !== "string" ||
-    !path.isAbsolute(quarantine) ||
-    path.dirname(quarantine) !== path.dirname(row.path) ||
-    !path.basename(quarantine).startsWith(".cleanup-")
-  )
-    return [path.parse(row.path).root]; // Corrupt provenance: conservatively refuse admission.
-  return [row.path, quarantine];
+  if (identity?.quarantinePath === undefined) return [row.path];
+  // Cache folders moved out beside the checkout stay fenced until the purge deletes them.
+  const record = readRemovalRecord(row.path, identity);
+  if (!record) return [path.parse(row.path).root]; // Corrupt provenance: conservatively refuse admission.
+  return [row.path, record.quarantine, ...record.caches.map((cache) => cache.destination)];
 };
 
 /** Resolve aliases even when the leaf was removed, so refusal survives partial cleanup. */

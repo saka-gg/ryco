@@ -27,7 +27,7 @@ import {
   type VcsStatusResult,
 } from "@ryco/contracts";
 import { governChildProcess } from "../processGovernor.ts";
-import type { VerifiedWorktreeCleanup } from "../storage/filesystem.ts";
+import type { VerifiedWorktreeCleanup } from "../storage/quarantineRemoval.ts";
 import { makeGitGrepOutputParser } from "./gitGrepOutput.ts";
 import * as GitVcsDriverCore from "./GitVcsDriverCore.ts";
 import * as VcsDriver from "./VcsDriver.ts";

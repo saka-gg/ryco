@@ -128,6 +128,58 @@ export const ignoredCacheDirectories = (status: ParsedWorktreeStatus): string[] 
   status.regenerableIgnored.filter((entry) => entry.endsWith("/"));
 
 /**
+ * Cache folders cleanup without a review (storage cleanup) may delete: dependencies and tool
+ * caches that a package manager or tool fills again (a subset of the shared rule's regenerable
+ * folders). Build output (`dist/`, `build/`, `target/`, `coverage/`, a generic `.cache/`) can hold
+ * signed artifacts or reports nobody can rebuild, so only Remove checkout, which the user
+ * reviews, deletes it.
+ */
+const UNATTENDED_CACHE_FOLDER_NAMES: ReadonlySet<string> = new Set([
+  "node_modules",
+  ".turbo",
+  ".next",
+  ".nuxt",
+  ".svelte-kit",
+  ".parcel-cache",
+  ".vite",
+  ".angular",
+  ".expo",
+  "__pycache__",
+  ".pytest_cache",
+  ".mypy_cache",
+  ".ruff_cache",
+  ".tox",
+  ".venv",
+  ".gradle",
+  ".dart_tool",
+]);
+
+/**
+ * Splits ignored cache folders (`ignoredCacheDirectories`) into those storage cleanup may
+ * delete without a review, as relative paths without the trailing slash, and the rest, as Git
+ * listed them.
+ */
+export function splitUnattendedCacheFolders(folders: readonly string[]): {
+  readonly unattended: string[];
+  readonly reviewedOnly: string[];
+} {
+  const unattended: string[] = [];
+  const reviewedOnly: string[] = [];
+  for (const folder of folders) {
+    const relative = folder.replace(/\/$/, "");
+    const name = relative.slice(relative.lastIndexOf("/") + 1);
+    if (
+      UNATTENDED_CACHE_FOLDER_NAMES.has(name) &&
+      classifyIgnoredPath(folder) === "regenerable" &&
+      relative.split("/").every((segment) => segment !== "" && segment !== "." && segment !== "..")
+    )
+      unattended.push(relative);
+    else reviewedOnly.push(folder);
+  }
+  return { unattended: unattended.toSorted(), reviewedOnly };
+}
+
+/**
  * The shared rule for cleanup that runs without a review (storage cleanup): an ignored entry is
  * regenerable only by its own name (`node_modules/`, `tsconfig.tsbuildinfo`, `.DS_Store`), not
  * because a folder above it has a cache-like name. Matching mode lists an entry on its own when

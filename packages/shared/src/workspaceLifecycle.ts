@@ -67,15 +67,29 @@ const REGENERABLE_DIRECTORIES: ReadonlySet<string> = new Set([
 
 const REGENERABLE_FILES = [/\.tsbuildinfo$/, /\.py[cod]$/, /^\.DS_Store$/, /^\.eslintcache$/];
 
-/** Never regenerable, even inside a cache directory. */
-const SENSITIVE_FILES = [
+/** Secrets people put in place themselves: a package manager never installs these names. */
+const USER_SECRET_FILES = [
   /^\.env(\..*)?$/i,
-  /\.(pem|key|p12|pfx|keystore|jks|kdbx)$/i,
-  /\.(sqlite3?|db|db3)(-wal|-shm|-journal)?$/i,
   /^id_(rsa|ed25519|ecdsa|dsa)(\.pub)?$/i,
-  /^(credentials|secrets?)(\..*)?$/i,
   /^\.(npmrc|pypirc|netrc|git-credentials)$/i,
 ];
+
+/** Never regenerable, even inside a cache directory. */
+const SENSITIVE_FILES = [
+  ...USER_SECRET_FILES,
+  /\.(pem|key|p12|pfx|keystore|jks|kdbx)$/i,
+  /\.(sqlite3?|db|db3)(-wal|-shm|-journal)?$/i,
+  /^(credentials|secrets?)(\..*)?$/i,
+];
+
+/**
+ * Whether a file name inside a dependency folder (`node_modules/`, `.venv/`) marks something a
+ * person put there. Narrower than the sensitive names `classifyIgnoredPath` protects: packages
+ * ship key, certificate and database fixtures and `credentials.*` sources (a checkout of Ryco
+ * holds dozens in `node_modules/`), but never an `.env` file, an SSH key or a credentials file.
+ */
+export const isUserSecretFileName = (name: string): boolean =>
+  USER_SECRET_FILES.some((pattern) => pattern.test(name));
 
 export type IgnoredPathClass = "regenerable" | "protected";
 
