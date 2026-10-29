@@ -70,10 +70,13 @@ const GROK_PHASE_TIMEOUT_HINTS: Partial<Record<AcpStartupPhase, string>> = {
   authenticate: `The Grok CLI did not confirm its login; sign in with the Grok CLI or set ${GROK_API_KEY_ENV}, then try again.`,
 };
 
+/** Whether Grok sessions in `environment` authenticate with an xAI API key, not the CLI login. */
+export function usesGrokApiKey(environment: NodeJS.ProcessEnv | undefined): boolean {
+  return Boolean(environment?.[GROK_API_KEY_ENV]?.trim());
+}
+
 function resolveGrokAuthMethodId(environment: NodeJS.ProcessEnv | undefined): string {
-  return environment?.[GROK_API_KEY_ENV]?.trim()
-    ? GROK_AUTH_METHOD_API_KEY
-    : GROK_AUTH_METHOD_CACHED_TOKEN;
+  return usesGrokApiKey(environment) ? GROK_AUTH_METHOD_API_KEY : GROK_AUTH_METHOD_CACHED_TOKEN;
 }
 
 export const makeGrokAcpRuntime = (

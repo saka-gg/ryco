@@ -546,6 +546,47 @@ describe("groupSubscriptionLimits", () => {
     expect(groups.flatMap((group) => group.withoutLimits)).toEqual([]);
   });
 
+  it("lists a direct Grok account under Grok, apart from a hub's xAI accounts", () => {
+    const environment = {
+      environmentId: "m5",
+      label: "M5",
+      connected: true,
+      hubs: [
+        hub([
+          hubAccount({
+            authIndex: "1",
+            provider: "xai",
+            quota: { status: "ok", windows: [{ id: "five_hour", ...fiveHour(20) }] },
+          }),
+        ]),
+      ],
+      providers: [
+        provider({
+          instanceId: ProviderInstanceId.make("grok"),
+          driver: ProviderDriverKind.make("grok"),
+          auth: { status: "authenticated", email: "me@example.com" },
+          rateLimits: {
+            limitId: "grok-credits",
+            secondary: { usedPercent: 37, windowDurationMins: 10_080 },
+            windows: [{ id: "credits", usedPercent: 37, windowDurationMins: 10_080 }],
+          },
+        }),
+      ],
+    };
+    const direct = listDirectProviderAccounts([environment]);
+    const groups = groupSubscriptionLimits({
+      hubs: environment.hubs.map((snapshot) => ({ environmentId: "m5", hub: snapshot })),
+      direct: direct.accounts,
+      routed: direct.routed,
+    });
+
+    expect(groups.map((group) => [group.label, group.directAccounts.length])).toEqual([
+      ["Grok", 1],
+      ["xAI", 0],
+    ]);
+    expect(groups[0]!.directAccounts[0]!.windows.map(({ label }) => label)).toEqual(["Weekly"]);
+  });
+
   it("lists the instances without limits it is given under their provider", () => {
     const { accounts, withoutLimits } = listDirectProviderAccounts([
       {

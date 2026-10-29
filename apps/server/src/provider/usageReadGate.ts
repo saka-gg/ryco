@@ -66,6 +66,8 @@ const MIN_THROTTLE_COOLDOWN_MS = 60_000;
 const MAX_THROTTLE_COOLDOWN_MS = 15 * 60_000;
 const FAILURE_COOLDOWN_MS = 60_000;
 const MAX_STALE_AGE_MS = 60 * 60_000;
+// A credential this close to its expiry counts as expired: the request would race the expiry.
+const CREDENTIAL_EXPIRY_SKEW_MS = 60_000;
 
 const FAILED: UsageReadOutcome = { _tag: "Failed" };
 const CLEARED: UsageReadOutcome = { _tag: "Cleared" };
@@ -103,6 +105,38 @@ export function parseRetryAfterMs(value: string | null, nowMs: number): number |
   const dateMs = Date.parse(trimmed);
   return Number.isFinite(dateMs) && dateMs > nowMs ? dateMs - nowMs : undefined;
 }
+
+/**
+ * A credential's expiry as a provider CLI stores it (`expiresAt`, `expires_at`), in epoch ms: an
+ * ISO date, or epoch seconds or milliseconds. Undefined when it is absent or unreadable.
+ */
+export function parseCredentialExpiresAtMs(value: unknown): number | undefined {
+  const epochMs = (epoch: number) => (epoch < 1_000_000_000_000 ? epoch * 1000 : epoch);
+  if (typeof value === "number") return Number.isFinite(value) ? epochMs(value) : undefined;
+  if (typeof value !== "string" || value.trim().length === 0) return undefined;
+  const numeric = Number(value);
+  if (Number.isFinite(numeric)) return epochMs(numeric);
+  const parsed = Date.parse(value);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+/**
+ * The usage read of a credential the provider's CLI owns and renews: `request`, unless the
+ * credential has expired (`expiresAtMs`, undefined when unknown) or expires within a minute. Then
+ * usage is cleared without a request; Ryco never renews the CLI's credential itself.
+ */
+export const credentialUsageReadPlan = (
+  accountKey: string,
+  expiresAtMs: number | undefined,
+  request: Effect.Effect<UsageReadOutcome>,
+): Effect.Effect<UsageReadPlan> =>
+  Effect.map(Clock.currentTimeMillis, (nowMs) => ({
+    accountKey,
+    fetch:
+      expiresAtMs !== undefined && nowMs > expiresAtMs - CREDENTIAL_EXPIRY_SKEW_MS
+        ? Effect.succeed(CLEARED)
+        : request,
+  }));
 
 /** The outcome of a non-2xx usage response. */
 export function usageOutcomeForStatus(
