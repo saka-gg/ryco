@@ -10,7 +10,12 @@ import {
   scopedScriptCommand,
   validateAppKeybindings,
 } from "./appKeybindings.ts";
-import { appKeybindingsFromRules, importAppKeybindings } from "./appKeybindingsEditing.ts";
+import type { KeybindingRule } from "@ryco/contracts/keybindings";
+import {
+  appKeybindingsFromEditor,
+  appKeybindingsFromRules,
+  importAppKeybindings,
+} from "./appKeybindingsEditing.ts";
 import {
   APP_DEFAULT_KEYBINDINGS,
   APP_DEFAULT_RESOLVED_KEYBINDINGS,
@@ -268,6 +273,58 @@ describe("documents saved by a newer version", () => {
       rules: [futureRule, { key: "mod+x", command: "terminal.toggle" }],
       disabledCommands: ["chat.newLocal", "chat.new", "future.command"],
     });
+  });
+
+  it("keeps fields it doesn't know on a rule it uses while that rule stays as it is", async () => {
+    const known = { key: "mod+alt+y", command: "chat.new", futureField: true };
+    const { app, values } = await hydrated({ rules: [known], disabledCommands: [] });
+    expect(app.getSnapshot().preferences.rules).toEqual([
+      { key: "mod+alt+y", command: "chat.new" },
+    ]);
+    // An edit to another command in the keybindings editor, which saves its whole snapshot.
+    const editorRows = (chatNew: readonly KeybindingRule[]) => [
+      ...APP_DEFAULT_KEYBINDINGS.filter(
+        (rule) => rule.command !== "chat.new" && rule.command !== "terminal.toggle",
+      ),
+      ...chatNew,
+      { key: "mod+x", command: "terminal.toggle" },
+    ];
+    await app.update((current) =>
+      appKeybindingsFromEditor(current, editorRows([{ key: "mod+alt+y", command: "chat.new" }])),
+    );
+    expect(storedDocument(values).rules).toEqual([
+      known,
+      { key: "mod+x", command: "terminal.toggle" },
+    ]);
+    // Spelling the same shortcut differently is no change to the rule.
+    await app.update(() =>
+      appKeybindingsFromRules(
+        editorRows([
+          { key: "alt+mod+y", command: "chat.new" },
+          { key: "alt+mod+y", command: "chat.new" },
+        ]),
+      ),
+    );
+    expect(storedDocument(values).rules).toEqual([
+      { key: "alt+mod+y", command: "chat.new", futureField: true },
+      { key: "alt+mod+y", command: "chat.new" },
+      { key: "mod+x", command: "terminal.toggle" },
+    ]);
+    // Changing the rule writes it as this version knows it, and the fields stay gone.
+    await app.update((current) =>
+      appKeybindingsFromEditor(current, editorRows([{ key: "mod+alt+u", command: "chat.new" }])),
+    );
+    expect(storedDocument(values).rules).toEqual([
+      { key: "mod+x", command: "terminal.toggle" },
+      { key: "mod+alt+u", command: "chat.new" },
+    ]);
+    await app.update((current) =>
+      appKeybindingsFromEditor(current, editorRows([{ key: "mod+alt+y", command: "chat.new" }])),
+    );
+    expect(storedDocument(values).rules).toEqual([
+      { key: "mod+x", command: "terminal.toggle" },
+      { key: "mod+alt+y", command: "chat.new" },
+    ]);
   });
 
   it("drops a rule it cannot compile once the user edits that command", async () => {
