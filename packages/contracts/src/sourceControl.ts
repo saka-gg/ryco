@@ -712,12 +712,29 @@ export const SourceControlDiscoveryResult = Schema.Struct({
 });
 export type SourceControlDiscoveryResult = typeof SourceControlDiscoveryResult.Type;
 
+/**
+ * Why a forge call failed, when the server could tell. Closed set: a kind added later must map
+ * to "failed", since an older client cannot decode a literal it does not know.
+ */
+export const SourceControlProviderErrorReason = Schema.Literals([
+  "missing-tool",
+  "unauthenticated",
+  "rate-limited",
+  "not-found",
+  "failed",
+]);
+export type SourceControlProviderErrorReason = typeof SourceControlProviderErrorReason.Type;
+
 export class SourceControlProviderError extends Schema.TaggedError<SourceControlProviderError>()(
   "SourceControlProviderError",
   {
     provider: SourceControlProviderKind,
     operation: Schema.String,
     detail: Schema.String,
+    /** Unset when the server did not classify the failure (and from servers before this field). */
+    reason: Schema.optional(SourceControlProviderErrorReason),
+    /** Epoch ms when the host should accept requests again; set with reason "rate-limited". */
+    retryAt: Schema.optional(NonNegativeInt),
     cause: Schema.optional(Schema.Defect()),
   },
 ) {

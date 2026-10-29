@@ -2,6 +2,7 @@ import type {
   SourceControlCommentAuthorRole,
   SourceControlProviderInfo,
   SourceControlProviderKind,
+  SourceControlProviderErrorReason,
 } from "@ryco/contracts";
 
 export interface ChangeRequestPresentation {
@@ -383,4 +384,71 @@ export function detectSourceControlProviderFromRemoteUrl(
     name: host,
     baseUrl: toBaseUrl(host),
   };
+}
+
+// ── Source control failures ──────────────────────────────────────────
+
+/** What a failed forge call says about itself (`SourceControlProviderError`). */
+export interface SourceControlFailureInfo {
+  readonly provider: SourceControlProviderKind;
+  /** Null when the server did not classify the failure, or predates the field. */
+  readonly reason: SourceControlProviderErrorReason | null;
+  /** Epoch ms when the host accepts requests again; null when not given. */
+  readonly retryAt: number | null;
+}
+
+// Checked against the contract's literals, so a new kind or reason cannot be missed here.
+const SOURCE_CONTROL_PROVIDER_KINDS = {
+  github: true,
+  gitlab: true,
+  forgejo: true,
+  "azure-devops": true,
+  bitbucket: true,
+  unknown: true,
+} as const satisfies Record<SourceControlProviderKind, true>;
+
+const SOURCE_CONTROL_PROVIDER_ERROR_REASONS = {
+  "missing-tool": true,
+  unauthenticated: true,
+  "rate-limited": true,
+  "not-found": true,
+  failed: true,
+} as const satisfies Record<SourceControlProviderErrorReason, true>;
+
+function isSourceControlProviderKind(value: unknown): value is SourceControlProviderKind {
+  return typeof value === "string" && Object.hasOwn(SOURCE_CONTROL_PROVIDER_KINDS, value);
+}
+
+function isSourceControlProviderErrorReason(
+  value: unknown,
+): value is SourceControlProviderErrorReason {
+  return typeof value === "string" && Object.hasOwn(SOURCE_CONTROL_PROVIDER_ERROR_REASONS, value);
+}
+
+/**
+ * Reads a `SourceControlProviderError` structurally, whether decoded from the
+ * wire or raised on the server; null for anything else. Fields with an
+ * unexpected type read as absent.
+ */
+export function readSourceControlFailure(error: unknown): SourceControlFailureInfo | null {
+  if (typeof error !== "object" || error === null) return null;
+  const record = error as {
+    readonly _tag?: unknown;
+    readonly provider?: unknown;
+    readonly reason?: unknown;
+    readonly retryAt?: unknown;
+  };
+  if (record._tag !== "SourceControlProviderError") return null;
+  const retryAt = record.retryAt;
+  return {
+    provider: isSourceControlProviderKind(record.provider) ? record.provider : "unknown",
+    reason: isSourceControlProviderErrorReason(record.reason) ? record.reason : null,
+    retryAt:
+      typeof retryAt === "number" && Number.isSafeInteger(retryAt) && retryAt >= 0 ? retryAt : null,
+  };
+}
+
+/** True for a `SourceControlProviderError` with reason "rate-limited". */
+export function isRateLimitedSourceControlFailure(error: unknown): boolean {
+  return readSourceControlFailure(error)?.reason === "rate-limited";
 }

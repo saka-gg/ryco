@@ -209,6 +209,11 @@ describe("server boot import boundaries", () => {
     expect(
       reached(/^apps\/server\/src\/device\/(?:SshDeviceBackend|deviceHostProtocol)\.ts$/u),
     ).toEqual([]);
+    // Forge failure classification loads with the forge clients. Only the import-free HTTP
+    // status and header helpers the eager Forgejo client reads are on the serve path.
+    expect(
+      reached(/^apps\/server\/src\/sourceControl\/forge(?:Failure|HttpRateLimit)\.ts$/u),
+    ).toEqual(["apps/server/src/sourceControl/forgeHttpRateLimit.ts"]);
     // Source-control clients load with the provider that uses them (Forgejo answers
     // synchronous remote detection and stays eager).
     expect(

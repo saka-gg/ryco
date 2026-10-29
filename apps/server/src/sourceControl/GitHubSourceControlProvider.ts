@@ -35,6 +35,7 @@ import * as GitHubIssues from "./gitHubIssues.ts";
 import * as GitHubPullRequestMutations from "./gitHubPullRequestMutations.ts";
 import * as GitHubPullRequests from "./gitHubPullRequests.ts";
 import * as GitHubRequiredChecks from "./gitHubRequiredChecks.ts";
+import { sourceControlProviderErrorFrom } from "./forgeFailure.ts";
 import * as SourceControlProvider from "./SourceControlProvider.ts";
 import { withSourceControlBodyFile } from "./sourceControlBodyFile.ts";
 export { githubDiscovery as discovery } from "./SourceControlProviderDiscoveryCatalog.ts";
@@ -43,12 +44,7 @@ function providerError(
   operation: string,
   cause: GitHubCli.GitHubCliError,
 ): SourceControlProviderError {
-  return new SourceControlProviderError({
-    provider: "github",
-    operation,
-    detail: cause.detail,
-    cause,
-  });
+  return sourceControlProviderErrorFrom("github", operation, cause);
 }
 
 function toChangeRequest(

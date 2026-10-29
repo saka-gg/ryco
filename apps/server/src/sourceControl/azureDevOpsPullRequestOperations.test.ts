@@ -1012,3 +1012,21 @@ describe("lists, detail and pickers", () => {
     }),
   );
 });
+
+describe("failure kinds", () => {
+  it.effect("keeps a rate limit when an az read fails", () =>
+    Effect.gen(function* () {
+      const { page } = fakeAzure({
+        execute: () =>
+          new AzureDevOpsCliError({
+            operation: "execute",
+            detail: "Azure DevOps is rate limiting requests. Ryco tries again shortly.",
+            failureKind: "rate-limited",
+          }),
+      });
+      const error = yield* page.listAssignees({ cwd: "/repo" }).pipe(Effect.flip);
+      assert.strictEqual(error.operation, "listAssignees");
+      assert.strictEqual(error.failureKind, "rate-limited");
+    }),
+  );
+});

@@ -12,6 +12,7 @@ import * as GitLabCli from "./GitLabCli.ts";
 import * as GitLabIssues from "./gitLabIssues.ts";
 import * as GitLabMergeRequestPage from "./gitLabMergeRequestPage.ts";
 import * as GitLabMergeRequests from "./gitLabMergeRequests.ts";
+import { sourceControlProviderErrorFrom } from "./forgeFailure.ts";
 import * as SourceControlProvider from "./SourceControlProvider.ts";
 export { gitlabDiscovery as discovery } from "./SourceControlProviderDiscoveryCatalog.ts";
 
@@ -19,12 +20,7 @@ function providerError(
   operation: string,
   cause: GitLabCli.GitLabCliError,
 ): SourceControlProviderError {
-  return new SourceControlProviderError({
-    provider: "gitlab",
-    operation,
-    detail: cause.detail,
-    cause,
-  });
+  return sourceControlProviderErrorFrom("gitlab", operation, cause);
 }
 
 function toChangeRequest(summary: GitLabCli.GitLabMergeRequestSummary): ChangeRequest {
