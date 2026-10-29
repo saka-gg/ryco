@@ -24,11 +24,14 @@ called. This matters for clients such as Codex that cache the initial MCP catalo
   [Handing over artifacts](#handing-over-artifacts)).
 - `ryco_list_artifacts`: the caller's own thread's artifacts, newest first, with the ids a
   handover takes. Needs the `read` grant.
-- `ryco_send_message`, `ryco_interrupt_thread`, `ryco_update_thread`: queue/steer work, interrupt a
+- `ryco_send_message`, `ryco_interrupt_thread`, `ryco_update_thread`: queue/steer work (a queued
+  message joins the thread's follow-up queue as the agent's, visible and editable in the chat, and
+  is sent when the thread is idle; the request completes once it is queued), interrupt a
   turn, rename/archive/restore, select models and options, set runtime/interaction/token modes,
   and set or clear a persistent goal. With `goalStatus` (`complete` or `blocked`) an agent reports
   on its own thread's goal, which ends automatic goal turns (see the Codex provider guide).
-- `ryco_read_thread`, `ryco_search_threads`, `ryco_wait_threads`: paginated messages, content search,
+- `ryco_read_thread`, `ryco_search_threads`, `ryco_wait_threads`: paginated messages (the first
+  page also lists the thread's queued follow-ups and why the queue waits), content search,
   and bounded waiting for completion or user attention. Background agents count as active work. A
   wait returns as soon as a waited thread settles or asks for attention: it wakes on the thread's
   session, turn, pending-request and background-work events instead of polling, and re-checks at

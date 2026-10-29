@@ -547,3 +547,75 @@ describe("readThreadPage message paging", () => {
     }),
   );
 });
+
+describe("readThreadPage", () => {
+  const page = { oldestCursor: null, newestCursor: null, hasMoreBefore: false };
+  const entry = (messageId: string, text: string, author: "user" | "agent") => ({
+    messageId,
+    text,
+    attachments: [],
+    modelSelection: { instanceId: "codex", model: "gpt-5.6" },
+    runtimeMode: "approval-required",
+    interactionMode: "default",
+    createdAt: "2026-10-01T00:00:00.000Z",
+    updatedAt: "2026-10-01T00:00:00.000Z",
+    revision: 1,
+    status: "queued",
+    author,
+  });
+  const projectionsWith = (followUpQueue: unknown) =>
+    ({
+      getThreadShellById: () => Effect.succeed(Option.some(thread(1))),
+      getThreadWindow: () =>
+        Effect.succeed({
+          thread: {
+            ...thread(1),
+            messages: [],
+            activities: [],
+            proposedPlans: [],
+            checkpoints: [],
+            ...(followUpQueue === undefined ? {} : { followUpQueue }),
+          },
+          history: { messages: page, activities: page, proposedPlans: page, checkpoints: page },
+        }),
+      getThreadHistoryPage: () => Effect.die("unused"),
+    }) as unknown as ProjectionSnapshotQueryShape;
+
+  it.effect("lists the thread's queued follow-ups on the first page, each text cut short", () =>
+    Effect.gen(function* () {
+      const long = "x".repeat(600);
+      const result = yield* readThreadPage(
+        projectionsWith({
+          entries: [entry("queued-1", "Run the tests", "user"), entry("queued-2", long, "agent")],
+          hold: {
+            reason: "error",
+            detail: "Provider failed: Authorization: Bearer rycoac_secret-token-value",
+            causeKeys: ["session-error:x"],
+            heldAt: "2026-10-01T00:00:00.000Z",
+          },
+        }),
+        { threadId: ThreadId.make("thread-001") },
+      );
+      assert.strictEqual(result.followUpQueue?.hold?.reason, "error");
+      // A provider's raw error is redacted like other diagnostics an agent reads.
+      assert.notInclude(result.followUpQueue?.hold?.detail ?? "", "secret-token-value");
+      assert.deepStrictEqual(
+        result.followUpQueue?.entries.map((queued) => [
+          queued.messageId,
+          queued.author,
+          queued.text.length,
+          queued.textTruncated ?? false,
+        ]),
+        [
+          ["queued-1", "user", 13, false],
+          ["queued-2", "agent", 500, true],
+        ],
+      );
+
+      const empty = yield* readThreadPage(projectionsWith(undefined), {
+        threadId: ThreadId.make("thread-001"),
+      });
+      assert.notProperty(empty, "followUpQueue");
+    }),
+  );
+});

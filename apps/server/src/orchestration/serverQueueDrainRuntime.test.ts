@@ -29,6 +29,7 @@ import {
   makeServerQueueDrain,
   MAX_QUEUE_DISPATCH_ATTEMPTS,
   QUEUE_DISPATCH_STALL_MS,
+  queueDispatchModes,
   queueDispatchRuntimeMode,
   queueStartEndedOf,
   RESTART_HOLD_DETAIL,
@@ -436,6 +437,41 @@ describe("ServerQueueDrain", () => {
       );
     }),
   );
+
+  it("sends an agent's entry with the chat's current model and modes, a person's with its own", () => {
+    const chat = {
+      modelSelection: { instanceId: "claude", model: "chat-model" },
+      runtimeMode: "auto-accept-edits",
+      interactionMode: "plan",
+      tokenMode: "aggressive",
+    } as const;
+    const queuedWith = {
+      modelSelection: { instanceId: "codex", model: "queued-model" },
+      runtimeMode: "full-access",
+      interactionMode: "default",
+      tokenMode: "off",
+    } as const;
+    const agent = queueDispatchModes(
+      entry("agent", { author: "agent", ...queuedWith } as Partial<QueuedFollowUp>),
+      chat as never,
+      runtimeModePrivilegeRank,
+    );
+    // The chat's own model and modes, so the chat is never switched back; never above the
+    // runtime mode the entry was queued with.
+    assert.deepEqual(agent as unknown, { ...chat, runtimeMode: "auto-accept-edits" });
+    const lowerQueued = queueDispatchModes(
+      entry("agent", { author: "automation", runtimeMode: "approval-required" }),
+      chat as never,
+      runtimeModePrivilegeRank,
+    );
+    assert.equal(lowerQueued.runtimeMode, "approval-required");
+    const person = queueDispatchModes(
+      entry("user", { author: "user", ...queuedWith } as Partial<QueuedFollowUp>),
+      chat as never,
+      runtimeModePrivilegeRank,
+    );
+    assert.deepEqual(person as unknown, queuedWith);
+  });
 
   it.effect("sends nothing for a thread in Trash", () =>
     Effect.gen(function* () {

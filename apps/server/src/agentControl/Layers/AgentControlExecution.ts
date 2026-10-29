@@ -27,6 +27,7 @@ import {
   type OrchestrationThreadShell,
   type SourceControlSetPullRequestWatchResult,
   type ThreadDelegatedCreateCommand,
+  type ThreadQueueAddCommand,
   type ThreadTurnStartCommand,
 } from "@ryco/contracts";
 import { Cause, Duration, Effect, Layer, Option, Stream } from "effect";
@@ -356,18 +357,6 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
         ),
       );
 
-    const waitForIdle = (threadId: ThreadId) =>
-      waitForThread(
-        threadId,
-        (thread) =>
-          thread.archivedAt !== null
-            ? Effect.fail(new Error("Target thread became archived."))
-            : Effect.succeed(
-                thread.session?.status !== "running" || thread.session.activeTurnId === null,
-              ),
-        "Timed out waiting for the target thread to become idle.",
-      );
-
     const settleProposalFailure = (
       proposal: AgentControlProposal,
       operation: AgentControlOperation,
@@ -591,16 +580,21 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
             | ClientOrchestrationCommand
             | ThreadDelegatedCreateCommand
             /** A turn start whose attachments the server already stored (handed-over artifacts). */
-            | { readonly stored: ThreadTurnStartCommand },
+            | { readonly stored: ThreadTurnStartCommand }
+            /** A follow-up the node queues as the agent's (`author` is server-only). */
+            | { readonly queued: ThreadQueueAddCommand },
           updateState?: (state: AgentControlOperationState) => AgentControlOperationState,
         ) =>
           Effect.gen(function* () {
-            const command = "stored" in request ? request.stored : request;
+            const command =
+              "stored" in request ? request.stored : "queued" in request ? request.queued : request;
             const result = yield* "stored" in request
               ? commandApplication.applyInternal(request.stored)
-              : request.type === "thread.delegated.create"
-                ? commandApplication.applyInternal(request)
-                : commandApplication.apply(request);
+              : "queued" in request
+                ? commandApplication.applyInternal(request.queued)
+                : request.type === "thread.delegated.create"
+                  ? commandApplication.applyInternal(request)
+                  : commandApplication.apply(request);
             const state = updateState?.(operation.state) ?? operation.state;
             yield* checkpoint(
               appendStep(
@@ -1487,23 +1481,29 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
           }
 
           if (shouldQueue) {
-            const idle = yield* waitForIdle(plan.threadId);
+            // The thread's own follow-up queue: visible and editable in the chat, sent by the
+            // node's drain at the next idle moment, after the person's own follow-ups, and held
+            // like them. The operation ends once the message is queued.
             yield* validator.revalidateExecution(proposal, { allowTurnAdvance: true });
-            yield* dispatch("turn-queued", {
-              type: "thread.turn.start",
-              commandId: commandIdFor(operation.operationId, "turn-queue"),
-              threadId: plan.threadId,
-              message: {
-                messageId,
-                role: "user",
-                text: plan.text,
-                attachments: [],
+            const current = yield* loadThread(plan.threadId);
+            const createdAt = new Date().toISOString();
+            yield* dispatch("follow-up-queued", {
+              queued: {
+                type: "thread.queue.add",
+                commandId: commandIdFor(operation.operationId, "follow-up-queue"),
+                threadId: plan.threadId,
+                author: "agent",
+                entry: {
+                  messageId,
+                  text: plan.text,
+                  attachments: [],
+                  modelSelection: current.modelSelection,
+                  runtimeMode: current.runtimeMode,
+                  interactionMode: current.interactionMode,
+                  ...(current.tokenMode === undefined ? {} : { tokenMode: current.tokenMode }),
+                },
+                createdAt,
               },
-              modelSelection: idle.modelSelection,
-              runtimeMode: idle.runtimeMode,
-              interactionMode: idle.interactionMode,
-              ...(idle.tokenMode === undefined ? {} : { tokenMode: idle.tokenMode }),
-              createdAt: new Date().toISOString(),
             });
           }
           yield* checkpoint({ ...operation.state, delivery });
