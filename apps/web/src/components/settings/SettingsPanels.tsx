@@ -102,7 +102,7 @@ function AboutVersionTitle() {
   );
 }
 
-const REPOSITORY_URL = "https://github.com/sak0a/ryco";
+const REPOSITORY_URL = "https://github.com/saka-gg/ryco";
 
 function openExternalLink(url: string) {
   void ensureLocalApi()
@@ -131,7 +131,7 @@ function AboutBrandingHeader() {
             className="h-auto px-0 text-[11px] text-muted-foreground hover:text-foreground"
             onClick={() => openExternalLink(REPOSITORY_URL)}
           >
-            github.com/sak0a/ryco
+            github.com/saka-gg/ryco
           </Button>
         </p>
       </div>

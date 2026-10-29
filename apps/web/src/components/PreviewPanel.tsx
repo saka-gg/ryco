@@ -79,7 +79,7 @@ import {
   AlertDialogPopup,
   AlertDialogTitle,
 } from "./ui/alert-dialog";
-import { cn } from "~/lib/utils";
+import { cn, isMacPlatform } from "~/lib/utils";
 import {
   detectPreviewFileKind,
   filterPreviewProjectEntries,
@@ -250,6 +250,10 @@ interface PreviewPanelProps {
   /** The reveal was acted on; the caller clears it so a repeat link fires again. */
   onRevealHandled?: (() => void) | undefined;
 }
+
+/** The Save button's shortcut hint, in this platform's notation. */
+const SAVE_SHORTCUT_LABEL =
+  typeof navigator !== "undefined" && isMacPlatform(navigator.platform) ? "⌘S" : "Ctrl+S";
 
 export default function PreviewPanel({
   mode = "inline",
@@ -1015,7 +1019,7 @@ export default function PreviewPanel({
                   disabled={!canSaveSelectedFile}
                   onClick={() => void saveSelectedFile()}
                   size="xs"
-                  title="Save file (Ctrl/⌘ S)"
+                  title={`Save file (${SAVE_SHORTCUT_LABEL})`}
                 >
                   {currentEditSession.saveStatus === "saving" ? (
                     <LoaderCircleIcon className="animate-spin" />
@@ -1023,7 +1027,7 @@ export default function PreviewPanel({
                     <SaveIcon />
                   )}
                   Save
-                  <span className="ml-0.5 text-[9px] opacity-70">⌘S</span>
+                  <span className="ml-0.5 text-[9px] opacity-70">{SAVE_SHORTCUT_LABEL}</span>
                 </Button>
               </div>
             ) : null}

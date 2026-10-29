@@ -83,6 +83,34 @@ const detail = (cause: unknown) =>
   cause instanceof Error ? cause.message : "Storage operation failed; refresh and retry.";
 const failure = (cause: unknown) => new StorageError({ detail: detail(cause) });
 const attempt = <A>(f: () => Promise<A>) => Effect.tryPromise({ try: f, catch: failure });
+
+/**
+ * The size a node-level entry shows: a location that does not exist yet (no backup taken so far)
+ * holds nothing, and the database counts its write-ahead log, as the Database block does.
+ */
+const sizeOnDisk = <S extends { readonly bytes: number | null; readonly sizeStatus: string }>(
+  entry: { readonly id: string; readonly path: string },
+  size: S,
+) =>
+  Effect.gen(function* () {
+    const sizeOf = (file: string) =>
+      attempt(() =>
+        fs.lstat(file).then(
+          (stat) => stat.size,
+          (cause: NodeJS.ErrnoException) => {
+            if (cause.code === "ENOENT") return null;
+            throw cause;
+          },
+        ),
+      ).pipe(Effect.orElseSucceed(() => undefined));
+    if (size.bytes === null && (yield* sizeOf(entry.path)) === null) {
+      return { ...size, bytes: 0, sizeStatus: "complete" as const };
+    }
+    if (entry.id === "history" && size.bytes !== null) {
+      return { ...size, bytes: size.bytes + ((yield* sizeOf(`${entry.path}-wal`)) ?? 0) };
+    }
+    return size;
+  });
 const canonical = canonicalStoragePath;
 const contains = (root: string, candidate: string) =>
   candidate === root || candidate.startsWith(root.endsWith(path.sep) ? root : root + path.sep);
@@ -619,6 +647,7 @@ export function makeStorageService(deps: {
                     unsafe: true,
                   })),
                 );
+          const shown = protectedSource ? size : yield* sizeOnDisk(entry, size);
           entries.push({
             ...entry,
             reason:
@@ -626,8 +655,8 @@ export function makeStorageService(deps: {
                 ? entry.reason +
                   " Managed path exclusions exceed their bound; repository size is unavailable."
                 : entry.reason,
-            bytes: size.bytes,
-            sizeStatus: size.sizeStatus,
+            bytes: shown.bytes,
+            sizeStatus: shown.sizeStatus,
             eligible: false,
           });
         }
