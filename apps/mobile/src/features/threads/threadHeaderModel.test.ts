@@ -716,3 +716,20 @@ describe("thread header compact action", () => {
     expect(model.compactAction).toBeNull();
   });
 });
+
+describe("thread header terminal action", () => {
+  it("offers the terminal wherever there is a workspace, and never on an archived thread", () => {
+    const build = (archivedAt: string | null, cwd: string | null) =>
+      buildThreadHeaderModel({
+        thread: thread({ archivedAt, worktreePath: null }),
+        project: cwd === null ? null : ({ name: "Ryco", cwd } as Project),
+        worktree: null,
+        nodeLabel: "Studio",
+        hasPendingApproval: false,
+        hasPendingUserInput: false,
+      });
+    expect(build(null, "/repo").terminalVisible).toBe(true);
+    expect(build("2026-10-28T00:00:00.000Z", "/repo").terminalVisible).toBe(false);
+    expect(build(null, null).terminalVisible).toBe(false);
+  });
+});

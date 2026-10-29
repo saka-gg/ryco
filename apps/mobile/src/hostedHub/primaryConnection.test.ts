@@ -186,6 +186,7 @@ function deps() {
     pushSequenceMonitor: { recordEvent: () => undefined, recordSnapshot: () => undefined },
     resetShellProjection: vi.fn(),
     applyShellEvent: vi.fn(),
+    applyTerminalEvent: vi.fn(),
     syncShellSnapshot: vi.fn(),
   };
 }
@@ -473,6 +474,27 @@ describe("hosted environment connection", () => {
 
     expect(input.applyShellEvent).toHaveBeenCalledTimes(2);
     expect(input.syncShellSnapshot).not.toHaveBeenCalled();
+  });
+
+  it("forwards terminal events only from the current session generation", () => {
+    const { input } = connect(studio);
+    const connectionInput = connectionFactory.input as {
+      applyTerminalEvent: (event: unknown, environmentId: string) => void;
+    };
+    const event = {
+      type: "output",
+      threadId: "thread-a",
+      terminalId: "default",
+      createdAt: "2026-08-11T12:00:00.000Z",
+      data: "payload",
+    };
+
+    connectionInput.applyTerminalEvent(event, studio.environmentId);
+    expect(input.applyTerminalEvent).toHaveBeenCalledWith(event, studio.environmentId);
+
+    getHostedEnvironmentSessions().renew(studio.environmentId);
+    connectionInput.applyTerminalEvent({ ...event, data: "stale" }, studio.environmentId);
+    expect(input.applyTerminalEvent).toHaveBeenCalledTimes(1);
   });
 
   it("never reads or publishes config from a replaced generation", async () => {

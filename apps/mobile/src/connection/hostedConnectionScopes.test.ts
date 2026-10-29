@@ -38,6 +38,18 @@ describe("mobile hosted connection scope leases", () => {
     expect(store.isEnvironmentRetained(ENV_A)).toBe(false);
   });
 
+  it("keeps a thread's terminal and its detail view as separate refcounted scopes", () => {
+    const store = createMobileHostedScopeLeaseStore();
+    const releaseDetail = store.retain(ENV_A, { type: "thread-detail", threadId: THREAD_A });
+    const releaseTerminal = store.retain(ENV_A, { type: "terminal", threadId: THREAD_A });
+
+    expect(store.list(ENV_A)).toHaveLength(2);
+    releaseDetail();
+    expect(store.isEnvironmentRetained(ENV_A)).toBe(true);
+    releaseTerminal();
+    expect(store.isEnvironmentRetained(ENV_A)).toBe(false);
+  });
+
   it("computes diagnostics from the live scopes when read", () => {
     const store = createMobileHostedScopeLeaseStore();
     const read = () => readMobileHostedScopeLeaseDiagnostics(store, () => 42);

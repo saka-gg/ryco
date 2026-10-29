@@ -1,6 +1,6 @@
 # Native mobile delivery status
 
-**Current as of 2026-08-23.** This is
+**Current as of 2026-10-29.** This is
 the concise delivery ledger for the native app. Older design specifications and implementation
 plans remain useful as historical records, but this file is authoritative when their status
 language disagrees. Delivery states below are explicit; the distinction between merged and open
@@ -33,8 +33,22 @@ work is load-bearing.
   crash-atomic promotion and the `anyNodeVerified` marker), and the account email
   verification-link handoff.
 - The read-only workspace file browser from PR #330 (merged 2026-08-12, `dc2af6431`):
-  tree/search/source browsing, raster/SVG/sandboxed-HTML previews, deep-link parsing, and the
-  regular-width file inspector — still the only surface with a split layout.
+  tree/search/source browsing, raster/SVG/sandboxed-HTML previews, and deep-link parsing.
+- A shared regular-width workspace inspector (`features/workspace/ThreadWorkspaceLayout`): on
+  iPad-sized windows the focused workspace tool (Files, Terminal) opens in one column beside the
+  conversation, one tool at a time. Phones keep full-screen drill-in routes.
+- The thread terminal (`threads/:environmentId/:threadId/terminal`): a full PTY on the node through
+  xterm.js in a contained WebView (a generated, hash-pinned document with every network and
+  storage class denied), reached from the thread header. Multiple sessions as tabs (up to eight
+  started on the device), an accessory row with arrows first, one-shot Ctrl, paste with bracketed
+  paste when the program asks for it, and safe error copy. Direct and hosted terminal events go
+  through the shared admission path, hosted ones fenced by the session generation. Input is gated
+  on the shared mutation readiness and the node's operator rule: viewers, non-owner direct
+  pairings and hosted sessions that have not accepted a current snapshot only watch. Sessions keep
+  running when the screen goes away; the background suspends the view and the foreground
+  re-hydrates it from the node's bounded snapshot rather than replaying buffered output. A mounted
+  terminal counts toward the hosted warm set as a mounted thread view does. Terminal content is
+  memory-only on the device.
 - Since 2026-08-16: Expo/React Native upgrades, deterministic-clock E2EE pairing tests, queued
   messages steering into active turns (`8244e7b92`), and the shared Agent Control queue state
   with proposal approval surfaces (`caf8af36c`, `022d2430c`).
@@ -108,17 +122,17 @@ only shell metadata. It is separate from the hosted browser client's opt-in stor
 
 ## Open delivery slices
 
-| Slice                    | Repository state         | What remains                                                                                                                                                            |
-| ------------------------ | ------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| General thread inspector | Not on `main`            | Land the shared files/review/source-control/terminal container before treating those surfaces as one architecture.                                                      |
-| Mobile source control    | Not on `main`            | Branch/status/actions and the full native review workflow need a scoped PR and current validation.                                                                      |
-| Mobile terminal          | Not on `main`            | Only `terminalPreferences` exists; the bounded renderer and focused workspace need a scoped PR plus native QA.                                                          |
-| Agent notifications      | Local only               | Thread alerts post local notifications while the app runs. Background delivery needs Hub push-token support and device QA, under the contentless-push constraint above. |
-| Live Activity            | Not on `main`            | Native lifecycle, Hub push-token support, device QA — under the contentless-push constraint above.                                                                      |
-| Tablet inspector         | Delivered for files only | Generalize the regular-width split layout across workspace tools. Home surfaces are width-neutral single columns.                                                       |
-| Find in files            | Web only                 | The node's `projects.searchContent` and the client runtime's `createWorkspaceContentSearch` are shared; a native screen remains.                                        |
-| Android                  | Unqualified              | Exercise image/SVG/HTML preview, WebView isolation, navigation, native modules, and relay lifecycle on Android.                                                         |
-| Store distribution       | Not complete             | Apple Developer/App Store Connect/TestFlight work remains separate from simulator and Personal Team development.                                                        |
+| Slice                    | Repository state   | What remains                                                                                                                                                            |
+| ------------------------ | ------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| General thread inspector | Files and terminal | Review and source control still open as their own routes; move them into the shared inspector when they gain regular-width layouts.                                     |
+| Mobile source control    | Not on `main`      | Branch/status/actions and the full native review workflow need a scoped PR and current validation.                                                                      |
+| Mobile terminal          | iOS simulator QA   | Android device QA, physical-device relay QA and hardware-keyboard QA. Sessions started elsewhere beyond eight keep a tab but share renderer slots.                      |
+| Agent notifications      | Local only         | Thread alerts post local notifications while the app runs. Background delivery needs Hub push-token support and device QA, under the contentless-push constraint above. |
+| Live Activity            | Not on `main`      | Native lifecycle, Hub push-token support, device QA — under the contentless-push constraint above.                                                                      |
+| Tablet inspector         | Files and terminal | The split layout is shared by workspace tools; review and source control are not in it yet. Home surfaces are width-neutral single columns.                             |
+| Find in files            | Web only           | The node's `projects.searchContent` and the client runtime's `createWorkspaceContentSearch` are shared; a native screen remains.                                        |
+| Android                  | Unqualified        | Exercise image/SVG/HTML preview, WebView isolation, navigation, native modules, and relay lifecycle on Android.                                                         |
+| Store distribution       | Not complete       | Apple Developer/App Store Connect/TestFlight work remains separate from simulator and Personal Team development.                                                        |
 
 ## File-browser acceptance still open (from PR #330)
 

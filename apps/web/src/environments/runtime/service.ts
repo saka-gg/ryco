@@ -18,6 +18,7 @@ import {
 } from "@ryco/contracts";
 import { Throttler } from "@tanstack/react-pacer";
 import { scopeProjectRef, scopeThreadRef } from "@ryco/client-runtime/scoped";
+import { createTerminalEventAdmission } from "@ryco/client-runtime/state/terminal";
 import {
   createKnownEnvironment,
   getKnownEnvironmentWsBaseUrl,
@@ -658,16 +659,18 @@ function markSavedEnvironmentCredentialRejected(
   }, 0);
 }
 
-export function shouldApplyTerminalEvent(input: {
-  serverThreadArchivedAt: string | null | undefined;
-  hasDraftThread: boolean;
-}): boolean {
-  if (input.serverThreadArchivedAt !== undefined) {
-    return input.serverThreadArchivedAt === null;
-  }
-
-  return input.hasDraftThread;
-}
+/** Web's binding of the shared terminal-event admission path. */
+const admitTerminalEvent = createTerminalEventAdmission({
+  // The shell entry, stub or full: an archived stub is still a known, archived thread.
+  readServerThreadArchivedAt: (threadRef) =>
+    selectEnvironmentState(useStore.getState(), threadRef.environmentId).threadShellById[
+      threadRef.threadId
+    ]?.archivedAt,
+  hasDraftThread: (threadRef) =>
+    useComposerDraftStore.getState().getDraftThreadByRef(threadRef) !== null,
+  applyTerminalEvent: (threadRef, event) =>
+    useTerminalStateStore.getState().applyTerminalEvent(threadRef, event),
+});
 
 function applyRecoveredEventBatch(
   events: ReadonlyArray<OrchestrationEvent>,
@@ -846,21 +849,7 @@ function createEnvironmentConnectionHandlers(
     },
     applyTerminalEvent: (event: TerminalEvent, environmentId: EnvironmentId) => {
       if (!acceptsEvent()) return;
-      const threadRef = scopeThreadRef(environmentId, ThreadId.make(event.threadId));
-      // The shell entry, stub or full: an archived stub is still a known, archived thread.
-      const serverThread = selectEnvironmentState(useStore.getState(), environmentId)
-        .threadShellById[threadRef.threadId];
-      const hasDraftThread =
-        useComposerDraftStore.getState().getDraftThreadByRef(threadRef) !== null;
-      if (
-        !shouldApplyTerminalEvent({
-          serverThreadArchivedAt: serverThread?.archivedAt,
-          hasDraftThread,
-        })
-      ) {
-        return;
-      }
-      useTerminalStateStore.getState().applyTerminalEvent(threadRef, event);
+      admitTerminalEvent(event, environmentId);
     },
   };
 }

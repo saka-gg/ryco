@@ -104,6 +104,8 @@ export interface ThreadHeaderModel {
    * action is withheld rather than opening onto an empty screen.
    */
   readonly filesVisible: boolean;
+  /** The terminal needs the same workspace, and an archived thread takes no terminal events. */
+  readonly terminalVisible: boolean;
   readonly moreActions: ReadonlyArray<ThreadMoreAction>;
   /** Last known pull request / work item for the thread's worktree, if any. */
   readonly changeRequest: ChangeRequestBadge | null;
@@ -331,6 +333,11 @@ export function buildThreadHeaderModel(input: {
           : running
             ? "Running"
             : "Ready";
+  const workspaceRoot = resolveThreadWorkspaceRoot({
+    thread: input.thread,
+    worktree: input.worktree,
+    project: input.project,
+  });
   const moreActions: ThreadMoreAction[] = ["rename"];
   if (running) moreActions.push("stop");
   moreActions.push(input.thread.archivedAt === null ? "archive" : "unarchive", "details");
@@ -377,12 +384,8 @@ export function buildThreadHeaderModel(input: {
       ? `${contextAccessibilityLabel} ${pullRequestWatch.chip.accessibilityLabel}`
       : contextAccessibilityLabel,
     reviewVisible: input.thread.turnDiffSummaries.some((summary) => summary.files.length > 0),
-    filesVisible:
-      resolveThreadWorkspaceRoot({
-        thread: input.thread,
-        worktree: input.worktree,
-        project: input.project,
-      }) !== null,
+    filesVisible: workspaceRoot !== null,
+    terminalVisible: workspaceRoot !== null && input.thread.archivedAt === null,
     moreActions,
     changeRequest: buildChangeRequestBadge(input.worktree),
     settlementAction,

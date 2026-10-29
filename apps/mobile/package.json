@@ -23,6 +23,8 @@
     "config:dev": "APP_VARIANT=development expo config",
     "config:preview": "APP_VARIANT=preview expo config",
     "config:prod": "APP_VARIANT=production expo config",
+    "build:terminal-renderer": "node scripts/build-terminal-renderer.mts",
+    "check:terminal-renderer": "node scripts/build-terminal-renderer.mts --check",
     "test": "vp test run",
     "typecheck": "tsc --noEmit --incremental",
     "typecheck:fast": "tsc-rs --noEmit --incremental --tsBuildInfoFile .turbo/tsc-rs.tsbuildinfo"
@@ -103,6 +105,8 @@
     "@types/node": "catalog:",
     "@types/react": "~19.2.18",
     "@types/react-dom": "^19.2.7",
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0",
     "babel-preset-expo": "~57.0.11",
     "react-dom": "19.2.3",
     "tailwindcss": "^4.3.3",

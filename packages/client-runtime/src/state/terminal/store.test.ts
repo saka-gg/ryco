@@ -124,6 +124,28 @@ describe("terminal store replay events", () => {
   });
 });
 
+describe("terminal store event history", () => {
+  it("forgets one closed session's events and reconciliation without touching its siblings", () => {
+    const store = createTerminalStateStore();
+    const entries = (terminalId: string) =>
+      selectTerminalEventEntries(store.getState().terminalEventEntriesByKey, thread, terminalId);
+    store.getState().applyTerminalEvent(thread, started("default", 1));
+    store.getState().applyTerminalEvent(thread, output("default", 2));
+    store.getState().applyTerminalEvent(thread, started("tests", 3));
+
+    store.getState().clearTerminalEventHistory(thread, "default");
+
+    expect(entries("default")).toEqual([]);
+    expect(entries("tests")).toHaveLength(1);
+    // A later session under the same id starts from a clean reconciliation.
+    store.getState().applyTerminalEvent(thread, output("default", 2));
+    expect(entries("default")).toHaveLength(1);
+    const unchanged = store.getState();
+    store.getState().clearTerminalEventHistory(thread, "missing");
+    expect(store.getState()).toBe(unchanged);
+  });
+});
+
 describe("terminal store persistence", () => {
   it("writes storage only when the persisted terminal state changes", () => {
     const writes: string[] = [];

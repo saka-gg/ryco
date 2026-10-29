@@ -212,6 +212,9 @@ function scopeDemand(
 ): ConnectionDemandLeaseInput {
   switch (scope.type) {
     case "thread-detail":
+    // A terminal is mounted thread work: it counts toward the warm set as the
+    // thread's own view does, with no retention policy of its own.
+    case "terminal":
       return { environmentId, scope: { type: "thread-detail", threadId: scope.threadId } };
     case "vcs-status":
       return { environmentId, scope: { type: "vcs-status", cwd: scope.cwd } };

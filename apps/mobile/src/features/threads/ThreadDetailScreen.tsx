@@ -169,6 +169,7 @@ import {
   useStore,
 } from "../../state/threadsRuntime";
 import { useHomeEnvironments } from "../home/useHomeEnvironments";
+import { TerminalHeaderButton } from "../terminal/TerminalHeaderButton";
 import { useRepositoryStatus } from "../newTask/useNewTaskRepository";
 import { AgentControlProposalCard } from "./AgentControlProposalCard";
 import {
@@ -399,10 +400,13 @@ function ThreadDeliveryBanner(props: {
 }
 
 function HeaderActions(props: {
+  readonly environmentId: EnvironmentId;
+  readonly threadId: ThreadId;
   readonly model: ThreadHeaderModel;
   readonly iconColor: string;
   readonly onReview: () => void;
   readonly onFiles: () => void;
+  readonly onTerminal: () => void;
   readonly onMore: () => void;
 }) {
   return (
@@ -426,6 +430,14 @@ function HeaderActions(props: {
         >
           <SymbolView name="folder" size={21} tintColor={props.iconColor} type="monochrome" />
         </Pressable>
+      ) : null}
+      {props.model.terminalVisible ? (
+        <TerminalHeaderButton
+          environmentId={props.environmentId}
+          threadId={props.threadId}
+          iconColor={props.iconColor}
+          onPress={props.onTerminal}
+        />
       ) : null}
       <Pressable
         accessibilityRole="button"
@@ -1267,16 +1279,28 @@ export function ThreadDetailScreen(props: {
     [environmentId, navigation, threadId],
   );
 
+  const openTerminal = useCallback(
+    () =>
+      navigation.navigate("ThreadTerminal", {
+        environmentId,
+        threadId,
+      }),
+    [environmentId, navigation, threadId],
+  );
+
   useLayoutEffect(() => {
     navigation.setOptions({
       title: headerModel?.title ?? "Task",
       headerRight: headerModel
         ? () => (
             <HeaderActions
+              environmentId={environmentId}
+              threadId={threadId}
               model={headerModel}
               iconColor={iconColor}
               onReview={openReview}
               onFiles={openFiles}
+              onTerminal={openTerminal}
               onMore={() => {
                 setActionError(null);
                 setActionsVisible(true);
@@ -1285,7 +1309,16 @@ export function ThreadDetailScreen(props: {
           )
         : undefined,
     });
-  }, [headerModel, iconColor, navigation, openFiles, openReview]);
+  }, [
+    environmentId,
+    headerModel,
+    iconColor,
+    navigation,
+    openFiles,
+    openReview,
+    openTerminal,
+    threadId,
+  ]);
 
   const enqueueFileUpload = useCallback(
     (attachment: DraftComposerFileAttachment) => {

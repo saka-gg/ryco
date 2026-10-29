@@ -149,6 +149,20 @@ export const MVP_ROOT_ROUTES = {
     ios: { presentation: "card" },
     android: { presentation: "card" },
   },
+  /**
+   * A thread's terminal. A card with a solid header on both platforms: the
+   * terminal owns the viewport below it, and output must never slide under a
+   * translucent header. Regular-width windows show it in the workspace
+   * inspector instead (see ThreadWorkspaceLayout).
+   */
+  ThreadTerminal: {
+    linking: `${THREAD}/terminal`,
+    overlay: false,
+    headerPreset: "solid",
+    headerAction: "back",
+    ios: { presentation: "card" },
+    android: { presentation: "card" },
+  },
   Connections: {
     linking: "connections",
     overlay: true,

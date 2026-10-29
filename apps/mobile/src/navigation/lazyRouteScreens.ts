@@ -171,6 +171,13 @@ export const SettingsWorkspaceRouteScreen = lazyScreen(
       require("../features/settings/SettingsWorkspaceRouteScreen") as typeof import("../features/settings/SettingsWorkspaceRouteScreen")
     ).SettingsWorkspaceRouteScreen,
 );
+export const ThreadTerminalRouteScreen = lazyScreen(
+  "ThreadTerminalRouteScreen",
+  () =>
+    (
+      require("../features/terminal/ThreadTerminalRouteScreen") as typeof import("../features/terminal/ThreadTerminalRouteScreen")
+    ).ThreadTerminalRouteScreen,
+);
 export const ThreadRouteScreen = lazyScreen(
   "ThreadRouteScreen",
   () =>

@@ -12,6 +12,7 @@ import type {
 import type { EnvironmentId } from "@ryco/contracts";
 
 import { readMobileHostedConnectionCoordinator } from "../connection/hostedConnectionCoordinator";
+import { applyMobileTerminalEvent } from "../connection/terminalEventSink";
 import { createMobileConnectionRegistry } from "../runtime/bootstrap";
 import { mobileRuntimeStartupBarrier } from "../runtime/startupBarrier";
 import { useStore } from "../state/threadsRuntime";
@@ -57,6 +58,7 @@ function supervisorHandlers(target: EnvironmentConnectionSupervisor): HostedPrim
     pushSequenceMonitor: noPushSequenceMonitor,
     resetShellProjection: (environmentId) => target.resetShellProjection(environmentId),
     applyShellEvent: (event, environmentId) => target.applyShellEvent(event, environmentId),
+    applyTerminalEvent: (event, environmentId) => applyMobileTerminalEvent(event, environmentId),
     syncShellSnapshot: (snapshot, environmentId, callbacks) =>
       target.syncShellSnapshot(snapshot, environmentId, callbacks),
   };
