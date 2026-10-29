@@ -199,6 +199,55 @@ export class ProjectReadFileBinaryError extends Schema.TaggedError<ProjectReadFi
   },
 ) {}
 
+/**
+ * Previews too large for one relay message (one RPC message is at most 4 MiB on the
+ * hosted relay, `RELAY_MAX_RPC_MESSAGE_BYTES`) travel in bounded chunks. Same chunk size as
+ * chat attachments (`CHAT_ATTACHMENT_READ_CHUNK_BYTES`).
+ */
+export const PROJECT_READ_FILE_CHUNK_BYTES = 256 * 1024;
+export const PROJECT_READ_FILE_CHUNKED_MAX_BYTES = 32 * 1024 * 1024;
+const PROJECT_READ_FILE_FINGERPRINT_MAX_LENGTH = 128;
+
+export const ProjectReadFileChunkInput = Schema.Struct({
+  cwd: TrimmedNonEmptyString,
+  relativePath: TrimmedNonEmptyString.check(Schema.isMaxLength(PROJECT_WRITE_FILE_PATH_MAX_LENGTH)),
+  // An integer below the cap. `isLessThanOrEqualTo` because the server's boot code already
+  // ships it, and `isLessThan` would add about 0.9 KB there.
+  offset: NonNegativeInt.check(Schema.isLessThanOrEqualTo(PROJECT_READ_FILE_CHUNKED_MAX_BYTES - 1)),
+  /** The first chunk's `fingerprint`; a later chunk fails when the file changed since. */
+  expectedFingerprint: Schema.optional(
+    TrimmedNonEmptyString.check(Schema.isMaxLength(PROJECT_READ_FILE_FINGERPRINT_MAX_LENGTH)),
+  ),
+});
+export type ProjectReadFileChunkInput = typeof ProjectReadFileChunkInput.Type;
+
+/**
+ * One bounded slice of a PDF or raster image. `mimeType` is sniffed from the
+ * file's first bytes on every chunk, never from its name.
+ */
+export const ProjectReadFileChunkResult = Schema.Struct({
+  relativePath: TrimmedNonEmptyString,
+  offset: NonNegativeInt,
+  totalBytes: PositiveInt.check(Schema.isLessThanOrEqualTo(PROJECT_READ_FILE_CHUNKED_MAX_BYTES)),
+  dataBase64: Schema.String.check(
+    Schema.isMaxLength(4 * Math.ceil(PROJECT_READ_FILE_CHUNK_BYTES / 3)),
+  ),
+  mimeType: TrimmedNonEmptyString,
+  /** Opaque identity of the file's state while it is read. */
+  fingerprint: TrimmedNonEmptyString.check(
+    Schema.isMaxLength(PROJECT_READ_FILE_FINGERPRINT_MAX_LENGTH),
+  ),
+});
+export type ProjectReadFileChunkResult = typeof ProjectReadFileChunkResult.Type;
+
+export class ProjectReadFileChunkError extends Schema.TaggedError<ProjectReadFileChunkError>()(
+  "ProjectReadFileChunkError",
+  {
+    message: TrimmedNonEmptyString,
+    cause: Schema.optional(Schema.Defect()),
+  },
+) {}
+
 export const ProjectListEntriesInput = Schema.Struct({
   cwd: TrimmedNonEmptyString,
 });

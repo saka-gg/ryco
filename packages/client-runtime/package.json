@@ -38,6 +38,10 @@
       "types": "./src/rpc/shellSnapshotAssembly.ts",
       "import": "./src/rpc/shellSnapshotAssembly.ts"
     },
+    "./rpc/workspaceFileRead": {
+      "types": "./src/rpc/workspaceFileRead.ts",
+      "import": "./src/rpc/workspaceFileRead.ts"
+    },
     "./connection": {
       "types": "./src/connection/index.ts",
       "import": "./src/connection/index.ts"

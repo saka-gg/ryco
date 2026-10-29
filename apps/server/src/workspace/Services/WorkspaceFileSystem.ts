@@ -12,6 +12,8 @@ import type { Effect } from "effect";
 import type {
   ProjectReadFileBinaryInput,
   ProjectReadFileBinaryResult,
+  ProjectReadFileChunkInput,
+  ProjectReadFileChunkResult,
   ProjectReadFileInput,
   ProjectReadFileResult,
   ProjectStageFileReferenceInput,
@@ -97,6 +99,23 @@ export interface WorkspaceFileSystemShape {
     input: ProjectReadFileBinaryInput,
   ) => Effect.Effect<
     ProjectReadFileBinaryResult,
+    WorkspaceFileSystemError | WorkspacePathOutsideRootError
+  >;
+
+  /**
+   * Read one bounded chunk of a PDF or raster image relative to the workspace
+   * root, for previews too large for one relay message.
+   *
+   * Rejects paths that escape the workspace root, files above the chunked
+   * preview budget, and files whose first bytes are neither a PDF nor a
+   * supported raster image (sniffed on every chunk, never from the path's
+   * extension). Each chunk carries a fingerprint of the file's state; a chunk
+   * read with `expectedFingerprint` fails when the file changed since.
+   */
+  readonly readFileChunk: (
+    input: ProjectReadFileChunkInput,
+  ) => Effect.Effect<
+    ProjectReadFileChunkResult,
     WorkspaceFileSystemError | WorkspacePathOutsideRootError
   >;
 

@@ -26,8 +26,11 @@ headers, authorization, or service-worker caching policy.
 
 The PDF preview is currently visual: text selection, search, interactive links,
 forms, and document scripting are not enabled. Password-protected and invalid
-PDFs show a download fallback. Native mobile and workspace file-explorer previews
-are separate surfaces and are not changed by this implementation.
+PDFs show a download fallback. The Files panel reuses the same renderer for
+workspace PDFs, reading their bytes through the bounded `projects.readFileChunk`
+RPC (256 KiB pieces, 32 MiB at most) and handing them to PDF.js directly, with no
+URL (see [Files and chat](files-to-chat.md)). Native mobile previews are a
+separate surface and are not changed by this implementation.
 
 ## T3 Code comparison
 
@@ -67,8 +70,9 @@ Reviewed `pingdotgg/t3code` at commit
    file until its transfer settles. Propagate cancellation while preserving
    other drafts' uploads.
 5. **PDF accessibility and navigation:** add a text layer, search, and page jump
-   for long documents. Reuse the renderer for file-explorer PDFs only after that
-   surface has an appropriate authorized binary read path.
+   for long documents. Partly done: the Files panel now reuses the renderer for
+   workspace PDFs over the chunked `projects.readFileChunk` read; the text layer,
+   search and page jump are still open.
 
 Upload progress, retry, size/count limits, and expired-token send blockers already
 exist in Ryco; they should be extended rather than replaced.

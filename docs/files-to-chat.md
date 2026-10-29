@@ -16,9 +16,40 @@ pane's thread.
 
 **Cmd/Ctrl-click** opens the file in your editor instead. The link's context menu
 (right-click) offers **Open in Ryco**, **Open in editor**, **Copy relative path**
-and **Copy full path**. Links to files outside the thread's workspace, and links
-outside a thread (side chat, agent activity), open in the editor as before. The
-frozen web phone tier is unchanged.
+and **Copy full path**. In a reply, links to files outside the thread's workspace,
+and links outside a thread (side chat, agent activity), open in the editor as
+before. A rendered Markdown file is different (see below). The frozen web phone
+tier is unchanged.
+
+### PDFs and Markdown in the Files panel
+
+A PDF opens in a page viewer with previous/next page and zoom controls, the same
+renderer chat attachments use. Markdown opens rendered, with a **Preview** /
+**Source** toggle in the file's toolbar. Each file keeps its own choice while the
+panel shows the thread, and a file you have not toggled opens in its default. A
+link to a line opens the source, so the line can be marked. Files longer than
+256K characters open as source (the toggle still renders them); that default is
+taken when the file opens, so editing it or an agent changing its size does not
+switch the view. Save and Discard work from either view.
+
+Images and links inside a rendered file resolve from the file's own folder
+(`../assets/diagram.png` from `docs/guide.md` is `assets/diagram.png`) and stay
+inside the thread's workspace: an image outside it shows its alt text. Rendered
+files are third-party content, so their links are limited. A link to a workspace
+file (inline or reference-style) opens it in the Files panel; `http(s)` and
+`mailto` links open in a new tab. In-page anchors (`#usage`), other relative links
+(`LICENSE`, `docs/`) and thread references (`@thread:` mentions included) do
+nothing yet. A link to a file outside the workspace opens in the editor only on
+Cmd/Ctrl-click or from the link's menu, never on a plain or middle click.
+
+PDFs opened in the panel (and, on nodes that support it, raster images opened in
+the panel) load in 256 KiB pieces, up to 32 MiB, so large files also reach hosted
+web, where one relay message cannot carry more than about 3 MiB of file. Images
+inside a rendered Markdown file still load in one read, so on hosted web an image
+there over about 3 MiB shows its alt text. Progress shows while the pieces arrive,
+opening another file stops the read, and a read that fails (a dropped connection,
+a file that changed while it was read) offers **Try again**. A node running an
+older Ryco shows "Update Ryco on this node to preview PDFs."
 
 The panel opens through a one-shot route key (`workspaceFile`, with
 `workspaceFileLine`), consumed like the pull request tab's reveal: a repeat link

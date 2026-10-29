@@ -333,6 +333,8 @@ describe.skipIf(!hasCurrentBuild)("built server bundle", () => {
       expect(source).not.toMatch(/^\/\/#region src\/usage\/UsageService\.ts$/mu);
       // Loaded with the first ACP Registry search or install.
       expect(source).not.toMatch(/^\/\/#region src\/provider\/acp\/AcpRegistryCatalog\.ts$/mu);
+      // Loaded with the first chunked PDF or image preview.
+      expect(source).not.toMatch(/^\/\/#region src\/workspace\/previewFileChunk\.ts$/mu);
     }
   });
 });

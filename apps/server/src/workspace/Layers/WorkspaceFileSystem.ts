@@ -15,7 +15,7 @@ import {
   PROJECT_RELOCATION_PENDING_MESSAGE,
   PROJECT_STAGE_FILE_MAX_BYTES,
 } from "@ryco/contracts";
-import { NotRegularFileError, openRegularFile } from "@ryco/shared/regularFile";
+import { openRegularFile } from "@ryco/shared/regularFile";
 
 import {
   WorkspaceFileConflictError,
@@ -28,6 +28,12 @@ import {
 import { WorkspaceEntries } from "../Services/WorkspaceEntries.ts";
 import { WorkspacePathOutsideRootError, WorkspacePaths } from "../Services/WorkspacePaths.ts";
 import { detectRasterImageMimeType } from "../../imageMime.ts";
+import {
+  FILE_CHANGED_WHILE_READING,
+  openPreviewFile,
+  sameFileState,
+  tooLargeToPreview,
+} from "../previewFile.ts";
 
 /** The largest file the Files panel previews; content search skips larger ones too. */
 export const WORKSPACE_PREVIEW_MAX_BYTES = 512 * 1024;
@@ -81,16 +87,6 @@ function encodeWorkspaceText(
   return encoding === "utf8-bom" ? Buffer.concat([UTF8_BOM, encoded]) : encoded;
 }
 
-function sameFileState(left: BigIntStats, right: BigIntStats): boolean {
-  return (
-    left.dev === right.dev &&
-    left.ino === right.ino &&
-    left.size === right.size &&
-    left.mtimeNs === right.mtimeNs &&
-    left.ctimeNs === right.ctimeNs
-  );
-}
-
 function pathStaysWithinRoot(rootPath: string, targetPath: string): boolean {
   const relative = NodePath.relative(rootPath, targetPath);
   return (
@@ -118,19 +114,10 @@ async function readStableFileBytes(
   readonly bytes: Buffer;
   readonly stat: BigIntStats;
 }> {
-  const { handle, stat: beforeReadStat } = await openRegularFile(filePath, {
-    bigint: true,
-    followSymlinks: true,
-  }).catch((cause: unknown) => {
-    throw cause instanceof NotRegularFileError
-      ? new Error("Only regular files can be previewed.", { cause })
-      : cause;
-  });
+  const { handle, stat: beforeReadStat } = await openPreviewFile(filePath);
   try {
     if (beforeReadStat.size > BigInt(maxBytes)) {
-      throw new Error(
-        `File is too large to preview (${beforeReadStat.size} bytes). Limit is ${maxBytes} bytes.`,
-      );
+      throw tooLargeToPreview(beforeReadStat.size, maxBytes);
     }
     const bytes = await handle.readFile();
     const afterReadStat = await handle.stat({ bigint: true });
@@ -140,7 +127,7 @@ async function readStableFileBytes(
       !sameFileState(beforeReadStat, afterReadStat) ||
       !sameFileState(afterReadStat, pathStat)
     ) {
-      throw new Error("File changed while it was being read. Try again.");
+      throw new Error(FILE_CHANGED_WHILE_READING);
     }
     return { bytes, stat: afterReadStat };
   } finally {
@@ -543,6 +530,37 @@ export const makeWorkspaceFileSystem = Effect.gen(function* () {
     };
   });
 
+  const readFileChunk: WorkspaceFileSystemShape["readFileChunk"] = Effect.fn(
+    "WorkspaceFileSystem.readFileChunk",
+  )(function* (input) {
+    const target = yield* workspacePaths.resolveRelativePathWithinRoot({
+      workspaceRoot: input.cwd,
+      relativePath: input.relativePath,
+    });
+
+    const { realTargetPath } = yield* ensureResolvedPathStaysWithinWorkspace(
+      input,
+      target.absolutePath,
+    );
+    const chunk = yield* Effect.tryPromise({
+      try: async () => {
+        // Loaded on the first chunked preview, outside the server's boot chunks.
+        const { readStableFileChunk } = await import("../previewFileChunk.ts");
+        return readStableFileChunk(realTargetPath, input.offset, input.expectedFingerprint);
+      },
+      catch: toWorkspaceFileSystemError(input, "workspaceFileSystem.readFileChunk"),
+    });
+
+    return {
+      relativePath: target.relativePath,
+      offset: input.offset,
+      totalBytes: chunk.totalBytes,
+      dataBase64: chunk.bytes.toString("base64"),
+      mimeType: chunk.mimeType,
+      fingerprint: chunk.fingerprint,
+    };
+  });
+
   const writeFile: WorkspaceFileSystemShape["writeFile"] = Effect.fn(
     "WorkspaceFileSystem.writeFile",
   )(function* (input) {
@@ -680,6 +698,7 @@ export const makeWorkspaceFileSystem = Effect.gen(function* () {
   return {
     readFile,
     readFileBinary,
+    readFileChunk,
     writeFile: (input) =>
       storageLifecycleLock.withPermit(
         assertStorageWritable(input.cwd).pipe(Effect.andThen(writeFile(input))),

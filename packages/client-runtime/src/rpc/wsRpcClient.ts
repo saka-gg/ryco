@@ -144,6 +144,7 @@ export interface WsRpcClient {
     readonly readFile: RpcUnaryMethod<typeof WS_METHODS.projectsReadFile>;
     readonly readIcon: RpcUnaryMethod<typeof WS_METHODS.projectsReadIcon>;
     readonly readFileBinary: RpcUnaryMethod<typeof WS_METHODS.projectsReadFileBinary>;
+    readonly readFileChunk: RpcUnaryMethod<typeof WS_METHODS.projectsReadFileChunk>;
     readonly searchEntries: RpcUnaryMethod<typeof WS_METHODS.projectsSearchEntries>;
     /** Aborting `signal` withdraws the request; the node stops searching. */
     readonly searchContent: (
@@ -611,6 +612,8 @@ export function createWsRpcClient(transport: WsTransport, device?: DeviceRpcClie
         transport.request((client) => client[WS_METHODS.projectsReadIcon](input)),
       readFileBinary: (input) =>
         transport.request((client) => client[WS_METHODS.projectsReadFileBinary](input)),
+      readFileChunk: (input) =>
+        transport.request((client) => client[WS_METHODS.projectsReadFileChunk](input)),
       searchEntries: (input) =>
         transport.request((client) => client[WS_METHODS.projectsSearchEntries](input)),
       searchContent: (input, options) => {

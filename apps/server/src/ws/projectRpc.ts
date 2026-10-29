@@ -5,6 +5,7 @@ import {
   type ProjectListEntriesResult,
   ProjectReadIconError,
   ProjectReadFileBinaryError,
+  ProjectReadFileChunkError,
   ProjectReadFileError,
   ProjectSearchContentError,
   ProjectSearchEntriesError,
@@ -47,6 +48,34 @@ export const makeProjectHandlers = (ctx: WsRpcContext) => {
             ),
         }),
       ),
+    );
+
+  /**
+   * A client's read of a workspace file: operator access, the workspace held
+   * while that client reads it, and one wording for a path outside the root.
+   */
+  const workspaceRead = <A, R, E>(
+    method: string,
+    cwd: string,
+    read: Effect.Effect<A, WorkspaceFileSystemError | WorkspacePathOutsideRootError, R>,
+    toError: (props: { readonly message: string; readonly cause: unknown }) => E,
+  ) =>
+    observeRpcEffect(
+      method,
+      ownerEffect(
+        method,
+        ctx.clientWorkspaceUse.use(cwd, read).pipe(
+          Effect.mapError((cause) =>
+            toError({
+              message: Schema.is(WorkspacePathOutsideRootError)(cause)
+                ? "Workspace file path must stay within the project root."
+                : cause.detail,
+              cause,
+            }),
+          ),
+        ),
+      ),
+      { "rpc.aggregate": "workspace" },
     );
 
   return defineWsHandlers({
@@ -134,42 +163,25 @@ export const makeProjectHandlers = (ctx: WsRpcContext) => {
         { "rpc.aggregate": "workspace" },
       ),
     [WS_METHODS.projectsReadFile]: (input) =>
-      observeRpcEffect(
+      workspaceRead(
         WS_METHODS.projectsReadFile,
-        ownerEffect(
-          WS_METHODS.projectsReadFile,
-          ctx.clientWorkspaceUse.use(input.cwd, workspaceFileSystem.readFile(input)).pipe(
-            Effect.mapError((cause) => {
-              const message = Schema.is(WorkspacePathOutsideRootError)(cause)
-                ? "Workspace file path must stay within the project root."
-                : cause.detail;
-              return new ProjectReadFileError({
-                message,
-                cause,
-              });
-            }),
-          ),
-        ),
-        { "rpc.aggregate": "workspace" },
+        input.cwd,
+        workspaceFileSystem.readFile(input),
+        (props) => new ProjectReadFileError(props),
       ),
     [WS_METHODS.projectsReadFileBinary]: (input) =>
-      observeRpcEffect(
+      workspaceRead(
         WS_METHODS.projectsReadFileBinary,
-        ownerEffect(
-          WS_METHODS.projectsReadFileBinary,
-          ctx.clientWorkspaceUse.use(input.cwd, workspaceFileSystem.readFileBinary(input)).pipe(
-            Effect.mapError((cause) => {
-              const message = Schema.is(WorkspacePathOutsideRootError)(cause)
-                ? "Workspace file path must stay within the project root."
-                : cause.detail;
-              return new ProjectReadFileBinaryError({
-                message,
-                cause,
-              });
-            }),
-          ),
-        ),
-        { "rpc.aggregate": "workspace" },
+        input.cwd,
+        workspaceFileSystem.readFileBinary(input),
+        (props) => new ProjectReadFileBinaryError(props),
+      ),
+    [WS_METHODS.projectsReadFileChunk]: (input) =>
+      workspaceRead(
+        WS_METHODS.projectsReadFileChunk,
+        input.cwd,
+        workspaceFileSystem.readFileChunk(input),
+        (props) => new ProjectReadFileChunkError(props),
       ),
     [WS_METHODS.projectsWriteFile]: (input) =>
       observeRpcEffect(

@@ -1,5 +1,4 @@
 import { CheckIcon, CopyIcon } from "lucide-react";
-import { resolveWorkspaceRelativePath } from "@ryco/client-runtime/state/files";
 import {
   isTerminalSnippetLanguage,
   terminalSnippetError,
@@ -84,6 +83,16 @@ interface ChatMarkdownProps {
   smoothStreaming?: boolean;
   skills?: ReadonlyArray<Pick<ServerProviderSkill, "name" | "displayName">>;
   searchHighlight?: Omit<SkillInlineTextSearchHighlight, "cursor" | "keyPrefix"> | undefined;
+  /**
+   * Set when this renders a workspace document (a Markdown file in the Files
+   * panel) instead of a message: the document's own folder, which relative
+   * links and images resolve against. Containment, workspace reads and the
+   * Files panel stay scoped to `cwd`. It also switches links to document
+   * mode: the text is third-party content, so a link may open a workspace
+   * file in Ryco or an http(s)/mailto page, and nothing else; thread
+   * references (`/ryco/thread/…` links, `@thread:` mentions) stay text.
+   */
+  documentFolder?: string | undefined;
 }
 
 const EMPTY_MARKDOWN_SKILLS: ReadonlyArray<Pick<ServerProviderSkill, "name" | "displayName">> = [];
@@ -365,6 +374,12 @@ interface MarkdownFileLinkProps {
   label: string;
   theme: "light" | "dark";
   className?: string | undefined;
+  /**
+   * A plain click that cannot open the file in Ryco falls back to the editor
+   * (the default, for agent replies). Off in a rendered document, whose links
+   * reach the editor only on Cmd/Ctrl-click or from the link's menu.
+   */
+  editorOnPlainClick?: boolean | undefined;
 }
 
 type MarkdownFileLinkAction = "open-ryco" | "open" | "copy-relative" | "copy-full";
@@ -375,6 +390,17 @@ const MARKDOWN_LINK_HREF_PATTERN = /\[[^\]]*]\(([^)\s]+)(?:\s+["'][^"']*["'])?\)
 const MARKDOWN_FILE_LINK_CLASS_NAME = "chat-markdown-file-link";
 const MARKDOWN_FILE_LINK_ICON_CLASS_NAME = "chat-markdown-file-link-icon";
 const MARKDOWN_FILE_LINK_LABEL_CLASS_NAME = "chat-markdown-file-link-label";
+const DOCUMENT_WEB_LINK_PROTOCOLS = new Set(["http:", "https:", "mailto:"]);
+
+/** A document link that may leave the app: an absolute http(s) or mailto URL. */
+function isDocumentWebLink(href: string | undefined): boolean {
+  if (!href) return false;
+  try {
+    return DOCUMENT_WEB_LINK_PROTOCOLS.has(new URL(href).protocol);
+  } catch {
+    return false;
+  }
+}
 
 function pathParentSegments(path: string): string[] {
   const normalized = path.replaceAll("\\", "/");
@@ -460,6 +486,7 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
   label,
   theme,
   className,
+  editorOnPlainClick = true,
 }: MarkdownFileLinkProps) {
   // Phone tier: long-press mirrors right-click, presenting the same file
   // actions through the shared bottom action sheet. Its file actions stay
@@ -604,8 +631,30 @@ const MarkdownFileLink = memo(function MarkdownFileLink({
               event.stopPropagation();
               // Cmd/Ctrl-click asks for the editor; a plain click opens the
               // file in Ryco when it can.
-              if (event.metaKey || event.ctrlKey || !handleOpenInRyco()) handleOpen();
+              if (event.metaKey || event.ctrlKey) handleOpen();
+              else if (!handleOpenInRyco()) {
+                if (editorOnPlainClick) handleOpen();
+                else
+                  toastManager.add({
+                    type: "info",
+                    title:
+                      workspacePath === null
+                        ? "This file is outside the thread's workspace."
+                        : "This file cannot be opened here.",
+                  });
+              }
             }}
+            {...(editorOnPlainClick
+              ? {}
+              : {
+                  // A document's href is its own relative text: a middle click
+                  // would open it against the app's origin in a new tab (or,
+                  // in the desktop app, in the external browser).
+                  onAuxClick: (event: ReactMouseEvent<HTMLAnchorElement>) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                  },
+                })}
             onContextMenu={(event) => {
               // A fired long-press already presented the menu; swallow the
               // platform's synthetic contextmenu instead of double-firing.
@@ -649,7 +698,8 @@ function areMarkdownFileLinkPropsEqual(
     previous.line === next.line &&
     previous.label === next.label &&
     previous.theme === next.theme &&
-    previous.className === next.className
+    previous.className === next.className &&
+    previous.editorOnPlainClick === next.editorOnPlainClick
   );
 }
 
@@ -681,6 +731,7 @@ const RenderedChatMarkdown = memo(function RenderedChatMarkdown({
   skills = EMPTY_MARKDOWN_SKILLS,
   searchHighlight,
   allowTerminalInsertion = false,
+  documentFolder,
 }: ChatMarkdownProps) {
   usePerfMark("ChatMarkdown");
   const rootRef = useRef<HTMLDivElement>(null);
@@ -731,13 +782,13 @@ const RenderedChatMarkdown = memo(function RenderedChatMarkdown({
     for (const href of JSON.parse(markdownLinkHrefsKey) as string[]) {
       const normalizedHref = normalizeMarkdownLinkHrefKey(href);
       if (metaByHref.has(normalizedHref)) continue;
-      const meta = resolveMarkdownFileLinkMeta(normalizedHref, cwd);
+      const meta = resolveMarkdownFileLinkMeta(normalizedHref, cwd, documentFolder);
       if (meta) {
         metaByHref.set(normalizedHref, meta);
       }
     }
     return metaByHref;
-  }, [cwd, markdownLinkHrefsKey]);
+  }, [cwd, documentFolder, markdownLinkHrefsKey]);
   const fileLinkParentSuffixByPath = useMemo(() => {
     const filePaths = [...markdownFileLinkMetaByHref.values()].map((meta) => meta.filePath);
     return buildFileLinkParentSuffixByPath(filePaths);
@@ -752,6 +803,10 @@ const RenderedChatMarkdown = memo(function RenderedChatMarkdown({
     },
     [rendersQuoteCitations],
   );
+  // A rendered workspace file is third-party content: it never names threads,
+  // so its `@thread:` text stays text instead of a chip that opens one.
+  const documentMode = documentFolder !== undefined;
+  const inlineEnvironmentId = documentMode ? undefined : environmentId;
   const markdownComponents = useMemo<Components>(
     () => ({
       p({ node: _node, children, ...props }) {
@@ -761,7 +816,7 @@ const RenderedChatMarkdown = memo(function RenderedChatMarkdown({
               children,
               skills,
               markdownSearchHighlightRef.current,
-              environmentId,
+              inlineEnvironmentId,
             )}
           </p>
         );
@@ -773,7 +828,7 @@ const RenderedChatMarkdown = memo(function RenderedChatMarkdown({
               children,
               skills,
               markdownSearchHighlightRef.current,
-              environmentId,
+              inlineEnvironmentId,
             )}
           </li>
         );
@@ -785,7 +840,7 @@ const RenderedChatMarkdown = memo(function RenderedChatMarkdown({
               children,
               skills,
               markdownSearchHighlightRef.current,
-              environmentId,
+              inlineEnvironmentId,
             )}
           </blockquote>
         );
@@ -806,7 +861,7 @@ const RenderedChatMarkdown = memo(function RenderedChatMarkdown({
               children,
               skills,
               markdownSearchHighlightRef.current,
-              environmentId,
+              inlineEnvironmentId,
             )}
           </td>
         );
@@ -818,7 +873,7 @@ const RenderedChatMarkdown = memo(function RenderedChatMarkdown({
               children,
               skills,
               markdownSearchHighlightRef.current,
-              environmentId,
+              inlineEnvironmentId,
             )}
           </th>
         );
@@ -827,7 +882,7 @@ const RenderedChatMarkdown = memo(function RenderedChatMarkdown({
         const quoteCitation =
           rendersQuoteCitations && isQuoteCitationHref(href) ? parseQuoteCitationHref(href) : null;
         if (quoteCitation) return <QuoteCitationChip citation={quoteCitation} />;
-        const threadHref = resolveMarkdownThreadHref(href, environmentId);
+        const threadHref = documentMode ? null : resolveMarkdownThreadHref(href, environmentId);
         if (threadHref)
           return (
             <a {...props} href={threadHref}>
@@ -835,7 +890,27 @@ const RenderedChatMarkdown = memo(function RenderedChatMarkdown({
             </a>
           );
         const normalizedHref = href ? normalizeMarkdownLinkHrefKey(href) : "";
-        const fileLinkMeta = normalizedHref ? markdownFileLinkMetaByHref.get(normalizedHref) : null;
+        // The precomputed map holds inline links only; a document's reference
+        // links (`[x][ref]`) and linked images resolve from the href here.
+        const fileLinkMeta = normalizedHref
+          ? (markdownFileLinkMetaByHref.get(normalizedHref) ??
+            (documentMode
+              ? resolveMarkdownFileLinkMeta(normalizedHref, cwd, documentFolder)
+              : null))
+          : null;
+        if (!fileLinkMeta && documentMode && !isDocumentWebLink(href)) {
+          // Anchors, other relative links and emptied hrefs do nothing in a
+          // document: no new tab of the app's own origin, no external browser.
+          return (
+            <span className="chat-markdown-inert-link" title={href || undefined}>
+              {renderSkillInlineMarkdownChildren(
+                props.children,
+                skills,
+                markdownSearchHighlightRef.current,
+              )}
+            </span>
+          );
+        }
         if (!fileLinkMeta) {
           return (
             <a {...props} href={href} target="_blank" rel="noopener noreferrer">
@@ -868,16 +943,17 @@ const RenderedChatMarkdown = memo(function RenderedChatMarkdown({
             targetPath={fileLinkMeta.targetPath}
             displayPath={fileLinkMeta.displayPath}
             filePath={fileLinkMeta.filePath}
-            workspacePath={cwd ? resolveWorkspaceRelativePath(fileLinkMeta.filePath, cwd) : null}
+            workspacePath={fileLinkMeta.workspacePath}
             line={fileLinkMeta.line}
             label={labelParts.join(" · ")}
             theme={resolvedTheme}
             className={props.className}
+            {...(documentMode ? { editorOnPlainClick: false } : {})}
           />
         );
       },
       img({ node: _node, src, alt, title }) {
-        const relativePath = resolveMarkdownWorkspaceImagePath(src, cwd);
+        const relativePath = resolveMarkdownWorkspaceImagePath(src, cwd, documentFolder);
         if (relativePath && cwd && environmentId) {
           return (
             <WorkspaceMarkdownImage
@@ -990,8 +1066,11 @@ const RenderedChatMarkdown = memo(function RenderedChatMarkdown({
     [
       diffThemeName,
       cwd,
+      documentFolder,
+      documentMode,
       environmentId,
       fileLinkParentSuffixByPath,
+      inlineEnvironmentId,
       isStreaming,
       completedText,
       markdownFileLinkMetaByHref,

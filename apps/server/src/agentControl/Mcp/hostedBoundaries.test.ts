@@ -57,6 +57,7 @@ describe("pre-auth server environment descriptor", () => {
       "projectContentSearch",
       "projectIcons",
       "projectPreferences",
+      "projectReadFileChunk",
       "projectSearchEmptyQuery",
       "providerProjectCommands",
       "providerSessionPrewarm",

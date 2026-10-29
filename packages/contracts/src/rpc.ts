@@ -265,6 +265,9 @@ import {
   ProjectReadIconError,
   ProjectReadFileBinaryInput,
   ProjectReadFileBinaryResult,
+  ProjectReadFileChunkError,
+  ProjectReadFileChunkInput,
+  ProjectReadFileChunkResult,
   ProjectReadFileError,
   ProjectReadFileInput,
   ProjectReadFileResult,
@@ -439,6 +442,7 @@ export const WS_METHODS = {
   projectsReadFile: "projects.readFile",
   projectsReadIcon: "projects.readIcon",
   projectsReadFileBinary: "projects.readFileBinary",
+  projectsReadFileChunk: "projects.readFileChunk",
   projectsWriteFile: "projects.writeFile",
   projectsStageFileReference: "projects.stageFileReference",
 
@@ -1716,6 +1720,12 @@ export const WsProjectsReadFileBinaryRpc = Rpc.make(WS_METHODS.projectsReadFileB
   error: Schema.Union([ProjectReadFileBinaryError, AuthRpcError]),
 });
 
+export const WsProjectsReadFileChunkRpc = Rpc.make(WS_METHODS.projectsReadFileChunk, {
+  payload: ProjectReadFileChunkInput,
+  success: ProjectReadFileChunkResult,
+  error: Schema.Union([ProjectReadFileChunkError, AuthRpcError]),
+});
+
 export const WsProjectsWriteFileRpc = Rpc.make(WS_METHODS.projectsWriteFile, {
   payload: ProjectWriteFileInput,
   success: ProjectWriteFileResult,
@@ -2594,6 +2604,7 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   | typeof WsProjectsReadFileRpc
   | typeof WsProjectsReadIconRpc
   | typeof WsProjectsReadFileBinaryRpc
+  | typeof WsProjectsReadFileChunkRpc
   | typeof WsProjectsWriteFileRpc
   | typeof WsProjectsStageFileReferenceRpc
   | typeof WsChatAttachmentsCreateFileUploadRpc
@@ -2815,6 +2826,7 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   WsProjectsReadFileRpc,
   WsProjectsReadIconRpc,
   WsProjectsReadFileBinaryRpc,
+  WsProjectsReadFileChunkRpc,
   WsProjectsWriteFileRpc,
   WsProjectsStageFileReferenceRpc,
   WsChatAttachmentsCreateFileUploadRpc,

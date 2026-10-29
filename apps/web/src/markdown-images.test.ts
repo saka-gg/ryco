@@ -35,6 +35,19 @@ describe("resolveMarkdownWorkspaceImagePath", () => {
     ).toBeNull();
   });
 
+  it("resolves relative images from a base directory and keeps them inside cwd", () => {
+    expect(resolveMarkdownWorkspaceImagePath("../assets/a.png", "/repo", "/repo/docs")).toBe(
+      "assets/a.png",
+    );
+    expect(resolveMarkdownWorkspaceImagePath("shot.png", "/repo", "/repo/docs")).toBe(
+      "docs/shot.png",
+    );
+    expect(resolveMarkdownWorkspaceImagePath("../../a.png", "/repo", "/repo/docs")).toBeNull();
+    expect(
+      resolveMarkdownWorkspaceImagePath("../assets/a.png", undefined, "/repo/docs"),
+    ).toBeNull();
+  });
+
   it("handles Windows paths without case-sensitive drive comparisons", () => {
     expect(
       resolveMarkdownWorkspaceImagePath("C:\\Repo\\Project\\assets\\shot.png", "c:\\repo\\project"),

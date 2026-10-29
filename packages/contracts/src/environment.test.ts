@@ -101,6 +101,17 @@ describe("ExecutionEnvironmentCapabilities.projectContentSearch", () => {
   });
 });
 
+describe("ExecutionEnvironmentCapabilities.projectReadFileChunk", () => {
+  it("stays absent for older nodes and decodes when advertised", () => {
+    expect(decodeDescriptor(descriptor({})).capabilities.projectReadFileChunk).toBeUndefined();
+    expect(
+      decodeDescriptor(descriptor({ projectReadFileChunk: true })).capabilities
+        .projectReadFileChunk,
+    ).toBe(true);
+    expect(() => decodeDescriptor(descriptor({ projectReadFileChunk: "true" }))).toThrow();
+  });
+});
+
 describe("ExecutionEnvironmentCapabilities.terminalWriteRequireIdle", () => {
   it("stays absent for older nodes and decodes when advertised", () => {
     expect(decodeDescriptor(descriptor({})).capabilities.terminalWriteRequireIdle).toBeUndefined();
