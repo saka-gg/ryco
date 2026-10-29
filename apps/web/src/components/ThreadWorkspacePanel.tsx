@@ -1618,6 +1618,7 @@ export default function ThreadWorkspacePanel(props: {
               <WorkspacePullRequestPanel
                 environmentId={threadChangeRequest.environmentId}
                 project={threadChangeRequest.project}
+                threadRef={workspaceThreadRef}
                 number={pullRequestNumber}
                 resolving={threadChangeRequest.resolving}
                 onSelectNumber={(number) =>

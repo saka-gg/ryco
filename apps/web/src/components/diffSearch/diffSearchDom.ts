@@ -5,6 +5,7 @@ import {
   isSameDiffSearchMatch,
   parseDiffRenderedLineIndexes,
   type DiffSearchMatch,
+  type DiffSearchReadingPosition,
   type DiffSearchRenderMode,
 } from "~/lib/diffSearch";
 
@@ -282,6 +283,78 @@ export function readDiffSearchSeedSelection(root: HTMLElement | null): string | 
     return null;
   const text = selection.toString();
   return text.length > 0 && !text.includes("\n") ? text : null;
+}
+
+/** First index whose element's bottom edge is below `top` (elements stacked top to bottom). */
+function firstIndexBelow(count: number, bottomAt: (index: number) => number, top: number): number {
+  let low = 0;
+  let high = count;
+  while (low < high) {
+    const middle = (low + high) >>> 1;
+    if (bottomAt(middle) > top) high = middle;
+    else low = middle + 1;
+  }
+  return low;
+}
+
+/**
+ * The first row of a file at or below `top`: the highest across its columns.
+ * The split layout pads a column with rowless buffers opposite the other
+ * side's lines, so one column alone can start below rows already on screen.
+ */
+function firstRowBelow(fileElement: HTMLElement, top: number): HTMLElement | null {
+  let first: HTMLElement | null = null;
+  let firstTop = Number.POSITIVE_INFINITY;
+  for (const container of fileElement.querySelectorAll<HTMLElement>("diffs-container")) {
+    for (const column of container.shadowRoot?.querySelectorAll("code") ?? []) {
+      const rows = column.querySelectorAll<HTMLElement>("[data-line][data-line-index]");
+      if (rows.length === 0) continue;
+      const row =
+        rows[firstIndexBelow(rows.length, (at) => rows[at]!.getBoundingClientRect().bottom, top)];
+      if (!row) continue;
+      const rowTop = row.getBoundingClientRect().top;
+      if (rowTop < firstTop) {
+        first = row;
+        firstTop = rowTop;
+      }
+    }
+  }
+  return first;
+}
+
+/**
+ * Where the reader is in a diff surface: the first file whose bottom is below
+ * the top of the scroller and, when that file's top is scrolled past, its
+ * first row below the file's sticky header. Null without a rendered diff.
+ * Read when a search starts, so it can start there (see
+ * `firstDiffSearchMatchIndexFrom`).
+ */
+export function readDiffSearchReadingPosition(
+  root: HTMLElement | null,
+): DiffSearchReadingPosition | null {
+  const scroller = root?.querySelector<HTMLElement>(".diff-render-surface");
+  if (!root || !scroller) return null;
+  const top = scroller.getBoundingClientRect().top;
+  const fileElements = root.querySelectorAll<HTMLElement>("[data-diff-file-index]");
+  const fileElement =
+    fileElements[
+      firstIndexBelow(
+        fileElements.length,
+        (at) => fileElements[at]!.getBoundingClientRect().bottom,
+        top,
+      )
+    ];
+  if (!fileElement) return null;
+  const fileIndex = Number.parseInt(fileElement.dataset.diffFileIndex ?? "", 10);
+  if (!Number.isFinite(fileIndex)) return null;
+  if (fileElement.getBoundingClientRect().top >= top) return { fileIndex, line: null };
+  // A sticky file header covers the rows scrolled under it.
+  const header = fileElement.querySelector<HTMLElement>(":scope > header");
+  const visibleTop = Math.max(top, header?.getBoundingClientRect().bottom ?? top);
+  const row = firstRowBelow(fileElement, visibleTop);
+  // Every row of it is scrolled past (only its header, threads or margin show): read on from the next file.
+  if (!row) return { fileIndex: fileIndex + 1, line: null };
+  return { fileIndex, line: parseDiffRenderedLineIndexes(row.getAttribute("data-line-index")) };
 }
 
 /** Whether pierre has rendered code rows for a file (a folded or unhighlighted file has none). */

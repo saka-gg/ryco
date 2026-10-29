@@ -610,6 +610,40 @@ export function getNextDiffSearchMatchIndex(
   return (currentIndex + delta + matchCount) % matchCount;
 }
 
+/** Where the reader is in a diff: the first file on screen and, inside it, the first row. */
+export interface DiffSearchReadingPosition {
+  readonly fileIndex: number;
+  /** Rendered indexes of the file's first row on screen; null when the file starts on screen. */
+  readonly line: DiffRenderedLineIndexes | null;
+}
+
+/**
+ * Index of the first match at or after the reading position, or 0 when every
+ * match is before it (T3 Code `getFirstVisibleSearchMatchIndex`): a new search
+ * starts where the reader is, not at the top of a long diff.
+ */
+export function firstDiffSearchMatchIndexFrom(
+  matches: readonly DiffSearchMatch[],
+  position: DiffSearchReadingPosition | null,
+  renderMode: DiffSearchRenderMode,
+): number {
+  if (position === null) return 0;
+  const lineIndex =
+    position.line === null
+      ? null
+      : renderMode === "split"
+        ? position.line.split
+        : position.line.stacked;
+  for (let index = 0; index < matches.length; index += 1) {
+    const match = matches[index]!;
+    if (match.fileIndex < position.fileIndex) continue;
+    if (match.fileIndex > position.fileIndex || lineIndex === null) return index;
+    const rendered = getDiffSearchMatchRenderedLineIndex(match, renderMode);
+    if (rendered === null || rendered >= lineIndex) return index;
+  }
+  return 0;
+}
+
 export function getDiffSearchMatchRenderedLineIndex(
   match: DiffSearchMatch,
   renderMode: DiffSearchRenderMode,

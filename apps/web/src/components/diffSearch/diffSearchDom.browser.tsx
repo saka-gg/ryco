@@ -8,6 +8,7 @@ import {
   findRenderedDiffLineElement,
   hasRenderedDiffRows,
   indexMatchesByRenderedLine,
+  readDiffSearchReadingPosition,
 } from "./diffSearchDom";
 
 /*
@@ -219,5 +220,122 @@ describe("diffSearchHighlightCss", () => {
     expect(diffSearchHighlightCss("ryco-test")).toContain("::highlight(ryco-test-match)");
     expect(diffSearchHighlightCss("ryco-test")).toContain("::highlight(ryco-test-current)");
     expect(diffSearchHighlightCss("ryco-test", { current: false })).not.toContain("-current");
+  });
+});
+
+describe("readDiffSearchReadingPosition", () => {
+  /**
+   * Three files in a 200 px scroller, each a 30 px sticky header, ten 20 px
+   * rows and a 50 px trailer (a thread list): 280 px per file.
+   */
+  function mountStream() {
+    const root = document.createElement("div");
+    const scroller = document.createElement("div");
+    scroller.className = "diff-render-surface";
+    scroller.style.cssText = "height: 200px; overflow: auto;";
+    for (let fileIndex = 0; fileIndex < 3; fileIndex += 1) {
+      const section = document.createElement("section");
+      section.dataset.diffFileIndex = String(fileIndex);
+      const header = document.createElement("header");
+      header.style.cssText = "position: sticky; top: 0; height: 30px; background: white;";
+      const container = document.createElement("diffs-container");
+      container.style.display = "block";
+      const code = document.createElement("code");
+      code.style.display = "block";
+      for (let row = 0; row < 10; row += 1) {
+        const element = document.createElement("div");
+        element.setAttribute("data-line", String(row + 1));
+        element.setAttribute("data-line-index", `${row},${row}`);
+        element.style.height = "20px";
+        code.append(element);
+      }
+      container.attachShadow({ mode: "open" }).append(code);
+      const trailer = document.createElement("div");
+      trailer.style.height = "50px";
+      section.append(header, container, trailer);
+      scroller.append(section);
+    }
+    root.append(scroller);
+    document.body.append(root);
+    return { root, scroller };
+  }
+
+  it("reads the first file on screen, from its top when it starts on screen", () => {
+    const { root } = mountStream();
+    expect(readDiffSearchReadingPosition(root)).toEqual({ fileIndex: 0, line: null });
+  });
+
+  it("reads the first row below the file's sticky header once its top is scrolled past", () => {
+    const { root, scroller } = mountStream();
+    // 100 px into file 1: rows 0-4 are above or under its 30 px header.
+    scroller.scrollTop = 380;
+    expect(readDiffSearchReadingPosition(root)).toEqual({
+      fileIndex: 1,
+      line: { stacked: 5, split: 5 },
+    });
+  });
+
+  it("reads on from the next file when only the end of a file without rows shows", () => {
+    const { root, scroller } = mountStream();
+    // 240 px into file 1: its rows are all above; its header and trailer still show.
+    scroller.scrollTop = 520;
+    expect(readDiffSearchReadingPosition(root)).toEqual({ fileIndex: 2, line: null });
+  });
+
+  it("reads nothing without a rendered diff", () => {
+    expect(readDiffSearchReadingPosition(null)).toBeNull();
+    expect(readDiffSearchReadingPosition(document.createElement("div"))).toBeNull();
+  });
+
+  it("reads the first row on screen across both columns of a split file", () => {
+    // One split file: rows 0-4 are context on both sides, rows 5-14 are added
+    // lines (a 200 px buffer in the deletions column), rows 15-19 context again.
+    const root = document.createElement("div");
+    const scroller = document.createElement("div");
+    scroller.className = "diff-render-surface";
+    scroller.style.cssText = "height: 200px; overflow: auto;";
+    const section = document.createElement("section");
+    section.dataset.diffFileIndex = "0";
+    const header = document.createElement("header");
+    header.style.cssText = "position: sticky; top: 0; height: 30px; background: white;";
+    const container = document.createElement("diffs-container");
+    container.style.display = "block";
+    const pre = document.createElement("pre");
+    pre.style.cssText = "display: grid; grid-template-columns: 1fr 1fr; margin: 0;";
+    const row = (index: number) => {
+      const element = document.createElement("div");
+      element.setAttribute("data-line", String(index + 1));
+      element.setAttribute("data-line-index", `${index},${index}`);
+      element.style.height = "20px";
+      return element;
+    };
+    const deletions = document.createElement("code");
+    deletions.style.display = "block";
+    const additions = document.createElement("code");
+    additions.style.display = "block";
+    for (let index = 0; index < 20; index += 1) {
+      additions.append(row(index));
+      if (index < 5 || index >= 15) deletions.append(row(index));
+      else if (index === 5) {
+        const buffer = document.createElement("div");
+        buffer.setAttribute("data-content-buffer", "");
+        buffer.style.height = "200px";
+        deletions.append(buffer);
+      }
+    }
+    pre.append(deletions, additions);
+    container.attachShadow({ mode: "open" }).append(pre);
+    section.append(header, container);
+    scroller.append(section);
+    root.append(scroller);
+    document.body.append(root);
+
+    // 140 px in: rows 0-6 are above or under the 30 px header; row 7, an added
+    // line, is the first on screen (the deletions column's next row is 15).
+    scroller.scrollTop = 140;
+    expect(readDiffSearchReadingPosition(root)).toEqual({
+      fileIndex: 0,
+      line: { stacked: 7, split: 7 },
+    });
   });
 });

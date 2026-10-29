@@ -220,7 +220,10 @@ function TreeRows(props: {
   return (
     <nav
       aria-label="Changed files"
-      className="min-h-0 flex-1 overflow-y-auto px-2 pb-8"
+      // A click on a folder row or blank space focuses the tree (the Files tab
+      // around it is focusable for find), so arrow and page keys still scroll it.
+      tabIndex={-1}
+      className="min-h-0 flex-1 overflow-y-auto px-2 pb-8 outline-hidden"
       ref={scrollerRef}
     >
       {props.emptyLabel !== null && props.rows.length === 0 ? (

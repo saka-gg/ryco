@@ -26,6 +26,12 @@ export interface DiffSearchBarProps {
   readonly presentation: "desktop" | "phone";
   /** Escape in the field. */
   readonly onEscape: () => void;
+  /**
+   * A bar the find key opens: an X that closes it replaces the one that
+   * clears the field.
+   */
+  readonly onClose?: (() => void) | undefined;
+  readonly className?: string | undefined;
 }
 
 const ICON_BUTTON_CLASS_NAME =
@@ -48,6 +54,8 @@ export function DiffSearchBar({
   placeholder,
   presentation,
   onEscape,
+  onClose,
+  className,
 }: DiffSearchBarProps) {
   const phone = presentation === "phone";
   const { inputRef, result } = search;
@@ -56,7 +64,10 @@ export function DiffSearchBar({
   return (
     <div
       role="search"
-      className="flex shrink-0 items-center gap-2 border-b border-border/50 bg-card/40 px-2.5 py-1.5 [-webkit-app-region:no-drag]"
+      className={cn(
+        "flex shrink-0 items-center gap-2 border-b border-border/50 bg-card/40 px-2.5 py-1.5 [-webkit-app-region:no-drag]",
+        className,
+      )}
     >
       <SearchIcon className="size-3.5 shrink-0 text-muted-foreground/70" />
       <input
@@ -170,7 +181,17 @@ export function DiffSearchBar({
           </div>
         </>
       )}
-      {search.query && (
+      {onClose ? (
+        <button
+          type="button"
+          onClick={onClose}
+          className={ICON_BUTTON_CLASS_NAME}
+          aria-label="Close find"
+          title="Close find (Escape)"
+        >
+          <XIcon className="size-3.5" />
+        </button>
+      ) : search.query ? (
         <button
           type="button"
           onClick={() => {
@@ -183,7 +204,7 @@ export function DiffSearchBar({
         >
           <XIcon className="size-3" />
         </button>
-      )}
+      ) : null}
     </div>
   );
 }

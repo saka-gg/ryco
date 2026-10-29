@@ -10,7 +10,7 @@ import { PullRequestShortcutsDialog } from "./PullRequestShortcutsDialog";
  * are the defaults underneath, plus the shortcuts dialog (`?`, the bar menu).
  */
 export function PullRequestsPageShortcuts() {
-  const { nav, layout } = usePullRequestsPage();
+  const { nav, layout, repository } = usePullRequestsPage();
   const shortcutsOpen = usePullRequestsLayoutStore((state) => state.shortcutsOpen);
   const setShortcutsOpen = usePullRequestsLayoutStore((state) => state.setShortcutsOpen);
   usePullRequestsShortcut("j", () => nav.stepPullRequest(1));
@@ -29,5 +29,11 @@ export function PullRequestsPageShortcuts() {
     else layout.openDrawer();
   });
   usePullRequestsShortcut("?", () => setShortcutsOpen(true));
-  return <PullRequestShortcutsDialog open={shortcutsOpen} onOpenChange={setShortcutsOpen} />;
+  return (
+    <PullRequestShortcutsDialog
+      open={shortcutsOpen}
+      onOpenChange={setShortcutsOpen}
+      scope={repository}
+    />
+  );
 }

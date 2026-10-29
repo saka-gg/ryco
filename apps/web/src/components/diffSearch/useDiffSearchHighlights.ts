@@ -1,6 +1,5 @@
 import { type RefObject, useEffect, useRef } from "react";
 
-import { cssHighlightRegistry } from "~/lib/cssHighlights";
 import type { DiffSearchMatch, DiffSearchRenderMode } from "~/lib/diffSearch";
 
 import { diffSearchHighlightNames, findDiffSearchRanges, isNearViewport } from "./diffSearchDom";
@@ -37,7 +36,11 @@ export function useDiffSearchHighlights(input: {
   }, [current]);
 
   useEffect(() => {
-    const cssHighlights = cssHighlightRegistry();
+    // The registry is read here, not through `~/lib/cssHighlights`: that module
+    // is shared with the chat route, and a third surface importing it (pull
+    // request files) would split it into a chunk of its own on that route's
+    // budgeted closure.
+    const cssHighlights = typeof Highlight === "undefined" ? null : CSS.highlights;
     if (!cssHighlights) return;
     const names = diffSearchHighlightNames(name);
     const clear = () => {
