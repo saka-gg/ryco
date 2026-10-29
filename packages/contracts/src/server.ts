@@ -366,6 +366,15 @@ export const ServerChatsCapability = Schema.Struct({
 });
 export type ServerChatsCapability = typeof ServerChatsCapability.Type;
 
+/**
+ * Absent from nodes without server-side pull request watches; clients then hide every watch
+ * control (the Auto-fix CI switch, the watch status line).
+ */
+export const ServerPullRequestWatchCapability = Schema.Struct({
+  available: Schema.Boolean,
+});
+export type ServerPullRequestWatchCapability = typeof ServerPullRequestWatchCapability.Type;
+
 export const ServerConfig = Schema.Struct({
   usageContractVersion: Schema.optional(NonNegativeInt),
   environment: ExecutionEnvironmentDescriptor,
@@ -373,6 +382,7 @@ export const ServerConfig = Schema.Struct({
   cwd: TrimmedNonEmptyString,
   workspaceAccessRoot: Schema.optional(TrimmedNonEmptyString),
   chats: Schema.optionalKey(ServerChatsCapability),
+  pullRequestWatch: Schema.optionalKey(ServerPullRequestWatchCapability),
   keybindingsConfigPath: TrimmedNonEmptyString,
   keybindings: ResolvedKeybindingsConfig,
   issues: ServerConfigIssues,

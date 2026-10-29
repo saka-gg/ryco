@@ -169,6 +169,23 @@ describe("server boot import boundaries", () => {
     ).toEqual([]);
   });
 
+  it("loads the pull request watch sweep after the server serves", () => {
+    // Only the thin service layer is on the serve path; the sweep, its host-read adapters and
+    // the shared decision rules load through import() once commands are admitted.
+    const graph = staticGraph("src/cliMain.ts");
+    expect(
+      graph.files.filter((file) =>
+        /(?:\/sourceControl\/(?:pullRequestWatchSweep|pullRequestWatchObservation)|\/persistence\/wakeStartDelivery|packages\/shared\/src\/pullRequestWatch)\.ts$/u.test(
+          file,
+        ),
+      ),
+    ).toEqual([]);
+    expect(graph.files).toContain("apps/server/src/sourceControl/PullRequestWatchService.ts");
+    expect(staticGraph("src/cliMain.ts", { dynamic: true }).files).toContain(
+      "apps/server/src/sourceControl/pullRequestWatchSweep.ts",
+    );
+  });
+
   it("keeps optional feature stacks off the serve path", () => {
     const graph = staticGraph("src/cliMain.ts");
     const reached = (pattern: RegExp) => graph.files.filter((file) => pattern.test(file));
@@ -370,6 +387,16 @@ describe.skipIf(!hasCurrentBuild)("built server bundle pull request watches", ()
     expect(boot).toContain("function summarizePullRequestWatches(");
     expect(boot).not.toContain("function decidePullRequestWatch(");
     expect(boot).not.toContain("function renderPullRequestWatchWake(");
+  });
+
+  it("keeps the watch sweep and its host-read adapters out of the boot chunks", () => {
+    const cliChunk = readFileSync(builtEntry, "utf8").match(/import\("(\.\/cliMain[^"]+)"\)/u)?.[1];
+    const serve = builtStaticClosure(path.resolve(serverRoot, "dist", cliChunk!));
+    for (const chunk of serve.chunks) {
+      expect(readFileSync(chunk, "utf8")).not.toMatch(
+        /^\/\/#region src\/(?:sourceControl\/(?:pullRequestWatchSweep|pullRequestWatchObservation)|persistence\/wakeStartDelivery)\.ts$/mu,
+      );
+    }
   });
 });
 
