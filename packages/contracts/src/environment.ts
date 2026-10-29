@@ -106,6 +106,12 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
   /** `provider.readProjectCommands` (per-directory skills and slash commands); absent on older servers. */
   providerProjectCommands: Schema.optionalKey(Schema.Boolean),
   /**
+   * `git.runStackedAction` honours `recoverable` (the action outlives its request), with
+   * `git.resumeStackedAction` and `git.cancelStackedAction`; absent on older servers, which
+   * drop the key and stop the action when its request closes.
+   */
+  recoverableGitActions: Schema.optionalKey(Schema.Boolean),
+  /**
    * `server.subscribeNodeUpdate` / `server.checkNodeUpdate` / `server.updateNode`: the node
    * reports its Ryco release and installation and can update itself; absent on older servers.
    */

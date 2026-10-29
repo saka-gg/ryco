@@ -92,6 +92,7 @@ import * as TextGeneration from "./textGeneration/TextGeneration.ts";
 import { ProviderInstanceRegistryHydrationLive } from "./provider/Layers/ProviderInstanceRegistryHydration.ts";
 import { TerminalManagerLive } from "./terminal/Layers/Manager.ts";
 import { WorktreeSetupTrackerLive } from "./project/Layers/WorktreeSetupTracker.ts";
+import { GitActionRunnerLive } from "./git/GitActionRunner.ts";
 import * as GitManager from "./git/GitManager.ts";
 import { KeybindingsLive } from "./keybindings.ts";
 import { ServerRuntimeStartup, ServerRuntimeStartupLive } from "./serverRuntimeStartup.ts";
@@ -530,8 +531,11 @@ const RuntimeCoreBaseDependenciesLive = RuntimeFeatureLayerLive.pipe(
   Layer.provideMerge(GitLayerLive),
   Layer.provideMerge(VcsLayerLive),
   Layer.provideMerge(ProviderRuntimeLayerLive),
-  // With the one in-memory feed of first-send worktree setups, shared by every connection.
-  Layer.provideMerge(Layer.mergeAll(TerminalLayerLive, WorktreeSetupTrackerLive)),
+  // With the one in-memory feed of first-send worktree setups and the runner of recoverable
+  // Git actions, each shared by every connection.
+  Layer.provideMerge(
+    Layer.mergeAll(TerminalLayerLive, WorktreeSetupTrackerLive, GitActionRunnerLive),
+  ),
   Layer.provideMerge(AgentControlLayerLive),
   Layer.provideMerge(PersistenceLayerLive),
   Layer.provideMerge(ProjectionWorktreeRepositoryLive),

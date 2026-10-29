@@ -84,6 +84,9 @@ export const RPC_ACCESS_POLICY = {
   [WS_METHODS.gitResolvePullRequest]: "operator",
   [WS_METHODS.gitRestoreWorktree]: "operator",
   [WS_METHODS.gitRunStackedAction]: "operator",
+  // Progress carries commit subjects and hook output, like the run itself.
+  [WS_METHODS.gitResumeStackedAction]: "operator",
+  [WS_METHODS.gitCancelStackedAction]: "operator",
   [WS_METHODS.keybindingsReplaceCustom]: "owner",
   [WS_METHODS.mcpListServers]: "owner",
   [WS_METHODS.mcpListWorkspaces]: "owner",
@@ -355,6 +358,9 @@ export const RPC_DELIVERY_EFFECT_POLICY = {
   [WS_METHODS.gitResolvePullRequest]: "read",
   [WS_METHODS.gitRestoreWorktree]: "mutation",
   [WS_METHODS.gitRunStackedAction]: "mutation",
+  // Attaching again only observes: it never starts Git, so losing or repeating it is harmless.
+  [WS_METHODS.gitResumeStackedAction]: "read",
+  [WS_METHODS.gitCancelStackedAction]: "mutation",
   [WS_METHODS.keybindingsReplaceCustom]: "mutation",
   [WS_METHODS.mcpListServers]: "read",
   [WS_METHODS.mcpListWorkspaces]: "read",

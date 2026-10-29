@@ -136,7 +136,7 @@ import * as SourceControlProviderRegistry from "../sourceControl/SourceControlPr
 import { BootstrapCredentialService } from "../auth/Services/BootstrapCredentialService.ts";
 import { SessionCredentialService } from "../auth/Services/SessionCredentialService.ts";
 import { authorizeRpcPrincipal, type WsRpcAccess } from "../auth/wsAuthorization.ts";
-import type { RpcPrincipal } from "./RpcPrincipal.ts";
+import { type RpcPrincipal, rpcPrincipalOwnerKey } from "./RpcPrincipal.ts";
 import { AtlassianConnectionService } from "../atlassian/AtlassianConnectionService.ts";
 import { JiraWorkItemService } from "../atlassian/JiraWorkItemService.ts";
 import { AdvertisedEndpointRegistry } from "../remote/Services/AdvertisedEndpointRegistry.ts";
@@ -155,6 +155,7 @@ import {
 import { WorktreeSetupTracker } from "../project/Services/WorktreeSetupTracker.ts";
 import { setupProjectScript } from "@ryco/shared/projectScripts";
 import { makeWorktreeSetupTracker } from "../project/Layers/WorktreeSetupTracker.ts";
+import { GitActionRunner } from "../git/GitActionRunner.ts";
 
 export { isThreadDetailEvent } from "./context/orchestrationEvents.ts";
 export { toAuthAccessStreamEvent } from "./context/authEvents.ts";
@@ -245,6 +246,10 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
     const worktreeSetupTracker = Option.isSome(worktreeSetupTrackerOption)
       ? worktreeSetupTrackerOption.value
       : yield* makeWorktreeSetupTracker;
+    // The node's one runner, so an action survives the connection that started it. Route tests
+    // without it get no recoverable actions (git.runStackedAction stays request-owned), never a
+    // runner private to this connection, which would lose every action when it closes.
+    const gitActionRunner = Option.getOrUndefined(yield* Effect.serviceOption(GitActionRunner));
     const providerRegistry = yield* ProviderRegistry;
     const modelManifest = yield* Effect.serviceOption(ModelManifest);
     // Optional for the same reason as ContextHandoffInspection: route tests
@@ -1411,6 +1416,9 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
       vcsStatusBroadcaster,
       terminalManager,
       worktreeSetupTracker,
+      gitActionRunner,
+      // Read per request: a relay channel's device is known only after its handshake.
+      gitActionOwner: () => rpcPrincipalOwnerKey(principal),
       providerRegistry,
       modelManifest,
       providerService,

@@ -44,6 +44,7 @@ const handlerLayer = Layer.mergeAll(
 
 const ownerSession: AuthenticatedSession = {
   sessionId: AuthSessionId.make("session-owner"),
+  chainId: AuthSessionId.make("session-owner"),
   subject: "owner",
   method: "browser-session-cookie",
   role: "owner",

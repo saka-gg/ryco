@@ -106,6 +106,7 @@ export const makeServerEnvironment = Effect.fn("makeServerEnvironment")(function
       conversationRevert: true,
       providerSessionPrewarm: true,
       providerProjectCommands: true,
+      recoverableGitActions: true,
       projectSearchEmptyQuery: true,
       projectContentSearch: true,
       projectReadFileChunk: true,

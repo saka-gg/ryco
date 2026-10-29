@@ -22,6 +22,8 @@ export interface IssuedSession {
 
 export interface VerifiedSession {
   readonly sessionId: AuthSessionId;
+  /** The pairing (rotation chain) the session belongs to: its first session's id. */
+  readonly chainId: AuthSessionId;
   readonly token: string;
   readonly method: ServerAuthSessionMethod;
   readonly client: AuthClientMetadata;
@@ -40,6 +42,13 @@ export type SessionCredentialChange =
   | {
       readonly type: "clientRemoved";
       readonly sessionId: AuthSessionId;
+      /** The pairing (rotation chain) the session belonged to. */
+      readonly chainId: AuthSessionId;
+      /**
+       * `revoked`: the pairing ended. `superseded`: a renewal took over from this session and
+       * the pairing goes on under its successor.
+       */
+      readonly reason: "revoked" | "superseded";
     };
 
 export class SessionCredentialError extends Data.TaggedError("SessionCredentialError")<{

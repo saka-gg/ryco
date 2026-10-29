@@ -1,6 +1,6 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
-import { Clock, Duration, Effect, Layer } from "effect";
+import { Clock, Duration, Effect, Fiber, Layer, Stream } from "effect";
 import { TestClock } from "effect/testing";
 
 import type { ServerConfigShape } from "../../config.ts";
@@ -287,6 +287,47 @@ it.layer(NodeServices.layer)("SessionCredentialServiceLive", (it) => {
       const refused = yield* Effect.flip(sessions.rotate(paired.sessionId));
       expect(refused).toBeInstanceOf(SessionRotationError);
       expect((refused as SessionRotationError).reason).toBe("superseded");
+    }).pipe(Effect.provide(withClock())),
+  );
+
+  it.effect("announces a renewal's predecessor as superseded and a revocation as revoked", () =>
+    Effect.gen(function* () {
+      const sessions = yield* SessionCredentialService;
+      const removals = yield* sessions.streamChanges.pipe(
+        Stream.filter((change) => change.type === "clientRemoved"),
+        Stream.take(3),
+        Stream.runCollect,
+        Effect.forkScoped,
+      );
+      const paired = yield* sessions.issue({ method: "bearer-session-token", subject: "renewing" });
+      yield* TestClock.adjust(Duration.days(2));
+      const rotated = yield* sessions.rotate(paired.sessionId);
+      // The successor belongs to the same pairing: its chain is the first session.
+      const verified = yield* sessions.verify(rotated.token);
+      expect(verified.chainId).toBe(paired.sessionId);
+      expect((yield* sessions.verify(paired.token)).chainId).toBe(paired.sessionId);
+      expect(yield* sessions.revoke(rotated.sessionId)).toBe(true);
+
+      const [superseded, ...revoked] = [...(yield* Fiber.join(removals))];
+      // The renewal leaves the pairing in place; only the revocation ends it.
+      expect(superseded).toEqual({
+        type: "clientRemoved",
+        sessionId: paired.sessionId,
+        chainId: paired.sessionId,
+        reason: "superseded",
+      });
+      // Revoking any session of a pairing revokes all of them, in no particular order.
+      expect(revoked).toHaveLength(2);
+      expect(revoked).toEqual(
+        expect.arrayContaining(
+          [paired.sessionId, rotated.sessionId].map((sessionId) => ({
+            type: "clientRemoved",
+            sessionId,
+            chainId: paired.sessionId,
+            reason: "revoked",
+          })),
+        ),
+      );
     }).pipe(Effect.provide(withClock())),
   );
 

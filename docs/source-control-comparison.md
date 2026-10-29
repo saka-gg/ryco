@@ -162,6 +162,30 @@ changes made while the message was generated. `stagedOnly` cannot be combined wi
 Staged review and the commit-message context list staged submodule pointers even when
 the user's config ignores submodules, because the commit records them.
 
+### Git actions across reconnects
+
+A commit, push or pull request action normally belongs to its request: when the client's
+connection closes, the node stops the action and its Git child. A client that can attach
+again sends `recoverable: true` with a random UUID `actionId` to a node that advertises
+`recoverableGitActions`. The action then runs on the node until it ends, whatever happens
+to the connection. The client follows it again with `git.resumeStackedAction` (the same
+input; it replays the current step, then the rest, and never starts Git) and stops it with
+`git.cancelStackedAction`. Steps that already finished stay done.
+
+Actions belong to the client that started them: a direct client's pairing (a bearer
+renewal keeps it), a relay device's identity key, or, for hosted web channels that identify
+no device, the action id alone. Revoking a direct pairing stops its running actions and
+refuses its later starts; renewing it does not. Revoking a relay device ends its channels, but
+an action it already started runs to its end. While a recoverable action runs, the node refuses
+another one in the same checkout and holds the checkout against storage cleanup.
+
+The node keeps the outcome of the last 256 actions for 30 minutes, in memory only. A resume
+it has no record of (after a restart, for an old action, or for a start that never arrived)
+fails with `GitActionResultUnavailableError`, and a start for that id that arrives later is
+refused, so Git never runs twice for one action. The client then asks the user to check the
+repository status instead of retrying: a graceful node shutdown stops the Git child, but a
+node that crashed may leave it running to completion, and a retry could race it.
+
 ### Guarded index mutation
 
 `vcs.readLocalChanges` authorizes cwd and the resolved worktree through
