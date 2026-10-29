@@ -7,6 +7,8 @@ import {
   sumUsageImports,
   usageCacheReadShare,
   type MergedUsageSummary,
+  type UsageBreakdownRow,
+  type UsageModelKey,
 } from "@ryco/client-runtime/usage";
 import type { UsageImportedMetric, UsageProviderKind } from "@ryco/contracts";
 import {
@@ -19,9 +21,11 @@ import {
   SparklesIcon,
   type LucideIcon,
 } from "lucide-react";
-import { useMemo, useState } from "react";
+import { useId, useMemo, useState } from "react";
 
 import { Button } from "~/components/ui/button";
+import { notifySurfaceLoadFailure } from "~/components/ui/surfaceLoadFailure";
+import { preloadableLazy, useLazyComponentReady } from "~/lib/preloadableLazy";
 import { cn } from "~/lib/utils";
 import {
   formatCost,
@@ -31,11 +35,9 @@ import {
   formatProviderLabel,
   formatTimestamp,
   formatTokens,
-  formatUsd,
 } from "~/lib/statisticsFormat";
 
 import { Panel, StatePanel, StatSkeleton } from "../../settings/statistics/parts";
-import { SeriesAreaChart } from "../charts";
 import { EnvironmentSelect } from "../EnvironmentSelect";
 import type { StatisticsSearch } from "../statisticsSearch";
 import { useUsageSummary } from "../useUsageSummary";
@@ -46,6 +48,15 @@ import {
   filterUsageBuckets,
   sumUsageTotals,
 } from "./selectors";
+import { UsageMetricChart, type UsageChartMetric } from "./UsageMetricChart";
+
+// Most visits never open a model, so its detail loads on the first open (warmed on intent).
+const UsageModelDialog = preloadableLazy(() =>
+  import("./UsageModelDialog").then((module) => module.UsageModelDialog),
+);
+const preloadUsageModelDialog = () => {
+  void UsageModelDialog.preload();
+};
 
 export function UsageView({
   search,
@@ -59,6 +70,20 @@ export function UsageView({
     environmentIds: search.environmentIds,
   });
   const { merged } = result;
+  // Kept through the close animation; cleared once it ends.
+  const [modelDetail, setModelDetail] = useState<{
+    readonly target: UsageModelKey;
+    readonly open: boolean;
+  } | null>(null);
+  const modelDialogReady = useLazyComponentReady(UsageModelDialog, modelDetail !== null, {
+    onLoadError: (error) => {
+      const target = modelDetail?.target;
+      setModelDetail(null);
+      notifySurfaceLoadFailure("model details", error, () => {
+        if (target) setModelDetail({ target, open: true });
+      });
+    },
+  });
   const derived = useMemo(() => {
     if (!merged) return null;
     const buckets = filterUsageBuckets(merged, search.providers);
@@ -236,38 +261,28 @@ export function UsageView({
           >
             <div className="divide-y divide-border/60">
               {breakdown.slice(0, 20).map((row) => (
-                <div
+                <BreakdownRow
                   key={row.key}
-                  className="grid grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-5 px-4 py-3.5 sm:px-5"
-                >
-                  <div className="min-w-0">
-                    <p className="truncate text-sm font-medium">
-                      {search.usageBreakdown === "model"
-                        ? formatModelLabel(row.label)
-                        : formatDayLabel(row.label)}
-                    </p>
-                    <p className="mt-0.5 text-[11px] text-muted-foreground">
-                      {row.provider
-                        ? formatProviderLabel(row.provider)
-                        : `${row.responses} responses`}
-                    </p>
-                  </div>
-                  <div className="text-right">
-                    <p className="text-sm font-medium tabular-nums">{formatTokens(row.tokens)}</p>
-                    <p className="text-[11px] text-muted-foreground">tokens</p>
-                  </div>
-                  <div className="w-24 text-right">
-                    <p className="text-sm font-medium tabular-nums">{formatCost(row.costUsd)}</p>
-                    <p className="text-[11px] text-muted-foreground">
-                      {row.unpricedTokens > 0
-                        ? `${formatTokens(row.unpricedTokens)} unpriced`
-                        : "estimated"}
-                    </p>
-                  </div>
-                </div>
+                  row={row}
+                  dimension={search.usageBreakdown}
+                  onOpenModel={(target) => setModelDetail({ target, open: true })}
+                />
               ))}
             </div>
           </Panel>
+          {modelDetail !== null && modelDialogReady ? (
+            <UsageModelDialog
+              target={modelDetail.target}
+              open={modelDetail.open}
+              onOpenChange={(open) =>
+                setModelDetail((current) => (current === null ? null : { ...current, open }))
+              }
+              onClosed={() => setModelDetail(null)}
+              summary={merged}
+              buckets={derived.buckets}
+              metric={search.usageMetric}
+            />
+          ) : null}
         </>
       )}
       <Coverage
@@ -394,12 +409,71 @@ function BreakdownToggle({ search, onSearchChange }: SearchControlProps) {
   );
 }
 
+/** A model row opens that model's detail; a day row only reads. */
+function BreakdownRow({
+  row,
+  dimension,
+  onOpenModel,
+}: {
+  readonly row: UsageBreakdownRow;
+  readonly dimension: StatisticsSearch["usageBreakdown"];
+  readonly onOpenModel: (target: UsageModelKey) => void;
+}) {
+  const id = useId();
+  const layout = "grid grid-cols-[minmax(0,1fr)_auto_auto] items-center gap-5 px-4 py-3.5 sm:px-5";
+  // Spans, not paragraphs: a model row is a button, which takes phrasing content only.
+  const content = (
+    <>
+      <span className="block min-w-0">
+        <span id={`${id}-label`} className="block truncate text-sm font-medium">
+          {dimension === "model" ? formatModelLabel(row.label) : formatDayLabel(row.label)}
+        </span>
+        <span id={`${id}-source`} className="mt-0.5 block text-[11px] text-muted-foreground">
+          {row.provider ? formatProviderLabel(row.provider) : `${row.responses} responses`}
+        </span>
+      </span>
+      <span id={`${id}-tokens`} className="block text-right">
+        <span className="block text-sm font-medium tabular-nums">{formatTokens(row.tokens)}</span>
+        <span className="block text-[11px] text-muted-foreground">tokens</span>
+      </span>
+      <span id={`${id}-cost`} className="block w-24 text-right">
+        <span className="block text-sm font-medium tabular-nums">{formatCost(row.costUsd)}</span>
+        <span className="block text-[11px] text-muted-foreground">
+          {row.unpricedTokens > 0 ? `${formatTokens(row.unpricedTokens)} unpriced` : "estimated"}
+        </span>
+      </span>
+    </>
+  );
+  const provider = row.provider;
+  if (dimension !== "model" || provider === undefined) {
+    return <div className={layout}>{content}</div>;
+  }
+  return (
+    <button
+      type="button"
+      aria-haspopup="dialog"
+      // Named by model and provider (one model ID can run through several providers).
+      aria-labelledby={`${id}-label ${id}-source`}
+      aria-describedby={`${id}-tokens ${id}-cost`}
+      onClick={() => onOpenModel({ provider, model: row.label })}
+      onPointerEnter={preloadUsageModelDialog}
+      onFocus={preloadUsageModelDialog}
+      className={cn(
+        layout,
+        "w-full text-left outline-none transition-colors hover:bg-accent/40 focus-visible:bg-accent/40 focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset",
+      )}
+    >
+      {content}
+    </button>
+  );
+}
+
 function UsageAreaChart({
   data,
   metric,
 }: {
   readonly data: ReturnType<typeof buildUsageDaySeries>;
-  readonly metric: "cost" | "tokens";
+  readonly metric: UsageChartMetric;
 }) {
   const dates = useMemo(() => data.map((point) => point.date), [data]);
   const series = useMemo(
@@ -413,17 +487,12 @@ function UsageAreaChart({
     [data, metric],
   );
   return (
-    <SeriesAreaChart
+    <UsageMetricChart
       className="min-h-[300px] flex-1"
       label="Usage over time"
       dates={dates}
       series={series}
-      yAxisWidth={44}
-      dashedGrid
-      formatYTick={(value) =>
-        metric === "cost" ? `$${value.toFixed(value < 10 ? 1 : 0)}` : formatTokens(value)
-      }
-      formatValue={(value) => (metric === "cost" ? formatUsd(value) : formatInteger(value))}
+      metric={metric}
     />
   );
 }

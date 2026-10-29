@@ -34,6 +34,14 @@ per day and model, so the parts still add up to the reported cost. Reported cost
 without a rate, and cost from nodes that predate the split, cannot be divided and is
 shown as "Other".
 
+Selecting a model in the usage breakdown opens its detail: cost by type, its daily
+trend, cache reads as a share of all input tokens (cache writes count as misses), and
+the cost per million tokens. That rate divides the estimated cost by the priced tokens
+only, so unpriced tokens of the same model do not dilute it. An unpriced model's trend
+shows tokens, since its cost is unknown rather than zero. The detail has no session
+count: sessions are counted per day and model, so a sum would count a multi-day
+session more than once.
+
 History includes disabled configured accounts. Codex and Claude instances resolve
 stores with the same home and environment precedence as their runtime, including
 `CODEX_HOME`, `CLAUDE_CONFIG_DIR`, and `HOME`; shared stores count once.

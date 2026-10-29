@@ -274,6 +274,17 @@ describe("web bundle splitting boundaries", () => {
     expect(primaryActions).toContain("onFocus={preloadAutomationsDialog}");
   });
 
+  it("loads the usage model detail on its first open and preloads it on intent", async () => {
+    const usageView = await readSource("../components/statistics/usage/UsageView.tsx");
+
+    expect(usageView).toContain('import("./UsageModelDialog")');
+    expect(usageView).not.toMatch(/^import \{[^}]*\} from "\.\/UsageModelDialog";$/mu);
+    expect(usageView).toContain("useLazyComponentReady(UsageModelDialog");
+    expect(usageView).toContain("onLoadError:");
+    expect(usageView).toContain("onPointerEnter={preloadUsageModelDialog}");
+    expect(usageView).toContain("onFocus={preloadUsageModelDialog}");
+  });
+
   it("starts the desktop quit guard on every Electron window, behind the quit feedback chunk", async () => {
     // Without the responder, Desktop main quits without asking, and nothing else would notice.
     const mainEntry = await readSource("../main.tsx");
