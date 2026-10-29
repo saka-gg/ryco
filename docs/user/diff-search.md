@@ -1,8 +1,10 @@
 # Find in a diff
 
+You can find text in two diffs: the Diff panel beside a thread, and the **Files** tab of a pull
+request. `Cmd` below is `Ctrl` on Windows and Linux.
+
 The Diff panel has a search row above the changed files. It searches file paths and the lines the
-diff shows. While a search is active, the panel lists only the files with a match. `Cmd` below is
-`Ctrl` on Windows and Linux.
+diff shows. While a search is active, the panel lists only the files with a match.
 
 ## Open it with the find key
 
@@ -37,6 +39,25 @@ The three buttons next to the search field change how it matches:
 The search is not trimmed: leading spaces find indentation. It stops at 100,000 matches; the
 counter then ends in `+` and the files it did not reach stay in the list. The options last while
 the panel is open and are off again the next time you open it.
+
+## A pull request's files
+
+In the **Files** tab of a pull request, on the pull requests page or beside a thread, click into
+the diff or the file tree and press `Cmd+F`. A find bar opens above the diff with the same field,
+options and counter.
+
+- It searches the lines of every file, also files you marked **Viewed** and files that start
+  folded (generated files, very large changes). The file tree's **Filter files** field finds paths.
+- The diff is not filtered: every file stays where it is.
+- A new search starts at the first match from where you are reading, not at the top of the pull
+  request. `Enter` goes there.
+- A match in a folded file opens that file. Its **Viewed** mark stays.
+- `Escape` in the field, or the close button, closes the bar and leaves focus in the diff, so the
+  page's keys (`J`, `K`, `V` and the others) keep working.
+- The options last while the pull request is open. A new push keeps the current match when its
+  line is still there; choosing a single commit closes the bar.
+
+The pull requests page's shortcut list (`?`) shows your find key under **Review**.
 
 ## Limits
 

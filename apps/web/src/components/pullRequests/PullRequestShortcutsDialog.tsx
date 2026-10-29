@@ -1,3 +1,7 @@
+import type { ScriptShortcutScope } from "@ryco/client-runtime/state/settings";
+
+import { useAppKeybindings } from "../../appKeybindings";
+import { shortcutLabelForCommand } from "../../keybindings";
 import {
   Dialog,
   DialogDescription,
@@ -8,9 +12,13 @@ import {
 } from "../ui/dialog";
 import { KeyHint } from "./primitives";
 
+type ShortcutRow = readonly [keys: ReadonlyArray<string>, label: string];
+
 const SHORTCUT_GROUPS: ReadonlyArray<{
   readonly title: string;
-  readonly rows: ReadonlyArray<readonly [keys: ReadonlyArray<string>, label: string]>;
+  readonly rows: ReadonlyArray<ShortcutRow>;
+  /** Also lists the find key (the user's thread-find binding) here. */
+  readonly findRow?: true;
 }> = [
   {
     title: "Move",
@@ -34,6 +42,7 @@ const SHORTCUT_GROUPS: ReadonlyArray<{
       [["C"], "Commit scope"],
       [["⌘", "↵"], "Submit comment or review"],
     ],
+    findRow: true,
   },
   {
     title: "Act",
@@ -51,7 +60,13 @@ const SHORTCUT_GROUPS: ReadonlyArray<{
 export function PullRequestShortcutsDialog(props: {
   readonly open: boolean;
   readonly onOpenChange: (open: boolean) => void;
+  /** The repository's project: a project shortcut on the same key takes it there. */
+  readonly scope?: ScriptShortcutScope | null | undefined;
 }) {
+  const keybindings = useAppKeybindings(props.scope ?? null);
+  // Find in the diff follows the thread-find binding, so the row shows that key;
+  // none when nothing is bound to it (or the key runs a project shortcut here).
+  const findKey = shortcutLabelForCommand(keybindings, "thread.find");
   return (
     <Dialog open={props.open} onOpenChange={props.onOpenChange}>
       <DialogPopup className="max-w-lg">
@@ -65,20 +80,29 @@ export function PullRequestShortcutsDialog(props: {
               <h3 className="text-[11px] text-muted-foreground">{group.title}</h3>
               <dl className="grid gap-1.5">
                 {group.rows.map(([keys, label]) => (
-                  <div key={label} className="flex items-center justify-between gap-4 text-[13px]">
-                    <dt className="text-foreground/90">{label}</dt>
-                    <dd className="flex shrink-0 items-center gap-1">
-                      {keys.map((key) => (
-                        <KeyHint key={key}>{key}</KeyHint>
-                      ))}
-                    </dd>
-                  </div>
+                  <ShortcutRowView key={label} keys={keys} label={label} />
                 ))}
+                {group.findRow && findKey !== null ? (
+                  <ShortcutRowView keys={[findKey]} label="Find in the diff" />
+                ) : null}
               </dl>
             </section>
           ))}
         </DialogPanel>
       </DialogPopup>
     </Dialog>
+  );
+}
+
+function ShortcutRowView(props: { readonly keys: ReadonlyArray<string>; readonly label: string }) {
+  return (
+    <div className="flex items-center justify-between gap-4 text-[13px]">
+      <dt className="text-foreground/90">{props.label}</dt>
+      <dd className="flex shrink-0 items-center gap-1">
+        {props.keys.map((key) => (
+          <KeyHint key={key}>{key}</KeyHint>
+        ))}
+      </dd>
+    </div>
   );
 }

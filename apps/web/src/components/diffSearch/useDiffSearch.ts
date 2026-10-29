@@ -10,6 +10,7 @@ import {
   EMPTY_DIFF_SEARCH_INDEX,
   EMPTY_DIFF_SEARCH_RESULT,
   escapeDiffSearchRegExp,
+  firstDiffSearchMatchIndexFrom,
   getNextDiffSearchMatchIndex,
   groupDiffSearchMatchesByFileIndex,
   isSearchableDiffQuery,
@@ -18,11 +19,12 @@ import {
   type DiffSearchIndexOptions,
   type DiffSearchMatch,
   type DiffSearchOptions,
+  type DiffSearchReadingPosition,
   type DiffSearchRenderMode,
   type DiffSearchResult,
 } from "~/lib/diffSearch";
 
-import { readDiffSearchSeedSelection } from "./diffSearchDom";
+import { readDiffSearchReadingPosition, readDiffSearchSeedSelection } from "./diffSearchDom";
 import { useDiffSearchHighlights } from "./useDiffSearchHighlights";
 
 /** Typing settles this long before a search runs. */
@@ -47,6 +49,14 @@ export interface UseDiffSearchInput {
   readonly revealMatch: (match: DiffSearchMatch, signal: AbortSignal) => Promise<void>;
   /** A file's path, for match identity across refreshes. */
   readonly filePathOf: (fileIndex: number) => string;
+  /**
+   * Start a new search at the first match from where the reader is (the first
+   * file and row on screen) instead of the top of the diff (T3 Code). For a
+   * view that shows every file; the Diff panel lists only matching files.
+   */
+  readonly startAtReadingPosition?: boolean;
+  /** A new value clears the query: the view now shows another diff (a commit scope). */
+  readonly scopeKey?: string | null;
 }
 
 export interface DiffSearchController {
@@ -104,17 +114,26 @@ function keyOf(
 
 /**
  * Where the current match is once the search or its result changed. A new
- * query or option starts over at the first match; a refresh of the same
- * search (a patch update) keeps the match when its text is still there.
+ * query or option starts over at `startIndex` (the first match, or the first
+ * from the reading position); a refresh of the same search (a patch update)
+ * keeps the match when its text is still there.
  */
 function nextSearchPosition(
   previous: SearchPosition,
   searchKey: string,
   result: DiffSearchResult,
   filePathOf: (fileIndex: number) => string,
+  startIndex: (matches: readonly DiffSearchMatch[]) => number,
 ): SearchPosition {
   if (previous.searchKey !== searchKey || previous.matchKey === null) {
-    return { searchKey, result, index: 0, revealed: false, matchKey: keyOf(result, 0, filePathOf) };
+    const index = startIndex(result.matches);
+    return {
+      searchKey,
+      result,
+      index,
+      revealed: false,
+      matchKey: keyOf(result, index, filePathOf),
+    };
   }
   const matches = result.matches;
   const previousMatch = previous.result.matches[previous.index];
@@ -149,8 +168,28 @@ function nextSearchPosition(
 export function useDiffSearch(input: UseDiffSearchInput): DiffSearchController {
   const { files, filePathOf, highlightName, indexOptions, renderMode, revealMatch, rootRef } =
     input;
-  const [query, setQuery] = useState("");
+  const startAtReadingPosition = input.startAtReadingPosition ?? false;
+  const [query, setTypedQuery] = useState("");
+  const [scopeKey, setScopeKey] = useState(input.scopeKey ?? null);
+  if (scopeKey !== (input.scopeKey ?? null)) {
+    // Adjusted during render; a reveal still pending aborts with the search key below.
+    setScopeKey(input.scopeKey ?? null);
+    setTypedQuery("");
+  }
   const [options, setOptions] = useState<DiffSearchOptions>(DEFAULT_DIFF_SEARCH_OPTIONS);
+  // Read when the query or an option changes (not during render), so the
+  // search that follows starts where the reader is at that moment.
+  const [readingPosition, setReadingPosition] = useState<DiffSearchReadingPosition | null>(null);
+  const noteReadingPosition = useCallback(() => {
+    if (startAtReadingPosition) setReadingPosition(readDiffSearchReadingPosition(rootRef.current));
+  }, [rootRef, startAtReadingPosition]);
+  const setQuery = useCallback(
+    (next: string) => {
+      noteReadingPosition();
+      setTypedQuery(next);
+    },
+    [noteReadingPosition],
+  );
   const [debouncedQuery] = useDebouncedValue(query, { wait: DIFF_SEARCH_DEBOUNCE_MS });
   // Clearing the field stops the search at once; typing waits for the debounce.
   const effectiveQuery = isSearchableDiffQuery(query) ? debouncedQuery : "";
@@ -200,7 +239,9 @@ export function useDiffSearch(input: UseDiffSearchInput): DiffSearchController {
   if (position.searchKey !== searchKey || position.result !== result) {
     // Adjusted during render (React's "information from previous renders"), so
     // the counter never shows a stale index for one frame.
-    position = nextSearchPosition(position, searchKey, result, filePathOf);
+    position = nextSearchPosition(position, searchKey, result, filePathOf, (matches) =>
+      firstDiffSearchMatchIndexFrom(matches, readingPosition, renderMode),
+    );
     setPosition(position);
   }
   const currentIndex = position.index;
@@ -263,7 +304,8 @@ export function useDiffSearch(input: UseDiffSearchInput): DiffSearchController {
   const focusFind = useCallback(() => {
     const field = inputRef.current;
     // In the field already, the find key selects the query instead of replacing it.
-    if (field && document.activeElement !== field) {
+    // A field that is not mounted yet (a find bar about to open) takes the seed too.
+    if (field === null || document.activeElement !== field) {
       // Only text selected in the searched view seeds it, not a selection elsewhere on the page.
       const selected = readDiffSearchSeedSelection(rootRef.current);
       if (selected !== null) {
@@ -276,22 +318,26 @@ export function useDiffSearch(input: UseDiffSearchInput): DiffSearchController {
       inputRef.current?.focus();
       inputRef.current?.select();
     });
-  }, [options.regex, rootRef]);
+  }, [options.regex, rootRef, setQuery]);
 
   const clear = useCallback(() => {
     revealRef.current?.controller.abort();
-    setQuery("");
+    setTypedQuery("");
   }, []);
 
   const reset = useCallback(() => {
     revealRef.current?.controller.abort();
-    setQuery("");
+    setTypedQuery("");
     setOptions(DEFAULT_DIFF_SEARCH_OPTIONS);
   }, []);
 
-  const toggleOption = useCallback((option: keyof DiffSearchOptions) => {
-    setOptions((previous) => ({ ...previous, [option]: !previous[option] }));
-  }, []);
+  const toggleOption = useCallback(
+    (option: keyof DiffSearchOptions) => {
+      noteReadingPosition();
+      setOptions((previous) => ({ ...previous, [option]: !previous[option] }));
+    },
+    [noteReadingPosition],
+  );
 
   return {
     query,

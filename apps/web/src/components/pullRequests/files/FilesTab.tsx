@@ -5,9 +5,11 @@ import {
   EMPTY_REVIEW_DRAFT,
   indexReviewThreads,
   selectReviewDraft,
+  type DiffAnnotationSide,
   type ReviewDraftComment,
 } from "@ryco/client-runtime/state/pull-request-review";
 import {
+  type RefObject,
   useCallback,
   useEffect,
   useEffectEvent,
@@ -21,6 +23,7 @@ import { useCopyToClipboard } from "../../../hooks/useCopyToClipboard";
 import { useDiffFileNavigation } from "../../../hooks/useDiffFileNavigation";
 import { useDiffLayout } from "../../../hooks/useDiffLayout";
 import { useTheme } from "../../../hooks/useTheme";
+import type { DiffSearchIndexOptions, DiffSearchMatch } from "../../../lib/diffSearch";
 import { cn } from "../../../lib/utils";
 import { usePullRequestReviewDraftStore } from "../../../pullRequestReviewDraftStore";
 import {
@@ -28,6 +31,9 @@ import {
   invalidateSourceControl,
   useSubmitChangeRequestReviewMutation,
 } from "../../../rpc/useSourceControl";
+import { useDiffFindSurface } from "../../diffSearch/diffFindSurface";
+import { DiffSearchBar } from "../../diffSearch/DiffSearchBar";
+import { useDiffSearch } from "../../diffSearch/useDiffSearch";
 import { DiffWorkerPoolProvider } from "../../DiffWorkerPoolProvider";
 import { stackedThreadToast, toastManager } from "../../ui/toast";
 import { usePullRequestAgentHandoff } from "../agentHandoff";
@@ -38,7 +44,11 @@ import {
 } from "../PullRequestsPageContext";
 import { usePullRequestsLayoutStore } from "../pullRequestsLayoutStore";
 import { usePullRequestsShortcut } from "../pullRequestsShortcuts";
-import type { DiffFileActions, DiffRenderSettings } from "./DiffFileSection";
+import {
+  PULL_REQUEST_DIFF_SEARCH_HIGHLIGHT_NAME,
+  type DiffFileActions,
+  type DiffRenderSettings,
+} from "./DiffFileSection";
 import {
   findDiffLineElement,
   flashDiffLine,
@@ -72,6 +82,8 @@ import { usePullRequestDiffFiles } from "./usePullRequestDiffFiles";
 
 const TREE_WIDTH = 248;
 const EMPTY_KEYS: ReadonlySet<string> = new Set();
+/** Find searches the diff's lines; the file tree's filter already finds paths. */
+const DIFF_SEARCH_INDEX_OPTIONS: DiffSearchIndexOptions = { includePaths: false };
 
 /** A line composer is tied to the patch it was opened on. */
 interface ComposerState {
@@ -135,6 +147,59 @@ function scrollOffsetOf(scroller: HTMLElement, element: HTMLElement): number {
 }
 
 /**
+ * After a file was opened: wait until its diff is mounted and every file is
+ * laid out (the highlighter worker may still be warming up), so a scroll
+ * target measured next stays where it is. Null when cancelled or gone.
+ */
+async function settleOpenedFile(
+  viewportRef: RefObject<HTMLDivElement | null>,
+  path: string,
+  signal: AbortSignal,
+): Promise<{ readonly scroller: HTMLElement; readonly section: HTMLElement } | null> {
+  // A collapsed file mounts its diff first.
+  for (
+    let attempt = 0;
+    attempt < 30 && !sectionIn(viewportRef.current, path)?.querySelector("diffs-container");
+    attempt += 1
+  ) {
+    if (signal.aborted) return null;
+    await nextFrame();
+  }
+  const viewport = viewportRef.current;
+  if (!viewport || !(await waitForDiffLayout(viewport, signal))) return null;
+  const scroller = scrollerIn(viewport);
+  const section = sectionIn(viewport, path);
+  if (!scroller || !section || signal.aborted) return null;
+  return { scroller, section };
+}
+
+/**
+ * Walk the virtualized diff to `line` on `side`, then keep it centered while
+ * the files above it settle. Resolves with the line, or null.
+ */
+async function revealAndHoldDiffLine(input: {
+  readonly scroller: HTMLElement;
+  readonly section: HTMLElement;
+  readonly side: DiffAnnotationSide;
+  readonly line: number;
+  readonly signal: AbortSignal;
+}): Promise<HTMLElement | null> {
+  const { scroller, section, side, line, signal } = input;
+  const walk = () => revealDiffLine({ scroller, fileElement: section, side, line, signal });
+  const find = () => findDiffLineElement(section, side, line);
+  await walk();
+  return holdInView({
+    scroller,
+    resolve: find,
+    recover: async () => {
+      await walk();
+      return find();
+    },
+    signal,
+  });
+}
+
+/**
  * The Files tab: the whole change request (or one commit) as one virtualized
  * diff, full width, with the file tree docked at 248px on wide readers and
  * laid over the diff on narrow ones. Review happens in place: threads sit
@@ -170,7 +235,7 @@ function FilesUnavailable() {
 }
 
 function FilesTabContent() {
-  const { nav, layout, model } = usePullRequestsPage();
+  const { nav, layout, model, repository, surface } = usePullRequestsPage();
   const capabilities = model.capabilities;
   const selection = usePullRequestSelection();
   const handoff = usePullRequestAgentHandoff();
@@ -260,6 +325,8 @@ function FilesTabContent() {
   const [lineSelection, setLineSelection] = useState<LineSelectionState | null>(null);
   /** Patches (render keys) whose full contents the host refused. */
   const [expansionBlocked, setExpansionBlocked] = useState<ReadonlySet<string>>(EMPTY_KEYS);
+  /** Find's bar (the find key opens it); its query clears with the scope below. */
+  const [findOpen, setFindOpen] = useState(false);
 
   // A commit scope is another diff: its files start fresh. A new head keeps
   // what the reader set up; state tied to one file's patch checks it below.
@@ -268,6 +335,7 @@ function FilesTabContent() {
     setScope(commitSha);
     setOpenOverrides(new Map());
     setLineSelection(null);
+    setFindOpen(false);
   }
   const patchKeyOf = (path: string) => files.byPath.get(path)?.renderKey;
   // The composer and the selection show only on the patch they were made on
@@ -607,57 +675,46 @@ function FilesTabContent() {
     if (!path || !files.byPath.has(path)) return;
     const targetPath = path;
     setOpen(targetPath, true);
-    // A collapsed file mounts its diff first; then every file has to be laid out
-    // (the highlighter worker may still be warming up) before anything is measured.
-    for (
-      let attempt = 0;
-      attempt < 30 && !sectionOf(targetPath)?.querySelector("diffs-container");
-      attempt += 1
-    ) {
-      if (signal.aborted) return;
-      await nextFrame();
-    }
-    const viewport = viewportRef.current;
-    if (!viewport || !(await waitForDiffLayout(viewport, signal))) return;
-    const scroller = scrollerOf();
-    const section = sectionOf(targetPath);
-    if (!scroller || !section || signal.aborted) return;
+    const settled = await settleOpenedFile(viewportRef, targetPath, signal);
+    if (!settled) return;
+    const { scroller, section } = settled;
 
-    const findThread = () =>
-      threadId === null
-        ? null
-        : section.querySelector<HTMLElement>(`[data-review-thread-id="${CSS.escape(threadId)}"]`);
-    const findLine = () => (line === null ? null : findDiffLineElement(section, side, line));
+    if (threadId === null) {
+      if (line === null) {
+        scrollToFile(targetPath);
+        await holdInView({
+          scroller,
+          resolve: () => sectionOf(targetPath),
+          recover: async () => sectionOf(targetPath),
+          signal,
+          align: "start",
+        });
+        return;
+      }
+      const target = await revealAndHoldDiffLine({ scroller, section, side, line, signal });
+      if (target && !signal.aborted) flashDiffLine(target);
+      return;
+    }
+
+    const threadSelector = `[data-review-thread-id="${CSS.escape(threadId)}"]`;
+    const findThread = () => section.querySelector<HTMLElement>(threadSelector);
     const walkToLine = () =>
       line === null
         ? Promise.resolve(null)
         : revealDiffLine({ scroller, fileElement: section, side, line, signal });
-
-    if (line === null && threadId === null) {
-      scrollToFile(targetPath);
-      await holdInView({
-        scroller,
-        resolve: () => sectionOf(targetPath),
-        recover: async () => sectionOf(targetPath),
-        signal,
-        align: "start",
-      });
-      return;
-    }
     if (line !== null) await walkToLine();
     else scrollToFile(targetPath);
     const target = await holdInView({
       scroller,
-      resolve: () => (threadId === null ? findLine() : findThread()),
+      resolve: findThread,
       recover: async () => {
         await walkToLine();
-        return threadId === null ? findLine() : findThread();
+        return findThread();
       },
       signal,
     });
     if (!target || signal.aborted) return;
-    if (threadId === null) flashDiffLine(target);
-    else flashElement(target);
+    flashElement(target);
   };
   const revealFromLink = useEffectEvent(reveal);
   useEffect(() => {
@@ -671,6 +728,68 @@ function FilesTabContent() {
     void revealFromLink(controller.signal);
   }, [active, files.status, revealKey, search.file, search.thread, threadsSettled]);
   useEffect(() => () => revealRef.current?.controller.abort(), []);
+
+  // ── Find (the thread-find key, ⌘F by default) ───────────────────────
+  // Every file in reading order, folded and viewed ones too: the stream is
+  // not filtered, and a match in a folded file opens it.
+  const searchFiles = useMemo(() => files.files.map((file) => file.fileDiff), [files.files]);
+  const searchFilePathOf = useCallback(
+    (fileIndex: number) => files.files[fileIndex]?.path ?? "",
+    [files.files],
+  );
+  const revealSearchMatch = useCallback(
+    async (match: DiffSearchMatch, signal: AbortSignal) => {
+      const file = files.files[match.fileIndex];
+      if (!file) return;
+      // The reader took over: a link's reveal still waiting for the diff must not scroll away.
+      revealRef.current?.controller.abort();
+      // Open only (find never folds); a viewed file keeps its mark.
+      setOpen(file.path, true);
+      const settled = await settleOpenedFile(viewportRef, file.path, signal);
+      if (!settled) return;
+      if (match.side === undefined || match.lineNumber === undefined) {
+        scrollToSection(viewportRef.current, file.path);
+        return;
+      }
+      await revealAndHoldDiffLine({
+        ...settled,
+        side: match.side,
+        line: match.lineNumber,
+        signal,
+      });
+    },
+    [files.files, setOpen],
+  );
+  const find = useDiffSearch({
+    files: searchFiles,
+    rootRef: viewportRef,
+    renderMode: diffLayout === "split" ? "split" : "stacked",
+    highlightName: PULL_REQUEST_DIFF_SEARCH_HIGHLIGHT_NAME,
+    indexOptions: DIFF_SEARCH_INDEX_OPTIONS,
+    revealMatch: revealSearchMatch,
+    filePathOf: searchFilePathOf,
+    startAtReadingPosition: true,
+    // Another commit scope is another diff: the query clears with it.
+    scopeKey: commitSha,
+  });
+  const findSurface = useDiffFindSurface({
+    onFind: () => {
+      // The overlay tree's backdrop covers the diff, the bar included.
+      usePullRequestFilesUiStore.getState().setTreeOverlayOpen(false);
+      setFindOpen(true);
+      find.focusFind();
+    },
+    enabled: files.status === "ready",
+    // The chat beside a workspace reader resolves the key with its project and thread.
+    scope: repository,
+    threadRef: surface.kind === "workspace" ? surface.threadRef : null,
+  });
+  const closeFind = () => {
+    find.clear();
+    setFindOpen(false);
+    // Focus stays in the diff, so the find key and keyboard scrolling keep working.
+    window.requestAnimationFrame(findSurface.focus);
+  };
 
   // ── Tree ────────────────────────────────────────────────────────────
   const treeShown = useFileTreeShown(layout.treeDocked);
@@ -872,7 +991,14 @@ function FilesTabContent() {
   );
 
   return (
-    <div className="relative flex min-h-0 min-w-0 flex-1">
+    // The find surface holds the tree too: the find key works from a tree row or its filter.
+    <div
+      {...findSurface.props}
+      className={cn(
+        "relative flex min-h-0 min-w-0 flex-1",
+        findSurface.props.tabIndex !== undefined && "outline-hidden",
+      )}
+    >
       {layout.treeDocked ? (
         treeShown ? (
           <aside
@@ -920,6 +1046,19 @@ function FilesTabContent() {
         commitScoped={commitSha !== null}
         onRetry={() =>
           invalidateSourceControl({ environmentId: model.environmentId, cwd: model.cwd })
+        }
+        findBar={
+          findOpen ? (
+            <DiffSearchBar
+              search={find}
+              label="Find in diff"
+              placeholder="Find in diff"
+              presentation="desktop"
+              onEscape={closeFind}
+              onClose={closeFind}
+              className="px-6 @max-[640px]/reader:px-3"
+            />
+          ) : null
         }
       />
     </div>

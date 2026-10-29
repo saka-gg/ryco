@@ -3,7 +3,7 @@ import "~/index.css";
 import "../pullRequests.css";
 
 import type { ReactNode } from "react";
-import { afterEach, describe, expect, it, vi } from "vite-plus/test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { page, userEvent } from "vite-plus/test/browser";
 import { render } from "vitest-browser-react";
 
@@ -18,6 +18,8 @@ vi.mock("~/components/projectExplorer/usePullRequestFilesViewed", async () => {
   return createPullRequestFilesViewedMock();
 });
 
+import { resetAppKeybindings } from "~/appKeybindings";
+import { isMacPlatform } from "~/lib/utils";
 import { usePullRequestReviewDraftStore } from "~/pullRequestReviewDraftStore";
 import type { SourceControlChangeRequestDiffInput } from "~/rpc/sourceControlAtoms";
 
@@ -34,6 +36,7 @@ import {
   sourceControlRpcMock,
   type PullRequestsTestProviderProps,
 } from "../testing/PullRequestsTestProvider";
+import { usePullRequestsPage } from "../PullRequestsPageContext";
 import { findDiffLineElement } from "./diffReveal";
 import { FilesTab } from "./FilesTab";
 import { toggleFileTree, usePullRequestFilesUiStore } from "./pullRequestFilesStore";
@@ -479,5 +482,317 @@ describe("Files tab (real pierre)", () => {
     await expect
       .element(page.getByRole("button", { name: `Collapse ${LAYERS}`, exact: true }))
       .toHaveFocus();
+  });
+});
+
+const STACK_RAIL = "apps/web/src/components/pullRequests/PullRequestStackRail.tsx";
+const FIND_MATCH = "ryco-pr-diff-search-match";
+const FIND_CURRENT = "ryco-pr-diff-search-current";
+
+function scroller(): HTMLElement {
+  const element = document.querySelector<HTMLElement>(".diff-render-surface");
+  if (!element) throw new Error("Missing the diff scroller");
+  return element;
+}
+
+function highlightRanges(name: string): Range[] {
+  const highlight = CSS.highlights.get(name);
+  return highlight ? ([...highlight] as Range[]) : [];
+}
+
+/** The thread-find key (⌘F / Ctrl+F), sent where focus is. */
+function pressFindKey(): KeyboardEvent {
+  const mac = isMacPlatform(navigator.platform);
+  const event = new KeyboardEvent("keydown", {
+    key: "f",
+    code: "KeyF",
+    metaKey: mac,
+    ctrlKey: !mac,
+    bubbles: true,
+    cancelable: true,
+  });
+  (document.activeElement ?? document.body).dispatchEvent(event);
+  return event;
+}
+
+/** The first file in reading order, once pierre has drawn its rows. */
+async function firstRenderedRow(): Promise<HTMLElement> {
+  await expect
+    .poll(
+      () =>
+        document
+          .querySelector("[data-diff-file-path] diffs-container")
+          ?.shadowRoot?.querySelector("[data-line]") ?? null,
+      { timeout: 15_000 },
+    )
+    .not.toBeNull();
+  return document
+    .querySelector("[data-diff-file-path] diffs-container")!
+    .shadowRoot!.querySelector<HTMLElement>("[data-line]")!;
+}
+
+/** Click a line (focus lands in the diff), press the find key and type `query`. */
+async function findFrom(row: HTMLElement, query: string) {
+  await userEvent.click(row);
+  expect(pressFindKey().defaultPrevented).toBe(true);
+  const field = page.getByRole("textbox", { name: "Find in diff" });
+  await expect.element(field).toHaveFocus();
+  await field.fill(query);
+  return field;
+}
+
+function findCounter(): string | null {
+  return (
+    document
+      .querySelector('[role="search"] [aria-live="polite"]')
+      ?.textContent?.replace(/\s+/gu, " ")
+      .trim() ?? null
+  );
+}
+
+describe("Find in the Files tab (real pierre)", () => {
+  beforeEach(async () => {
+    // The find key is the thread-find binding (⌘F / Ctrl+F by default).
+    await resetAppKeybindings();
+  });
+  afterEach(() => {
+    CSS.highlights.delete(FIND_MATCH);
+    CSS.highlights.delete(FIND_CURRENT);
+  });
+
+  it("finds text in every file, including a folded viewed file, and opens it on the match", async () => {
+    await renderFiles();
+    const row = await firstRenderedRow();
+    // The viewed file is folded: its diff is not even mounted.
+    await expect
+      .element(page.getByRole("button", { name: `Expand ${LAYERS}`, exact: true }))
+      .toBeInTheDocument();
+    expect(section(LAYERS).querySelector("diffs-container")).toBeNull();
+
+    await findFrom(row, "assessLayer");
+    await expect.poll(findCounter).toBe("1 of 2");
+    await userEvent.keyboard("{Enter}");
+
+    // Opened on the match, which is in view and painted as the current one.
+    const anchor = fixtureDiffAnchor(703, LAYERS, "...assessLayer(entry)");
+    await vi.waitFor(
+      () => {
+        const line = findDiffLineElement(section(LAYERS), "additions", anchor.line);
+        expect(line).toBeTruthy();
+        const lineRect = line!.getBoundingClientRect();
+        const viewport = scroller().getBoundingClientRect();
+        expect(lineRect.top).toBeGreaterThanOrEqual(viewport.top);
+        expect(lineRect.bottom).toBeLessThanOrEqual(viewport.bottom);
+      },
+      { timeout: 10_000 },
+    );
+    expect(section(LAYERS).querySelector("[data-diff-file-body]")?.hasAttribute("inert")).toBe(
+      false,
+    );
+    // Pierre re-creates rows while the file settles; the highlight follows them.
+    await vi.waitFor(
+      () => {
+        const ranges = highlightRanges(FIND_CURRENT);
+        expect(ranges).toHaveLength(1);
+        expect(ranges[0]!.toString()).toBe("assessLayer");
+        expect(ranges[0]!.startContainer.getRootNode()).toBe(shadowOf(LAYERS));
+      },
+      { timeout: 5_000 },
+    );
+    // Opening it for a match leaves the viewed mark alone.
+    await expect
+      .element(page.getByRole("checkbox", { name: `Viewed ${LAYERS}`, exact: true }).first())
+      .toHaveAttribute("aria-checked", "true");
+  });
+
+  it("opens find seeded from text selected on one line of the diff", async () => {
+    await renderFiles();
+    await userEvent.click(await firstRenderedRow());
+    // Select one token of the first row (pierre draws it in a shadow root) and
+    // press the key in the same task: pierre may re-create rows while the file
+    // settles, which would drop a selection made earlier.
+    const row = await firstRenderedRow();
+    const walker = document.createTreeWalker(row, NodeFilter.SHOW_TEXT);
+    let text: Text | null = null;
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+      if (!(node.parentElement?.closest("[data-line-number-content]") ?? null)) {
+        const candidate = node as Text;
+        if (/\w{4,}/u.test(candidate.data)) {
+          text = candidate;
+          break;
+        }
+      }
+    }
+    if (!text) throw new Error("Expected a word on the row");
+    const word = /\w{4,}/u.exec(text.data)!;
+    const range = document.createRange();
+    range.setStart(text, word.index);
+    range.setEnd(text, word.index + word[0].length);
+    document.getSelection()?.removeAllRanges();
+    document.getSelection()?.addRange(range);
+    expect(document.getSelection()?.toString()).toBe(word[0]);
+    expect(pressFindKey().defaultPrevented).toBe(true);
+
+    const field = page.getByRole("textbox", { name: "Find in diff" });
+    await expect.element(field).toHaveFocus();
+    await expect.element(field).toHaveValue(word[0]);
+  });
+
+  it("keeps keyboard scrolling after a click into the diff", async () => {
+    await renderFiles();
+    const row = await firstRenderedRow();
+    await userEvent.click(row);
+    // The click focuses the scroller (no ring for a pointer), so the keys scroll the diff.
+    expect(document.activeElement).toBe(scroller());
+    expect(scroller().matches(":focus-visible")).toBe(false);
+    const before = scroller().scrollTop;
+    await userEvent.keyboard("{PageDown}");
+    await vi.waitFor(() => expect(scroller().scrollTop).toBeGreaterThan(before));
+  });
+
+  it("starts at the first match from the reading position", async () => {
+    await renderFiles();
+    await firstRenderedRow();
+    // Read on from a later file; the first file has a match too.
+    const rail = section(STACK_RAIL);
+    scroller().scrollTop +=
+      rail.getBoundingClientRect().top - scroller().getBoundingClientRect().top;
+    await expect
+      .poll(() => shadowOf(STACK_RAIL).querySelector<HTMLElement>("[data-line]"), {
+        timeout: 15_000,
+      })
+      .not.toBeNull();
+    await findFrom(
+      shadowOf(STACK_RAIL).querySelector<HTMLElement>("[data-line]")!,
+      '"./stackLayers.logic"',
+    );
+    await expect.poll(findCounter).toMatch(/^([2-9]|\d{2,}) of \d+$/u);
+
+    await userEvent.keyboard("{Enter}");
+    await vi.waitFor(
+      () => {
+        const ranges = highlightRanges(FIND_CURRENT);
+        expect(ranges).toHaveLength(1);
+        expect(ranges[0]!.toString()).toBe('"./stackLayers.logic"');
+        expect(ranges[0]!.startContainer.getRootNode()).toBe(shadowOf(STACK_RAIL));
+      },
+      { timeout: 5_000 },
+    );
+  });
+
+  it("closes with Escape, clears its highlights and leaves the page keys working", async () => {
+    await renderFiles();
+    const row = await firstRenderedRow();
+    const field = await findFrom(row, "stackLayers");
+    await expect.poll(findCounter).toMatch(/^1 of \d+$/u);
+    // The first file's match is the current one; it is painted before the field closes.
+    await vi.waitFor(() => expect(highlightRanges(FIND_CURRENT)).toHaveLength(1));
+
+    await userEvent.keyboard("{Escape}");
+    await expect.element(field).not.toBeInTheDocument();
+    await vi.waitFor(() => {
+      expect(CSS.highlights.has(FIND_MATCH)).toBe(false);
+      expect(CSS.highlights.has(FIND_CURRENT)).toBe(false);
+    });
+    // Focus stays in the diff: J still steps to the next file.
+    await vi.waitFor(() => expect(document.activeElement).toBe(scroller()));
+    const before = scroller().scrollTop;
+    await userEvent.keyboard("j");
+    await vi.waitFor(() => expect(scroller().scrollTop).not.toBe(before));
+
+    // The find key opens it again, empty.
+    expect(pressFindKey().defaultPrevented).toBe(true);
+    await expect.element(page.getByRole("textbox", { name: "Find in diff" })).toHaveValue("");
+  });
+
+  it("keeps the current match when a new head still has it", async () => {
+    await renderFiles();
+    const row = await firstRenderedRow();
+    await findFrom(row, "assessLayer");
+    await expect.poll(findCounter).toBe("1 of 2");
+    await userEvent.keyboard("{Enter}");
+    await userEvent.keyboard("{Enter}");
+    await expect.poll(findCounter).toBe("2 of 2");
+
+    // The new head adds a match in an earlier file: the same match is now the third.
+    const pushed = fixtureDiff(703).replace(
+      "import { planStackMerge, stackMergeLabel }",
+      "import { assessLayer, planStackMerge, stackMergeLabel }",
+    );
+    expect(pushed).not.toBe(fixtureDiff(703));
+    pushNewHead(() => pushed);
+    await expect.poll(findCounter, { timeout: 10_000 }).toBe("3 of 3");
+  });
+
+  it("closes find and clears its query when a single commit is chosen", async () => {
+    function ScopeButtons() {
+      const { nav } = usePullRequestsPage();
+      return (
+        <>
+          <button type="button" onClick={() => nav.scopeToCommit(fixtureSha("c3e81a0"))}>
+            One commit
+          </button>
+          <button type="button" onClick={() => nav.scopeToCommit(undefined)}>
+            Whole pull request
+          </button>
+        </>
+      );
+    }
+    await renderFiles({}, { before: <ScopeButtons /> });
+    const row = await firstRenderedRow();
+    const field = await findFrom(row, "assessLayer");
+    await expect.poll(findCounter).toBe("1 of 2");
+
+    await page.getByRole("button", { name: "One commit" }).click();
+    await expect.element(field).not.toBeInTheDocument();
+    await vi.waitFor(() => expect(CSS.highlights.has(FIND_MATCH)).toBe(false));
+
+    // Back on the whole pull request, the find key opens it empty.
+    await page.getByRole("button", { name: "Whole pull request" }).click();
+    await vi.waitFor(() => {
+      scroller().focus();
+      expect(document.activeElement).toBe(scroller());
+    });
+    expect(pressFindKey().defaultPrevented).toBe(true);
+    await expect.element(page.getByRole("textbox", { name: "Find in diff" })).toHaveValue("");
+  });
+
+  it("closes the overlay tree when the find key is pressed in it", async () => {
+    await renderFiles(
+      {},
+      {
+        width: 680,
+        before: (
+          <button type="button" onClick={() => toggleFileTree(false)}>
+            Toggle tree
+          </button>
+        ),
+      },
+    );
+    await firstRenderedRow();
+    const overlay = page.getByRole("complementary", { name: "Files" });
+    await page.getByRole("button", { name: "Toggle tree" }).click();
+    await expect.element(overlay).toHaveAttribute("data-open", "true");
+    await expect.poll(() => overlay.element().contains(document.activeElement)).toBe(true);
+
+    // Its backdrop would cover the find bar: the overlay closes and the field takes focus.
+    expect(pressFindKey().defaultPrevented).toBe(true);
+    await expect.element(overlay).toHaveAttribute("data-open", "false");
+    await expect.element(page.getByRole("textbox", { name: "Find in diff" })).toHaveFocus();
+  });
+
+  it("focuses the file tree on a click on a folder row, so the keys still scroll it", async () => {
+    await renderFiles();
+    await firstRenderedRow();
+    const tree = page.getByRole("navigation", { name: "Changed files" });
+    const folder = tree
+      .element()
+      .querySelector<HTMLElement>("li:not([data-tree-path]):not([aria-hidden])");
+    if (!folder) throw new Error("Expected a folder row in the tree");
+    await userEvent.click(folder);
+    expect(document.activeElement).toBe(tree.element());
+    // Inside the Files tab, the find key still opens find.
+    expect(pressFindKey().defaultPrevented).toBe(true);
+    await expect.element(page.getByRole("textbox", { name: "Find in diff" })).toHaveFocus();
   });
 });

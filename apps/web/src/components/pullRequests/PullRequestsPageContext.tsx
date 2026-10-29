@@ -1,3 +1,4 @@
+import type { ScopedThreadRef } from "@ryco/contracts";
 import { createContext, useContext } from "react";
 
 import type { ProjectCheckoutOption, ProjectCheckoutRequest } from "../../projectCheckouts.logic";
@@ -131,6 +132,11 @@ export type PullRequestsSurface =
       readonly kind: "workspace";
       /** Continue on the full page with the same change request and tab. */
       readonly openOnPage: () => void;
+      /**
+       * The thread beside the reader: diff find resolves its key with that
+       * thread's `when` context, as the chat's thread find does.
+       */
+      readonly threadRef: ScopedThreadRef | null;
     };
 
 export const PULL_REQUESTS_PAGE_SURFACE: PullRequestsSurface = { kind: "page" };

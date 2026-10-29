@@ -9,8 +9,10 @@ import {
   diffSearchMatchKey,
   doesDiffSearchMatchRenderedLine,
   type DiffSearchFile,
+  type DiffSearchMatch,
   type DiffSearchOptions,
   findDiffSearchMatches,
+  firstDiffSearchMatchIndexFrom,
   getDiffSearchMatchRenderedLineIndex,
   getNextDiffSearchMatchIndex,
   isWholeWordMatch,
@@ -184,6 +186,46 @@ describe("getNextDiffSearchMatchIndex", () => {
 
   it("returns zero when there are no matches", () => {
     expect(getNextDiffSearchMatchIndex(3, 0, 1)).toBe(0);
+  });
+});
+
+describe("firstDiffSearchMatchIndexFrom", () => {
+  // Three files; file 1 has matches on stacked rows 2 and 9 (split rows 1 and 5).
+  const at = (fileIndex: number, unified: number, split: number): DiffSearchMatch => ({
+    fileIndex,
+    field: "addition",
+    unifiedLineIndex: unified,
+    splitLineIndex: split,
+    start: 0,
+    end: 1,
+  });
+  const matches = [at(0, 4, 4), at(1, 2, 1), at(1, 9, 5), at(2, 0, 0)];
+
+  it("starts at the top without a reading position", () => {
+    expect(firstDiffSearchMatchIndexFrom(matches, null, "stacked")).toBe(0);
+  });
+
+  it("starts at the first match of the file on screen when it starts on screen", () => {
+    expect(firstDiffSearchMatchIndexFrom(matches, { fileIndex: 1, line: null }, "stacked")).toBe(1);
+  });
+
+  it("skips the rows of that file scrolled past, in the current layout", () => {
+    const position = { fileIndex: 1, line: { stacked: 5, split: 3 } };
+    expect(firstDiffSearchMatchIndexFrom(matches, position, "stacked")).toBe(2);
+    expect(firstDiffSearchMatchIndexFrom(matches, position, "split")).toBe(2);
+    expect(
+      firstDiffSearchMatchIndexFrom(
+        matches,
+        { fileIndex: 1, line: { stacked: 2, split: 1 } },
+        "stacked",
+      ),
+    ).toBe(1);
+  });
+
+  it("moves on to a later file, and wraps to the first match when none is after", () => {
+    const pastFile = { fileIndex: 1, line: { stacked: 20, split: 20 } };
+    expect(firstDiffSearchMatchIndexFrom(matches, pastFile, "stacked")).toBe(3);
+    expect(firstDiffSearchMatchIndexFrom(matches, { fileIndex: 5, line: null }, "stacked")).toBe(0);
   });
 });
 
