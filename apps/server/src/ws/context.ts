@@ -70,7 +70,7 @@ import { OrchestrationModelSwitchBlockedError } from "../orchestration/Errors.ts
 import { ContextHandoffInspection } from "../orchestration/Services/ContextHandoffInspection.ts";
 import { ProjectionSnapshotQuery } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 import { StatisticsQuery } from "../statistics/StatisticsQuery.ts";
-import { UsageService, UsageServiceTest } from "../usage/UsageService.ts";
+import { UsageService, UsageServiceTest } from "../usage/UsageServiceTag.ts";
 import { CliProxyService, CliProxyServiceUnavailable } from "../cliProxy/CliProxyService.ts";
 import { ProviderRegistry } from "../provider/Services/ProviderRegistry.ts";
 import { ModelManifest } from "../provider/ModelManifest.ts";

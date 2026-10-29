@@ -18,7 +18,6 @@ import {
 import {
   Cause,
   Clock,
-  Context,
   Deferred,
   Duration,
   Effect,
@@ -83,6 +82,20 @@ import {
 } from "./usageTranscriptReader.ts";
 import { readBoundedUsageFile } from "./usageFileReader.ts";
 import type { UsageRecord } from "./usageRecord.ts";
+import {
+  USAGE_RATES_WARM_DELAY_MS,
+  UsageService,
+  type UsageServiceShape,
+  usageRatesCachePath,
+  usageStateDirectory,
+} from "./UsageServiceTag.ts";
+
+export {
+  makeEmptyUsageSummary,
+  UsageService,
+  type UsageServiceShape,
+  UsageServiceTest,
+} from "./UsageServiceTag.ts";
 
 export const LITELLM_USAGE_RATES_URL =
   "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json";
@@ -100,8 +113,6 @@ const RATES_RESPONSE_TIMEOUT_MS = 10_000;
 const RATES_BODY_TIMEOUT_MS = 3 * 60_000;
 /** With no rates at all, a summary waits at most this long for the first download. */
 const RATES_FIRST_FETCH_WAIT_MS = 2_000;
-/** Refresh stale cached rates once shortly after boot, before a summary needs them. */
-const RATES_WARM_DELAY_MS = 30_000;
 const MTIME_WINDOW_SLACK_MS = 36 * 60 * 60 * 1000;
 const PRICING_CACHE_VERSION = 2;
 /** Freshly parsed work per source and request. Cached records do not count against it. */
@@ -200,33 +211,15 @@ interface SourceTally {
   existingRootCount: number;
 }
 
-export interface UsageServiceShape {
-  readonly readSummary: (input: UsageSummaryRequest) => Effect.Effect<UsageSummary, UsageReadError>;
+export interface UsageServiceOptions {
+  /**
+   * When a node that downloaded rates before refreshes them if stale, after construction:
+   * 30 s by default, `null` for never. The deferred layer passes 0 when its own warm-up loads
+   * the pipeline, and `null` when a summary does, because that summary refreshes stale rates
+   * itself and a second refresh would read the rates file from disk twice at the same time.
+   */
+  readonly ratesWarmDelayMs?: number | null;
 }
-
-export class UsageService extends Context.Service<UsageService, UsageServiceShape>()(
-  "ryco/usage/UsageService",
-) {}
-
-export const makeEmptyUsageSummary = (input: UsageSummaryRequest): UsageSummary => ({
-  contractVersion: USAGE_CONTRACT_VERSION,
-  ...(input.startDate === undefined ? {} : { startDate: input.startDate }),
-  endDate: input.endDate,
-  timeZone: input.timeZone,
-  generatedAt: "1970-01-01T00:00:00.000Z",
-  scanDurationMs: 0,
-  buckets: [],
-  sources: [],
-  pricing: {
-    state: "unavailable",
-    recognizedModelCount: 0,
-    unrecognizedModelCount: 0,
-  },
-});
-
-export const UsageServiceTest = UsageService.of({
-  readSummary: (input) => Effect.succeed(makeEmptyUsageSummary(input)),
-});
 
 function isValidCalendarDate(value: UsageCalendarDate): boolean {
   const timestamp = Date.parse(`${value}T00:00:00.000Z`);
@@ -294,7 +287,11 @@ function coverageMessage(
   return undefined;
 }
 
-const makeUsageService = Effect.gen(function* () {
+/**
+ * Builds the usage pipeline. The server loads this module on first use
+ * (`UsageServiceDeferred.ts`); tests build it eagerly with {@link UsageServiceLive}.
+ */
+export const makeUsageService = Effect.fnUntraced(function* (options: UsageServiceOptions = {}) {
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
   const config = yield* ServerConfig;
@@ -305,11 +302,11 @@ const makeUsageService = Effect.gen(function* () {
   const scanSemaphore = yield* Semaphore.make(1);
   const persistLock = yield* Semaphore.make(1);
 
-  const usageStateDir = path.join(config.stateDir, "usage");
+  const usageStateDir = usageStateDirectory(path, config.stateDir);
   yield* fileSystem
     .makeDirectory(usageStateDir, { recursive: true })
     .pipe(Effect.catchCause(() => Effect.void));
-  const ratesCachePath = path.join(usageStateDir, "pricing-cache.json");
+  const ratesCachePath = usageRatesCachePath(path, config.stateDir);
   const store = yield* makeUsageScanCacheStore({
     directory: path.join(usageStateDir, "scan-cache"),
     legacyFilePath: path.join(usageStateDir, "scan-cache.json"),
@@ -477,12 +474,15 @@ const makeUsageService = Effect.gen(function* () {
   });
 
   // Users who opened usage before get fresh rates before their next visit.
-  yield* Effect.sleep(Duration.millis(RATES_WARM_DELAY_MS)).pipe(
-    Effect.andThen(fileSystem.exists(ratesCachePath)),
-    Effect.flatMap((exists) => (exists ? startRatesRefresh : Effect.void)),
-    Effect.catchCause(() => Effect.void),
-    Effect.forkIn(serviceScope),
-  );
+  const ratesWarmDelayMs =
+    options.ratesWarmDelayMs === undefined ? USAGE_RATES_WARM_DELAY_MS : options.ratesWarmDelayMs;
+  if (ratesWarmDelayMs !== null)
+    yield* Effect.sleep(Duration.millis(ratesWarmDelayMs)).pipe(
+      Effect.andThen(fileSystem.exists(ratesCachePath)),
+      Effect.flatMap((exists) => (exists ? startRatesRefresh : Effect.void)),
+      Effect.catchCause(() => Effect.void),
+      Effect.forkIn(serviceScope),
+    );
 
   const resolveTranscriptSources = Effect.fn("UsageService.resolveTranscriptSources")(function* () {
     const settings = yield* settingsService.getSettings.pipe(
@@ -1211,4 +1211,5 @@ const makeUsageService = Effect.gen(function* () {
   return { readSummary } satisfies UsageServiceShape;
 });
 
-export const UsageServiceLive = Layer.effect(UsageService, makeUsageService);
+/** The pipeline built with its layer. The server uses `UsageServiceDeferredLive`. */
+export const UsageServiceLive = Layer.effect(UsageService, makeUsageService());

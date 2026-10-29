@@ -12,7 +12,7 @@ import {
 
 import { inheritedTurnRowSql } from "../orchestration/forkInheritanceSql.ts";
 import { SqliteReadClient } from "../persistence/SqliteReadClient.ts";
-import { makeUsageDayFormatter } from "../usage/usageAggregation.ts";
+import { makeUsageDayFormatter } from "../usage/usageDay.ts";
 
 export interface DailyRecapQueryShape {
   readonly getDailyRecap: (
