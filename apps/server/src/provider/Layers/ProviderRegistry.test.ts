@@ -3089,31 +3089,33 @@ const waitForProvider = (
   });
 
 describe("ProviderRegistry compatibility advisories", () => {
-  it.effect("rates an installed OpenCode 2.x as unsupported from the code floor", () =>
-    Effect.gen(function* () {
-      const instanceId = ProviderInstanceId.make("opencode");
-      const { runtimeServices } = yield* buildSingleInstanceRegistry({
-        instanceId,
-        driver: ProviderDriverKind.make("opencode"),
-        enabled: true,
-        installed: true,
-        version: "2.0.18",
-        status: "error",
-        auth: { status: "unknown" },
-        checkedAt: "2026-10-04T00:00:00.000Z",
-        message: "OpenCode v2.0.18 is not supported yet.",
-        models: [],
-        slashCommands: [],
-        skills: [],
-      });
+  it.effect(
+    "rates an installed OpenCode 2.x below its minimum as unsupported from the code floor",
+    () =>
+      Effect.gen(function* () {
+        const instanceId = ProviderInstanceId.make("opencode");
+        const { runtimeServices } = yield* buildSingleInstanceRegistry({
+          instanceId,
+          driver: ProviderDriverKind.make("opencode"),
+          enabled: true,
+          installed: true,
+          version: "2.0.18",
+          status: "error",
+          auth: { status: "unknown" },
+          checkedAt: "2026-10-04T00:00:00.000Z",
+          message: "OpenCode v2.0.18 is too old. Upgrade OpenCode 2 to v2.2.0 or newer.",
+          models: [],
+          slashCommands: [],
+          skills: [],
+        });
 
-      const provider = yield* waitForProvider(
-        instanceId,
-        (candidate) => candidate?.compatibilityAdvisory !== undefined,
-      ).pipe(Effect.provide(runtimeServices));
+        const provider = yield* waitForProvider(
+          instanceId,
+          (candidate) => candidate?.compatibilityAdvisory !== undefined,
+        ).pipe(Effect.provide(runtimeServices));
 
-      assert.strictEqual(provider?.compatibilityAdvisory?.status, "unsupported");
-    }),
+        assert.strictEqual(provider?.compatibilityAdvisory?.status, "unsupported");
+      }),
   );
 
   it.effect(

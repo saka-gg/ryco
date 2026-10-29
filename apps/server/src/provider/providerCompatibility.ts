@@ -3,7 +3,7 @@
  *
  * Three layers, in order:
  * 1. Code-owned floors (`HARD_COMPATIBILITY_FLOORS`): limits of THIS build that no manifest can
- *    lift — today, OpenCode major ≥ 2 (`openCodeVersionFloor`).
+ *    lift — today, OpenCode 3.x and later and 2.x below its minimum (`openCodeVersionFloor`).
  * 2. The current model manifest's `compatibility[]` (remote from GitHub main, then disk cache).
  * 3. The bundled manifest's `compatibility[]`, when the current manifest has no policy for the
  *    driver and this Ryco version.

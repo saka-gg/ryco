@@ -14,7 +14,7 @@ import {
   type OpenCodeRuntimeShape,
 } from "../opencodeRuntime.ts";
 import { OPENCODE_NON_JSON_HEALTH_MESSAGE } from "../openCodeVersion.ts";
-import { checkOpenCodeProviderStatus } from "./OpenCodeProvider.ts";
+import { checkOpenCodeProviderStatus, OPENCODE_V2_LOCAL_DATA_NOTE } from "./OpenCodeProvider.ts";
 import type { OpenCodeInventory } from "../opencodeRuntime.ts";
 
 const DEFAULT_VERSION_STDOUT = "opencode 1.14.19\n";
@@ -36,6 +36,8 @@ const runtimeMock = {
     inventoryError: null as Error | null,
     closeCalls: 0,
     connectCalls: 0,
+    /** Set on a client created for a 2.x server (the facade). */
+    clientGeneration: undefined as "v2" | undefined,
     healthData: DEFAULT_HEALTH_DATA as unknown,
     inventory: {
       providerList: { connected: [] as string[], all: [] as unknown[], default: {} },
@@ -48,6 +50,7 @@ const runtimeMock = {
     this.state.inventoryError = null;
     this.state.closeCalls = 0;
     this.state.connectCalls = 0;
+    this.state.clientGeneration = undefined;
     this.state.healthData = DEFAULT_HEALTH_DATA;
     this.state.inventory = {
       providerList: { connected: [], all: [] as unknown[], default: {} },
@@ -91,6 +94,9 @@ const OpenCodeRuntimeTestDouble: OpenCodeRuntimeShape = {
       : Effect.succeed({ stdout: runtimeMock.state.versionStdout, stderr: "", code: 0 }),
   createOpenCodeSdkClient: () =>
     Effect.succeed({
+      ...(runtimeMock.state.clientGeneration
+        ? { generation: runtimeMock.state.clientGeneration }
+        : {}),
       global: {
         health: async () => ({ data: runtimeMock.state.healthData }),
       },
@@ -138,7 +144,7 @@ it.layer(testLayer)("checkOpenCodeProviderStatus", (it) => {
     }),
   );
 
-  it.effect("explains a 2.x binary without connecting to it", () =>
+  it.effect("names the upgrade for a 2.x binary below the minimum without starting it", () =>
     Effect.gen(function* () {
       runtimeMock.state.versionStdout = "opencode v2.0.18\n";
       const snapshot = yield* checkOpenCodeProviderStatus(makeOpenCodeSettings(), process.cwd());
@@ -146,9 +152,60 @@ it.layer(testLayer)("checkOpenCodeProviderStatus", (it) => {
       assert.equal(snapshot.status, "error");
       assert.equal(snapshot.installed, true);
       assert.equal(snapshot.version, "2.0.18");
-      assert.ok(snapshot.message?.includes("not supported yet"), snapshot.message);
+      assert.equal(
+        snapshot.message,
+        "OpenCode v2.0.18 is too old. Upgrade OpenCode 2 to v2.2.0 or newer.",
+      );
       assert.equal(runtimeMock.state.connectCalls, 0);
     }),
+  );
+
+  it.effect("refuses a 3.x binary without starting it", () =>
+    Effect.gen(function* () {
+      runtimeMock.state.versionStdout = "opencode v3.0.0\n";
+      const snapshot = yield* checkOpenCodeProviderStatus(makeOpenCodeSettings(), process.cwd());
+
+      assert.equal(snapshot.status, "error");
+      assert.equal(snapshot.message, "OpenCode v3.0.0 is not supported by this Ryco release.");
+      assert.equal(runtimeMock.state.connectCalls, 0);
+    }),
+  );
+
+  it.effect(
+    "runs a 2.x binary at the minimum, lists its models and notes the data conversion",
+    () =>
+      Effect.gen(function* () {
+        runtimeMock.state.versionStdout = "opencode v2.2.0\n";
+        runtimeMock.state.clientGeneration = "v2";
+        runtimeMock.state.healthData = { healthy: true, version: "2.2.0" };
+        runtimeMock.state.inventory = {
+          providerList: {
+            connected: ["opencode"],
+            all: [
+              {
+                id: "opencode",
+                name: "OpenCode Zen",
+                models: { "big-pickle": { id: "big-pickle", name: "Big Pickle" } },
+              },
+            ],
+            default: {},
+          },
+          agents: [{ name: "build", hidden: false, mode: "primary" }],
+        };
+        const snapshot = yield* checkOpenCodeProviderStatus(makeOpenCodeSettings(), process.cwd());
+
+        assert.equal(snapshot.status, "ready");
+        assert.equal(snapshot.version, "2.2.0");
+        assert.equal(runtimeMock.state.connectCalls, 1);
+        assert.deepEqual(
+          snapshot.models.map((model) => model.slug),
+          ["opencode/big-pickle"],
+        );
+        assert.equal(
+          snapshot.message,
+          `1 upstream provider connected through OpenCode. ${OPENCODE_V2_LOCAL_DATA_NOTE}`,
+        );
+      }),
   );
 
   it.effect("hides generic Effect.tryPromise text for local CLI probe failures", () =>
@@ -379,16 +436,45 @@ it.layer(testLayer)("checkOpenCodeProviderStatus with configured server URL", (i
     }),
   );
 
-  it.effect("explains a 2.x configured server verbatim", () =>
+  it.effect("explains a configured 2.x server's version problems verbatim", () =>
     Effect.gen(function* () {
+      const settings = makeOpenCodeSettings({ serverUrl: "http://127.0.0.1:9999" });
       runtimeMock.state.healthData = { healthy: true, version: "2.0.18" };
+      runtimeMock.state.clientGeneration = "v2";
+      const old = yield* checkOpenCodeProviderStatus(settings, process.cwd());
+      assert.equal(old.status, "error");
+      assert.equal(
+        old.message,
+        "OpenCode v2.0.18 is too old. Upgrade OpenCode 2 to v2.2.0 or newer.",
+      );
+
+      // A server that answered detection as 1.x but reports 2.x gets no mutation.
+      runtimeMock.state.healthData = { healthy: true, version: "2.2.0" };
+      runtimeMock.state.clientGeneration = undefined;
+      const mismatched = yield* checkOpenCodeProviderStatus(settings, process.cwd());
+      assert.equal(mismatched.status, "error");
+      assert.equal(
+        mismatched.message,
+        "The OpenCode server reports v2.2.0 but did not identify itself as OpenCode 2.",
+      );
+    }),
+  );
+
+  it.effect("connects to a configured 2.x server without the local data note", () =>
+    Effect.gen(function* () {
+      runtimeMock.state.healthData = { healthy: true, version: "2.2.0" };
+      runtimeMock.state.clientGeneration = "v2";
       const snapshot = yield* checkOpenCodeProviderStatus(
         makeOpenCodeSettings({ serverUrl: "http://127.0.0.1:9999" }),
         process.cwd(),
       );
 
-      assert.equal(snapshot.status, "error");
-      assert.ok(snapshot.message?.startsWith("The OpenCode server reports v2.0.18."));
+      assert.equal(snapshot.status, "warning");
+      assert.equal(snapshot.version, "2.2.0");
+      assert.equal(
+        snapshot.message,
+        "Connected to the configured OpenCode server, but it did not report any connected upstream providers.",
+      );
     }),
   );
 

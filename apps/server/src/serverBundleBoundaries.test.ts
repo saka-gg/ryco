@@ -244,6 +244,9 @@ describe("server boot import boundaries", () => {
     // OpenCode 2.x support (facade, mappings, event translation) loads once a server is detected
     // as 2.x.
     expect(reached(/^apps\/server\/src\/provider\/openCodeV2\w*\.ts$/u)).toEqual([]);
+    // The OpenCode MCP config adapter loads with the first MCP settings or Agent Control call
+    // that reaches OpenCode.
+    expect(reached(/^apps\/server\/src\/mcp\/adapters\/OpenCodeMcpConfig\.ts$/u)).toEqual([]);
     // The heap snapshot writer loads with the first SIGUSR2, the event-loop stall history reader
     // with the first Diagnostics snapshot.
     expect(
