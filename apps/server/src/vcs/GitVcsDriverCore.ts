@@ -1,7 +1,6 @@
 import { resolveWorktreeCheckoutPath } from "../project/worktreeCheckoutPaths.ts";
 import * as SqlClient from "effect/sql/SqlClient";
 import { acquireWorktreeCreationLease, recordCreatedWorktree } from "../storage/lifecycle.ts";
-import { removeVerifiedWorktree } from "../storage/filesystem.ts";
 import type { Dirent } from "node:fs";
 import fsPromises from "node:fs/promises";
 import nodePath from "node:path";
@@ -3358,7 +3357,11 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
                 yield* assertWorktreeSetupComplete(config.stateDir, markerPath, ownerToken);
                 yield* mutation;
                 yield* Effect.tryPromise({
-                  try: () => removeVerifiedWorktree(input.cwd, markerPath, input.cleanup!),
+                  // Loaded on first use: only storage cleanup removes checkouts this way.
+                  try: () =>
+                    import("../storage/quarantineRemoval.ts").then(({ removeVerifiedWorktree }) =>
+                      removeVerifiedWorktree(input.cwd, markerPath, input.cleanup!),
+                    ),
                   catch: (cause) =>
                     createGitCommandError(
                       "GitVcsDriver.removeWorktree",

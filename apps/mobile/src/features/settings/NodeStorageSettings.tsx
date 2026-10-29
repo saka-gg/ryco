@@ -92,7 +92,7 @@ function NodeStoragePanel({
     }
     Alert.alert(
       "Enable automatic cleanup?",
-      "This node will remove qualifying archived, stopped, clean, unshared Ryco-owned checkouts after the retention period. Messages, branches and usage history remain. Dirty/untracked/ignored work, submodules, archives and credentials stay protected.",
+      "This node will remove qualifying archived, stopped, unshared Ryco-owned checkouts, with their dependency folders such as node_modules, after the retention period. Messages, branches and usage history remain. Uncommitted and untracked work, .env and other ignored files, submodules, archives and credentials stay protected.",
       [
         { text: "Cancel", style: "cancel" },
         {

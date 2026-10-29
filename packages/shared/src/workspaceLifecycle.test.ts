@@ -8,6 +8,7 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   classifyIgnoredPath,
+  isUserSecretFileName,
   parseWorktreeStatus,
   planLifecycleSuggestions,
   resolveLifecycleSuggestionPolicy,
@@ -48,6 +49,17 @@ describe("ignored content classification", () => {
     "../escape/",
   ])("protects %s: credentials, databases, outputs and unknown content", (entry) => {
     expect(classifyIgnoredPath(entry)).toBe("protected");
+  });
+
+  it("tells secrets people put in place from fixtures packages ship", () => {
+    for (const name of [".env", ".env.production", "id_ed25519", "id_rsa.pub", ".npmrc", ".netrc"])
+      expect(isUserSecretFileName(name), name).toBe(true);
+    // Sensitive to the reviewed rule, but packages ship them (Ryco's own dependencies do).
+    for (const name of ["server.pem", "test.key", "fixture.sqlite", "credentials.js", "index.js"]) {
+      expect(isUserSecretFileName(name), name).toBe(false);
+      if (name !== "index.js")
+        expect(classifyIgnoredPath(`node_modules/pkg/${name}`)).toBe("protected");
+    }
   });
 
   it("parses porcelain v1 -z output, including renames", () => {

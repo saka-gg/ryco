@@ -157,7 +157,7 @@ function StorageEditor({
         <>
           <SettingsRow
             title="Retention policy"
-            description="Applies hourly after the device starts. Only archived, stopped, clean, unshared Ryco checkouts qualify; abandoned ones get a 24-hour grace period."
+            description="Applies hourly after the device starts. Only archived, stopped, unshared Ryco checkouts with no uncommitted work qualify. Dependency folders such as node_modules go with them; .env and other ignored files keep a checkout. Abandoned checkouts get a 24-hour grace period."
             status={retentionScopeLabel}
             resetAction={
               projectId && settings?.projectStorageRetention[projectId] ? (
@@ -226,7 +226,8 @@ function StorageEditor({
                   }
                 >
                   Qualifying checkouts are removed after {enableApproval.completedWorktreeDays}{" "}
-                  days. Dirty, untracked, ignored, shared, and running work stays protected.
+                  days. Uncommitted, untracked, shared, and running work stays protected, and so do
+                  ignored files that are not dependency caches, such as .env.
                 </SettingsNotice>
               </div>
             ) : null}

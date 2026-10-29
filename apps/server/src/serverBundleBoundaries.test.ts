@@ -231,6 +231,11 @@ describe("server boot import boundaries", () => {
     expect(
       reached(/^apps\/server\/src\/(?:persistence\/databaseBackups|cliDb\/dbRun)\.ts$/u),
     ).toEqual([]);
+    // Storage cleanup loads its checks and removal on first use: the status check and the
+    // quarantined removal, and the cache folder (node_modules) check and background purge.
+    expect(
+      reached(/^apps\/server\/src\/storage\/(?:cacheFolders|quarantineRemoval)\.ts$/u),
+    ).toEqual([]);
     // The heap snapshot writer loads with the first SIGUSR2, the event-loop stall history reader
     // with the first Diagnostics snapshot.
     expect(

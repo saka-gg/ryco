@@ -1,4 +1,4 @@
-import { mintStorageCleanupClaim } from "./cleanupClaim.ts";
+import { mintStorageCleanupClaim, removalProofIdentity } from "./cleanupClaim.ts";
 import { readPersistedCwd } from "../provider/runtimeCwd.ts";
 import { ProviderProtectedPaths, type ProviderProtectedPathsShape } from "./providerProtection.ts";
 import { workspaceSessionActive } from "../workspace/lifecycleSafety.ts";
@@ -42,15 +42,19 @@ import {
 import { GitWorkflowService, type GitWorkflowServiceShape } from "../git/GitWorkflowService.ts";
 import {
   assertCanonicalPath,
-  assertCleanWorktree,
+  cacheCheckBudget,
+  cacheMoveDestination,
   captureWorktreeIdentity,
+  checkoutManifest,
   MAX_QUARANTINE_REMOVAL_ENTRIES,
   measureDirectory,
-  removeQuarantinedTemporaryDirectory,
+  type CacheMove,
   type ScanBudget,
   type MeasuredSize,
   type WorktreeIdentity,
 } from "./filesystem.ts";
+// Types only: the module itself loads on first use (`import()` below), off the boot path.
+import type { CheckedCacheFolder } from "./cacheFolders.ts";
 import {
   storageLifecycleLock,
   acquireStorageSettingsLease,
@@ -113,8 +117,18 @@ const sizeOnDisk = <S extends { readonly bytes: number | null; readonly sizeStat
     return size;
   });
 const canonical = canonicalStoragePath;
+/** The removal code (and the status check before it) loads on first use, off the boot path. */
+const loadRemoval = attempt(() => import("./quarantineRemoval.ts"));
 const contains = (root: string, candidate: string) =>
   candidate === root || candidate.startsWith(root.endsWith(path.sep) ? root : root + path.sep);
+/** Where a removal's cache folders stand: `planned`, `caches-only` (purging) or `preserved`. */
+const cachePurgeState = (row: Pick<OwnedStorageRow, "identity_json">): unknown => {
+  try {
+    return (JSON.parse(row.identity_json) as { purge?: unknown } | null)?.purge;
+  } catch {
+    return undefined;
+  }
+};
 
 export function makeStorageService(deps: {
   sql: SqlClient.SqlClient;
@@ -133,6 +147,8 @@ export function makeStorageService(deps: {
   recordCheckoutRemoval?: (checkoutPath: string) => Effect.Effect<void>;
   /** The node's database (size, free space, compaction); every scan page carries it. */
   readDatabase?: Effect.Effect<DatabaseStorageReport>;
+  /** Starts work that outlives the request (the cache purge after a manual batch). */
+  runInBackground?: (work: Effect.Effect<void, StorageError>) => Effect.Effect<void>;
 }) {
   const { sql, config, settings, snapshots, providers, terminals, policy, git } = deps;
   const resolveProtectedSources = (
@@ -148,6 +164,24 @@ export function makeStorageService(deps: {
   const scanLock = Semaphore.makeUnsafe(1);
   const ownedRows = (projectId?: ProjectId, cursor?: string) =>
     sql<OwnedStorageRow>`SELECT * FROM storage_owned_entries WHERE state != 'removed' AND id > ${cursor ?? ""} AND (${projectId ?? null} IS NULL OR project_id = ${projectId ?? null} OR project_id IS NULL) ORDER BY id LIMIT 257`;
+  const purgeLock = Semaphore.makeUnsafe(1);
+  /**
+   * Deletes the cache folders that removed checkouts left beside them (`cacheFolders.ts`,
+   * loaded on first use), one pass at a time, holding no admission lock or settings lease.
+   * With nothing pending it is one query.
+   */
+  const purgePending = purgeLock
+    .withPermit(
+      Effect.gen(function* () {
+        const pending = yield* sql<{
+          id: string;
+        }>`SELECT id FROM storage_owned_entries WHERE state = 'removing' AND json_extract(identity_json, '$.purge') = 'caches-only' LIMIT 1`;
+        if (pending.length === 0) return;
+        const { purgePendingCacheFolders } = yield* attempt(() => import("./cacheFolders.ts"));
+        yield* purgePendingCacheFolders(sql);
+      }),
+    )
+    .pipe(Effect.mapError(failure));
 
   const inventory = () =>
     Effect.gen(function* () {
@@ -278,7 +312,28 @@ export function makeStorageService(deps: {
     /** Null when nothing was measured yet: display measures it with what is left. */
     readonly size: MeasuredSize | null;
   };
-  type Verification = { readonly eligible: true; readonly entry: StorageEntry } | Refusal;
+  type Verification =
+    | {
+        readonly eligible: true;
+        readonly entry: StorageEntry;
+        /** Cache folders the removal moves out whole, relative to the checkout. */
+        readonly caches: readonly string[];
+        /** The folders whose contents were checked, by identity; null when only by identity. */
+        readonly checkedCaches: readonly CheckedCacheFolder[] | null;
+      }
+    | Refusal;
+  /**
+   * How `verify` treats a checkout's cache folders. Their contents are checked within `budget`
+   * (a finding keeps the checkout); with `sizing` (scans only) their size is added for display
+   * while it lasts. "identity-only" skips the contents: the revalidation under the settings
+   * lease, moments after a full check, keeps that lease short, and the purge checks them again
+   * before deleting anything.
+   */
+  type CacheCheck =
+    | { readonly budget: ScanBudget; readonly sizing: ScanBudget | null }
+    | "identity-only";
+  /** Cache folder bytes the last scan counted, per ledger id: preview shows them (display only). */
+  const scannedCacheBytes = new Map<string, number>();
   type Classification =
     | { readonly kind: "protected"; readonly base: EntryBase; readonly refusal: Refusal }
     | {
@@ -353,6 +408,12 @@ export function makeStorageService(deps: {
         );
       if (row.state === "in_use")
         return protect("Temporary staging data is still in use by its producer.");
+      if (row.state === "removing" && cachePurgeState(row) === "caches-only")
+        return protect(
+          "Removed; deleting its cache folders in the background." +
+            (row.last_error ? ` ${row.last_error}` : ""),
+          false,
+        );
       if (row.state !== "owned")
         return protect(
           "Interrupted cleanup or removed checkout; inspect on disk before retrying. No automatic retry." +
@@ -465,7 +526,10 @@ export function makeStorageService(deps: {
       Effect.orElseSucceed(() => UNKNOWN_SIZE),
     );
 
-  /** Ownership, Git and filesystem checks that must hold right before a row is removed. */
+  /**
+   * Ownership, Git and filesystem checks that must hold right before a row is removed; the
+   * checkout's cache folders (`node_modules`, `.venv`), relative to it.
+   */
   const safetyChecks = (
     row: OwnedStorageRow,
     project: Extract<Classification, { kind: "candidate" }>["project"],
@@ -490,7 +554,9 @@ export function makeStorageService(deps: {
           return yield* new StorageError({
             detail: "Git no longer registers this exact checkout.",
           });
-        yield* attempt(() => assertCleanWorktree(row.path, row.repository_path!));
+        const { assertRemovableWorktree } = yield* loadRemoval;
+        return (yield* attempt(() => assertRemovableWorktree(row.path, row.repository_path!)))
+          .cacheFolders;
       } else {
         const temporaryRoot = yield* attempt(() =>
           assertCanonicalPath(path.join(config.stateDir, "storage-temporary")),
@@ -512,6 +578,7 @@ export function makeStorageService(deps: {
           return yield* new StorageError({
             detail: "Temporary directory contains a repository; protected.",
           });
+        return [] as readonly string[];
       }
     });
 
@@ -542,14 +609,17 @@ export function makeStorageService(deps: {
   /**
    * Whether a candidate can be removed now. The checks that need no traversal (ownership,
    * Git registration, the classified Git status, merge state) run first, so a checkout they
-   * protect is never walked; then the whole tree is measured within `budget` and must be
-   * complete, link-free and small enough for one quarantined removal. A spent `budget` (a
-   * scan's shared one) refuses before any Git process starts, so it bounds those checks too.
+   * protect is never walked; then the tree outside its cache folders is measured within
+   * `budget` and must be complete, link-free (tracked links aside) and small enough for one
+   * quarantined removal; then the cache folders' contents are checked (`cacheCheck`). A spent
+   * `budget` (a scan's shared one) refuses before any Git process starts, so it bounds those
+   * checks too.
    */
   const verify = (
     row: OwnedStorageRow,
     candidate: Extract<Classification, { kind: "candidate" }>,
     budget: ScanBudget,
+    cacheCheck: CacheCheck,
   ) =>
     Effect.gen(function* () {
       const refuse = (reason: string, size: MeasuredSize | null = null): Refusal => ({
@@ -565,37 +635,85 @@ export function makeStorageService(deps: {
         );
       if (!present) return refuse(UNAVAILABLE, UNKNOWN_SIZE);
       if (budget.remaining <= 0 || Date.now() >= budget.deadline) return refuse(INCOMPLETE);
-      const unsafe = yield* safetyChecks(row, candidate.project).pipe(
-        Effect.match({ onSuccess: () => null, onFailure: detail }),
+      const checked = yield* safetyChecks(row, candidate.project).pipe(
+        Effect.match({
+          onSuccess: (caches) => ({ caches, unsafe: null }),
+          onFailure: (cause) => ({ caches: [], unsafe: detail(cause) }),
+        }),
       );
-      if (unsafe) return refuse(unsafe);
+      if (checked.unsafe) return refuse(checked.unsafe);
+      const caches = checked.caches;
       const size = yield* attempt(() =>
-        measureDirectory(row.path, budget, new Set(), row.category === "temporary"),
+        row.category === "temporary"
+          ? measureDirectory(row.path, budget, new Set(), true)
+          : measureDirectory(
+              row.path,
+              budget,
+              new Set(),
+              false,
+              undefined,
+              checkoutManifest(caches),
+            ),
       ).pipe(Effect.orElseSucceed(() => UNKNOWN_SIZE));
+      // `size` counts each cache folder as one entry without its bytes, so a refusal from here
+      // on leaves the size to the scan's display measurement of the whole checkout.
+      const measured = caches.length > 0 ? null : size;
       if (size.sizeStatus === "unknown") return refuse(UNAVAILABLE, size);
-      if (size.unsafe || size.sizeStatus !== "complete") return refuse(INCOMPLETE, size);
+      if (size.unsafe || size.sizeStatus !== "complete") return refuse(INCOMPLETE, measured);
       if ((size.entries ?? 0) > MAX_QUARANTINE_REMOVAL_ENTRIES)
         return refuse(
           `Too many files to remove safely in one pass (more than ${MAX_QUARANTINE_REMOVAL_ENTRIES.toLocaleString("en-US")}).`,
-          size,
+          measured,
         );
       if (row.category === "temporary") {
         const changed = yield* assertTemporaryUnchanged(row, size).pipe(
           Effect.match({ onSuccess: () => null, onFailure: detail }),
         );
-        if (changed) return refuse(changed, size);
+        if (changed) return refuse(changed, measured);
+      }
+      // Cache folder bytes (display only): what this scan counted, else what the last one did;
+      // null (a lower bound, with what was counted) when neither got through them all.
+      let cacheBytes: number | null =
+        caches.length === 0 ? 0 : (scannedCacheBytes.get(row.id) ?? null);
+      let countedBytes = 0;
+      let checkedCaches: readonly CheckedCacheFolder[] | null = caches.length === 0 ? [] : null;
+      if (caches.length > 0 && cacheCheck !== "identity-only") {
+        const { checkCacheFolders } = yield* attempt(() => import("./cacheFolders.ts"));
+        const contents = yield* attempt(() =>
+          checkCacheFolders(row.path, caches, cacheCheck.budget, cacheCheck.sizing),
+        ).pipe(Effect.match({ onSuccess: (check) => check, onFailure: detail }));
+        if (typeof contents === "string")
+          return refuse(`Its cache folders could not be read completely: ${contents}`, measured);
+        if (contents.finding) return refuse(contents.finding, measured);
+        if (!contents.complete)
+          return refuse(
+            "Its cache folders could not be checked within the check's limits (2,000,000 entries, 30 seconds).",
+            measured,
+          );
+        checkedCaches = contents.folders;
+        if (contents.sized) {
+          cacheBytes = contents.bytes;
+          scannedCacheBytes.set(row.id, contents.bytes);
+        } else countedBytes = contents.bytes;
       }
       yield* sql`UPDATE storage_owned_entries SET project_id = ${candidate.base.projectId}, completed_at = ${candidate.completedAt} WHERE id = ${row.id}`;
+      const shown = caches.slice(0, 3).map((folder) => `${folder}/`);
       return {
         eligible: true,
+        caches,
+        checkedCaches,
         entry: {
           ...candidate.base,
-          bytes: size.bytes,
-          sizeStatus: size.sizeStatus,
+          bytes: size.bytes === null ? null : size.bytes + (cacheBytes ?? countedBytes),
+          sizeStatus: cacheBytes === null ? "bounded" : size.sizeStatus,
           eligible: true,
-          reason: candidate.associated
-            ? "Archived, stopped session; owned and clean checkout."
-            : "Abandoned Ryco-owned data; no session references this path.",
+          reason:
+            (candidate.associated
+              ? "Archived, stopped session; owned and clean checkout."
+              : "Abandoned Ryco-owned data; no session references this path.") +
+            (caches.length > 0
+              ? ` Its cache folders (${shown.join(", ")}${caches.length > 3 ? ` and ${caches.length - 3} more` : ""}) go with it.`
+              : ""),
         },
       } satisfies Verification;
     });
@@ -628,15 +746,34 @@ export function makeStorageService(deps: {
           }),
         );
 
-  /** Classifies and verifies one row for preview and removal (no display measurement). */
-  const inspect = (row: OwnedStorageRow, context: InventoryContext, budget: ScanBudget) =>
+  /**
+   * Classifies and verifies one row for preview and removal, each with its own budgets (no
+   * display measurement): the entry, the cache folders its removal moves out, and (unless
+   * "identity-only") the identities of those whose contents were checked.
+   */
+  const inspect = (
+    row: OwnedStorageRow,
+    context: InventoryContext,
+    cacheCheck: "contents" | "identity-only" = "contents",
+  ) =>
     Effect.gen(function* () {
       const classified = yield* classify(row, context);
       const verdict =
         classified.kind === "candidate"
-          ? yield* verify(row, classified, budget)
+          ? yield* verify(
+              row,
+              classified,
+              measurementBudget(),
+              cacheCheck === "contents"
+                ? { budget: cacheCheckBudget(), sizing: null }
+                : "identity-only",
+            )
           : classified.refusal;
-      return yield* presentEntry(row, classified.base, verdict, null);
+      return {
+        entry: yield* presentEntry(row, classified.base, verdict, null),
+        caches: verdict.eligible ? verdict.caches : [],
+        checkedCaches: verdict.eligible ? verdict.checkedCaches : null,
+      };
     });
 
   const scanInventory = (projectId?: ProjectId, cursor?: string) =>
@@ -656,11 +793,17 @@ export function makeStorageService(deps: {
           if (!projectId || classification.base.projectId === projectId)
             classified.push({ row, classification });
         }
+        // Cache folders' contents get a budget of their own, shared by the page's candidates, and
+        // their sizes (display only) a shorter one: running out of it leaves lower bounds.
+        const cacheCheck = {
+          budget: cacheCheckBudget(),
+          sizing: { remaining: 1_000_000, deadline: Date.now() + 10_000 },
+        };
         const verdicts: Verification[] = [];
         for (const { row, classification } of classified)
           verdicts.push(
             classification.kind === "candidate"
-              ? yield* verify(row, classification, budget)
+              ? yield* verify(row, classification, budget, cacheCheck)
               : classification.refusal,
           );
         for (const [index, { row, classification }] of classified.entries())
@@ -872,7 +1015,7 @@ export function makeStorageService(deps: {
       const entries: StorageEntry[] = [];
       // Each entry gets its own budget, as at removal: entries selected from different scan
       // pages each fit their page's budget, not necessarily one shared one.
-      for (const row of rows) entries.push(yield* inspect(row, context, measurementBudget()));
+      for (const row of rows) entries.push((yield* inspect(row, context)).entry);
       if (
         new Set(entryIds).size !== entryIds.length ||
         entries.length !== entryIds.length ||
@@ -919,7 +1062,9 @@ export function makeStorageService(deps: {
           status: "protected" as const,
           detail: "Provider archive/source configuration changed. Preview again.",
         };
-      const fresh = yield* inspect(row, context, measurementBudget());
+      // The one check of the cache folders' contents before the claim (its own budget).
+      const checked = yield* inspect(row, context);
+      const fresh = checked.entry;
       if (!fresh.eligible || fresh.path !== entry.path || fresh.projectId !== entry.projectId)
         return { id: entry.id, status: "protected" as const, detail: fresh.reason };
       let settingsLease: ReturnType<typeof acquireStorageSettingsLease> | null = null;
@@ -983,11 +1128,33 @@ export function makeStorageService(deps: {
       // Persistent refusal state now owns this path. Long I/O runs outside the admission lock.
       // Normal turn/bootstrap/editor/terminal admissions all refuse this path until completion.
       const finalContext = yield* inventory();
-      const revalidated = yield* inspect(row, finalContext, measurementBudget());
+      // Under the settings lease: cache folders by identity only (their contents were checked
+      // moments ago, and the purge checks them again before deleting anything).
+      const revalidation = yield* inspect(row, finalContext, "identity-only");
+      const revalidated = revalidation.entry;
       const deletionManifest =
         row.category === "worktree"
-          ? yield* attempt(() => measureDirectory(row.path, measurementBudget(), new Set(), true))
+          ? yield* attempt(() =>
+              measureDirectory(
+                row.path,
+                measurementBudget(),
+                new Set(),
+                true,
+                undefined,
+                checkoutManifest(revalidation.caches),
+              ),
+            )
           : null;
+      // The cache folders this removal moves, as the deletion manifest pinned them: they must
+      // be the very folders whose contents were checked above, not ones that appeared or were
+      // replaced since (the revalidation only looked at their identity).
+      const pinnedCaches: CheckedCacheFolder[] = revalidation.caches.map((relativePath) => {
+        const recorded = deletionManifest?.manifest?.find(
+          (item) => item.opaque && item.relativePath === relativePath,
+        )?.stat;
+        return { relativePath, device: recorded?.dev ?? -1, inode: recorded?.ino ?? -1 };
+      });
+      const cachesChanged = JSON.stringify(pinnedCaches) !== JSON.stringify(checked.checkedCaches);
       // Read authoritative settings AFTER the final filesystem inspection. Resolve
       // source declarations again, including aliases/missing leaves, under admission.
       const settingsRefusal = yield* storageLifecycleLock.withPermit(
@@ -1026,16 +1193,19 @@ export function makeStorageService(deps: {
         JSON.stringify(finalContext.protectedSources) !==
           JSON.stringify(context.protectedSources) ||
         JSON.stringify(finalContext.protectedPaths) !== JSON.stringify(context.protectedPaths) ||
-        settingsRefusal !== null
+        settingsRefusal !== null ||
+        cachesChanged
       ) {
         yield* sql`UPDATE storage_owned_entries SET state = 'owned' WHERE id = ${entry.id} AND state = 'removing'`;
         return {
           id: entry.id,
           status: "protected" as const,
-          detail: revalidated.eligible
-            ? (settingsRefusal ??
-              "Policy or provider archive/source configuration changed before removal.")
-            : revalidated.reason,
+          detail: !revalidated.eligible
+            ? revalidated.reason
+            : (settingsRefusal ??
+              (cachesChanged && (row.category !== "worktree" || deletionManifest?.fingerprint)
+                ? "Cache folders changed after their contents were checked. Review again."
+                : "Policy or provider archive/source configuration changed before removal.")),
         };
       }
       const quarantine = path.join(
@@ -1043,9 +1213,19 @@ export function makeStorageService(deps: {
         `.cleanup-${row.id}-${crypto.randomUUID()}`,
       );
       const identity = JSON.parse(row.identity_json) as WorktreeIdentity & { fingerprint?: string };
-      // Persist recovery location before either category is moved. Original path
-      // refusal survives restart; no interrupted batch repeats unknown deletion.
-      yield* sql`UPDATE storage_owned_entries SET identity_json = ${JSON.stringify({ ...identity, quarantinePath: quarantine })} WHERE id = ${row.id} AND state = 'removing'`;
+      // Each cache folder leaves whole to a Ryco-named sibling, pinned by the identity the
+      // deletion manifest recorded.
+      const caches: CacheMove[] = pinnedCaches.map(({ relativePath, device, inode }, index) => ({
+        relativePath,
+        destination: cacheMoveDestination(quarantine, index),
+        device,
+        inode,
+      }));
+      const proof = removalProofIdentity(identity, quarantine, caches);
+      // Persist recovery location (and cache folder destinations) before either category is
+      // moved. Original path refusal survives restart; no interrupted batch repeats unknown
+      // deletion: a purge still `planned` after a restart is an interrupted removal.
+      yield* sql`UPDATE storage_owned_entries SET identity_json = ${JSON.stringify(proof)} WHERE id = ${row.id} AND state = 'removing'`;
       const cleanupClaim =
         row.category === "worktree"
           ? yield* mintStorageCleanupClaim(sql, {
@@ -1055,6 +1235,7 @@ export function makeStorageService(deps: {
               quarantine,
               fingerprint: deletionManifest!.fingerprint!,
               identity,
+              caches,
               lease: settingsLease!,
             })
           : null;
@@ -1069,16 +1250,19 @@ export function makeStorageService(deps: {
                 fingerprint: deletionManifest!.fingerprint!,
                 identity,
                 claim: cleanupClaim!,
+                caches,
                 assertAdmission: () => settingsLease!.assertValid(),
               },
             })
-          : attempt(() =>
-              removeQuarantinedTemporaryDirectory(
-                row.path,
-                quarantine,
-                identity.fingerprint!,
-                undefined,
-                () => settingsLease!.assertValid(),
+          : Effect.flatMap(loadRemoval, ({ removeQuarantinedTemporaryDirectory }) =>
+              attempt(() =>
+                removeQuarantinedTemporaryDirectory(
+                  row.path,
+                  quarantine,
+                  identity.fingerprint!,
+                  undefined,
+                  () => settingsLease!.assertValid(),
+                ),
               ),
             );
       const removed = yield* removal.pipe(
@@ -1089,10 +1273,22 @@ export function makeStorageService(deps: {
         yield* sql`UPDATE storage_owned_entries SET last_error = ${removed} WHERE id = ${entry.id}`;
         return { id: entry.id, status: "failed" as const, detail: removed };
       }
-      yield* sql`UPDATE storage_owned_entries SET state = 'removed' WHERE id = ${entry.id}`;
+      scannedCacheBytes.delete(entry.id);
+      // The checkout is gone; its cache folders wait beside it for the background purge, and
+      // the row stays `removing` (their paths fenced) until it has deleted them.
+      if (caches.length > 0)
+        yield* sql`UPDATE storage_owned_entries SET identity_json = ${JSON.stringify({ ...proof, purge: "caches-only" })} WHERE id = ${entry.id}`;
+      else yield* sql`UPDATE storage_owned_entries SET state = 'removed' WHERE id = ${entry.id}`;
       // Keep the workspace record truthful: it stays (with branch and path) as provenance.
       if (row.category === "worktree" && deps.recordCheckoutRemoval)
         yield* deps.recordCheckoutRemoval(row.path);
+      if (caches.length > 0)
+        return {
+          id: entry.id,
+          status: "removed" as const,
+          detail:
+            "Removed verified checkout. Its cache folders (node_modules and similar) are deleted in the background. Git registration, branches, messages and historical usage are retained; Restore workspace checks a removed checkout out again.",
+        };
       return {
         id: entry.id,
         status: "removed" as const,
@@ -1175,6 +1371,9 @@ export function makeStorageService(deps: {
         yield* sql`UPDATE storage_cleanup_previews SET result_json = ${JSON.stringify({ results })} WHERE token = ${token}`;
       }
       yield* sql`UPDATE storage_cleanup_previews SET state = 'done' WHERE token = ${token}`;
+      // Cache folders of the removed checkouts are deleted after the batch answers.
+      if (results.some((result) => result.status === "removed") && deps.runInBackground)
+        yield* deps.runInBackground(purgePending);
       return { results } satisfies StorageCleanupResult;
     }).pipe(Effect.mapError(failure));
 
@@ -1208,7 +1407,7 @@ export function makeStorageService(deps: {
    * 20 entries and verifies at most 64 due candidates; the next pass continues after the last
    * one it checked, so candidates that stay protected never keep the ones after them waiting.
    */
-  const runRetention = Effect.gen(function* () {
+  const retentionPass = Effect.gen(function* () {
     const currentSettings = yield* settings.getSettings;
     if (
       ![
@@ -1236,7 +1435,9 @@ export function makeStorageService(deps: {
         const candidate = classified.value;
         const retention = resolveStorageRetentionPolicy(currentSettings, candidate.base.projectId);
         if (!retentionDue(retention, row.category, candidate.completedAt, Date.now())) continue;
-        const verdict = yield* verify(row, candidate, measurementBudget()).pipe(
+        // Cache folders by identity only here: `remove` checks their contents (once, with its
+        // own budget) before it claims anything, so a due checkout is walked once, not twice.
+        const verdict = yield* verify(row, candidate, measurementBudget(), "identity-only").pipe(
           Effect.tapError((cause) =>
             Effect.logWarning("storage retention could not verify an entry", cause),
           ),
@@ -1265,6 +1466,11 @@ export function makeStorageService(deps: {
     }
     retentionCursor = cursor;
   }).pipe(Effect.mapError(failure));
+  /** A retention pass, then the cache folders its removals (and any earlier ones) left. */
+  const runRetention = retentionPass.pipe(
+    Effect.exit,
+    Effect.flatMap((pass) => Effect.andThen(purgePending, pass)),
+  );
 
   /** Only this allocator makes temporary data eligible. Existing caches/archives are never adopted. */
   const createTemporaryDirectory = (projectId: ProjectId) =>
@@ -1309,6 +1515,7 @@ export function makeStorageService(deps: {
     preview,
     execute,
     runRetention,
+    purgePending,
     createTemporaryDirectory,
     completeTemporaryDirectory,
   };
@@ -1354,8 +1561,11 @@ export const StorageServiceLive = Layer.effect(
     const databaseServices = yield* Effect.context<
       SqlClient.SqlClient | ServerConfig | FileSystem.FileSystem | EventLogCompaction
     >();
+    const scope = yield* Effect.scope;
     const service = makeStorageService({
       recordCheckoutRemoval,
+      runInBackground: (work) =>
+        Effect.forkIn(work.pipe(Effect.ignore({ log: true })), scope).pipe(Effect.asVoid),
       // The report (and the doctor suggestion in it) loads when Storage settings first ask, which
       // keeps it off the server's boot path (serverBundleBoundaries.test.ts).
       readDatabase: Effect.promise(() => import("../persistence/databaseStorageReport.ts")).pipe(
@@ -1372,6 +1582,14 @@ export const StorageServiceLive = Layer.effect(
       policy: yield* WorkspaceAccessPolicy,
       git: yield* GitWorkflowService,
     });
+    // An approved removal whose cache folders were still being deleted when the node stopped
+    // finishes 5 minutes after start, without waiting for the first retention pass.
+    yield* Effect.forkScoped(
+      Effect.sleep("5 minutes").pipe(
+        Effect.andThen(service.purgePending),
+        Effect.ignore({ log: true }),
+      ),
+    );
     // Sleep first: no filesystem traversal on startup, and disabled installs do no traversal at all.
     yield* Effect.forkScoped(
       Effect.forever(
