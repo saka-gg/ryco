@@ -191,6 +191,7 @@ const undoRepairEffect: Record<string, string | ReadonlyArray<string>> = {
     "CREATE INDEX idx_orch_events_command_id ON orchestration_events(command_id)",
   "drop-thread-priority-tables": "CREATE TABLE thread_priority_batches (slot INTEGER)",
   "pull-request-watches": "DROP INDEX idx_projection_thread_pull_request_watches_active",
+  "follow-up-queue": "DROP INDEX idx_projection_thread_queue_entries_position",
 };
 
 it.effect("finds exactly the repair whose effect a database from before the records lacks", () =>

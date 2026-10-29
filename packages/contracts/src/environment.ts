@@ -156,6 +156,12 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
    * absent on older servers, which drop the key from settings patches.
    */
   usagePriceOverrides: Schema.optionalKey(Schema.Boolean),
+  /**
+   * The node keeps each thread's follow-up queue (`thread.queue.*` commands, `followUpQueue` on
+   * threads and shells) and sends it on its own; absent on older servers, whose clients keep
+   * their own queue.
+   */
+  serverFollowUpQueue: Schema.optionalKey(Schema.Literal(true)),
   fileAttachments: Schema.optional(Schema.Struct({ maxUploadBytes: NonNegativeInt })),
 });
 export type ExecutionEnvironmentCapabilities = typeof ExecutionEnvironmentCapabilities.Type;

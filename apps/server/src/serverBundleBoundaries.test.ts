@@ -323,6 +323,9 @@ describe("server boot import boundaries", () => {
         /^apps\/server\/src\/(?:device\/(?:deviceObservation|deviceUiSnapshot|deviceLogs)|providerTools\/deviceTool(?:Actions|Guidance|Definitions)|agentControl\/(?:Mcp\/deviceRoutineTools|deviceControlConsent))\.ts$/u,
       ),
     ).toEqual([]);
+    // The follow-up queue drain loads once commands are admitted; the boot path holds only its
+    // layer (and the decider's and projector's queue rules).
+    expect(reached(/^apps\/server\/src\/orchestration\/serverQueueDrainRuntime\.ts$/u)).toEqual([]);
   });
 
   it("loads the repository clone runner with the first clone", () => {

@@ -165,6 +165,49 @@ const message = (id: string) => MessageId.make(id);
 // ── holds ────────────────────────────────────────────────────────────────
 
 describe("ServerWakeFence holds", () => {
+  test("a follow-up queue that waits to send goes first; a held one blocks nothing", () =>
+    Effect.gen(function* () {
+      const h = yield* setup();
+      const idle = shell("thread");
+      assert.equal(yield* h.fence.holdReason(idle, T0), null);
+      const waiting = shell("thread", {
+        followUpQueueSummary: { count: 2, hold: null, headStatus: "queued", headPreview: "next" },
+      });
+      // Delegated results and pull request updates wait behind the user's follow-ups...
+      assert.equal(yield* h.fence.holdReason(waiting, T0), "busy");
+      assert.equal(yield* h.fence.holdReason(waiting, T0, "pull-request-watch"), "busy");
+      // ...which the queue itself sends at this idle edge.
+      assert.equal(yield* h.fence.holdReason(waiting, T0, "follow-up-queue"), null);
+      const held = shell("thread", {
+        followUpQueueSummary: {
+          count: 2,
+          hold: { reason: "paused", detail: null, causeKeys: ["paused:x"], heldAt: now },
+          headStatus: "queued",
+          headPreview: "next",
+        },
+      });
+      assert.equal(yield* h.fence.holdReason(held, T0), null);
+      // A head that waits for Retry sends nothing, so it blocks nothing either.
+      const failedHead = shell("thread", {
+        followUpQueueSummary: { count: 1, hold: null, headStatus: "failed", headPreview: "x" },
+      });
+      assert.equal(yield* h.fence.holdReason(failedHead, T0), null);
+      // A goal's next turn waits for every queued follow-up, held or waiting for Retry too.
+      assert.equal(yield* h.fence.holdReason(idle, T0, "goal-continuation"), null);
+      assert.equal(yield* h.fence.holdReason(waiting, T0, "goal-continuation"), "busy");
+      assert.equal(yield* h.fence.holdReason(held, T0, "goal-continuation"), "busy");
+      assert.equal(yield* h.fence.holdReason(failedHead, T0, "goal-continuation"), "busy");
+      // The queue's own pass still waits for an idle thread.
+      assert.equal(
+        yield* h.fence.holdReason(
+          withSession(waiting, { status: "running" }),
+          T0,
+          "follow-up-queue",
+        ),
+        "busy",
+      );
+    }));
+
   test("holds a usage-limited thread first, even while it is busy with a pending start", () =>
     Effect.gen(function* () {
       const h = yield* setup();

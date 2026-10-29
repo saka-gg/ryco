@@ -81,13 +81,19 @@ import {
   requireThreadReadyForCheckpointRevert,
 } from "./checkpointRevertPolicy.ts";
 import { isUserOriginatedCommandId } from "./commandOrigin.ts";
+import type { FollowUpQueueDraft, FollowUpQueueRules } from "./followUpQueue.ts";
+import {
+  followUpQueueConcernedBy,
+  followUpQueueDraftOccurredAt,
+  loadFollowUpQueueRules,
+} from "./followUpQueueLoader.ts";
 import { projectEvent } from "./projector.ts";
 import {
   pullRequestWatchesAfterUpdate,
   pullRequestWatchesOf,
   pullRequestWatchUpdateBlocker,
 } from "./pullRequestWatchUpdates.ts";
-import { serverWakeCopy } from "./serverWake.ts";
+import { serverWakeCopy, serverWakeSource } from "./serverWake.ts";
 import { threadReferencesPayload } from "./threadReferences.ts";
 import { restartContinuationTargetBlocker } from "./restartContinuationPolicy.ts";
 import {
@@ -358,7 +364,7 @@ function settlementBlockerDetail(blocker: ThreadSettlementBlocker): string {
     case "queued-turn":
       return "a turn may still be queued";
     case "local-queue":
-      return "a local message is queued";
+      return "a follow-up message is queued";
     case "delivery-unknown":
       return "message delivery is unresolved";
     case "unsupported":
@@ -541,6 +547,22 @@ function requireUnreservedMessageId(command: {
       );
 }
 
+/** One queue draft as a planned event of `command`. */
+function followUpQueueEvent(
+  command: OrchestrationCommand,
+  draft: FollowUpQueueDraft,
+): PlannedOrchestrationEvent {
+  return {
+    ...withEventBase({
+      aggregateKind: "thread",
+      aggregateId: draft.payload.threadId,
+      occurredAt: followUpQueueDraftOccurredAt(draft),
+      commandId: command.commandId,
+    }),
+    ...draft,
+  } as PlannedOrchestrationEvent;
+}
+
 const decideCommandSequence = Effect.fn("decideCommandSequence")(function* ({
   commands,
   readModel,
@@ -553,7 +575,7 @@ const decideCommandSequence = Effect.fn("decideCommandSequence")(function* ({
   const plannedEvents: PlannedOrchestrationEvent[] = [];
 
   for (const nextCommand of commands) {
-    const decided = yield* decideOrchestrationCommand({
+    const decided = yield* decideCommand({
       command: nextCommand,
       readModel: nextReadModel,
     });
@@ -570,7 +592,12 @@ const decideCommandSequence = Effect.fn("decideCommandSequence")(function* ({
   return plannedEvents;
 });
 
-export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand")(function* ({
+/**
+ * One command's own events. Nested decisions (a wake's turn start, a turn's goal, a forced
+ * project removal's Trash) call this, so the queue follow-ons are added once, by
+ * `decideOrchestrationCommand`, over the whole batch.
+ */
+const decideCommand = Effect.fn("decideOrchestrationCommand.command")(function* ({
   command,
   readModel,
 }: {
@@ -815,7 +842,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
     }
 
     case "thread.history.import": {
-      const created = yield* decideOrchestrationCommand({
+      const created = yield* decideCommand({
         readModel,
         command: { ...command, type: "thread.create" },
       });
@@ -987,7 +1014,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         newWorktree === null
           ? []
           : plannedEventList(
-              yield* decideOrchestrationCommand({
+              yield* decideCommand({
                 readModel,
                 command: {
                   type: "worktree.create",
@@ -1066,9 +1093,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
       const followUpEvents: PlannedOrchestrationEvent[] = [];
       for (const followUp of followUps) {
         followUpEvents.push(
-          ...plannedEventList(
-            yield* decideOrchestrationCommand({ readModel: withThread, command: followUp }),
-          ),
+          ...plannedEventList(yield* decideCommand({ readModel: withThread, command: followUp })),
         );
       }
       return [
@@ -1764,7 +1789,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
       // turn, usage limit, wake guard, pending revert, lifecycle) under the same command id.
       // The watch event goes first, so the turn's events already see the recorded progress.
       // Any refusal rejects the whole command: no progress without its wake.
-      const turnEvents = yield* decideOrchestrationCommand({
+      const turnEvents = yield* decideCommand({
         readModel,
         command: {
           type: "thread.turn.start",
@@ -1785,6 +1810,28 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         },
       });
       return [watchEvent, ...plannedEventList(turnEvents)];
+    }
+
+    case "thread.queue.add":
+    case "thread.queue.edit":
+    case "thread.queue.move":
+    case "thread.queue.remove":
+    case "thread.queue.steer":
+    case "thread.queue.hold":
+    case "thread.queue.resume":
+    case "thread.queue.retry":
+    case "thread.queue.hold.record": {
+      const thread = yield* requireThread({ readModel, command, threadId: command.threadId });
+      const rules = yield* loadFollowUpQueueRules;
+      const decision = rules.decideCommand(readModel, thread, command);
+      if ("refused" in decision) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: decision.refused,
+        });
+      }
+      // An empty list is an accepted no-op (an add that was already queued or sent, say).
+      return decision.drafts.map((draft) => followUpQueueEvent(command, draft));
     }
 
     case "thread.turn.start": {
@@ -1812,6 +1859,20 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         command,
         nowMs: Date.now(),
       });
+      // A queued follow-up's dispatch: the head must still be that entry, at that revision. It
+      // runs with the modes it was queued with (`*-mode-set` first, as a client's send).
+      let queueDispatch: ReturnType<FollowUpQueueRules["dispatchModes"]> | null = null;
+      if (command.queueDispatch !== undefined) {
+        const queueRules = yield* loadFollowUpQueueRules;
+        const queueDispatchBlocker = queueRules.dispatchBlocker(targetThread, command);
+        if (queueDispatchBlocker !== null) {
+          return yield* new OrchestrationCommandInvariantError({
+            commandType: command.type,
+            detail: queueDispatchBlocker,
+          });
+        }
+        queueDispatch = queueRules.dispatchModes(targetThread, command);
+      }
       // A null runtime is a review of a stopped session: it holds while no runtime is bound.
       const resumeGuard = command.claudeResumeGuard;
       if (
@@ -1872,11 +1933,12 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
         });
       }
 
-      // Server wake fence (delegation-returns §3.5): delegated results and pull request
-      // watch updates. A wake is a normal queued turn start that (re)creates or resumes the
-      // session, so the thread's turn, runtime and provider instance are not fenced and legacy
-      // guard fields are ignored. Pending starts are invisible here; ServerWakeFence's idle
-      // rule owns them. Only the wording depends on the wake's source.
+      // Server wake fence (delegation-returns §3.5): delegated results, pull request watch
+      // updates, goal continuations and queued follow-ups. A wake is a normal queued turn start that (re)creates or
+      // resumes the session, so the thread's turn, runtime and provider instance are not fenced
+      // and legacy guard fields are ignored. Pending starts are invisible here; ServerWakeFence's
+      // idle rule owns them. A queued follow-up is the user's own message and keeps the model
+      // it was queued with; every other wake runs on the thread's model.
       const guard = command.delegationReturnGuard;
       if (
         guard &&
@@ -1885,8 +1947,9 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           targetThread.session?.status === "starting" ||
           targetThread.latestTurn?.state === "running" ||
           (latestUserMessage(targetThread.messages)?.id ?? null) !== guard.latestUserMessageId ||
-          JSON.stringify(command.modelSelection ?? targetThread.modelSelection) !==
-            JSON.stringify(targetThread.modelSelection) ||
+          (serverWakeSource(guard) !== "follow-up-queue" &&
+            JSON.stringify(command.modelSelection ?? targetThread.modelSelection) !==
+              JSON.stringify(targetThread.modelSelection)) ||
           targetThread.projectId !== guard.projectId ||
           targetThread.runtimeMode !== guard.runtimeMode ||
           targetThread.worktreePath !== guard.worktreePath)
@@ -1899,7 +1962,13 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
       // usage-limits §5.2: an accepted turn start clears the limit below, and only the user's
       // or the auto-resume's turn may do that. ServerWakeFence holds the wake while the limit
       // applies, so this only fires on a race with a new limit.
-      if (guard && applicableUsageLimit(targetThread) !== null) {
+      if (
+        guard &&
+        applicableUsageLimit({
+          usageLimit: targetThread.usageLimit,
+          modelSelection: command.modelSelection ?? targetThread.modelSelection,
+        }) !== null
+      ) {
         return yield* new OrchestrationCommandInvariantError({
           commandType: command.type,
           detail: serverWakeCopy(guard).usageLimited,
@@ -1946,6 +2015,23 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
           detail: `Proposed plan '${sourceProposedPlan?.planId}' belongs to thread '${sourceThread.id}' in a different project.`,
         });
       }
+      const turnModes = queueDispatch?.modes ?? {
+        runtimeMode: targetThread.runtimeMode,
+        interactionMode: targetThread.interactionMode,
+        tokenMode: normalizeTokenMode(targetThread.tokenMode),
+      };
+      const modeEvents = (queueDispatch?.drafts ?? []).map(
+        (draft) =>
+          ({
+            ...withEventBase({
+              aggregateKind: "thread",
+              aggregateId: command.threadId,
+              occurredAt: command.createdAt,
+              commandId: command.commandId,
+            }),
+            ...draft,
+          }) as PlannedOrchestrationEvent,
+      );
       const userMessageEvent: Omit<OrchestrationEvent, "sequence"> = {
         ...withEventBase({
           aggregateKind: "thread",
@@ -2051,9 +2137,9 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
             ? { modelSelection: command.modelSelection }
             : {}),
           ...(command.titleSeed !== undefined ? { titleSeed: command.titleSeed } : {}),
-          runtimeMode: targetThread.runtimeMode,
-          interactionMode: targetThread.interactionMode,
-          tokenMode: normalizeTokenMode(targetThread.tokenMode),
+          runtimeMode: turnModes.runtimeMode,
+          interactionMode: turnModes.interactionMode,
+          tokenMode: turnModes.tokenMode,
           ...(sourceProposedPlan !== undefined ? { sourceProposedPlan } : {}),
           ...(command.origin !== undefined ? { origin: command.origin } : {}),
           ...(isContextHandoff
@@ -2086,7 +2172,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
       const goalEvents =
         command.goal === undefined
           ? []
-          : yield* decideOrchestrationCommand({
+          : yield* decideCommand({
               readModel,
               command: {
                 type: "thread.goal.set",
@@ -2148,6 +2234,7 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
               }
             : event,
         ),
+        ...modeEvents,
         ...(unsettledEvent === null ? turnEvents : [unsettledEvent, ...turnEvents]),
         ...(autoResumedActivity === null ? [] : [autoResumedActivity]),
       ];
@@ -3362,4 +3449,24 @@ export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand"
       });
     }
   }
+});
+
+/**
+ * Decides one command: its own events, then the follow-up queue events they cause in the same
+ * batch (a Stop's hold, a sent message leaving the queue, Trash ending it; `followUpQueueFollowOns`).
+ */
+export const decideOrchestrationCommand = Effect.fn("decideOrchestrationCommand")(function* ({
+  command,
+  readModel,
+}: {
+  readonly command: OrchestrationCommand;
+  readonly readModel: OrchestrationReadModel;
+}): Effect.fn.Return<DecideOrchestrationCommandResult, OrchestrationCommandInvariantError> {
+  const decided = yield* decideCommand({ command, readModel });
+  const events = plannedEventList(decided);
+  // Only a thread with a queue can need queue events; the rules load for those alone.
+  if (!followUpQueueConcernedBy(readModel, events)) return decided;
+  const followOns = (yield* loadFollowUpQueueRules).followOns({ command, readModel, events });
+  if (followOns.length === 0) return decided;
+  return [...events, ...followOns.map((draft) => followUpQueueEvent(command, draft))];
 });

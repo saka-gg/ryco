@@ -2254,8 +2254,13 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
     // A server wake (delegated result, pull request update) is a normal queued turn start:
     // ensureSessionForThread creates or resumes the session. The decider requires an
     // unchanged model selection, so a handoff is unreachable here; keep the defensive check
-    // (never hand off on untrusted input).
-    if (event.payload.delegationReturnGuard && event.payload.contextHandoff !== undefined) {
+    // (never hand off on untrusted input). A queued follow-up is the user's own message: it
+    // keeps the model it was queued with and hands off like a send.
+    if (
+      event.payload.delegationReturnGuard &&
+      serverWakeSource(event.payload.delegationReturnGuard) !== "follow-up-queue" &&
+      event.payload.contextHandoff !== undefined
+    ) {
       const refused = serverWakeCopy(event.payload.delegationReturnGuard).handoffRefused;
       yield* appendProviderFailureActivity({
         threadId: event.payload.threadId,

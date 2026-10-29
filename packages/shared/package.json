@@ -412,6 +412,10 @@
       "types": "./src/usagePriceOverrides.ts",
       "import": "./src/usagePriceOverrides.ts"
     },
+    "./queueHold": {
+      "types": "./src/queueHold.ts",
+      "import": "./src/queueHold.ts"
+    },
     "./threadSettlement": {
       "types": "./src/threadSettlement.ts",
       "import": "./src/threadSettlement.ts"

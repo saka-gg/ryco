@@ -22,6 +22,7 @@ import { RestartContinuationLive } from "./orchestration/Layers/RestartContinuat
 import { CompletionReturnDeliveryLive } from "./agentControl/Layers/CompletionReturnDelivery.ts";
 import { ServerWakeFenceLive } from "./orchestration/Layers/ServerWakeFence.ts";
 import { PullRequestWatchServiceLive } from "./sourceControl/PullRequestWatchService.ts";
+import { ServerQueueDrainLive } from "./orchestration/Layers/ServerQueueDrain.ts";
 import { AgentControlWorkspacesLive } from "./agentControl/workspaceLifecycle.ts";
 import { AutomationCentreLive } from "./agentControl/Layers/AutomationCentre.ts";
 import { Duration, Effect, Layer } from "effect";
@@ -699,6 +700,11 @@ const RuntimeServicesLive = Layer.mergeAll(
     Layer.provideMerge(ServerRuntimeStartupLive),
     Layer.provideMerge(OrchestrationCommandApplicationLive),
   ),
+  // Each thread's queued follow-ups, sent behind the same wake fence (its runtime loads lazily).
+  ServerQueueDrainLive.pipe(
+    Layer.provideMerge(ServerRuntimeStartupLive),
+    Layer.provideMerge(OrchestrationCommandApplicationLive),
+  ),
   AgentControlExecutionLive.pipe(
     Layer.provideMerge(ServerRuntimeStartupLive),
     Layer.provideMerge(AgentControlActionValidatorLive),
@@ -726,8 +732,9 @@ const RuntimeServicesLive = Layer.mergeAll(
   Layer.provideMerge(WorkspaceLifecycleLive),
   // Delete dialog: what the work a checkout alone holds is about.
   Layer.provideMerge(WorkspaceChangeSummaryLive),
-  // One fence for every server wake (delegated results, pull request updates): they share its
-  // pending-start sightings and its cold-start budget.
+  // One fence for every server wake (delegated results, pull request updates, goal
+  // continuations, queued follow-ups): they share its pending-start sightings and its cold-start
+  // budget.
   Layer.provideMerge(ServerWakeFenceLive),
   // Squash- and rebase-merge proofs for checkout removal: lifecycle, storage, Agent Control.
   Layer.provideMerge(CheckoutMergeProverLive),

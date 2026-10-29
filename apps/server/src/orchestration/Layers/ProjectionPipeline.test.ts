@@ -112,8 +112,13 @@ it("routes each event only to its explicit projection owners", () => {
   assert.deepEqual(ORCHESTRATION_EVENT_PROJECTORS["thread.deleted"], [
     ORCHESTRATION_PROJECTOR_NAMES.threads,
     ORCHESTRATION_PROJECTOR_NAMES.threadPullRequestWatches,
+    ORCHESTRATION_PROJECTOR_NAMES.threadFollowUpQueues,
   ]);
-  assert.equal(Object.keys(ORCHESTRATION_EVENT_PROJECTORS).length, 52);
+  // The follow-up queue has its own tables too.
+  assert.deepEqual(ORCHESTRATION_EVENT_PROJECTORS["thread.queue-entry-added"], [
+    ORCHESTRATION_PROJECTOR_NAMES.threadFollowUpQueues,
+  ]);
+  assert.equal(Object.keys(ORCHESTRATION_EVENT_PROJECTORS).length, 59);
 });
 
 it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
@@ -1221,6 +1226,47 @@ it.layer(
       assert.isTrue(yield* exists(removePath));
       assert.isTrue(yield* exists(otherThreadPath));
 
+      // A queued follow-up's attachment is no message's yet; it is sent after the revert.
+      const queuedAttachmentId = "thread-revert-files-00000000-0000-4000-8000-000000000004";
+      const queuedPath = path.join(attachmentsDir, `${queuedAttachmentId}.png`);
+      yield* fileSystem.writeFileString(queuedPath, "queued");
+      yield* appendAndProject({
+        type: "thread.queue-entry-added",
+        eventId: EventId.make("evt-revert-files-queue"),
+        aggregateKind: "thread",
+        aggregateId: threadId,
+        occurredAt: now,
+        commandId: CommandId.make("cmd-revert-files-queue"),
+        causationEventId: null,
+        correlationId: CorrelationId.make("cmd-revert-files-queue"),
+        metadata: {},
+        payload: {
+          threadId,
+          entry: {
+            messageId: MessageId.make("message-queued"),
+            text: "Next",
+            attachments: [
+              {
+                type: "image",
+                id: queuedAttachmentId,
+                name: "queued.png",
+                mimeType: "image/png",
+                sizeBytes: 6,
+              },
+            ],
+            modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5-codex" },
+            runtimeMode: "full-access",
+            interactionMode: "default",
+            createdAt: now,
+            updatedAt: now,
+            revision: 1,
+            status: "queued",
+            author: "user",
+          },
+          beforeMessageId: null,
+        },
+      });
+
       yield* appendAndProject({
         type: "thread.reverted",
         eventId: EventId.make("evt-revert-files-7"),
@@ -1240,6 +1286,7 @@ it.layer(
       assert.isTrue(yield* exists(keepPath));
       assert.isFalse(yield* exists(removePath));
       assert.isTrue(yield* exists(otherThreadPath));
+      assert.isTrue(yield* exists(queuedPath));
     }),
   );
 });

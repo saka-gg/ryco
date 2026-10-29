@@ -146,6 +146,38 @@ describe("orchestrationStreams", () => {
     }),
   );
 
+  it.effect("forwards the thread's follow-up queue events to its subscribers", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("thread-queue-events");
+      const liveQueue = yield* Queue.bounded<OrchestrationEvent, OrchestrationGetSnapshotError>(4);
+      const overflowedRef = yield* Ref.make(false);
+      const replayMetrics = yield* makeWsReplayMetrics({
+        stream: "thread",
+        subscriptionId: "orchestration-stream-thread-queue-unit",
+        snapshotSequence: 0,
+      });
+      const forwarded = yield* offerOrchestrationThreadLiveEventOrFail({
+        threadId,
+        event: {
+          ...makeThreadDeletedEvent(1, threadId),
+          type: "thread.queue-released",
+          payload: {
+            threadId,
+            acknowledgedCauseKeys: ["paused:x"],
+            updatedAt: "2026-04-05T00:00:00.000Z",
+          },
+        } as OrchestrationEvent,
+        recordLiveSequence: () => Effect.void,
+        liveQueue,
+        overflowedRef,
+        replayMetrics,
+      });
+      assert.equal(forwarded, true);
+      assert.equal((yield* Queue.take(liveQueue)).type, "thread.queue-released");
+      yield* replayMetrics.reset;
+    }),
+  );
+
   it.effect("fails live queues on overflow so subscriptions resync by reconnecting", () =>
     Effect.gen(function* () {
       const threadId = ThreadId.make("thread-live-overflow");

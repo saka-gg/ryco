@@ -34,7 +34,44 @@ import { makeDeviceHandlers } from "./deviceRpc.ts";
 import { DeviceService } from "../device/Services/DeviceService.ts";
 import { authorizeRpcPrincipal, type WsRpcAccess } from "../auth/wsAuthorization.ts";
 
-const makeWsRpcHandlers = (principal: RpcPrincipal) =>
+/**
+ * The application group's handlers, named through each module's own factory. Inferred, the
+ * handler map is spelled out with every RPC's payload, once for each place the layer's type
+ * mentions it, and that outgrew the length TypeScript serializes a declaration's type to.
+ */
+type WsRpcHandlerMap = ReturnType<typeof makeAgentControlHandlers> &
+  ReturnType<typeof makeAutomationCentreHandlers> &
+  ReturnType<typeof makeOrchestrationHandlers> &
+  ReturnType<typeof makeContextHandoffHandlers> &
+  ReturnType<typeof makeProviderHandlers> &
+  ReturnType<typeof makeProviderSessionPrewarmHandlers> &
+  ReturnType<typeof makeProviderProjectCommandsHandlers> &
+  ReturnType<typeof makeSideQuestionHandlers> &
+  ReturnType<typeof makeStatisticsHandlers> &
+  ReturnType<typeof makeCliProxyHandlers> &
+  ReturnType<typeof makeSourceControlHandlers> &
+  ReturnType<typeof makeProjectHandlers> &
+  ReturnType<typeof makeChatProjectHandlers> &
+  ReturnType<typeof makeSessionImportHandlers> &
+  ReturnType<typeof makeThreadForkHandlers> &
+  ReturnType<typeof makeStorageHandlers> &
+  ReturnType<typeof makeLifecycleHandlers> &
+  ReturnType<typeof makeDailyRecapHandlers> &
+  ReturnType<typeof makeLocalTaskHandlers> &
+  ReturnType<typeof makeNotesHandlers> &
+  ReturnType<typeof makeNodeUpdateHandlers> &
+  ReturnType<typeof makeGitHandlers> &
+  ReturnType<typeof makeTerminalHandlers>;
+
+type WsRpcContextBuild = ReturnType<typeof makeWsRpcContext>;
+
+const makeWsRpcHandlers = (
+  principal: RpcPrincipal,
+): Effect.Effect<
+  WsRpcHandlerMap,
+  Effect.Error<WsRpcContextBuild>,
+  Effect.Services<WsRpcContextBuild> | Scope.Scope
+> =>
   Effect.gen(function* () {
     const ctx = yield* makeWsRpcContext(principal);
     yield* Effect.addFinalizer(() => ctx.clientWorkspaceUse.release);

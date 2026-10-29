@@ -796,10 +796,102 @@ it.effect("refuses a client's turn start or steer that uses an id the server min
       expect(refused.message).toBe("This message id is reserved for messages Ryco sends.");
     }
     yield* refuseServerMintedMessageId(start("a1b2c3"));
+    // A queued follow-up is sent under its own id, so it may not borrow one either.
+    const queued = (messageId: string) =>
+      ({
+        type: "thread.queue.add",
+        commandId: "cmd-3",
+        threadId: "thread-1",
+        entry: { messageId, text: "Later", attachments: [] },
+        createdAt: "2026-10-29T00:00:00.000Z",
+      }) as unknown as Parameters<typeof refuseServerMintedMessageId>[0];
+    const refusedQueued = yield* Effect.flip(
+      refuseServerMintedMessageId(queued("delegation-result:x")),
+    );
+    expect(refusedQueued.message).toBe("This message id is reserved for messages Ryco sends.");
+    yield* refuseServerMintedMessageId(queued("queued-1"));
     yield* refuseServerMintedMessageId({
       type: "thread.archive",
       commandId: "cmd-2",
       threadId: "thread-1",
     } as unknown as Parameters<typeof refuseServerMintedMessageId>[0]);
   }),
+);
+
+const queueAddCommand = (messageId: string): ClientOrchestrationCommand => {
+  const turn = fileTurnCommand();
+  if (turn.type !== "thread.turn.start") throw new Error("Expected a turn start fixture");
+  return {
+    type: "thread.queue.add",
+    commandId: CommandId.make(`queue-add-${messageId}`),
+    threadId: turn.threadId,
+    entry: {
+      messageId: MessageId.make(messageId),
+      text: "Queued with a file",
+      attachments: turn.message.attachments,
+      modelSelection: { instanceId: "codex", model: "gpt-5.4" } as never,
+      runtimeMode: "full-access",
+      interactionMode: "default",
+    },
+    createdAt: "2026-01-01T00:00:00.000Z",
+  };
+};
+
+it.effect("stores a queued follow-up's attachments like a sent message's", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const workspaceAccessRoot = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "ryco-normalizer-queue-",
+      });
+      const normalized = yield* normalizeDispatchCommand(queueAddCommand("queued-1")).pipe(
+        Effect.provide(makeNormalizerLayer(workspaceAccessRoot)),
+      );
+      if (normalized.type !== "thread.queue.add") {
+        throw new Error(`Unexpected normalized command: ${normalized.type}`);
+      }
+      const [attachment] = normalized.entry.attachments;
+      expect(attachment?.type).toBe("file");
+      expect(attachment && "id" in attachment ? attachment.id : undefined).toBeTypeOf("string");
+      expect(attachment && "dataUrl" in attachment).toBe(false);
+      expect(normalized.alreadySent).toBeUndefined();
+    }).pipe(Effect.provide(NodeServices.layer)),
+  ),
+);
+
+it.effect("marks a queued follow-up that is already a message as sent, storing nothing", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const workspaceAccessRoot = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "ryco-normalizer-queue-sent-",
+      });
+      const layer = Layer.mergeAll(
+        WorkspaceAccessPolicyLayer(workspaceAccessRoot),
+        WorkspacePathsLive,
+        ServerConfig.layerTest(workspaceAccessRoot, { prefix: "ryco-normalizer-test-" }),
+        Layer.succeed(ProjectionSnapshotQuery, {
+          getThreadMessageById: ({ messageId }) =>
+            Effect.succeed(
+              messageId === "sent-1" ? Option.some({ id: messageId } as never) : Option.none(),
+            ),
+        } as Partial<ProjectionSnapshotQueryShape> as ProjectionSnapshotQueryShape),
+      ).pipe(Layer.provideMerge(NodeServices.layer));
+      const { normalized, stored } = yield* Effect.gen(function* () {
+        const config = yield* ServerConfig;
+        const normalized = yield* normalizeDispatchCommand(queueAddCommand("sent-1"));
+        const fs = yield* FileSystem.FileSystem;
+        const stored = (yield* fs.exists(config.attachmentsDir))
+          ? yield* fs.readDirectory(config.attachmentsDir)
+          : [];
+        return { normalized, stored };
+      }).pipe(Effect.provide(layer));
+      if (normalized.type !== "thread.queue.add") {
+        throw new Error(`Unexpected normalized command: ${normalized.type}`);
+      }
+      expect(normalized.alreadySent).toBe(true);
+      expect(normalized.entry.attachments).toEqual([]);
+      expect(stored).toEqual([]);
+    }).pipe(Effect.provide(NodeServices.layer)),
+  ),
 );

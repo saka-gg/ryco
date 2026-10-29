@@ -1,13 +1,19 @@
 /**
  * The fence every server wake passes before it is dispatched: a queued turn start the server
- * sends on its own (a delegated result, a pull request watch update). One instance per process,
- * so its pending-start sightings and its cold-start budget are shared by every wake source.
+ * sends on its own (a delegated result, a pull request watch update, a goal continuation, a
+ * queued follow-up). One instance per process, so its pending-start sightings and its
+ * cold-start budget are shared by every wake source.
  *
  * The decider fences the dispatch itself (`delegationReturnGuard`); this fence decides whether
  * a wake should be tried at all, from what the decider cannot see: pending turn starts, the
  * revert journal and live provider sessions.
  */
-import type { MessageId, OrchestrationThreadShell, ThreadId } from "@ryco/contracts";
+import type {
+  MessageId,
+  OrchestrationThreadShell,
+  ServerWakeSource,
+  ThreadId,
+} from "@ryco/contracts";
 import { Context } from "effect";
 import type { Effect } from "effect";
 import type { ProjectionRepositoryError } from "../../persistence/Errors.ts";
@@ -24,10 +30,13 @@ export interface ServerWakeFenceShape {
    * accepted turn start would), then the shared queued-turn idle rule plus a pending start
    * first seen by this process less than `QUEUED_TURN_START_GRACE_MS` ago. Process time, so a
    * stale pending row left by a restart stops blocking and client clock skew cannot open it.
+   * Every source but the queue itself is also `busy` while the thread's follow-up queue waits
+   * to send (`followUpQueueWaiting`): the user's follow-ups go first.
    */
   readonly holdReason: (
     shell: OrchestrationThreadShell,
     nowMs: number,
+    source?: ServerWakeSource,
   ) => Effect.Effect<ServerWakeHold | null, ServerWakeFenceError>;
   /**
    * A pending checkpoint revert: the decider rejects every turn start until it ends. Reads the

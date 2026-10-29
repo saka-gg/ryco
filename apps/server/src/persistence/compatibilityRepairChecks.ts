@@ -251,6 +251,11 @@ const checks: Record<CompatibilityRepairKey, (c: SchemaCatalog) => RepairApplied
   "pull-request-watches": (c) =>
     c.has("table", "projection_thread_pull_request_watches") &&
     c.has("index", "idx_projection_thread_pull_request_watches_active"),
+  // Both tables and the entries' order index; no backfill.
+  "follow-up-queue": (c) =>
+    c.has("table", "projection_thread_queue_entries") &&
+    c.has("table", "projection_thread_queue_holds") &&
+    c.has("index", "idx_projection_thread_queue_entries_position"),
 };
 
 /** Of `keys`, the repairs whose effect this database already has, read without writing. */

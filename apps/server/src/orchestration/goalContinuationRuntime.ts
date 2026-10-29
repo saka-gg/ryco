@@ -203,7 +203,9 @@ export const makeGoalContinuation = (deps: GoalContinuationDeps) => {
       // The pin first, then the idle check: a person's message accepted after the pin fails the
       // decider's guard, and one accepted before it shows as a pending start here.
       const latestUserMessageId = yield* deps.fence.latestUserMessageId(threadId);
-      if ((yield* deps.fence.holdReason(shell, nowMs)) !== null) return "held" as Attempt;
+      if ((yield* deps.fence.holdReason(shell, nowMs, "goal-continuation")) !== null) {
+        return "held" as Attempt;
+      }
       const { cold, budgetFull } = yield* deps.fence.coldStart(threadId, nowMs);
       if (cold && budgetFull) return "held" as Attempt;
       const ids = goalContinuationIds(threadId, turnId);
@@ -316,7 +318,7 @@ export const makeGoalContinuation = (deps: GoalContinuationDeps) => {
         candidate.retryAtMs = candidate.backoffUntilMs;
         return;
       }
-      if ((yield* deps.fence.holdReason(shell, nowMs)) !== null) {
+      if ((yield* deps.fence.holdReason(shell, nowMs, "goal-continuation")) !== null) {
         candidate.readySinceMs = null;
         candidate.retryAtMs = nowMs + HELD_RECHECK_MS;
         return;
@@ -372,9 +374,15 @@ export const makeGoalContinuation = (deps: GoalContinuationDeps) => {
     const threadId = event.aggregateId as ThreadId;
     switch (event.type) {
       case "thread.turn-start-requested":
-        // A person's or an agent's own message starts a fresh run of automatic turns; server
-        // wakes (delegated results, pull request updates, continuations) do not.
-        if (event.payload.delegationReturnGuard === undefined) chains.delete(threadId);
+        // A person's or an agent's own message starts a fresh run of automatic turns, also when
+        // the thread's follow-up queue sends it; other server wakes (delegated results, pull
+        // request updates, continuations) do not.
+        if (
+          event.payload.delegationReturnGuard === undefined ||
+          event.payload.delegationReturnGuard.source === "follow-up-queue"
+        ) {
+          chains.delete(threadId);
+        }
         return false;
       case "thread.goal-updated":
         goalless.delete(threadId);
