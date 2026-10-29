@@ -650,12 +650,18 @@ function isAllowedThreadSearchEditableTarget(target: EventTarget | null | undefi
   );
 }
 
+/** A diff view (the Diff panel) runs its own find while focus is inside it. */
+function isDiffFindSurfaceTarget(target: EventTarget | null | undefined): boolean {
+  return elementFromEventTarget(target)?.closest("[data-diff-find-surface]") != null;
+}
+
 function shouldIgnoreThreadMessageSearchShortcut(
   event: globalThis.KeyboardEvent & { isComposing?: boolean },
 ): boolean {
   if (event.type !== "keydown") return true;
   if (event.isComposing) return true;
   if (isTerminalFocused()) return true;
+  if (isDiffFindSurfaceTarget(event.target)) return true;
   if (isDialogShortcutTarget(event.target) || hasOpenDialogShortcutTarget()) return true;
   if (
     isEditableShortcutTarget(event.target) &&
