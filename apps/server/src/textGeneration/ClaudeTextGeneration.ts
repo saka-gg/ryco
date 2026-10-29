@@ -116,7 +116,7 @@ export const makeClaudeTextGeneration = Effect.fn("makeClaudeTextGeneration")(fu
     prompt,
     outputSchemaJson,
     modelSelection,
-    toolsEnabled = true,
+    toolsEnabled = operation === "generateIssueContent",
     lightweight = operation === "answerSideQuestion",
     persistSession = true,
     timeoutMs = CLAUDE_TIMEOUT_MS,
@@ -133,6 +133,10 @@ export const makeClaudeTextGeneration = Effect.fn("makeClaudeTextGeneration")(fu
     prompt: string;
     outputSchemaJson: S;
     modelSelection: ModelSelection;
+    /**
+     * True (issue drafting only) gives the run Claude's tools with permission checks skipped.
+     * False runs without built-in tools and without MCP servers.
+     */
     toolsEnabled?: boolean;
     /**
      * Run without the user's setting sources, MCP servers, hooks, memory and
@@ -180,15 +184,11 @@ export const makeClaudeTextGeneration = Effect.fn("makeClaudeTextGeneration")(fu
           "-p",
           ...(lightweight || !persistSession ? ["--no-session-persistence"] : []),
           ...(lightweight
-            ? [
-                "--setting-sources",
-                "",
-                "--strict-mcp-config",
-                "--mcp-config",
-                '{"mcpServers":{}}',
-                "--system-prompt",
-                lightweightSystemPrompt(operation),
-              ]
+            ? ["--setting-sources", "", "--system-prompt", lightweightSystemPrompt(operation)]
+            : []),
+          // `--tools ""` turns off built-in tools only; MCP servers need their own switch.
+          ...(lightweight || !toolsEnabled
+            ? ["--strict-mcp-config", "--mcp-config", '{"mcpServers":{}}']
             : []),
           "--output-format",
           "json",
