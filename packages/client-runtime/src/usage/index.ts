@@ -1,6 +1,7 @@
 export * from "./merge.ts";
 export * from "./selectors.ts";
 export * from "./costBreakdown.ts";
+export * from "./modelDetail.ts";
 export * from "./request.ts";
 export * from "./summaryCache.ts";
 export * from "./statisticsSnapshotCache.ts";
