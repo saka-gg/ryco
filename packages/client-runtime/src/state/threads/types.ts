@@ -31,6 +31,7 @@ import type {
   ThreadLineage,
   ThreadUsageLimit,
   ThreadPullRequestWatchShell,
+  ThreadFollowUpQueueShell,
 } from "@ryco/contracts";
 import { DEFAULT_AGENT_TOKEN_MODE as CONTRACT_DEFAULT_AGENT_TOKEN_MODE } from "@ryco/contracts/orchestration";
 
@@ -349,6 +350,11 @@ export interface SidebarThreadSummary {
    * when it has none, and from older servers.
    */
   pullRequestWatches?: ThreadPullRequestWatchShell;
+  /**
+   * The node's follow-up queue for this thread (count, hold, head preview) while it holds an
+   * entry. Absent when empty, and from older servers.
+   */
+  followUpQueueSummary?: ThreadFollowUpQueueShell;
 }
 
 export interface SidebarWorktreeSummary {

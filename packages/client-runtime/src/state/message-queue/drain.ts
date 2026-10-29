@@ -27,6 +27,16 @@ export type QueueDrainWaitReason =
   | "in-flight"
   | "steering";
 
+/**
+ * A device hold recorded because moving an entry to the node failed. It waits for Resume
+ * (which tries again) instead of retrying on every evaluation.
+ */
+export const QUEUE_MIGRATION_FAILED_CAUSE_PREFIX = "migrate-failed:";
+
+export function queueMigrationFailedCauseKey(messageId: string): string {
+  return `${QUEUE_MIGRATION_FAILED_CAUSE_PREFIX}${messageId}`;
+}
+
 export interface QueueDrainInput {
   readonly nowIso: string;
   readonly queue: ReadonlyArray<{
@@ -42,7 +52,17 @@ export interface QueueDrainInput {
   readonly view: QueueThreadView | null;
   /** Local draft key with a mounted foreground sender (web only). */
   readonly draft: boolean;
-  readonly environment: { readonly shellLive: boolean; readonly mutationReady: boolean };
+  readonly environment: {
+    readonly shellLive: boolean;
+    readonly mutationReady: boolean;
+    /** The node keeps follow-up queues itself (`capabilities.serverFollowUpQueue`). */
+    readonly serverQueue?: boolean | undefined;
+  };
+  /**
+   * Whether the node's queue can carry the head (absent: it can). One it cannot carry (a
+   * Computer Use turn, say) is sent from this device as before, in its place.
+   */
+  readonly headMigratable?: boolean | undefined;
   readonly pendingDispatch: QueuedDispatchSnapshot | null;
   readonly dispatchedMessageIds: ReadonlySet<string>;
   readonly sender: "foreground" | "background" | null;
@@ -64,6 +84,8 @@ export type QueueDrainStep =
   | { readonly kind: "release"; readonly causeKeys: string[] }
   | { readonly kind: "hold"; readonly hold: QueueHold }
   | { readonly kind: "wait"; readonly reason: QueueDrainWaitReason }
+  /** Move this device's entries, head first, to the node's queue (design §3.7). */
+  | { readonly kind: "migrate" }
   | {
       readonly kind: "send";
       readonly messageId: string;
@@ -73,6 +95,7 @@ export type QueueDrainStep =
 export type QueueDrainSteerRejection = QueuedMessageSteerRejection;
 
 const IDLE: QueueDrainStep = { kind: "idle" };
+const MIGRATE: QueueDrainStep = { kind: "migrate" };
 const THREAD_GONE: QueueDrainStep = { kind: "thread-gone" };
 const WAIT_STEPS = {} as Record<QueueDrainWaitReason, QueueDrainStep>;
 function wait(reason: QueueDrainWaitReason): QueueDrainStep {
@@ -196,7 +219,21 @@ export function resolveQueueDrainStep(input: QueueDrainInput): QueueDrainStep {
     return { kind: "hold", hold: holdQueueForCauses(input.hold, partition.hold, input.nowIso)! };
   }
 
-  // 10–17. Waits, in order.
+  // 10. The node keeps this thread's queue: this device's entries move there instead of being
+  // sent from here, once nothing of theirs is in flight. A held queue moves with its hold.
+  if (environment.serverQueue === true && view.started && input.headMigratable !== false) {
+    if (input.hold?.causeKeys.some((key) => key.startsWith(QUEUE_MIGRATION_FAILED_CAUSE_PREFIX))) {
+      return wait("held");
+    }
+    if (input.pendingDispatch !== null) return wait("awaiting-ack");
+    if (view.archived) return wait("archived");
+    if (!environment.mutationReady) return wait("environment");
+    if (queue.some((entry) => entry.deliveryStatus === "sending")) return wait("in-flight");
+    if (Object.keys(input.steerAttempts).length > 0) return wait("steering");
+    return MIGRATE;
+  }
+
+  // 11–18. Waits, in order.
   if (input.hold !== null) return wait("held");
   if (input.pendingDispatch !== null) return wait("awaiting-ack");
   if (view.archived) return wait("archived");
@@ -207,6 +244,6 @@ export function resolveQueueDrainStep(input: QueueDrainInput): QueueDrainStep {
   const headWait = headWaitReason(head, input.steerAttempts);
   if (headWait !== null) return wait(headWait);
 
-  // 18.
+  // 19.
   return { kind: "send", messageId: head.id, sender: input.sender };
 }

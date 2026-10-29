@@ -341,9 +341,10 @@ const CHAT_ROUTE_FORBIDDEN_SOURCES: readonly ForbiddenBundleSource[] = [
  * (78 KiB) returning to the static graph fails the budget, not only the rules.
  * 750 KiB on 2026-10-24 with the navigation and long-running-health batches,
  * 757 KiB with the transcript's row height estimates (6 KiB that every thread
- * open and switch uses before its first paint).
+ * open and switch uses before its first paint). 761 KiB on 2026-10-29 with the
+ * composer's view of the node's follow-up queue.
  */
-const CHAT_ROUTE_GZIP_BUDGET = 760 * KIB;
+const CHAT_ROUTE_GZIP_BUDGET = 761 * KIB;
 /**
  * 156 since removing AI Focus on 2026-10-29: the same 44 KiB of shared lucide
  * icons regrouped by importing entry set into six `icons` chunks instead of
@@ -368,7 +369,8 @@ const TRACING_EXPORTER_SOURCES: readonly ForbiddenBundleSource[] = [
  * connection and pull request links from chat add about 5 KiB to the first
  * paint path. 527 KiB with the push alert device RPCs, whose schemas the
  * boot RPC client carries. 528 KiB with the follow-up queue's commands and
- * events in the orchestration contracts that boot decodes.
+ * events in the orchestration contracts that boot decodes. 529 KiB with the
+ * threads store applying the queue's events.
  */
 export const DEFAULT_BUNDLE_BUDGET_POLICY: BundleBudgetPolicy = {
   bootChunk: "main",
@@ -377,7 +379,7 @@ export const DEFAULT_BUNDLE_BUDGET_POLICY: BundleBudgetPolicy = {
       name: "boot",
       chunk: "main",
       beyondBoot: false,
-      maxGzipBytes: 528 * KIB,
+      maxGzipBytes: 529 * KIB,
       forbiddenSources: [
         ...HOSTED_RUNTIME_SOURCES,
         ...MARKDOWN_SOURCES,

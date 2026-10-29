@@ -24,6 +24,7 @@ import { readEnvironmentApi } from "../environmentApi";
 import { readEnvironmentConnection } from "../environments/runtime";
 import { newCommandId, randomUUID } from "../lib/utils";
 import { holdMessageQueueForInterrupt } from "../messageQueueDrain";
+import { readServerFollowUpQueueSupported } from "../messageQueueEnvironment";
 import { selectThreadByRef, selectWorkingDelegatedDescendants, useStore } from "../store";
 import {
   interruptThreadTurn,
@@ -84,7 +85,9 @@ export function useChatSessionActions(input: {
     // and undo the hold only if the interrupt never reached the server.
     const held = holdMessageQueueForInterrupt(environmentId, activeThreadId);
     try {
-      await interruptThreadTurn(api, activeThreadId);
+      await interruptThreadTurn(api, activeThreadId, {
+        holdQueue: readServerFollowUpQueueSupported(environmentId),
+      });
     } catch (error) {
       held.undo();
       throw error;
