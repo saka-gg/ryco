@@ -34,12 +34,11 @@ export interface InboxOrderSnapshot {
 /** `buildInboxSidebarModel`'s section order, for a section the hold did not show. */
 const SECTION_RANK: Readonly<Record<InboxSidebarSectionKey, number>> = {
   pinned: 0,
-  focus: 1,
-  active: 2,
-  "needs-input": 3,
-  recent: 4,
-  snoozed: 5,
-  settled: 6,
+  active: 1,
+  "needs-input": 2,
+  recent: 3,
+  snoozed: 4,
+  settled: 5,
 };
 
 function lifecycleSignature(row: InboxSidebarRow): string {

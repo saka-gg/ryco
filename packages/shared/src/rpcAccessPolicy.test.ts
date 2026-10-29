@@ -50,7 +50,6 @@ describe("shared RPC access policy", () => {
       false,
     );
     expect(rpcAccessFor(WS_METHODS.sourceControlMergeChangeRequest)).toBe("operator");
-    expect(rpcAccessFor(WS_METHODS.threadPriorityEnsureCurrent)).toBe("operator");
   });
 
   it("keeps chat-folder methods at the project-mutation tier", () => {

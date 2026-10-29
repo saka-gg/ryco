@@ -33,10 +33,9 @@ export function shellSettlementPolicy(
 /**
  * Server-side settlement input for manual settle and snooze eligibility
  * (`canSettleThread`/`canSnoozeThread`), which never depends on the automatic
- * rule, so it is left off here; the AI Focus candidates apply the node's rule
- * ({@link nodeAutoSettleAfterDays}) themselves. Pins are client-local and
- * liveness is not in the read model, and neither ever gates manual settlement,
- * so both are passed as neutral values.
+ * rule, so it is left off here. Pins are client-local and liveness is not in
+ * the read model, and neither ever gates manual settlement, so both are passed
+ * as neutral values.
  */
 export function threadSettlementInput(
   readModel: OrchestrationReadModel,

@@ -243,7 +243,6 @@ function revealMovedSidebarRows(
 const selectSidebarThreadSortOrder = (settings: UnifiedSettings) => settings.sidebarThreadSortOrder;
 const selectSidebarProjectSortOrder = (settings: UnifiedSettings) =>
   settings.sidebarProjectSortOrder;
-const selectAiFocusEnabled = (settings: UnifiedSettings) => settings.aiFocusEnabled;
 const selectSidebarAutoSettleAfterDays = (settings: UnifiedSettings) =>
   settings.sidebarAutoSettleAfterDays;
 const selectServerProviders = (config: ServerConfig | null) => config?.providers ?? null;
@@ -477,7 +476,6 @@ export default function Sidebar() {
   const navigate = useNavigate();
   const sidebarThreadSortOrder = useSettings(selectSidebarThreadSortOrder);
   const sidebarProjectSortOrder = useSettings(selectSidebarProjectSortOrder);
-  const aiFocusEnabled = useSettings(selectAiFocusEnabled);
   const sidebarAutoSettleAfterDays = useSettings(selectSidebarAutoSettleAfterDays);
   // Stable while the grouping settings are: it feeds the whole project-tree
   // derivation chain.
@@ -1260,7 +1258,6 @@ export default function Sidebar() {
       deliveryUnknownThreadKeys,
       localQueuedThreadKeys,
       pinnedThreadKeys,
-      aiFocusEnabled,
       autoSettleAfterDays: sidebarAutoSettleAfterDays,
       lastVisitedAtByKey: threadLastVisitedAtById,
     };
@@ -1534,7 +1531,6 @@ export default function Sidebar() {
                   stopThreadSession={stopThreadSession}
                   interruptThreadTurn={interruptThreadTurn}
                   activeThreadKey={activeRouteThreadKey}
-                  aiFocusEnabled={aiFocusEnabled}
                   autoSettleAfterDays={sidebarAutoSettleAfterDays}
                   deliveryUnknownThreadKeys={deliveryUnknownThreadKeys}
                   environments={inboxEnvironments}

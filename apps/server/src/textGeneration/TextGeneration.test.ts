@@ -4,7 +4,7 @@ import { describe, expect } from "vite-plus/test";
 
 import { ProviderInstanceId } from "@ryco/contracts";
 import { createModelSelection } from "@ryco/shared/model";
-import type { IssueContentGenerationResult, RankInboxThreadsInput } from "./TextGeneration.ts";
+import type { IssueContentGenerationResult } from "./TextGeneration.ts";
 
 import type { ProviderInstance } from "../provider/ProviderDriver.ts";
 import type { ProviderInstanceRegistryShape } from "../provider/Services/ProviderInstanceRegistry.ts";
@@ -19,7 +19,6 @@ const makeStubTextGeneration = (overrides: Partial<TextGenerationShape>): TextGe
   generateBranchName: () => Effect.die("generateBranchName stub not configured for this test"),
   generateThreadTitle: () => Effect.die("generateThreadTitle stub not configured for this test"),
   generateIssueContent: () => Effect.die("generateIssueContent stub not configured for this test"),
-  rankInboxThreads: () => Effect.die("rankInboxThreads stub not configured for this test"),
   answerSideQuestion: () => Effect.die("answerSideQuestion stub not configured for this test"),
   summarizeWorkspaceChanges: () =>
     Effect.die("summarizeWorkspaceChanges stub not configured for this test"),
@@ -62,71 +61,6 @@ const makeStubRegistry = (
 };
 
 describe("makeTextGenerationFromRegistry", () => {
-  it.effect("routes inbox ranking to the selected provider instance without fallback", () =>
-    Effect.gen(function* () {
-      const selectedId = ProviderInstanceId.make("claude_work");
-      const calls: RankInboxThreadsInput["modelSelection"][] = [];
-      const selected = makeStubInstance(
-        selectedId,
-        makeStubTextGeneration({
-          rankInboxThreads: (input) => {
-            calls.push(input.modelSelection);
-            return Effect.succeed({ rankings: [] });
-          },
-        }),
-      );
-      const other = makeStubInstance(
-        ProviderInstanceId.make("codex"),
-        makeStubTextGeneration({
-          rankInboxThreads: () => Effect.die("must not fall back"),
-        }),
-      );
-      const tg = makeTextGenerationFromRegistry(makeStubRegistry([selected, other]));
-      const result = yield* tg.rankInboxThreads({
-        cwd: process.cwd(),
-        chunk: {
-          candidates: [],
-          threadIdsByCandidateId: new Map(),
-          serializedCandidates: '{"candidates":[]}',
-          prompt: "rank",
-        },
-        modelSelection: createModelSelection(selectedId, "claude-sonnet", [
-          { id: "effort", value: "high" },
-        ]),
-      });
-      expect(result.rankings).toEqual([]);
-      expect(calls).toEqual([
-        createModelSelection(selectedId, "claude-sonnet", [{ id: "effort", value: "high" }]),
-      ]);
-    }),
-  );
-
-  it.effect("fails inbox ranking when the selected provider instance is unavailable", () =>
-    Effect.gen(function* () {
-      const tg = makeTextGenerationFromRegistry(makeStubRegistry([]));
-      const result = yield* tg
-        .rankInboxThreads({
-          cwd: process.cwd(),
-          chunk: {
-            candidates: [],
-            threadIdsByCandidateId: new Map(),
-            serializedCandidates: '{"candidates":[]}',
-            prompt: "rank",
-          },
-          modelSelection: createModelSelection(
-            ProviderInstanceId.make("missing_instance"),
-            "gpt-5",
-          ),
-        })
-        .pipe(Effect.result);
-      expect(Result.isFailure(result)).toBe(true);
-      if (Result.isFailure(result)) {
-        expect(result.failure.operation).toBe("rankInboxThreads");
-        expect(result.failure.detail).toContain("missing_instance");
-      }
-    }),
-  );
-
   it.effect("delegates to the matching instance's textGeneration closure", () =>
     Effect.gen(function* () {
       const personalId = ProviderInstanceId.make("codex_personal");

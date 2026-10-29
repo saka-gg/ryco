@@ -30,7 +30,6 @@ import type {
   ThreadGoal,
   ThreadLineage,
   ThreadUsageLimit,
-  ThreadPriorityProjectedRanking,
 } from "@ryco/contracts";
 import { DEFAULT_AGENT_TOKEN_MODE as CONTRACT_DEFAULT_AGENT_TOKEN_MODE } from "@ryco/contracts/orchestration";
 
@@ -342,8 +341,6 @@ export interface SidebarThreadSummary {
   backgroundLiveness?: "working" | "monitoring" | null | undefined;
   hasPendingUserInput: boolean;
   hasActionableProposedPlan: boolean;
-  /** Optional environment-local derived ranking projected by supporting servers. */
-  priority?: ThreadPriorityProjectedRanking | undefined;
   /** Server-owned provenance; absent/null on root threads and from older servers. */
   lineage?: ThreadLineage | null | undefined;
 }

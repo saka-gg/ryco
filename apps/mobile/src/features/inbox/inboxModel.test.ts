@@ -87,29 +87,6 @@ function thread(
 }
 
 describe("Inbox model", () => {
-  it("puts Focus above Active without duplicating promoted threads", () => {
-    const sections = buildInboxSections({
-      projects: [project(NODE_A, "project-a", "Ryco")],
-      worktrees: [],
-      environments: [{ environmentId: NODE_A, label: "Mac Studio", connectionState: "connected" }],
-      threads: [
-        thread(NODE_A, "approval", "project-a", { hasPendingApprovals: true }),
-        thread(NODE_A, "ordinary", "project-a"),
-      ],
-      aiFocusEnabled: true,
-      nowMs: Date.parse("2026-08-25T12:00:00.000Z"),
-    });
-
-    expect(sections.map((section) => section.title)).toEqual(["Focus", "Active"]);
-    expect(sections[0]?.rows[0]).toMatchObject({
-      threadId: "approval",
-      focusTitle: "Approval required",
-      focusAiGenerated: false,
-    });
-    expect(sections[1]?.rows.map((row) => row.threadId)).toEqual(["ordinary"]);
-    expect(new Set(sections.flatMap((section) => section.rows.map((row) => row.key))).size).toBe(2);
-  });
-
   it("keeps idle work and attention blockers together in the Active queue", () => {
     const projects = [project(NODE_A, "project-a", "Ryco"), project(NODE_B, "project-b", "Hub")];
     const sections = buildInboxSections({
@@ -600,9 +577,8 @@ describe("mobile settlement and attention policy", () => {
     expect(sections.map((section) => section.key)).toEqual(["active"]);
     expect(sections[0]?.rows).toHaveLength(4);
   });
-  it("puts pending input in Focus when enabled without duplicating it in Active", () => {
+  it("keeps pending input Active while idle work settles", () => {
     const sections = build({
-      aiFocusEnabled: true,
       threads: [
         thread(NODE_A, "input", "p", {
           latestUserMessageAt: activityAt,
@@ -611,7 +587,7 @@ describe("mobile settlement and attention policy", () => {
         thread(NODE_A, "old", "p", { latestUserMessageAt: activityAt }),
       ],
     });
-    expect(sections.map((section) => section.key)).toEqual(["focus", "settled"]);
+    expect(sections.map((section) => section.key)).toEqual(["active", "settled"]);
     expect(sections[0]?.rows[0]).toMatchObject({ state: "needs-input", canSettle: false });
     expect(new Set(sections.flatMap((section) => section.rows.map((row) => row.key))).size).toBe(2);
   });

@@ -19,7 +19,6 @@ import {
   type BranchNameGenerationInput,
   type ThreadTitleGenerationResult,
   type TextGenerationShape,
-  validateRankInboxThreadsResult,
 } from "./TextGeneration.ts";
 import {
   buildBranchNamePrompt,
@@ -28,7 +27,6 @@ import {
   buildIssueContentTitlePrompt,
   buildPrContentPrompt,
   buildThreadTitlePrompt,
-  buildThreadPriorityPrompt,
   buildSideQuestionPrompt,
   buildWorkspaceChangesSummaryPrompt,
 } from "./TextGenerationPrompts.ts";
@@ -201,7 +199,6 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
       | "generateBranchName"
       | "generateThreadTitle"
       | "generateIssueContent"
-      | "rankInboxThreads"
       | "answerSideQuestion"
       | "summarizeWorkspaceChanges";
     cwd: string;
@@ -526,22 +523,6 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
       }),
     );
 
-  const rankInboxThreads: TextGenerationShape["rankInboxThreads"] = Effect.fn(
-    "CodexTextGeneration.rankInboxThreads",
-  )(function* (input) {
-    const { prompt, outputSchema } = buildThreadPriorityPrompt({
-      serializedCandidates: input.chunk.serializedCandidates,
-    });
-    const generated = yield* runCodexJson({
-      operation: "rankInboxThreads",
-      cwd: input.cwd,
-      prompt,
-      outputSchemaJson: outputSchema,
-      modelSelection: input.modelSelection,
-    });
-    return yield* validateRankInboxThreadsResult(input, generated.rankings);
-  });
-
   const summarizeWorkspaceChanges: TextGenerationShape["summarizeWorkspaceChanges"] = Effect.fn(
     "CodexTextGeneration.summarizeWorkspaceChanges",
   )(function* (input) {
@@ -563,7 +544,6 @@ export const makeCodexTextGeneration = Effect.fn("makeCodexTextGeneration")(func
     generateBranchName,
     generateThreadTitle,
     generateIssueContent,
-    rankInboxThreads,
     answerSideQuestion,
     summarizeWorkspaceChanges,
   } satisfies TextGenerationShape;

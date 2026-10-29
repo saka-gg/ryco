@@ -8,8 +8,6 @@ import * as Schema from "effect/Schema";
 export const HOSTED_INBOX_PREFERENCES_KEY = "ryco:hosted-inbox-preferences:v1";
 const PREFERENCE_KEYS = [
   "sidebarAutoSettleAfterDays",
-  "aiFocusEnabled",
-  "aiFocusRefreshIntervalMs",
   "notifyOnTurnCompleteWhenUnfocused",
   "threadNotificationSound",
   "threadNotificationToasts",

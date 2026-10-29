@@ -6,7 +6,6 @@ import { Schema } from "effect";
 import { ProviderInstanceId } from "./providerInstance.ts";
 import { CliProxyHubId } from "./cliProxy.ts";
 import {
-  AiFocusRefreshIntervalMs,
   ClientSettingsPatch,
   ClientSettingsSchema,
   DEFAULT_CHAT_WIDTH,
@@ -68,42 +67,18 @@ describe("ServerSettings.threadAutoSettleAfterDays", () => {
   });
 });
 
-describe("AI Focus settings", () => {
-  it("decodes historical client settings as disabled with a ten-minute interval", () => {
-    const decoded = decodeClientSettings({});
-    expect(decoded.aiFocusEnabled).toBe(false);
-    expect(decoded.aiFocusRefreshIntervalMs).toBe(600_000);
-    expect(DEFAULT_CLIENT_SETTINGS.aiFocusEnabled).toBe(false);
-    expect(DEFAULT_CLIENT_SETTINGS.aiFocusRefreshIntervalMs).toBe(600_000);
-  });
-
-  it("accepts manual-only and the approved literal intervals, but rejects arbitrary values", () => {
-    const decodeInterval = Schema.decodeUnknownSync(AiFocusRefreshIntervalMs);
-    for (const interval of [
-      0, 300_000, 600_000, 1_800_000, 3_600_000, 21_600_000, 86_400_000,
-    ] as const) {
-      expect(decodeInterval(interval)).toBe(interval);
-      expect(decodeClientSettingsPatch({ aiFocusRefreshIntervalMs: interval })).toMatchObject({
-        aiFocusRefreshIntervalMs: interval,
-      });
-    }
-    expect(() => decodeInterval(60_000)).toThrow();
-  });
-
-  it("decodes historical server settings with no ranking model override", () => {
-    expect(decodeServerSettings({}).inboxPriorityModelSelection).toBeNull();
-    expect(DEFAULT_SERVER_SETTINGS.inboxPriorityModelSelection).toBeNull();
-  });
-
-  it("patches an environment-local model override or resets it to inheritance", () => {
-    expect(
-      decodeServerSettingsPatch({
-        inboxPriorityModelSelection: { instanceId: "claude", model: "claude-sonnet" },
-      }).inboxPriorityModelSelection,
-    ).toMatchObject({ instanceId: "claude", model: "claude-sonnet" });
-    expect(
-      decodeServerSettingsPatch({ inboxPriorityModelSelection: null }).inboxPriorityModelSelection,
-    ).toBeNull();
+describe("Removed AI Focus settings", () => {
+  it("decodes settings saved while AI Focus existed, dropping its keys", () => {
+    const client = decodeClientSettings({
+      aiFocusEnabled: true,
+      aiFocusRefreshIntervalMs: 600_000,
+    });
+    expect(Object.hasOwn(client, "aiFocusEnabled")).toBe(false);
+    expect(Object.hasOwn(client, "aiFocusRefreshIntervalMs")).toBe(false);
+    const server = decodeServerSettings({
+      inboxPriorityModelSelection: { instanceId: "claude", model: "claude-sonnet" },
+    });
+    expect(Object.hasOwn(server, "inboxPriorityModelSelection")).toBe(false);
   });
 });
 

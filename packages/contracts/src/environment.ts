@@ -63,7 +63,6 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
    * each client's own rule and which drop the key from settings patches.
    */
   nodeAutoSettlement: Schema.optionalKey(Schema.Boolean),
-  threadPriorityRanking: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   worktreeSubmoduleSettings: Schema.optionalKey(Schema.Boolean),
   /** Usage-limit settings and the resume/snooze worker; absent on older servers. */
   usageLimitRecovery: Schema.optionalKey(Schema.Boolean),

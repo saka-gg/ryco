@@ -23,7 +23,6 @@ describe("ExecutionEnvironmentCapabilities.threadSettlement", () => {
     expect(decodeDescriptor(descriptor({ repositoryIdentity: true })).capabilities).toEqual({
       repositoryIdentity: true,
       threadSettlement: false,
-      threadPriorityRanking: false,
     });
   });
 
@@ -31,14 +30,6 @@ describe("ExecutionEnvironmentCapabilities.threadSettlement", () => {
     expect(
       decodeDescriptor(descriptor({ repositoryIdentity: true, threadSettlement: true }))
         .capabilities.threadSettlement,
-    ).toBe(true);
-  });
-
-  it("decodes missing ranking support as false and preserves explicit support", () => {
-    expect(decodeDescriptor(descriptor({})).capabilities.threadPriorityRanking).toBe(false);
-    expect(
-      decodeDescriptor(descriptor({ threadPriorityRanking: true })).capabilities
-        .threadPriorityRanking,
     ).toBe(true);
   });
 });

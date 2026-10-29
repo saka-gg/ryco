@@ -111,7 +111,6 @@ const baseProps = (): InboxSidebarProps => ({
   deliveryUnknownThreadKeys: new Set(),
   localQueuedThreadKeys: new Set(),
   activeThreadKey: rowKey(0, 0),
-  aiFocusEnabled: false,
   autoSettleAfterDays: null,
   pinnedThreadKeys: new Set(),
   onOpenThread: vi.fn(),

@@ -17,7 +17,6 @@ import { ServerStateBootstrap } from "../../state/serverStateSync";
 import { deriveAppAccess, isWorkspaceDeepLink } from "./appAccessModel";
 import { watchDirectCredentialAccess } from "./directCredentialAccess";
 import { HOSTED_LAUNCH_DECISION_DEADLINE_MS, markAppAccessDecided } from "./launchDecision";
-import { ThreadPriorityRefreshBridge } from "../../components/ThreadPriorityRefreshBridge";
 import { ThreadAlertsBridge } from "../../notifications/ThreadAlertsBridge";
 
 const logo = require("../../../../../assets/logo_letter_only.svg");
@@ -141,7 +140,6 @@ export function AppAccessGate(props: {
   return (
     <>
       <ServerStateBootstrap />
-      <ThreadPriorityRefreshBridge />
       <ThreadAlertsBridge />
       <WorkspaceNavigation linking={props.linking} theme={props.theme} />
     </>

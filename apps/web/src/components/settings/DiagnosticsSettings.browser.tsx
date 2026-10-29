@@ -149,7 +149,6 @@ const serverConfig = {
     capabilities: {
       repositoryIdentity: true,
       threadSettlement: false,
-      threadPriorityRanking: false,
     },
   },
   auth: {

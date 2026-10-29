@@ -46,10 +46,6 @@ import {
   type WorktreePullRequestLink,
 } from "@ryco/shared/worktreePullRequests";
 import {
-  describeThreadPriorityFocus,
-  type ThreadPriorityFocusMetadata,
-} from "@ryco/shared/threadPriority";
-import {
   defaultInstanceIdForDriver,
   type DesktopWorkspaceMachineProjection,
   type EnvironmentId,
@@ -80,7 +76,6 @@ export type InboxSidebarAttention = "approval" | "input" | "plan";
 
 export type InboxSidebarSectionKey =
   | "pinned"
-  | "focus"
   | "active"
   | "needs-input"
   | "recent"
@@ -207,7 +202,6 @@ export interface InboxSidebarRow {
   /** The thread is a "No project" chat (its project is a chat folder). */
   readonly isChat: boolean;
   readonly isWorktree: boolean;
-  readonly rankingModelLabel: string | null;
   readonly workspaceLabel: string;
   readonly contextLabel: string;
   readonly state: InboxSidebarThreadState;
@@ -252,7 +246,6 @@ export interface InboxSidebarRow {
   readonly settlementActionEnabled: boolean;
   readonly settlementDisabledReason: string | null;
   readonly effectiveSettlementTimestamp: string | null;
-  readonly focus: ThreadPriorityFocusMetadata | null;
   /** Server-owned provenance; null on root threads. */
   readonly lineage: ThreadLineage | null;
   /** Delegated descendants folded under this host row; empty unless it is a host. */
@@ -263,14 +256,7 @@ export interface InboxSidebarRow {
 
 export interface InboxSidebarSection {
   readonly key: InboxSidebarSectionKey;
-  readonly title:
-    | "Pinned"
-    | "Focus"
-    | "Active now"
-    | "Needs input"
-    | "Recent"
-    | "Settled"
-    | "Snoozed";
+  readonly title: "Pinned" | "Active now" | "Needs input" | "Recent" | "Settled" | "Snoozed";
   readonly rows: ReadonlyArray<InboxSidebarRow>;
 }
 
@@ -292,7 +278,6 @@ export interface BuildInboxSidebarInput {
   readonly deliveryUnknownThreadKeys?: ReadonlySet<string>;
   readonly localQueuedThreadKeys?: ReadonlySet<string>;
   readonly activeThreadKey?: string | null;
-  readonly aiFocusEnabled?: boolean;
   /** This client's rule, for environments whose node states none. */
   readonly autoSettleAfterDays?: SidebarAutoSettleAfterDays;
   readonly pinnedThreadKeys?: ReadonlySet<string>;
@@ -306,16 +291,6 @@ export interface BuildInboxSidebarInput {
 export interface InboxSidebarModel {
   readonly sections: ReadonlyArray<InboxSidebarSection>;
   readonly nextSettlementEvaluationAtMs: number | null;
-}
-
-export interface InboxFocusExplanation {
-  readonly title: string;
-  readonly detail: string;
-  readonly aiGenerated: boolean;
-}
-
-export function describeInboxFocus(focus: ThreadPriorityFocusMetadata): InboxFocusExplanation {
-  return describeThreadPriorityFocus(focus);
 }
 
 function capabilityFields(
@@ -839,7 +814,6 @@ function nestDelegatedRows(
     threadId: row.threadId,
     lineage: row.lineage,
     pinned: row.pinned,
-    focused: row.focus !== null,
     urgency: row.snoozedUntil
       ? "snoozed"
       : row.settled
@@ -1072,7 +1046,6 @@ export function buildInboxSidebarModel(input: BuildInboxSidebarInput): InboxSide
       text: input.filters.query,
     },
     currentThreadKey: input.activeThreadKey,
-    aiFocusEnabled: input.aiFocusEnabled,
     autoSettleAfterDays: input.autoSettleAfterDays,
     nowMs,
   });
@@ -1092,7 +1065,7 @@ export function buildInboxSidebarModel(input: BuildInboxSidebarInput): InboxSide
   );
   const singleProject = threadProjectNames.size <= 1;
   const rows: InboxSidebarRow[] = [];
-  for (const entry of [...inbox.focus, ...inbox.active, ...inbox.settled, ...inbox.snoozed]) {
+  for (const entry of [...inbox.active, ...inbox.settled, ...inbox.snoozed]) {
     const thread = entry.thread;
     if (!thread) continue;
     const environment = environmentById.get(thread.environmentId);
@@ -1139,10 +1112,6 @@ export function buildInboxSidebarModel(input: BuildInboxSidebarInput): InboxSide
       project: project ?? null,
       isChat,
       isWorktree: Boolean(worktree?.worktreePath ?? thread.worktreePath),
-      rankingModelLabel: modelDisplayName(
-        entry.focus?.ranking?.modelSelection,
-        environment?.providers,
-      ),
       workspaceLabel,
       contextLabel,
       state,
@@ -1196,7 +1165,6 @@ export function buildInboxSidebarModel(input: BuildInboxSidebarInput): InboxSide
       settlementActionEnabled: availability.settle.enabled,
       settlementDisabledReason: threadLifecycleDisabledReason(availability, "settle"),
       effectiveSettlementTimestamp: entry.lifecycle.effectiveSettlementTimestamp,
-      focus: entry.focus,
       lineage: thread.lineage ?? null,
       delegatedChildren: NO_DELEGATED_CHILDREN,
       delegatedState: false,
@@ -1212,18 +1180,14 @@ export function buildInboxSidebarModel(input: BuildInboxSidebarInput): InboxSide
   const pinned = topLevelRows.filter((row) => row.pinned).toSorted(compareRecent);
   const unpinnedRows = topLevelRows.filter((row) => !row.pinned);
   const unsettledRows = unpinnedRows.filter((row) => !row.settled && !row.snoozedUntil);
-  const focus = unsettledRows.filter((row) => row.focus !== null);
   const active = unsettledRows
-    .filter((row) => row.focus === null && sectionKey(row.placementState) === "active")
+    .filter((row) => sectionKey(row.placementState) === "active")
     .toSorted(compareActive);
   const needsInput = unsettledRows
-    .filter(
-      (row) =>
-        row.focus === null && !row.settled && sectionKey(row.placementState) === "needs-input",
-    )
+    .filter((row) => !row.settled && sectionKey(row.placementState) === "needs-input")
     .toSorted(compareRecent);
   const recent = unsettledRows
-    .filter((row) => row.focus === null && sectionKey(row.placementState) === "recent")
+    .filter((row) => sectionKey(row.placementState) === "recent")
     .toSorted(compareRecent);
   const settled = unpinnedRows
     .filter((row) => row.settled)
@@ -1235,7 +1199,6 @@ export function buildInboxSidebarModel(input: BuildInboxSidebarInput): InboxSide
 
   const sections: InboxSidebarSection[] = [
     ...(pinned.length > 0 ? [{ key: "pinned", title: "Pinned", rows: pinned } as const] : []),
-    ...(focus.length > 0 ? [{ key: "focus", title: "Focus", rows: focus } as const] : []),
     ...(active.length > 0 ? [{ key: "active", title: "Active now", rows: active } as const] : []),
     ...(needsInput.length > 0
       ? [{ key: "needs-input", title: "Needs input", rows: needsInput } as const]
