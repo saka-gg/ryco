@@ -320,10 +320,11 @@ export function CrownOverview(props: CrownOverviewProps & { readonly open?: bool
   }, [liveGitNoticeId, collapse]);
 
   const onAlertAction = () => {
-    const action = shownAlert?.action;
-    if (!action) return;
-    alerts.clear();
-    action.onClick();
+    const alert = shownAlert;
+    if (!alert?.action) return;
+    // A running git action's Stop acts in place: its alert stays until the result replaces it.
+    if (!alert.live) alerts.clear();
+    alert.action.onClick();
   };
 
   const onAlertOpen = (event: MouseEvent<HTMLElement>) => {

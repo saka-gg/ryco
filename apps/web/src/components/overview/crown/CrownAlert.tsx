@@ -56,8 +56,9 @@ const ALERT_SWAP_TIMING: KeyframeAnimationOptions = {
  * It keeps rendering the last alert after the crown folds back, so the
  * cross-fade never shows an empty layer. Clicking anywhere opens the card on
  * the alert's section; View is the keyboard-reachable control for the same.
- * An alert with an action (a git result's "View PR") offers it in View's place,
- * and a live one (a git action still running) spins until its result lands.
+ * An alert with an action (a git result's "View PR", a running action's Stop)
+ * offers it in View's place, and a live one (a git action still running) spins
+ * until its result lands.
  * While focus is inside, `onFocusWithinChange` lets the crown hold the alert.
  */
 export function CrownAlert({

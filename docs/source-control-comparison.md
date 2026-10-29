@@ -205,6 +205,17 @@ was replaced or disposed is dropped. The client stops waiting after 30 minutes w
 (`unsupported`). In-flight actions are kept in memory only, so a reloaded client cannot follow
 them again.
 
+In the web app, the commit, push and pull request actions of the git controls and the crown's
+Ship button, and the review panel's Commit staged, ask for recovery. Their notice (the crown's
+live alert, or a toast) offers Stop once the node has reported the action, until the action
+reports its end; Stop acts in place and the notice ends with "Stopped" when the node stopped it,
+or keeps Stop with the reason when the stop request failed. While the client waits for a
+connection the notice says "Reconnecting... It keeps running on the node.", and a resume that
+replays the current step keeps that step's elapsed time. When the client cannot learn the outcome
+the notice says "Couldn't confirm the Git action" and asks to check the repository status; the
+checkout's status is read again after that and after a stop. The mobile app keeps request-owned
+actions until it offers Stop too.
+
 ### Guarded index mutation
 
 `vcs.readLocalChanges` authorizes cwd and the resolved worktree through
