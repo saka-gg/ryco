@@ -13,6 +13,7 @@ import { ComputerManager } from "../ComputerManager.ts";
 import { desktopDeliveryMode } from "../DesktopOperationQueue.ts";
 import { isModelDesktopObservationActive } from "../modelDesktopObservation.ts";
 import { FakeComputerBackend } from "../FakeComputerBackend.ts";
+import { ComputerApprovalExpiredError } from "../ComputerApprovalGate.ts";
 import type { McpToolCallResult } from "./protocol.ts";
 import type { ToolContext } from "./toolRuntime.ts";
 import {
@@ -244,6 +245,33 @@ describe("computer_browser_* gateway tools", () => {
     expect(result.isError).toBe(true);
     expect(textOf(result)).toContain("denied");
     expect(backend.callsFor("browser.browser_type")).toHaveLength(0);
+  });
+
+  it("reports an expired approval as retryable without dispatching", async () => {
+    const { backend, manager, call } = await setup({
+      authorizeAction: async () => {
+        throw new ComputerApprovalExpiredError();
+      },
+    });
+    const audit = vi.spyOn(manager, "recordComputerAudit");
+    try {
+      const result = await call("computer_browser_type", {
+        target_id: "t",
+        tab_id: "tab",
+        ref: "p1:0",
+        text: "hello",
+      });
+      expect(result.isError).toBe(true);
+      expect(JSON.parse(textOf(result))).toMatchObject({
+        error: { code: "approval_expired", effect: "not-dispatched", retryable: true },
+      });
+      expect(backend.callsFor("browser.browser_type")).toHaveLength(0);
+      expect(audit).toHaveBeenCalledWith(
+        expect.objectContaining({ effect: "refused", code: "approval_expired" }),
+      );
+    } finally {
+      await manager.dispose();
+    }
   });
 
   it.each(["missing", "not requested", "failed"] as const)(

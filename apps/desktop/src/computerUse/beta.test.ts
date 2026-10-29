@@ -79,7 +79,7 @@ afterEach(async () => {
   beta = undefined;
   vi.clearAllMocks();
 });
-async function fixture() {
+async function fixture(isDestroyed: () => boolean = () => false) {
   directory = await mkdtemp(join(tmpdir(), "ryco-beta-test-"));
   await mkdir(join(directory, "cua-driver"));
   await writeFile(join(directory, "cua-driver", "cua-driver"), "fixture");
@@ -87,7 +87,7 @@ async function fixture() {
     stateDir: directory,
     resourcesDir: directory,
     getWindow: () =>
-      ({ isDestroyed: () => false, webContents: { send: mocks.send } }) as unknown as BrowserWindow,
+      ({ isDestroyed, webContents: { send: mocks.send } }) as unknown as BrowserWindow,
   });
   await beta.start();
   return beta;
@@ -140,6 +140,32 @@ it.skipIf(process.platform !== "darwin")(
     await expect(runtime.request({ operation: "consent", ...identity })).rejects.toThrow(
       "no longer active",
     );
+  },
+);
+it.skipIf(process.platform !== "darwin")(
+  "does not bind the turn when no window can show the consent dialog",
+  async () => {
+    let destroyed = true;
+    const runtime = await fixture(() => destroyed);
+    const identity = { threadId: "thread", turnId: "turn" };
+    await runtime.request({
+      operation: "begin",
+      ...identity,
+      intent: await runtime.prepare("thread", true),
+    });
+    expect(await runtime.request({ operation: "consent", ...identity })).toEqual({
+      approved: false,
+      outcome: "unavailable",
+      retryable: true,
+    });
+    expect(mocks.showMessageBox).not.toHaveBeenCalled();
+    destroyed = false;
+    expect(await runtime.request({ operation: "consent", ...identity })).toEqual({
+      approved: true,
+      outcome: "accept",
+      retryable: false,
+    });
+    expect(mocks.showMessageBox).toHaveBeenCalledTimes(1);
   },
 );
 it.skipIf(process.platform !== "darwin")(
