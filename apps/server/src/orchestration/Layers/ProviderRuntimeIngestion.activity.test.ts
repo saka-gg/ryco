@@ -1,6 +1,7 @@
 import {
   EventId,
   ProviderDriverKind,
+  ProviderInstanceId,
   RuntimeItemId,
   RuntimeRequestId,
   RuntimeTaskId,
@@ -135,6 +136,80 @@ describe("runtimeEventToActivities runtime notices", () => {
     expect((long?.payload as { readonly detail?: string } | undefined)?.detail?.length).toBe(4_000);
     expect(bare?.payload).toEqual({});
     expect(bare?.turnId).toBeNull();
+  });
+});
+
+describe("runtimeEventToActivities Claude Fast mode state", () => {
+  const configured = (config: Record<string, unknown>, extra: Record<string, unknown> = {}) =>
+    runtimeEventToActivities({
+      ...base,
+      provider: ProviderDriverKind.make("claudeAgent"),
+      providerInstanceId: ProviderInstanceId.make("claude-hub"),
+      type: "session.configured",
+      eventId: EventId.make("evt-configured"),
+      payload: { config },
+      ...extra,
+    } satisfies ProviderRuntimeEvent);
+
+  it("projects the report as the thread's one turn-less Fast mode activity", () => {
+    expect(
+      configured(
+        {
+          fastModeState: {
+            state: "off",
+            disabledReason: "not_first_party",
+            model: "claude-opus-4-8",
+            requested: true,
+          },
+        },
+        { turnId: TurnId.make("turn-1"), sessionSequence: 12 },
+      ),
+    ).toEqual([
+      {
+        id: "claude-fast-mode:thread-1:state",
+        createdAt: base.createdAt,
+        tone: "info",
+        kind: "fast-mode.state",
+        summary: "Fast mode state",
+        payload: {
+          state: "off",
+          disabledReason: "not_first_party",
+          model: "claude-opus-4-8",
+          requested: true,
+          instanceId: "claude-hub",
+        },
+        turnId: null,
+        sequence: 12,
+      },
+    ]);
+  });
+
+  it("projects nothing for the raw init config or the start options", () => {
+    expect(
+      configured({
+        type: "system",
+        subtype: "init",
+        model: "claude-opus-4-8",
+        fast_mode_state: "on",
+        fast_mode_disabled_reason: "free",
+      }),
+    ).toEqual([]);
+    expect(configured({ model: "claude-opus-4-8", fastMode: true })).toEqual([]);
+  });
+
+  it("projects nothing for an invalid report and drops invalid optional fields", () => {
+    for (const fastModeState of [null, "on", { state: "turbo" }, { disabledReason: "free" }]) {
+      expect(configured({ fastModeState }), JSON.stringify(fastModeState)).toEqual([]);
+    }
+    const [activity] = configured({
+      fastModeState: {
+        state: "cooldown",
+        disabledReason: "Not Allowed",
+        model: "m".repeat(200),
+        requested: "yes",
+      },
+    });
+    expect(activity?.payload).toEqual({ state: "cooldown", instanceId: "claude-hub" });
   });
 });
 

@@ -1,5 +1,6 @@
 export * from "./activityPayload.ts";
 export * from "./contextHandoff.ts";
+export * from "./fastModeNotice.ts";
 export * from "./forkOrigin.ts";
 export * from "./dispatchAck.ts";
 export * from "./session-logic.ts";

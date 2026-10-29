@@ -3,6 +3,7 @@ import type {
   ProviderOptionDescriptor,
   ProviderOptionSelection,
 } from "@ryco/contracts";
+import type { FastModeNotice } from "@ryco/client-runtime/state/session";
 import {
   getProviderOptionCurrentValue,
   getProviderOptionDescriptors,
@@ -301,6 +302,8 @@ export interface ModelTuningSummary {
   readonly speed: SpeedTier;
   /** Only present when the model offers a choice of context window. */
   readonly contextWindowLabel: string | null;
+  /** Set when the provider reports a Fast mode other than `speed` asks for (Claude only). */
+  readonly speedNotice?: FastModeNotice | null;
 }
 
 export function summarizeModelTuning(tuning: ModelTuning | null): ModelTuningSummary | null {

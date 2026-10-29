@@ -957,6 +957,9 @@ function shouldIncludeActivityInWorkLog(
     activity.kind !== "tool.started" &&
     activity.kind !== "agent.message" &&
     activity.kind !== "context-window.updated" &&
+    // `FAST_MODE_STATE_ACTIVITY_KIND` (`@ryco/shared/claudeFastMode`), spelled out: importing it
+    // here put that module, parser included, on the web boot path.
+    activity.kind !== "fast-mode.state" &&
     activity.kind !== CONTEXT_HANDOFF_ACTIVITY_KIND &&
     activity.kind !== THREAD_FORKED_ACTIVITY_KIND &&
     !isContextCompactionActivity(activity) &&
