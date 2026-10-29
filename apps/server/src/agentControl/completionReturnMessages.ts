@@ -86,6 +86,11 @@ export function renderCompletionReturn(
     JSON.stringify({
       summary: text.slice(0, CHILD_OUTPUT_MAX_CHARS),
       truncated: text.length > CHILD_OUTPUT_MAX_CHARS,
+      ...(text.length > CHILD_OUTPUT_MAX_CHARS
+        ? {
+            readMore: `ryco_task_status with taskId ${record.childThreadId} returns the whole result in pages.`,
+          }
+        : {}),
       ...(state === "error"
         ? { error: "The initial child run failed. Inspect the child for details." }
         : {}),

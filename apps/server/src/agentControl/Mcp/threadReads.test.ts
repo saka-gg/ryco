@@ -1,6 +1,10 @@
 import {
+  AGENT_CONTROL_MCP_MESSAGE_PAGE_MAX_CHARS,
+  AGENT_CONTROL_MCP_MESSAGE_TEXT_MAX_CHARS,
   EventId,
+  MessageId,
   OrchestrationThreadShell,
+  type OrchestrationMessage,
   ThreadId,
   type OrchestrationEvent,
   type OrchestrationEventType,
@@ -16,7 +20,7 @@ import {
   threadKeyPageOf,
   type ProjectionSnapshotQueryShape,
 } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
-import { allThreadsVisible, listThreadsPage, waitThreads } from "./threadReads.ts";
+import { allThreadsVisible, listThreadsPage, readThreadPage, waitThreads } from "./threadReads.ts";
 
 const thread = (index: number, options: { archived?: boolean; projectId?: string } = {}) =>
   Schema.decodeUnknownSync(OrchestrationThreadShell)({
@@ -395,6 +399,151 @@ describe("waitThreads", () => {
       const result = yield* harness.wait(0);
       assert.isTrue(result.timedOut);
       assert.strictEqual(harness.totalReads(), 2);
+    }),
+  );
+});
+
+describe("readThreadPage message paging", () => {
+  const shell = thread(1);
+  const message = (
+    id: string,
+    text: string,
+    options: { streaming?: boolean; updatedAt?: string } = {},
+  ): OrchestrationMessage => ({
+    id: MessageId.make(id),
+    role: "assistant",
+    text,
+    turnId: null,
+    streaming: options.streaming ?? false,
+    createdAt: "2026-10-01T00:00:00.000Z",
+    updatedAt: options.updatedAt ?? "2026-10-01T00:00:00.000Z",
+  });
+
+  const makePagingProjections = (messages: OrchestrationMessage[]) => {
+    const byId = new Map(messages.map((entry) => [entry.id as string, entry]));
+    return {
+      byId,
+      projections: {
+        getThreadShellById: () => Effect.succeed(Option.some(shell)),
+        getThreadWindow: () =>
+          Effect.succeed({
+            thread: { messages },
+            history: {
+              messages: { hasMoreBefore: false, oldestCursor: null },
+            },
+          }),
+        getThreadHistoryPage: () => Effect.die("not used"),
+        getThreadMessageById: (input: { readonly messageId: string }) =>
+          Effect.succeed(Option.fromNullishOr(byId.get(input.messageId))),
+      } as unknown as ProjectionSnapshotQueryShape,
+    };
+  };
+
+  it.effect("reads a 50,000-character report whole through continuations", () =>
+    Effect.gen(function* () {
+      const report = Array.from({ length: 5_000 }, (_, index) => `${index}`.padStart(9, "-") + "\n")
+        .join("")
+        .slice(0, 50_000);
+      const { projections } = makePagingProjections([message("report", report)]);
+      const first = yield* readThreadPage(projections, { threadId: shell.id });
+      const head = first.messages[0]!;
+      assert.isTrue(head.truncated);
+      assert.equal(head.text.length, AGENT_CONTROL_MCP_MESSAGE_TEXT_MAX_CHARS);
+      assert.equal(head.totalChars, 50_000);
+      assert.equal(head.nextOffsetChars, AGENT_CONTROL_MCP_MESSAGE_TEXT_MAX_CHARS);
+      let text = head.text;
+      let next = head.nextOffsetChars ?? null;
+      let reads = 0;
+      while (next !== null) {
+        const page = yield* readThreadPage(projections, {
+          threadId: shell.id,
+          message: { messageId: head.messageId, version: head.version!, offsetChars: next },
+        });
+        const slice = page.messages[0]!;
+        assert.isAtMost(slice.text.length, AGENT_CONTROL_MCP_MESSAGE_PAGE_MAX_CHARS);
+        assert.equal(slice.offsetChars, next);
+        assert.equal(slice.version, head.version);
+        assert.isNull(page.nextCursor);
+        text += slice.text;
+        next = slice.nextOffsetChars ?? null;
+        reads += 1;
+      }
+      assert.equal(text, report);
+      assert.equal(reads, 3);
+    }),
+  );
+
+  it.effect("refuses a changed, streaming or unknown message and a cursor with a message", () =>
+    Effect.gen(function* () {
+      const long = "x".repeat(AGENT_CONTROL_MCP_MESSAGE_TEXT_MAX_CHARS + 10);
+      const { projections, byId } = makePagingProjections([message("m", long)]);
+      const first = (yield* readThreadPage(projections, { threadId: shell.id })).messages[0]!;
+      const continuation = {
+        messageId: "m",
+        version: first.version!,
+        offsetChars: first.nextOffsetChars!,
+      };
+
+      const both = yield* readThreadPage(projections, {
+        threadId: shell.id,
+        cursor: "cursor",
+        message: continuation,
+      }).pipe(Effect.flip);
+      assert.equal(both.reason, "Pass either cursor or message, not both.");
+
+      const offset = yield* readThreadPage(projections, {
+        threadId: shell.id,
+        message: { ...continuation, offsetChars: long.length + 1 },
+      }).pipe(Effect.flip);
+      assert.equal(offset.reason, "Invalid offset for this message.");
+
+      const unknown = yield* readThreadPage(projections, {
+        threadId: shell.id,
+        message: { ...continuation, messageId: "other" },
+      }).pipe(Effect.flip);
+      assert.equal(unknown.reason, "Message not found.");
+
+      byId.set("m", message("m", `${long}more`, { updatedAt: "2026-10-01T00:01:00.000Z" }));
+      const changed = yield* readThreadPage(projections, {
+        threadId: shell.id,
+        message: continuation,
+      }).pipe(Effect.flip);
+      assert.equal(
+        changed.reason,
+        "The message changed since that version. Read the thread again before continuing.",
+      );
+
+      byId.set("m", message("m", long, { streaming: true }));
+      const streaming = yield* readThreadPage(projections, {
+        threadId: shell.id,
+        message: continuation,
+      }).pipe(Effect.flip);
+      assert.equal(
+        streaming.reason,
+        "The message is still streaming. Read the thread again after it settles.",
+      );
+    }),
+  );
+
+  it.effect("gives a streaming message no continuation and keeps the page budget", () =>
+    Effect.gen(function* () {
+      const long = "y".repeat(AGENT_CONTROL_MCP_MESSAGE_TEXT_MAX_CHARS * 2);
+      const messages = [
+        ...Array.from({ length: 12 }, (_, index) => message(`old-${index}`, long)),
+        message("live", long, { streaming: true }),
+      ];
+      const { projections } = makePagingProjections(messages);
+      const page = yield* readThreadPage(projections, { threadId: shell.id });
+      const live = page.messages.at(-1)!;
+      assert.isTrue(live.truncated);
+      assert.isUndefined(live.version);
+      const total = page.messages.reduce((sum, entry) => sum + entry.text.length, 0);
+      assert.equal(total, 80_000);
+      // Messages cut to nothing by the budget still say where to read on.
+      const emptied = page.messages[0]!;
+      assert.equal(emptied.text, "");
+      assert.equal(emptied.nextOffsetChars, 0);
+      assert.isString(emptied.version);
     }),
   );
 });

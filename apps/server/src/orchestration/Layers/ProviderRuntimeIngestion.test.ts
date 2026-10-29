@@ -634,7 +634,7 @@ describe("ProviderRuntimeIngestion", () => {
     expect(observations).toBe(3);
     expect(
       await Effect.runPromise(repo.output(record.childThreadId, asTurnId("initial-turn"))),
-    ).toEqual({ text: "part ".repeat(10), streaming: 0 });
+    ).toEqual({ text: "part ".repeat(10), messageId: "assistant:answer", streaming: 0 });
   });
 
   it("returns a delegated child's narration, not a blank, when its turn ends on an HTML page", async () => {
@@ -725,7 +725,11 @@ describe("ProviderRuntimeIngestion", () => {
     expect(thread?.latestTurn?.assistantMessageId).toBe(narration?.id);
     expect(
       await Effect.runPromise(repo.output(record.childThreadId, asTurnId("initial-turn"))),
-    ).toEqual({ text: "Revenue grew 40%; Q3 led.", streaming: 0 });
+    ).toEqual({
+      text: "Revenue grew 40%; Q3 led.",
+      messageId: "assistant:narration",
+      streaming: 0,
+    });
   });
 
   it("does not resurrect a cleared native goal from a delayed update", async () => {

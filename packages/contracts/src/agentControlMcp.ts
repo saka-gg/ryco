@@ -184,8 +184,15 @@ export const AGENT_CONTROL_MCP_LIST_LIMIT_MAX = 50;
 export const AGENT_CONTROL_MCP_LIST_LIMIT_DEFAULT = 20;
 export const AGENT_CONTROL_MCP_MESSAGE_LIMIT_MAX = 50;
 export const AGENT_CONTROL_MCP_MESSAGE_LIMIT_DEFAULT = 20;
-/** Per-message transcript text cap; longer text is truncated and flagged. */
+/**
+ * Per-message transcript text cap; longer text is truncated and flagged, and the
+ * message carries a continuation (`version`, `nextOffsetChars`) to read the rest.
+ */
 export const AGENT_CONTROL_MCP_MESSAGE_TEXT_MAX_CHARS = 8_000;
+/** Text of one message a continuation read returns at most. */
+export const AGENT_CONTROL_MCP_MESSAGE_PAGE_MAX_CHARS = 20_000;
+/** Opaque version of a message's text; a continuation must name the version it continues. */
+export const AGENT_CONTROL_MCP_MESSAGE_VERSION_MAX_CHARS = 64;
 /**
  * Aggregate transcript text budget per `ryco_read_thread` page. Newest
  * messages keep their text; older messages beyond the budget are
@@ -230,11 +237,31 @@ export const AgentControlMcpListThreadsInput = Schema.Struct({
 });
 export type AgentControlMcpListThreadsInput = typeof AgentControlMcpListThreadsInput.Type;
 
+export const AgentControlMcpMessageVersion = TrimmedNonEmptyString.check(
+  Schema.isMaxLength(AGENT_CONTROL_MCP_MESSAGE_VERSION_MAX_CHARS),
+);
+
+/**
+ * Where to continue reading one long message: the `messageId`, `version` and
+ * `nextOffsetChars` a truncated message reported. Offsets count UTF-16 code units.
+ */
+export const AgentControlMcpMessageContinuation = Schema.Struct({
+  messageId: TrimmedNonEmptyString.check(Schema.isMaxLength(256)),
+  version: AgentControlMcpMessageVersion,
+  offsetChars: NonNegativeInt,
+}).pipe(rejectExcessProperties);
+export type AgentControlMcpMessageContinuation = typeof AgentControlMcpMessageContinuation.Type;
+
 export const AgentControlMcpReadThreadInput = Schema.Struct({
   threadId: ThreadId,
   messageLimit: Schema.optional(PositiveInt),
   /** Page older history; minted by a previous `ryco_read_thread` call. */
   cursor: Schema.optional(AgentControlMcpCursor),
+  /**
+   * Read the rest of one truncated message instead of a history page. Not
+   * combinable with `cursor`; `messageLimit` does not apply.
+   */
+  message: Schema.optional(AgentControlMcpMessageContinuation),
 });
 export type AgentControlMcpReadThreadInput = typeof AgentControlMcpReadThreadInput.Type;
 
@@ -703,6 +730,18 @@ export const AgentControlMcpMessage = Schema.Struct({
   turnId: Schema.NullOr(TurnId),
   attachmentCount: NonNegativeInt,
   createdAt: IsoDateTime,
+  /**
+   * Set when `text` is a slice of a longer, settled message: pass `messageId`,
+   * `version` and `nextOffsetChars` back as `message` to read on. Absent while the
+   * message still streams (read it again once it settles).
+   */
+  version: Schema.optional(AgentControlMcpMessageVersion),
+  /** Where `text` starts in the whole message (UTF-16 code units). */
+  offsetChars: Schema.optional(NonNegativeInt),
+  /** Length of the whole message (UTF-16 code units). */
+  totalChars: Schema.optional(NonNegativeInt),
+  /** Where the next slice starts; null once `text` reaches the end. */
+  nextOffsetChars: Schema.optional(Schema.NullOr(NonNegativeInt)),
 });
 export type AgentControlMcpMessage = typeof AgentControlMcpMessage.Type;
 

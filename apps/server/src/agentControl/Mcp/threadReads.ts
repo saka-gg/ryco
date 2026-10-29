@@ -20,14 +20,18 @@ import {
   AGENT_CONTROL_MCP_LIST_LIMIT_MAX,
   AGENT_CONTROL_MCP_MESSAGE_LIMIT_DEFAULT,
   AGENT_CONTROL_MCP_MESSAGE_LIMIT_MAX,
+  AGENT_CONTROL_MCP_MESSAGE_PAGE_MAX_CHARS,
   AGENT_CONTROL_MCP_MESSAGE_TEXT_MAX_CHARS,
   AGENT_CONTROL_MCP_READ_THREAD_TEXT_BUDGET_CHARS,
+  AGENT_CONTROL_TASK_RESULT_MAX_CHARS,
   AgentControlMcpListThreadsResult,
   AgentControlMcpReadThreadResult,
   OrchestrationThreadActivity,
   OrchestrationThreadHistoryCursor,
+  MessageId,
   type AgentControlMcpListThreadsInput,
   type AgentControlMcpMessage,
+  type AgentControlMcpMessageContinuation,
   type AgentControlMcpReadThreadInput,
   type AgentControlMcpThreadSummary,
   type OrchestrationMessage,
@@ -50,7 +54,18 @@ import type { TerminalManagerShape } from "../../terminal/Services/Manager.ts";
 import type { WorkspaceAccessPolicyShape } from "../../workspace/Services/WorkspaceAccessPolicy.ts";
 import type { WorkspaceFileSystemShape } from "../../workspace/Services/WorkspaceFileSystem.ts";
 import { threadWakeSource, waitUntil, type WaitWakeSource } from "../eventDrivenWait.ts";
+import type { PageLimits } from "../messagePages.ts";
 import { redactAgentControlSecrets } from "../ProviderInjection.ts";
+
+/** Paging rules, loaded on the first read that cuts a text so they stay off the boot path. */
+export const loadMessagePages = Effect.promise(() => import("../messagePages.ts"));
+
+export const MESSAGE_PAGE_LIMITS: PageLimits = {
+  messageMaxChars: AGENT_CONTROL_MCP_MESSAGE_TEXT_MAX_CHARS,
+  pageBudgetChars: AGENT_CONTROL_MCP_READ_THREAD_TEXT_BUDGET_CHARS,
+  continuationMaxChars: AGENT_CONTROL_MCP_MESSAGE_PAGE_MAX_CHARS,
+  taskResultMaxChars: AGENT_CONTROL_TASK_RESULT_MAX_CHARS,
+};
 
 /** Bounded, presentation-safe tool failure. Never carries internals. */
 export class ToolFailure {
@@ -218,43 +233,29 @@ export const toThreadSummary = (shell: OrchestrationThreadShell): AgentControlMc
   updatedAt: shell.updatedAt,
 });
 
-const toMcpMessage = (message: OrchestrationMessage): AgentControlMcpMessage => {
-  const truncated = message.text.length > AGENT_CONTROL_MCP_MESSAGE_TEXT_MAX_CHARS;
-  return {
+/**
+ * Messages of a page as they are, or null when one of them must be cut (longer than the
+ * per-message cap, or past the page's text budget): those pages go through the lazy
+ * paging rules, which add continuations.
+ */
+const wholeMcpMessages = (
+  messages: ReadonlyArray<OrchestrationMessage>,
+): ReadonlyArray<AgentControlMcpMessage> | null => {
+  let total = 0;
+  for (const message of messages) {
+    total += message.text.length;
+    if (message.text.length > AGENT_CONTROL_MCP_MESSAGE_TEXT_MAX_CHARS) return null;
+  }
+  if (total > AGENT_CONTROL_MCP_READ_THREAD_TEXT_BUDGET_CHARS) return null;
+  return messages.map((message) => ({
     messageId: message.id,
     role: message.role,
-    text: truncated
-      ? message.text.slice(0, AGENT_CONTROL_MCP_MESSAGE_TEXT_MAX_CHARS)
-      : message.text,
-    truncated,
+    text: message.text,
+    truncated: false,
     turnId: message.turnId,
     attachmentCount: message.attachments?.length ?? 0,
     createdAt: message.createdAt,
-  };
-};
-
-/**
- * Enforce the aggregate transcript budget over an ascending-order page.
- * Newest messages keep their text; once the budget is exhausted walking
- * backwards, older messages are truncated (possibly to empty) and
- * flagged. The message set itself is untouched, so history cursors stay
- * exact, and the bounded page can never blow the listener's response cap.
- */
-const applyTranscriptTextBudget = (
-  messages: ReadonlyArray<AgentControlMcpMessage>,
-): ReadonlyArray<AgentControlMcpMessage> => {
-  let remaining = AGENT_CONTROL_MCP_READ_THREAD_TEXT_BUDGET_CHARS;
-  const bounded = [...messages];
-  for (let index = bounded.length - 1; index >= 0; index -= 1) {
-    const message = bounded[index]!;
-    if (message.text.length <= remaining) {
-      remaining -= message.text.length;
-      continue;
-    }
-    bounded[index] = { ...message, text: message.text.slice(0, remaining), truncated: true };
-    remaining = 0;
-  }
-  return bounded;
+  }));
 };
 
 // Bound both arbitrary activity payloads and the aggregate response. Never stringify
@@ -365,6 +366,36 @@ export const listThreadsPage = (
     });
   });
 
+/** The next slice of one long message, bound to the version the reader started from. */
+const readMessageContinuation = (
+  projections: ProjectionSnapshotQueryShape,
+  shell: OrchestrationThreadShell,
+  continuation: AgentControlMcpMessageContinuation,
+) =>
+  Effect.gen(function* () {
+    const getThreadMessageById = projections.getThreadMessageById;
+    if (getThreadMessageById === undefined) {
+      return yield* failTool("Thread history is unavailable.");
+    }
+    const found = yield* getThreadMessageById({
+      threadId: shell.id,
+      messageId: MessageId.make(continuation.messageId),
+    }).pipe(Effect.mapError(() => new ToolFailure("Thread read failed.")));
+    if (Option.isNone(found)) return yield* failTool("Message not found.");
+    const slice = (yield* loadMessagePages).continueMessage(
+      found.value,
+      continuation,
+      MESSAGE_PAGE_LIMITS,
+    );
+    if ("failure" in slice) return yield* failTool(slice.failure);
+    return Schema.encodeSync(AgentControlMcpReadThreadResult)({
+      thread: toThreadSummary(shell),
+      messages: [slice.message],
+      hasMoreBefore: false,
+      nextCursor: null,
+    });
+  });
+
 export const readThreadPage = (
   projections: ProjectionSnapshotQueryShape,
   input: AgentControlMcpReadThreadInput,
@@ -377,6 +408,12 @@ export const readThreadPage = (
       AGENT_CONTROL_MCP_MESSAGE_LIMIT_MAX,
     );
     const shell = yield* findVisibleThread(projections, input.threadId, visible);
+    if (input.message !== undefined) {
+      if (input.cursor !== undefined) {
+        return yield* failTool("Pass either cursor or message, not both.");
+      }
+      return yield* readMessageContinuation(projections, shell, input.message);
+    }
 
     const getThreadWindow = projections.getThreadWindow;
     const getThreadHistoryPage = projections.getThreadHistoryPage;
@@ -418,7 +455,9 @@ export const readThreadPage = (
 
     return Schema.encodeSync(AgentControlMcpReadThreadResult)({
       thread: toThreadSummary(shell),
-      messages: applyTranscriptTextBudget(messages.map(toMcpMessage)),
+      messages:
+        wholeMcpMessages(messages) ??
+        (yield* loadMessagePages).toBudgetedMcpMessages(messages, MESSAGE_PAGE_LIMITS),
       hasMoreBefore: pageInfo.hasMoreBefore,
       nextCursor: pageInfo.hasMoreBefore ? pageInfo.oldestCursor : null,
     });
