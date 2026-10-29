@@ -28,7 +28,14 @@ BOOL RycoHardwareButtonFromName(NSString *name, RycoHardwareButton *outButton);
 
 @interface RycoHIDBridge : NSObject
 
-/// Connects a HID client to `device` (a `SimDevice`). Returns NO on failure.
+/// The SimulatorKit binary to resolve Indigo symbols from. Set once by
+/// `loadPrivateFrameworks`, so the bridge opens exactly the image Swift loaded
+/// instead of re-deriving the path (Xcode 27 moved the framework).
+@property(class, nonatomic, copy, nullable) NSString *simulatorKitPath;
+
+/// Connects a HID client to `device` (a `SimDevice`). Returns NO on failure,
+/// including when this host's CoreSimulator would drop Indigo input (see
+/// CoreSimulatorVersion.h): refusing is honest, an acked no-op is not.
 - (BOOL)attachToDevice:(id)device
                  error:(NSError **)error NS_SWIFT_NAME(attach(toDevice:));
 
