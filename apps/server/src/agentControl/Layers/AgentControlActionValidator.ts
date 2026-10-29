@@ -2,6 +2,7 @@ import { AgentControlWorkspaces } from "../workspaceLifecycle.ts";
 import type {
   AgentControlActionPlan,
   AgentControlDeviceActionPlan,
+  AgentControlDeviceControlConsentPlan,
   AgentControlProviderSessionPrincipal,
   AgentControlProposal,
   ModelSelection,
@@ -114,6 +115,7 @@ const targetThreadIds = (plan: AgentControlActionPlan): ReadonlyArray<string> =>
     case "sendMessage":
     case "interruptThread":
     case "updateThread":
+    case "deviceControlConsent":
       return [plan.threadId];
     default:
       return isAgentControlDevicePlan(plan) ? [plan.threadId] : [];
@@ -121,7 +123,7 @@ const targetThreadIds = (plan: AgentControlActionPlan): ReadonlyArray<string> =>
 };
 
 const validateDevicePlanScope = (
-  plan: AgentControlDeviceActionPlan,
+  plan: AgentControlDeviceActionPlan | AgentControlDeviceControlConsentPlan,
   input: {
     readonly originThreadId: string;
     readonly originProjectId: string;
@@ -619,9 +621,16 @@ export const makeAgentControlActionValidatorFromDeps = (deps: {
       if (input.plan.kind === "automationRun") {
         return yield* fail("invalid-plan", "Scheduled run proposals are server-owned.");
       }
-      if (isAgentControlDevicePlan(input.plan)) {
+      if (isAgentControlDevicePlan(input.plan) || input.plan.kind === "deviceControlConsent") {
         // Proposal submission validates immutable scope and bounded input only.
-        // Authoritative device state is deliberately read only after approval.
+        // Authoritative device state is deliberately read only after approval (a consent's
+        // attachment is also checked by ryco_device before it asks).
+        if (input.plan.kind === "deviceControlConsent" && deps.deviceService?.supported !== true) {
+          return yield* fail(
+            "invalid-plan",
+            "Simulator or emulator device control is unavailable.",
+          );
+        }
         yield* validateDevicePlanScope(input.plan, {
           originThreadId: caller.id,
           originProjectId: caller.projectId,
@@ -740,7 +749,7 @@ export const makeAgentControlActionValidatorFromDeps = (deps: {
             "External integrations cannot manage the node's Tasks.",
           );
         }
-        if (isAgentControlDevicePlan(input.plan)) {
+        if (isAgentControlDevicePlan(input.plan) || input.plan.kind === "deviceControlConsent") {
           return yield* fail(
             "privilege-escalation",
             "External integrations cannot control devices.",
@@ -965,6 +974,8 @@ export const makeAgentControlActionValidatorFromDeps = (deps: {
           "privilege-escalation",
           "Only an originating provider thread can manage the node's Tasks.",
         );
+      } else if (proposal.plan.kind === "deviceControlConsent") {
+        return yield* fail("privilege-escalation", "External integrations cannot control devices.");
       } else if (handsOverArtifacts(proposal.plan)) {
         return yield* fail(
           "privilege-escalation",
@@ -1031,7 +1042,10 @@ export const makeAgentControlActionValidatorFromDeps = (deps: {
         yield* validateLocalTaskDelete(proposal.plan);
         return;
       }
-      if (isAgentControlDevicePlan(proposal.plan)) {
+      if (
+        isAgentControlDevicePlan(proposal.plan) ||
+        proposal.plan.kind === "deviceControlConsent"
+      ) {
         if (principal.kind !== "provider-session") {
           return yield* fail(
             "privilege-escalation",
@@ -1039,6 +1053,39 @@ export const makeAgentControlActionValidatorFromDeps = (deps: {
           );
         }
         const origin = snapshot.threads.find((thread) => thread.id === principal.threadId);
+        if (proposal.plan.kind === "deviceControlConsent") {
+          // Consent belongs to the exact task (turn) and runtime that asked: approving a
+          // card after that task ended grants nothing.
+          if (
+            !origin ||
+            principal.turnId === undefined ||
+            principal.runtimeSessionId === undefined ||
+            origin.session?.status !== "running" ||
+            origin.session.activeTurnId !== principal.turnId ||
+            origin.session.runtimeSessionId !== principal.runtimeSessionId ||
+            origin.session.providerInstanceId !== principal.providerInstanceId
+          ) {
+            return yield* fail("caller-stale", "The task that asked has ended.");
+          }
+          yield* validateDevicePlanScope(proposal.plan, {
+            originThreadId: principal.threadId,
+            originProjectId,
+            originProviderInstanceId: principal.providerInstanceId,
+          });
+          if (
+            deps.deviceService?.supported !== true ||
+            deps.deviceService.manager.exclusiveAttachment(
+              proposal.plan.threadId,
+              proposal.plan.udid,
+            ) !== "exclusive"
+          ) {
+            return yield* fail(
+              "thread-stale",
+              "The device is no longer attached to this thread only.",
+            );
+          }
+          return;
+        }
         const project = snapshot.projects.find((candidate) => candidate.id === originProjectId);
         if (
           !origin ||

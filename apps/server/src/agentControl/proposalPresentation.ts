@@ -75,6 +75,7 @@ export const agentControlRiskTagsForPlan = (
     case "deviceTap":
     case "deviceSwipe":
     case "devicePressButton":
+    case "deviceControlConsent":
       return [AGENT_CONTROL_RISK_TAGS.deviceMutation];
   }
 };
@@ -125,5 +126,7 @@ export const agentControlPromptSummaryForPlan = (plan: AgentControlActionPlan): 
     case "deviceStopRecording":
     case "deviceShutdown":
       return plan.executionSummary;
+    case "deviceControlConsent":
+      return `Allow routine input on device ${plan.udid} for this task`;
   }
 };

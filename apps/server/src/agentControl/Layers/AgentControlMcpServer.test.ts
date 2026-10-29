@@ -21,6 +21,7 @@ import {
   type AgentControlProposalStreamProposalEvent,
 } from "@ryco/contracts";
 import { assert, it } from "@effect/vitest";
+import { vi } from "vitest";
 import {
   Context,
   Effect,
@@ -40,6 +41,16 @@ import {
 import type { ProjectionSnapshotQueryShape } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
 import { ProjectionSnapshotQuery } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
 import { ProviderRegistry } from "../../provider/Services/ProviderRegistry.ts";
+import { DeviceManager } from "../../device/DeviceManager.ts";
+import { FakeDeviceBackend } from "../../device/FakeDeviceBackend.ts";
+import { DeviceService } from "../../device/Services/DeviceService.ts";
+
+/** Counts loads of `ryco_device`'s module, which must never load at boot. */
+const deviceRoutineModule = vi.hoisted(() => ({ loads: 0 }));
+vi.mock("../Mcp/deviceRoutineTools.ts", async (importOriginal) => {
+  deviceRoutineModule.loads += 1;
+  return await importOriginal();
+});
 import { CompletionReturnRepositoryLive } from "../../persistence/Layers/AgentControlCompletionReturns.ts";
 import { AgentControlProposalRepositoryLive } from "../../persistence/Layers/AgentControlProposals.ts";
 import { SqlitePersistenceMemory } from "../../persistence/Layers/Sqlite.ts";
@@ -926,6 +937,85 @@ it.live("installs the HTML render tools on the private listener when the service
         assert.include(manager.listed, name);
         assert.include(manager.advertised ?? [], name);
       }
+    }),
+  ),
+);
+
+it.live("installs ryco_device where devices exist, for sessions that may drive them", () =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      const listFor = (
+        context: Context.Context<AgentControlSessionRegistry>,
+        capabilities: ReadonlyArray<AgentControlCapability>,
+        runtime: string,
+      ) =>
+        Effect.gen(function* () {
+          const registry = Context.get(context, AgentControlSessionRegistry);
+          const endpoint = yield* registry.currentEndpoint;
+          const url = (endpoint as Option.Some<{ url: string }>).value.url;
+          const lease = yield* registry.issueLease({
+            threadId: callerThreadId,
+            providerInstanceId: codexInstance,
+            runtimeSessionId: RuntimeSessionId.make(runtime),
+            capabilities,
+            injectionMode: "codex-http",
+          });
+          const bearer = Redacted.value(
+            (lease as Option.Some<AgentControlIssuedLease>).value.credential,
+          );
+          const listed = (
+            parseBody(yield* rpc(url, bearer, "tools/list")).result as {
+              tools: ReadonlyArray<{ name: string }>;
+            }
+          ).tools.map((tool) => tool.name);
+          const catalog = yield* rpc(url, bearer, "tools/call", {
+            name: AGENT_CONTROL_MCP_TOOLS.capabilities,
+            arguments: {},
+          });
+          const advertised = (
+            parseBody(catalog).result as { structuredContent?: { tools?: ReadonlyArray<string> } }
+          ).structuredContent?.tools;
+          return { listed, advertised };
+        });
+      const settings = ServerSettingsService.layerTest({ agentControl: { enabled: true } });
+      const manager = new DeviceManager({ backend: new FakeDeviceBackend() });
+      yield* Effect.addFinalizer(() => Effect.promise(() => manager.dispose()));
+      const deviceGrants = [
+        AGENT_CONTROL_CAPABILITIES.read,
+        AGENT_CONTROL_CAPABILITIES.readDevices,
+        AGENT_CONTROL_CAPABILITIES.readDeviceContent,
+        AGENT_CONTROL_CAPABILITIES.controlDevices,
+      ];
+
+      const withDevices = yield* Layer.build(
+        makeMcpServerLayer(settings).pipe(
+          Layer.provideMerge(Layer.succeed(DeviceService, { supported: true, manager })),
+        ),
+      );
+      // The listener runs, and the module still has not loaded (no other test in this
+      // file provides a device service, so nothing before this point can have loaded it).
+      assert.strictEqual(deviceRoutineModule.loads, 0);
+      const reader = yield* listFor(
+        withDevices,
+        [AGENT_CONTROL_CAPABILITIES.read, AGENT_CONTROL_CAPABILITIES.readDeviceContent],
+        "runtime-device-reader",
+      );
+      assert.notInclude(reader.listed, "ryco_device");
+      // A session that cannot drive devices never loads it either.
+      assert.strictEqual(deviceRoutineModule.loads, 0);
+      const driver = yield* listFor(withDevices, deviceGrants, "runtime-device-driver");
+      assert.include(driver.listed, "ryco_device");
+      assert.include(driver.advertised ?? [], "ryco_device");
+      assert.strictEqual(deviceRoutineModule.loads, 1);
+
+      const unsupported = yield* Layer.build(
+        makeMcpServerLayer(settings).pipe(
+          Layer.provideMerge(Layer.succeed(DeviceService, { supported: false, manager })),
+        ),
+      );
+      const nowhere = yield* listFor(unsupported, deviceGrants, "runtime-device-unsupported");
+      assert.notInclude(nowhere.listed, "ryco_device");
+      assert.notInclude(nowhere.advertised ?? [], "ryco_device");
     }),
   ),
 );

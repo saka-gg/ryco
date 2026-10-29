@@ -26,10 +26,12 @@ import {
 } from "@ryco/contracts";
 import { assert, it } from "@effect/vitest";
 import { Effect, Fiber, Option, PubSub, Schema } from "effect";
+import sharp from "sharp";
 
 import type { ProjectionSnapshotQueryShape } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
 import { DeviceManager } from "../../device/DeviceManager.ts";
 import { FakeDeviceBackend } from "../../device/FakeDeviceBackend.ts";
+import type { DeviceDescribeUiResult } from "@ryco/contracts";
 import {
   AgentControlCapabilityDeniedError,
   AgentControlDisabledError,
@@ -38,7 +40,12 @@ import {
 import type { AgentControlPolicyShape } from "../Services/AgentControlPolicy.ts";
 import type { AgentControlAutomationShape } from "../Services/AgentControlAutomation.ts";
 import type { AgentControlSessionRecord } from "../Services/AgentControlSessionRegistry.ts";
-import { makeAgentControlMcpTools, type AgentControlMcpToolDeps } from "./tools.ts";
+import {
+  AGENT_CONTROL_DEVICE_IMAGE_MAX_BASE64_CHARS,
+  makeAgentControlMcpTools,
+  type AgentControlMcpToolDeps,
+} from "./tools.ts";
+import { AGENT_CONTROL_MCP_MAX_RESPONSE_BYTES } from "./transportGuard.ts";
 
 // ── Fixtures ──────────────────────────────────────────────────────────
 
@@ -512,6 +519,136 @@ it.effect(
       assert.strictEqual(backend.calls.filter((entry) => entry.kind === "screenshot").length, 1);
       yield* Effect.promise(() => manager.dispose());
     }),
+);
+
+/** A fake whose accessibility tree carries one very long value. */
+class LongTreeBackend extends FakeDeviceBackend {
+  value: string;
+  constructor(value: string) {
+    super();
+    this.value = value;
+  }
+  override async describeUi(udid: string): Promise<DeviceDescribeUiResult> {
+    const tree = await super.describeUi(udid);
+    return { ...tree, root: { ...tree.root, value: this.value } };
+  }
+}
+
+it.effect("device content fits the Agent Control response cap or is refused in words", () =>
+  Effect.gen(function* () {
+    const backend = new LongTreeBackend("v".repeat(400_000));
+    backend.bootExternally("FAKE-0001");
+    const manager = new DeviceManager({ backend });
+    yield* Effect.promise(() => manager.attach(callerThreadId, "FAKE-0001"));
+    const contentSession = {
+      ...writeSession,
+      grantedCapabilities: [AGENT_CONTROL_CAPABILITIES.readDeviceContent],
+    };
+    const deps = makeDeps({ deviceService: { supported: true, manager } });
+
+    // A full-resolution capture: well past the cap as a raw PNG.
+    const png = yield* Effect.promise(() =>
+      sharp({
+        create: {
+          width: 1_000,
+          height: 1_000,
+          channels: 3,
+          background: "#202020",
+          noise: { type: "gaussian", mean: 128, sigma: 60 },
+        },
+      })
+        .png()
+        .toBuffer(),
+    );
+    assert.isAbove(png.toString("base64").length, AGENT_CONTROL_MCP_MAX_RESPONSE_BYTES);
+    backend.setScreenshotPng(png.toString("base64"));
+    const screenshot = yield* call(
+      deps,
+      AGENT_CONTROL_MCP_TOOLS.readDeviceScreenshot,
+      { udid: "FAKE-0001" },
+      contentSession,
+    );
+    assert.isUndefined(screenshot.isError);
+    assert.deepStrictEqual(
+      screenshot.content.map((block) => block.type),
+      ["text", "image"],
+    );
+    const image = screenshot.content[1];
+    if (image?.type === "image") {
+      assert.strictEqual(image.mimeType, "image/jpeg");
+      assert.isAtMost(image.data.length, AGENT_CONTROL_DEVICE_IMAGE_MAX_BASE64_CHARS);
+    }
+    // The capture's own size beside the fitted one: a position read from a scaled
+    // image maps back to capture pixels (Android input coordinates).
+    const sizes = JSON.parse(screenshot.content[0]?.text ?? "{}") as {
+      width: number;
+      height: number;
+      scaledToFitTransport: { mimeType: string; width: number; height: number };
+    };
+    assert.strictEqual(sizes.width, 1_000);
+    assert.strictEqual(sizes.height, 1_000);
+    assert.strictEqual(sizes.scaledToFitTransport.mimeType, "image/jpeg");
+    const fittedSize = yield* Effect.promise(() =>
+      sharp(Buffer.from(image?.type === "image" ? image.data : "", "base64")).metadata(),
+    );
+    assert.strictEqual(sizes.scaledToFitTransport.width, fittedSize.width);
+    assert.strictEqual(sizes.scaledToFitTransport.height, fittedSize.height);
+    const envelope = JSON.stringify({ jsonrpc: "2.0", id: 1, result: screenshot });
+    assert.isBelow(Buffer.byteLength(envelope, "utf8"), AGENT_CONTROL_MCP_MAX_RESPONSE_BYTES);
+
+    // A small capture stays the PNG as captured.
+    backend.setScreenshotPng(
+      (yield* Effect.promise(() =>
+        sharp({ create: { width: 4, height: 4, channels: 3, background: "#fff" } })
+          .png()
+          .toBuffer(),
+      )).toString("base64"),
+    );
+    const small = yield* call(
+      deps,
+      AGENT_CONTROL_MCP_TOOLS.readDeviceScreenshot,
+      { udid: "FAKE-0001" },
+      contentSession,
+    );
+    assert.strictEqual(small.content.length, 1);
+    assert.strictEqual(
+      small.content[0]?.type === "image" ? small.content[0].mimeType : null,
+      "image/png",
+    );
+
+    // A tree whose JSON passes 400,000 characters would not fit beside the envelope.
+    const tree = yield* call(
+      deps,
+      AGENT_CONTROL_MCP_TOOLS.describeDeviceUi,
+      { udid: "FAKE-0001" },
+      contentSession,
+    );
+    assert.isTrue(tree.isError);
+    assert.strictEqual(tree.content[0]?.text, "Device UI content exceeds the internal read limit.");
+    // Measured on the wire: fewer characters than the cap, three UTF-8 bytes each.
+    backend.value = "設".repeat(140_000);
+    const wide = yield* call(
+      deps,
+      AGENT_CONTROL_MCP_TOOLS.describeDeviceUi,
+      { udid: "FAKE-0001" },
+      contentSession,
+    );
+    assert.isTrue(wide.isError);
+    // Half as many still fits, inside the response cap.
+    backend.value = "設".repeat(70_000);
+    const fits = yield* call(
+      deps,
+      AGENT_CONTROL_MCP_TOOLS.describeDeviceUi,
+      { udid: "FAKE-0001" },
+      contentSession,
+    );
+    assert.isUndefined(fits.isError);
+    assert.isBelow(
+      Buffer.byteLength(JSON.stringify({ jsonrpc: "2.0", id: 1, result: fits }), "utf8"),
+      AGENT_CONTROL_MCP_MAX_RESPONSE_BYTES,
+    );
+    yield* Effect.promise(() => manager.dispose());
+  }),
 );
 
 it.effect("automation create, update, and cancel remain inert exact proposals until accepted", () =>

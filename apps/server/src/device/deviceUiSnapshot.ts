@@ -53,6 +53,21 @@ function clip(text: string, maxLength: number): string {
   return flat.length > maxLength ? `${flat.slice(0, maxLength - 1)}…` : flat;
 }
 
+/**
+ * An element's label and value as the snapshot shows them: whitespace folded
+ * and clipped. A text view's value can hold a whole document; evidence that
+ * names the element it hit needs only its start.
+ */
+export function clippedElementText(node: DeviceUiNode): {
+  readonly label: string | null;
+  readonly value: string | null;
+} {
+  return {
+    label: node.label === null ? null : clip(node.label, MAX_LABEL_LENGTH),
+    value: node.value === null ? null : clip(node.value, MAX_VALUE_LENGTH),
+  };
+}
+
 function formatNode(node: DeviceUiNode): string {
   const parts = [node.subrole === null ? node.role : `${node.role}/${node.subrole}`];
   if (hasText(node.label)) parts.push(JSON.stringify(clip(node.label, MAX_LABEL_LENGTH)));

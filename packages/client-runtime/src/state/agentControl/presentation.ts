@@ -13,6 +13,7 @@ import {
   AGENT_CONTROL_AUTOMATION_MIN_INTERVAL_MS,
   AGENT_CONTROL_AUTOMATION_RUN_HISTORY_MAX,
   type AgentControlCompletionReturn,
+  type AgentControlDeviceActionPlan,
   type AgentControlProposal,
   type AgentControlProposalId,
   type AgentControlProposalStatus,
@@ -150,7 +151,7 @@ function planPresentation(proposal: AgentControlProposal): {
   ];
   const plan = proposal.plan;
   const deviceDetails = (
-    devicePlan: Extract<AgentControlProposal["plan"], { kind: `device${string}` }>,
+    devicePlan: AgentControlDeviceActionPlan,
     actionLines: ReadonlyArray<string>,
   ): ReadonlyArray<AgentControlDetailSection> => [
     {
@@ -584,6 +585,28 @@ function planPresentation(proposal: AgentControlProposal): {
         targetLabel: `device ${shortId(plan.udid)}`,
         runtimeLabel: "explicit approval required",
         detailSections: deviceDetails(plan, ["Action: shut down this exact Simulator."]),
+      };
+    case "deviceControlConsent":
+      return {
+        actionLabel: "Allow Device for this task",
+        targetLabel: `device ${shortId(plan.udid)}`,
+        runtimeLabel: "this task only",
+        detailSections: [
+          {
+            heading: "Routine device actions until this response ends",
+            lines: [
+              "The agent may tap, swipe, type, press hardware buttons, scroll, launch installed apps and change simulator settings on this device.",
+              "It can type into any app on the device, including its web browser.",
+              "Installing apps, opening links directly, booting, attaching and shutting down still ask each time.",
+              "Use Stop in chat to end the task. Messages sent while the agent is working continue it; the next task asks again.",
+              `Device UDID: ${plan.udid}`,
+              `Thread: ${plan.threadId}`,
+              `Project: ${plan.projectId}`,
+              `Provider instance: ${plan.providerInstanceId}`,
+              "Nothing the agent types or taps is stored with this request.",
+            ],
+          },
+        ],
       };
   }
 }

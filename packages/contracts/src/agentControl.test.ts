@@ -4,6 +4,7 @@ import { Schema } from "effect";
 import {
   AGENT_CONTROL_CAPABILITIES,
   AGENT_CONTROL_ACTION_CAPABILITIES,
+  AGENT_CONTROL_DEVICE_ACTION_KINDS,
   AGENT_CONTROL_PLAN_VERSION,
   AgentControlActionPlan,
   AgentControlCapability,
@@ -223,6 +224,30 @@ describe("AgentControlActionPlan", () => {
     expect(() => decodePlan({ kind: "device.call", method: "tap", payload: {} })).toThrow();
   });
 
+  it("carries only the scope of a device-control consent, never what the agent does", () => {
+    const consent = {
+      kind: "deviceControlConsent",
+      threadId: "thread-1",
+      projectId: "project-1",
+      providerInstanceId: "codex",
+      udid: "FAKE-0001",
+    };
+    expect(decodePlan(consent)).toEqual(consent);
+    // Typed text, labels, coordinates and bundle ids run directly and are never persisted.
+    for (const content of [
+      { text: "hunter2" },
+      { label: "Pay" },
+      { x: 10, y: 20 },
+      { bundleId: "com.apple.Preferences" },
+    ]) {
+      expect(() => decodePlan({ ...consent, ...content })).toThrow();
+    }
+    expect(() => decodePlan({ ...consent, udid: "bad udid" })).toThrow();
+    expect(AGENT_CONTROL_ACTION_CAPABILITIES.deviceControlConsent).toBe("devices.control");
+    // Not a device action: it has no expected-version target and runs no device executor.
+    expect(AGENT_CONTROL_DEVICE_ACTION_KINDS).not.toContain("deviceControlConsent");
+  });
+
   it("rejects unknown action kinds", () => {
     expect(() => decodePlan({ kind: "runShellCommand", command: "rm -rf /" })).toThrow();
   });
@@ -351,6 +376,7 @@ describe("forward compatibility (additive extension)", () => {
       "deleteLocalTask",
       "deviceAttach",
       "deviceBoot",
+      "deviceControlConsent",
       "deviceDetach",
       "deviceInstall",
       "deviceLaunch",

@@ -3,7 +3,7 @@ import { request as httpRequest } from "node:http";
 import sharp from "sharp";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { DeviceBackendError } from "../device/DeviceBackend.ts";
+import { DeviceBackendError, type DeviceSwipeGesture } from "../device/DeviceBackend.ts";
 import { DEVICE_IDLE_SHUTDOWN_MS, DeviceManager } from "../device/DeviceManager.ts";
 import {
   DEVICE_WAIT_DEFAULT_MS,
@@ -11,9 +11,13 @@ import {
   type DeviceSettleTiming,
 } from "../device/deviceObservation.ts";
 import { FakeDeviceBackend } from "../device/FakeDeviceBackend.ts";
+import type { DeviceAvailability } from "@ryco/contracts";
+import { DEVICE_NOT_ATTACHED_TEXT, DEVICE_SHARED_TEXT } from "./deviceToolActions.ts";
 import { DEVICE_TOOL_DEFINITIONS } from "./deviceToolDefinitions.ts";
 import {
+  AGENT_CONTROL_DEVICE_POINTER,
   DEVICE_TOOL_NAMES,
+  agentControlDeviceLockFor,
   blockProcessDeviceToolsForAgentControl,
   callDeviceTool,
   deviceToolRequiresApproval,
@@ -113,7 +117,9 @@ describe("device tool gateway", () => {
     manager = new DeviceManager({ backend });
     gateway = await startDeviceToolGateway(manager);
     const binding = gateway.createBinding({ threadId: "thread-locked", isTurnActive: () => true });
-    const release = blockProcessDeviceToolsForAgentControl("thread-locked", "lease-1");
+    const release = blockProcessDeviceToolsForAgentControl("thread-locked", "lease-1", {
+      agentControlDevices: true,
+    });
 
     const listed = await post(binding.url, binding.headers, "tools/list");
     expect(
@@ -131,7 +137,9 @@ describe("device tool gateway", () => {
     }
     expect(backend.calls).toEqual([]);
 
-    const releaseReplacement = blockProcessDeviceToolsForAgentControl("thread-locked", "lease-2");
+    const releaseReplacement = blockProcessDeviceToolsForAgentControl("thread-locked", "lease-2", {
+      agentControlDevices: true,
+    });
     release();
     const stillLocked = await post(binding.url, binding.headers, "tools/list");
     expect(
@@ -190,6 +198,85 @@ describe("device tool gateway", () => {
     }
 
     expect(backend.callsOfKind("shutdown").map((call) => call.udid)).toEqual(["FAKE-0001"]);
+  });
+
+  it("points a locked session at Agent Control's device tools only when its lease has them", async () => {
+    const backend = new FakeDeviceBackend();
+    manager = new DeviceManager({ backend });
+    gateway = await startDeviceToolGateway(manager);
+    const listedNames = async (binding: { url: string; headers: Record<string, string> }) =>
+      (
+        (await post(binding.url, binding.headers, "tools/list")).body as {
+          result: { tools: Array<{ name: string }> };
+        }
+      ).result.tools.map((tool) => tool.name);
+    const callText = async (
+      binding: { url: string; headers: Record<string, string> },
+      name: string,
+    ) =>
+      (
+        (
+          await post(binding.url, binding.headers, "tools/call", {
+            name,
+            arguments: { udid: "FAKE-0001" },
+          })
+        ).body as { result: { isError?: boolean; content: Array<{ text: string }> } }
+      ).result;
+
+    // A full Agent Control lease: the session has ryco_device.
+    const full = gateway.createBinding({ threadId: "thread-full", isTurnActive: () => true });
+    const releaseFull = blockProcessDeviceToolsForAgentControl("thread-full", "lease-full", {
+      agentControlDevices: true,
+    });
+    expect(agentControlDeviceLockFor("thread-full")).toEqual({
+      leaseId: "lease-full",
+      agentControlDevices: true,
+    });
+    expect(await listedNames(full)).toEqual(["device_list"]);
+    const refused = await callText(full, "device_tap");
+    expect(refused.isError).toBe(true);
+    expect(refused.content[0]?.text).toContain("use ryco_device");
+    expect(refused.content[0]?.text).toContain("ryco_propose_device_*");
+    const listing = await callText(full, "device_list");
+    expect(listing.isError).toBeUndefined();
+    // The listing, then the pointer; the gateway's own guide names tools hidden here.
+    expect(listing.content.map((block) => block.text).at(-1)).toBe(AGENT_CONTROL_DEVICE_POINTER);
+    expect(JSON.parse(listing.content[0]!.text).devices).toBeDefined();
+    expect(listing.content.some((block) => block.text.startsWith("- Device guide"))).toBe(false);
+
+    // A Computer Use lease (OpenCode): no device tools anywhere, and no pointer to any.
+    const computer = gateway.createBinding({
+      threadId: "thread-computer",
+      isTurnActive: () => true,
+    });
+    const releaseComputer = blockProcessDeviceToolsForAgentControl(
+      "thread-computer",
+      "lease-computer",
+      { agentControlDevices: false },
+    );
+    expect(await listedNames(computer)).toEqual(["device_list"]);
+    const unavailable = await callText(computer, "device_screenshot");
+    expect(unavailable.isError).toBe(true);
+    expect(unavailable.content[0]?.text).toBe(
+      "Device tools are unavailable in this session while Agent Control runs Computer Use.",
+    );
+    const computerListing = await callText(computer, "device_list");
+    expect(computerListing.content.map((block) => block.text)).not.toContain(
+      AGENT_CONTROL_DEVICE_POINTER,
+    );
+    expect(computerListing.content.some((block) => block.text.includes("ryco_device"))).toBe(false);
+    expect(backend.calls).toEqual([]);
+
+    releaseFull();
+    releaseComputer();
+    releaseComputer();
+    expect(agentControlDeviceLockFor("thread-full")).toBeNull();
+    expect(agentControlDeviceLockFor("thread-computer")).toBeNull();
+    // Unlocked again: the whole catalogue, and the guide with the next success.
+    expect(await listedNames(full)).toEqual(DEVICE_TOOL_NAMES);
+    const unlocked = await callText(full, "device_list");
+    expect(unlocked.content[0]?.text).toMatch(/^- Device guide/u);
+    expect(unlocked.content.map((block) => block.text)).not.toContain(AGENT_CONTROL_DEVICE_POINTER);
   });
 
   it("keeps recoverable navigation misses out of the viewer error state", () => {
@@ -461,6 +548,31 @@ describe("device tool evidence, waits, logs and configure", () => {
     expect(refused.isError).toBe(true);
   });
 
+  it("leaves out the oldest log lines when a read would pass the response cap", async () => {
+    const { backend, call } = await bootedGateway();
+    // 400 lines of 500 CJK characters: about 600 KB in UTF-8, past Agent Control's 512 KiB.
+    const log = Array.from({ length: 400 }, (_, index) => `${index} ${"日".repeat(500)}`);
+    backend.setLogResult({
+      process: "App",
+      log,
+      crashes: [],
+      omitted: 3,
+      truncated: false,
+      note: "Unified log.",
+    });
+
+    const result = await call("device_logs", { udid: UDID, bundleId: "com.example.app" });
+
+    expect(result.isError).not.toBe(true);
+    const text = textBlock(result, 0);
+    expect(Buffer.byteLength(JSON.stringify(text), "utf8")).toBeLessThanOrEqual(400_000);
+    const read = jsonBlock(result) as unknown as { log: string[]; omitted: number; note: string };
+    // The newest lines stay; the dropped ones are counted and said.
+    expect(read.log.at(-1)).toBe(log.at(-1));
+    expect(read.omitted).toBe(3 + log.length - read.log.length);
+    expect(read.note).toContain("Older lines were left out to fit the response");
+  });
+
   it("applies one simulator setting and refuses an invalid one", async () => {
     const { backend, call } = await bootedGateway();
 
@@ -676,5 +788,205 @@ describe("device tool evidence, waits, logs and configure", () => {
     expect(shotMetadata).toMatchObject({ mimeType: "image/png", width: 1_000, height: 1_000 });
     expect(shotMetadata.scaledToFitTransport).toMatchObject({ mimeType: "image/jpeg" });
     expect(shotMetadata.scaledToFitTransport.width).toBeLessThan(1_000);
+  });
+});
+
+/** A fake that runs a test's hook once, at a chosen point inside a device call. */
+class HookedBackend extends FakeDeviceBackend {
+  readonly hooks: { availability?: () => void; describeUi?: () => void; swipe?: () => void } = {};
+  private fire(point: keyof HookedBackend["hooks"]) {
+    const hook = this.hooks[point];
+    delete this.hooks[point];
+    hook?.();
+  }
+  override availability(): Promise<DeviceAvailability> {
+    this.fire("availability");
+    return super.availability();
+  }
+  override async describeUi(udid: string) {
+    this.fire("describeUi");
+    return super.describeUi(udid);
+  }
+  override async swipe(udid: string, gesture: DeviceSwipeGesture): Promise<void> {
+    await super.swipe(udid, gesture);
+    this.fire("swipe");
+  }
+}
+
+describe('attachment "require-attached" (Agent Control)', () => {
+  const OTHER_THREAD = "thread-other";
+  const inputs = (backend: FakeDeviceBackend) =>
+    backend.calls.filter((entry) =>
+      ["tap", "swipe", "typeText", "pressButton", "launch", "testing"].includes(entry.kind),
+    );
+
+  async function attachedManager() {
+    const backend = new HookedBackend();
+    await backend.boot(UDID);
+    manager = new DeviceManager({ backend });
+    return { backend, manager };
+  }
+
+  it("never attaches: refuses a device this thread does not hold alone, without a pane error", async () => {
+    const { backend, manager } = await attachedManager();
+    const tap = (threadId: string, attachment?: "require-attached") =>
+      callDeviceTool({
+        manager,
+        threadId,
+        name: "device_tap",
+        args: { udid: UDID, x: 1, y: 1 },
+        timing: FAST,
+        ...(attachment === undefined ? {} : { attachment }),
+      });
+
+    const refused = await tap(THREAD, "require-attached");
+    expect(refused).toEqual({
+      content: [{ type: "text", text: DEVICE_NOT_ATTACHED_TEXT }],
+      isError: true,
+    });
+    expect(inputs(backend)).toEqual([]);
+    expect(backend.callsOfKind("attachStream")).toEqual([]);
+    expect(manager.attachedThreadIds(UDID)).toEqual([]);
+    expect((await manager.getThreadState(THREAD)).lastError).toBeNull();
+
+    // The gateway's default attaches the device it drives, which is what Agent Control must not do.
+    expect((await tap(OTHER_THREAD)).isError).toBeUndefined();
+    expect(manager.attachedThreadIds(UDID)).toEqual([OTHER_THREAD]);
+    await manager.attach(THREAD, UDID);
+    const shared = await tap(THREAD, "require-attached");
+    expect(shared.content).toEqual([{ type: "text", text: DEVICE_SHARED_TEXT }]);
+    expect(backend.callsOfKind("tap")).toHaveLength(1);
+  });
+
+  it("stops before the input when the device is detached or shared during the call", async () => {
+    for (const [point, change, refusal] of [
+      // While the pane is told an agent is using the device (the call's first await).
+      ["availability", "detach", DEVICE_NOT_ATTACHED_TEXT],
+      // While the screen is read before the input.
+      ["describeUi", "detach", DEVICE_NOT_ATTACHED_TEXT],
+      ["describeUi", "attach elsewhere", DEVICE_SHARED_TEXT],
+    ] as const) {
+      const { backend, manager } = await attachedManager();
+      await manager.attach(THREAD, UDID);
+      backend.hooks[point] = () => {
+        if (change === "detach") void manager.detach(THREAD);
+        else void manager.attach(OTHER_THREAD, UDID);
+      };
+      const result = await callDeviceTool({
+        manager,
+        threadId: THREAD,
+        name: "device_type",
+        args: { udid: UDID, text: "secret" },
+        attachment: "require-attached",
+        timing: FAST,
+      });
+      expect(result).toEqual({ content: [{ type: "text", text: refusal }], isError: true });
+      expect(inputs(backend)).toEqual([]);
+      expect((await manager.getThreadState(THREAD)).lastError).toBeNull();
+      await manager.dispose();
+    }
+  });
+
+  it("stops scrolling toward a label, and never taps it, once the device is detached", async () => {
+    const { backend, manager } = await attachedManager();
+    await manager.attach(THREAD, UDID);
+    backend.hooks.swipe = () => void manager.detach(THREAD);
+    const result = await callDeviceTool({
+      manager,
+      threadId: THREAD,
+      name: "device_tap",
+      args: { udid: UDID, label: "Deep Row" },
+      attachment: "require-attached",
+      timing: FAST,
+    });
+    expect(result.content).toEqual([{ type: "text", text: DEVICE_NOT_ATTACHED_TEXT }]);
+    expect(backend.callsOfKind("swipe")).toHaveLength(1);
+    expect(backend.callsOfKind("tap")).toEqual([]);
+  });
+
+  it("stops scrolling toward a label, and never taps it, once the call is aborted", async () => {
+    for (const attachment of ["require-attached", undefined] as const) {
+      for (const [name, args] of [
+        ["device_tap", { udid: UDID, label: "Deep Row" }],
+        ["device_scroll_to_element", { udid: UDID, label: "Deep Row", maxSwipes: 32 }],
+      ] as const) {
+        const { backend, manager } = await attachedManager();
+        if (attachment !== undefined) await manager.attach(THREAD, UDID);
+        // Stop, the turn ending or the request timing out, mid-scroll.
+        const controller = new AbortController();
+        backend.hooks.swipe = () => controller.abort();
+        const result = await callDeviceTool({
+          manager,
+          threadId: THREAD,
+          name,
+          args,
+          signal: controller.signal,
+          timing: FAST,
+          ...(attachment === undefined ? {} : { attachment }),
+        });
+        expect(result.isError).toBe(true);
+        expect(backend.callsOfKind("swipe")).toHaveLength(1);
+        expect(backend.callsOfKind("tap")).toEqual([]);
+        await manager.dispose();
+      }
+    }
+  });
+
+  it("clips the element text a tap and a scroll report", async () => {
+    const backend = new (class extends FakeDeviceBackend {
+      override async describeUi(udid: string) {
+        const tree = await super.describeUi(udid);
+        const children = tree.root.children.map((child) =>
+          child.label === "Continue"
+            ? { ...child, label: `Continue ${"label ".repeat(50)}`, value: "v".repeat(300_000) }
+            : child,
+        );
+        return { ...tree, root: { ...tree.root, children } };
+      }
+    })();
+    await backend.boot(UDID);
+    manager = new DeviceManager({ backend });
+    const tapped = await callDeviceTool({
+      manager,
+      threadId: THREAD,
+      name: "device_tap",
+      args: { udid: UDID, label: "Continue", observe: false },
+      timing: FAST,
+    });
+    const element = jsonBlock(tapped as ToolResult).element as Record<string, string>;
+    expect(element.label).toHaveLength(80);
+    expect(element.label?.endsWith("…")).toBe(true);
+    expect(element.valueBeforeTap).toBe(`${"v".repeat(59)}…`);
+    const scrolled = await callDeviceTool({
+      manager,
+      threadId: THREAD,
+      name: "device_scroll_to_element",
+      args: { udid: UDID, label: "Continue", observe: false },
+      timing: FAST,
+    });
+    expect((jsonBlock(scrolled as ToolResult).element as Record<string, string>).value).toBe(
+      `${"v".repeat(59)}…`,
+    );
+    expect(JSON.stringify(scrolled).length).toBeLessThan(2_000);
+  });
+
+  it("refuses a JSON tree by its size on the wire, not its character count", async () => {
+    // Fewer characters than the cap, but three UTF-8 bytes each.
+    const backend = new (class extends FakeDeviceBackend {
+      override async describeUi(udid: string) {
+        const tree = await super.describeUi(udid);
+        return { ...tree, root: { ...tree.root, value: "設".repeat(140_000) } };
+      }
+    })();
+    await backend.boot(UDID);
+    manager = new DeviceManager({ backend });
+    const tree = await callDeviceTool({
+      manager,
+      threadId: THREAD,
+      name: "device_describe_ui",
+      args: { udid: UDID, format: "tree" },
+    });
+    expect(tree.isError).toBe(true);
+    expect(textBlock(tree as ToolResult, 0)).toBe('UI tree is too large; use format "compact".');
   });
 });

@@ -132,6 +132,13 @@ export type DeviceEventListener = (event: DeviceEvent) => void;
 /** Who pointed a thread at a device. Only a person's choice keeps a Ryco-owned simulator running. */
 export type DeviceAttachmentSource = "user" | "agent";
 
+/** How `tapElement` and `scrollToElement` reach a labelled element. */
+export interface DeviceUiTargetOptions {
+  readonly maxScrolls?: number | undefined;
+  /** Runs before every swipe and the final tap; throwing stops the operation there. */
+  readonly guard?: (() => void) | undefined;
+}
+
 export interface DeviceManagerOptions {
   readonly backend: DeviceBackend;
   readonly transport?: DeviceFrameTransport;
@@ -462,6 +469,17 @@ export class DeviceManager {
     return [...this.threads.entries()]
       .filter(([, attachment]) => attachment.attachedDeviceUdid === udid)
       .map(([threadId]) => threadId);
+  }
+
+  /**
+   * `udid` as `threadId` sees it: attached to it alone, attached to no
+   * thread, or attached to another thread (with or without this one). Agent
+   * Control's routine input runs only on `"exclusive"`.
+   */
+  exclusiveAttachment(threadId: string, udid: string): "exclusive" | "unattached" | "shared" {
+    const holders = this.attachedThreadIds(udid);
+    if (holders.some((holder) => holder !== threadId)) return "shared";
+    return holders.length === 0 ? "unattached" : "exclusive";
   }
 
   /**
@@ -954,9 +972,9 @@ export class DeviceManager {
   async tapElement(
     udid: string,
     target: DeviceUiTarget,
-    options: { readonly maxScrolls?: number | undefined } = {},
+    options: DeviceUiTargetOptions = {},
   ): Promise<DeviceUiTargetMatch> {
-    const assertCurrent = this.operationGuard(udid);
+    const assertCurrent = this.operationGuard(udid, options.guard);
     const match = await this.scrollToElement(udid, target, options);
     assertCurrent();
     await this.withDeviceAction(udid, () => this.backend.tap(udid, match.point.x, match.point.y));
@@ -980,9 +998,9 @@ export class DeviceManager {
   async scrollToElement(
     udid: string,
     target: DeviceUiTarget,
-    options: { readonly maxScrolls?: number | undefined } = {},
+    options: DeviceUiTargetOptions = {},
   ): Promise<DeviceUiTargetMatch> {
-    const assertCurrent = this.operationGuard(udid);
+    const assertCurrent = this.operationGuard(udid, options.guard);
     const maxScrolls = options.maxScrolls ?? DEVICE_DEFAULT_MAX_SCROLLS;
     let tree = await this.describeUi(udid);
     assertCurrent();
@@ -1046,7 +1064,7 @@ export class DeviceManager {
   }
 
   /** The match, or null when the label has not been rendered into the tree yet. */
-  private operationGuard(udid: string): () => void {
+  private operationGuard(udid: string, guard?: () => void): () => void {
     const generation = this.deviceGenerations.get(udid) ?? 0;
     return () => {
       if (this.disposed || generation !== (this.deviceGenerations.get(udid) ?? 0)) {
@@ -1054,6 +1072,7 @@ export class DeviceManager {
           "Stale device operation: device host disconnected or lifecycle changed",
         );
       }
+      guard?.();
     };
   }
 
@@ -1122,7 +1141,7 @@ export class DeviceManager {
   }
 
   async readLogs(udid: string, query: DeviceLogQuery): Promise<DeviceLogResult> {
-    return await this.backend.readLogs(udid, query);
+    return await this.withDeviceAction(udid, () => this.backend.readLogs(udid, query));
   }
 
   async openUrl(udid: string, url: string): Promise<void> {
@@ -1333,6 +1352,21 @@ export class DeviceManager {
     if (this.removedThreads.has(threadId)) return;
     if (this.threadState(threadId).paneSurfacedUdid === udid) return;
     await this.ensureThreadAttached(threadId, udid).catch(() => undefined);
+    this.requestOpenPane(threadId, udid, reason);
+  }
+
+  /**
+   * `surfaceDeviceForAgent` for callers that may only drive a device the
+   * thread already has attached (Agent Control): opens the pane once, and
+   * never attaches. A device that is no longer attached here stays hidden.
+   */
+  surfaceAttachedDeviceForAgent(
+    threadId: string,
+    udid: string,
+    reason: DeviceOpenPaneReason,
+  ): void {
+    const attachment = this.threadState(threadId);
+    if (attachment.attachedDeviceUdid !== udid || attachment.paneSurfacedUdid === udid) return;
     this.requestOpenPane(threadId, udid, reason);
   }
 

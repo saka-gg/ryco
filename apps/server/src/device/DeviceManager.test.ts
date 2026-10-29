@@ -1126,6 +1126,33 @@ describe("DeviceManager agent auto-attach", () => {
     ).toEqual([DEVICE_A, DEVICE_B]);
   });
 
+  it("surfaces an attached device once and never attaches one for Agent Control", async () => {
+    const { backend, manager, events } = makeManager();
+    await backend.boot(DEVICE_A);
+    await backend.boot(DEVICE_B);
+    await manager.attach(THREAD_A, DEVICE_A);
+
+    // Not attached here: no attachment, no pane request.
+    manager.surfaceAttachedDeviceForAgent(THREAD_A, DEVICE_B, "agent-tool");
+    manager.surfaceAttachedDeviceForAgent(THREAD_B, DEVICE_B, "agent-tool");
+    expect((await manager.getThreadState(THREAD_B)).attachedDeviceUdid).toBeNull();
+    expect((await manager.getThreadState(THREAD_A)).attachedDeviceUdid).toBe(DEVICE_A);
+
+    for (let call = 0; call < 3; call += 1) {
+      manager.surfaceAttachedDeviceForAgent(THREAD_A, DEVICE_A, "agent-launch");
+    }
+    const opened = events.filter((event) => event.type === "device.open-pane-requested");
+    expect(opened).toEqual([
+      {
+        type: "device.open-pane-requested",
+        threadId: THREAD_A,
+        udid: DEVICE_A,
+        reason: "agent-launch",
+      },
+    ]);
+    expect(backend.callsOfKind("attachStream")).toHaveLength(1);
+  });
+
   it("attaches each thread independently", async () => {
     const { backend, manager } = makeManager();
     await backend.boot(DEVICE_A);

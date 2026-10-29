@@ -102,6 +102,7 @@ import {
   readProjectShells,
 } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
 import type { DeviceServiceShape } from "../../device/Services/DeviceService.ts";
+import { fitScreenshotToBase64Budget } from "../../screenshotFit.ts";
 import type { WorkspaceAccessPolicyShape } from "../../workspace/Services/WorkspaceAccessPolicy.ts";
 import type { AgentControlPolicyShape } from "../Services/AgentControlPolicy.ts";
 import type { AgentControlActionValidatorShape } from "../Services/AgentControlActionValidator.ts";
@@ -246,7 +247,18 @@ const projectScriptsSchema = {
 } as const;
 
 const cursorSchemaProperty = { type: "string", maxLength: 1_024 } as const;
-const AGENT_CONTROL_DEVICE_UI_CONTENT_MAX_CHARS = 512 * 1_024;
+/**
+ * A UI tree as JSON, measured as it travels (escaped inside the result's
+ * JSON, in UTF-8), with room left in the 512 KiB response cap
+ * (`transportGuard.ts`) for the JSON-RPC envelope.
+ */
+const AGENT_CONTROL_DEVICE_UI_CONTENT_MAX_BYTES = 400_000;
+/**
+ * Base64 characters one device image may use in an Agent Control result: the
+ * HTML preview's budget, which leaves about 150 KB of the 512 KiB response
+ * cap for the JSON, a screen snapshot and the driving guide beside it.
+ */
+export const AGENT_CONTROL_DEVICE_IMAGE_MAX_BASE64_CHARS = 360_000;
 const limitSchemaProperty = (maximum: number) =>
   ({ type: "integer", minimum: 1, maximum }) as const;
 const automationScheduleSchema = {
@@ -1620,13 +1632,49 @@ export const makeAgentControlMcpTools = (deps: AgentControlMcpToolDeps): AgentCo
         () => service.manager.screenshot(udid, { save: false }),
         "Device screenshot read failed.",
       );
+      const image = {
+        type: "image",
+        data: screenshot.bytesBase64,
+        mimeType: screenshot.mimeType,
+      } as AgentControlMcpToolResult["content"][number];
+      if (screenshot.bytesBase64.length <= AGENT_CONTROL_DEVICE_IMAGE_MAX_BASE64_CHARS) {
+        return {
+          _tag: "PrivateDeviceContentResult",
+          content: [image],
+        } satisfies PrivateDeviceContentResult;
+      }
+      // A full-resolution simulator PNG often passes the response cap; the
+      // listener would replace it with an opaque "Response too large".
+      const fitted = yield* devicePromise(
+        () =>
+          fitScreenshotToBase64Budget(
+            screenshot.bytesBase64,
+            AGENT_CONTROL_DEVICE_IMAGE_MAX_BASE64_CHARS,
+          ),
+        "The screenshot is too large to return.",
+      );
       return {
         _tag: "PrivateDeviceContentResult",
         content: [
+          // The capture's own size beside the fitted one (as device_screenshot
+          // reports it): Android input coordinates are capture pixels, so a
+          // position read from a scaled image needs scaling back.
+          {
+            type: "text",
+            text: JSON.stringify({
+              width: screenshot.width,
+              height: screenshot.height,
+              scaledToFitTransport: {
+                mimeType: fitted.mimeType,
+                width: fitted.width,
+                height: fitted.height,
+              },
+            }),
+          },
           {
             type: "image",
-            data: screenshot.bytesBase64,
-            mimeType: "image/png",
+            data: fitted.data,
+            mimeType: fitted.mimeType,
           } as AgentControlMcpToolResult["content"][number],
         ],
       } satisfies PrivateDeviceContentResult;
@@ -1640,7 +1688,10 @@ export const makeAgentControlMcpTools = (deps: AgentControlMcpToolDeps): AgentCo
         "Device UI read failed.",
       );
       const encoded = JSON.stringify(tree);
-      if (encoded.length > AGENT_CONTROL_DEVICE_UI_CONTENT_MAX_CHARS) {
+      if (
+        Buffer.byteLength(JSON.stringify(encoded), "utf8") >
+        AGENT_CONTROL_DEVICE_UI_CONTENT_MAX_BYTES
+      ) {
         return yield* failTool("Device UI content exceeds the internal read limit.");
       }
       return {
