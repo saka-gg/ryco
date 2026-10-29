@@ -25,6 +25,7 @@ import path from "node:path";
 import {
   CONTEXT_HANDOFF_ACTIVITY_KIND,
   ContextHandoffActivityPayload,
+  GitCommandError,
   ModelSelection,
   ProviderRuntimeEvent,
   ProviderSession,
@@ -452,7 +453,6 @@ describe("ProviderCommandReactor", () => {
     const listLocalBranchNames = vi.fn<GitWorkflowServiceShape["listLocalBranchNames"]>(() =>
       Effect.succeed(["ryco/1234abcd", "feature/workspace", "feature/recovered"]),
     );
-    const pruneWorktrees = vi.fn<GitWorkflowServiceShape["pruneWorktrees"]>(() => Effect.void);
     const createWorktree = vi.fn<GitWorkflowServiceShape["createWorktree"]>(
       (input: Parameters<GitWorkflowServiceShape["createWorktree"]>[0]) =>
         Effect.succeed({
@@ -703,7 +703,6 @@ describe("ProviderCommandReactor", () => {
           invalidateStatus,
           listLocalBranchNames,
           listWorktreePaths,
-          pruneWorktrees,
           renameBranch,
         } satisfies Partial<GitWorkflowServiceShape>),
       ),
@@ -851,7 +850,6 @@ describe("ProviderCommandReactor", () => {
       invalidateStatus,
       listLocalBranchNames,
       listWorktreePaths,
-      pruneWorktrees,
       renameBranch,
       refreshStatus,
       generateBranchName,
@@ -1459,21 +1457,162 @@ describe("ProviderCommandReactor", () => {
     await waitFor(() => harness.startSession.mock.calls.length === 1);
     await waitFor(() => harness.sendTurn.mock.calls.length === 1);
     expect(harness.listLocalBranchNames).toHaveBeenCalledWith("/tmp/provider-project");
-    expect(harness.pruneWorktrees).toHaveBeenCalledWith("/tmp/provider-project");
     expect(harness.createWorktree).toHaveBeenCalledWith({
       projectId: ProjectId.make("project-1"),
       cwd: "/tmp/provider-project",
       path: worktreePath,
       refName: "feature/recovered",
       dependencyHydration: "none",
+      replaceMissingRegistration: true,
     });
     expect(harness.startSession.mock.calls[0]?.[1]).toMatchObject({ cwd: worktreePath });
     expect(
-      harness.pruneWorktrees.mock.invocationCallOrder[0] ?? Number.MAX_SAFE_INTEGER,
-    ).toBeLessThan(harness.createWorktree.mock.invocationCallOrder[0] ?? Number.MAX_SAFE_INTEGER);
-    expect(
       harness.createWorktree.mock.invocationCallOrder[0] ?? Number.MAX_SAFE_INTEGER,
     ).toBeLessThan(harness.startSession.mock.invocationCallOrder[0] ?? Number.MAX_SAFE_INTEGER);
+  });
+
+  it("uses the checkout a concurrent recreation finished first instead of failing the turn", async () => {
+    const baseDir = fs.mkdtempSync(path.join(os.tmpdir(), "ryco-worktree-recovery-race-"));
+    const harness = await createHarness({ baseDir });
+    const worktreePath = path.join(baseDir, "worktrees", "feature-recovered");
+    // Recreate checkout on the Projects page wins the destination; the driver then refuses
+    // this attempt because the checkout already exists.
+    harness.createWorktree.mockImplementation((input) =>
+      Effect.sync(() => fs.mkdirSync(worktreePath, { recursive: true })).pipe(
+        Effect.andThen(
+          Effect.fail(
+            new GitCommandError({
+              operation: "GitVcsDriver.createWorktree",
+              command: "git worktree add",
+              cwd: input.cwd,
+              detail: "Worktree destination already exists. Choose a different branch or root.",
+            }),
+          ),
+        ),
+      ),
+    );
+    harness.listWorktreePaths.mockImplementation(() =>
+      Effect.sync(() => (fs.existsSync(worktreePath) ? [worktreePath] : [])),
+    );
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.meta.update",
+        commandId: CommandId.make("cmd-record-raced-worktree"),
+        threadId: ThreadId.make("thread-1"),
+        branch: "feature/recovered",
+        worktreePath,
+      }),
+    );
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make("cmd-turn-start-raced-worktree"),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: asMessageId("user-message-raced-worktree"),
+          role: "user",
+          text: "continue in the recreated worktree",
+          attachments: [],
+        },
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: new Date().toISOString(),
+      }),
+    );
+
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    expect(harness.createWorktree).toHaveBeenCalledTimes(1);
+    expect(harness.assertWorktreeSetupComplete).toHaveBeenCalledWith(worktreePath);
+    expect(harness.startSession.mock.calls[0]?.[1]).toMatchObject({ cwd: worktreePath });
+  });
+
+  it("recreates a missing worktree over its own stale registration and prunes no other", async () => {
+    const baseDir = fs.realpathSync(
+      fs.mkdtempSync(path.join(os.tmpdir(), "ryco-worktree-targeted-recovery-")),
+    );
+    const repo = path.join(baseDir, "repo");
+    fs.mkdirSync(repo);
+    const localGit = (cwd: string, ...args: string[]) =>
+      execFileSync("git", args, {
+        cwd,
+        encoding: "utf8",
+        stdio: ["pipe", "pipe", "pipe"],
+        env: { ...process.env, GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null" },
+      });
+    localGit(repo, "init", "-b", "main");
+    localGit(
+      repo,
+      "-c",
+      "user.name=Fixture",
+      "-c",
+      "user.email=fixture@example.invalid",
+      "commit",
+      "--allow-empty",
+      "-m",
+      "base",
+    );
+    const worktreePath = path.join(baseDir, "worktrees", "recovered");
+    const interrupted = path.join(baseDir, "worktrees", "interrupted");
+    localGit(repo, "worktree", "add", "-b", "feature/recovered", worktreePath);
+    localGit(repo, "worktree", "add", "-b", "feature/interrupted", interrupted);
+    // The thread's checkout was deleted outside Ryco, which leaves Git's registration (a checkout
+    // storage cleanup removed is refused by the path lease until it is restored), and another
+    // checkout's cleanup stopped half-way: its quarantine still needs its own registration.
+    fs.rmSync(worktreePath, { recursive: true, force: true });
+    const quarantine = path.join(baseDir, "worktrees", ".cleanup-interrupted");
+    fs.renameSync(interrupted, quarantine);
+    const h = await createHarness({ baseDir, workspaceRoot: repo });
+    const gitRuntime = ManagedRuntime.make(
+      GitVcsDriver.layer.pipe(
+        Layer.provideMerge(ServerConfig.layerTest(process.cwd(), baseDir)),
+        Layer.provideMerge(NodeServices.layer),
+      ),
+    );
+    try {
+      const driver = await gitRuntime.runPromise(Effect.service(GitVcsDriver.GitVcsDriver));
+      h.createWorktree.mockImplementation(driver.createWorktree);
+      h.listWorktreePaths.mockImplementation(() => driver.listWorktreePaths(repo));
+      h.listLocalBranchNames.mockImplementation(() => driver.listLocalBranchNames(repo));
+      h.assertWorktreeSetupComplete.mockImplementation(driver.assertWorktreeSetupComplete);
+      await Effect.runPromise(
+        h.engine.dispatch({
+          type: "thread.meta.update",
+          commandId: CommandId.make("record-cleaned-worktree"),
+          threadId: ThreadId.make("thread-1"),
+          branch: "feature/recovered",
+          worktreePath,
+        }),
+      );
+      await Effect.runPromise(
+        h.engine.dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.make("turn-after-cleanup"),
+          threadId: ThreadId.make("thread-1"),
+          message: {
+            messageId: asMessageId("message-after-cleanup"),
+            role: "user",
+            text: "continue",
+            attachments: [],
+          },
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          runtimeMode: "approval-required",
+          createdAt: new Date().toISOString(),
+        }),
+      );
+      await waitFor(() => h.sendTurn.mock.calls.length === 1);
+      expect(h.startSession.mock.calls[0]?.[1]).toMatchObject({ cwd: worktreePath });
+      expect(localGit(worktreePath, "symbolic-ref", "--short", "HEAD").trim()).toBe(
+        "feature/recovered",
+      );
+      expect(localGit(repo, "worktree", "list", "--porcelain")).toContain(
+        `worktree ${interrupted}\n`,
+      );
+      expect(localGit(quarantine, "symbolic-ref", "--short", "HEAD").trim()).toBe(
+        "feature/interrupted",
+      );
+    } finally {
+      await gitRuntime.dispose();
+    }
   });
 
   it("refuses a retained incomplete worktree checkout on the second provider turn, including after driver restart", async () => {
@@ -1514,7 +1653,6 @@ describe("ProviderCommandReactor", () => {
       h.createWorktree.mockImplementation(driver.createWorktree);
       h.listWorktreePaths.mockImplementation(() => driver.listWorktreePaths(repo));
       h.listLocalBranchNames.mockImplementation(() => driver.listLocalBranchNames(repo));
-      h.pruneWorktrees.mockImplementation(() => driver.pruneWorktrees(repo));
       h.assertWorktreeSetupComplete.mockImplementation(driver.assertWorktreeSetupComplete);
       await Effect.runPromise(
         h.engine.dispatch({
@@ -1682,7 +1820,6 @@ describe("ProviderCommandReactor", () => {
         ) ?? false
       );
     });
-    expect(harness.pruneWorktrees).not.toHaveBeenCalled();
     expect(harness.createWorktree).not.toHaveBeenCalled();
     expect(harness.startSession).not.toHaveBeenCalled();
     expect(harness.sendTurn).not.toHaveBeenCalled();
@@ -1730,7 +1867,6 @@ describe("ProviderCommandReactor", () => {
         ) ?? false
       );
     });
-    expect(harness.pruneWorktrees).not.toHaveBeenCalled();
     expect(harness.createWorktree).not.toHaveBeenCalled();
     expect(harness.startSession).not.toHaveBeenCalled();
     expect(harness.sendTurn).not.toHaveBeenCalled();

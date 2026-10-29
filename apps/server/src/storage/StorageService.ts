@@ -1097,7 +1097,7 @@ export function makeStorageService(deps: {
         id: entry.id,
         status: "removed" as const,
         detail:
-          "Removed verified checkout/data. Git registration, branches, messages and historical usage are retained; missing registrations may be pruned explicitly.",
+          "Removed verified checkout/data. Git registration, branches, messages and historical usage are retained; Restore workspace checks a removed checkout out again.",
       };
     }).pipe(Effect.scoped, Effect.mapError(failure));
 

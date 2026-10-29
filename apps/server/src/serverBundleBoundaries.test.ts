@@ -236,6 +236,13 @@ describe("server boot import boundaries", () => {
     expect(
       reached(/^apps\/server\/src\/observability\/(?:HeapSnapshot|EventLoopStallHistory)\.ts$/u),
     ).toEqual([]);
+    // Recreating a recorded checkout (Restore, or a turn start that finds it missing) loads its
+    // routine and Git's registration rule on first use.
+    expect(
+      reached(
+        /^apps\/server\/src\/(?:workspace\/checkoutRecreation|vcs\/worktreeRegistrationReplacement)\.ts$/u,
+      ),
+    ).toEqual([]);
     // The OTEL variable resolver and the OTLP exporters load only when an export is configured,
     // and the `ryco trace summary` implementation only when that command runs.
     expect(

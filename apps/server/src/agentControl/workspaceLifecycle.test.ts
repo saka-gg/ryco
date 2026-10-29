@@ -297,6 +297,35 @@ describe("governed workspace preflight", () => {
       workspacePlanBlockers(await f.plan({ checkoutMode: "record-only" })).length,
     ).toBeGreaterThan(0);
   });
+  it("plans recreating a checkout whose missing path Git still registers, unless it is locked", async () => {
+    const f = fixture();
+    const archive = () => {
+      f.snapshot = {
+        ...f.snapshot,
+        worktrees: f.snapshot.worktrees?.map((row) =>
+          row.worktreeId === "topic" ? { ...row, archivedAt: NOW } : row,
+        ),
+      };
+    };
+    archive();
+    // Storage cleanup deletes the directory and keeps Git's registration.
+    rmSync(f.checkout, { recursive: true });
+    const plan = await f.plan({ action: "restore", checkoutMode: "restore-checkout" });
+    expect(plan.expected).toMatchObject({
+      checkout: "missing",
+      gitRegistered: true,
+      blockers: [],
+    });
+    expect(workspacePlanBlockers(plan)).toEqual([]);
+    expect(workspacePlanBlockers({ ...plan, deleteBranch: true }).length).toBeGreaterThan(0);
+
+    const locked = fixture();
+    locked.git(locked.repo, "worktree", "lock", locked.checkout);
+    rmSync(locked.checkout, { recursive: true });
+    const lockedPlan = await locked.plan({ action: "restore", checkoutMode: "restore-checkout" });
+    expect(lockedPlan.expected.gitRegistered).toBeNull();
+    expect(workspacePlanBlockers(lockedPlan).join(" ")).toContain("locked");
+  });
   it("rejects stale revisions, changed paths and new sessions", async () => {
     const f = fixture();
     const plan = await f.plan();

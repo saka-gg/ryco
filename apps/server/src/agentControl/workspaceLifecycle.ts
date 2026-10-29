@@ -68,15 +68,15 @@ export const workspacePlanBlockers = (
   if (plan.action === "restore") {
     if (s.archivedAt === null) blockers.push("Restore requires an archived workspace record.");
     if (plan.checkoutMode === "restore-checkout") {
+      // A registration Git keeps for the missing path (storage cleanup leaves one) is replaced
+      // when the checkout is recreated; a locked one fails the inspection.
       if (
         plan.deleteBranch ||
         s.checkout !== "missing" ||
-        s.gitRegistered !== false ||
+        s.gitRegistered === null ||
         s.branchHead === null
       )
-        blockers.push(
-          "Recreating a checkout requires an absent checkout and registration and a retained branch.",
-        );
+        blockers.push("Recreating a checkout requires an absent checkout and a retained branch.");
     } else if (plan.checkoutMode !== "record-only")
       blockers.push("Invalid checkout mode for restore.");
   } else if (plan.checkoutMode === "record-only") {
@@ -290,7 +290,13 @@ export const AgentControlWorkspacesLive = Layer.effect(
             })),
           ),
         );
-        if (inspection._tag === "Success") return { ...state, ...inspection.value };
+        if (inspection._tag === "Success") {
+          // A registration Git keeps that recreating may not replace fails the shared
+          // lifecycle's own preflight (`recreateCheckoutBlockers`) when an approved plan runs,
+          // before anything changes.
+          const { registrationRefusal: _refusal, ...facts } = inspection.value;
+          return { ...state, ...facts };
+        }
         const failure = Cause.squash(inspection.cause);
         return {
           ...state,

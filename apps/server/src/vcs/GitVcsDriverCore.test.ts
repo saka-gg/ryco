@@ -158,6 +158,23 @@ const initRepoWithCommit = (
   });
 
 it.layer(TestLayer)("GitVcsDriver core integration", (it) => {
+  describe("listLocalBranchNames", () => {
+    it.effect("names a branch a tag shares its name with by its plain name", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        const { initialBranch } = yield* initRepoWithCommit(cwd);
+        yield* git(cwd, ["branch", "release"]);
+        yield* git(cwd, ["tag", "release"]);
+        const driver = yield* GitVcsDriver.GitVcsDriver;
+
+        assert.deepStrictEqual(
+          (yield* driver.listLocalBranchNames(cwd)).toSorted(),
+          [initialBranch, "release"].toSorted(),
+        );
+      }),
+    );
+  });
+
   describe("readRangeContext", () => {
     it.effect("returns empty context when base and HEAD are identical", () =>
       Effect.gen(function* () {
@@ -1472,6 +1489,172 @@ it.layer(TestLayer)("GitVcsDriver core integration", (it) => {
           assert.include(yield* git(cwd, ["worktree", "list", "--porcelain"]), checkout);
           assert.isNotEmpty(yield* git(cwd, ["rev-parse", "refs/heads/verified-history"]));
         }).pipe(Effect.provide(SqlitePersistenceMemory)),
+    );
+    it.effect(
+      "recreates a checkout storage cleanup removed over its own registration and prunes no other",
+      () =>
+        Effect.gen(function* () {
+          const raw = yield* makeTmpDir();
+          const cwd = yield* Effect.promise(() => fsPromises.realpath(raw));
+          const { initialBranch } = yield* initRepoWithCommit(cwd);
+          const pathService = yield* Path.Path;
+          const fileSystem = yield* FileSystem.FileSystem;
+          const sql = yield* SqlClient.SqlClient;
+          // Records ownership and takes the creation lease, as the server's driver does.
+          const driver = yield* makeGitVcsDriverCore();
+          const cleaned = pathService.join(cwd, "cleaned");
+          const interrupted = pathService.join(cwd, "interrupted");
+          const plain = pathService.join(cwd, "plain");
+          for (const [checkout, branch] of [
+            [cleaned, "cleaned-history"],
+            [interrupted, "interrupted-history"],
+            [plain, "plain-history"],
+          ] as const)
+            yield* driver.createWorktree({
+              cwd,
+              path: checkout,
+              refName: initialBranch,
+              newRefName: branch,
+            });
+          // Storage cleanup removed two checkouts and kept their Git registrations.
+          yield* fileSystem.remove(cleaned, { recursive: true });
+          yield* fileSystem.remove(plain, { recursive: true });
+          yield* sql`UPDATE storage_owned_entries SET state = 'removed', created_at = '2026-01-01T00:00:00.000Z' WHERE path = ${cleaned}`;
+          // Another cleanup stopped half-way: its quarantine needs its own registration.
+          const quarantine = pathService.join(cwd, ".cleanup-interrupted");
+          yield* Effect.promise(() => fsPromises.rename(interrupted, quarantine));
+          yield* sql`UPDATE storage_owned_entries SET state = 'removing', identity_json = ${JSON.stringify({ quarantinePath: quarantine })} WHERE path = ${interrupted}`;
+
+          // Without the flag Git refuses the registration cleanup left behind.
+          const refused = yield* driver
+            .createWorktree({ cwd, path: plain, refName: "plain-history" })
+            .pipe(Effect.result);
+          assert.equal(refused._tag, "Failure");
+          // Storage admission still refuses a path whose cleanup is pending.
+          const pending = yield* driver
+            .createWorktree({
+              cwd,
+              path: interrupted,
+              refName: "interrupted-history",
+              replaceMissingRegistration: true,
+            })
+            .pipe(Effect.result);
+          assert.equal(pending._tag, "Failure");
+          if (pending._tag === "Failure")
+            assert.include(pending.failure.detail, "cleanup is pending");
+
+          const recreated = yield* driver.createWorktree({
+            cwd,
+            path: cleaned,
+            refName: "cleaned-history",
+            replaceMissingRegistration: true,
+          });
+          assert.equal(recreated.worktree.path, cleaned);
+          assert.equal(yield* git(cleaned, ["branch", "--show-current"]), "cleaned-history");
+          const rows = yield* sql<{
+            state: string;
+            created_at: string;
+          }>`SELECT state, created_at FROM storage_owned_entries WHERE path = ${cleaned}`;
+          assert.equal(rows[0]?.state, "owned");
+          assert.notEqual(rows[0]?.created_at, "2026-01-01T00:00:00.000Z");
+          // The interrupted cleanup's registration and quarantine are untouched.
+          assert.include(
+            yield* git(cwd, ["worktree", "list", "--porcelain"]),
+            `worktree ${interrupted}\n`,
+          );
+          assert.equal(yield* git(quarantine, ["branch", "--show-current"]), "interrupted-history");
+
+          // The refused plain add left its setup journal; Git's stale registration of that
+          // missing path does not keep the journal from being reclaimed when recreating.
+          const retried = yield* driver.createWorktree({
+            cwd,
+            path: plain,
+            refName: "plain-history",
+            replaceMissingRegistration: true,
+          });
+          assert.equal(retried.worktree.path, plain);
+          assert.equal(yield* git(plain, ["branch", "--show-current"]), "plain-history");
+          yield* driver.assertWorktreeSetupComplete(plain);
+        }).pipe(Effect.provide(Layer.merge(OverrideTestLayer, SqlitePersistenceMemory))),
+    );
+    it.effect("never replaces a locked, detached or duplicate registration", () =>
+      Effect.gen(function* () {
+        const raw = yield* makeTmpDir();
+        const cwd = yield* Effect.promise(() => fsPromises.realpath(raw));
+        const { initialBranch } = yield* initRepoWithCommit(cwd);
+        const pathService = yield* Path.Path;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const driver = yield* GitVcsDriver.GitVcsDriver;
+        const listing = () => git(cwd, ["worktree", "list", "--porcelain"]);
+        const recreate = (checkout: string, refName: string) =>
+          driver
+            .createWorktree({ cwd, path: checkout, refName, replaceMissingRegistration: true })
+            .pipe(Effect.result);
+
+        const locked = pathService.join(cwd, "locked");
+        yield* git(cwd, ["worktree", "add", "-b", "locked-history", locked]);
+        yield* git(cwd, ["worktree", "lock", locked]);
+        yield* fileSystem.remove(locked, { recursive: true });
+        const lockedResult = yield* recreate(locked, "locked-history");
+        assert.equal(lockedResult._tag, "Failure");
+        if (lockedResult._tag === "Failure") assert.include(lockedResult.failure.detail, "locked");
+
+        // A detached HEAD may be the only reference to its commit.
+        const detached = pathService.join(cwd, "detached");
+        yield* git(cwd, ["worktree", "add", "--detach", detached]);
+        yield* fileSystem.remove(detached, { recursive: true });
+        yield* git(cwd, ["branch", "free-history"]);
+        const detachedResult = yield* recreate(detached, "free-history");
+        assert.equal(detachedResult._tag, "Failure");
+        if (detachedResult._tag === "Failure") {
+          assert.include(detachedResult.failure.detail, "on a detached commit");
+          // The hint names that one registration, never a repository-wide prune.
+          assert.include(detachedResult.failure.detail, `git worktree remove ${detached}`);
+          assert.notInclude(detachedResult.failure.detail, "prune");
+        }
+
+        // `--force` would check a branch out a second time.
+        const stale = pathService.join(cwd, "stale");
+        const other = pathService.join(cwd, "other");
+        yield* git(cwd, ["worktree", "add", "-b", "stale-history", stale]);
+        yield* git(cwd, ["worktree", "add", "-b", "other-history", other]);
+        yield* fileSystem.remove(stale, { recursive: true });
+        const duplicate = yield* recreate(stale, "other-history");
+        assert.equal(duplicate._tag, "Failure");
+        if (duplicate._tag === "Failure")
+          assert.include(duplicate.failure.detail, `checked out at ${other}.`);
+        const main = yield* recreate(stale, initialBranch);
+        assert.equal(main._tag, "Failure");
+        if (main._tag === "Failure") assert.include(main.failure.detail, `checked out at ${cwd}.`);
+
+        // A branch another missing checkout still holds: its registration is not this path's to
+        // replace (an interrupted cleanup's quarantine may need it), so nothing changes.
+        const moved = pathService.join(cwd, "moved");
+        const elsewhere = pathService.join(cwd, "elsewhere");
+        yield* git(cwd, ["worktree", "add", "-b", "moved-history", elsewhere]);
+        yield* fileSystem.remove(elsewhere, { recursive: true });
+        const held = yield* recreate(moved, "moved-history");
+        assert.equal(held._tag, "Failure");
+        if (held._tag === "Failure")
+          assert.include(
+            held.failure.detail,
+            `still checked out at ${elsewhere}, which is missing`,
+          );
+        assert.isFalse(yield* fileSystem.exists(moved));
+
+        for (const checkout of [locked, detached, stale, elsewhere]) {
+          assert.include(yield* listing(), `worktree ${checkout}\n`);
+          assert.isFalse(yield* fileSystem.exists(checkout));
+        }
+
+        // Without a leftover registration the flag is a plain add.
+        const removed = pathService.join(cwd, "removed");
+        yield* git(cwd, ["worktree", "add", "-b", "removed-history", removed]);
+        yield* git(cwd, ["worktree", "remove", removed]);
+        const plain = yield* recreate(removed, "removed-history");
+        assert.equal(plain._tag, "Success");
+        assert.equal(yield* git(removed, ["branch", "--show-current"]), "removed-history");
+      }),
     );
     it.effect(
       "verified cleanup preserves ignored external archives arriving during quarantine",

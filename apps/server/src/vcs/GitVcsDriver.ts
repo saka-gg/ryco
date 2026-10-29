@@ -41,6 +41,15 @@ export interface GitWorktreeCreationContext {
   readonly settingsSnapshot?: ServerSettings | undefined;
   /** Observes the fetch and checkout while the worktree is created. */
   readonly progress?: GitWorktreeCreationProgress | undefined;
+  /**
+   * Recreating a checkout at its recorded `path` (no `newRefName`): a Git registration of
+   * exactly that missing path, which storage cleanup keeps and a directory deleted outside
+   * Ryco leaves too, is replaced by the add itself (`git worktree add --force`). Only when it
+   * is on a branch, not locked, and no other worktree has `refName` checked out; otherwise the
+   * creation fails before anything changes. No other registration is touched: an interrupted
+   * storage cleanup keeps its quarantine's Git metadata.
+   */
+  readonly replaceMissingRegistration?: boolean | undefined;
 }
 
 export interface GitWorktreeCreationProgress {
@@ -405,7 +414,6 @@ export interface GitVcsDriverShape {
   readonly removeWorktree: (
     input: VcsRemoveWorktreeInput & { readonly cleanup?: VerifiedWorktreeCleanup },
   ) => Effect.Effect<void, GitCommandError>;
-  readonly pruneWorktrees: (cwd: string) => Effect.Effect<void, GitCommandError>;
   readonly renameBranch: (
     input: GitRenameBranchInput,
   ) => Effect.Effect<GitRenameBranchResult, GitCommandError>;

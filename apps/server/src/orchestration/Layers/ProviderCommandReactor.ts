@@ -747,41 +747,43 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
           );
         }
 
-        const localBranches = yield* gitWorkflow.listLocalBranchNames(repositoryRoot);
-        if (!localBranches.includes(branch)) {
-          return yield* failRecovery(
-            `Cannot recreate missing worktree '${worktreePath}' because branch '${branch}' no longer exists.`,
-          );
-        }
-
-        yield* gitWorkflow.pruneWorktrees(repositoryRoot);
-
-        // Another process may have recreated the path while the stale metadata was pruned.
-        if (pathEntryExists(worktreePath)) {
-          const registeredPaths = yield* registeredWorktreePaths();
-          if (registeredPaths.includes(worktreeIdentity(worktreePath))) {
-            yield* gitWorkflow.assertWorktreeSetupComplete(worktreePath);
+        // The same routine as Restore: a stale registration of this exact path is replaced,
+        // and no other registration is pruned. Loaded on first use, off the boot path.
+        const recreation = yield* Effect.exit(
+          Effect.promise(() => import("../../workspace/checkoutRecreation.ts")).pipe(
+            Effect.flatMap(({ recreateRecordedCheckout }) =>
+              recreateRecordedCheckout(gitWorkflow, {
+                projectId: project.id,
+                repositoryRoot,
+                path: worktreePath,
+                branch,
+              }),
+            ),
+            Effect.catchTag("CheckoutRecreationError", (error) =>
+              Effect.fail(
+                failRecovery(
+                  error.reason === "branch-missing"
+                    ? `Cannot recreate missing worktree '${worktreePath}' because branch '${branch}' no longer exists.`
+                    : `Worktree recovery returned unexpected metadata for '${worktreePath}' and branch '${branch}'.`,
+                ),
+              ),
+            ),
+          ),
+        );
+        if (recreation._tag === "Failure") {
+          // Recreate checkout on the Projects page may have checked it out here first (the
+          // driver then refuses the existing destination): use that checkout when Git registers
+          // it and its setup completed; otherwise this attempt's error stands.
+          if (
+            pathEntryExists(worktreePath) &&
+            (yield* registeredWorktreePaths().pipe(
+              Effect.orElseSucceed((): readonly string[] => []),
+            )).includes(worktreeIdentity(worktreePath)) &&
+            (yield* Effect.exit(gitWorkflow.assertWorktreeSetupComplete(worktreePath)))._tag ===
+              "Success"
+          )
             return false;
-          }
-          return yield* failRecovery(
-            `Refusing to recreate worktree '${worktreePath}' because another filesystem entry now occupies that path.`,
-          );
-        }
-
-        const created = yield* gitWorkflow.createWorktree({
-          projectId: project.id,
-          cwd: repositoryRoot,
-          path: worktreePath,
-          refName: branch,
-          dependencyHydration: "none",
-        });
-        if (
-          worktreeIdentity(created.worktree.path) !== worktreeIdentity(worktreePath) ||
-          created.worktree.refName !== branch
-        ) {
-          return yield* failRecovery(
-            `Worktree recovery returned unexpected metadata for '${worktreePath}' and branch '${branch}'.`,
-          );
+          return yield* Effect.failCause(recreation.cause);
         }
 
         const changedAt = new Date().toISOString();
