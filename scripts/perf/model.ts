@@ -343,9 +343,13 @@ const CHAT_ROUTE_FORBIDDEN_SOURCES: readonly ForbiddenBundleSource[] = [
  * 757 KiB with the transcript's row height estimates (6 KiB that every thread
  * open and switch uses before its first paint). 761 KiB on 2026-10-29 with the
  * composer's view of the node's follow-up queue, 763 KiB with its moving
- * marks, queue-waiting signal, add outcome and edit state.
+ * marks, queue-waiting signal, add outcome and edit state. 765 KiB on
+ * 2026-10-30 after the new-worktree dialog left: the route's own chunks
+ * shrank, but losing the dialog as an icon importer regrouped the shared
+ * lucide chunks, and one now carries 26 icons the route does not use
+ * (+2.7 KiB; the grouping is entries-aware, see `CHAT_ROUTE_MAX_FILES`).
  */
-const CHAT_ROUTE_GZIP_BUDGET = 763 * KIB;
+const CHAT_ROUTE_GZIP_BUDGET = 765 * KIB;
 /**
  * 156 since removing AI Focus on 2026-10-29: the same 44 KiB of shared lucide
  * icons regrouped by importing entry set into six `icons` chunks instead of
