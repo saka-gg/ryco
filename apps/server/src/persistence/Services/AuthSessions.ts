@@ -103,12 +103,25 @@ export type RevokeOtherAuthSessionsInput = typeof RevokeOtherAuthSessionsInput.T
 
 /**
  * Linked sessions to end because their device lost its authorization: its Hub
- * enrollment was revoked, or its local client authorization was withdrawn.
- * Exactly one selector is set.
+ * enrollment was revoked, its local client authorization was withdrawn, or the
+ * Hub withdrew or lowered its access. By client key, optionally narrowed, or by
+ * Hub enrollment alone.
  */
 export const RevokeLinkedAuthSessionsInput = Schema.Union([
+  Schema.Struct({
+    clientFingerprint: Schema.String,
+    /** Only links of this trust source; any when absent. */
+    trustSource: Schema.optionalKey(AuthAccessLink.fields.trustSource),
+    /** Only links of this Hub enrollment (`null`: links that name none); any when absent. */
+    enrollmentId: Schema.optionalKey(Schema.NullOr(Schema.String)),
+    /** Only links of this Hub account (`null`: links that name none); any account when absent. */
+    accountId: Schema.optionalKey(Schema.NullOr(Schema.String)),
+    /** Only sessions linked at one of these roles; every role when absent. */
+    roles: Schema.optionalKey(Schema.Array(AuthAccessLink.fields.role)),
+    revokedAt: Schema.DateTimeUtcFromString,
+  }),
+  // Last: a selector with a client key is never read as this one.
   Schema.Struct({ enrollmentId: Schema.String, revokedAt: Schema.DateTimeUtcFromString }),
-  Schema.Struct({ clientFingerprint: Schema.String, revokedAt: Schema.DateTimeUtcFromString }),
 ]);
 export type RevokeLinkedAuthSessionsInput = typeof RevokeLinkedAuthSessionsInput.Type;
 

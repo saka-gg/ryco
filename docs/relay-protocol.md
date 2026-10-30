@@ -98,7 +98,8 @@ Node authentication:
   nodeId,
   nonce,
   signature,
-  clientVersion? // optional
+  clientVersion?, // optional
+  features?       // optional
 }
 ```
 
@@ -107,6 +108,14 @@ the Hub keep its record of the node current after the node updates. It is displa
 not part of the signed transcript and grants nothing. A node leaves it out rather than send a value
 outside those bounds, and a relay that predates the field ignores it, like any unknown optional
 field.
+
+`features` lists Hub features the node understands (at most 16 names, each non-empty, trimmed, at
+most 64 characters), so the Hub may send it the frames that come with them. Names are open strings:
+either side ignores a name it does not know, and a relay that predates the field ignores it. It is
+not part of the signed transcript. A frame type that comes with a feature is sent only on a
+connection whose auth listed that feature, never to an older node (an unknown frame type ends the
+node's connection). `linked-access-check` asks for `node.linked-access.changed`
+([hub-linked-access-check.md](hub-linked-access-check.md)).
 
 Client authentication:
 
@@ -180,6 +189,10 @@ All fields listed without “optional” are required.
 | `ping`           | `nonce`                                                        | Probe connection liveness              |
 | `pong`           | matching `nonce`                                               | Answer a liveness probe                |
 | `error`          | `code`, `fatal`, optional `supported`, optional `retryAfterMs` | Report a connection-level error        |
+
+Protocol 1.3 adds the E2EE authorization frames of `relay-e2ee-protocol.md` §18.5 and
+`node.linked-access.changed` (no fields beyond the version envelope), which the Hub sends to a node
+that listed the `linked-access-check` feature when a member's access to it may have changed.
 
 An omitted `channel.close.reason` is an orderly close. When present, it must be one of the stable
 close reasons. `retryAfterMs` is an integer from 0 through 300,000 and is available only in protocol

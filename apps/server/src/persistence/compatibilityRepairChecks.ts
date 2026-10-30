@@ -256,6 +256,9 @@ const checks: Record<CompatibilityRepairKey, (c: SchemaCatalog) => RepairApplied
     c.has("table", "projection_thread_queue_entries") &&
     c.has("table", "projection_thread_queue_holds") &&
     c.has("index", "idx_projection_thread_queue_entries_position"),
+  "auth-access-link-account": (c) =>
+    c.hasColumns("auth_pairing_links", ["link_account_id"]) &&
+    c.hasColumns("auth_sessions", ["link_account_id"]),
 };
 
 /** Of `keys`, the repairs whose effect this database already has, read without writing. */

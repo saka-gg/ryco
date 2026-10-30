@@ -49,6 +49,9 @@ export function accessLinkForRelayAuthority(
     enrollmentId: authority.trustSource === "account-enrolled" ? authority.enrollmentId : null,
     clientFingerprint: base64UrlEncode(authority.clientIdentityFingerprint),
     role: authority.role,
+    ...(authority.trustSource === "account-enrolled" && authority.accountId !== undefined
+      ? { accountId: authority.accountId }
+      : {}),
   };
 }
 

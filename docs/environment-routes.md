@@ -66,6 +66,8 @@ Running the relay's E2EE over the direct socket would let them in; it is not bui
 - Order: tailnet HTTPS, tailnet, LAN, public, then the relay. Routes of one reach keep their order.
 - Credentials never cross route kinds. The linked bearer is node-wide, so every direct address of
   the machine shares it.
+- The node revokes or narrows a linked bearer when the Hub withdraws or lowers the member's access
+  ([hub-linked-access-check.md](hub-linked-access-check.md)).
 - Sources:
   - `linked`: from the grant.
   - `learned`: from the machine's advertised endpoints, read again on each relay connect.

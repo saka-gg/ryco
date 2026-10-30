@@ -577,6 +577,8 @@ describe("HubConnector", () => {
     const socket = new FakeSocket();
     let currentAdvertisement = e2eeAdvertisement(1, 2_000_000);
     const revocations: RelayFrame[] = [];
+    let onlineCalls = 0;
+    let linkedAccessNudges = 0;
     const activeIdentity = identity();
     const connector = new HubConnector({
       config: enabledConfig,
@@ -600,6 +602,13 @@ describe("HubConnector", () => {
       scheduler: clock.value,
       onE2eeEnrollmentRevoked: (frame) => {
         revocations.push(frame);
+      },
+      features: ["linked-access-check"],
+      onOnline: () => {
+        onlineCalls += 1;
+      },
+      onLinkedAccessChanged: () => {
+        linkedAccessNudges += 1;
       },
     });
     const starting = connector.start();
@@ -633,6 +642,13 @@ describe("HubConnector", () => {
       } as unknown as RelayFrame),
     } as MessageEvent);
     await starting;
+    expect(onlineCalls).toBe(1);
+    // The auth frame asks for the linked-access nudge.
+    const auth = decodeRelayFrame(socket.sent[0]!);
+    expect(auth).toMatchObject({
+      ok: true,
+      value: { type: "auth", peer: "node", features: ["linked-access-check"] },
+    });
 
     const published = socket.sent
       .map((bytes) => decodeRelayFrame(bytes))
@@ -694,6 +710,17 @@ describe("HubConnector", () => {
     } as MessageEvent);
     await settle();
     expect(revocations).toHaveLength(1);
+
+    socket.emit("message", {
+      data: encoded({
+        type: "node.linked-access.changed",
+        protocolMajor: 1,
+        protocolMinor: 3,
+      } as unknown as RelayFrame),
+    } as MessageEvent);
+    await settle();
+    expect(linkedAccessNudges).toBe(1);
+    expect(connector.status().state).toBe("online");
     await connector.stop();
     expect(connector.e2eeSnapshot().accountGrantReady).toBe(false);
   });

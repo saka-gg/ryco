@@ -149,6 +149,7 @@ import Migration0094, {
 import Migration0095, {
   ensureThreadFollowUpQueueTables,
 } from "./Migrations/095_ThreadFollowUpQueue.ts";
+import Migration0096 from "./Migrations/096_AuthAccessLinkAccount.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -255,6 +256,7 @@ export const migrationEntries = [
   [93, "DropUnusedOrchestrationIndexes", Migration0093],
   [94, "PullRequestWatches", Migration0094],
   [95, "ThreadFollowUpQueue", Migration0095],
+  [96, "AuthAccessLinkAccount", Migration0096],
 ] as const;
 
 export const makeMigrationLoader = (throughId?: number) =>
@@ -498,6 +500,14 @@ export const repairAuthSessionRotationColumns = Effect.fn("repairAuthSessionRota
 export const repairAuthAccessLinkColumns = Effect.fn("repairAuthAccessLinkColumns")(function* () {
   yield* Migration0090;
 });
+
+// The linked device's Hub account: run 096 again as a repair when another branch's 096 (or a
+// later id) was recorded first.
+export const repairAuthAccessLinkAccountColumn = Effect.fn("repairAuthAccessLinkAccountColumn")(
+  function* () {
+    yield* Migration0096;
+  },
+);
 
 // Project kinds and the chat relocation journal: run 080 again as a repair when another
 // branch's 080 (or a later id) was recorded first.
@@ -835,6 +845,7 @@ const compatibilityRepairs = [
   },
   { key: "pull-request-watches", since: 94, run: () => repairPullRequestWatchesTable() },
   { key: "follow-up-queue", since: 95, run: () => repairThreadFollowUpQueueTables() },
+  { key: "auth-access-link-account", since: 96, run: () => repairAuthAccessLinkAccountColumn() },
 ] as const;
 
 export type CompatibilityRepairKey = (typeof compatibilityRepairs)[number]["key"];

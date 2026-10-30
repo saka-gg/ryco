@@ -33,6 +33,7 @@ const AuthPairingLinkDbRow = Schema.Struct({
   linkEnrollmentId: Schema.NullOr(Schema.String),
   linkClientFingerprint: Schema.NullOr(Schema.String),
   linkRole: Schema.NullOr(Schema.Literals(["viewer", "operator", "owner"])),
+  linkAccountId: Schema.NullOr(Schema.String),
 });
 
 function toAuthPairingLinkRecord(row: typeof AuthPairingLinkDbRow.Type): AuthPairingLinkRecord {
@@ -54,6 +55,7 @@ function toAuthPairingLinkRecord(row: typeof AuthPairingLinkDbRow.Type): AuthPai
             enrollmentId: row.linkEnrollmentId,
             clientFingerprint: row.linkClientFingerprint,
             role: row.linkRole,
+            ...(row.linkAccountId === null ? {} : { accountId: row.linkAccountId }),
           }
         : null,
   };
@@ -83,7 +85,8 @@ const makeAuthPairingLinkRepository = Effect.gen(function* () {
     link_trust_source AS "linkTrustSource",
     link_enrollment_id AS "linkEnrollmentId",
     link_client_fingerprint AS "linkClientFingerprint",
-    link_role AS "linkRole"
+    link_role AS "linkRole",
+    link_account_id AS "linkAccountId"
   `);
 
   const createPairingLinkRow = SqlSchema.void({
@@ -104,7 +107,8 @@ const makeAuthPairingLinkRepository = Effect.gen(function* () {
           link_trust_source,
           link_enrollment_id,
           link_client_fingerprint,
-          link_role
+          link_role,
+          link_account_id
         )
         VALUES (
           ${input.id},
@@ -120,7 +124,8 @@ const makeAuthPairingLinkRepository = Effect.gen(function* () {
           ${input.link?.trustSource ?? null},
           ${input.link?.enrollmentId ?? null},
           ${input.link?.clientFingerprint ?? null},
-          ${input.link?.role ?? null}
+          ${input.link?.role ?? null},
+          ${input.link?.accountId ?? null}
         )
       `,
   });
