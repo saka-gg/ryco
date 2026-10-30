@@ -16,6 +16,8 @@ const hoisted = vi.hoisted(() => ({
   /** The one `useMemo` slot ThreadMessage has, kept across renders like React keeps it. */
   memo: null as null | { deps: ReadonlyArray<unknown>; value: unknown },
   share: vi.fn(async (_input: unknown) => undefined),
+  openURL: vi.fn(async (_url: string) => true),
+  nativeMarkdown: false,
   player: {
     replace: vi.fn(),
     play: vi.fn(),
@@ -60,7 +62,7 @@ vi.mock("react-native", () => ({
   View: "View",
 }));
 vi.mock("expo", () => ({ useEvent: () => null }));
-vi.mock("expo-linking", () => ({ openURL: async () => undefined }));
+vi.mock("expo-linking", () => ({ openURL: hoisted.openURL }));
 vi.mock("expo-video", () => ({
   useVideoPlayer: () => hoisted.player,
   VideoView: "VideoView",
@@ -81,7 +83,7 @@ vi.mock("../settings/appearance/useScaledTextRole", () => ({
   useScaledTextRole: () => ({ fontSize: 16 }),
 }));
 vi.mock("../../native/SelectableMarkdownText", () => ({
-  hasNativeSelectableMarkdownText: () => false,
+  hasNativeSelectableMarkdownText: () => hoisted.nativeMarkdown,
   SelectableMarkdownText: "SelectableMarkdownText",
 }));
 vi.mock("./ThreadHtmlRender", () => ({ ThreadHtmlRender: "ThreadHtmlRender" }));
@@ -183,7 +185,39 @@ function renderMessage(
 
 beforeEach(() => {
   hoisted.memo = null;
+  hoisted.nativeMarkdown = false;
+  hoisted.openURL.mockClear();
   vi.mocked(htmlRenderOfAttachment).mockClear();
+});
+
+describe("ThreadMessage links", () => {
+  it("opens only web links from an agent's message, like the pull request screens", () => {
+    hoisted.nativeMarkdown = true;
+    const tree = renderMessage([], {
+      role: "assistant",
+      text: "See [docs](https://example.test).",
+    });
+    const markdown = collectElements(tree, (element) => element.type === "SelectableMarkdownText");
+    const onLinkPress = (markdown[0]?.props as { onLinkPress?: (href: string) => void })
+      .onLinkPress;
+    expect(onLinkPress).toBeDefined();
+    // One tap on any of these would act for the reader: call, text, another
+    // app's deep link, one of Ryco's own routes, a script.
+    for (const href of [
+      "tel:+15550100",
+      "sms:+15550100",
+      "ryco://pair?code=ABC",
+      "otherapp://do-something",
+      "javascript:alert(1)",
+      "file:///etc/hosts",
+      "relative/path.md",
+    ]) {
+      onLinkPress?.(href);
+    }
+    expect(hoisted.openURL).not.toHaveBeenCalled();
+    onLinkPress?.("https://example.test/docs");
+    expect(hoisted.openURL).toHaveBeenCalledWith("https://example.test/docs");
+  });
 });
 
 describe("ThreadMessage agent folds", () => {
