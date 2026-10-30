@@ -197,6 +197,17 @@ it.layer(NodeServices.layer)("ServerAuthLive", (it) => {
       expect(
         yield* serverAuth.getSessionState(makeBearerRequest(bearer.sessionToken)),
       ).toMatchObject({ authenticated: true, role: "client", linkedRole: "operator" });
+      // Its sockets keep the link too: the role ceiling, and the end the socket closes at.
+      const websocket = yield* serverAuth.issueWebSocketToken(session);
+      const socketSession = yield* serverAuth.authenticateWebSocketUpgrade(
+        makeWebSocketRequest(websocket.token),
+      );
+      expect(socketSession.link).toEqual(link);
+      expect(directRpcPrincipal(socketSession)).toMatchObject({
+        transport: "direct",
+        role: "operator",
+        canManageLocalAccess: false,
+      });
 
       // A browser cookie is never made from one.
       const asCookie = yield* issueLinked();

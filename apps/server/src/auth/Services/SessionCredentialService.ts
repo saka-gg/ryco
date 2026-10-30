@@ -155,15 +155,15 @@ export interface SessionCredentialServiceShape {
   ) => Effect.Effect<number, SessionCredentialError>;
   /**
    * Completes when a session holding a socket stops authenticating: its pairing
-   * was revoked, or a Hub-linked session reached its end. A direct socket closes
-   * with it, so revoking a client or a link takes effect on a live connection,
-   * not at its next connect.
+   * was revoked, or a Hub-linked session reached its end (other sessions end
+   * only when revoked). A direct socket closes with it, so revoking a client or
+   * a link takes effect on a live connection, not at its next connect. It also
+   * completes when the session's record cannot be read, so the client checks in
+   * again.
    */
   readonly awaitEnd: (session: {
     readonly sessionId: AuthSessionId;
     readonly chainId: AuthSessionId;
-    /** A Hub-linked session's expiry; other sessions end only when revoked. */
-    readonly linkedExpiresAt?: DateTime.DateTime;
   }) => Effect.Effect<void>;
   readonly markConnected: (sessionId: AuthSessionId) => Effect.Effect<void, never>;
   readonly markDisconnected: (sessionId: AuthSessionId) => Effect.Effect<void, never>;

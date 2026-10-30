@@ -1,5 +1,16 @@
 import { AuthSessionId, type AuthClientMetadata, type AuthClientSession } from "@ryco/contracts";
-import { Clock, DateTime, Duration, Effect, Layer, PubSub, Ref, Schema, Stream } from "effect";
+import {
+  Clock,
+  DateTime,
+  Duration,
+  Effect,
+  Layer,
+  PubSub,
+  Ref,
+  Schedule,
+  Schema,
+  Stream,
+} from "effect";
 import { Option } from "effect";
 import * as Semaphore from "effect/Semaphore";
 
@@ -133,6 +144,12 @@ export function sessionExpiresAtMs(
         record.chainIssuedAt.epochMilliseconds + Duration.toMillis(LINKED_SESSION_MAX_AGE),
       );
 }
+
+/** A connected session's record read: a busy database gets a few tries. */
+const AWAIT_END_READ_RETRY = {
+  schedule: Schedule.spaced(Duration.millis(250)),
+  times: 3,
+} as const;
 
 /** The longest single wait of `sleepUntil`. */
 const WALL_CLOCK_CHECK_INTERVAL = Duration.hours(1);
@@ -357,13 +374,15 @@ export const makeSessionCredentialService = Effect.gen(function* () {
     });
 
   // Revoking any session of a pairing revokes the whole pairing.
+  // Every revocation stores and announces together: a request dropped in
+  // between must not leave a revoked session's socket open.
   const revokeChain = (sessionId: AuthSessionId) =>
     Effect.gen(function* () {
       const revokedAt = yield* DateTime.now;
       const revoked = yield* authSessions.revoke({ sessionId, revokedAt });
       yield* forgetRevoked(revoked);
       return revoked;
-    });
+    }).pipe(Effect.uninterruptible);
 
   // A rotated session's first use: the session it replaced is superseded, and
   // the pairing's entry moves to the new session.
@@ -771,17 +790,25 @@ export const makeSessionCredentialService = Effect.gen(function* () {
       const revoked = yield* authSessions.revokeLinked({ ...selector, revokedAt });
       yield* forgetRevoked(revoked);
       return new Set(revoked.map((session) => session.chainId)).size;
-    }).pipe(Effect.mapError(toSessionCredentialError("Failed to revoke linked sessions.")));
+    }).pipe(
+      Effect.uninterruptible,
+      Effect.mapError(toSessionCredentialError("Failed to revoke linked sessions.")),
+    );
 
   const awaitEnd: SessionCredentialServiceShape["awaitEnd"] = (session) =>
     Effect.scoped(
       Effect.gen(function* () {
         const changes = yield* PubSub.subscribe(changesPubSub);
-        // Revoked between the socket's check and this subscription.
+        // Read after subscribing: a revocation since the socket's check shows here.
         const row = yield* authSessions
           .getById({ sessionId: session.sessionId })
-          .pipe(Effect.orElseSucceed(() => Option.none()));
-        if (Option.isSome(row) && row.value.revokedAt !== null) return;
+          .pipe(Effect.retry(AWAIT_END_READ_RETRY), Effect.option);
+        if (Option.isNone(row)) {
+          yield* Effect.logWarning("Could not read a connected session; closing its socket.");
+          return;
+        }
+        if (Option.isNone(row.value) || row.value.value.revokedAt !== null) return;
+        const record = row.value.value;
         const revoked = Effect.gen(function* () {
           while (true) {
             const change = yield* PubSub.take(changes);
@@ -794,9 +821,9 @@ export const makeSessionCredentialService = Effect.gen(function* () {
             }
           }
         });
-        yield* session.linkedExpiresAt === undefined
+        yield* record.link === null
           ? revoked
-          : Effect.raceFirst(revoked, sleepUntil(session.linkedExpiresAt.epochMilliseconds));
+          : Effect.raceFirst(revoked, sleepUntil(sessionExpiresAtMs(record)));
       }),
     );
 
@@ -811,7 +838,10 @@ export const makeSessionCredentialService = Effect.gen(function* () {
       // Clients revoked, not sessions: each pairing counts once, however many
       // times it rotated.
       return new Set(revoked.map((session) => session.chainId)).size;
-    }).pipe(Effect.mapError(toSessionCredentialError("Failed to revoke other sessions.")));
+    }).pipe(
+      Effect.uninterruptible,
+      Effect.mapError(toSessionCredentialError("Failed to revoke other sessions.")),
+    );
 
   return {
     cookieName,

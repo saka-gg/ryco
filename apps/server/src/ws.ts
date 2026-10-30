@@ -78,13 +78,7 @@ const serveUntilSessionEnds = <E, R>(
       Effect.raceFirst(
         serve,
         sessions
-          .awaitEnd({
-            sessionId: session.sessionId,
-            chainId: session.chainId,
-            ...(session.link !== undefined && session.expiresAt !== undefined
-              ? { linkedExpiresAt: session.expiresAt }
-              : {}),
-          })
+          .awaitEnd({ sessionId: session.sessionId, chainId: session.chainId })
           .pipe(Effect.as(HttpServerResponse.empty())),
       ),
     () => sessions.markDisconnected(session.sessionId),

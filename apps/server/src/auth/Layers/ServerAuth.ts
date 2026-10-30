@@ -27,6 +27,7 @@ import {
   SessionCredentialService,
   type SessionCredentialUnavailableError,
   type SessionRotationRefusal,
+  type VerifiedSession,
 } from "../Services/SessionCredentialService.ts";
 import { AuthControlPlaneLive, AuthCoreLive } from "./AuthControlPlane.ts";
 
@@ -202,6 +203,21 @@ const ROTATION_REFUSAL_STATUS = {
   idle: 401,
 } as const satisfies Record<SessionRotationRefusal, 401 | 403 | 409>;
 
+/**
+ * A checked credential as the request's session. Both the HTTP and the socket
+ * paths use it, so a Hub-linked session keeps its link (its role ceiling and its
+ * end) on either.
+ */
+const toAuthenticatedSession = (session: VerifiedSession): AuthenticatedSession => ({
+  sessionId: session.sessionId,
+  chainId: session.chainId,
+  subject: session.subject,
+  method: session.method,
+  role: session.role,
+  ...(session.expiresAt ? { expiresAt: session.expiresAt } : {}),
+  ...(session.link === null ? {} : { link: session.link }),
+});
+
 function parseBearerToken(request: HttpServerRequest.HttpServerRequest): string | null {
   const header = request.headers["authorization"];
   if (typeof header !== "string" || !header.startsWith(AUTHORIZATION_PREFIX)) {
@@ -221,15 +237,7 @@ export const makeServerAuth = Effect.gen(function* () {
 
   const authenticateToken = (token: string): Effect.Effect<AuthenticatedSession, AuthError> =>
     sessions.verify(token).pipe(
-      Effect.map((session) => ({
-        sessionId: session.sessionId,
-        chainId: session.chainId,
-        subject: session.subject,
-        method: session.method,
-        role: session.role,
-        ...(session.expiresAt ? { expiresAt: session.expiresAt } : {}),
-        ...(session.link === null ? {} : { link: session.link }),
-      })),
+      Effect.map(toAuthenticatedSession),
       Effect.catchTags({
         SessionCredentialError: (cause) =>
           Effect.logWarning("Rejected authenticated session credential.").pipe(
@@ -586,14 +594,7 @@ export const makeServerAuth = Effect.gen(function* () {
         const websocketToken = requestUrl.value.searchParams.get(WEBSOCKET_TOKEN_QUERY_PARAM);
         if (websocketToken && websocketToken.trim().length > 0) {
           return yield* sessions.verifyWebSocketToken(websocketToken).pipe(
-            Effect.map((session) => ({
-              sessionId: session.sessionId,
-              chainId: session.chainId,
-              subject: session.subject,
-              method: session.method,
-              role: session.role,
-              ...(session.expiresAt ? { expiresAt: session.expiresAt } : {}),
-            })),
+            Effect.map(toAuthenticatedSession),
             Effect.mapError((cause) =>
               cause._tag === "SessionCredentialUnavailableError"
                 ? toCredentialCheckUnavailable(cause)

@@ -98,6 +98,26 @@ it.layer(NodeServices.layer)("SessionCredentialServiceLive", (it) => {
     }).pipe(Effect.provide(makeFaultySessionCredentialLayer(store)));
   });
 
+  it.effect("closes a socket whose session record it cannot read, after a few tries", () => {
+    const store = { failing: false };
+    return Effect.gen(function* () {
+      const sessions = yield* SessionCredentialService;
+      const issued = yield* sessions.issue({ method: "bearer-session-token", subject: "phone" });
+      const verified = yield* sessions.verify(issued.token);
+
+      store.failing = true;
+      const socket = yield* sessions
+        .awaitEnd({ sessionId: verified.sessionId, chainId: verified.chainId })
+        .pipe(Effect.forkChild({ startImmediately: true }));
+      yield* TestClock.adjust(Duration.millis(500));
+      expect(socket.pollUnsafe()).toBeUndefined();
+      yield* TestClock.adjust(Duration.millis(500));
+      yield* Fiber.join(socket);
+    }).pipe(
+      Effect.provide(Layer.merge(makeFaultySessionCredentialLayer(store), TestClock.layer())),
+    );
+  });
+
   it.effect("issues and verifies signed browser session tokens", () =>
     Effect.gen(function* () {
       const sessions = yield* SessionCredentialService;
@@ -494,11 +514,7 @@ it.layer(NodeServices.layer)("SessionCredentialServiceLive", (it) => {
         .awaitEnd({ sessionId: verifiedPhone.sessionId, chainId: verifiedPhone.chainId })
         .pipe(Effect.forkChild({ startImmediately: true }));
       const linkSocket = yield* sessions
-        .awaitEnd({
-          sessionId: verifiedLink.sessionId,
-          chainId: verifiedLink.chainId,
-          linkedExpiresAt: linked.expiresAt,
-        })
+        .awaitEnd({ sessionId: verifiedLink.sessionId, chainId: verifiedLink.chainId })
         .pipe(Effect.forkChild({ startImmediately: true }));
 
       // Another client's revocation leaves the phone's socket alone.
