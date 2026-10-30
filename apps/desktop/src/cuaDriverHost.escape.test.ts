@@ -270,7 +270,10 @@ describe("physical Escape interrupt", () => {
   it.each([true, false])(
     "keeps foreground recovery paused through continued typing (scoped target: %s)",
     async (scoped) => {
-      const f = await fixture(capability, { delayObservation: true });
+      // The cooldown runs on a stepped clock and every read is held until the test lets it
+      // answer, so each step below lands where it must however slowly the test runs.
+      let now = 1_000_000;
+      const f = await fixture(capability, { holdObservation: true, now: () => now });
       const task = { threadId: "foreground-recovery", turnId: "turn" };
       const target = scoped ? { pid: 700, window_id: 900 } : {};
       const typing = cuaRequest(
@@ -289,16 +292,27 @@ describe("physical Escape interrupt", () => {
       expect(physicalInput()).toBe(true);
       await expect(typing).resolves.toMatchObject({ ok: false, effect: "dispatched-unknown" });
       await waitForEvent(f, "interrupt-ack");
-      await new Promise((resolve) => setTimeout(resolve, ESCAPE_INPUT_COOLDOWN_MS + 50));
+      now += ESCAPE_INPUT_COOLDOWN_MS + 50;
 
-      const observe = () =>
-        cuaRequest(f.endpoint, {
+      // Starts a read and returns once the driver holds it.
+      let observations = 0;
+      const startObservation = async () => {
+        const reply = cuaRequest(f.endpoint, {
           method: "call",
           name: "get_window_state",
           args: target,
           modelObservation: true,
           task,
         });
+        observations += 1;
+        await waitForEvent(f, "observe", observations);
+        return { reply };
+      };
+      const observe = async () => {
+        const { reply } = await startObservation();
+        await f.releaseObservation();
+        return reply;
+      };
       const act = () =>
         cuaRequest(f.endpoint, {
           method: "call",
@@ -306,11 +320,11 @@ describe("physical Escape interrupt", () => {
           args: { ...target, delivery_mode: "foreground", key: "enter" },
           task,
         });
-      const reading = observe();
-      await waitForEvent(f, "observe");
+      const reading = await startObservation();
       // The interrupted action already returned; input must still invalidate this read.
       expect(physicalInput()).toBe(true);
-      await expect(reading).resolves.toMatchObject({
+      await f.releaseObservation();
+      await expect(reading.reply).resolves.toMatchObject({
         result: { structuredContent: { code: "computer_input_paused" } },
       });
       await expect(act()).resolves.toMatchObject({
@@ -320,7 +334,7 @@ describe("physical Escape interrupt", () => {
       await observe();
       expect(physicalInput()).toBe(true);
       expect((await f.events()).filter((event) => event.event === "interrupt")).toHaveLength(1);
-      await new Promise((resolve) => setTimeout(resolve, ESCAPE_INPUT_COOLDOWN_MS + 50));
+      now += ESCAPE_INPUT_COOLDOWN_MS + 50;
       await expect(act()).resolves.toMatchObject({
         result: { structuredContent: { code: "computer_input_paused" } },
       });

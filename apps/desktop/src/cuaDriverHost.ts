@@ -415,6 +415,7 @@ export class CuaDriverHost {
    * a repeated press just re-arms it. Reads are never gated by it.
    */
   private inputInterruptCooldownUntil = 0;
+  private readonly now: () => number;
   /**
    * Abort handles for mutating calls whose driver request is live right now.
    * The input interrupt aborts them so the caller sees an immediate verdict
@@ -515,6 +516,11 @@ export class CuaDriverHost {
      * stock monochrome cursor: no `set_agent_cursor_style` call is made.
      */
     cursorStyle?: () => CuaCursorStyle | null | undefined;
+    /**
+     * The clock the physical-input cooldown is armed and checked on, in
+     * milliseconds. Defaults to `Date.now`; tests step it instead of sleeping.
+     */
+    now?: () => number;
   };
   constructor(options: {
     binaryPath: string;
@@ -571,8 +577,14 @@ export class CuaDriverHost {
      * stock monochrome cursor: no `set_agent_cursor_style` call is made.
      */
     cursorStyle?: () => CuaCursorStyle | null | undefined;
+    /**
+     * The clock the physical-input cooldown is armed and checked on, in
+     * milliseconds. Defaults to `Date.now`; tests step it instead of sleeping.
+     */
+    now?: () => number;
   }) {
     this.options = options;
+    this.now = options.now ?? Date.now;
   }
 
   get isInputMonitorRequested(): boolean {
@@ -1027,7 +1039,7 @@ export class CuaDriverHost {
       // it is refused. Reads are never gated: the generation stays live and
       // observation flows through the whole cooldown.
       if (
-        this.inputInterruptCooldownUntil > Date.now() &&
+        this.inputInterruptCooldownUntil > this.now() &&
         (CUA_ACTION_TOOLS.has(name) || CUA_BROWSER_MUTATION_TOOLS.has(name))
       )
         return this.inputInterruptedReply();
@@ -1570,7 +1582,7 @@ export class CuaDriverHost {
       // tracking while continued physical input can still make them stale.
       if (
         modelObservation &&
-        this.inputInterruptCooldownUntil <= Date.now() &&
+        this.inputInterruptCooldownUntil <= this.now() &&
         !connection.destroyed &&
         !generation.retired &&
         !generation.didExit &&
@@ -2649,7 +2661,7 @@ export class CuaDriverHost {
     log("physical Escape: interrupting computer input");
     this.desktopObservationRequired = true;
     this.browserObservationRequired = true;
-    this.inputInterruptCooldownUntil = Date.now() + ESCAPE_INPUT_COOLDOWN_MS;
+    this.inputInterruptCooldownUntil = this.now() + ESCAPE_INPUT_COOLDOWN_MS;
     void this.interruptInput().catch((error: unknown) => {
       log(`emergency input interrupt failed: ${String(error)}`);
     });
@@ -2702,7 +2714,7 @@ export class CuaDriverHost {
     const affectedInputInFlight =
       this.activeForegroundInput &&
       [...this.inFlightInputInterrupts].some((input) => !input.signal.aborted);
-    this.inputInterruptCooldownUntil = Date.now() + ESCAPE_INPUT_COOLDOWN_MS;
+    this.inputInterruptCooldownUntil = this.now() + ESCAPE_INPUT_COOLDOWN_MS;
     if (alreadyPaused && !affectedInputInFlight) {
       // Repeated typing keeps observations stale without sending one native
       // cancellation RPC per key. No new mutation can enter this paused gate.
@@ -3217,7 +3229,7 @@ export class CuaDriverHost {
           code: "computer_input_paused",
           layer: "driver-host",
           message,
-          wait_seconds: Math.max(0, (this.inputInterruptCooldownUntil - Date.now()) / 1000),
+          wait_seconds: Math.max(0, (this.inputInterruptCooldownUntil - this.now()) / 1000),
           requery_hint:
             "Wait, then observe the affected target before deciding the next action. Waiting alone does not resume input.",
         },
