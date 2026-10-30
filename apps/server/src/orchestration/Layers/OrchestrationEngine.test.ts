@@ -3322,6 +3322,21 @@ describe("model switches past native background work", () => {
       await system.run(
         system.engine.dispatch(turn("same", { instanceId: claude, model: "fixture" })),
       );
+      // Nor does Fast mode, which the live session applies in-session, either way.
+      for (const [id, fastMode] of [
+        ["fast-on", true],
+        ["fast-off", false],
+      ] as const) {
+        await system.run(
+          system.engine.dispatch(
+            turn(id, {
+              instanceId: claude,
+              model: "fixture",
+              options: [{ id: "fastMode", value: fastMode }],
+            }),
+          ),
+        );
+      }
       // The user chose to stop the tasks: the change goes through.
       await system.run(
         system.engine.dispatch(

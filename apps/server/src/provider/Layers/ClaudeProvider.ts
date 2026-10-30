@@ -11,6 +11,7 @@ import { Effect, Option, Path, Result } from "effect";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
 import {
   createModelCapabilities,
+  getModelSelectionBooleanOptionValue,
   getProviderOptionCurrentValue,
   getProviderOptionDescriptors,
 } from "@ryco/shared/model";
@@ -91,6 +92,14 @@ export function resolveClaudeEffort(
   const effortDescriptor = descriptors.find((descriptor) => descriptor.id === "effort");
   const value = getProviderOptionCurrentValue(effortDescriptor);
   return typeof value === "string" ? value : undefined;
+}
+
+/** Whether a selection asks Claude Code for Fast mode on a model that offers it. */
+export function resolveClaudeFastMode(modelSelection: ModelSelection | undefined): boolean {
+  if (getModelSelectionBooleanOptionValue(modelSelection, "fastMode") !== true) return false;
+  return getProviderOptionDescriptors({
+    caps: getClaudeModelCapabilities(modelSelection?.model),
+  }).some((descriptor) => descriptor.type === "boolean" && descriptor.id === "fastMode");
 }
 
 /**

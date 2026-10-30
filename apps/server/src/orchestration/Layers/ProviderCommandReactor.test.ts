@@ -3817,6 +3817,57 @@ describe("ProviderCommandReactor", () => {
     });
   });
 
+  it("keeps the claude session when only fast mode changes", async () => {
+    const harness = await createHarness({
+      threadModelSelection: {
+        instanceId: ProviderInstanceId.make("claudeAgent"),
+        model: "claude-opus-4-6",
+      },
+    });
+    const now = new Date().toISOString();
+    const turn = (id: string, fastMode: boolean) =>
+      harness.engine.dispatch({
+        type: "thread.turn.start",
+        commandId: CommandId.make(`cmd-turn-start-claude-fast-${id}`),
+        threadId: ThreadId.make("thread-1"),
+        message: {
+          messageId: asMessageId(`user-message-claude-fast-${id}`),
+          role: "user",
+          text: `claude turn ${id}`,
+          attachments: [],
+        },
+        modelSelection: createModelSelection(
+          ProviderInstanceId.make("claudeAgent"),
+          "claude-opus-4-6",
+          [
+            { id: "effort", value: "high" },
+            { id: "fastMode", value: fastMode },
+          ],
+        ),
+        interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+        runtimeMode: "approval-required",
+        createdAt: now,
+      });
+
+    await Effect.runPromise(turn("1", true));
+    await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+    await Effect.runPromise(turn("2", false));
+    await waitFor(() => harness.sendTurn.mock.calls.length === 2);
+
+    // The adapter applies the new speed to the live session at this turn.
+    expect(harness.startSession.mock.calls).toHaveLength(1);
+    expect(harness.sendTurn.mock.calls[1]?.[0]).toMatchObject({
+      modelSelection: createModelSelection(
+        ProviderInstanceId.make("claudeAgent"),
+        "claude-opus-4-6",
+        [
+          { id: "effort", value: "high" },
+          { id: "fastMode", value: false },
+        ],
+      ),
+    });
+  });
+
   it("restarts the provider session when runtime mode is updated on the thread", async () => {
     const harness = await createHarness();
     const now = new Date().toISOString();

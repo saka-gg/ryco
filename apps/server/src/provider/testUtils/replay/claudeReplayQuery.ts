@@ -14,8 +14,8 @@
  *   `normalizeClaudeOutbound`), `prompt.offer { message }` for each prompt message the query
  *   reads, `permission.response { result }` for each `canUseTool` answer, and the methods
  *   `query.interrupt { args }`, `query.set_model { model }`, `query.set_permission_mode { mode }`,
- *   `query.set_max_thinking_tokens { maxThinkingTokens }`, `query.stop_task { taskId }` and
- *   `query.close`.
+ *   `query.set_max_thinking_tokens { maxThinkingTokens }`,
+ *   `query.apply_flag_settings { settings }`, `query.stop_task { taskId }` and `query.close`.
  * - Inbound, what the CLI answers: `sdk.message { message }`, yielded by the query;
  *   `permission.request { toolName, input, options }`, which calls the query's `canUseTool`
  *   (`options.requestId` defaults to `toolUseID`); and `interrupt.result { value }`, which
@@ -411,6 +411,7 @@ const openReplayQuery = (
       setPermissionMode: (mode) => call({ type: "query.set_permission_mode", mode }),
       setMaxThinkingTokens: (maxThinkingTokens) =>
         call({ type: "query.set_max_thinking_tokens", maxThinkingTokens }),
+      applyFlagSettings: (settings) => call({ type: "query.apply_flag_settings", settings }),
       stopTask: (taskId) => call({ type: "query.stop_task", taskId }),
       close,
       // Only when the transcript says how the CLI answered initialize; the adapter allows none.
