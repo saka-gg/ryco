@@ -89,7 +89,11 @@ import {
   setCoarsePointerEmulation,
 } from "../../test/browserPointer";
 
-import { BrowserWsRpcHarness, type NormalizedWsRpcRequestBody } from "../../test/wsRpcHarness";
+import {
+  BrowserWsRpcHarness,
+  type NormalizedWsRpcRequestBody,
+  WsRpcUnservedStream,
+} from "../../test/wsRpcHarness";
 
 import { DEFAULT_CLIENT_SETTINGS } from "@ryco/contracts/settings";
 
@@ -209,6 +213,8 @@ interface TestFixture {
    * and send archived threads as full shells.
    */
   serverIgnoresArchivedStubs?: boolean;
+  /** Streams the node does not serve, as a node from before them: subscribing fails alone. */
+  unservedStreams?: ReadonlySet<string>;
 }
 
 let fixture: TestFixture;
@@ -2722,6 +2728,9 @@ export function setupChatViewBrowserSuite() {
     await rpcHarness.reset({
       resolveUnary: resolveWsRpc,
       getInitialStreamValues: (request) => {
+        if (fixture.unservedStreams?.has(request._tag) === true) {
+          return new WsRpcUnservedStream();
+        }
         if (request._tag === WS_METHODS.subscribeServerLifecycle) {
           return [
             {
