@@ -437,7 +437,8 @@ const TRACING_EXPORTER_SOURCES: readonly ForbiddenBundleSource[] = [
  * of its numbers, and the queued message summary with its quote citation
  * parser moved to the shell. A paired launch's first load (boot, shell and a
  * thread) shrank by about 3 KiB; the cap stays so the rest is room for the
- * contract fields boot decodes.
+ * contract fields boot decodes. 526 KiB from 2026-10-30 (530 before): boot
+ * measured 522.4 KiB, so the cap leaves about 3.6 KiB of room instead of 7.6.
  */
 export const DEFAULT_BUNDLE_BUDGET_POLICY: BundleBudgetPolicy = {
   bootChunk: "main",
@@ -446,7 +447,7 @@ export const DEFAULT_BUNDLE_BUDGET_POLICY: BundleBudgetPolicy = {
       name: "boot",
       chunk: "main",
       beyondBoot: false,
-      maxGzipBytes: 530 * KIB,
+      maxGzipBytes: 526 * KIB,
       forbiddenSources: [
         ...HOSTED_RUNTIME_SOURCES,
         ...MARKDOWN_SOURCES,
