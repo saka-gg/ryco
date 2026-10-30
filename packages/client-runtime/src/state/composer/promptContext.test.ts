@@ -480,6 +480,12 @@ describe("agentMessageFoldOf", () => {
       label: "Auto-fix CI",
       summary: "#7: checks failed, attempt 2 of 3",
     });
+    // A first line in another shape still names its pull request.
+    expect(fold("Auto-fix CI (automatic message): checks failed on PR #9, attempt 1.")).toEqual({
+      kind: "pull-request",
+      label: "Auto-fix CI",
+      summary: "#9",
+    });
   });
 
   it("leaves typed messages, assistant replies and an agent's new-thread prompt alone", () => {

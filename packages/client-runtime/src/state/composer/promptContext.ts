@@ -335,9 +335,9 @@ const DELEGATION_TASK_COUNT = /^(\d+) task\(s\) you delegated/m;
 const DELEGATION_SECTION_STATE =
   /^Delegated (?:initial-run result|result|task notice) \(([a-z-]+)[,)]/gm;
 /** `renderPullRequestAutoFixPrompt`'s first line (`@ryco/shared/pullRequestWatch`). */
-const AUTO_FIX_ATTEMPT = /^Auto-fix CI\b.*? PR #(\d+) at [0-9a-f]+, (attempt \d+ of \d+)/;
-/** The pull request a watch's update or notice names first (`pull request #12`). */
-const PULL_REQUEST_NUMBER = /\bpull request #(\d+)/i;
+const AUTO_FIX_ATTEMPT = /^Auto-fix CI\b.*? PR #(\d+) at \S+, (attempt \d+ of \d+)/;
+/** The pull request an update or notice names first (`pull request #12`, `PR #12`). */
+const PULL_REQUEST_NUMBER = /\b(?:pull request|PR) #(\d+)/i;
 
 function firstLine(text: string): string {
   const line =
@@ -402,7 +402,7 @@ export function agentMessageFoldOf(message: {
     const number = PULL_REQUEST_NUMBER.exec(message.text)?.[1];
     return {
       kind: "pull-request",
-      label: "Pull request update",
+      label: message.text.startsWith("Auto-fix CI") ? "Auto-fix CI" : "Pull request update",
       summary: number === undefined ? "" : `#${number}`,
     };
   }
