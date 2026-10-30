@@ -13,7 +13,6 @@ import {
   type MobileLinkedDirectAccess,
 } from "./linkedDirectAccess";
 import {
-  setMobileDirectRoute,
   setMobileLinkedHubs,
   setMobileLinkNotice,
   setMobileLinking,
@@ -42,7 +41,6 @@ export function mobileLinkedDirectAccess(): MobileLinkedDirectAccess {
       registry.driver.supervisor
         .require(hubEnvironmentId)
         .client.server.issueLinkedDirectAccess({ deviceLabel: DEVICE_LABEL }),
-    onRoute: setMobileDirectRoute,
   });
   // The rows learn which machines are linked from here, never from the catalog.
   const publishLinked = () =>

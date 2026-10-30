@@ -272,6 +272,16 @@ export interface HostedRelayAttemptBinding {
   /** Opens a direct route's socket; bound together with {@link resolveDirectRoute}. */
   readonly createDirectSocket?: (url: string) => HostedDirectSocket;
   /**
+   * Where the relay-refusal hold on direct routes lives, when it must outlive
+   * this factory: a released and reacquired environment gets a new factory,
+   * and must not take a direct route the relay just refused. Absent, the hold
+   * is this factory's own.
+   */
+  readonly directRouteHold?: {
+    readonly held: () => boolean;
+    readonly set: (held: boolean) => void;
+  };
+  /**
    * A server-authenticated channel was refused for its session: the counterpart of an HTTP ticket
    * request answered 401. Hand the session to its lifecycle owner to revalidate, which expires it
    * when the Hub no longer accepts it.
@@ -611,8 +621,17 @@ export class HostedRelayAttemptFactory {
     return (
       this.#binding.resolveDirectRoute !== undefined &&
       this.#binding.createDirectSocket !== undefined &&
-      !this.#directHeld
+      !this.#isDirectHeld()
     );
+  }
+
+  #isDirectHeld(): boolean {
+    return this.#binding.directRouteHold?.held() ?? this.#directHeld;
+  }
+
+  #setDirectHeld(held: boolean): void {
+    this.#directHeld = held;
+    this.#binding.directRouteHold?.set(held);
   }
 
   async #resolveDirectRoute(generation: number, isCurrent: () => boolean): Promise<string | null> {
@@ -633,7 +652,7 @@ export class HostedRelayAttemptFactory {
     if (!isCurrent() || check.signal.aborted) {
       throw new Error("Hosted node selection changed.");
     }
-    if (route === null || this.#directHeld) return null;
+    if (route === null || this.#isDirectHeld()) return null;
     this.#pendingDirect = { route, generation };
     return route.url;
   }
@@ -748,7 +767,7 @@ export class HostedRelayAttemptFactory {
     const callbacks = {
       onTransportStatus: (status: HostedRelayTransportStatus) => {
         if (!isCurrentAttempt()) return;
-        if (status === "online") this.#directHeld = false;
+        if (status === "online") this.#setDirectHeld(false);
         this.#binding.transportStatus(generation, status);
         if (status === "online" && this.#recoveringAfterClose) {
           this.#recoveringAfterClose = false;
@@ -763,7 +782,7 @@ export class HostedRelayAttemptFactory {
       },
       onFailure: (failure: HostedRelayFailure) => {
         if (!isCurrentAttempt()) return;
-        if (RELAY_REFUSALS.has(failure.kind)) this.#directHeld = true;
+        if (RELAY_REFUSALS.has(failure.kind)) this.#setDirectHeld(true);
         this.#retryable = failure.retryable;
         this.#lastRetryAfterMs = failure.retryAfterMs;
         if (failure.compressionFailed === true) this.#compressionDisabled = true;

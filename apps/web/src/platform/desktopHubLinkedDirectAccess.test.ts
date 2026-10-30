@@ -59,7 +59,7 @@ vi.mock("./directRouteIdentityRequest", () => ({
   }) => requestDirectRouteIdentityProof(input),
 }));
 
-const { linkDesktopMachineDirectAccess, renewDesktopMachineDirectAccess } =
+const { haltDesktopLinking, linkDesktopMachineDirectAccess, renewDesktopMachineDirectAccess } =
   await import("./desktopHubLinkedDirectAccess");
 
 const machine = { environmentId: HUB, label: "MacBook Pro M4" };
@@ -168,5 +168,26 @@ describe("Desktop Hub-linked direct access", () => {
     ];
     renewDesktopMachineDirectAccess(machine);
     await vi.waitFor(() => expect(addSavedEnvironment).toHaveBeenCalledTimes(1));
+  });
+
+  it("saves nothing for a link still being made when the links are forgotten", async () => {
+    issueLinkedDirectAccess.mockResolvedValue(issued);
+    let releaseProof: (() => void) | undefined;
+    const gate = new Promise<void>((resolve) => {
+      releaseProof = resolve;
+    });
+    const signed = requestDirectRouteIdentityProof.getMockImplementation()!;
+    requestDirectRouteIdentityProof.mockImplementationOnce(async (input) => {
+      await gate;
+      return signed(input);
+    });
+    const linking = linkDesktopMachineDirectAccess(machine);
+    await vi.waitFor(() => expect(requestDirectRouteIdentityProof).toHaveBeenCalled());
+    // Remove direct access, or sign out of the Hub, while the proof is on the wire.
+    const halted = haltDesktopLinking();
+    releaseProof?.();
+    await expect(linking).rejects.toThrow("removed");
+    (await halted)();
+    expect(addSavedEnvironment).not.toHaveBeenCalled();
   });
 });

@@ -25,11 +25,13 @@ import {
   type DirectRouteIdentityProofAnswer,
 } from "./directRouteIdentity.ts";
 import {
+  ROUTE_CHECK_TIMEOUT_MS,
   checkEnvironmentRoutes,
   environmentRouteKey,
   linkedDirectRoutes,
   routeCheckAccepted,
   type EnvironmentRoute,
+  type RouteCheckResult,
 } from "./environmentRoutes.ts";
 
 export type LinkedDirectRoute = Extract<EnvironmentRoute, { kind: "direct" }>;
@@ -41,6 +43,7 @@ export interface HubLinkedRoutesPorts {
   readonly requestProof: (request: {
     readonly httpBaseUrl: string;
     readonly challenge: string;
+    readonly origin: string;
     readonly signal?: AbortSignal;
   }) => Promise<DirectRouteIdentityProofAnswer>;
   /**
@@ -66,6 +69,8 @@ export interface HubLinkedRoutesPorts {
   /** Whether an error from `socketUrl` or `readRole` is the node refusing the bearer. */
   readonly isBearerRefused: (error: unknown) => boolean;
   readonly nowMs?: () => number;
+  /** Test seam: {@link LINKED_ROUTE_ATTEMPT_DEADLINE_MS}. */
+  readonly attemptDeadlineMs?: number;
 }
 
 export interface HubLinkedRouteAttempt {
@@ -76,6 +81,37 @@ export interface HubLinkedRouteAttempt {
 }
 
 class LinkedRouteRefused extends Error {}
+
+/**
+ * How long one route's proof, socket token and role may take together before
+ * the attempt moves on (to the next route or the relay): an address that
+ * answers its descriptor and then stalls must not hold the machine up.
+ */
+export const LINKED_ROUTE_ATTEMPT_DEADLINE_MS = 5_000;
+
+/** Run `work` with a signal that aborts with `signal` or after `ms`; `null` once it did. */
+async function withDeadline<A>(
+  signal: AbortSignal,
+  ms: number,
+  work: (signal: AbortSignal) => Promise<A | null>,
+): Promise<A | null> {
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  signal.addEventListener("abort", abort, { once: true });
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const expired = new Promise<null>((resolve) => {
+    timer = setTimeout(() => {
+      controller.abort();
+      resolve(null);
+    }, ms);
+  });
+  try {
+    return await Promise.race([work(controller.signal), expired]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+    signal.removeEventListener("abort", abort);
+  }
+}
 
 export function createHubLinkedRoutes(ports: HubLinkedRoutesPorts) {
   const nowMs = ports.nowMs ?? Date.now;
@@ -89,8 +125,52 @@ export function createHubLinkedRoutes(ports: HubLinkedRoutesPorts) {
       nowMs: nowMs(),
     }).filter((route) => !refused.has(environmentRouteKey(route)));
 
-  const checkRoutes = (routes: ReadonlyArray<EnvironmentRoute>, signal: AbortSignal) =>
+  const checkDescriptors = (routes: ReadonlyArray<EnvironmentRoute>, signal: AbortSignal) =>
     checkEnvironmentRoutes({ routes, fetchDescriptorId: ports.fetchDescriptorId, signal });
+
+  const prove = (route: LinkedDirectRoute, signal: AbortSignal) =>
+    route.nodeIdentityPublicKey === undefined
+      ? Promise.resolve("refused" as const)
+      : proveDirectRouteIdentity({
+          httpBaseUrl: route.httpBaseUrl,
+          environmentId: route.expectedDescriptorId,
+          nodeIdentityPublicKey: route.nodeIdentityPublicKey,
+          requestProof: ports.requestProof,
+          signal,
+        });
+
+  /**
+   * The upgrader's check: a route counts as answering only when its descriptor
+   * names the machine and it proves the machine's key, both without any
+   * credential, so a route that would fail its attempt never drops the working
+   * connection to try it. A refused proof holds the address like an attempt's.
+   */
+  const checkRoutes = async (
+    routes: ReadonlyArray<EnvironmentRoute>,
+    signal: AbortSignal,
+    onRefused?: () => void,
+  ): Promise<ReadonlyMap<string, RouteCheckResult>> => {
+    const results = new Map(await checkDescriptors(routes, signal));
+    await Promise.all(
+      routes.map(async (route) => {
+        const key = environmentRouteKey(route);
+        const result = results.get(key);
+        if (route.kind !== "direct" || result === undefined || !routeCheckAccepted(route, result)) {
+          return;
+        }
+        const proof = await withDeadline(signal, ROUTE_CHECK_TIMEOUT_MS, (deadline) =>
+          prove(route, deadline),
+        );
+        if (proof === "proven") return;
+        if (proof === "refused") {
+          refused.add(key);
+          onRefused?.();
+        }
+        results.set(key, proof === null ? { kind: "timeout" } : { kind: "unreachable" });
+      }),
+    );
+    return results;
+  };
 
   /** The route's attempt once it proved the machine's key; `null` to try the next one. */
   async function attemptOver(
@@ -98,13 +178,7 @@ export function createHubLinkedRoutes(ports: HubLinkedRoutesPorts) {
     signal: AbortSignal,
   ): Promise<HubLinkedRouteAttempt | null> {
     if (route.nodeIdentityPublicKey === undefined) return null;
-    const proof = await proveDirectRouteIdentity({
-      httpBaseUrl: route.httpBaseUrl,
-      environmentId: route.expectedDescriptorId,
-      nodeIdentityPublicKey: route.nodeIdentityPublicKey,
-      requestProof: ports.requestProof,
-      signal,
-    });
+    const proof = await prove(route, signal);
     if (proof === "refused") throw new LinkedRouteRefused();
     if (proof !== "proven" || signal.aborted) return null;
     const bearerToken = await ports.readBearerToken(route.expectedDescriptorId);
@@ -133,13 +207,17 @@ export function createHubLinkedRoutes(ports: HubLinkedRoutesPorts) {
     ): Promise<HubLinkedRouteAttempt | null> {
       const routes = routesFor(hubEnvironmentId);
       if (routes.length === 0) return null;
-      const results = await checkRoutes(routes, signal);
+      const results = await checkDescriptors(routes, signal);
       for (const route of routes) {
         if (route.kind !== "direct" || signal.aborted) continue;
         const result = results.get(environmentRouteKey(route));
         if (result === undefined || !routeCheckAccepted(route, result)) continue;
         try {
-          const attempt = await attemptOver(route, signal);
+          const attempt = await withDeadline(
+            signal,
+            ports.attemptDeadlineMs ?? LINKED_ROUTE_ATTEMPT_DEADLINE_MS,
+            (deadline) => attemptOver(route, deadline),
+          );
           if (attempt !== null) return attempt;
         } catch (error) {
           // A refused bearer or identity waits for the link to change; an

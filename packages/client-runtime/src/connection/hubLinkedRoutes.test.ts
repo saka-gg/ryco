@@ -34,12 +34,13 @@ function ports(overrides: Partial<HubLinkedRoutesPorts> = {}): HubLinkedRoutesPo
     listLinkedRecords: () => [record("https://studio.tail1.ts.net")],
     readBearerToken: async () => "linked-bearer",
     fetchDescriptorId: async () => DIRECT,
-    requestProof: async ({ challenge }) => ({
+    requestProof: async ({ challenge, origin }) => ({
       kind: "signed",
       signature: encodeBase64Url(
         ed25519.sign(
           encodeDirectRouteIdentityTranscript({
             environmentId: DIRECT,
+            origin,
             challenge: decodeBase64Url(challenge),
           }),
           nodeSecret,
@@ -104,5 +105,42 @@ describe("a Hub machine's linked routes", () => {
     await expect(routes.resolve(HUB, signal(), onRefused)).resolves.toBeNull();
     expect(readBearerToken).not.toHaveBeenCalled();
     expect(onRefused).toHaveBeenCalledTimes(1);
+  });
+
+  it("moves on from an address that answers its descriptor and then stalls", async () => {
+    const routes = createHubLinkedRoutes(
+      ports({ socketUrl: () => new Promise(() => undefined), attemptDeadlineMs: 20 }),
+    );
+    await expect(routes.resolve(HUB, signal())).resolves.toBeNull();
+  });
+
+  it("lets the upgrader count a route only once it proved the key, holding one that refused", async () => {
+    const onRefused = vi.fn();
+    const proven = createHubLinkedRoutes(ports());
+    const route = proven.routesFor(HUB);
+    await expect(proven.checkRoutes(route, signal())).resolves.toEqual(
+      new Map([["https://studio.tail1.ts.net", { kind: "answered", descriptorId: DIRECT }]]),
+    );
+
+    const impostor = createHubLinkedRoutes(
+      ports({
+        requestProof: async () => ({
+          kind: "signed",
+          signature: encodeBase64Url(new Uint8Array(64)),
+        }),
+      }),
+    );
+    const results = await impostor.checkRoutes(impostor.routesFor(HUB), signal(), onRefused);
+    expect(results.get("https://studio.tail1.ts.net")).toEqual({ kind: "unreachable" });
+    expect(onRefused).toHaveBeenCalledTimes(1);
+    expect(impostor.routesFor(HUB)).toEqual([]);
+
+    // Paced or silent: not counted this time, and not held either.
+    const paced = createHubLinkedRoutes(
+      ports({ requestProof: async () => ({ kind: "unreachable" }) }),
+    );
+    const pacedResults = await paced.checkRoutes(paced.routesFor(HUB), signal());
+    expect(pacedResults.get("https://studio.tail1.ts.net")).toEqual({ kind: "unreachable" });
+    expect(paced.routesFor(HUB)).toHaveLength(1);
   });
 });

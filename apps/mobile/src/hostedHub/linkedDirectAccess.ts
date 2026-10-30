@@ -74,6 +74,7 @@ export interface MobileLinkedDirectAccessDeps {
   readonly requestProof: (request: {
     readonly httpBaseUrl: string;
     readonly challenge: string;
+    readonly origin: string;
     readonly signal?: AbortSignal;
   }) => Promise<DirectRouteIdentityProofAnswer>;
   readonly isBearerRefused: (error: unknown) => boolean;
@@ -81,8 +82,6 @@ export interface MobileLinkedDirectAccessDeps {
   readonly issueLinkedDirectAccess: (
     hubEnvironmentId: EnvironmentId,
   ) => Promise<AuthLinkedDirectAccess>;
-  /** The route a machine's latest attempt took: a direct route's address, or `null` for the relay. */
-  readonly onRoute?: (hubEnvironmentId: EnvironmentId, routeKey: string | null) => void;
   readonly nowMs?: () => number;
 }
 
@@ -137,14 +136,23 @@ export function createMobileLinkedDirectAccess(deps: MobileLinkedDirectAccessDep
         signal,
       });
       if (!session.authenticated) throw new LinkedBearerRefused();
-      return session.linkedRole ?? null;
+      const role: unknown = session.linkedRole;
+      return role === "viewer" || role === "operator" || role === "owner" ? role : null;
     },
     isBearerRefused: (error) => error instanceof LinkedBearerRefused || deps.isBearerRefused(error),
     nowMs,
   });
   const inFlight = new Map<EnvironmentId, Promise<MobileHubLinkOutcome>>();
+  /** Bumped by every forget: a link that started before it saves nothing. */
+  let forgetEpoch = 0;
   const lastAutomaticAttemptAt = new Map<EnvironmentId, number>();
   const upgradeChecks = new Map<EnvironmentId, () => void>();
+  /**
+   * Machines whose relay refused this device (authorization withdrawn, not
+   * verified, update required): no direct route until a relay socket opens
+   * again, whichever connection generation asks.
+   */
+  const relayRefused = new Set<EnvironmentId>();
   const listeners = new Set<() => void>();
   const notify = () => {
     for (const listener of listeners) listener();
@@ -166,7 +174,12 @@ export function createMobileLinkedDirectAccess(deps: MobileLinkedDirectAccessDep
     readonly environmentId: EnvironmentId;
     readonly label: string;
   }): Promise<MobileHubLinkOutcome> {
+    const epoch = forgetEpoch;
+    const forgotten = () => {
+      if (forgetEpoch !== epoch) throw new Error("Direct access was removed while it was added.");
+    };
     const access = await deps.issueLinkedDirectAccess(machine.environmentId);
+    forgotten();
     if (access.kind === "unavailable") return "no-direct-endpoint";
     // A machine paired by hand stays an environment of its own.
     if (deps.catalog.get(access.environmentId) !== null) return "already-paired";
@@ -179,10 +192,12 @@ export function createMobileLinkedDirectAccess(deps: MobileLinkedDirectAccessDep
         proveDirectRouteIdentity({ ...input, requestProof: deps.requestProof }),
     });
     if (target === null) return "unreachable";
+    forgotten();
     const bearer = await deps.remoteApi.bootstrapRemoteBearerSession({
       httpBaseUrl: target.httpBaseUrl,
       credential: target.credential,
     });
+    forgotten();
     const prior = deps.catalog.getLinked(target.environmentId);
     const now = new Date(nowMs()).toISOString();
     const record: SavedEnvironmentRecord = {
@@ -198,10 +213,17 @@ export function createMobileLinkedDirectAccess(deps: MobileLinkedDirectAccessDep
         nodeIdentityPublicKey: target.nodeIdentityPublicKey,
       },
     };
-    await deps.catalog.persistRecord(record);
+    // The bearer first: a record saved without one would show the machine as
+    // linked after a restart, with nothing to use.
     if (!(await deps.catalog.writeBearerToken(record.environmentId, bearer.sessionToken))) {
-      if (prior !== null) await deps.catalog.persistRecord(prior);
       throw new Error("Unable to persist the direct access credential.");
+    }
+    try {
+      await deps.catalog.persistRecord(record);
+    } catch (error) {
+      if (prior === null)
+        await deps.catalog.removeBearerToken(record.environmentId).catch(() => {});
+      throw error;
     }
     deps.catalog.registryStore.getState().upsert(record);
     // A reinstalled node answers under another direct id: its older link goes.
@@ -262,6 +284,14 @@ export function createMobileLinkedDirectAccess(deps: MobileLinkedDirectAccessDep
     renew,
     linkFor,
     isLinking: (hubEnvironmentId: EnvironmentId) => inFlight.has(hubEnvironmentId),
+    /** The hosted attempt factory's `directRouteHold` port for one machine. */
+    directRouteHold: (hubEnvironmentId: EnvironmentId) => ({
+      held: () => relayRefused.has(hubEnvironmentId),
+      set: (held: boolean) => {
+        if (held) relayRefused.add(hubEnvironmentId);
+        else relayRefused.delete(hubEnvironmentId);
+      },
+    }),
     subscribe(listener: () => void): () => void {
       listeners.add(listener);
       return () => listeners.delete(listener);
@@ -279,12 +309,9 @@ export function createMobileLinkedDirectAccess(deps: MobileLinkedDirectAccessDep
       const attempt = await routes.resolve(machine.environmentId, signal, () =>
         renew(machine, { force: true }),
       );
-      const route =
-        attempt === null || attempt.role === undefined
-          ? null
-          : { routeKey: attempt.routeKey, url: attempt.url, role: attempt.role };
-      if (!signal.aborted) deps.onRoute?.(machine.environmentId, route?.routeKey ?? null);
-      return route;
+      return attempt === null || attempt.role === undefined
+        ? null
+        : { routeKey: attempt.routeKey, url: attempt.url, role: attempt.role };
     },
 
     /**
@@ -307,7 +334,8 @@ export function createMobileLinkedDirectAccess(deps: MobileLinkedDirectAccessDep
       const upgrader = createEnvironmentRouteUpgrader({
         readRoutes: () => [...routes.routesFor(hubEnvironmentId), RELAY_ROUTE],
         readActiveRouteKey: input.readActiveRouteKey,
-        checkRoutes: routes.checkRoutes,
+        checkRoutes: (candidates, signal) =>
+          routes.checkRoutes(candidates, signal, () => renew(input.machine, { force: true })),
         reconnect: () => {
           if (input.mayUpgrade()) input.reconnect();
         },
@@ -320,7 +348,6 @@ export function createMobileLinkedDirectAccess(deps: MobileLinkedDirectAccessDep
         stopped = true;
         unsubscribe?.();
         upgrader.dispose();
-        deps.onRoute?.(hubEnvironmentId, null);
         if (upgradeChecks.get(hubEnvironmentId) === check) upgradeChecks.delete(hubEnvironmentId);
       };
       const trigger = (reason: BetterRouteTrigger) => {
@@ -353,6 +380,10 @@ export function createMobileLinkedDirectAccess(deps: MobileLinkedDirectAccessDep
      * machine's connection on one of them reconnects over the relay.
      */
     async forget(hubEnvironmentId?: EnvironmentId): Promise<void> {
+      // A link still being made saves nothing now, and one that already saved
+      // is in the catalog by the time the pass below reads it.
+      forgetEpoch += 1;
+      await Promise.allSettled([...inFlight.values()]);
       const hubs = new Set<EnvironmentId>();
       for (const record of deps.catalog.listLinked()) {
         const hub = record.hubLink?.hubEnvironmentId as EnvironmentId | undefined;
@@ -362,6 +393,8 @@ export function createMobileLinkedDirectAccess(deps: MobileLinkedDirectAccessDep
         hubs.add(hub);
         await dropLink(record);
       }
+      // And a renewal that started meanwhile saves nothing either.
+      forgetEpoch += 1;
       for (const hub of hubs) upgradeChecks.get(hub)?.();
       notify();
     },

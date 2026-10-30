@@ -1026,6 +1026,47 @@ describe("direct routes on an environment's attempts", () => {
     expect(direct).toHaveLength(1);
   });
 
+  it("keeps a relay refusal across generations when the hold lives outside the factory", async () => {
+    const first = sessions.ensureRecord(hubNode(ENV_Y)).generation;
+    sessions.markConnectRequested(ENV_Y, first);
+    const relay: Array<{ readonly callbacks: Callbacks }> = [];
+    let held = false;
+    const directRouteHold = {
+      held: () => held,
+      set: (next: boolean) => {
+        held = next;
+      },
+    };
+    const answer = {
+      routeKey: "https://studio.tail1.ts.net",
+      url: DIRECT_URL,
+      role: "owner" as const,
+    };
+    const firstPorts = directPorts({ route: async () => null, relay });
+    const { factory: firstFactory } = bind(ENV_Y, {
+      ports: { ...firstPorts.ports, directRouteHold },
+    });
+    firstFactory.createSocket(await firstFactory.nextUrl());
+    relay[0]!.callbacks.onFailure({ kind: "authorization-removed", retryable: false });
+
+    // Released and acquired again: a new generation, a new factory.
+    sessions.renew(ENV_Y);
+    const second = record(ENV_Y).generation;
+    sessions.markConnectRequested(ENV_Y, second);
+    const secondPorts = directPorts({ route: async () => answer, relay });
+    const { factory: secondFactory } = bind(ENV_Y, {
+      ports: { ...secondPorts.ports, directRouteHold },
+    });
+    secondFactory.createSocket(await secondFactory.nextUrl());
+    expect(secondPorts.checks).toHaveLength(0);
+    expect(relay).toHaveLength(2);
+    expect(secondFactory.mayTakeDirectRoutes()).toBe(false);
+
+    relay[1]!.callbacks.onTransportStatus("online");
+    expect(held).toBe(false);
+    expect(secondFactory.mayTakeDirectRoutes()).toBe(true);
+  });
+
   it("reports a direct socket that dropped as a retryable failure, a clean close as closed", async () => {
     const { generation } = sessions.ensureRecord(hubNode(ENV_Y));
     sessions.markConnectRequested(ENV_Y, generation);

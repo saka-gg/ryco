@@ -21,6 +21,7 @@ import {
   waitForSavedEnvironmentRegistryHydration,
   type SavedEnvironmentRecord,
 } from "../environments/runtime/catalog";
+import { haltDesktopLinking } from "./desktopHubLinkedDirectAccess";
 import type { DesktopWorkspaceDirectRoutes } from "./desktopWorkspaceSocket";
 
 /**
@@ -133,6 +134,7 @@ export function requestDesktopHubRouteCheck(hubEnvironmentId: string): void {
  * bearers go; the machines' connections leave any direct route they were on.
  */
 export async function forgetDesktopHubLinkedDirectAccess(hubEnvironmentId?: string): Promise<void> {
+  const linkingHalted = await haltDesktopLinking();
   const hubs = new Set<string>();
   for (const record of listLinkedDirectRecords()) {
     const hub = record.hubLink?.hubEnvironmentId;
@@ -142,6 +144,7 @@ export async function forgetDesktopHubLinkedDirectAccess(hubEnvironmentId?: stri
     linkedRoutes.forgetRefusal(record.httpBaseUrl);
     await removeSavedEnvironmentBearerToken(record.environmentId).catch(() => undefined);
   }
+  linkingHalted();
   for (const hub of hubs) upgradeChecksByHubId.get(hub)?.();
 }
 

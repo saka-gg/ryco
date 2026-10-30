@@ -48,6 +48,7 @@ export type HostedEnvironmentAttemptPorts = Pick<
   | "connectionSuspect"
   | "resolveDirectRoute"
   | "createDirectSocket"
+  | "directRouteHold"
 > & {
   /** Sees every failure of this environment's current attempt, e.g. a device-wide revocation. */
   readonly onFailure?: (failure: HostedRelayFailure) => void;

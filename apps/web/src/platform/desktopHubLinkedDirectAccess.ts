@@ -29,9 +29,30 @@ const AUTOMATIC_RENEWAL_RETRY_MS = 15 * 60 * 1000;
 const inFlight = new Map<EnvironmentId, Promise<DesktopHubLinkOutcome>>();
 const lastAutomaticAttemptAt = new Map<EnvironmentId, number>();
 
+/** Bumped by every forget: a link that started before it saves nothing. */
+let forgetEpoch = 0;
+
 /** The link itself loads on first use: Desktop's workspace state, and so boot, imports this module. */
-const link = (machine: { readonly environmentId: EnvironmentId; readonly label: string }) =>
-  import("./desktopHubLinkedDirectLink").then((module) => module.linkDesktopMachine(machine));
+const link = (machine: { readonly environmentId: EnvironmentId; readonly label: string }) => {
+  const epoch = forgetEpoch;
+  return import("./desktopHubLinkedDirectLink").then((module) =>
+    module.linkDesktopMachine(machine, () => forgetEpoch === epoch),
+  );
+};
+
+/**
+ * Before links are forgotten (Remove direct access, Hub sign-out): links still
+ * being made save nothing now, and the ones that already saved are done.
+ * Returns the step to take once the forget has run, so a renewal that started
+ * meanwhile saves nothing either.
+ */
+export async function haltDesktopLinking(): Promise<() => void> {
+  forgetEpoch += 1;
+  await Promise.allSettled([...inFlight.values()]);
+  return () => {
+    forgetEpoch += 1;
+  };
+}
 
 /** One link per machine at a time; a second request joins the first. */
 function linkOnce(machine: {

@@ -43,6 +43,7 @@ import {
   subscribeMobileRouteTriggers,
 } from "./linkedDirectAccessRuntime";
 import { capLinkedRole } from "./linkedDirectAccess";
+import { setMobileDirectRoute } from "./linkedDirectAccessState";
 
 /**
  * The supervisor's stream handlers a hosted node connection feeds. The
@@ -139,6 +140,7 @@ export function createHostedEnvironmentConnection(
         return role === null ? null : { ...route, role };
       },
       createDirectSocket: (url) => new WebSocket(url) as unknown as HostedDirectSocket,
+      directRouteHold: linked.directRouteHold(environmentId),
     },
   });
   // Environment-scoped, not generation-scoped: the replay may give up, and a
@@ -223,6 +225,24 @@ export function createHostedEnvironmentConnection(
       input.applyTerminalEvent(event, eventEnvironmentId);
     },
   });
+  // The row's "Direct" label, from the route this generation's open socket took.
+  // A newer generation publishes its own; a released environment shows none.
+  let stopRouteLabel: (() => void) | null = null;
+  const publishRouteLabel = () => {
+    const current = sessions.read(environmentId);
+    if (current === undefined) setMobileDirectRoute(environmentId, null);
+    if (current?.generation !== generation) {
+      stopRouteLabel?.();
+      stopRouteLabel = null;
+      return;
+    }
+    const routeKey = current.transportStatus === "online" ? attemptFactory.activeRouteKey() : null;
+    setMobileDirectRoute(
+      environmentId,
+      routeKey !== null && routeKey !== "relay" ? routeKey : null,
+    );
+  };
+  stopRouteLabel = sessions.subscribe(publishRouteLabel);
   // While on the relay: better routes are checked, and the link renewed when due.
   // It stops once this generation is replaced or released.
   linked.keepUpgraded({
