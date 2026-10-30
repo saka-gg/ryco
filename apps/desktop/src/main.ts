@@ -189,6 +189,15 @@ import {
 import { isBackendReadinessAborted, waitForHttpReady } from "./backendReadiness.ts";
 import { createBackendRestartBackoff } from "./backendRestartBackoff.ts";
 import { sanitizeLogValue } from "./logValue.ts";
+import {
+  DATABASE_LIST_TIMEOUT_MS,
+  DATABASE_RESTORE_TIMEOUT_MS,
+  pickRestorableBackup,
+  readRestoreOutcome,
+  type RestorableBackup,
+  runServerCli,
+  type ServerCliLaunch,
+} from "./databaseRecovery.ts";
 import { runRecoveryDialogLoop } from "./recoveryDialog.ts";
 import {
   attachRendererCrashRecovery,
@@ -3487,7 +3496,11 @@ function handleBackendFrame(
  * A deterministic start failure: stop restarting and say so in the boot
  * window instead of spinning the splash screen forever.
  */
-function haltBackendStartup(child: ChildProcess.ChildProcess | null, describe: () => string): void {
+function haltBackendStartup(
+  child: ChildProcess.ChildProcess | null,
+  describe: () => string,
+  fatalCode: string | null = null,
+): void {
   if (isQuitting || backendStartupHalted) return;
   backendStartupHalted = true;
   cancelBackendReadinessWait();
@@ -3501,7 +3514,7 @@ function haltBackendStartup(child: ChildProcess.ChildProcess | null, describe: (
   const show = () => {
     if (shown) return;
     shown = true;
-    void showBackendStartupFailure(describe());
+    void showBackendStartupFailure(describe(), fatalCode);
   };
   if (child === null) {
     show();
@@ -3541,18 +3554,31 @@ function handleBackendStartFailure(
   );
 }
 
-async function showBackendStartupFailure(detail: string): Promise<void> {
+async function showBackendStartupFailure(
+  detail: string,
+  fatalCode: string | null = null,
+): Promise<void> {
   const window = mainWindow ?? BrowserWindow.getAllWindows()[0] ?? null;
   if (window && !window.isDestroyed()) revealWindow(window);
+  // A newer Ryco upgraded the database: offer its newest backup this build opens.
+  const backup = fatalCode === "database-schema-newer" ? await findRestorableBackup() : null;
   const options = {
     type: "error" as const,
     title: `${APP_DISPLAY_NAME} could not start`,
     message: `${APP_DISPLAY_NAME} could not start its local server.`,
     detail,
-    buttons: ["Retry", "Open Logs", "Quit"],
+    buttons: backup
+      ? ["Retry", "Open Logs", "Restore Backup…", "Quit"]
+      : ["Retry", "Open Logs", "Quit"],
     defaultId: 0,
-    cancelId: 2,
+    cancelId: backup ? 3 : 2,
     noLink: true,
+  };
+  const retry = () => {
+    backendStartupHalted = false;
+    backendFailurePolicy.reset();
+    backendRestartBackoff.reset();
+    startBackend();
   };
   await runRecoveryDialogLoop({
     show: () => showMessageBoxForWindow(window, options),
@@ -3560,13 +3586,107 @@ async function showBackendStartupFailure(detail: string): Promise<void> {
     openLogs: () => shell.openPath(LOG_DIR),
     primary: () => {
       writeDesktopLogHeader("backend start retry requested");
-      backendStartupHalted = false;
-      backendFailurePolicy.reset();
-      backendRestartBackoff.reset();
-      startBackend();
+      retry();
     },
+    extra: backup ? () => restoreDatabaseBackup(window, backup, retry) : undefined,
     quit: () => app.quit(),
   });
+}
+
+/** How the desktop runs its own server CLI: like the backend child, with CLI arguments. */
+function serverCliLaunch(): ServerCliLaunch {
+  return {
+    executable: isDevelopment ? resolveDevelopmentBunExecutable() : process.execPath,
+    backendEntry: resolveBackendEntry(),
+    nodeRuntime: !isDevelopment,
+    compileCacheHook: desktopLaunchRecord?.compileCacheDir == null ? null : COMPILE_CACHE_HOOK_PATH,
+    cwd: resolveBackendCwd(),
+    env: backendChildEnv(),
+    baseDir: BACKEND_BASE_DIR,
+    devUrl: isDevelopment ? resolveDesktopDevServerUrl() : null,
+  };
+}
+
+/** The newest backup this build can restore, or null (none, or `db list` failed). */
+async function findRestorableBackup(): Promise<RestorableBackup | null> {
+  const result = await runServerCli(serverCliLaunch(), ["db", "list"], DATABASE_LIST_TIMEOUT_MS);
+  const backup = result.exitCode === 0 ? pickRestorableBackup(result.stdout) : null;
+  writeDesktopLogHeader(
+    `database backups listed exitCode=${result.exitCode ?? "null"} timedOut=${result.timedOut} restorable=${backup === null ? "none" : sanitizeLogValue(backup.path)}`,
+  );
+  return backup;
+}
+
+/**
+ * Asks before restoring `backup` in place of the database (`ryco db restore --replace`), runs it,
+ * and starts the backend again once it worked. True when it took over; false to show the failure
+ * dialog again (cancelled, or the restore failed).
+ */
+async function restoreDatabaseBackup(
+  window: BrowserWindow | null,
+  backup: RestorableBackup,
+  retry: () => void,
+): Promise<boolean> {
+  const takenAt = new Date(backup.createdAt).toLocaleString();
+  const confirm = await showMessageBoxForWindow(window, {
+    type: "warning",
+    title: "Restore the database from a backup?",
+    message: `Restore the database from the backup taken ${takenAt}?`,
+    detail:
+      `This version of ${APP_DISPLAY_NAME} can't open its database because a newer version updated it. ` +
+      `Installing that newer version again keeps everything.\n\n` +
+      `Restoring goes back to the backup from ${takenAt}: everything since then is moved aside (kept, not deleted), ` +
+      `and every paired device and integration signs out and pairs again.`,
+    buttons: ["Restore Backup", "Cancel"],
+    defaultId: 1,
+    cancelId: 1,
+    noLink: true,
+  });
+  if (confirm.response !== 0 || isQuitting) return false;
+  writeDesktopLogHeader(`database restore started backup=${sanitizeLogValue(backup.path)}`);
+  if (window && !window.isDestroyed()) window.setProgressBar(2);
+  const result = await runServerCli(
+    serverCliLaunch(),
+    ["db", "restore", backup.path, "--replace"],
+    DATABASE_RESTORE_TIMEOUT_MS,
+  );
+  if (window && !window.isDestroyed()) window.setProgressBar(-1);
+  const outcome = readRestoreOutcome(result);
+  writeDesktopLogHeader(
+    outcome.ok
+      ? `database restore finished replacedDir=${sanitizeLogValue(outcome.replacedDir)}`
+      : `database restore failed exitCode=${result.exitCode ?? "null"} timedOut=${result.timedOut} message=${sanitizeLogValue(outcome.message)}`,
+  );
+  if (isQuitting) return true;
+  if (!outcome.ok) {
+    await showMessageBoxForWindow(window, {
+      type: "error",
+      title: "The backup was not restored",
+      message: "The backup was not restored.",
+      detail: outcome.message,
+      buttons: ["OK"],
+      noLink: true,
+    });
+    return false;
+  }
+  await showMessageBoxForWindow(window, {
+    type: "info",
+    title: "Database restored",
+    message: `The database was restored from the backup taken ${takenAt}.`,
+    detail:
+      `The database it replaced is kept in:\n${outcome.replacedDir}` +
+      (outcome.signedOut ? "\n\nPaired devices were signed out: pair them again." : "") +
+      (outcome.revoked.integrations > 0
+        ? `\n\nIntegrations were signed out too (${outcome.revoked.integrations}): pair them again.`
+        : "") +
+      (outcome.warnings.length > 0 ? `\n\n${outcome.warnings.join("\n")}` : ""),
+    buttons: ["OK"],
+    noLink: true,
+  });
+  if (isQuitting) return true;
+  writeDesktopLogHeader("backend start after database restore");
+  retry();
+  return true;
 }
 
 /** A message box as a sheet on `window` while it is open, app-modal otherwise. */
@@ -3798,14 +3918,17 @@ function startBackend(): void {
     writeDesktopLogHeader(
       `backend start halted reason=${decision.reason} consecutiveFailures=${decision.consecutiveFailures} ${details}`,
     );
-    haltBackendStartup(child, () =>
-      describeBackendStartupFailure({
-        reason: decision.reason,
-        consecutiveFailures: decision.consecutiveFailures,
-        fatal: readiness.fatal,
-        exitDetails: details,
-        outputLines: outputTail.lines(),
-      }),
+    haltBackendStartup(
+      child,
+      () =>
+        describeBackendStartupFailure({
+          reason: decision.reason,
+          consecutiveFailures: decision.consecutiveFailures,
+          fatal: readiness.fatal,
+          exitDetails: details,
+          outputLines: outputTail.lines(),
+        }),
+      readiness.fatal?.code ?? null,
     );
   };
 
