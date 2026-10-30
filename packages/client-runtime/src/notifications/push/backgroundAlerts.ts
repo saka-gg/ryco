@@ -119,9 +119,9 @@ export interface BackgroundAlertsPorts {
    * which this one cannot speak for); null when there is none, or it is older
    * than a node keeps a registration nobody refreshes.
    */
+  /** Read once; the memo itself drops a key past `EARLIER_INSTALL_KEY_RETIRE_MS`. */
   readonly earlierInstallKey: {
     readonly read: () => Promise<PushKey | null>;
-    readonly clear: () => Promise<void>;
   };
   readonly notifications: {
     readonly readPermission: () => Promise<boolean>;
@@ -476,9 +476,11 @@ export function createBackgroundAlerts(ports: BackgroundAlertsPorts): Background
   /**
    * Retires the key an earlier installation left on every Hub channel that is
    * up, by its public key: those registrations sit under that installation's
-   * enrollment, so nothing else this installation can do removes them. Once
-   * every Hub machine the app lists answered, the key is forgotten; until then
-   * a later connect or launch asks the rest.
+   * enrollment, so nothing else this installation can do removes them. Each
+   * channel is asked once per connection, for as long as the key is
+   * remembered (`EARLIER_INSTALL_KEY_RETIRE_MS`, the nodes' own drop): the app
+   * lists only the machines it is connected to now, so "every machine
+   * answered" is never known, and a refusal now may be a channel not ready yet.
    */
   const retireEarlierInstallKey = async () => {
     if (earlierKey === undefined) {
@@ -508,18 +510,6 @@ export function createBackgroundAlerts(ports: BackgroundAlertsPorts): Background
         }
       }
       earlierKeyRetired.set(connection.environmentId, ready);
-    }
-    if (
-      hubConnections.length > 0 &&
-      hubConnections.every((connection) => earlierKeyRetired.has(connection.environmentId))
-    ) {
-      earlierKey = null;
-      earlierKeyRetired.clear();
-      try {
-        await ports.earlierInstallKey.clear();
-      } catch (error) {
-        report("Forgetting the earlier installation's push key failed", error);
-      }
     }
   };
 

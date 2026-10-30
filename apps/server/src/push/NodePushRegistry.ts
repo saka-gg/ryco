@@ -25,6 +25,8 @@ import type { PushRegistration } from "./pushRegistrations.ts";
 /** The device a relay channel's verified grant names, and the role it acts at. */
 export interface PushDeviceIdentity {
   readonly enrollmentId: string;
+  /** The Hub account the grant names; absent from authorities that predate it. */
+  readonly accountId?: string | undefined;
   readonly role: RpcPrincipalRole;
 }
 

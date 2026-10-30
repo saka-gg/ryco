@@ -42,6 +42,7 @@ describe("relayChannelAuthority", () => {
     ).toEqual({
       trustSource: "account-enrolled",
       enrollmentId: "enr_1",
+      accountId: "acct",
       clientIdentityFingerprint: FINGERPRINT,
       role: "operator",
       nodeIdentityPublicKey: NODE_KEY,

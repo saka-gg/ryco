@@ -151,9 +151,6 @@ function harness(
   const earlier = { key: options.earlierInstallKey ?? null };
   const earlierInstallKey = {
     read: vi.fn(async () => earlier.key),
-    clear: vi.fn(async () => {
-      earlier.key = null;
-    }),
   };
   const notifications = {
     readPermission: vi.fn(async () => options.permission ?? true),
@@ -805,7 +802,7 @@ describe("the key an earlier installation left", () => {
     enrollmentId: null,
   };
 
-  it("is retired by its public key on every Hub machine, whether or not alerts are on here, then forgotten", async () => {
+  it("is retired by its public key on every Hub machine it connects to, whether or not alerts are on here", async () => {
     const test = harness({ enabled: false, earlierInstallKey: EARLIER });
     const node = fakeConnection("env-a");
     const later = fakeConnection("env-b");
@@ -817,8 +814,6 @@ describe("the key an earlier installation left", () => {
     const retire = { keyId: EARLIER.keyId, publicKey: EARLIER.publicKey };
     expect(node.push.unregisterDevice).toHaveBeenCalledWith(retire);
     expect(direct.push.unregisterDevice).not.toHaveBeenCalled();
-    // A machine that is not up yet keeps it remembered.
-    expect(test.earlierInstallKey.clear).not.toHaveBeenCalled();
     // Nothing else happens while alerts are off here.
     expect(test.hub.getNativePushCapability).not.toHaveBeenCalled();
     expect(test.hub.unregisterNativePush).not.toHaveBeenCalled();
@@ -827,15 +822,16 @@ describe("the key an earlier installation left", () => {
     await settle();
     expect(later.push.unregisterDevice).toHaveBeenCalledWith(retire);
     expect(node.push.unregisterDevice).toHaveBeenCalledTimes(1);
-    expect(test.earlier.key).toBeNull();
 
-    // Forgotten: later connects ask nothing.
+    // Every machine the app listed answered, but the app lists only the machines
+    // it is connected to: the key stays remembered, and a new connect asks again.
+    expect(test.earlier.key).not.toBeNull();
     node.reconnect();
     await settle();
-    expect(node.push.unregisterDevice).toHaveBeenCalledTimes(1);
+    expect(node.push.unregisterDevice).toHaveBeenCalledTimes(2);
   });
 
-  it("asks a machine again when retiring it failed, and takes an older node's answer as done", async () => {
+  it("asks a machine again when retiring it failed, and an older node's answer once per connection", async () => {
     const test = harness({ earlierInstallKey: EARLIER });
     const flaky = fakeConnection("env-a");
     const older = fakeConnection("env-b");
@@ -853,7 +849,7 @@ describe("the key an earlier installation left", () => {
     await settle();
     expect(flaky.push.unregisterDevice).toHaveBeenCalledTimes(2);
     expect(older.push.unregisterDevice).toHaveBeenCalledTimes(1);
-    expect(test.earlier.key).toBeNull();
+    expect(test.earlier.key).not.toBeNull();
   });
 });
 

@@ -61,12 +61,11 @@ describe("the key an earlier installation left", () => {
   const record = (recordedAt: number, publicKey = PUBLIC_KEY) =>
     JSON.stringify({ publicKey, recordedAt });
 
-  it("reads as a push key with the id a node knows it by, until it is cleared", async () => {
+  it("reads as a push key with the id a node knows it by, for as long as it is kept", async () => {
     const storage = memoryKv({ [EARLIER_INSTALL_PUSH_KEY]: record(1_000) });
     const memo = createEarlierInstallKeyMemo(storage, () => 2_000);
     expect(await memo.read()).toEqual({ publicKey: PUBLIC_KEY, keyId: KEY_ID, enrollmentId: null });
-    await memo.clear();
-    expect(await memo.read()).toBeNull();
+    expect(await memo.read()).toEqual({ publicKey: PUBLIC_KEY, keyId: KEY_ID, enrollmentId: null });
   });
 
   it("is dropped once nodes have dropped what it registered, or when it can't be read", async () => {

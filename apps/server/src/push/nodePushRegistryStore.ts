@@ -102,6 +102,7 @@ export const makeNodePushRegistry = (options: {
         update((current) => {
           const next = registerPushDevice(current, {
             enrollmentId: device.enrollmentId,
+            accountId: device.accountId,
             role: device.role,
             input,
             newSalt: newSalt(),
@@ -113,6 +114,7 @@ export const makeNodePushRegistry = (options: {
         update((current) => {
           const result = unregisterPushDevice(current, {
             enrollmentId: device.enrollmentId,
+            accountId: device.accountId,
             keyId: input.keyId,
             publicKey: input.publicKey,
           });

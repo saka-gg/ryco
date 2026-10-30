@@ -70,6 +70,5 @@ export function createEarlierInstallKeyMemo(
       if (key === null) await clear();
       return key;
     },
-    clear,
   };
 }

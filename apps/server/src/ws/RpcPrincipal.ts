@@ -16,6 +16,8 @@ export type RelayChannelAuthority =
   | {
       readonly trustSource: "account-enrolled";
       readonly enrollmentId: string;
+      /** The Hub account the channel's verified grant names: one person's devices share it. */
+      readonly accountId?: string;
       readonly clientIdentityFingerprint: Uint8Array;
       readonly role: RpcPrincipalRole;
       /**

@@ -91,10 +91,12 @@ describe("the push key's install check", () => {
       return { publicKey: PUBLIC_KEY, enrollmentId: "enr_earlier" };
     });
     const deleteKey = vi.fn(async () => {
-      order.push("delete");
+      order.push(`delete (public half kept: ${store.items.has(EARLIER_INSTALL_PUSH_KEY)})`);
     });
     await createPushKeyCustody({ deleteKey, readKey }, store, () => 1_234)();
-    expect(order).toEqual(["read", "delete"]);
+    // Kept before the delete: a launch that dies between the two keeps the only handle on
+    // the old registrations.
+    expect(order).toEqual(["read", "delete (public half kept: true)"]);
     expect(JSON.parse(store.items.get(EARLIER_INSTALL_PUSH_KEY)!)).toEqual({
       publicKey: PUBLIC_KEY,
       recordedAt: 1_234,

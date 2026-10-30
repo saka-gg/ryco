@@ -424,7 +424,8 @@ export const RPC_DELIVERY_EFFECT_POLICY = {
   [WS_METHODS.serverGetAdvertisedEndpoints]: "read",
   // Repeating it only issues another short-lived single-use code.
   [WS_METHODS.authIssueLinkedDirectAccess]: "read",
-  // The device's own alert preferences on this node, not workspace state.
+  // The device's own alert preferences on this node (and an earlier installation's of the same
+  // Hub account, which `push.unregisterDevice` may retire by its key), not workspace state.
   [WS_METHODS.pushRegisterDevice]: "read",
   [WS_METHODS.pushUnregisterDevice]: "read",
   [WS_METHODS.pushSetPresence]: "read",

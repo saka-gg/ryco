@@ -43,11 +43,12 @@ export function createPushKeyCustody(
     markerKey: PUSH_INSTALL_MARKER_KEY,
     markerValue: PUSH_INSTALL_MARKER_VALUE,
     destroy: async () => {
-      // Only its public half is kept, to retire it; unreadable, it is deleted all the same.
+      // Only its public half is kept, to retire it, and it is kept before the key goes: a
+      // launch that dies between the two must not lose the only handle on the old
+      // registrations. Unreadable, the key is deleted all the same.
       const left = await Promise.resolve()
         .then(() => native.readKey())
         .catch(() => null);
-      await native.deleteKey();
       if (left && typeof left.publicKey === "string") {
         const record: EarlierInstallPushKeyRecord = {
           publicKey: left.publicKey,
@@ -55,6 +56,7 @@ export function createPushKeyCustody(
         };
         await kv.setItem(EARLIER_INSTALL_PUSH_KEY, JSON.stringify(record));
       }
+      await native.deleteKey();
     },
   });
 }
