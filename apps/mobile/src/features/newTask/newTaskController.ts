@@ -345,6 +345,38 @@ function turnStartCommand(
   return command as TurnStartCommand;
 }
 
+/**
+ * The attempt to run again after a failure. The node keeps a receipt for every
+ * command id: an accepted one answers as accepted again, a refused one is
+ * refused again. So a step the node refused gets a fresh command id, while a
+ * step that may have been delivered (a lost connection) keeps its own, and the
+ * node answers it from its receipt instead of running it twice.
+ */
+export function prepareNewTaskRetry(
+  attempt: NewTaskAttempt,
+  failure: { readonly step: NewTaskFailureStep; readonly deliveryUncertain: boolean },
+  newCommandId: () => CommandId,
+): NewTaskAttempt {
+  if (failure.deliveryUncertain) return attempt;
+  const ids = attempt.ids;
+  switch (failure.step) {
+    case "project":
+      return attempt.projectCommandAccepted
+        ? attempt
+        : { ...attempt, ids: { ...ids, projectCommandId: newCommandId() } };
+    case "worktree":
+      return attempt.turnStarted
+        ? attempt
+        : { ...attempt, ids: { ...ids, turnCommandId: newCommandId() } };
+    case "thread":
+      return attempt.threadCommandAccepted
+        ? attempt
+        : { ...attempt, ids: { ...ids, threadCommandId: newCommandId() } };
+    case "turn":
+      return attempt;
+  }
+}
+
 export async function runNewTaskAttempt(
   attempt: NewTaskAttempt,
   deps: NewTaskControllerDeps,

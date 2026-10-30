@@ -8,6 +8,7 @@ import {
   type WorktreeSetupFeedApi,
 } from "@ryco/client-runtime/state/worktree-setup";
 import type {
+  CommandId,
   EnvironmentId,
   ModelSelection,
   ProjectId,
@@ -20,6 +21,7 @@ import { create } from "zustand";
 
 import type { DraftComposerImageAttachment } from "../../lib/composerImages";
 import {
+  prepareNewTaskRetry,
   runNewTaskAttempt,
   type NewTaskAttempt,
   type NewTaskControllerDeps,
@@ -135,6 +137,8 @@ function dropWorktreeFeed(key: string): void {
 export interface NewTaskLaunchDeps {
   readonly controller: NewTaskControllerDeps;
   readonly feedApi: WorktreeSetupFeedApi;
+  /** A refused step is sent again under a fresh id (see `prepareNewTaskRetry`). */
+  readonly newCommandId: () => CommandId;
 }
 
 /** Keys whose attempt is running, so a double tap on Retry runs it once. */
@@ -202,11 +206,21 @@ export function startNewTaskLaunch(input: {
   return key;
 }
 
-/** Run a failed launch again from the step that failed, under the same ids. */
+/**
+ * Run a failed launch again from the step that failed: a step that may have
+ * been delivered keeps its command id, a refused one gets a fresh one.
+ */
 export function retryNewTaskLaunch(key: string, deps: NewTaskLaunchDeps): void {
   const launch = readNewTaskLaunch(key);
   if (!launch || launch.status !== "failed" || running.has(key)) return;
-  const next: NewTaskLaunch = { ...launch, status: "starting", failure: null };
+  const next: NewTaskLaunch = {
+    ...launch,
+    attempt: launch.failure
+      ? prepareNewTaskRetry(launch.attempt, launch.failure, deps.newCommandId)
+      : launch.attempt,
+    status: "starting",
+    failure: null,
+  };
   patchLaunch(key, () => next);
   beginWorktreeFeed(next, deps.feedApi);
   void run(key, deps);

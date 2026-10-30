@@ -2,6 +2,7 @@ import { scopeProjectRef, scopeThreadRef } from "@ryco/client-runtime/scoped";
 import type { EnvironmentId } from "@ryco/contracts";
 
 import { ensureEnvironmentApi } from "../../connection/environmentApi";
+import { newCommandId } from "../../lib/ids";
 import {
   selectProjectByRef,
   selectSidebarThreadSummaryByRef,
@@ -28,6 +29,7 @@ export function createNewTaskLaunchDeps(environmentId: EnvironmentId): NewTaskLa
   const api = ensureEnvironmentApi(environmentId);
   return {
     feedApi: api,
+    newCommandId,
     controller: {
       dispatch: (command) => api.orchestration.dispatchCommand(command),
       waitForProject: (projectId) =>

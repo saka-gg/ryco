@@ -12,6 +12,7 @@ import {
 
 import {
   createNewTaskAttempt,
+  prepareNewTaskRetry,
   runNewTaskAttempt,
   type NewTaskControllerDeps,
   type NewTaskStableIds,
@@ -215,7 +216,7 @@ describe("New Task controller", () => {
     expect(result.attempt.turnStarted).toBe(true);
   });
 
-  it("shows the node's refusal of a new worktree and sends the same command on retry", async () => {
+  it("shows the node's refusal of a new worktree as certain and keeps the attempt's ids", async () => {
     let refuse = true;
     const runtime = deps({
       dispatch: async (command) => {
@@ -352,6 +353,34 @@ describe("New Task controller", () => {
     expect(lost.message).toBe(
       "The task could not be confirmed. The project and worktree remain available.",
     );
+  });
+
+  it("renews only a refused step's command id for a retry", () => {
+    const base = createNewTaskAttempt({
+      environmentId,
+      prompt: "Start here",
+      project: { kind: "new", workspaceRoot: "/code/new-project" },
+      worktree: { kind: "local" },
+      createdAt,
+      ids,
+    });
+    const fresh = () => CommandId.make("command-fresh");
+    expect(
+      prepareNewTaskRetry(base, { step: "project", deliveryUncertain: false }, fresh).ids,
+    ).toEqual({ ...ids, projectCommandId: "command-fresh" });
+    // May have been delivered: the node answers the same id from its receipt.
+    expect(prepareNewTaskRetry(base, { step: "project", deliveryUncertain: true }, fresh)).toBe(
+      base,
+    );
+    const projectDone = { ...base, projectCommandAccepted: true, projectReady: true };
+    expect(
+      prepareNewTaskRetry(projectDone, { step: "thread", deliveryUncertain: false }, fresh).ids,
+    ).toEqual({ ...ids, threadCommandId: "command-fresh" });
+    // Only the confirmation was missing: nothing to renew.
+    const threadSent = { ...projectDone, threadCommandAccepted: true };
+    expect(
+      prepareNewTaskRetry(threadSent, { step: "thread", deliveryUncertain: false }, fresh),
+    ).toBe(threadSent);
   });
 
   it("reports uncertain turn delivery without dropping the authoritative thread", async () => {

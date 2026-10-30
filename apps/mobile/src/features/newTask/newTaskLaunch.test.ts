@@ -101,8 +101,10 @@ function node(options?: {
     },
   );
   let held: Promise<void> | null = null;
+  let minted = 0;
   const deps: NewTaskLaunchDeps = {
     feedApi: { vcs: { onWorktreeSetup } } as never,
+    newCommandId: () => CommandId.make(`command-fresh-${++minted}`),
     controller: {
       dispatch: async (command) => {
         commands.push(command);
@@ -228,7 +230,7 @@ describe("New Task launch", () => {
     ).toEqual(["done", "done", "done"]);
   });
 
-  it("shows the node's refusal with Retry and Edit task, and Retry sends the same command", async () => {
+  it("shows the node's refusal with Retry and Edit task, and Retry sends it under a fresh id", async () => {
     let refuse = true;
     const remote = node({
       refuse: () => {
@@ -254,10 +256,38 @@ describe("New Task launch", () => {
     expect(useWorktreeLaunchStore.getState().launchesByKey[key]?.phase).toBe("preparing");
     await settle();
     expect(readNewTaskLaunch(key)?.status).toBe("started");
+    // The node keeps a receipt of the refused id and would refuse it again.
     expect(remote.commands.map((command) => command.commandId)).toEqual([
       ids.turnCommandId,
-      ids.turnCommandId,
+      "command-fresh-1",
     ]);
+    expect(remote.commands[1]).toMatchObject({
+      threadId: ids.threadId,
+      message: { messageId: ids.messageId },
+    });
+  });
+
+  it("sends a turn start that may have been delivered again under its own id", async () => {
+    let lose = true;
+    const remote = node({
+      refuse: (command) => {
+        if (command.type !== "thread.turn.start" || !lose) return null;
+        lose = false;
+        return "SocketCloseError: connection lost";
+      },
+    });
+    startNewTaskLaunch({ attempt: attempt(), draft, deps: remote.deps });
+    await settle();
+    retryNewTaskLaunch(key, remote.deps);
+    await settle();
+
+    expect(readNewTaskLaunch(key)?.status).toBe("started");
+    // The node answers a delivered id from its receipt instead of starting it twice.
+    expect(
+      remote.commands
+        .filter((command) => command.type === "thread.turn.start")
+        .map((command) => command.commandId),
+    ).toEqual([ids.turnCommandId, ids.turnCommandId]);
   });
 
   it("offers no Edit task once the node may hold a thread for the task", async () => {
