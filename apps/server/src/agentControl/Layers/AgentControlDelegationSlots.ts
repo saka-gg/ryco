@@ -26,7 +26,7 @@ import { ServerWakeFence } from "../../orchestration/Services/ServerWakeFence.ts
 import { findThreadInArray } from "../../orchestration/threadIndex.ts";
 import { CompletionReturnRepository } from "../../persistence/Layers/AgentControlCompletionReturns.ts";
 import { ServerRuntimeStartup } from "../../serverRuntimeStartup.ts";
-import { cancelledByDelegatingChat } from "../delegatedTaskControl.ts";
+import { cancelledByDelegatingChat, noLongerAwaited } from "../delegatedTaskControl.ts";
 import { AgentControlOperationStore } from "../Services/AgentControlOperationStore.ts";
 import { AgentControlProposalEvents } from "../Services/AgentControlProposalEvents.ts";
 import { AgentControlProposalStore } from "../Services/AgentControlProposalStore.ts";
@@ -94,10 +94,19 @@ export const AgentControlDelegationSlotsLive = Layer.effectDiscard(
             getProposal: proposals.getById,
             getOperation: operations.getByProposalId,
             dispatch: application.apply,
+            recordHold: application.applyInternal,
             causePrefix: DELEGATION_SLOT_CAUSE_PREFIX,
             ...(Option.isSome(completionReturns)
-              ? { getCompletionReturn: completionReturns.value.get }
+              ? {
+                  getCompletionReturn: completionReturns.value.get,
+                  waitingGivenUp: (record) =>
+                    completionReturns.value.userStoppedAfterApproval(
+                      record,
+                      record.sinceSequence ?? 0,
+                    ),
+                }
               : {}),
+            noLongerAwaited,
             cancelledByDelegatingChat,
             cancelCommandId: delegationSlotCancelCommandId,
             noUserMessageSent,

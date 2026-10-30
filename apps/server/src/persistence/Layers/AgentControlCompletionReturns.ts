@@ -119,6 +119,11 @@ export const CompletionReturnRecord = Schema.Struct({
    * clears, because the delivery window opens no earlier than the reset (usage-limits §5.2).
    */
   limitResetAt: Schema.optional(IsoDateTime),
+  /**
+   * When the task's first message was sent: at once, or when a capped request's slot freed. The
+   * return's time limit runs from it (`waitingReturnExpired`). Remembered once known.
+   */
+  startedAt: Schema.optional(IsoDateTime),
 });
 export type CompletionReturnRecord = typeof CompletionReturnRecord.Type;
 const decode = Schema.decodeUnknownSync(Schema.fromJsonString(CompletionReturnRecord));
@@ -304,6 +309,15 @@ export const makeCompletionReturnRepository = Effect.gen(function* () {
     WHERE thread_id = ${record.childThreadId} AND pending_message_id = ${record.initialMessageId}
       AND turn_id IS NOT NULL LIMIT 1
   `.pipe(Effect.map((rows) => (rows[0] ? TurnId.make(rows[0].turnId) : null))),
+    );
+  /** When the task's first message was sent, or null while it waits in the task's queue. */
+  const initialMessageSentAt = (record: CompletionReturnRecord) =>
+    safe(
+      sql<{ createdAt: string }>`
+    SELECT created_at AS "createdAt" FROM projection_thread_messages
+    WHERE message_id = ${record.initialMessageId} AND thread_id = ${record.childThreadId}
+    LIMIT 1
+  `.pipe(Effect.map((rows) => rows[0]?.createdAt ?? null)),
     );
   const turnMessageId = (threadId: ThreadId, turnId: TurnId) =>
     safe(
@@ -521,6 +535,15 @@ export const makeCompletionReturnRepository = Effect.gen(function* () {
   const pendingTurnStart = (threadId: ThreadId) => safe(readPendingTurnStart(sql, threadId));
   const wakeStartState = (threadId: ThreadId, messageId: MessageId) =>
     safe(readWakeStartState(sql, { threadId, messageId }));
+  /** The thread's newest event sequence, or null without events. */
+  const lastEventSequence = (threadId: ThreadId) =>
+    safe(
+      sql<{ sequence: number }>`
+    SELECT sequence FROM orchestration_events
+    WHERE aggregate_kind = 'thread' AND stream_id = ${threadId}
+    ORDER BY sequence DESC LIMIT 1
+  `.pipe(Effect.map((rows) => rows[0]?.sequence ?? null)),
+    );
   const firstEventSequence = (threadId: ThreadId) =>
     safe(
       sql<{ sequence: number }>`
@@ -571,6 +594,35 @@ export const makeCompletionReturnRepository = Effect.gen(function* () {
     LIMIT 1
   `.pipe(Effect.map((rows) => rows.length > 0)),
     );
+  /**
+   * The first event of any returnToOrigin task of request `proposalId`: its first task's
+   * creation, which follows the request's approval in the server's own event order.
+   */
+  const requestStartSequence = (proposalId: AgentControlProposalId) =>
+    safe(
+      sql<{ sequence: number | null }>`
+    SELECT min((SELECT e.sequence FROM orchestration_events e
+      WHERE e.aggregate_kind = 'thread' AND e.stream_id = r.child_thread_id
+      ORDER BY e.sequence ASC LIMIT 1)) AS sequence
+    FROM agent_control_completion_returns r WHERE r.proposal_id = ${proposalId}
+  `.pipe(Effect.map((rows) => rows[0]?.sequence ?? null)),
+    );
+  /**
+   * `cohortUserStop` for a task of a capped request (`maxConcurrent`): only Stops after the
+   * request's approval count (`requestStartSequence`), and after `afterSequence`. A Stop pressed
+   * while the request waited for approval does not keep its waiting tasks from starting, so it
+   * does not end their results either. The delivery and the slot runtime both decide with it.
+   */
+  const userStoppedAfterApproval = (record: CompletionReturnRecord, afterSequence: number) =>
+    Effect.gen(function* () {
+      const start = yield* requestStartSequence(record.proposalId);
+      return yield* cohortUserStop({
+        threadId: record.parentThreadId,
+        sinceSequence: Math.max(start ?? 0, afterSequence),
+        delegatingMessageId: yield* turnMessageId(record.parentThreadId, record.parentTurnId),
+        wakesSince: record.createdAt,
+      });
+    });
   /**
    * Whether a checkpoint revert on `threadId` after `sinceSequence` dropped `turnId`
    * (rollback-correctness: `thread.reverted` names the turns it dropped). The delegating
@@ -661,6 +713,7 @@ export const makeCompletionReturnRepository = Effect.gen(function* () {
     get,
     save,
     initialTurnId,
+    initialMessageSentAt,
     observe,
     output,
     latestUserMessageId,
@@ -676,8 +729,10 @@ export const makeCompletionReturnRepository = Effect.gen(function* () {
     pendingTurnStart,
     wakeStartState,
     firstEventSequence,
+    lastEventSequence,
     worktreeArchived,
     cohortUserStop,
+    userStoppedAfterApproval,
     turnDroppedByRevert,
     startFailed,
     turnStartSequence,

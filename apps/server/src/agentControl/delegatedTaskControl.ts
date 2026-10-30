@@ -65,6 +65,14 @@ export const DELEGATED_TASK_CANCEL_DETAIL =
 export const cancelledByDelegatingChat = (
   record: Pick<CompletionReturnRecord, "status" | "detail">,
 ) => record.status === "cancelled" && record.detail === DELEGATED_TASK_CANCEL_DETAIL;
+/**
+ * The delegating chat no longer waits for the task's return: cancelled with `ryco_task_cancel`,
+ * by the chat's Stop, archive or delete, past its time limit, or settled otherwise. A task in this
+ * state whose first message was never sent (a capped request's task waiting for a slot) never
+ * starts.
+ */
+export const noLongerAwaited = (record: Pick<CompletionReturnRecord, "status">) =>
+  record.status !== "waiting";
 export const DELEGATED_TASK_WAITING_DETAIL =
   "Waiting for a free slot: it starts when an earlier task of its request stops working.";
 
@@ -195,9 +203,9 @@ export const makeDelegatedTaskControl = (deps: DelegatedTaskControlDeps) => {
           : null;
       let state = yield* runState(record);
       // Its first message was never sent: a task of a capped request still waiting for a slot,
-      // or one `ryco_task_cancel` took out of its queue (it never starts).
+      // or one its chat gave up on before that (it never starts).
       const unsent = state === "starting" && child !== null && child.latestUserMessageAt === null;
-      const cancelled = unsent && cancelledByDelegatingChat(record);
+      const cancelled = unsent && noLongerAwaited(record);
       const waiting =
         unsent &&
         !cancelled &&

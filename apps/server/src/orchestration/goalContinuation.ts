@@ -110,6 +110,13 @@ export const goalPausingFailedTurn = (
   return turn.turnId;
 };
 
+/**
+ * How long a capped request's task whose goal will continue its finished turn keeps its delegation
+ * slot after the slot runtime first finds it idle: the grace (which starts no earlier), a few held
+ * rechecks and the dispatch. So the grace never frees the slot for another task.
+ */
+export const GOAL_CONTINUATION_PENDING_MS = 60_000;
+
 export const GOAL_CHAIN_PAUSE_NOTICE = {
   summary: "Goal paused",
   detail: `Ryco paused the goal after ${GOAL_CONTINUATION_MAX_CHAIN} automatic turns in a row. Resume the goal to keep going.`,
