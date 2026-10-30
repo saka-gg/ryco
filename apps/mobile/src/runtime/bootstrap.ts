@@ -202,6 +202,15 @@ export function initializeMobileRuntime(): MobileConnectionRegistry {
           ),
         );
         accountEnvironmentIds.clear();
+        // Direct access was linked through this account's relay: its links and
+        // bearers go with it.
+        if (registry.catalog.listLinked().length > 0) {
+          void import("../hostedHub/linkedDirectAccessRuntime")
+            .then(({ mobileLinkedDirectAccess }) => mobileLinkedDirectAccess().forget())
+            .catch((error: unknown) =>
+              console.warn("Linked direct access was not forgotten.", error),
+            );
+        }
       }
       for (const node of currentHostedState.nodes) accountEnvironmentIds.add(node.environmentId);
       if (currentAccountId !== null) artworkAccountId = currentAccountId;

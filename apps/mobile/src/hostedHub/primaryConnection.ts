@@ -22,6 +22,7 @@ import {
   bindHostedDispatchReplay,
   createHostedEnvironmentAttemptFactory,
   hostedDispatchLineage,
+  type HostedDirectSocket,
 } from "@ryco/client-runtime/relay";
 import { bindHostedGitActionDelivery, createWsRpcClient } from "@ryco/client-runtime/rpc";
 
@@ -37,6 +38,11 @@ import { mobileHostedRelayUrl, openMobileEarlyRelaySocket } from "./relaySocket"
 import { getMobileHostedConfig } from "./runtimeConfig";
 import { writeEnvironmentServerConfig } from "../state/environmentServerConfigs";
 import { getMobileNativeE2eeEnrollmentCoordinator } from "./e2eeEnrollment";
+import {
+  mobileLinkedDirectAccess,
+  subscribeMobileRouteTriggers,
+} from "./linkedDirectAccessRuntime";
+import { capLinkedRole } from "./linkedDirectAccess";
 
 /**
  * The supervisor's stream handlers a hosted node connection feeds. The
@@ -89,6 +95,10 @@ export function createHostedEnvironmentConnection(
     isCurrent: acceptsEvent,
   };
 
+  // The machine's linked direct routes (`linkedDirectAccess.ts`): each attempt
+  // asks them first; this factory stays the attempt's lifecycle owner.
+  const linked = mobileLinkedDirectAccess();
+  const machine = { environmentId, label: node.label };
   const { factory: attemptFactory } = createHostedEnvironmentAttemptFactory({
     sessions,
     environmentId,
@@ -117,6 +127,18 @@ export function createHostedEnvironmentConnection(
           getMobileNativeE2eeEnrollmentCoordinator()?.applyRevocation(failure.enrollmentRevoked);
         }
       },
+      resolveDirectRoute: async (signal) => {
+        const route = await linked.resolveRoute(machine, signal);
+        if (route === null) return null;
+        const directoryRole =
+          hostedHubStore
+            .getState()
+            .nodes.find((entry) => entry.id === node.id && entry.revokedAt === null)
+            ?.effectiveRole ?? null;
+        const role = capLinkedRole(route.role, directoryRole);
+        return role === null ? null : { ...route, role };
+      },
+      createDirectSocket: (url) => new WebSocket(url) as unknown as HostedDirectSocket,
     },
   });
   // Environment-scoped, not generation-scoped: the replay may give up, and a
@@ -155,7 +177,7 @@ export function createHostedEnvironmentConnection(
     environmentId,
   };
 
-  return createEnvironmentConnection({
+  const connection = createEnvironmentConnection({
     // The supervisor keeps hosted node connections as "primary" ones.
     kind: "primary",
     knownEnvironment,
@@ -201,4 +223,25 @@ export function createHostedEnvironmentConnection(
       input.applyTerminalEvent(event, eventEnvironmentId);
     },
   });
+  // While on the relay: better routes are checked, and the link renewed when due.
+  // It stops once this generation is replaced or released.
+  linked.keepUpgraded({
+    machine,
+    readActiveRouteKey: () => attemptFactory.activeRouteKey(),
+    mayUpgrade: () =>
+      attemptFactory.mayTakeDirectRoutes() &&
+      sessions.read(environmentId)?.sessionStatus === "ready",
+    relayReady: () => {
+      const record = sessions.read(environmentId);
+      return (
+        record?.generation === generation &&
+        record.transportStatus === "online" &&
+        record.sessionStatus === "ready"
+      );
+    },
+    isCurrent: acceptsEvent,
+    reconnect: () => void connection.reconnect().catch(() => undefined),
+    subscribeTriggers: subscribeMobileRouteTriggers,
+  });
+  return connection;
 }

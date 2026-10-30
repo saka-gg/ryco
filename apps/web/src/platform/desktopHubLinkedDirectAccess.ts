@@ -1,5 +1,5 @@
 import type { EnvironmentId } from "@ryco/contracts";
-import { hubLinkedDirectAccessDue } from "@ryco/client-runtime/connection";
+import { hubLinkedDirectAccessDue, type HubLinkOutcome } from "@ryco/client-runtime/connection";
 
 import { listLinkedDirectRecords } from "../environments/runtime/catalog";
 
@@ -21,16 +21,7 @@ import { listLinkedDirectRecords } from "../environments/runtime/catalog";
  * Renewing it rewrites the stored address and bearer in place.
  */
 
-export type DesktopHubLinkOutcome =
-  | "linked"
-  /** The user already paired this machine by hand; that pairing is left alone. */
-  | "already-paired"
-  /** The machine listens on loopback only. */
-  | "no-direct-endpoint"
-  /** The machine is older than the direct identity proof: it names no key to prove. */
-  | "node-update-required"
-  /** None of its HTTPS or Tailscale addresses answered as the machine from this network. */
-  | "unreachable";
+export type DesktopHubLinkOutcome = HubLinkOutcome;
 
 /** After a failed automatic renewal, the next attempt waits at least this long. */
 const AUTOMATIC_RENEWAL_RETRY_MS = 15 * 60 * 1000;

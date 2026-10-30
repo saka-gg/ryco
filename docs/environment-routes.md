@@ -7,7 +7,8 @@ environment with its own id, so the machine and its threads show twice, and noth
 
 This page is the design. Phase 1, the route model and its policy, is in
 `packages/client-runtime/src/connection/environmentRoutes.ts`; the upgrade loop is
-`environmentRouteUpgrader.ts`. Phase 2 (Desktop) uses them.
+`environmentRouteUpgrader.ts`; the walk each attempt makes over a machine's linked routes is
+`hubLinkedRoutes.ts`. Phase 2 (Desktop) and phase 3 (the phone) use them.
 
 ## Identity
 
@@ -88,6 +89,15 @@ Running the relay's E2EE over the direct socket would let them in; it is not bui
 Only native clients use routes: Desktop and the mobile app. The hosted browser keeps its single
 relay lifecycle owner and never sees a route. `canAdoptHostedEnvironmentSession` is unchanged.
 
+On the phone the hosted attempt factory (`HostedRelayAttemptFactory`) stays the one lifecycle owner
+of a Hub machine's connection. Its binding gains two native-only ports, `resolveDirectRoute` and
+`createDirectSocket`; the hosted browser binds neither and takes exactly the relay path it took
+before. A direct attempt is an attempt like any other: it starts after the same admission checks,
+is fenced by the session generation, publishes its role when its socket opens (the linked
+session's role, which the node reports in `GET /api/auth/session` as `linkedRole`, since no relay
+reports one there), and is ready only after its own fresh shell snapshot. A relay refusal holds
+every direct route until a relay socket opens again.
+
 ## Phases
 
 1. The route model and policy in client-runtime, pure and tested (this change), plus the mobile
@@ -124,7 +134,16 @@ relay lifecycle owner and never sees a route. `canAdoptHostedEnvironmentSession`
    - Not done: an upgrade drops the open socket before the new route has proven itself (turns
      run on the node and resume, but in-flight requests fail and retry); a linked session keeps
      the role it was linked with until it is renewed.
-3. Mobile: ask for linked direct access over the relay through the shared helpers. Its adapter
-   only supplies network changes.
+3. Mobile (done):
+   - a Hub machine's row offers "Add direct access" while its relay session is ready, and
+     "Remove direct access" once linked; the phone asks over the relay, proves the address's
+     identity key and saves the link apart from environments, exactly as Desktop does;
+   - every attempt of the machine's hosted connection walks its linked routes first
+     (`apps/mobile/src/hostedHub/linkedDirectAccess.ts`), then the relay;
+   - while on the relay, better routes are checked every minute, on a network change and on
+     resume, and an aged link is renewed there; removing a link moves a connection on it back to
+     the relay at once;
+   - signing out of the Hub, or another account, forgets every link and its bearer;
+   - the row says "Direct" while the machine's latest attempt took a direct route.
 4. Optionally, the node pushes its direct endpoints in its config, and Desktop mode includes
    MagicDNS.

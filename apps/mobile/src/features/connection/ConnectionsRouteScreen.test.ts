@@ -90,6 +90,11 @@ vi.mock("./useConnectionController", () => ({
   useSavedEnvironments: () => ({ rows: rowsMock.rows, isLoading: false }),
   useConnectionActions: () => actionsMock,
 }));
+vi.mock("../../hostedHub/useLinkedDirectAccess", () => ({
+  useMobileLinkedDirectAccess: () => ({ linked: {}, linking: {}, directRoute: {}, notice: {} }),
+  addMobileDirectAccessLazily: vi.fn(),
+  removeMobileDirectAccessLazily: vi.fn(),
+}));
 vi.mock("../../hostedHub/state", () => ({
   useMobileHostedConnectionsStore: () => [],
   ensureMobileHostedSession: hostedMock.ensureMobileHostedSession,

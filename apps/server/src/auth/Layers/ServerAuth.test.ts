@@ -193,6 +193,10 @@ it.layer(NodeServices.layer)("ServerAuthLive", (it) => {
         role: "operator",
         canManageLocalAccess: false,
       });
+      // The linked role, for a phone on a direct route where no relay reports one.
+      expect(
+        yield* serverAuth.getSessionState(makeBearerRequest(bearer.sessionToken)),
+      ).toMatchObject({ authenticated: true, role: "client", linkedRole: "operator" });
 
       // A browser cookie is never made from one.
       const asCookie = yield* issueLinked();
