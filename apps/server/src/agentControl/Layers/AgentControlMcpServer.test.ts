@@ -7,6 +7,7 @@ import {
   AGENT_CONTROL_DELEGATION_MCP_TOOLS,
   AGENT_CONTROL_LOCAL_TASK_MCP_TOOLS,
   AGENT_CONTROL_MCP_TOOLS,
+  AGENT_CONTROL_QUEUE_MCP_TOOLS,
   AgentControlProposalId,
   AgentControlRequestId,
   ProviderInstanceId,
@@ -1007,6 +1008,10 @@ it.live("installs ryco_device where devices exist, for sessions that may drive t
       assert.include(driver.listed, "ryco_device");
       assert.include(driver.advertised ?? [], "ryco_device");
       assert.strictEqual(deviceRoutineModule.loads, 1);
+      // The device tools wrap the queue tools: both are there, with devices or without.
+      for (const listing of [reader, driver]) {
+        assert.include(listing.listed, AGENT_CONTROL_QUEUE_MCP_TOOLS.queueList);
+      }
 
       const unsupported = yield* Layer.build(
         makeMcpServerLayer(settings).pipe(
@@ -1016,6 +1021,7 @@ it.live("installs ryco_device where devices exist, for sessions that may drive t
       const nowhere = yield* listFor(unsupported, deviceGrants, "runtime-device-unsupported");
       assert.notInclude(nowhere.listed, "ryco_device");
       assert.notInclude(nowhere.advertised ?? [], "ryco_device");
+      assert.include(nowhere.listed, AGENT_CONTROL_QUEUE_MCP_TOOLS.queueList);
     }),
   ),
 );

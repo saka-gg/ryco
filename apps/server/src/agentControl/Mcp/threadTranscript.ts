@@ -96,8 +96,10 @@ const wholeMcpMessages = (
  * A thread's follow-up queue as a page shows it: who queued what, each text cut short. A hold's
  * detail can be a provider's raw error, so it is redacted like other diagnostics an agent reads.
  */
-const toMcpFollowUpQueue = (
+export const toMcpFollowUpQueue = (
   queue: ThreadFollowUpQueue,
+  /** `ryco_queue_list`: marks the caller's own entries and names each one's revision. */
+  caller?: { readonly threadId: string },
 ): NonNullable<AgentControlMcpReadThreadResult["followUpQueue"]> => ({
   hold:
     queue.hold === null
@@ -117,6 +119,9 @@ const toMcpFollowUpQueue = (
     return {
       messageId: entry.messageId,
       author: entry.author,
+      ...(caller === undefined
+        ? {}
+        : { revision: entry.revision, mine: entry.queuedBy === caller.threadId }),
       status: entry.status,
       text: truncated ? entry.text.slice(0, AGENT_CONTROL_MCP_QUEUED_TEXT_MAX_CHARS) : entry.text,
       ...(truncated ? { textTruncated: true as const } : {}),

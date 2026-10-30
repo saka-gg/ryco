@@ -6,6 +6,9 @@ import { withArtifactTools } from "../Mcp/artifactTools.ts";
 import { withDelegationTools } from "../Mcp/delegationTools.ts";
 import { withLocalTaskTools } from "../Mcp/localTaskTools.ts";
 import { withLazyAgentControlTools } from "../Mcp/lazyTools.ts";
+import { toMcpFollowUpQueue } from "../Mcp/threadTranscript.ts";
+import { findThreadInArray } from "../../orchestration/threadIndex.ts";
+import { extractThreadReferences } from "@ryco/shared/threadMentions";
 import { AGENT_CONTROL_DEVICE_TOOL } from "../../providerTools/deviceToolGateway.ts";
 import { LocalTaskService } from "../../tasks/LocalTaskService.ts";
 import { makeDelegatedTaskControl } from "../delegatedTaskControl.ts";
@@ -31,7 +34,7 @@ import { TerminalManager } from "../../terminal/Services/Manager.ts";
  *
  * @module AgentControlMcpServer
  */
-import { AGENT_CONTROL_CAPABILITIES } from "@ryco/contracts";
+import { AGENT_CONTROL_CAPABILITIES, AGENT_CONTROL_QUEUE_MCP_TOOLS } from "@ryco/contracts";
 import { Effect, Exit, Layer, Option, Scope, Stream } from "effect";
 import { ServerConfig } from "../../config.ts";
 import { CliProxyService } from "../../cliProxy/CliProxyService.ts";
@@ -202,19 +205,39 @@ const makeAgentControlMcpServer = Effect.gen(function* () {
         ...(Option.isSome(config) ? { taskFilesDir: config.value.taskFilesDir } : {}),
       })
     : computerTools;
+  // A thread's follow-up queue for agents: list it, change their own entries. The module loads
+  // the first time a session lists or calls tools, never at boot.
+  const queueTools = withLazyAgentControlTools(taskTools, {
+    names: Object.values(AGENT_CONTROL_QUEUE_MCP_TOOLS),
+    writeNames: [
+      AGENT_CONTROL_QUEUE_MCP_TOOLS.queueEdit,
+      AGENT_CONTROL_QUEUE_MCP_TOOLS.queueRemove,
+    ],
+    mayUse: (session) => session.grantedCapabilities.includes(AGENT_CONTROL_CAPABILITIES.read),
+    load: () =>
+      import("../Mcp/queueTools.ts").then((module) =>
+        module.withQueueTools(taskTools, {
+          policy,
+          registry,
+          projections,
+          engine,
+          helpers: { findThreadInArray, toMcpFollowUpQueue, extractThreadReferences },
+        }),
+      ),
+  });
   // Routine device input under per-task consent, where devices exist. Its
   // module (consent index, driving guide) loads the first time a session that
   // may drive devices lists or calls tools, never at boot.
   const deviceTools =
     Option.isSome(deviceService) && deviceService.value.supported
-      ? withLazyAgentControlTools(taskTools, {
+      ? withLazyAgentControlTools(queueTools, {
           names: [AGENT_CONTROL_DEVICE_TOOL],
           writeNames: [AGENT_CONTROL_DEVICE_TOOL],
           mayUse: (session) =>
             session.grantedCapabilities.includes(AGENT_CONTROL_CAPABILITIES.controlDevices),
           load: () =>
             import("../Mcp/deviceRoutineTools.ts").then((module) =>
-              module.withDeviceRoutineTools(taskTools, {
+              module.withDeviceRoutineTools(queueTools, {
                 policy,
                 registry,
                 proposals,
@@ -232,7 +255,7 @@ const makeAgentControlMcpServer = Effect.gen(function* () {
               }),
             ),
         })
-      : taskTools;
+      : queueTools;
   const tools = withCompleteAgentControlCatalog(deviceTools);
 
   // Start/stop transitions are serialized so a rapid settings flip cannot

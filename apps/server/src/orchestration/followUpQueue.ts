@@ -214,6 +214,12 @@ type FollowUpQueueCommand = Extract<
 >;
 
 const refuse = (refused: string): FollowUpQueueDecision => ({ refused });
+
+/** An agent's edit or removal (Agent Control) reaches only what that chat's agent queued. */
+const NOT_THE_AGENTS =
+  "Only follow-ups this chat's agent queued, still queued and not being sent, can be changed.";
+const queuedByAgentOf = (entry: QueuedFollowUp, chat: ThreadId): boolean =>
+  entry.author === "agent" && entry.queuedBy === chat;
 const record = (...drafts: ReadonlyArray<FollowUpQueueDraft>): FollowUpQueueDecision => ({
   drafts,
 });
@@ -341,6 +347,10 @@ function addedEntry(command: ThreadQueueAddCommand): QueuedFollowUp {
     status: entry.failure === undefined ? "queued" : "failed",
     ...(entry.failure === undefined ? {} : { failure: entry.failure }),
     author: command.author ?? "user",
+    // Only an agent's entry names the chat that queued it.
+    ...(command.author === "agent" && command.queuedBy !== undefined
+      ? { queuedBy: command.queuedBy }
+      : {}),
   };
 }
 
@@ -479,6 +489,9 @@ function decideQueueCommand(
       if (entry.status === "steering") {
         return refuse("That follow-up is being sent into the running turn.");
       }
+      if (command.queuedBy !== undefined && !queuedByAgentOf(entry, command.queuedBy)) {
+        return refuse(NOT_THE_AGENTS);
+      }
       // Only the entry's own stored attachments can stay; anything else is uploaded anew.
       const kept = new Set<string>(command.keptAttachmentIds ?? []);
       const keptAttachments = entry.attachments.filter(
@@ -518,6 +531,10 @@ function decideQueueCommand(
             status: entry.status,
             ...(entry.failure === undefined ? {} : { failure: entry.failure }),
             author: entry.author,
+            // A person's edit makes the text theirs: the agent no longer changes it.
+            ...(entry.queuedBy === undefined || command.queuedBy === undefined
+              ? {}
+              : { queuedBy: entry.queuedBy }),
           },
         },
       });
@@ -547,10 +564,23 @@ function decideQueueCommand(
       });
     }
 
-    case "thread.queue.remove":
+    case "thread.queue.remove": {
+      const { queuedBy } = command;
+      if (
+        queuedBy !== undefined &&
+        !command.messageIds.every((messageId) => {
+          const entry = entryOf(messageId);
+          return (
+            entry !== undefined && entry.status !== "steering" && queuedByAgentOf(entry, queuedBy)
+          );
+        })
+      ) {
+        return refuse(NOT_THE_AGENTS);
+      }
       return record(
         ...removedDrafts(thread.id, queue, command.messageIds, "user", command.createdAt),
       );
+    }
 
     case "thread.queue.steer": {
       const entry = entryOf(command.messageId);

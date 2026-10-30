@@ -766,6 +766,9 @@ export const AGENT_CONTROL_MCP_QUEUED_TEXT_MAX_CHARS = 500;
 export const AgentControlMcpQueuedFollowUp = Schema.Struct({
   messageId: MessageId,
   author: FollowUpQueueEntryAuthor,
+  /** `ryco_queue_list`: the revision `ryco_queue_edit` names, and whether the caller queued it. */
+  revision: Schema.optional(PositiveInt),
+  mine: Schema.optional(Schema.Boolean),
   status: FollowUpQueueEntryStatus,
   text: Schema.String,
   textTruncated: Schema.optional(Schema.Literal(true)),
