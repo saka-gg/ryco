@@ -5,8 +5,12 @@ import { AppText as Text } from "../../components/AppText";
 import { ErrorBanner } from "../../components/ErrorBanner";
 import { cn } from "../../lib/cn";
 import { useThemeColor } from "../../lib/useThemeColor";
+import {
+  shownPullRequestActionSheet,
+  type PullRequestActionSheet,
+} from "./pullRequestActionsModel";
 import { FilterChip } from "./PullRequestParts";
-import type { PullRequestActionsControl } from "./usePullRequestActions";
+import { usePullRequestReviewDraft, type PullRequestActionsControl } from "./usePullRequestActions";
 
 // The pull request screen's changes: review, merge and branch update. Layout
 // only; what is offered and what is sent come from pullRequestActionsModel.
@@ -78,6 +82,8 @@ function ReviewSheet(props: {
 }) {
   const { control } = props;
   const review = control.review;
+  // The draft is read here, not by the screen: a keystroke re-renders this sheet only.
+  const draft = usePullRequestReviewDraft(control);
   const placeholderColor = useThemeColor("--color-placeholder");
   const textColor = useThemeColor("--color-foreground");
   if (review === null) return null;
@@ -93,7 +99,7 @@ function ReviewSheet(props: {
         actionLabel={busy ? "Sending…" : "Submit"}
         actionDisabled={busy || control.blockedReason !== null}
         onCancel={props.onClose}
-        onAction={() => control.submitReview(props.onClose)}
+        onAction={() => draft.submit(props.onClose)}
       />
       {control.blockedReason ? (
         <Text className="text-sm text-foreground-muted">{control.blockedReason}</Text>
@@ -104,9 +110,9 @@ function ReviewSheet(props: {
           <FilterChip
             key={option.event}
             label={option.label}
-            selected={review.event === option.event}
+            selected={draft.event === option.event}
             onPress={() => {
-              if (!option.disabled) control.setEvent(option.event);
+              if (!option.disabled) draft.setEvent(option.event);
             }}
           />
         ))}
@@ -115,11 +121,11 @@ function ReviewSheet(props: {
         <Text className="text-xs text-foreground-muted">{review.authorNote}</Text>
       ) : null}
       <TextInput
-        value={control.summary}
-        onChangeText={control.setSummary}
+        value={draft.summary}
+        onChangeText={draft.setSummary}
         editable={!busy}
         multiline
-        placeholder={review.event === "approve" ? "Leave a comment (optional)" : "Leave a comment"}
+        placeholder={draft.event === "approve" ? "Leave a comment (optional)" : "Leave a comment"}
         placeholderTextColor={placeholderColor as string}
         textAlignVertical="top"
         className="min-h-36 rounded-2xl border border-border bg-card px-4 py-3 font-sans text-base"
@@ -153,34 +159,36 @@ function MergeSheet(props: {
         <Text className="text-sm text-foreground-muted">{control.blockedReason}</Text>
       ) : null}
       {control.error ? <ErrorBanner message={control.error} /> : null}
-      <View className="overflow-hidden rounded-2xl bg-card">
-        {merge.methods.map((option) => {
-          const selected = option.method === merge.method;
-          return (
-            <Pressable
-              key={option.method}
-              accessibilityRole="radio"
-              accessibilityState={{ selected, disabled: option.disabledReason !== null }}
-              disabled={option.disabledReason !== null || busy}
-              onPress={() => control.setMethod(option.method)}
-              className="min-h-14 flex-row items-center gap-3 border-t border-border px-4 py-3 active:bg-subtle disabled:opacity-40"
-            >
-              <View
-                className={cn(
-                  "h-4 w-4 rounded-full border-2",
-                  selected ? "border-primary bg-primary" : "border-border",
-                )}
-              />
-              <View className="min-w-0 flex-1">
-                <Text className="text-base font-ryco-medium text-foreground">{option.label}</Text>
-                {option.disabledReason ? (
-                  <Text className="text-xs text-foreground-muted">{option.disabledReason}</Text>
-                ) : null}
-              </View>
-            </Pressable>
-          );
-        })}
-      </View>
+      {merge.methods ? (
+        <View className="overflow-hidden rounded-2xl bg-card">
+          {merge.methods.map((option) => {
+            const selected = option.method === merge.method;
+            return (
+              <Pressable
+                key={option.method}
+                accessibilityRole="radio"
+                accessibilityState={{ selected, disabled: option.disabledReason !== null }}
+                disabled={option.disabledReason !== null || busy}
+                onPress={() => control.setMethod(option.method)}
+                className="min-h-14 flex-row items-center gap-3 border-t border-border px-4 py-3 active:bg-subtle disabled:opacity-40"
+              >
+                <View
+                  className={cn(
+                    "h-4 w-4 rounded-full border-2",
+                    selected ? "border-primary bg-primary" : "border-border",
+                  )}
+                />
+                <View className="min-w-0 flex-1">
+                  <Text className="text-base font-ryco-medium text-foreground">{option.label}</Text>
+                  {option.disabledReason ? (
+                    <Text className="text-xs text-foreground-muted">{option.disabledReason}</Text>
+                  ) : null}
+                </View>
+              </Pressable>
+            );
+          })}
+        </View>
+      ) : null}
       {control.deleteBranch !== null ? (
         <View className="flex-row items-center gap-3 rounded-2xl bg-card px-4 py-3">
           <Text className="flex-1 text-base font-ryco-medium text-foreground">
@@ -210,7 +218,11 @@ function MergeSheet(props: {
 /** Review, merge and update-branch for an open pull request; nothing when none applies. */
 export function PullRequestActionsPanel(props: { readonly control: PullRequestActionsControl }) {
   const { control } = props;
-  const [sheet, setSheet] = useState<"review" | "merge" | null>(null);
+  const [openedSheet, setSheet] = useState<PullRequestActionSheet | null>(null);
+  // A sheet whose action went away (a refresh found the pull request merged)
+  // closes instead of going blank, and stays closed if the action comes back.
+  const sheet = shownPullRequestActionSheet(openedSheet, control);
+  if (sheet !== openedSheet) setSheet(sheet);
   if (control.review === null && control.merge === null && control.updateBranch === null) {
     return control.notice ? (
       <Text className="px-5 text-sm font-ryco-medium text-success">{control.notice}</Text>

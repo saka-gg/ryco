@@ -12,7 +12,6 @@ import { LoadingStrip } from "../../components/LoadingStrip";
 import { cn } from "../../lib/cn";
 import { openWebLink } from "../../lib/openWebLink";
 import {
-  derivePullRequestDetailItems,
   derivePullRequestHeader,
   describePullRequestNextStep,
   parsePullRequestNumberParam,
@@ -41,6 +40,7 @@ import { usePullRequestActions } from "./usePullRequestActions";
 import {
   usePullRequest,
   usePullRequestCheckout,
+  usePullRequestDetailItems,
   usePullRequestDiff,
   useSourceControlProvider,
 } from "./usePullRequestData";
@@ -305,22 +305,33 @@ export function PullRequestRouteScreen(props: PullRequestRouteProps) {
     detail: pullRequest.detail.data,
     enabled: tab === "files" && pullRequest.capabilities.diff,
   });
+  const detail = pullRequest.detail.data;
+  const hostName = resolveChangeRequestPresentationForKind(
+    detail?.provider ?? "github",
+  ).providerName;
+  const items = usePullRequestDetailItems({
+    tab,
+    hostName,
+    hostKnown: provider !== null,
+    pullRequest,
+    diff,
+  });
 
   // The same readiness the thread screen sends with: connected, allowed to
-  // change things, and not a cached view.
+  // change things, and not a cached view. A role the node refuses changes to
+  // (a viewer) is offered none.
   const environments = useHomeEnvironments();
-  const mutationReady =
-    environments.find((environment) => environment.environmentId === environmentId)
-      ?.mutationReady === true;
+  const environment = environments.find((entry) => entry.environmentId === environmentId);
   const actions = usePullRequestActions({
     environmentId,
     cwd: checkout.cwd,
     number,
-    detail: pullRequest.detail.data,
+    detail,
     viewer: pullRequest.activity.data?.viewer ?? null,
     nextAction: pullRequest.nextAction,
     capabilities: pullRequest.capabilities,
-    mutationReady,
+    mutationReady: environment?.mutationReady === true,
+    role: environment?.role,
     // A review the viewer started on the host only counts where the host reports it.
     hostPendingComments: pullRequest.capabilities.submitReview.pendingReview
       ? (pullRequest.activity.data?.pendingReview?.commentsCount ?? 0)
@@ -343,11 +354,7 @@ export function PullRequestRouteScreen(props: PullRequestRouteProps) {
     );
   }
 
-  const detail = pullRequest.detail.data;
   const header = derivePullRequestHeader(detail, null);
-  const hostName = resolveChangeRequestPresentationForKind(
-    detail?.provider ?? "github",
-  ).providerName;
 
   const openFile = (path: string) =>
     navigation.navigate("ProjectPullRequestFile", {
@@ -356,18 +363,6 @@ export function PullRequestRouteScreen(props: PullRequestRouteProps) {
       number: String(number),
       path: [...relativePathToRouteSegments(path)],
     });
-
-  const items = derivePullRequestDetailItems({
-    tab,
-    header,
-    hostName,
-    detail,
-    activity: pullRequest.activity.data,
-    activitySupported: pullRequest.capabilities.activity,
-    hostKnown: provider !== null,
-    checks: pullRequest.checks,
-    diff,
-  });
 
   const loadError = pullRequest.detail.error?.message ?? null;
   const refreshing =

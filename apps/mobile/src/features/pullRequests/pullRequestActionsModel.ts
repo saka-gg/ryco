@@ -11,7 +11,7 @@ import {
   MERGE_METHOD_ACTION,
   MERGE_METHOD_CONFIRM,
   mergeDeleteBranchDefault,
-  mergeMethodOptions,
+  offeredMergeMethods,
   resolveMergeMethod,
   resolveReviewEvents,
   type ChangeRequestNextAction,
@@ -24,12 +24,16 @@ import {
   type ChangeRequestHostCapabilities,
   type ChangeRequestUpdateBranchMethod,
 } from "@ryco/shared/changeRequestHostCapabilities";
+import { WS_METHODS } from "@ryco/contracts/rpc";
+
+import { nodeRoleAllows, type NodeSessionRole } from "../../connection/nodeRoleAccess";
 
 /**
  * What the phone lets a reader do with an open pull request: submit a review,
  * merge it, or bring its branch up to date. Each is offered only where the
  * host implements it, the viewer may do it and the shared next-action rules
- * say it is the step to take; every one waits for the node to be ready for
+ * say it is the step to take, and nothing is offered to a session whose role
+ * on the node may not send it; every one waits for the node to be ready for
  * changes. React-free; the screen lays these out and sends the inputs built
  * here.
  */
@@ -39,13 +43,13 @@ export const PULL_REQUEST_NOT_READY =
 
 export interface PullRequestReviewAction {
   readonly options: ReadonlyArray<ReviewEventOption>;
-  readonly event: ChangeRequestReviewEvent;
   /** Shown when the viewer opened the pull request and can only comment. */
   readonly authorNote: string | null;
 }
 
 export interface PullRequestMergeAction {
-  readonly methods: ReadonlyArray<MergeMethodOption>;
+  /** The method choice; null where the host does not report the repository's settings. */
+  readonly methods: ReadonlyArray<MergeMethodOption> | null;
   readonly method: SourceControlChangeRequestMergeMethod;
   readonly label: string;
   readonly confirmLabel: string;
@@ -80,24 +84,28 @@ export function derivePullRequestActions(input: {
   readonly capabilities: ChangeRequestHostCapabilities;
   /** The node takes changes now (connected, not read-only, not a cached view). */
   readonly mutationReady: boolean;
-  /** The verdict the reader picked in the review draft. */
-  readonly chosenEvent: ChangeRequestReviewEvent | null;
+  /** The session's role on the node; undefined while unknown (the node then decides). */
+  readonly role: NodeSessionRole | undefined;
   /** The merge method the reader picked; else the first the repository allows. */
   readonly chosenMethod: SourceControlChangeRequestMergeMethod | null;
 }): PullRequestActions {
-  const { detail, viewer, nextAction, capabilities } = input;
+  const { detail, viewer, nextAction, capabilities, role } = input;
   if (detail === null || detail.state !== "open") return NO_ACTIONS;
+  // A role the node refuses the change to (a viewer) is not offered it at all:
+  // reconnecting would not help.
+  const roleAllows = (method: string) => role === undefined || nodeRoleAllows(role, method);
 
   const reviews = resolveReviewEvents({
     capabilities,
     isAuthor: viewer?.isAuthor ?? false,
-    chosen: input.chosenEvent,
+    chosen: null,
   });
   const review: PullRequestReviewAction | null =
-    reviews.options.length > 0 && viewer?.canReview !== false
+    reviews.options.length > 0 &&
+    viewer?.canReview !== false &&
+    roleAllows(WS_METHODS.sourceControlSubmitChangeRequestReview)
       ? {
           options: reviews.options,
-          event: reviews.event,
           authorNote:
             viewer?.isAuthor === true
               ? "You opened this pull request, so you can comment but not approve or request changes."
@@ -110,11 +118,12 @@ export function derivePullRequestActions(input: {
     canMergeChangeRequests(capabilities) &&
     nextAction?.kind === "merge" &&
     !nextAction.blocking &&
-    nextAction.viewerCanAct
+    nextAction.viewerCanAct &&
+    roleAllows(WS_METHODS.sourceControlMergeChangeRequest)
   ) {
     const method = resolveMergeMethod(detail, input.chosenMethod, capabilities.merge.methods);
     merge = {
-      methods: mergeMethodOptions(detail, capabilities.merge.methods),
+      methods: offeredMergeMethods(detail, capabilities.merge.methods),
       method,
       label: MERGE_METHOD_ACTION[method],
       confirmLabel: MERGE_METHOD_CONFIRM[method],
@@ -128,7 +137,8 @@ export function derivePullRequestActions(input: {
     nextAction.viewerCanAct &&
     updateMethod !== null &&
     detail.headSha !== undefined &&
-    viewer?.canUpdateBranch !== false
+    viewer?.canUpdateBranch !== false &&
+    roleAllows(WS_METHODS.sourceControlUpdateChangeRequest)
       ? { method: updateMethod }
       : null;
 
@@ -139,6 +149,39 @@ export function derivePullRequestActions(input: {
     merge,
     updateBranch,
   };
+}
+
+/**
+ * The verdict a review sends for the one the reader picked in the draft, by
+ * the shared rules: a verdict the host does not take falls back, and the
+ * author only comments.
+ */
+export function pullRequestReviewEvent(input: {
+  readonly capabilities: ChangeRequestHostCapabilities;
+  readonly viewer: Pick<ChangeRequestViewerCapabilities, "isAuthor"> | null;
+  readonly chosen: ChangeRequestReviewEvent | null;
+}): ChangeRequestReviewEvent {
+  return resolveReviewEvents({
+    capabilities: input.capabilities,
+    isAuthor: input.viewer?.isAuthor ?? false,
+    chosen: input.chosen,
+  }).event;
+}
+
+export type PullRequestActionSheet = "review" | "merge";
+
+/**
+ * The sheet on screen: the one the reader opened, while its action is still
+ * offered. A refresh that finds the pull request merged or closed takes the
+ * action away, and its sheet closes with it rather than going blank.
+ */
+export function shownPullRequestActionSheet(
+  opened: PullRequestActionSheet | null,
+  actions: Pick<PullRequestActions, "review" | "merge">,
+): PullRequestActionSheet | null {
+  if (opened === "review") return actions.review === null ? null : "review";
+  if (opened === "merge") return actions.merge === null ? null : "merge";
+  return null;
 }
 
 /** The merge request: guarded by the head the reader saw where the host can guard it. */

@@ -74,6 +74,19 @@ export function mergeMethodOptions(
   }));
 }
 
+/**
+ * The merge method choice to show, or null when there is none to offer: only
+ * a pull request whose host reports the repository's merge settings gets one.
+ * Without them every method would look allowed, and the reader could pick one
+ * the repository refuses.
+ */
+export function offeredMergeMethods(
+  detail: Pick<SourceControlChangeRequestDetail, "mergeCapabilities">,
+  hostMethods?: ReadonlySet<SourceControlChangeRequestMergeMethod>,
+): ReadonlyArray<MergeMethodOption> | null {
+  return detail.mergeCapabilities ? mergeMethodOptions(detail, hostMethods) : null;
+}
+
 /** The preferred method when the host and repository allow it, else the first they allow. */
 export function resolveMergeMethod(
   detail: Pick<SourceControlChangeRequestDetail, "mergeCapabilities">,

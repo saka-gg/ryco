@@ -9,7 +9,7 @@ import {
   deriveChangeRequestMergeAction,
   MERGE_METHOD_ACTION,
   mergeDeleteBranchDefault,
-  mergeMethodOptions,
+  offeredMergeMethods,
   workflowJobIdFromUrl,
   type MergeMethodOption,
   type ChangeRequestCheck,
@@ -820,10 +820,7 @@ export function deriveNextActionMenu(
 
   const mergeRelevant = (viewer?.canMerge ?? true) && canMergeChangeRequests(capabilities);
   return {
-    methods:
-      mergeRelevant && detail.mergeCapabilities
-        ? mergeMethodOptions(detail, capabilities.merge.methods)
-        : null,
+    methods: mergeRelevant ? offeredMergeMethods(detail, capabilities.merge.methods) : null,
     deleteBranchDefault: mergeRelevant ? mergeDeleteBranchDefault(detail, capabilities) : null,
     items,
   };

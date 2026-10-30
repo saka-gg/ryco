@@ -13,6 +13,8 @@ import {
   derivePullRequestActions,
   describePullRequestActionError,
   PULL_REQUEST_NOT_READY,
+  pullRequestReviewEvent,
+  shownPullRequestActionSheet,
 } from "./pullRequestActionsModel";
 
 const GITHUB = getChangeRequestHostCapabilities("github");
@@ -68,7 +70,7 @@ const base = {
   nextAction: next("merge"),
   capabilities: GITHUB,
   mutationReady: true,
-  chosenEvent: null,
+  role: "owner" as const,
   chosenMethod: null,
 };
 
@@ -76,13 +78,17 @@ describe("derivePullRequestActions", () => {
   it("offers review and merge on a mergeable pull request, with the repository's methods", () => {
     const actions = derivePullRequestActions(base);
     expect(actions.blockedReason).toBeNull();
-    expect(actions.review?.event).toBe("comment");
     expect(actions.review?.options.map((option) => option.event)).toEqual([
       "comment",
       "approve",
       "request_changes",
     ]);
     // The repository turns merge commits off, so squash is preselected.
+    expect(actions.merge?.methods?.map((option) => option.method)).toEqual([
+      "squash",
+      "merge",
+      "rebase",
+    ]);
     expect(actions.merge).toMatchObject({
       method: "squash",
       label: "Squash and merge",
@@ -92,14 +98,24 @@ describe("derivePullRequestActions", () => {
     expect(actions.updateBranch).toBeNull();
   });
 
-  it("keeps the reader's merge method and verdict where they are allowed", () => {
-    const actions = derivePullRequestActions({
+  it("keeps the reader's merge method where the repository allows it", () => {
+    expect(derivePullRequestActions({ ...base, chosenMethod: "rebase" }).merge?.method).toBe(
+      "rebase",
+    );
+    expect(derivePullRequestActions({ ...base, chosenMethod: "merge" }).merge?.method).toBe(
+      "squash",
+    );
+  });
+
+  it("offers no method choice where the host does not report the repository's settings", () => {
+    const merge = derivePullRequestActions({
       ...base,
+      detail: detail({ mergeCapabilities: undefined }),
       chosenMethod: "rebase",
-      chosenEvent: "approve",
-    });
-    expect(actions.merge?.method).toBe("rebase");
-    expect(actions.review?.event).toBe("approve");
+    }).merge;
+    expect(merge?.methods).toBeNull();
+    // The merge itself is still offered, with the reader's method.
+    expect(merge?.method).toBe("rebase");
   });
 
   it("does not offer a merge the next step says is blocked, or one the viewer cannot make", () => {
@@ -127,17 +143,36 @@ describe("derivePullRequestActions", () => {
   });
 
   it("lets the author only comment", () => {
-    const actions = derivePullRequestActions({
-      ...base,
-      viewer: viewer({ isAuthor: true }),
-      chosenEvent: "approve",
-    });
-    expect(actions.review?.event).toBe("comment");
+    const actions = derivePullRequestActions({ ...base, viewer: viewer({ isAuthor: true }) });
     expect(actions.review?.authorNote).toMatch(/you can comment/u);
+    expect(
+      pullRequestReviewEvent({
+        capabilities: GITHUB,
+        viewer: viewer({ isAuthor: true }),
+        chosen: "approve",
+      }),
+    ).toBe("comment");
+  });
+
+  it("offers a session whose role on the node is read-only nothing, instead of asking it to reconnect", () => {
+    for (const role of ["viewer", "client"] as const) {
+      for (const nextAction of [next("merge"), next("update-branch")]) {
+        expect(derivePullRequestActions({ ...base, role, nextAction })).toEqual({
+          blockedReason: null,
+          review: null,
+          merge: null,
+          updateBranch: null,
+        });
+      }
+    }
+    // Operators and owners are offered changes; an unknown role is left to the node.
+    for (const role of ["operator", "owner", undefined] as const) {
+      expect(derivePullRequestActions({ ...base, role }).merge).not.toBeNull();
+    }
   });
 
   it("waits for the node to take changes", () => {
-    const actions = derivePullRequestActions({ ...base, mutationReady: false });
+    const actions = derivePullRequestActions({ ...base, role: "operator", mutationReady: false });
     expect(actions.blockedReason).toBe(PULL_REQUEST_NOT_READY);
     // The actions stay visible so the reader sees what will be possible.
     expect(actions.merge).not.toBeNull();
@@ -153,6 +188,33 @@ describe("derivePullRequestActions", () => {
     const none = derivePullRequestActions({ ...base, capabilities: UNKNOWN, mutationReady: false });
     expect([none.review, none.merge, none.blockedReason]).toEqual([null, null, null]);
     expect(derivePullRequestActions({ ...base, detail: null }).review).toBeNull();
+  });
+});
+
+describe("pullRequestReviewEvent", () => {
+  it("sends the reader's verdict where the host takes it, else the first it offers", () => {
+    const input = { capabilities: GITHUB, viewer: viewer() };
+    expect(pullRequestReviewEvent({ ...input, chosen: null })).toBe("comment");
+    expect(pullRequestReviewEvent({ ...input, chosen: "approve" })).toBe("approve");
+    expect(pullRequestReviewEvent({ ...input, viewer: null, chosen: "request_changes" })).toBe(
+      "request_changes",
+    );
+  });
+});
+
+describe("shownPullRequestActionSheet", () => {
+  const review = derivePullRequestActions(base).review;
+  const merge = derivePullRequestActions(base).merge;
+
+  it("shows the sheet the reader opened while its action is offered", () => {
+    expect(shownPullRequestActionSheet("review", { review, merge })).toBe("review");
+    expect(shownPullRequestActionSheet("merge", { review, merge })).toBe("merge");
+    expect(shownPullRequestActionSheet(null, { review, merge })).toBeNull();
+  });
+
+  it("closes a sheet whose action went away", () => {
+    expect(shownPullRequestActionSheet("review", { review: null, merge })).toBeNull();
+    expect(shownPullRequestActionSheet("merge", { review, merge: null })).toBeNull();
   });
 });
 

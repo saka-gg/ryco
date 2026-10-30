@@ -28,7 +28,13 @@ import {
 } from "../../rpc/pullRequestAtoms";
 import { useMobileQuery, type MobileQueryResult } from "../../rpc/useMobileQuery";
 import { selectProjectByRef, useStore } from "../../state/threadsRuntime";
-import type { PullRequestDiffReadStatus } from "./pullRequestDetailModel";
+import {
+  derivePullRequestDetailItems,
+  derivePullRequestHeader,
+  type PullRequestDetailItem,
+  type PullRequestDetailTab,
+  type PullRequestDiffReadStatus,
+} from "./pullRequestDetailModel";
 import { splitPullRequestPatch, type PullRequestPatchFile } from "./pullRequestDiffModel";
 import {
   derivePullRequestListScreen,
@@ -255,4 +261,40 @@ export function usePullRequestDiff(input: {
       void query.refetch();
     },
   };
+}
+
+/**
+ * The pull request screen's rows, derived again only when the data under them
+ * changes. The reads around that data (`usePullRequest`, `usePullRequestDiff`)
+ * are new objects on every render; keyed on those, any re-render of the screen
+ * would rebuild every row and re-render each visible one, Markdown included.
+ */
+export function usePullRequestDetailItems(input: {
+  readonly tab: PullRequestDetailTab;
+  readonly hostName: string;
+  readonly hostKnown: boolean;
+  readonly pullRequest: Pick<PullRequestData, "detail" | "activity" | "capabilities" | "checks">;
+  readonly diff: Pick<PullRequestDiffData, "status" | "files" | "error">;
+}): ReadonlyArray<PullRequestDetailItem> {
+  const { tab, hostName, hostKnown } = input;
+  const detail = input.pullRequest.detail.data;
+  const activity = input.pullRequest.activity.data;
+  const activitySupported = input.pullRequest.capabilities.activity;
+  const checks = input.pullRequest.checks;
+  const { status, files, error } = input.diff;
+  return useMemo(
+    () =>
+      derivePullRequestDetailItems({
+        tab,
+        header: derivePullRequestHeader(detail, null),
+        hostName,
+        detail,
+        activity,
+        activitySupported,
+        hostKnown,
+        checks,
+        diff: { status, files, error },
+      }),
+    [tab, hostName, detail, activity, activitySupported, hostKnown, checks, status, files, error],
+  );
 }

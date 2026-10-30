@@ -5,6 +5,7 @@ import {
   isHeadMovedError,
   mergeDeleteBranchDefault,
   mergeMethodOptions,
+  offeredMergeMethods,
   resolveMergeMethod,
   resolveReviewEvents,
 } from "./merge.ts";
@@ -22,6 +23,16 @@ describe("merge methods", () => {
     expect(resolveMergeMethod(NO_MERGE_COMMITS, null)).toBe("squash");
     // Without repository settings every method is allowed.
     expect(resolveMergeMethod({}, "merge")).toBe("merge");
+  });
+
+  it("offers a method choice only where the host reports the repository's settings", () => {
+    expect(offeredMergeMethods(NO_MERGE_COMMITS)?.map((option) => option.method)).toEqual([
+      "squash",
+      "merge",
+      "rebase",
+    ]);
+    expect(offeredMergeMethods(NO_MERGE_COMMITS, new Set(["rebase"] as const))).toHaveLength(1);
+    expect(offeredMergeMethods({})).toBeNull();
   });
 
   it("leaves out methods the host cannot merge with", () => {
