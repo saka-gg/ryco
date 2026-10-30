@@ -2355,6 +2355,20 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       const pairedSessionId = clients.find((entry) => !entry.current)?.sessionId;
       assert.isDefined(pairedSessionId);
 
+      // The paired client is connected; revoking it closes that socket too.
+      const pairedSocketUrl = yield* getWsServerUrlForCookie(pairedSessionCookie);
+      const pairedSocket = new NodeSocket.NodeWS.WebSocket(pairedSocketUrl);
+      const pairedSocketClosed = new Promise<void>((resolve) => {
+        pairedSocket.once("close", () => resolve());
+      });
+      yield* Effect.promise(
+        () =>
+          new Promise<void>((resolve, reject) => {
+            pairedSocket.once("open", () => resolve());
+            pairedSocket.once("error", reject);
+          }),
+      );
+
       const revokeUrl = yield* getHttpServerUrl("/api/auth/clients/revoke");
       const revokeResponse = yield* Effect.promise(() =>
         fetch(revokeUrl, {
@@ -2374,6 +2388,14 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
 
       assert.equal(revokeResponse.status, 200);
       assert.equal(pairedClientPairingResponse.status, 401);
+      const closedInTime = yield* Effect.promise(() =>
+        Promise.race([
+          pairedSocketClosed.then(() => true),
+          new Promise<false>((resolve) => setTimeout(() => resolve(false), 10_000)),
+        ]),
+      );
+      pairedSocket.terminate();
+      assert.isTrue(closedInTime, "The revoked client's socket stayed open.");
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 

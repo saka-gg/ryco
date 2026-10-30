@@ -10,12 +10,12 @@ import type { SavedEnvironmentRecord } from "./catalog.ts";
  * for a one-time code, finds which of the node's direct endpoints answers as
  * that same node and proves it holds the node identity key the relay channel
  * verified, and redeems the code there like a pasted pairing link. The node's
- * linked session lives seven days; the client links again through the relay
+ * linked session lives four days; the client links again through the relay
  * well before then.
  */
 
 const DAY_MS = 24 * 60 * 60 * 1000;
-/** Link again once the stored direct credential is this old: within its seven days. */
+/** Link again once the stored direct credential is this old: within its four days. */
 export const HUB_LINKED_DIRECT_ACCESS_RENEW_AFTER_MS = 3 * DAY_MS;
 
 /**

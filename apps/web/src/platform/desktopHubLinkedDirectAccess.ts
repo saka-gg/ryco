@@ -98,7 +98,7 @@ export function readDesktopMachineDirectLink(hubEnvironmentId: EnvironmentId) {
 
 /**
  * After Desktop connects to a Hub machine: renew a link the owner made once it
- * has aged, well within the node's seven days. Machines never linked are left
+ * has aged, well within the node's four days. Machines never linked are left
  * alone, and a failure waits before the next connect tries again.
  */
 export function renewDesktopMachineDirectAccess(

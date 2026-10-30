@@ -1,11 +1,11 @@
 import { Effect, Layer } from "effect";
 import { WsDeviceRpcGroup, WsHostedRpcGroup } from "@ryco/contracts";
-import { HttpRouter, HttpServerRequest } from "effect/http";
+import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/http";
 import { RpcSerialization, RpcServer } from "effect/rpc";
 
 import * as ProviderMaintenanceRunner from "./provider/providerMaintenanceRunner.ts";
 import { ChatAttachmentUploadsLive } from "./attachmentUpload.ts";
-import { ServerAuth } from "./auth/Services/ServerAuth.ts";
+import { ServerAuth, type AuthenticatedSession } from "./auth/Services/ServerAuth.ts";
 import { ServerSecretStoreLive } from "./auth/Layers/ServerSecretStore.ts";
 import { AtlassianConnectionRepositoryLive } from "./persistence/Layers/AtlassianConnections.ts";
 import { layerConfig as SqlitePersistenceLayerLive } from "./persistence/Layers/Sqlite.ts";
@@ -17,7 +17,10 @@ import * as VcsDriverRegistry from "./vcs/VcsDriverRegistry.ts";
 import * as VcsProjectConfig from "./vcs/VcsProjectConfig.ts";
 import * as VcsProcess from "./vcs/VcsProcess.ts";
 import { respondToAuthError } from "./auth/http.ts";
-import { SessionCredentialService } from "./auth/Services/SessionCredentialService.ts";
+import {
+  SessionCredentialService,
+  type SessionCredentialServiceShape,
+} from "./auth/Services/SessionCredentialService.ts";
 import { makeDeviceWsRpcLayer, makeWsRpcLayer } from "./ws/index.ts";
 import { directPeerOf, directRpcPrincipal, type RpcPrincipal } from "./ws/RpcPrincipal.ts";
 import { ContextHandoffInspectionLive } from "./orchestration/Layers/ContextHandoffInspection.ts";
@@ -60,6 +63,28 @@ export const makeServerWsRpcLayer = (principal: RpcPrincipal) =>
   );
 
 /**
+ * Serves a direct socket until it closes or its session ends: the pairing was
+ * revoked, or a Hub-linked session reached its end. A revoked client or link
+ * then loses its live connection at once, not at its next connect.
+ */
+const serveUntilSessionEnds = <E, R>(
+  sessions: SessionCredentialServiceShape,
+  session: AuthenticatedSession,
+  serve: Effect.Effect<HttpServerResponse.HttpServerResponse, E, R>,
+) =>
+  Effect.acquireUseRelease(
+    sessions.markConnected(session.sessionId),
+    () =>
+      Effect.raceFirst(
+        serve,
+        sessions
+          .awaitEnd({ sessionId: session.sessionId, chainId: session.chainId })
+          .pipe(Effect.as(HttpServerResponse.empty())),
+      ),
+    () => sessions.markDisconnected(session.sessionId),
+  );
+
+/**
  * The main socket serves the application group and the simulator control group
  * together, as the hosted relay channel already does, so a direct client needs
  * no second socket or ws-token for device control. Older clients send only
@@ -87,11 +112,7 @@ export const websocketRpcRouteLayer = Layer.unwrap(
             Layer.merge(makeServerWsRpcLayer(principal), makeDeviceWsRpcLayer(principal)),
           ),
         );
-        return yield* Effect.acquireUseRelease(
-          sessions.markConnected(session.sessionId),
-          () => rpcWebSocketHttpEffect,
-          () => sessions.markDisconnected(session.sessionId),
-        );
+        return yield* serveUntilSessionEnds(sessions, session, rpcWebSocketHttpEffect);
       }).pipe(Effect.catchTag("AuthError", respondToAuthError)),
     ),
   ),
@@ -120,11 +141,7 @@ export const deviceWebsocketRpcRouteLayer = Layer.unwrap(
             "rpc.channel": "device",
           },
         }).pipe(Effect.provide(makeDeviceWsRpcLayer(directRpcPrincipal(session))));
-        return yield* Effect.acquireUseRelease(
-          sessions.markConnected(session.sessionId),
-          () => rpcWebSocketHttpEffect,
-          () => sessions.markDisconnected(session.sessionId),
-        );
+        return yield* serveUntilSessionEnds(sessions, session, rpcWebSocketHttpEffect);
       }).pipe(Effect.catchTag("AuthError", respondToAuthError)),
     ),
   ),
