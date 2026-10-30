@@ -2876,6 +2876,8 @@ setInterval(() => {}, 1000);
         yield* writeTextFile(cwd, "config/local.json", "{}\n");
         yield* writeTextFile(cwd, "packages/api/.env", "API=1\n");
         yield* writeTextFile(cwd, "debug.log", "noise\n");
+        // Untracked but not ignored: never copied, or a commit in the worktree could pick it up.
+        yield* writeTextFile(cwd, "notes.env", "draft\n");
 
         // Without the file nothing ignored is copied.
         const plain = yield* worktreeAt("plain");
@@ -2887,7 +2889,11 @@ setInterval(() => {}, 1000);
         });
         assert.isFalse(yield* fileSystem.exists(pathService.join(plain, ".env")));
 
-        yield* writeTextFile(cwd, ".worktreeinclude", ".env\n/config/local.json\ntracked.txt\n");
+        yield* writeTextFile(
+          cwd,
+          ".worktreeinclude",
+          ".env\n*.env\n/config/local.json\ntracked.txt\n",
+        );
         // Untracked in the source but tracked by the new branch: the branch's copy stays.
         yield* git(cwd, ["rm", "--cached", "-q", "tracked.txt"]);
         yield* writeTextFile(cwd, "tracked.txt", "local edit\n");
@@ -2905,6 +2911,18 @@ setInterval(() => {}, 1000);
         assert.equal(yield* read("packages/api/.env"), "API=1\n");
         assert.isFalse(yield* fileSystem.exists(pathService.join(included, "debug.log")));
         assert.equal(yield* read("tracked.txt"), "from the branch\n");
+        assert.isFalse(yield* fileSystem.exists(pathService.join(included, "notes.env")));
+
+        // A pull request from another repository gets none of them.
+        const fork = yield* worktreeAt("fork");
+        yield* driver.createWorktree({
+          cwd,
+          path: fork,
+          refName: initialBranch,
+          newRefName: "feature/fork",
+          copyDeclaredIncludes: false,
+        });
+        assert.isFalse(yield* fileSystem.exists(pathService.join(fork, ".env")));
       }),
     );
 
