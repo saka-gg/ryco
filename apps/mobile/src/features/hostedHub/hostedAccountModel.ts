@@ -437,6 +437,16 @@ export function createHostedAccountPromptDraft(
   };
 }
 
+/**
+ * Whether an open prompt outlives the change the screen just saw. A prompt
+ * belongs to a signed-in account: once there is none (signed out, the session
+ * ended, the account deleted) it is closed for good, so signing in again never
+ * brings back a confirmation, or what was typed into it, from before.
+ */
+export function hostedAccountDraftSurvives(state: HostedHubState): boolean {
+  return state.accountStatus === "authenticated" && state.account !== null;
+}
+
 export type HostedPromptFieldKey = "text" | "secondary" | "stepUpCode";
 
 export interface HostedAccountPromptField {

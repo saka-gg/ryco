@@ -24,6 +24,7 @@ import {
   createHostedRefusalMatcher,
   deriveHostedAccountManagementView,
   HOSTED_ACCOUNT_INTENTS,
+  hostedAccountDraftSurvives,
   isHostedPasskeySessionMessage,
   isHostedStepUpMessage,
   leaseHostedRecoveryCodeDisplay,
@@ -1520,6 +1521,19 @@ describe("deleting the account", () => {
       identifier: "ada",
       totpCode: "123456",
     });
+  });
+
+  it("closes the confirmation for good once the account session ends", () => {
+    // A committed deletion signs this device out; the screen can stay mounted,
+    // and signing in again must not reopen the sheet with the typed identifier.
+    expect(hostedAccountDraftSurvives(hubState())).toBe(true);
+    for (const patch of [
+      { accountStatus: "signed-out" as const },
+      { accountStatus: "session-expired" as const },
+      { account: null },
+    ]) {
+      expect(hostedAccountDraftSurvives(hubState(patch))).toBe(false);
+    }
   });
 
   it("says so in the prompt when the Hub cannot delete accounts yet", async () => {

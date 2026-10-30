@@ -20,6 +20,7 @@ import { SettingsRow } from "../settings/components/SettingsRow";
 import { SettingsSection } from "../settings/components/SettingsSection";
 import {
   deriveHostedAccountManagementView,
+  hostedAccountDraftSurvives,
   leaseHostedRecoveryCodeDisplay,
   type HostedAccountPromptDraft,
   type HostedAccountSection,
@@ -70,6 +71,14 @@ export function HostedAccountRouteScreen() {
   }, []);
 
   const signedIn = state.accountStatus === "authenticated";
+  const draftSurvives = hostedAccountDraftSurvives(state);
+
+  // A prompt dies with the account session it was opened in: after a sign-out
+  // (a committed account deletion signs this device out) this screen can stay
+  // mounted, and signing in again must not reopen it, typed text and all.
+  useEffect(() => {
+    if (!draftSurvives && draftRef.current !== null) setDraft(null);
+  }, [draftSurvives, setDraft]);
 
   // Reads, not mutations: both calls deduplicate, no-op while signed out, and
   // touch no credentials. Regenerating recovery codes deliberately has no
