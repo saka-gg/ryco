@@ -2,6 +2,7 @@ import type { ClaudeResumeGuard, OrchestrationThread } from "@ryco/contracts";
 import { CommandId, MessageId } from "@ryco/contracts/base-schemas";
 import {
   assessClaudeCacheResume,
+  CLAUDE_CACHE_REVIEW_WINDOW_LIMITS,
   claudeCompactUnavailableReason,
 } from "@ryco/shared/claudeCacheReview";
 import type { ClaudeCacheReview, ClaudeCacheReviewThread } from "@ryco/shared/claudeCacheReview";
@@ -84,10 +85,7 @@ export async function reviewClaudeResumeBeforeSend(
   )
     return undefined;
   const readWindow = () =>
-    getWindow({
-      threadId: input.threadId,
-      limits: { messages: 1, activities: 40, checkpoints: 1, proposedPlans: 1 },
-    });
+    getWindow({ threadId: input.threadId, limits: CLAUDE_CACHE_REVIEW_WINDOW_LIMITS });
   const read = async () => (await readWindow()).thread;
   input.assertMutationReady?.();
   const window = await readWindow();

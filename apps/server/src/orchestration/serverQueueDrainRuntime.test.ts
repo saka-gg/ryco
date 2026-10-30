@@ -23,6 +23,7 @@ import { makeKeyedSerialWorker } from "@ryco/shared/KeyedSerialWorker";
 import { losslessBackpressureQueuePolicy } from "@ryco/shared/QueuePolicy";
 import { restartCauseKey, turnStartFailedCauseKey } from "@ryco/shared/queueHold";
 
+import { PersistenceSqlError } from "../persistence/Errors.ts";
 import type { WakeStartState } from "../persistence/serverWakeQueries.ts";
 import { runtimeModePrivilegeRank, serverWakeGuard } from "./serverWake.ts";
 import {
@@ -70,7 +71,11 @@ type Receipts = Map<string, { readonly rejected: string } | "accepted">;
 const harness = (
   entries: ReadonlyArray<QueuedFollowUp>,
   queuedAtBoot: ThreadId[] = [],
-  options: { readonly receipts?: Receipts; readonly bootId?: string } = {},
+  options: {
+    readonly receipts?: Receipts;
+    readonly bootId?: string;
+    readonly claudeResumeReview?: Parameters<typeof makeServerQueueDrain>[0]["claudeResumeReview"];
+  } = {},
 ) =>
   Effect.gen(function* () {
     const receipts: Receipts = options.receipts ?? new Map();
@@ -86,6 +91,10 @@ const harness = (
       startStates: new Map<string, WakeStartState>(),
       trashedAt: null as string | null,
       threadRuntimeMode: "full-access" as RuntimeMode,
+      session: null as Pick<
+        NonNullable<OrchestrationThread["session"]>,
+        "providerName" | "providerInstanceId"
+      > | null,
     };
     const dispatched: Dispatched[] = [];
     const fenceCalls: string[] = [];
@@ -120,6 +129,7 @@ const harness = (
       id: threadId,
       deletedAt: null,
       trashedAt: state.trashedAt,
+      session: state.session,
       followUpQueue:
         state.entries.length === 0 && state.hold === null
           ? undefined
@@ -174,6 +184,9 @@ const harness = (
       runtimeModePrivilegeRank,
       queuedAtBoot,
       bootId: options.bootId ?? "42",
+      ...(options.claudeResumeReview === undefined
+        ? {}
+        : { claudeResumeReview: options.claudeResumeReview }),
     });
     const sent = () =>
       dispatched.flatMap((command) =>
@@ -181,6 +194,96 @@ const harness = (
       );
     return { drain, state, dispatched, sent, fenceCalls, holdReasonInputs, receipts };
   });
+
+describe("ServerQueueDrain: Claude resume review", () => {
+  const review = { reason: "This large conversation has been idle.", promptTokens: 120_400 };
+
+  it.effect(
+    "holds a head that would resume a cold Claude conversation until the person resumes",
+    () =>
+      Effect.gen(function* () {
+        const asked: string[] = [];
+        const h = yield* harness([entry("a"), entry("b")], [], {
+          claudeResumeReview: (_threadId, target) =>
+            Effect.sync(() => {
+              asked.push(target.instanceId);
+              return review;
+            }),
+        });
+        h.state.session = { providerName: "claudeAgent", providerInstanceId: CLAUDE };
+        yield* h.drain.drainThread(threadId);
+        assert.deepEqual(h.sent(), []);
+        assert.deepEqual(h.state.hold, {
+          reason: "review",
+          detail:
+            "This large conversation has been idle. Resume sends it anyway: Claude reads the whole conversation again (about 120k tokens) without its cache.",
+          causeKeys: ["review:a"],
+          heldAt: h.state.hold!.heldAt,
+        });
+        // Held: nothing more is asked or sent.
+        yield* h.drain.drainThread(threadId);
+        assert.deepEqual(asked, [CLAUDE]);
+        // The person's Resume answers the review: the head goes without another one.
+        h.state.hold = null;
+        yield* h.drain.drainThread(threadId);
+        assert.deepEqual(h.sent(), ["a"]);
+        assert.deepEqual(asked, [CLAUDE]);
+        // Once the queue is gone, nothing about it is remembered.
+        h.state.entries = [];
+        yield* h.drain.drainThread(threadId);
+        assert.equal(h.drain.reviewCount(), 0);
+      }),
+  );
+
+  it.effect("asks only for a native resume of the thread's own Claude session", () =>
+    Effect.gen(function* () {
+      const asked: string[] = [];
+      const reviewer = {
+        claudeResumeReview: () =>
+          Effect.sync(() => {
+            asked.push("asked");
+            return review;
+          }),
+      };
+      // A Codex session, or a Claude session while the head goes to another instance.
+      for (const session of [
+        { providerName: "codex", providerInstanceId: CLAUDE },
+        { providerName: "claudeAgent", providerInstanceId: CODEX },
+      ]) {
+        const h = yield* harness([entry("a")], [], reviewer);
+        h.state.session = session;
+        yield* h.drain.drainThread(threadId);
+        assert.deepEqual(h.sent(), ["a"]);
+      }
+      assert.deepEqual(asked, []);
+      // A review that needs nothing sends at once.
+      const warm = yield* harness([entry("a")], [], {
+        claudeResumeReview: () => Effect.succeed(null),
+      });
+      warm.state.session = { providerName: "claudeAgent", providerInstanceId: CLAUDE };
+      yield* warm.drain.drainThread(threadId);
+      assert.deepEqual(warm.sent(), ["a"]);
+    }),
+  );
+
+  it.effect("sends nothing while the review cannot be read, and asks again on the next pass", () =>
+    Effect.gen(function* () {
+      let fail = true;
+      const h = yield* harness([entry("a")], [], {
+        claudeResumeReview: () =>
+          fail
+            ? Effect.fail(new PersistenceSqlError({ operation: "window", detail: "busy" }))
+            : Effect.succeed(null),
+      });
+      h.state.session = { providerName: "claudeAgent", providerInstanceId: CLAUDE };
+      yield* h.drain.drainThread(threadId);
+      assert.deepEqual(h.dispatched, []);
+      fail = false;
+      yield* h.drain.drainThread(threadId);
+      assert.deepEqual(h.sent(), ["a"]);
+    }),
+  );
+});
 
 describe("ServerQueueDrain", () => {
   it.effect("sends one head per idle edge, and the next head waits for the previous start", () =>

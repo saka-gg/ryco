@@ -12,7 +12,10 @@
  *
  * Holds this module records: `restart` for every queue left by an earlier process (never sent
  * without a Resume), `error` when a sent entry's start failed or the decider kept refusing its
- * head, `stalled` when a sent entry's start neither bound nor failed for a long time.
+ * head, `stalled` when a sent entry's start neither bound nor failed for a long time, and
+ * `review` when sending the head would resume a large Claude conversation whose prompt cache has
+ * likely expired (the composer's resume review, `assessClaudeCacheResume`): the person's Resume
+ * answers it, and the head goes.
  *
  * It imports no value from a module the server's boot graph loads (only `effect`, which is split
  * already): everything else comes in through `ServerQueueDrainDeps`. Importing one would split
@@ -26,10 +29,12 @@ import type {
   FollowUpQueueHoldInput,
   InternalOrchestrationCommand,
   MessageId,
+  ModelSelection,
   OrchestrationDispatchCommandError,
   OrchestrationEvent,
   OrchestrationReadModel,
   OrchestrationThread,
+  OrchestrationThreadHistoryError,
   OrchestrationThreadShell,
   QueuedFollowUp,
   RuntimeMode,
@@ -103,7 +108,29 @@ export interface ServerQueueDrainDeps {
    * prefixes every command id it mints.
    */
   readonly bootId: string;
+  /**
+   * The composer's Claude resume review for a send to `target` now, or null when it needs none
+   * (`assessClaudeCacheResume` over the thread's newest activities).
+   */
+  readonly claudeResumeReview?: (
+    threadId: ThreadId,
+    target: ModelSelection,
+    nowMs: number,
+  ) => Effect.Effect<
+    ClaudeResumeReview | null,
+    ProjectionRepositoryError | OrchestrationThreadHistoryError
+  >;
 }
+
+/** What a review hold tells the person (`ClaudeCacheReview`). */
+export interface ClaudeResumeReview {
+  readonly reason: string;
+  readonly promptTokens: number;
+}
+
+/** The review hold's detail: why, and what Resume costs. */
+export const claudeReviewHoldDetail = (review: ClaudeResumeReview) =>
+  `${review.reason} Resume sends it anyway: Claude reads the whole conversation again (about ${Math.max(1, Math.round(review.promptTokens / 1000))}k tokens) without its cache.`;
 
 /** How a sent entry's start ended without a turn (`provider.turn.start.*` activities). */
 export interface QueueStartEnded {
@@ -223,6 +250,7 @@ export const makeServerQueueDrain = (deps: ServerQueueDrainDeps) =>
       while (watched.size > MAX_WATCHED_DISPATCHES) watched.delete(watched.keys().next().value!);
     };
 
+    /** Records a hold; false when it could not be (logged). */
     const recordHold = (threadId: ThreadId, commandId: string, hold: FollowUpQueueHoldInput) =>
       Effect.gen(function* () {
         const nowMs = yield* Clock.currentTimeMillis;
@@ -233,15 +261,73 @@ export const makeServerQueueDrain = (deps: ServerQueueDrainDeps) =>
           hold,
           createdAt: isoAt(nowMs),
         });
+        return true;
       }).pipe(
         Effect.catch((error) =>
           Effect.logWarning("follow-up queue hold was not recorded", {
             threadId,
             commandId,
             error: error.message,
-          }),
+          }).pipe(Effect.as(false)),
         ),
       );
+
+    /** The head each thread's review hold was recorded for, and the head its Resume answered. */
+    const reviewHeld = new Map<ThreadId, MessageId>();
+    const reviewed = new Map<ThreadId, MessageId>();
+
+    /**
+     * Whether the head waits for the person's review of a Claude resume: true once the hold is
+     * recorded, or while the review cannot be read (the next pass asks again). Only a native
+     * resume of the thread's own Claude session is reviewed; another instance takes a context
+     * handoff. A head whose review hold is gone again (the queue is unheld here) was resumed.
+     */
+    const awaitsClaudeReview = (
+      thread: OrchestrationThread,
+      head: QueuedFollowUp,
+      target: ModelSelection,
+      nowMs: number,
+    ) =>
+      Effect.gen(function* () {
+        const session = thread.session;
+        if (
+          deps.claudeResumeReview === undefined ||
+          session?.providerName !== "claudeAgent" ||
+          session.providerInstanceId !== target.instanceId ||
+          reviewed.get(thread.id) === head.messageId
+        ) {
+          return false;
+        }
+        if (reviewHeld.get(thread.id) === head.messageId) {
+          reviewHeld.delete(thread.id);
+          reviewed.set(thread.id, head.messageId);
+          return false;
+        }
+        const review = yield* deps.claudeResumeReview(thread.id, target, nowMs).pipe(
+          Effect.catchCause((cause) =>
+            Cause.hasInterruptsOnly(cause)
+              ? Effect.failCause(cause)
+              : Effect.logWarning("follow-up queue could not review the Claude resume", {
+                  threadId: thread.id,
+                  cause: Cause.pretty(cause),
+                }).pipe(Effect.as(undefined)),
+          ),
+        );
+        if (review === undefined) return true;
+        if (review === null) return false;
+        const held = yield* recordHold(
+          thread.id,
+          `queue-review-hold:${thread.id}:${head.messageId}:${nextAttemptId()}`,
+          {
+            reason: "review",
+            // The composer's own review cause for a queued message (`coordinator.ts`).
+            causeKeys: [`review:${head.messageId}`],
+            detail: claudeReviewHoldDetail(review),
+          },
+        );
+        if (held) reviewHeld.set(thread.id, head.messageId);
+        return true;
+      });
 
     /** Every queue an earlier process left: held until the user resumes it (no restart drain). */
     const holdQueuedAtBoot = Effect.forEach(
@@ -295,7 +381,11 @@ export const makeServerQueueDrain = (deps: ServerQueueDrainDeps) =>
         const attemptKey = head === undefined ? null : `${head.messageId}:${head.revision}`;
         // Refusals count for the head as it is now; an edited or removed head starts over.
         if (refusals.get(threadId)?.key !== attemptKey) refusals.delete(threadId);
-        if (queue === undefined || head === undefined || attemptKey === null) return;
+        if (queue === undefined || head === undefined || attemptKey === null) {
+          reviewHeld.delete(threadId);
+          reviewed.delete(threadId);
+          return;
+        }
         // In Trash, or held: sends nothing (Trash also holds the queue).
         if (queue.hold !== null || thread.trashedAt != null) return;
         if (head.status !== "queued") return;
@@ -314,6 +404,7 @@ export const makeServerQueueDrain = (deps: ServerQueueDrainDeps) =>
           "follow-up-queue",
         );
         if (held !== null) return;
+        if (yield* awaitsClaudeReview(thread, head, modes.modelSelection, nowMs)) return;
         const { cold, budgetFull } = yield* fence.coldStart(threadId, nowMs);
         if (cold && budgetFull) return;
         let reserved = false;
@@ -392,6 +483,8 @@ export const makeServerQueueDrain = (deps: ServerQueueDrainDeps) =>
       onStartEnded,
       /** Threads with refusals counted (tests: the map never outgrows the queues). */
       refusalCount: () => refusals.size,
+      /** Threads with a review remembered (tests: the maps never outgrow the queues). */
+      reviewCount: () => reviewHeld.size + reviewed.size,
     };
   });
 

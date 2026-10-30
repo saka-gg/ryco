@@ -11,6 +11,10 @@
  * @module ServerQueueDrain
  */
 import type { OrchestrationReadModel, ThreadId } from "@ryco/contracts";
+import {
+  assessClaudeCacheResume,
+  CLAUDE_CACHE_REVIEW_WINDOW_LIMITS,
+} from "@ryco/shared/claudeCacheReview";
 import { makeKeyedSerialWorker } from "@ryco/shared/KeyedSerialWorker";
 import { losslessBackpressureQueuePolicy } from "@ryco/shared/QueuePolicy";
 import { Cause, Context, Effect, Layer } from "effect";
@@ -81,6 +85,22 @@ export const ServerQueueDrainLive = Layer.effect(
             queuedAtBoot,
             // Unique per process start: the drain's command ids must never repeat a spent one.
             bootId: `${engine.bootSequence}-${crypto.randomUUID().slice(0, 8)}`,
+            ...(projections.getThreadWindow === undefined
+              ? {}
+              : {
+                  claudeResumeReview: (threadId, target, nowMs) =>
+                    projections.getThreadWindow!({
+                      threadId,
+                      limits: CLAUDE_CACHE_REVIEW_WINDOW_LIMITS,
+                    }).pipe(
+                      Effect.map(
+                        (window) =>
+                          assessClaudeCacheResume(window.thread, target, nowMs, {
+                            workspaceCwd: window.workspaceCwd,
+                          }) ?? null,
+                      ),
+                    ),
+                }),
           }),
         ),
         Effect.catchCause((cause) =>

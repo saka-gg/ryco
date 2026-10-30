@@ -16,7 +16,10 @@ import {
   type TurnId,
 } from "@ryco/contracts";
 import { BACKGROUND_WORK_BOUNDARY, deriveBackgroundWork } from "@ryco/shared/backgroundWork";
-import { assessClaudeCacheResume } from "@ryco/shared/claudeCacheReview";
+import {
+  assessClaudeCacheResume,
+  CLAUDE_CACHE_REVIEW_WINDOW_LIMITS,
+} from "@ryco/shared/claudeCacheReview";
 import { latestIsoTimestamp } from "@ryco/shared/turnFinalization";
 import { applicableUsageLimit } from "@ryco/shared/usageLimit";
 import { Cause, Clock, Effect, Exit, Layer, Option, Schedule } from "effect";
@@ -77,12 +80,6 @@ const SETTLED_RETENTION_MS = 30 * 24 * 3_600_000;
 const DISPATCH_PAGE_SIZE = 100;
 const DISPATCH_MAX_PAGES = 50;
 const CAPTURE_WINDOW_LIMITS = { messages: 1, activities: 50, proposedPlans: 1, checkpoints: 1 };
-const CLAUDE_REVIEW_WINDOW_LIMITS = {
-  messages: 1,
-  activities: 40,
-  proposedPlans: 1,
-  checkpoints: 1,
-};
 
 const EMPTY_BACKGROUND_WORK: RestartBackgroundWorkRecord = {
   tasks: [],
@@ -632,7 +629,7 @@ export const makeRestartContinuation = (options: RestartContinuationOptions = {}
             }
             if (thread === undefined) return yield* skip(record, "thread-closed");
             if (thread.session?.providerName === "claudeAgent") {
-              const window = yield* readWindow(thread.id, CLAUDE_REVIEW_WINDOW_LIMITS).pipe(
+              const window = yield* readWindow(thread.id, CLAUDE_CACHE_REVIEW_WINDOW_LIMITS).pipe(
                 Effect.exit,
               );
               if (Exit.isFailure(window)) {
