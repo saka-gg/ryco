@@ -909,7 +909,7 @@ it.effect("stops waiting for a task that never started 7 days after its creation
     assert.equal((yield* h.read()).status, "waiting");
     yield* h.tick(7 * DAY + 10);
     assert.equal((yield* h.read()).status, "delivered");
-    assert.include(h.sent[0]!.message.text, "within 7 days of being created");
+    assert.include(h.sent[0]!.message.text, "did not start within 7 days");
   }).pipe(Effect.provide(layer)),
 );
 
@@ -941,6 +941,48 @@ it.effect("never starts a task still waiting for its slot once the person stoppe
       "You stopped the delegating chat before this task's turn came, so it never starts.",
     );
     assert.equal(h.sent.length, 0);
+  }).pipe(Effect.provide(layer)),
+);
+
+it.effect("gives a task that starts late its whole 24 hours", () =>
+  Effect.gen(function* () {
+    const h = yield* setup();
+    yield* h.sql`DELETE FROM projection_thread_messages WHERE message_id = 'child-initial'`;
+    // Its slot frees halfway through day six: past the 7 days, it still has its 24 hours.
+    const startedAt = at(6.5 * DAY);
+    yield* h.sql`INSERT INTO projection_thread_messages (message_id, thread_id, turn_id, role, text, is_streaming, created_at, updated_at)
+      VALUES ('child-initial', 'child', NULL, 'user', 'Fixture task', 0, ${startedAt}, ${startedAt})`;
+    yield* h.tick(7 * DAY + 10);
+    assert.equal((yield* h.read()).status, "waiting");
+    yield* h.tick(7.5 * DAY - 10);
+    assert.equal((yield* h.read()).status, "waiting");
+    yield* h.tick(7.5 * DAY + 10);
+    assert.equal((yield* h.read()).status, "delivered");
+  }).pipe(Effect.provide(layer)),
+);
+
+it.effect("does not count a Stop pressed before the request was approved", () =>
+  Effect.gen(function* () {
+    const h = yield* setup();
+    yield* h.sql`DELETE FROM projection_thread_messages WHERE message_id = 'child-initial'`;
+    h.setChild({ ...shell("child", "child-turn", "child-runtime"), latestUserMessageAt: null });
+    yield* h.appendEvent({
+      stream: "parent",
+      type: "thread.turn-start-requested",
+      commandId: "web:send",
+      occurredAt: at(-120),
+      payload: { messageId: "parent-initial" },
+    });
+    // Stopped while the card waited, then approved: the batch still runs.
+    yield* h.appendEvent({
+      stream: "parent",
+      type: "thread.turn-interrupt-requested",
+      commandId: "web:stop",
+      occurredAt: at(-60),
+      payload: { turnId: "parent-turn" },
+    });
+    yield* h.tick(3);
+    assert.equal((yield* h.read()).status, "waiting");
   }).pipe(Effect.provide(layer)),
 );
 

@@ -28,7 +28,11 @@ import {
   noUserMessageSent,
 } from "../orchestration/delegationSlotHold.ts";
 import type { CompletionReturnRecord } from "../persistence/Layers/AgentControlCompletionReturns.ts";
-import { DELEGATED_TASK_CANCEL_DETAIL, noLongerAwaited } from "./delegatedTaskControl.ts";
+import {
+  cancelledByDelegatingChat,
+  DELEGATED_TASK_CANCEL_DETAIL,
+  noLongerAwaited,
+} from "./delegatedTaskControl.ts";
 import { threadsQueuedAtBoot } from "../orchestration/Layers/ServerQueueDrain.ts";
 import { anyLiveTaskWaitsForSlot } from "./Layers/AgentControlDelegationSlots.ts";
 import {
@@ -46,6 +50,7 @@ const slotKey = `delegation-slot:${proposalId}`;
 const CODEX = ProviderInstanceId.make("codex");
 const at = "2026-10-29T10:00:00.000Z";
 const taskId = (index: number) => ThreadId.make(`thread-task-${index}`);
+const PARENT = ThreadId.make("thread-parent");
 
 type Resume = Extract<ClientOrchestrationCommand, { type: "thread.queue.resume" }>;
 type Remove = Extract<ClientOrchestrationCommand, { type: "thread.queue.remove" }>;
@@ -115,6 +120,8 @@ const world = (input: { readonly cap: number | undefined; readonly count: number
   let loseReply = false;
   let loseRemoval = false;
   const known = { proposal: true };
+  /** The delegating chat. */
+  const parent = { state: "live" as "live" | "archived" | "gone" };
 
   const thread = (entry: Task) => ({
     id: entry.id,
@@ -132,12 +139,19 @@ const world = (input: { readonly cap: number | undefined; readonly count: number
     subscribeDomainEvents: Effect.die("not used"),
     getThreadShellById: (id) =>
       Effect.sync(() =>
-        tasks.some((entry) => entry.id === id)
-          ? Option.some({
-              id,
-              ...tasks.find((entry) => entry.id === id)!.shell,
-            } as unknown as OrchestrationThreadShell)
-          : Option.none(),
+        id === PARENT
+          ? parent.state === "gone"
+            ? Option.none()
+            : Option.some({
+                id,
+                archivedAt: parent.state === "archived" ? at : null,
+              } as unknown as OrchestrationThreadShell)
+          : tasks.some((entry) => entry.id === id)
+            ? Option.some({
+                id,
+                ...tasks.find((entry) => entry.id === id)!.shell,
+              } as unknown as OrchestrationThreadShell)
+            : Option.none(),
       ),
     // The fence: busy while the session works, or while an unheld queue waits to send.
     holdReason: (shell) =>
@@ -217,9 +231,11 @@ const world = (input: { readonly cap: number | undefined; readonly count: number
           status: task(index).returnStatus ?? (task(index).cancelled ? "cancelled" : "waiting"),
           detail: task(index).cancelled ? DELEGATED_TASK_CANCEL_DETAIL : "Waiting.",
           initialMessageId: firstMessage(index).messageId,
+          parentThreadId: PARENT,
         } as CompletionReturnRecord;
       }),
     noLongerAwaited,
+    cancelledByDelegatingChat,
     cancelCommandId: delegationSlotCancelCommandId,
     noUserMessageSent,
     cancelledTaskEntryIds,
@@ -252,6 +268,7 @@ const world = (input: { readonly cap: number | undefined; readonly count: number
     removals,
     refuse,
     operation,
+    parent,
     loseReply: (value: boolean) => (loseReply = value),
     loseRemoval: (value: boolean) => (loseRemoval = value),
   };
@@ -456,15 +473,31 @@ describe("delegation slots", () => {
         w.task(2).returnStatus = "ready";
         w.task(0).busy = false;
         yield* slots.pass;
-        // Both leave their queues; the slot goes to task 3.
+        // Neither starts; the slot goes to task 3. Their messages stay queued: a Stop, an
+        // archive or a delete can be undone, and the person can still resume them by hand.
         assert.deepEqual(w.released(), [taskId(3)]);
-        assert.deepEqual(
-          w.removals.map((command) => command.threadId),
-          [taskId(1), taskId(2)],
-        );
-        assert.isUndefined(w.task(1).queue);
-        assert.isUndefined(w.task(2).queue);
+        assert.deepEqual(w.removals, []);
+        assert.lengthOf(w.task(1).queue?.entries ?? [], 1);
+        assert.lengthOf(w.task(2).queue?.entries ?? [], 1);
       }),
+  );
+
+  it.effect("releases no slot once the delegating chat was archived or deleted", () =>
+    Effect.gen(function* () {
+      const w = world({ cap: 1, count: 3 });
+      const slots = yield* makeDelegationSlots(w.deps);
+      w.task(0).busy = false;
+      // Archived moments ago: its returns are not marked yet, and no waiting task starts.
+      w.parent.state = "archived";
+      yield* slots.pass;
+      w.parent.state = "gone";
+      yield* slots.pass;
+      assert.deepEqual(w.released(), []);
+      // Restored: the slot is free again.
+      w.parent.state = "live";
+      yield* slots.pass;
+      assert.deepEqual(w.released(), [taskId(1)]);
+    }),
   );
 
   it.effect("a task whose goal continues keeps its slot through the goal's grace", () =>

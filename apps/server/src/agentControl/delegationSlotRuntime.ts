@@ -23,9 +23,12 @@
  *
  * A task its delegating chat no longer waits for before its first message was sent never starts
  * and takes no slot: one cancelled with `ryco_task_cancel`, by the chat's Stop, archive or delete,
- * or past its return's time limit. Its slot's cause is never released, and its first message and
- * the agent's own follow-ups leave its queue (the cancel takes them out itself; should that removal
- * be lost, a restart in between, a pass removes them under the cancel's own id).
+ * or past its return's time limit. Its slot's cause is never released. Only `ryco_task_cancel`
+ * takes its first message and the agent's own follow-ups out of its queue (the cancel does it
+ * itself; should that removal be lost, a restart in between, a pass removes them under the
+ * cancel's own id); after a Stop, an archive or a delete, which a person can undo, they stay, and
+ * the person can still resume the task by hand. A parent archived or deleted moments ago counts
+ * before its return says so.
  *
  * A task whose goal will continue its last turn (a person's goal on a task an integration created;
  * a delegated task's own goal never continues) works through the goal's grace: the slot stays
@@ -99,6 +102,10 @@ export interface DelegationSlotDeps {
   readonly getCompletionReturn?: (typeof CompletionReturnRepository.Service)["get"];
   /** `noLongerAwaited`. */
   readonly noLongerAwaited: (record: Pick<CompletionReturnRecord, "status">) => boolean;
+  /** `cancelledByDelegatingChat`: only an explicit cancel takes the task's entries out. */
+  readonly cancelledByDelegatingChat: (
+    record: Pick<CompletionReturnRecord, "status" | "detail">,
+  ) => boolean;
   /** `delegationSlotCancelCommandId`. */
   readonly cancelCommandId: (proposalId: string, threadId: string) => CommandId;
   /** `noUserMessageSent`. */
@@ -238,8 +245,17 @@ export const makeDelegationSlots = (deps: DelegationSlotDeps) =>
           if (record !== undefined && deps.noLongerAwaited(record)) {
             return {
               state: "cancelled" as const,
-              removals: deps.cancelledTaskEntryIds(queue.entries, record.initialMessageId),
+              removals: deps.cancelledByDelegatingChat(record)
+                ? deps.cancelledTaskEntryIds(queue.entries, record.initialMessageId)
+                : [],
             };
+          }
+          // The delivery marks a gone parent's returns on its next scan: no slot opens meanwhile.
+          if (record !== undefined && waiting) {
+            const parent = yield* deps.getThreadShellById(record.parentThreadId);
+            if (Option.isNone(parent) || parent.value.archivedAt !== null) {
+              return { state: "cancelled" as const, removals: [] };
+            }
           }
         }
         if (waiting) return { state: "waiting" as const };

@@ -535,6 +535,15 @@ export const makeCompletionReturnRepository = Effect.gen(function* () {
   const pendingTurnStart = (threadId: ThreadId) => safe(readPendingTurnStart(sql, threadId));
   const wakeStartState = (threadId: ThreadId, messageId: MessageId) =>
     safe(readWakeStartState(sql, { threadId, messageId }));
+  /** The thread's newest event sequence, or null without events. */
+  const lastEventSequence = (threadId: ThreadId) =>
+    safe(
+      sql<{ sequence: number }>`
+    SELECT sequence FROM orchestration_events
+    WHERE aggregate_kind = 'thread' AND stream_id = ${threadId}
+    ORDER BY sequence DESC LIMIT 1
+  `.pipe(Effect.map((rows) => rows[0]?.sequence ?? null)),
+    );
   const firstEventSequence = (threadId: ThreadId) =>
     safe(
       sql<{ sequence: number }>`
@@ -562,6 +571,8 @@ export const makeCompletionReturnRepository = Effect.gen(function* () {
     readonly sinceSequence: number;
     readonly delegatingMessageId: MessageId | null;
     readonly wakesSince: string;
+    /** Only Stops at or after this time count (absent: any). */
+    readonly stoppedSince?: string;
   }) =>
     safe(
       sql`
@@ -577,6 +588,7 @@ export const makeCompletionReturnRepository = Effect.gen(function* () {
       AND stop.sequence > ${input.sinceSequence}
       AND stop.event_type = 'thread.turn-interrupt-requested'
       AND stop.actor_kind = 'client'
+      AND (${input.stoppedSince ?? null} IS NULL OR stop.occurred_at >= ${input.stoppedSince ?? null})
       AND (stop.command_id IS NULL OR stop.command_id NOT LIKE 'agent-control:%')
       AND ((${input.delegatingMessageId} IS NOT NULL
             AND json_extract(start.payload_json, '$.messageId') = ${input.delegatingMessageId})
@@ -691,6 +703,7 @@ export const makeCompletionReturnRepository = Effect.gen(function* () {
     pendingTurnStart,
     wakeStartState,
     firstEventSequence,
+    lastEventSequence,
     worktreeArchived,
     cohortUserStop,
     turnDroppedByRevert,

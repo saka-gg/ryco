@@ -26,7 +26,7 @@ import { ServerWakeFence } from "../../orchestration/Services/ServerWakeFence.ts
 import { findThreadInArray } from "../../orchestration/threadIndex.ts";
 import { CompletionReturnRepository } from "../../persistence/Layers/AgentControlCompletionReturns.ts";
 import { ServerRuntimeStartup } from "../../serverRuntimeStartup.ts";
-import { noLongerAwaited } from "../delegatedTaskControl.ts";
+import { cancelledByDelegatingChat, noLongerAwaited } from "../delegatedTaskControl.ts";
 import { AgentControlOperationStore } from "../Services/AgentControlOperationStore.ts";
 import { AgentControlProposalEvents } from "../Services/AgentControlProposalEvents.ts";
 import { AgentControlProposalStore } from "../Services/AgentControlProposalStore.ts";
@@ -99,6 +99,7 @@ export const AgentControlDelegationSlotsLive = Layer.effectDiscard(
               ? { getCompletionReturn: completionReturns.value.get }
               : {}),
             noLongerAwaited,
+            cancelledByDelegatingChat,
             cancelCommandId: delegationSlotCancelCommandId,
             noUserMessageSent,
             cancelledTaskEntryIds,

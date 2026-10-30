@@ -45,6 +45,7 @@ import { ProviderService } from "../../provider/Services/ProviderService.ts";
 import { AgentControlPolicy } from "../Services/AgentControlPolicy.ts";
 import { AgentControlProposalEvents } from "../Services/AgentControlProposalEvents.ts";
 import {
+  CAPTURE_EXPIRY_MS,
   WAITING_EXPIRY_MS,
   MAX_DELIVERY_ATTEMPTS,
   MAX_REPLAYS,
@@ -189,10 +190,15 @@ export const makeCompletionReturnDelivery = Effect.gen(function* () {
   /**
    * Wake message ids this process applied → scan time of the apply. The reactor only acts on
    * live events, so this process's reactor owns those starts; a wake an earlier process
-   * applied and never started died with it. Pruned after WAITING_EXPIRY_MS: no waiting row
-   * is older than that, and a row only looks at wakes delivered after it was created.
+   * applied and never started died with it. Pruned after WAITING_EXPIRY_MS plus a day: no
+   * waiting row is older than that, and a row only looks at wakes delivered after it was created.
    */
   const wakesAppliedHere = new Map<MessageId, number>();
+  /**
+   * Waiting rows of unstarted tasks → the parent event sequence their Stop check read through, so
+   * the next check reads only newer events. Lost on restart (the next check reads it all once).
+   */
+  const waitingStopCheckedThrough = new Map<ThreadId, number>();
 
   const publish = (proposalIds: Iterable<AgentControlProposalId>) =>
     Effect.forEach(
@@ -913,14 +919,28 @@ export const makeCompletionReturnDelivery = Effect.gen(function* () {
         return yield* notice(record, "request-failed", ctx);
       if (proposal.value.status !== "completed") return yield* hold(record, now);
       // A task still waiting for its slot never starts once the person stopped the delegating
-      // chat (the delegation slots then take its first message out of its queue).
+      // chat after approving the request. Each check reads only the parent's events since the
+      // last one: waiting rows are looked at every few seconds, a parent's history is long.
       if (startedAt === null) {
         const cache = new Map<TurnId, MessageId | null>();
         record = yield* withStopBound(record, cache);
-        if (
-          (yield* userStoppedRows(record.parentThreadId, [record], cache)).has(record.childThreadId)
-        )
+        const checkedThrough = waitingStopCheckedThrough.get(record.childThreadId);
+        const latest = yield* repository.lastEventSequence(record.parentThreadId);
+        const delegatingMessageId = yield* delegatingMessage(cache, record);
+        const stopped = yield* repository.cohortUserStop({
+          threadId: record.parentThreadId,
+          sinceSequence: Math.max(record.sinceSequence ?? 0, checkedThrough ?? 0),
+          delegatingMessageId,
+          wakesSince: record.createdAt,
+          stoppedSince: proposal.value.decidedAt ?? proposal.value.createdAt,
+        });
+        if (stopped) {
+          waitingStopCheckedThrough.delete(record.childThreadId);
           return yield* finish(record, "cancelled", DETAIL.userStoppedBeforeStart, now);
+        }
+        if (latest !== null) waitingStopCheckedThrough.set(record.childThreadId, latest);
+      } else {
+        waitingStopCheckedThrough.delete(record.childThreadId);
       }
       const child = yield* readShell(record.childThreadId);
       if (Option.isNone(child) || child.value.archivedAt !== null)
@@ -1101,7 +1121,8 @@ export const makeCompletionReturnDelivery = Effect.gen(function* () {
         };
         yield* fence.releaseColdSlots(ctx.nowMs);
         for (const [messageId, appliedMs] of wakesAppliedHere)
-          if (ctx.nowMs - appliedMs > WAITING_EXPIRY_MS) wakesAppliedHere.delete(messageId);
+          if (ctx.nowMs - appliedMs > WAITING_EXPIRY_MS + CAPTURE_EXPIRY_MS)
+            wakesAppliedHere.delete(messageId);
         for (const record of yield* repository.listDue(now)) {
           yield* processDue(record, ctx).pipe(
             Effect.catch(() =>
