@@ -23,6 +23,45 @@ function opacityOf(element: Element): number {
   return Number(getComputedStyle(element).opacity);
 }
 
+interface GhostTravel {
+  readonly from: { readonly left: number; readonly top: number };
+  readonly to: { readonly left: number; readonly top: number };
+}
+
+/**
+ * Records every ghost travel as it starts: where the ghost sets out and where it lands. A
+ * ghost lives only for its travel, so a test that reads its rect after a fixed sleep or a
+ * frame races the animation; the travel's own keyframes say the same thing at any time.
+ */
+function recordGhostTravels() {
+  const travels: GhostTravel[] = [];
+  const animate = Element.prototype.animate;
+  const spy = vi.spyOn(Element.prototype, "animate").mockImplementation(function (
+    this: Element,
+    keyframes,
+    options,
+  ) {
+    const frames = Array.isArray(keyframes) ? keyframes : [];
+    const first = frames[0];
+    const last = frames.at(-1);
+    if (
+      this instanceof HTMLElement &&
+      this.dataset.slot === "morph-ghost" &&
+      frames.length === 2 &&
+      typeof first?.left === "string" &&
+      typeof last?.left === "string"
+    ) {
+      const point = (frame: Keyframe) => ({
+        left: Number.parseFloat(String(frame.left)),
+        top: Number.parseFloat(String(frame.top)),
+      });
+      travels.push({ from: point(first), to: point(last) });
+    }
+    return animate.call(this, keyframes, options);
+  });
+  return { travels, restore: () => spy.mockRestore() };
+}
+
 function PickerHarness() {
   const triggerRef = useRef<HTMLButtonElement | null>(null);
   return (
@@ -224,15 +263,19 @@ describe("surface morph", () => {
     expect(ghosts()).toHaveLength(1);
     await vi.waitFor(() => expect(ghosts()).toHaveLength(0), { timeout: 2_000 });
 
-    await userEvent.keyboard("{Escape}");
-    // The item went away with its menu, so the fold lands on the trigger.
-    const triggerRect = trigger.getBoundingClientRect();
-    await sleep(380);
-    const ghost = ghosts()[0];
-    expect(ghost).toBeDefined();
-    const ghostRect = ghost!.getBoundingClientRect();
-    expect(Math.abs(ghostRect.left - triggerRect.left)).toBeLessThan(24);
-    expect(Math.abs(ghostRect.top - triggerRect.top)).toBeLessThan(24);
+    const folds = recordGhostTravels();
+    try {
+      await userEvent.keyboard("{Escape}");
+      // The item went away with its menu, so the fold lands on the trigger. The fold is over
+      // 430 ms after the key, possibly before the keyboard command has even returned here.
+      const triggerRect = trigger.getBoundingClientRect();
+      await vi.waitFor(() => expect(folds.travels.length).toBeGreaterThan(0), { timeout: 2_000 });
+      const landing = folds.travels.at(-1)!.to;
+      expect(Math.abs(landing.left - triggerRect.left)).toBeLessThan(24);
+      expect(Math.abs(landing.top - triggerRect.top)).toBeLessThan(24);
+    } finally {
+      folds.restore();
+    }
   });
 
   it("grows a dialog picked from a context menu out of the right-clicked row", async () => {
@@ -246,13 +289,19 @@ describe("surface morph", () => {
     // A native menu fires no DOM event when an item is picked; the dialog
     // opens whenever the person gets to it — here, after the click window.
     await sleep(1_400);
-    openFromContextMenu?.();
-    await nextFrame();
-    expect(ghosts()).toHaveLength(1);
-    const start = ghosts()[0]!.getBoundingClientRect();
-    const rowRect = row.getBoundingClientRect();
-    expect(Math.abs(start.left - rowRect.left)).toBeLessThan(40);
-    expect(Math.abs(start.top - rowRect.top)).toBeLessThan(40);
+    const grows = recordGhostTravels();
+    try {
+      openFromContextMenu?.();
+      // The dialog mounts when React gets to it, and its ghost lives only for the grow.
+      // (StrictMode attaches twice, so the live grow is the last one.)
+      await vi.waitFor(() => expect(grows.travels.length).toBeGreaterThan(0), { timeout: 2_000 });
+      const start = grows.travels.at(-1)!.from;
+      const rowRect = row.getBoundingClientRect();
+      expect(Math.abs(start.left - rowRect.left)).toBeLessThan(40);
+      expect(Math.abs(start.top - rowRect.top)).toBeLessThan(40);
+    } finally {
+      grows.restore();
+    }
   });
 
   it("falls back to a plain fade when nothing was just activated", async () => {
