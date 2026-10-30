@@ -597,6 +597,13 @@ export function startDesktopWorkspaceBridge(): () => void {
   };
   const adoptPublicationScope = (state: DesktopWorkspaceStatePush) => {
     if (publicationAccountId !== state.accountId) {
+      // Signed out, or another account: the links this Desktop made for the
+      // previous account's machines, and their bearers, go with it.
+      if (publicationAccountId !== null) {
+        void import("./desktopHubLinkedRoutes")
+          .then(({ forgetDesktopHubLinkedDirectAccess }) => forgetDesktopHubLinkedDirectAccess())
+          .catch(() => undefined);
+      }
       publications.clear();
       forgetThreadContentPublications();
       resetCachedThreadContent();

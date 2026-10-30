@@ -64,6 +64,9 @@ export const hasSavedEnvironmentRegistryHydrated = catalog.hasHydrated;
 export const waitForSavedEnvironmentRegistryHydration = catalog.waitForHydration;
 export const listSavedEnvironmentRecords = catalog.list;
 export const getSavedEnvironmentRecord = catalog.get;
+/** Hub-linked direct access: routes of a Hub machine, not environments of their own. */
+export const listLinkedDirectRecords = catalog.listLinked;
+export const getLinkedDirectRecord = catalog.getLinked;
 export const persistSavedEnvironmentRecord = catalog.persistRecord;
 export const readSavedEnvironmentBearerToken = catalog.readBearerToken;
 export const writeSavedEnvironmentBearerToken = catalog.writeBearerToken;

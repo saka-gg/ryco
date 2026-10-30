@@ -98,6 +98,34 @@ it("keys work that outlives a connection by pairing, by device, or as unidentifi
   );
 });
 
+it("keeps a device one owner whether it reaches the node over the relay or a linked address", () => {
+  const fingerprint = Uint8Array.of(0x01, 0x02, 0xfe);
+  const relay = rpcPrincipalOwnerKey(
+    relayRpcPrincipal("operator", "channel-a", () => ({
+      trustSource: "account-enrolled",
+      enrollmentId: "enrollment-1",
+      clientIdentityFingerprint: fingerprint,
+      role: "operator",
+    })),
+  );
+  const linked = directRpcPrincipal({
+    sessionId: AuthSessionId.make("session-linked"),
+    chainId: AuthSessionId.make("chain-linked"),
+    subject: "linked",
+    method: "bearer-session-token",
+    role: "client",
+    link: {
+      trustSource: "account-enrolled",
+      enrollmentId: "enrollment-1",
+      clientFingerprint: Buffer.from(fingerprint).toString("base64url"),
+      role: "operator",
+    },
+  });
+  // A Git action started over the relay is resumed or cancelled over the linked route.
+  expect(rpcPrincipalOwnerKey(linked)).toBe(relay);
+  expect(linked.canManageLocalAccess).toBe(false);
+});
+
 it("derives where a turn comes from the connection, never the payload", () => {
   const request = (remoteAddress: string | undefined, headers: Record<string, string> = {}) =>
     ({ source: { socket: { remoteAddress }, headers } }) as unknown as Parameters<

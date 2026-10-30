@@ -1,8 +1,10 @@
 export {
   getEnvironmentHttpBaseUrl,
+  getLinkedDirectRecord,
   getSavedEnvironmentRecord,
   getSavedEnvironmentRuntimeState,
   hasSavedEnvironmentRegistryHydrated,
+  listLinkedDirectRecords,
   listSavedEnvironmentRecords,
   resetSavedEnvironmentRegistryStoreForTests,
   resetSavedEnvironmentRuntimeStoreForTests,

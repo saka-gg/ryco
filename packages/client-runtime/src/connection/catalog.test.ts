@@ -68,3 +68,74 @@ describe("saved environment catalog hydration", () => {
     expect(seen.hydration).toEqual([{ hydrated: true, records: 0 }]);
   });
 });
+
+describe("Hub-linked direct access in the saved catalog", () => {
+  const LINKED: SavedEnvironmentRecord = {
+    environmentId: "env-direct" as EnvironmentId,
+    label: "Studio Mac",
+    wsBaseUrl: "ws://100.64.1.2:3773",
+    httpBaseUrl: "http://100.64.1.2:3773",
+    createdAt: "2026-10-24T00:00:00.000Z",
+    lastConnectedAt: null,
+    hubLink: { hubEnvironmentId: "env_hub", linkedAt: "2026-10-29T00:00:00.000Z" },
+  };
+
+  function catalogKeeping(stored: ReadonlyArray<SavedEnvironmentRecord>) {
+    const writes: Array<ReadonlyArray<SavedEnvironmentRecord>> = [];
+    const catalog = createSavedEnvironmentCatalog({
+      kv: {
+        getRegistry: async () => stored,
+        setRegistry: async (records) => {
+          writes.push(records);
+        },
+      },
+      secretKV: { get: async () => null, set: async () => true, remove: async () => {} },
+    });
+    return { catalog, writes };
+  }
+
+  // A linked record is a route of its Hub machine: listing or connecting
+  // environments must never see it, or the machine shows twice.
+  it("keeps linked records out of the environments and stores both lists together", async () => {
+    const { catalog, writes } = catalogKeeping([RECORD, LINKED]);
+    await catalog.waitForHydration();
+
+    expect(Object.keys(catalog.registryStore.getState().byId)).toEqual([RECORD.environmentId]);
+    expect(catalog.list().map((record) => record.environmentId)).toEqual([RECORD.environmentId]);
+    expect(catalog.get(LINKED.environmentId)).toBeNull();
+    expect(catalog.listLinked()).toEqual([LINKED]);
+    expect(catalog.getLinked(LINKED.environmentId)).toEqual(LINKED);
+
+    catalog.registryStore.getState().rename(RECORD.environmentId, "Renamed");
+    expect(
+      writes
+        .at(-1)
+        ?.map((record) => record.environmentId)
+        .toSorted(),
+    ).toEqual([RECORD.environmentId, LINKED.environmentId].toSorted());
+    await catalog.persistRecord({ ...LINKED, label: "Relinked" });
+    expect(
+      writes.at(-1)?.find((record) => record.environmentId === LINKED.environmentId)?.label,
+    ).toBe("Relinked");
+  });
+
+  it("moves a direct id between the lists when it is linked or paired by hand", () => {
+    const { catalog } = catalogKeeping([]);
+    catalog.registryStore.getState().upsert({ ...LINKED, hubLink: undefined });
+    expect(catalog.get(LINKED.environmentId)).not.toBeNull();
+
+    catalog.registryStore.getState().upsert(LINKED);
+    expect(catalog.get(LINKED.environmentId)).toBeNull();
+    expect(catalog.getLinked(LINKED.environmentId)).toEqual(LINKED);
+
+    catalog.registryStore.getState().remove(LINKED.environmentId);
+    expect(catalog.listLinked()).toEqual([]);
+  });
+
+  it("lets a record written this session win over its stored copy, in either list", async () => {
+    const { catalog } = catalogKeeping([{ ...LINKED, label: "Stored" }]);
+    catalog.registryStore.getState().upsert({ ...LINKED, label: "Fresh" });
+    await catalog.waitForHydration();
+    expect(catalog.getLinked(LINKED.environmentId)?.label).toBe("Fresh");
+  });
+});
