@@ -72,11 +72,11 @@ import {
   toFollowUpQueueHoldInput,
   type FollowUpQueueAddCommand,
   type FollowUpQueueEntryContent,
-  followUpQueueBadgeOf,
   followUpQueueEditAttachments,
   followUpQueueEditOf,
   withoutFollowUpQueueEditAttachment,
 } from "./serverQueue.ts";
+import { followUpQueueBadgeOf } from "./queueBadge.ts";
 import { createMessageQueueStore } from "./store.ts";
 
 const THREAD_ID = ThreadId.make("t");

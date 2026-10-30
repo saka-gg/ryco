@@ -3,7 +3,7 @@ import { ArchiveIcon, CloudIcon, PinIcon, XIcon } from "lucide-react";
 import React, { memo, useCallback, useMemo } from "react";
 import type { ScopedThreadRef } from "@ryco/contracts";
 import { scopedThreadKey, scopeProjectRef, scopeThreadRef } from "@ryco/client-runtime/scoped";
-import { followUpQueueBadgeOf } from "@ryco/client-runtime/state/message-queue";
+import { followUpQueueBadgeOf } from "@ryco/client-runtime/state/message-queue/queueBadge";
 import { usePrimaryEnvironmentId } from "../../environments/primary";
 import {
   useSavedEnvironmentRegistryStore,

@@ -416,6 +416,10 @@
       "types": "./src/queueHold.ts",
       "import": "./src/queueHold.ts"
     },
+    "./delegationSlot": {
+      "types": "./src/delegationSlot.ts",
+      "import": "./src/delegationSlot.ts"
+    },
     "./threadSettlement": {
       "types": "./src/threadSettlement.ts",
       "import": "./src/threadSettlement.ts"

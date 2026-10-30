@@ -198,6 +198,10 @@
       "types": "./src/state/message-queue/serverQueue.ts",
       "import": "./src/state/message-queue/serverQueue.ts"
     },
+    "./state/message-queue/queueBadge": {
+      "types": "./src/state/message-queue/queueBadge.ts",
+      "import": "./src/state/message-queue/queueBadge.ts"
+    },
     "./state/settings": {
       "types": "./src/state/settings/index.ts",
       "import": "./src/state/settings/index.ts"

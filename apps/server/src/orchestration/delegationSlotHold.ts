@@ -19,9 +19,12 @@ import type {
   QueuedFollowUp,
 } from "@ryco/contracts";
 
-import { DELEGATION_SLOT_CAUSE_PREFIX } from "@ryco/shared/queueHold";
+import { DELEGATION_SLOT_CAUSE_PREFIX } from "@ryco/shared/delegationSlot";
 
-export { DELEGATION_SLOT_CAUSE_PREFIX, heldOnlyForDelegationSlot } from "@ryco/shared/queueHold";
+export {
+  DELEGATION_SLOT_CAUSE_PREFIX,
+  heldOnlyForDelegationSlot,
+} from "@ryco/shared/delegationSlot";
 
 /** The hold of a task that waits for a free slot of request `proposalId`. */
 export const delegationSlotHold = (
