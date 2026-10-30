@@ -5,6 +5,7 @@ import {
   applySourceControlStateToPullRequestLinks,
   currentPullRequestFields,
   initialPullRequestLinks,
+  pullRequestLinkSearchTerms,
   readWorktreePullRequestLinks,
   resolveThreadPullRequestLink,
   selectCurrentPullRequestLink,
@@ -219,5 +220,27 @@ describe("workspaceDiscoversPullRequests", () => {
     // A server that predates links never discovers.
     expect(workspaceDiscoversPullRequests({ origin: "branch" })).toBe(false);
     expect(workspaceDiscoversPullRequests(null)).toBe(false);
+  });
+});
+
+describe("pullRequestLinkSearchTerms", () => {
+  it("names each pull request by number, repository reference, URL and title", () => {
+    expect(
+      pullRequestLinkSearchTerms([
+        { number: 5, title: "Fix it", url: "https://github.com/acme/app/pull/5" },
+        { number: 12, title: null, url: "https://gitlab.com/group/sub/proj/-/merge_requests/12" },
+        { number: 9, title: "No URL", url: null },
+      ]),
+    ).toEqual([
+      "#5",
+      "acme/app#5",
+      "https://github.com/acme/app/pull/5",
+      "Fix it",
+      "#12",
+      "group/sub/proj#12",
+      "https://gitlab.com/group/sub/proj/-/merge_requests/12",
+      "#9",
+      "No URL",
+    ]);
   });
 });

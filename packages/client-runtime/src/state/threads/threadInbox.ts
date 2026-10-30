@@ -27,6 +27,7 @@ import {
   type ThreadSettlementInput,
 } from "@ryco/shared/threadSettlement";
 import {
+  pullRequestLinkSearchTerms,
   resolveThreadPullRequestLink,
   type WorktreePullRequestLink,
 } from "@ryco/shared/worktreePullRequests";
@@ -484,8 +485,9 @@ function filterEntry(entry: ThreadInboxEntry, filters: ThreadInboxFilters | unde
     entry.worktree?.issueTitle,
     entry.worktree?.workItemKey,
     entry.worktree?.workItemTitle,
-    // Every pull request the workspace carried, so "#675" finds its thread.
-    ...(entry.worktree?.pullRequests ?? []).flatMap((link) => [link.title, `#${link.number}`]),
+    // Every pull request the workspace carried, so "#675", "owner/repo#675" or its URL finds
+    // its thread.
+    ...pullRequestLinkSearchTerms(entry.worktree?.pullRequests ?? []),
   ].some((value) => value?.toLocaleLowerCase().includes(text) === true);
 }
 

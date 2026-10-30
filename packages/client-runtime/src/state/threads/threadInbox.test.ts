@@ -849,6 +849,44 @@ describe("thread inbox", () => {
   });
 });
 
+describe("inbox search by pull request", () => {
+  it("finds a thread by its workspace's pull request number, repository reference or URL", () => {
+    const worktree = makeWorktree(environmentA, {
+      pullRequests: [
+        {
+          number: 675,
+          title: "Ship the inbox",
+          url: "https://github.com/acme/app/pull/675",
+          state: "open",
+          isDraft: false,
+          terminalAt: null,
+          headRefName: "feature",
+          baseRefName: "main",
+          source: "created",
+          linkedAt: "2026-07-31T02:00:00.000Z",
+          dismissedAt: null,
+        },
+      ],
+    });
+    const linked = makeThread(environmentA, "linked", {
+      worktreeId,
+      worktreePath: `/tmp/${environmentA}/worktree`,
+      title: "Inbox work",
+    });
+    const other = makeThread(environmentA, "other", { title: "Unrelated" });
+    const search = (text: string) =>
+      buildThreadInbox(
+        baseInput({ threads: [linked, other], worktrees: [worktree], filters: { text } }),
+      ).active.map((entry) => entry.thread?.id);
+
+    expect(search("#675")).toEqual([linked.id]);
+    expect(search("acme/app#675")).toEqual([linked.id]);
+    expect(search("https://github.com/acme/app/pull/675")).toEqual([linked.id]);
+    expect(search("ship the inbox")).toEqual([linked.id]);
+    expect(search("#676")).toEqual([]);
+  });
+});
+
 describe("snoozed inbox entries", () => {
   const until = "2026-07-31T13:00:00.000Z";
   const since = "2026-07-31T11:00:00.000Z";

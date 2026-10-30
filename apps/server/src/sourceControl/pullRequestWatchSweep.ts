@@ -105,7 +105,11 @@ import {
   pullRequestWatchObservation,
   withReviewThreadTails,
 } from "./pullRequestWatchObservation.ts";
-import type { PullRequestWatchSetInput } from "./PullRequestWatchService.ts";
+import type {
+  PullRequestLinkInput,
+  PullRequestLinkResult,
+  PullRequestWatchSetInput,
+} from "./PullRequestWatchService.ts";
 import type { RefreshWorktreeSourceControlStateInput } from "./refreshWorktreeSourceControlState.ts";
 import type { SourceControlProviderShape } from "./SourceControlProvider.ts";
 import type { SourceControlProviderRegistryShape } from "./SourceControlProviderRegistry.ts";
@@ -201,6 +205,9 @@ export interface PullRequestWatchRuntime {
   readonly setWatch: (
     input: PullRequestWatchSetRequest,
   ) => Effect.Effect<SourceControlSetPullRequestWatchResult, PullRequestWatchError>;
+  readonly linkPullRequest: (
+    input: PullRequestLinkInput,
+  ) => Effect.Effect<PullRequestLinkResult, PullRequestWatchError>;
   /** One full pass now (tests, the measurement script). */
   readonly sweep: Effect.Effect<void>;
   /**
@@ -1368,7 +1375,7 @@ export const makePullRequestWatchRuntime = (
       });
 
     /** The pull request a request names (number, URL or both), checked for agreement. */
-    const requestedPullRequest = (request: PullRequestWatchSetRequest) =>
+    const requestedPullRequest = (request: Pick<PullRequestWatchSetRequest, "number" | "url">) =>
       Effect.gen(function* () {
         if (request.url === undefined) {
           return { number: request.number, urlKey: null } satisfies RequestedPullRequest;
@@ -1407,7 +1414,7 @@ export const makePullRequestWatchRuntime = (
      */
     const resolveTarget = (
       shell: OrchestrationThreadShell,
-      request: PullRequestWatchSetRequest,
+      request: Pick<PullRequestWatchSetRequest, "origin" | "url">,
       named: RequestedPullRequest,
     ) =>
       Effect.gen(function* () {
@@ -1844,8 +1851,56 @@ export const makePullRequestWatchRuntime = (
         }),
       );
 
+    /**
+     * Links the pull request an agent names to its chat's workspace, as watching one would but
+     * without the watch: one another workspace of the project already links counts as linked,
+     * and one the user removed from the workspace stays removed.
+     */
+    const linkPullRequest = (request: PullRequestLinkInput) =>
+      serial.withLock(
+        request.threadId,
+        Effect.gen(function* () {
+          if (request.number === undefined && request.url === undefined) {
+            return yield* watchError(
+              "no-pull-request",
+              "Name the pull request: its number or its URL.",
+            );
+          }
+          const shell = yield* threadShell(request.threadId).pipe(
+            Effect.mapError(() =>
+              watchError("thread-unavailable", "Could not read the chat. Try again."),
+            ),
+          );
+          if (shell === null || shell.archivedAt !== null) {
+            return yield* watchError(
+              "thread-unavailable",
+              "Only an active chat links pull requests.",
+            );
+          }
+          const named = yield* requestedPullRequest(request);
+          const { link, pendingLink } = yield* resolveTarget(
+            shell,
+            { origin: "agent", url: request.url },
+            named,
+          );
+          if (pendingLink !== null) {
+            yield* dispatchLinks(pendingLink).pipe(
+              Effect.mapError((error) => watchError("thread-unavailable", error.detail)),
+            );
+          }
+          return {
+            number: link.number,
+            url: link.url ?? null,
+            title: link.title ?? null,
+            state: link.state ?? null,
+            alreadyLinked: pendingLink === null,
+          } satisfies PullRequestLinkResult;
+        }),
+      );
+
     return {
       setWatch,
+      linkPullRequest,
       sweep: sweepPass({ only: null, forceDetail: false }),
       recheck: recheckHeld,
       run,

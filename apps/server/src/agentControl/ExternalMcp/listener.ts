@@ -16,6 +16,7 @@ import {
   JSON_RPC_ERROR_CODES,
   jsonRpcError,
   jsonRpcResult,
+  mcpToolCallResult,
   parseJsonRpcMessage,
   type JsonRpcResponse,
 } from "../Mcp/jsonRpc.ts";
@@ -216,7 +217,7 @@ export const makeExternalMcpRequestHandler = (deps: {
             deps.tools.callTool(integration.integrationId, call.name, call.arguments),
             { signal: controller.signal },
           );
-          return endJson(response, 200, jsonRpcResult(id ?? null, result));
+          return endJson(response, 200, jsonRpcResult(id ?? null, mcpToolCallResult(result)));
         } catch {
           return endJson(
             response,

@@ -94,6 +94,28 @@ export function visiblePullRequestLinks(
   return links.filter((link) => !link.dismissedAt).toSorted(comparePullRequestLinks);
 }
 
+/** `owner/repo` (or `group/sub/project`) of a pull request URL on the common hosts. */
+const PULL_REQUEST_URL_REPOSITORY =
+  /^https?:\/\/[^/]+\/(.+?)\/(?:-\/)?(?:pull|pulls|merge_requests|pull-requests|_git\/[^/]+\/pullrequest)\/\d+/iu;
+
+/**
+ * What finds a thread by its workspace's pull requests: `#123`, `owner/repo#123`, the URL and the
+ * title of each (ported from T3 Code's thread search by linked pull request, #10870).
+ */
+export function pullRequestLinkSearchTerms(
+  links: ReadonlyArray<Pick<WorktreePullRequestLink, "number" | "title" | "url">>,
+): string[] {
+  return links.flatMap((link) => {
+    const repository = link.url ? PULL_REQUEST_URL_REPOSITORY.exec(link.url)?.[1] : undefined;
+    return [
+      `#${link.number}`,
+      ...(repository ? [`${repository}#${link.number}`] : []),
+      ...(link.url ? [link.url] : []),
+      ...(link.title ? [link.title] : []),
+    ];
+  });
+}
+
 /** The pull request a workspace is about now: the newest open one, else the last finished. */
 export function selectCurrentPullRequestLink(
   links: ReadonlyArray<WorktreePullRequestLink>,
