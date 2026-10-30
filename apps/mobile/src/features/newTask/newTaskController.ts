@@ -224,6 +224,13 @@ export type NewTaskRunResult =
 
 export interface NewTaskControllerDeps {
   readonly dispatch: (command: ClientOrchestrationCommand) => Promise<unknown>;
+  /**
+   * Whether the node already shows this thread. A turn start that prepares a
+   * worktree is not answered from a command receipt: sent again after it went
+   * through, the node would try to set the worktree up a second time. Its
+   * thread exists only once that turn start succeeded, so it is the evidence.
+   */
+  readonly threadExists?: (threadId: ThreadId) => boolean;
   readonly waitForProject: (projectId: ProjectId) => Promise<void>;
   readonly waitForThread: (input: {
     readonly threadId: ThreadId;
@@ -414,9 +421,13 @@ export async function runNewTaskAttempt(
   // A new worktree is prepared by the node inside the turn start, like web's
   // first send: the thread id is this attempt's own, so the thread screen can
   // open at once and follow the node's setup feed for it.
-  if (next.worktree.kind === "new") {
+  const worktree = next.worktree;
+  if (worktree.kind === "new") {
+    if (!next.turnStarted && deps.threadExists?.(next.threadId) === true) {
+      next = { ...next, turnStarted: true };
+    }
     if (!next.turnStarted) {
-      const branch = next.worktree.branch.trim();
+      const branch = worktree.branch.trim();
       if (!branch) return failed(next, "worktree", false);
       try {
         await deps.dispatch(
@@ -434,25 +445,27 @@ export async function runNewTaskAttempt(
             },
             prepareWorktree: {
               projectCwd: validateNodeWorkspacePath(next.project.workspaceRoot),
-              baseBranch: next.worktree.baseBranch,
+              baseBranch: worktree.baseBranch,
               branch,
-              fetchOrigin: next.worktree.fetchOrigin,
+              fetchOrigin: worktree.fetchOrigin,
             },
           }),
         );
       } catch (error) {
         return refused(next, "worktree", error);
       }
-      next = {
+      next = { ...next, turnStarted: true };
+    }
+    return {
+      ok: true,
+      attempt: {
         ...next,
         threadCommandAccepted: true,
         threadReady: true,
         worktreeReady: true,
         worktreeAttached: true,
-        turnStarted: true,
-      };
-    }
-    return { ok: true, attempt: next };
+      },
+    };
   }
 
   if (!next.threadReady) {

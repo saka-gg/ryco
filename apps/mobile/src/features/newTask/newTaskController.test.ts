@@ -254,6 +254,24 @@ describe("New Task controller", () => {
     ]);
   });
 
+  it("never sends a worktree-preparing turn start again once its thread exists", async () => {
+    const runtime = deps({ threadExists: (threadId) => threadId === ids.threadId });
+    const result = await runNewTaskAttempt(
+      createNewTaskAttempt({
+        environmentId,
+        prompt: "Isolate this change",
+        project: { kind: "existing", projectId: existingProjectId, workspaceRoot: "/code/ryco" },
+        worktree: { kind: "new", branch: "feat/mobile", baseBranch: "HEAD", fetchOrigin: false },
+        createdAt,
+        ids,
+      }),
+      runtime,
+    );
+    expect(result.ok).toBe(true);
+    expect(result.attempt.turnStarted).toBe(true);
+    expect(runtime.commands).toEqual([]);
+  });
+
   it("calls a lost new-worktree turn start uncertain, with the step's own text", async () => {
     const runtime = deps({
       dispatch: async () => {

@@ -32,6 +32,8 @@ export function createNewTaskLaunchDeps(environmentId: EnvironmentId): NewTaskLa
     newCommandId,
     controller: {
       dispatch: (command) => api.orchestration.dispatchCommand(command),
+      threadExists: (threadId) =>
+        selectThreadExistsByRef(useStore.getState(), scopeThreadRef(environmentId, threadId)),
       waitForProject: (projectId) =>
         waitForAuthoritative(
           () =>
