@@ -164,13 +164,17 @@ export function ScheduleEditor(props: ScheduleEditorSlotProps) {
 
   const checkout = checkouts.find((candidate) => candidate.key === checkoutKey);
   const providers = checkout?.providers ?? [];
-  const projectChats = useProjectChats(checkout?.environmentId, checkout?.projectId);
+  // A heartbeat is offered where the device takes one; a draft that has one keeps it. Only
+  // then are the project's chats read: every chat change would re-render the editor.
+  const offersHeartbeat = checkout?.snapshot?.heartbeats === true || draft.target !== null;
+  const projectChats = useProjectChats(
+    offersHeartbeat ? checkout?.environmentId : null,
+    checkout?.projectId,
+  );
   const chats = useMemo(() => heartbeatChatChoices(projectChats), [projectChats]);
-  // A heartbeat is offered where the device takes one; a draft that has one keeps it.
-  const heartbeat =
-    checkout?.snapshot?.heartbeats || draft.target !== null
-      ? { chats, choosing: choosingChat && draft.target === null }
-      : null;
+  const heartbeat = offersHeartbeat
+    ? { chats, choosing: choosingChat && draft.target === null }
+    : null;
 
   // A new draft opened before the device's providers arrived takes their
   // default model once they do; it stays a clean draft.

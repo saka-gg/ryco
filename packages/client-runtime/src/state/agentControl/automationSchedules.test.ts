@@ -1056,6 +1056,19 @@ describe("drafts", () => {
     expect(local.execution).toMatchObject({ title: "Spaced", tokenMode: "balanced" });
   });
 
+  it("saves no branch for a heartbeat, whose runs go to its chat", () => {
+    // A new draft defaults to a worktree off the main checkout's branch; picking a chat must not
+    // keep that branch, which the node would check on every run, hidden from the editor.
+    const draft = {
+      ...draftFromDefinition(twoHourly),
+      envMode: "worktree" as const,
+      baseRef: "feat/x",
+      target: { kind: "thread" as const, threadId: ThreadId.make("thread-ci") },
+    };
+    expect(definitionFromDraft(draft).execution).not.toHaveProperty("baseRef");
+    expect(definitionFromDraft({ ...draft, target: null }).execution.baseRef).toBe("feat/x");
+  });
+
   it("carries a heartbeat's chat through an edit, and names where runs go", () => {
     const heartbeat = {
       ...twoHourly,

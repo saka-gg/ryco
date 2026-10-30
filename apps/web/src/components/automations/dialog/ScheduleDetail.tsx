@@ -129,7 +129,11 @@ export function ScheduleDetail(props: ScheduleDetailProps) {
   const automation = row.automation;
   const def = row.def;
   const ex = def.execution;
-  const chats = useProjectChats(checkout.environmentId, checkout.projectId);
+  // Only a heartbeat names a chat; any other schedule needs no chat list.
+  const chats = useProjectChats(
+    ex.target === undefined ? null : checkout.environmentId,
+    checkout.projectId,
+  );
   const resumeWhyId = useId();
   const providers = checkout.providers.length ? checkout.providers : undefined;
   const lockedReason = checkout.disabledReason;

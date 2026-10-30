@@ -1040,7 +1040,9 @@ export function definitionFromDraft(draft: ScheduleDraft): AgentControlAutomatio
     runtimeMode: draft.runtimeMode,
     ...(draft.tokenMode ? { tokenMode: draft.tokenMode } : {}),
     envMode: draft.envMode,
-    ...(draft.envMode === "worktree" && baseRef ? { baseRef } : {}),
+    // A heartbeat runs in its chat: a branch would only be checked on every run, hidden from
+    // the editor, and fail them all once it is gone.
+    ...(draft.envMode === "worktree" && baseRef && draft.target === null ? { baseRef } : {}),
     ...(draft.target === null ? {} : { target: draft.target }),
   };
   return {
