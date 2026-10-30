@@ -2858,6 +2858,56 @@ setInterval(() => {}, 1000);
         }).pipe(Effect.provide(OverrideTestLayer)),
     );
 
+    it.effect("copies the untracked files .worktreeinclude names into a new worktree", () =>
+      Effect.gen(function* () {
+        const cwd = yield* makeTmpDir();
+        const { initialBranch } = yield* initRepoWithCommit(cwd);
+        const pathService = yield* Path.Path;
+        const fileSystem = yield* FileSystem.FileSystem;
+        const driver = yield* GitVcsDriver.GitVcsDriver;
+        const worktreeAt = (name: string) =>
+          Effect.map(makeTmpDir("git-worktrees-"), (dir) => pathService.join(dir, name));
+
+        yield* writeTextFile(cwd, ".gitignore", ".env\nconfig/local.json\n*.log\n");
+        yield* writeTextFile(cwd, "tracked.txt", "from the branch\n");
+        yield* git(cwd, ["add", ".gitignore", "tracked.txt"]);
+        yield* git(cwd, ["commit", "-m", "ignore local files"]);
+        yield* writeTextFile(cwd, ".env", "SECRET=1\n");
+        yield* writeTextFile(cwd, "config/local.json", "{}\n");
+        yield* writeTextFile(cwd, "packages/api/.env", "API=1\n");
+        yield* writeTextFile(cwd, "debug.log", "noise\n");
+
+        // Without the file nothing ignored is copied.
+        const plain = yield* worktreeAt("plain");
+        yield* driver.createWorktree({
+          cwd,
+          path: plain,
+          refName: initialBranch,
+          newRefName: "feature/plain",
+        });
+        assert.isFalse(yield* fileSystem.exists(pathService.join(plain, ".env")));
+
+        yield* writeTextFile(cwd, ".worktreeinclude", ".env\n/config/local.json\ntracked.txt\n");
+        // Untracked in the source but tracked by the new branch: the branch's copy stays.
+        yield* git(cwd, ["rm", "--cached", "-q", "tracked.txt"]);
+        yield* writeTextFile(cwd, "tracked.txt", "local edit\n");
+        const included = yield* worktreeAt("included");
+        yield* driver.createWorktree({
+          cwd,
+          path: included,
+          refName: initialBranch,
+          newRefName: "feature/included",
+        });
+        const read = (relative: string) =>
+          fileSystem.readFileString(pathService.join(included, relative));
+        assert.equal(yield* read(".env"), "SECRET=1\n");
+        assert.equal(yield* read("config/local.json"), "{}\n");
+        assert.equal(yield* read("packages/api/.env"), "API=1\n");
+        assert.isFalse(yield* fileSystem.exists(pathService.join(included, "debug.log")));
+        assert.equal(yield* read("tracked.txt"), "from the branch\n");
+      }),
+    );
+
     it.effect("copies dependency install directories when deprecated hydration is requested", () =>
       Effect.gen(function* () {
         const cwd = yield* makeTmpDir();

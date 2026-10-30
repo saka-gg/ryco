@@ -2941,6 +2941,50 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
    * registration of that path (`missingRegistrationReplacement` decides; a refusal fails here,
    * before anything changes).
    */
+  /**
+   * The untracked files the source checkout's `.worktreeinclude` names (`.env`, local config),
+   * copied into a new worktree. Without the file this costs one stat; the copy module loads only
+   * when there is one. Never fails the worktree: what could not be copied is logged.
+   */
+  const copyDeclaredWorktreeIncludes = (cwd: string, worktreePath: string) =>
+    Effect.gen(function* () {
+      const includeFile = path.join(cwd, ".worktreeinclude");
+      const declared = yield* fileSystem
+        .exists(includeFile)
+        .pipe(Effect.orElseSucceed(() => false));
+      if (!declared) return;
+      const include = yield* Effect.promise(() => import("./worktreeInclude.ts"));
+      const listed = yield* executeGit(
+        "GitVcsDriver.createWorktree.listIncluded",
+        cwd,
+        ["ls-files", "--others", "--ignored", `--exclude-from=${includeFile}`, "-z"],
+        { maxOutputBytes: include.WORKTREE_INCLUDE_MAX_LIST_BYTES },
+      );
+      if (listed.exitCode !== 0) {
+        return yield* Effect.logWarning(
+          "The worktree was created without the files .worktreeinclude names: git could not list them.",
+          { detail: listed.stderr.trim() },
+        );
+      }
+      const result = yield* include.copyWorktreeIncludedFiles({
+        sourceRoot: cwd,
+        worktreePath,
+        paths: include.parseWorktreeIncludePaths(listed.stdout),
+      });
+      if (result.failed.length > 0) {
+        yield* Effect.logWarning(
+          "Some files .worktreeinclude names could not be copied into the new worktree.",
+          { failed: result.failed },
+        );
+      }
+    }).pipe(
+      Effect.catch((error) =>
+        Effect.logWarning("The worktree was created without the files .worktreeinclude names.", {
+          detail: error.message,
+        }),
+      ),
+    );
+
   const missingRegistrationToReplace = (cwd: string, worktreePath: string, branch: string) =>
     Effect.gen(function* () {
       const operation = "GitVcsDriver.createWorktree.registration";
@@ -3233,6 +3277,8 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
                   ),
                 );
               }
+
+              yield* copyDeclaredWorktreeIncludes(input.cwd, worktreePath);
 
               if (input.dependencyHydration === "copyInstallDirs") {
                 yield* copyWorktreeDependencyInstallDirs({ cwd: input.cwd, worktreePath });
