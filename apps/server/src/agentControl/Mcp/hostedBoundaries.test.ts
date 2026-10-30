@@ -66,6 +66,7 @@ describe("pre-auth server environment descriptor", () => {
       "projectSearchEmptyQuery",
       "providerProjectCommands",
       "providerSessionPrewarm",
+      "pullRequestOptions",
       "recoverableGitActions",
       "repositoryIdentity",
       "requiredWorktreeBootstrap",

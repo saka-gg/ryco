@@ -7,6 +7,9 @@ import {
   mergeDetectedChangeRequestIntoGitStatus,
   requiresDefaultBranchConfirmation,
   resolveAutoFeatureBranchName,
+  resolveCreatePrDialogExecution,
+  resolveCreatePrDialogView,
+  resolveCreatePrExecution,
   resolveDefaultBranchActionDialogCopy,
   resolveLiveThreadBranchUpdate,
   resolvePullAvailability,
@@ -1382,3 +1385,117 @@ describe("resolveShipPlan", () => {
     assert.equal(plan.action, "commit");
   });
 });
+
+describe("Create PR dialog", () => {
+  const context = (overrides: Partial<VcsStatusResult>, isDefaultRef = false) => ({
+    gitStatus: status(overrides),
+    isBusy: false,
+    isDefaultRef,
+    hasPrimaryRemote: true,
+  });
+
+  it("commits, pushes and opens the PR when the tree is dirty", () => {
+    assert.deepEqual(
+      resolveCreatePrExecution(context({ hasWorkingTreeChanges: true, aheadOfDefaultCount: 0 })),
+      { kind: "run_action", action: "commit_push_pr" },
+    );
+  });
+
+  it("opens the PR from committed work, pushing first when needed", () => {
+    assert.deepEqual(resolveCreatePrExecution(context({ hasUpstream: false, aheadCount: 2 })), {
+      kind: "run_action",
+      action: "create_pr",
+    });
+  });
+
+  it("stays blocked behind upstream and without a ref", () => {
+    assert.deepInclude(resolveCreatePrExecution(context({ behindCount: 1 })), {
+      kind: "unavailable",
+      hint: "Branch is behind upstream. Pull before creating a PR.",
+    });
+    assert.deepInclude(resolveCreatePrExecution(context({ refName: null })), {
+      kind: "unavailable",
+    });
+    assert.deepEqual(
+      resolveCreatePrExecution(
+        context({ pr: { ...detectedPr(), state: "open" }, hasWorkingTreeChanges: true }),
+      ),
+      { kind: "open_pr" },
+    );
+  });
+
+  it("takes only committed work with the local-changes toggle off", () => {
+    const dirty = context({ hasWorkingTreeChanges: true, aheadOfDefaultCount: 1 });
+    assert.deepEqual(resolveCreatePrDialogExecution(dirty, true), {
+      kind: "run_action",
+      action: "commit_push_pr",
+    });
+    assert.deepEqual(resolveCreatePrDialogExecution(dirty, false), {
+      kind: "run_action",
+      action: "create_pr",
+    });
+    assert.deepInclude(
+      resolveCreatePrDialogExecution(
+        context({ hasWorkingTreeChanges: true, aheadOfDefaultCount: 0, aheadCount: 0 }),
+        false,
+      ),
+      { kind: "unavailable", hint: "No branch changes to include in a PR." },
+    );
+  });
+
+  it("summarises the branch and the local changes", () => {
+    assert.deepEqual(
+      resolveCreatePrDialogView(
+        context({
+          hasUpstream: false,
+          hasWorkingTreeChanges: true,
+          workingTree: { files: [], insertions: 4, deletions: 1 },
+        }),
+      ),
+      {
+        refName: "feature/test",
+        isNewBranch: true,
+        willCreateFeatureBranch: false,
+        showCommitToggle: true,
+        insertions: 4,
+        deletions: 1,
+      },
+    );
+    assert.deepInclude(resolveCreatePrDialogView(context({}, true)), {
+      isNewBranch: true,
+      willCreateFeatureBranch: true,
+      showCommitToggle: false,
+    });
+  });
+
+  it("enables the menu's Create PR on a dirty tree only when the dialog handles it", () => {
+    const dirty = status({ hasWorkingTreeChanges: true, aheadOfDefaultCount: 1 });
+    const pr = (createPrDialog: boolean) =>
+      buildMenuItems(dirty, false, true, createPrDialog).find((item) => item.id === "pr");
+    assert.equal(pr(false)?.disabled, true);
+    assert.equal(pr(true)?.disabled, false);
+  });
+
+  it("skips the generation stage when the user wrote the title and description", () => {
+    const stages = (hasCustomPullRequestText: boolean) =>
+      buildGitActionProgressStages({
+        action: "create_pr",
+        hasCustomCommitMessage: false,
+        hasWorkingTreeChanges: false,
+        hasCustomPullRequestText,
+      });
+    assert.deepEqual(stages(true), ["Preparing PR...", "Creating pull request..."]);
+    assert.include(stages(false), "Generating PR content...");
+  });
+});
+
+function detectedPr(): NonNullable<VcsStatusResult["pr"]> {
+  return {
+    number: 1,
+    title: "Open",
+    url: "https://example.com/pr/1",
+    baseRef: "main",
+    headRef: "feature/test",
+    state: "open",
+  };
+}

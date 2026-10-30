@@ -1271,3 +1271,139 @@ describe("git actions that outlive their connection", () => {
     expect(toastAddSpy).not.toHaveBeenCalled();
   });
 });
+
+describe("Create PR dialog", () => {
+  const mounted: Array<() => Promise<void>> = [];
+
+  beforeEach(() => {
+    writePrimaryEnvironmentDescriptor({
+      environmentId: ENVIRONMENT_A,
+      label: "Local environment",
+      platform: { os: "darwin", arch: "arm64" },
+      serverVersion: "0.0.0-test",
+      capabilities: { repositoryIdentity: true, threadSettlement: false },
+    });
+    liveBranchRef.current = BRANCH_NAME;
+  });
+
+  afterEach(async () => {
+    for (const unmount of mounted.splice(0)) await unmount();
+    await settleRunningStackedAction();
+    vi.clearAllMocks();
+    __resetEnvironmentApiOverridesForTests();
+    gitStatusOverridesRef.current = {};
+    primaryServerConfigRef.current = null;
+    resetPrimaryEnvironmentDescriptorForTests();
+    liveBranchRef.current = "";
+    document.body.innerHTML = "";
+  });
+
+  async function mountControl(input: {
+    pullRequestOptions: boolean;
+    status: Partial<VcsStatusResult>;
+  }) {
+    setEnvironmentConfig(ENVIRONMENT_A, "ryco", {
+      ...(input.pullRequestOptions ? { pullRequestOptions: true } : {}),
+    });
+    gitStatusOverridesRef.current = input.status;
+    const screen = await render(
+      <GitActionsControl
+        gitCwd={GIT_CWD}
+        activeThreadRef={scopeThreadRef(ENVIRONMENT_A, SHARED_THREAD_ID)}
+      />,
+    );
+    mounted.push(() => screen.unmount());
+    await page.getByRole("button", { name: "Git action options" }).click();
+  }
+
+  const dirtyTree: Partial<VcsStatusResult> = {
+    hasWorkingTreeChanges: true,
+    workingTree: {
+      files: [{ path: "src/app.ts", insertions: 12, deletions: 3 }],
+      insertions: 12,
+      deletions: 3,
+    },
+    aheadCount: 0,
+    aheadOfDefaultCount: 2,
+  };
+
+  it("commits, pushes and opens a draft with the title the user wrote", async () => {
+    await mountControl({ pullRequestOptions: true, status: dirtyTree });
+    await page.getByRole("menuitem", { name: "Create PR" }).click();
+    const dialog = page.getByRole("dialog");
+    await expect.element(dialog.getByText("Commit and push local changes")).toBeVisible();
+    await expect.element(dialog.getByText("+12")).toBeVisible();
+    await dialog.getByRole("textbox", { name: "PR title" }).fill("  Fix the flaky upload  ");
+    await dialog.getByRole("button", { name: "Create draft PR" }).click();
+
+    await vi.waitFor(() => expect(runStackedActionMutateAsyncSpy).toHaveBeenCalledTimes(1));
+    expect(runStackedActionMutateAsyncSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: "commit_push_pr",
+        pullRequest: { title: "Fix the flaky upload", draft: true },
+      }),
+    );
+    await expect.element(page.getByRole("dialog")).not.toBeInTheDocument();
+  });
+
+  it("leaves local changes out when the toggle is off", async () => {
+    await mountControl({ pullRequestOptions: true, status: dirtyTree });
+    await page.getByRole("menuitem", { name: "Create PR" }).click();
+    const dialog = page.getByRole("dialog");
+    await dialog.getByRole("checkbox").click();
+    await dialog.getByRole("textbox", { name: "PR description" }).fill("Body text");
+    await userEvent.keyboard("{Meta>}{Enter}{/Meta}");
+
+    await vi.waitFor(() => expect(runStackedActionMutateAsyncSpy).toHaveBeenCalledTimes(1));
+    expect(runStackedActionMutateAsyncSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: "create_pr",
+        pullRequest: { body: "Body text", allowDirtyWorkingTree: true },
+      }),
+    );
+  });
+
+  it("says why it cannot create a PR when nothing is committed and the toggle is off", async () => {
+    await mountControl({
+      pullRequestOptions: true,
+      status: { ...dirtyTree, aheadOfDefaultCount: 0 },
+    });
+    await page.getByRole("menuitem", { name: "Create PR" }).click();
+    const dialog = page.getByRole("dialog");
+    await dialog.getByRole("checkbox").click();
+    await expect.element(dialog.getByText("No branch changes to include in a PR.")).toBeVisible();
+    await expect.element(dialog.getByRole("button", { name: "Create PR" })).toBeDisabled();
+  });
+
+  it("keeps the one-click Create PR on a node that takes no pull request options", async () => {
+    await mountControl({ pullRequestOptions: false, status: dirtyTree });
+    await expect
+      .element(page.getByRole("menuitem", { name: "Create PR" }))
+      .toHaveAttribute("aria-disabled", "true");
+  });
+
+  it("sends the dialog's choices to the node", async () => {
+    const runStackedAction = vi.fn(() => new Promise<never>(() => undefined));
+    __setEnvironmentApiOverrideForTests(ENVIRONMENT_A, {
+      git: { runStackedAction },
+    } as unknown as EnvironmentApi);
+    await mountControl({ pullRequestOptions: true, status: {} });
+    void runStackedActionMutationRef.current?.mutationFn({
+      actionId: "action-1",
+      action: "create_pr",
+      pullRequest: { title: "Title", body: "Body", draft: true, allowDirtyWorkingTree: true },
+    });
+    expect(runStackedAction).toHaveBeenCalledWith(
+      {
+        action: "create_pr",
+        actionId: "action-1",
+        cwd: GIT_CWD,
+        prTitle: "Title",
+        prBody: "Body",
+        prDraft: true,
+        allowDirtyWorkingTree: true,
+      },
+      expect.objectContaining({ recoverable: true }),
+    );
+  });
+});

@@ -155,6 +155,11 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
    */
   stagedOnlyCommit: Schema.optionalKey(Schema.Boolean),
   /**
+   * `git.runStackedAction` honours `prTitle`, `prBody`, `prDraft` and `allowDirtyWorkingTree`;
+   * absent on older servers, which drop them, generate the text and open the pull request ready.
+   */
+  pullRequestOptions: Schema.optionalKey(Schema.Boolean),
+  /**
    * `terminal.write` honours `requireIdle` (types only into a shell it verifies idle, else
    * `TerminalBusyError`); absent on older servers, which drop the key and write unguarded.
    */

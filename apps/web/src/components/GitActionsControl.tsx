@@ -10,7 +10,7 @@ import type {
   VcsStatusResult,
 } from "@ryco/contracts";
 import { Option } from "effect";
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { Suspense, useCallback, useEffect, useMemo, useState } from "react";
 import { flushSync } from "react-dom";
 import {
   ArrowDownIcon,
@@ -91,6 +91,7 @@ import { ensureEnvironmentApi } from "~/environmentApi";
 import { useSavedEnvironmentRuntimeStore } from "~/environments/runtime";
 import { usePrimaryEnvironmentId } from "~/environments/primary";
 import { useServerConfig } from "~/rpc/serverState";
+import { preloadableLazy } from "~/lib/preloadableLazy";
 import { readLocalApi } from "~/localApi";
 import { getSourceControlPresentation } from "~/sourceControlPresentation";
 import { useSettingsDialogStore } from "../settingsDialogStore";
@@ -1092,6 +1093,22 @@ export function GitThreadSync({
   return null;
 }
 
+const LazyGitCreatePullRequestDialog = preloadableLazy(() =>
+  import("./GitCreatePullRequestDialog").then((module) => module.default),
+);
+
+/** Whether the environment's node takes the Create PR dialog's title, body and draft choice. */
+function useNodeTakesPullRequestOptions(environmentId: ScopedThreadRef["environmentId"] | null) {
+  const primaryEnvironmentId = usePrimaryEnvironmentId();
+  const primaryServerConfig = useServerConfig();
+  const environmentServerConfig = useSavedEnvironmentRuntimeStore((state) =>
+    environmentId ? state.byId[environmentId]?.serverConfig : null,
+  );
+  const serverConfig =
+    environmentId === primaryEnvironmentId ? primaryServerConfig : environmentServerConfig;
+  return serverConfig?.environment.capabilities.pullRequestOptions === true;
+}
+
 export default function GitActionsControl({
   gitCwd,
   activeThreadRef,
@@ -1132,6 +1149,8 @@ export default function GitActionsControl({
   const [excludedFiles, setExcludedFiles] = useState<ReadonlySet<string>>(new Set());
   const [isEditingFiles, setIsEditingFiles] = useState(false);
   const [isPublishDialogOpen, setIsPublishDialogOpen] = useState(false);
+  const [isCreatePrDialogOpen, setIsCreatePrDialogOpen] = useState(false);
+  const createPrDialog = useNodeTakesPullRequestOptions(activeEnvironmentId);
 
   const allFiles = gitStatusForActions?.workingTree.files ?? [];
   const selectedFiles = allFiles.filter((f) => !excludedFiles.has(f.path));
@@ -1139,8 +1158,8 @@ export default function GitActionsControl({
   const noneSelected = selectedFiles.length === 0;
 
   const gitActionMenuItems = useMemo(
-    () => buildMenuItems(gitStatusForActions, isGitActionRunning, hasPrimaryRemote),
-    [gitStatusForActions, hasPrimaryRemote, isGitActionRunning],
+    () => buildMenuItems(gitStatusForActions, isGitActionRunning, hasPrimaryRemote, createPrDialog),
+    [createPrDialog, gitStatusForActions, hasPrimaryRemote, isGitActionRunning],
   );
 
   const runDialogActionOnNewBranch = () => {
@@ -1199,6 +1218,10 @@ export default function GitActionsControl({
       return;
     }
     if (item.dialogAction === "create_pr") {
+      if (createPrDialog) {
+        setIsCreatePrDialogOpen(true);
+        return;
+      }
       void runGitActionWithToast({ action: "create_pr" });
       return;
     }
@@ -1355,6 +1378,7 @@ export default function GitActionsControl({
           <Menu
             onOpenChange={(open) => {
               if (open) {
+                if (createPrDialog) void LazyGitCreatePullRequestDialog.preload();
                 void refreshGitStatus({
                   environmentId: activeEnvironmentId,
                   cwd: gitCwd,
@@ -1694,6 +1718,33 @@ export default function GitActionsControl({
         environmentId={activeEnvironmentId}
         gitCwd={gitCwd}
       />
+
+      {isCreatePrDialogOpen ? (
+        <Suspense fallback={null}>
+          <LazyGitCreatePullRequestDialog
+            onOpenChange={setIsCreatePrDialogOpen}
+            context={{
+              gitStatus: gitStatusForActions,
+              isBusy: isGitActionRunning,
+              isDefaultRef,
+              hasPrimaryRemote,
+            }}
+            terminology={changeRequestTerminology}
+            onSubmit={(submission) => {
+              setIsCreatePrDialogOpen(false);
+              void runGitActionWithToast({
+                action: submission.action,
+                pullRequest: {
+                  ...(submission.title ? { title: submission.title } : {}),
+                  ...(submission.body ? { body: submission.body } : {}),
+                  ...(submission.draft ? { draft: true } : {}),
+                  ...(submission.leaveLocalChangesOut ? { allowDirtyWorkingTree: true } : {}),
+                },
+              });
+            }}
+          />
+        </Suspense>
+      ) : null}
 
       <GitDefaultBranchActionDialog runner={runner} />
     </>
