@@ -6,7 +6,7 @@
  *
  * @module cliDb/dbRun
  */
-import { Console, Effect, Path } from "effect";
+import { Console, Effect, Option, Path } from "effect";
 
 import { deriveServerPaths, type ServerConfigShape } from "../config.ts";
 import { expandHomePath } from "../os-jank.ts";
@@ -19,7 +19,13 @@ import {
   type ManualBackupResult,
   type ManualBackupStep,
   type RestoreResult,
+  DatabaseBackupCommandError,
 } from "../persistence/databaseBackups.ts";
+import { acquireDatabaseMaintenance } from "../persistence/databaseOwnerLock.ts";
+import {
+  replaceDatabaseWithBackup,
+  type ReplaceResult,
+} from "../persistence/databaseRestoreSwap.ts";
 import { makeRuntimeSqliteLayer } from "../persistence/Layers/Sqlite.ts";
 
 export interface DbRunInput {
@@ -31,7 +37,8 @@ export interface DbRunInput {
 
 export interface DbRestoreInput extends DbRunInput {
   readonly file: string;
-  readonly into: string;
+  readonly into: Option.Option<string>;
+  readonly replace: boolean;
   readonly fullCheck: boolean;
 }
 
@@ -108,6 +115,7 @@ const formatBackupList = (listing: {
     ]),
     "",
     "Restore one into a new directory with: ryco db restore <file> --into <new directory>",
+    "or, with Ryco stopped, in place of the database in use: ryco db restore <file> --replace",
   ].join("\n");
 };
 
@@ -124,10 +132,7 @@ const backupJson = (backup: ListedDatabaseBackup) => ({
   opensWithThisBuild: backup.opensWithThisBuild,
 });
 
-const formatRestore = (
-  result: RestoreResult,
-  live: { readonly stateDir: string; readonly secretsDir: string },
-) =>
+const formatRestore = (result: RestoreResult, file: string) =>
   [
     `Restored the database (schema ${result.schema}, ${result.check} ok) to ${result.path} ` +
       `(${formatBytes(result.bytes)}, ${seconds(result.ms)}).`,
@@ -136,12 +141,27 @@ const formatRestore = (
     "Next steps:",
     `  Start Ryco on it: ryco serve --base-dir ${result.baseDir}  (or RYCO_HOME=${result.baseDir})`,
     "  It has no settings, secrets or Hub identity, so pair your devices with it again.",
-    `  To make it your main database instead: quit Ryco, move ${live.stateDir}/state.sqlite,`,
-    "  state.sqlite-wal and state.sqlite-shm aside (do not delete them), and copy the restored",
-    "  file in as state.sqlite. That database accepts again what was revoked since the backup was",
-    "  taken, so also move this file aside, which signs every device out (pair them again):",
-    `    ${live.secretsDir}/server-signing-key.bin`,
-    "  and revoke again any pairing link or integration you revoked since the backup.",
+    "  To make the backup your main database instead, quit Ryco and run:",
+    `    ryco db restore ${file} --replace`,
+    "  It keeps the database it replaces and signs every device out (the restored database",
+    "  accepts again what was revoked since the backup was taken).",
+  ].join("\n");
+
+const formatReplace = (result: ReplaceResult) =>
+  [
+    `Restored the database (schema ${result.schema}, ${result.check} ok) in place of ${result.path} ` +
+      `(${formatBytes(result.bytes)}, ${seconds(result.ms)}).`,
+    ...result.warnings.map((warning) => `Warning: ${warning}`),
+    "",
+    `The database it replaced${result.signedOut ? " and the session signing key were" : " was"} moved to:`,
+    `  ${result.replacedDir}`,
+    "Nothing was deleted. Next steps:",
+    "  Start Ryco as usual.",
+    ...(result.signedOut
+      ? ["  Every device was signed out: pair your phones and other browsers again."]
+      : []),
+    "  The restored database accepts again what was revoked after the backup was taken: revoke",
+    "  again any pairing link or integration you revoked since then.",
   ].join("\n");
 
 /** `ryco db backup`. */
@@ -167,19 +187,46 @@ export const runDbList = (input: DbRunInput) =>
     );
   });
 
-/** `ryco db restore <file> --into <dir>`. */
+/** `ryco db restore <file> --into <dir>` or `--replace`. */
 export const runDbRestore = (input: DbRestoreInput) =>
   Effect.gen(function* () {
     const path = yield* Path.Path;
     const { config } = input;
-    const intoBaseDir = path.resolve(yield* expandHomePath(input.into.trim()));
+    if (input.replace === Option.isSome(input.into)) {
+      return yield* new DatabaseBackupCommandError({
+        reason: "unsafe-target",
+        message: input.replace
+          ? "Use either --into <directory> or --replace, not both."
+          : "Say where to restore: --into <new directory>, or --replace to make it the database in use.",
+      });
+    }
+    const file = path.resolve(yield* expandHomePath(input.file.trim()));
+    if (Option.isNone(input.into)) {
+      // As the database's owner: no server can start while the database is swapped.
+      const result = yield* Effect.scoped(
+        acquireDatabaseMaintenance(config.dbPath, "restore the database from a backup").pipe(
+          Effect.andThen(
+            replaceDatabaseWithBackup({
+              file,
+              live: { baseDir: config.baseDir, stateDir: config.stateDir, dbPath: config.dbPath },
+              openSqlite: makeRuntimeSqliteLayer,
+              fullCheck: input.fullCheck,
+              nowMs: Date.now(),
+            }),
+          ),
+        ),
+      );
+      yield* Console.log(input.json ? input.emitJson(result) : formatReplace(result));
+      return;
+    }
+    const intoBaseDir = path.resolve(yield* expandHomePath(input.into.value.trim()));
     const target = yield* deriveServerPaths(intoBaseDir, undefined);
     const result = yield* restoreDatabaseBackup({
-      file: path.resolve(yield* expandHomePath(input.file.trim())),
+      file,
       target: { baseDir: intoBaseDir, dbPath: target.dbPath },
       live: { baseDir: config.baseDir, stateDir: config.stateDir, dbPath: config.dbPath },
       openSqlite: makeRuntimeSqliteLayer,
       fullCheck: input.fullCheck,
     });
-    yield* Console.log(input.json ? input.emitJson(result) : formatRestore(result, config));
+    yield* Console.log(input.json ? input.emitJson(result) : formatRestore(result, file));
   });

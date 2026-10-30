@@ -187,13 +187,13 @@ describe("ryco db", () => {
       );
       assert.include(restore.output, `ryco serve --base-dir ${into}`);
       assert.include(restore.output, "pair your devices with it again");
-      // The swap into the data directory in use: an old database would accept again every
-      // session the signing key there signed and that was revoked after the backup.
-      const stateDir = NodePath.join(home.root, "userdata");
+      // Making it the database in use is `--replace`, which signs every device out: an old
+      // database would accept again every session revoked after the backup.
       assert.include(
         restore.output,
-        `${NodePath.join(stateDir, "secrets", "server-signing-key.bin")}`,
+        `ryco db restore ${NodePath.join(home.backupsDir, manual!)} --replace`,
       );
+      assert.include(restore.output, "signs every device out");
       assert.include(restore.output, "revoked since the backup");
     }).pipe(Effect.ensuring(home.cleanup), Effect.ensuring(target.cleanup));
   });

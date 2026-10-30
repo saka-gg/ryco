@@ -4,7 +4,8 @@ Ryco keeps its history in one SQLite database, `<stateDir>/state.sqlite` (`~/.ry
 default, `~/.ryco/dev` for development servers). Before an upgrade changes that database, Ryco
 writes a restorable copy of it next to it, in `<stateDir>/backups`. You can also back it up
 yourself at any time with `ryco db backup`, see the backups with `ryco db list`, and restore one
-into a new data directory with `ryco db restore` (see [Commands](#commands)).
+into a new data directory, or in place of the database in use, with `ryco db restore` (see
+[Commands](#commands)).
 
 ## When a backup is written
 
@@ -124,7 +125,8 @@ follow this naming are never removed. The Storage settings list the folder as "D
 
 ## Commands
 
-None of these commands migrates or writes the database in use, so they are safe while Ryco runs.
+None of these commands migrates the database in use, and only `ryco db restore --replace` changes
+it (as its owner, while no server runs). The others are safe while Ryco runs.
 `ryco db backup` reads it through a read-only connection (under Bun, when no other process has the
 database open, through a normal connection that only reads, because Bun's SQLite cannot open a
 WAL database read-only then); the other two never open it. Each takes `--base-dir <dir>` (like
@@ -194,17 +196,42 @@ Then start Ryco on it: `ryco serve --base-dir <dir>` (or `RYCO_HOME=<dir>`). The
 directory has no settings, secrets or Hub identity, so pair your devices with it again.
 
 A backup holds the database only. It does not include settings, secrets, the Hub identity,
-attachments, task files or logs, nor anything written after the backup was taken. To make the
-restored database your main one, quit Ryco (the desktop app, `ryco service stop`, or any
-`ryco serve`), move `<stateDir>/state.sqlite`, `state.sqlite-wal` and `state.sqlite-shm` aside (do
-not delete them), and copy `<dir>/userdata/state.sqlite` in as `state.sqlite`. Ryco does not do
-this swap for you yet.
+attachments, task files or logs, nor anything written after the backup was taken. To make a
+backup your main database instead, use `--replace` (below).
+
+### `ryco db restore <file> --replace`
+
+Makes the backup the database in use, after the same checks as `--into`, and keeps everything it
+replaces in `<stateDir>/replaced-<time>/`. Quit Ryco first (the desktop app, `ryco service stop`,
+or any `ryco serve`): the command takes the database's owner lock
+([database-ownership.md](database-ownership.md)) and refuses while a server holds it.
+
+1. It folds the write-ahead log into the database (`wal_checkpoint(TRUNCATE)`) and asks the
+   operating system whether any other process still has the database or its log open (`lsof` on
+   macOS, `/proc` on Linux, as `ryco doctor` does before its swap). SQLite opens `-wal` and `-shm`
+   by name, so a process that kept the old file open would share the restored file's log and
+   corrupt it. It refuses when another process has them open, or when that cannot be known
+   (Windows, no `lsof`); restore with `--into` there.
+2. It restores and checks the backup into a staging directory next to the database
+   (`<stateDir>/.restore-staging-<time>/`), on the same volume, so publishing it is a rename. A
+   backup with a newer schema than this build supports is refused.
+3. It writes a journal, `<stateDir>/state.sqlite.restore.json`, then moves the session signing key
+   (`secrets/server-signing-key.bin`) and `state.sqlite` with its `-wal`, `-shm` and `-journal`
+   files into `<stateDir>/replaced-<time>/`, renames the restored file to `state.sqlite`, and
+   removes the journal and the staging directory, flushing every directory on the way. Nothing is
+   deleted.
+
+If the command stops part-way (a crash, a power loss), the journal finishes the swap: the next
+start of Ryco, or the next `ryco db restore --replace`, completes it before anything opens the
+database. A swap that fails while it runs moves back what it moved, and the database stays as it
+was. A journal is only acted on when every path in it is one the command would have written for
+that database.
 
 Revocations live in the database, so the restored one accepts again every device session,
-pairing link and integration revoked after the backup was taken. Session tokens are signed with
-`<stateDir>/secrets/server-signing-key.bin`: move that file aside in the same swap, and every
-device is signed out and pairs again. Pairing links and integration credentials are checked
-against the database only, so revoke again any you revoked since the backup.
+pairing link and integration revoked after the backup was taken. That is why the signing key
+moves aside: every session token was signed with it, so every device is signed out and pairs
+again. Pairing links and integration credentials are checked against the database only, so revoke
+again any you revoked since the backup.
 
 ### What `ryco db backup` costs
 
@@ -246,4 +273,6 @@ A build that finds a database written by a newer build refuses to open it, befor
 or repair runs, and says where the backups are. Use a build that supports that schema, or find a
 backup taken before the upgrade with `ryco db list` (with the server's `--base-dir` or
 `--dev-url`, if it uses one) and restore it into a separate data directory with
-`ryco db restore <file> --into <new directory>`.
+`ryco db restore <file> --into <new directory>`, or, with Ryco stopped, in place of the database in
+use with `ryco db restore <file> --replace` (everything written since that backup stays in
+`<stateDir>/replaced-<time>/`).

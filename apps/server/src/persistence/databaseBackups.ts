@@ -2006,6 +2006,11 @@ export const restoreDatabaseBackup = Effect.fn("restoreDatabaseBackup")(function
   readonly openSqlite: OpenSqlite;
   /** `integrity_check` instead of `quick_check` (much slower on large databases). */
   readonly fullCheck?: boolean | undefined;
+  /**
+   * The target is the staging directory of an in-place restore (databaseRestoreSwap.ts), which
+   * lives inside the data directory in use on purpose: the restored file is renamed into place.
+   */
+  readonly staging?: boolean | undefined;
 }) {
   const env = yield* BackupEnvironment;
   const startedAt = performance.now();
@@ -2063,14 +2068,18 @@ export const restoreDatabaseBackup = Effect.fn("restoreDatabaseBackup")(function
     );
   }
 
-  // 2. The target: outside the data directory in use, new or empty.
-  const unsafe = yield* io("resolve", targetDir, () =>
-    unsafeRestoreTarget(targetDir, [
-      input.live.baseDir,
-      input.live.stateDir,
-      dirname(input.live.dbPath),
-    ]),
-  ).pipe(ioError);
+  // 2. The target: outside the data directory in use (unless it stages an in-place restore),
+  // new or empty.
+  const unsafe =
+    input.staging === true
+      ? undefined
+      : yield* io("resolve", targetDir, () =>
+          unsafeRestoreTarget(targetDir, [
+            input.live.baseDir,
+            input.live.stateDir,
+            dirname(input.live.dbPath),
+          ]),
+        ).pipe(ioError);
   if (unsafe !== undefined) {
     return yield* commandError(
       "unsafe-target",
