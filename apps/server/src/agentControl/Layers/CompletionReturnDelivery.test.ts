@@ -136,7 +136,7 @@ const withSession = (
   session: Partial<NonNullable<OrchestrationThreadShell["session"]>>,
 ): OrchestrationThreadShell => ({ ...thread, session: { ...thread.session!, ...session } });
 
-const proposalFor = (proposalId: string, parentThreadId = "parent") =>
+const proposalFor = (proposalId: string, parentThreadId = "parent", maxConcurrent?: number) =>
   Schema.decodeUnknownSync(AgentControlProposal)({
     proposalId,
     requestId: `request-${proposalId}`,
@@ -161,6 +161,7 @@ const proposalFor = (proposalId: string, parentThreadId = "parent") =>
           returnToOrigin: true,
         },
       ],
+      ...(maxConcurrent === undefined ? {} : { maxConcurrent }),
     },
     planDigest: "a".repeat(64),
     riskTags: [],
@@ -182,6 +183,8 @@ const setup = (
     readonly baseDir?: string;
     /** A fence shared with other server wakes; by default each worker builds its own. */
     readonly fence?: ServerWakeFenceShape;
+    /** The request's cap (`maxConcurrent`): its tasks past the cap wait for a slot. */
+    readonly maxConcurrent?: number;
   } = {},
 ) =>
   Effect.gen(function* () {
@@ -192,7 +195,7 @@ const setup = (
     const row = completionFixture(fixture);
     yield* repo.insert(row);
     yield* proposals.insert({
-      proposal: proposalFor(row.proposalId),
+      proposal: proposalFor(row.proposalId, "parent", options.maxConcurrent),
       principalScope: AgentControlPrincipalScope.make("fixture"),
     });
     yield* sql`INSERT INTO projection_turns (thread_id, turn_id, pending_message_id, state, requested_at, checkpoint_files_json)
@@ -913,26 +916,44 @@ it.effect("stops waiting for a task that never started 7 days after its creation
   }).pipe(Effect.provide(layer)),
 );
 
-it.effect("never starts a task still waiting for its slot once the person stopped the chat", () =>
-  Effect.gen(function* () {
-    const h = yield* setup();
-    yield* h.sql`DELETE FROM projection_thread_messages WHERE message_id = 'child-initial'`;
-    h.setChild({ ...shell("child", "child-turn", "child-runtime"), latestUserMessageAt: null });
-    yield* h.tick(3);
-    assert.equal((yield* h.read()).status, "waiting");
-    // The person stops the delegating turn while the task waits for a slot.
-    yield* h.appendEvent({
-      stream: "parent",
-      type: "thread.turn-start-requested",
-      commandId: "web:send",
-      payload: { messageId: "parent-initial" },
-    });
-    yield* h.appendEvent({
+/** A capped request's task whose first message still waits in its queue for a slot. */
+const setupWaitingCappedTask = Effect.gen(function* () {
+  const h = yield* setup({}, { maxConcurrent: 1 });
+  yield* h.sql`DELETE FROM projection_thread_messages WHERE message_id = 'child-initial'`;
+  h.setChild({ ...shell("child", "child-turn", "child-runtime"), latestUserMessageAt: null });
+  // The delegating turn started; the person may stop it before the request is approved.
+  yield* h.appendEvent({
+    stream: "parent",
+    type: "thread.turn-start-requested",
+    commandId: "web:send",
+    payload: { messageId: "parent-initial" },
+  });
+  const stop = (occurredAt?: string) =>
+    h.appendEvent({
       stream: "parent",
       type: "thread.turn-interrupt-requested",
       commandId: "web:stop",
+      ...(occurredAt === undefined ? {} : { occurredAt }),
       payload: { turnId: "parent-turn" },
     });
+  // Approved: the request creates its tasks.
+  const approve = h.appendEvent({
+    stream: "child",
+    type: "thread.created",
+    commandId: "agent-control:create",
+    actor: "server",
+  });
+  return { ...h, stop, approve };
+});
+
+it.effect("never starts a task still waiting for its slot once the person stopped the chat", () =>
+  Effect.gen(function* () {
+    const h = yield* setupWaitingCappedTask;
+    yield* h.approve;
+    yield* h.tick(3);
+    assert.equal((yield* h.read()).status, "waiting");
+    // The person stops the delegating turn while the task waits for a slot.
+    yield* h.stop();
     yield* h.tick(6);
     const record = yield* h.read();
     assert.equal(record.status, "cancelled");
@@ -963,26 +984,77 @@ it.effect("gives a task that starts late its whole 24 hours", () =>
 
 it.effect("does not count a Stop pressed before the request was approved", () =>
   Effect.gen(function* () {
-    const h = yield* setup();
-    yield* h.sql`DELETE FROM projection_thread_messages WHERE message_id = 'child-initial'`;
-    h.setChild({ ...shell("child", "child-turn", "child-runtime"), latestUserMessageAt: null });
-    yield* h.appendEvent({
-      stream: "parent",
-      type: "thread.turn-start-requested",
-      commandId: "web:send",
-      occurredAt: at(-120),
-      payload: { messageId: "parent-initial" },
-    });
+    const h = yield* setupWaitingCappedTask;
     // Stopped while the card waited, then approved: the batch still runs.
-    yield* h.appendEvent({
-      stream: "parent",
-      type: "thread.turn-interrupt-requested",
-      commandId: "web:stop",
-      occurredAt: at(-60),
-      payload: { turnId: "parent-turn" },
-    });
+    yield* h.stop();
+    yield* h.approve;
     yield* h.tick(3);
     assert.equal((yield* h.read()).status, "waiting");
+  }).pipe(Effect.provide(layer)),
+);
+
+it.effect("orders a Stop and the approval by the server's events, not the client's clock", () =>
+  Effect.gen(function* () {
+    const h = yield* setupWaitingCappedTask;
+    yield* h.approve;
+    yield* h.tick(3);
+    // Stopped after the approval from a client whose clock runs an hour behind the node's.
+    yield* h.stop(at(-3600));
+    yield* h.tick(6);
+    assert.equal((yield* h.read()).status, "cancelled");
+  }).pipe(Effect.provide(layer)),
+);
+
+it.effect("returns the result of a capped task that started after a Stop before approval", () =>
+  Effect.gen(function* () {
+    const h = yield* setupWaitingCappedTask;
+    yield* h.stop();
+    yield* h.approve;
+    yield* h.tick(3);
+    // Its slot frees, it runs and finishes: its result returns like its start went ahead.
+    yield* h.sql`INSERT INTO projection_thread_messages (message_id, thread_id, turn_id, role, text, is_streaming, created_at, updated_at)
+      VALUES ('child-initial', 'child', NULL, 'user', 'Fixture task', 0, ${at(4)}, ${at(4)})`;
+    h.setChild(shell("child", "child-turn", "child-runtime"));
+    yield* h.ack("completed");
+    yield* h.tick(6);
+    yield* h.tick(9);
+    const record = yield* h.read();
+    assert.equal(record.status, "delivered");
+    assert.equal(h.sent.length, 1);
+  }).pipe(Effect.provide(layer)),
+);
+
+it.effect("forgets a waiting task's Stop check once its return no longer waits", () =>
+  Effect.gen(function* () {
+    const h = yield* setupWaitingCappedTask;
+    yield* h.approve;
+    const worker = yield* h.makeWorker;
+    yield* worker.scan(at(3));
+    assert.equal(worker.stopChecksRemembered(), 1);
+    // Seven days without a start: the return ends with its notice.
+    yield* worker.scan(at(7 * DAY + 10));
+    assert.notEqual((yield* h.read()).status, "waiting");
+    assert.equal(worker.stopChecksRemembered(), 0);
+  }).pipe(Effect.provide(layer)),
+);
+
+it.effect("forgets the Stop check of a waiting task ryco_task_cancel ended", () =>
+  Effect.gen(function* () {
+    const h = yield* setupWaitingCappedTask;
+    yield* h.approve;
+    const worker = yield* h.makeWorker;
+    yield* worker.scan(at(3));
+    assert.equal(worker.stopChecksRemembered(), 1);
+    yield* h.repo.cancelOwned({
+      childThreadId: ThreadId.make("child"),
+      parentThreadId: ThreadId.make("parent"),
+      detail: "Cancelled.",
+      now: at(4),
+    });
+    yield* worker.scan(at(5));
+    assert.equal(worker.stopChecksRemembered(), 1);
+    yield* worker.scan(at(11 * 60));
+    assert.equal(worker.stopChecksRemembered(), 0);
   }).pipe(Effect.provide(layer)),
 );
 

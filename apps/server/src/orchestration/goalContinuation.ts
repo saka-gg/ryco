@@ -111,27 +111,11 @@ export const goalPausingFailedTurn = (
 };
 
 /**
- * How long after a clean turn the goal's next turn may still follow it: the grace, a few held
- * rechecks and the dispatch. A capped request's task counts as working meanwhile
- * (`goalContinuationPending`), so the grace never frees its delegation slot for another task.
+ * How long a capped request's task whose goal will continue its finished turn keeps its delegation
+ * slot after the slot runtime first finds it idle: the grace (which starts no earlier), a few held
+ * rechecks and the dispatch. So the grace never frees the slot for another task.
  */
 export const GOAL_CONTINUATION_PENDING_MS = 60_000;
-
-/**
- * Whether the goal's next turn may still follow the thread's latest turn: one it would continue
- * (`goalContinuationSourceTurn`) ended less than `GOAL_CONTINUATION_PENDING_MS` ago. Bounded, so a
- * thread whose goal does not continue after all (its provider has no Agent Control tools, a paused
- * chain) stops counting as busy on its own.
- */
-export const goalContinuationPending = (
-  shell: GoalShell,
-  observedSinceMs: number,
-  nowMs: number,
-): boolean => {
-  if (goalContinuationSourceTurn(shell, observedSinceMs) === null) return false;
-  const completedAtMs = instantMs(shell.latestTurn?.completedAt);
-  return completedAtMs !== null && nowMs - completedAtMs < GOAL_CONTINUATION_PENDING_MS;
-};
 
 export const GOAL_CHAIN_PAUSE_NOTICE = {
   summary: "Goal paused",

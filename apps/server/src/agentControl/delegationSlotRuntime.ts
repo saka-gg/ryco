@@ -23,16 +23,26 @@
  *
  * A task its delegating chat no longer waits for before its first message was sent never starts
  * and takes no slot: one cancelled with `ryco_task_cancel`, by the chat's Stop, archive or delete,
- * or past its return's time limit. Its slot's cause is never released. Only `ryco_task_cancel`
- * takes its first message and the agent's own follow-ups out of its queue (the cancel does it
- * itself; should that removal be lost, a restart in between, a pass removes them under the
- * cancel's own id); after a Stop, an archive or a delete, which a person can undo, they stay, and
- * the person can still resume the task by hand. A parent archived or deleted moments ago counts
- * before its return says so.
+ * or past its return's time limit. Its slot's cause becomes a hold of its own in one event
+ * (`delegationGivenUpHold`, cause `delegation-given-up:<proposalId>`), so the queue never runs in
+ * between: a pass no longer looks at it, a restart does not load this runtime for it, and only a
+ * person's Resume starts it. A task released but not sent yet is held again the same way. The swap
+ * has one command id per task, so a person's Resume after it is never undone. Only
+ * `ryco_task_cancel` takes its first message and the agent's own follow-ups out of its queue (the
+ * cancel does it itself; should that removal be lost, a restart in between, a pass removes them
+ * under the cancel's own id, and swaps the hold after); after a Stop, an archive or a delete they
+ * stay.
+ *
+ * The delivery marks a return given up on its next scan, seconds later, so a pass checks too:
+ * before it releases a waiting task, and while a released one is not sent yet, a Stop of the
+ * delegating chat after the request's approval gives the task up at once (`waitingGivenUp`, the
+ * delivery's own rule). No waiting task of a parent archived or deleted moments ago starts until
+ * its return says so.
  *
  * A task whose goal will continue its last turn (a person's goal on a task an integration created;
  * a delegated task's own goal never continues) works through the goal's grace: the slot stays
- * taken until the next turn starts or the goal stops.
+ * taken from the first pass that finds the task idle (when the goal's grace starts at the
+ * latest) until `GOAL_CONTINUATION_PENDING_MS` later, the next turn, or the goal's end.
  *
  * It imports no value from a module the server's boot graph loads (only `effect`, which is split
  * already); everything else comes in through `DelegationSlotDeps`.
@@ -43,13 +53,17 @@ import type {
   AgentControlProposalId,
   ClientOrchestrationCommand,
   CommandId,
+  FollowUpQueueHoldInput,
+  InternalOrchestrationCommand,
   MessageId,
   OrchestrationDispatchCommandError,
   OrchestrationEvent,
   OrchestrationReadModel,
   OrchestrationThread,
+  OrchestrationThreadShell,
   QueuedFollowUp,
   ThreadId,
+  TurnId,
 } from "@ryco/contracts";
 import { Cause, Clock, Duration, Effect, Option, Queue, Stream } from "effect";
 
@@ -64,7 +78,10 @@ import type {
 import type { OrchestrationEngineShape } from "../orchestration/Services/OrchestrationEngine.ts";
 import type { ProjectionSnapshotQueryShape } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 import type { ServerWakeFenceShape } from "../orchestration/Services/ServerWakeFence.ts";
-import { goalContinuationPending } from "../orchestration/goalContinuation.ts";
+import {
+  GOAL_CONTINUATION_PENDING_MS,
+  goalContinuationSourceTurn,
+} from "../orchestration/goalContinuation.ts";
 
 /** A pass over every waiting request at least this often (a start's grace, background work). */
 export const DELEGATION_SLOT_SWEEP_INTERVAL = Duration.seconds(30);
@@ -73,6 +90,27 @@ type QueueCommand = Extract<
   ClientOrchestrationCommand,
   { type: "thread.queue.resume" | "thread.queue.remove" }
 >;
+type HoldRecordCommand = Extract<
+  InternalOrchestrationCommand,
+  { type: "thread.queue.hold.record" }
+>;
+
+/** Cause keys of a given-up task's hold: `delegation-given-up:<proposalId>`. */
+export const DELEGATION_GIVEN_UP_CAUSE_PREFIX = "delegation-given-up:";
+
+/**
+ * The hold of a task its delegating chat gave up before it started, in place of its slot's. A
+ * Pause (`paused`), so the person's Resume starts the task.
+ */
+export const delegationGivenUpHold = (proposalId: string): FollowUpQueueHoldInput => ({
+  reason: "paused",
+  detail: "Its chat stopped waiting for it, so it does not start on its own. Resume to start it.",
+  causeKeys: [`${DELEGATION_GIVEN_UP_CAUSE_PREFIX}${proposalId}`],
+});
+
+/** The swap to the given-up hold: one per task, so a person's Resume after it stays. */
+export const delegationGivenUpCommandId = (proposalId: string, threadId: ThreadId) =>
+  `delegation-given-up:${proposalId}:${threadId}` as CommandId;
 
 /**
  * What the runtime reads and calls, provided by `AgentControlDelegationSlotsLive` on the boot
@@ -96,6 +134,10 @@ export interface DelegationSlotDeps {
   readonly dispatch: (
     command: QueueCommand,
   ) => Effect.Effect<{ readonly sequence: number }, OrchestrationDispatchCommandError>;
+  /** `OrchestrationCommandApplication.applyInternal`: swaps a given-up task's hold. */
+  readonly recordHold: (
+    command: HoldRecordCommand,
+  ) => Effect.Effect<{ readonly sequence: number }, OrchestrationDispatchCommandError>;
   /** `DELEGATION_SLOT_CAUSE_PREFIX`. */
   readonly causePrefix: string;
   /** The task's completion return, when the node keeps them. */
@@ -106,6 +148,14 @@ export interface DelegationSlotDeps {
   readonly cancelledByDelegatingChat: (
     record: Pick<CompletionReturnRecord, "status" | "detail">,
   ) => boolean;
+  /**
+   * Whether the delegating chat gave a task up that its return still shows as waiting: the
+   * person stopped the chat after the request's approval (the delivery's own rule,
+   * `userStoppedAfterApproval`). Asked only before a task starts.
+   */
+  readonly waitingGivenUp?: (
+    record: CompletionReturnRecord,
+  ) => ReturnType<(typeof CompletionReturnRepository.Service)["userStoppedAfterApproval"]>;
   /** `delegationSlotCancelCommandId`. */
   readonly cancelCommandId: (proposalId: string, threadId: string) => CommandId;
   /** `noUserMessageSent`. */
@@ -150,20 +200,12 @@ export function waitingRequestIds(
   return [...ids].toSorted();
 }
 
-/**
- * The tasks to release now: the first waiting ones, in entry order, while fewer than `max` of
- * the request's tasks work.
- */
-export function tasksToRelease(
-  tasks: ReadonlyArray<{ readonly threadId: ThreadId; readonly state: DelegationSlotTaskState }>,
+/** How many more of the request's tasks may start now: fewer than `max` work. */
+export function freeSlots(
+  tasks: ReadonlyArray<{ readonly state: DelegationSlotTaskState }>,
   max: number,
-): ReadonlyArray<ThreadId> {
-  const free = max - tasks.filter((task) => task.state === "working").length;
-  if (free <= 0) return [];
-  return tasks
-    .filter((task) => task.state === "waiting")
-    .slice(0, free)
-    .map((task) => task.threadId);
+): number {
+  return Math.max(0, max - tasks.filter((task) => task.state === "working").length);
 }
 
 /** Thread events after which a task may have stopped working, or a request may wait. */
@@ -201,6 +243,17 @@ export const makeDelegationSlots = (deps: DelegationSlotDeps) =>
      * request that releases nothing: not capped, or its operation failed or was cancelled.
      */
     const caps = new Map<AgentControlProposalId, number | null>();
+    /**
+     * Tasks whose goal will continue their finished turn → that turn, and when a pass first found
+     * the task idle after it: the goal's grace starts no earlier (`goalContinuationRuntime`).
+     * Kept for the tasks of the last pass only.
+     */
+    const goalIdleSince = new Map<
+      ThreadId,
+      { readonly turnId: TurnId; readonly sinceMs: number }
+    >();
+    /** Tasks a pass looked at, so `goalIdleSince` forgets the others. */
+    const seen = new Set<ThreadId>();
     /** Unique to this runtime: with the serial, every release attempt gets an id of its own. */
     const runId = globalThis.crypto.randomUUID().slice(0, 8);
     let serial = 0;
@@ -216,6 +269,26 @@ export const makeDelegationSlots = (deps: DelegationSlotDeps) =>
         return cap;
       });
 
+    /**
+     * Whether the goal's next turn may still follow the task's finished one: the fence lets it
+     * through, and a pass first found it so less than `GOAL_CONTINUATION_PENDING_MS` ago.
+     * Bounded, so a task whose goal does not continue after all (its provider has no Agent
+     * Control tools, a paused chain) frees its slot on its own.
+     */
+    const goalTurnPending = (shell: OrchestrationThreadShell, nowMs: number) => {
+      const turnId = goalContinuationSourceTurn(shell, observedSinceMs);
+      if (turnId === null) {
+        goalIdleSince.delete(shell.id);
+        return false;
+      }
+      let idle = goalIdleSince.get(shell.id);
+      if (idle?.turnId !== turnId) {
+        idle = { turnId, sinceMs: nowMs };
+        goalIdleSince.set(shell.id, idle);
+      }
+      return nowMs - idle.sinceMs < GOAL_CONTINUATION_PENDING_MS;
+    };
+
     const taskState = (
       threads: OrchestrationReadModel["threads"],
       threadId: ThreadId,
@@ -223,6 +296,7 @@ export const makeDelegationSlots = (deps: DelegationSlotDeps) =>
       nowMs: number,
     ) =>
       Effect.gen(function* () {
+        seen.add(threadId);
         const thread = deps.findThread(threads, threadId);
         // Deleted covers Trash too; an archived task neither works nor is started.
         if (thread === undefined || thread.deletedAt !== null || thread.archivedAt !== null) {
@@ -235,42 +309,56 @@ export const makeDelegationSlots = (deps: DelegationSlotDeps) =>
           queue !== undefined && queue.hold === null && queue.entries[0]?.status === "queued";
         // Given up before its first message was sent: whatever else waits in its queue, it never
         // starts, and what the cancel had to take out of the queue is taken out now.
-        if (
+        const record =
           queue !== undefined &&
           (waiting || unsent) &&
           deps.getCompletionReturn !== undefined &&
           deps.noUserMessageSent(thread)
+            ? yield* deps.getCompletionReturn(threadId)
+            : undefined;
+        if (
+          record !== undefined &&
+          (deps.noLongerAwaited(record) ||
+            // Released, not sent yet, and the chat stopped meanwhile: held again before the drain
+            // sends it.
+            (unsent && deps.waitingGivenUp !== undefined && (yield* deps.waitingGivenUp(record))))
         ) {
-          const record = yield* deps.getCompletionReturn(threadId);
-          if (record !== undefined && deps.noLongerAwaited(record)) {
-            return {
-              state: "cancelled" as const,
-              removals: deps.cancelledByDelegatingChat(record)
-                ? deps.cancelledTaskEntryIds(queue.entries, record.initialMessageId)
-                : [],
-            };
-          }
-          // The delivery marks a gone parent's returns on its next scan: no slot opens meanwhile.
-          if (record !== undefined && waiting) {
-            const parent = yield* deps.getThreadShellById(record.parentThreadId);
-            if (Option.isNone(parent) || parent.value.archivedAt !== null) {
-              return { state: "cancelled" as const, removals: [] };
-            }
-          }
+          return {
+            state: "cancelled" as const,
+            removals: deps.cancelledByDelegatingChat(record)
+              ? deps.cancelledTaskEntryIds(queue!.entries, record.initialMessageId)
+              : [],
+          };
         }
-        if (waiting) return { state: "waiting" as const };
+        if (waiting) return { state: "waiting" as const, record };
         if (unsent) return { state: "working" as const };
         const shell = yield* deps.getThreadShellById(threadId);
         if (Option.isNone(shell)) return { state: "gone" as const };
         // Running, starting, a start not bound yet, a question or approval, background work, or
         // the goal's grace before its next turn.
+        const hold = yield* deps.holdReason(shell.value, nowMs);
+        if (hold !== null) goalIdleSince.delete(threadId);
         return {
           state:
-            (yield* deps.holdReason(shell.value, nowMs)) === "busy" ||
-            goalContinuationPending(shell.value, observedSinceMs, nowMs)
+            hold === "busy" || (hold === null && goalTurnPending(shell.value, nowMs))
               ? ("working" as const)
               : ("idle" as const),
         };
+      });
+
+    /**
+     * Whether a waiting task may start now: its delegating chat still waits for it. A parent
+     * archived or deleted moments ago keeps it waiting until its return says so; a Stop after
+     * the request's approval gives it up at once.
+     */
+    const startable = (record: CompletionReturnRecord | undefined) =>
+      Effect.gen(function* () {
+        if (record === undefined) return "start" as const;
+        const parent = yield* deps.getThreadShellById(record.parentThreadId);
+        if (Option.isNone(parent) || parent.value.archivedAt !== null) return "wait" as const;
+        return deps.waitingGivenUp !== undefined && (yield* deps.waitingGivenUp(record))
+          ? ("give-up" as const)
+          : ("start" as const);
       });
 
     const release = (proposalId: AgentControlProposalId, threadId: ThreadId, causeKey: string) =>
@@ -297,7 +385,29 @@ export const makeDelegationSlots = (deps: DelegationSlotDeps) =>
         ),
       );
 
-    /** Finishes a cancel whose removal from the task's queue was lost. */
+    /** Holds a given-up task for a person's Resume, in place of its slot's cause. */
+    const giveUp = (proposalId: AgentControlProposalId, threadId: ThreadId, causeKey: string) =>
+      Effect.gen(function* () {
+        const nowMs = yield* Clock.currentTimeMillis;
+        yield* deps.recordHold({
+          type: "thread.queue.hold.record",
+          commandId: delegationGivenUpCommandId(proposalId, threadId),
+          threadId,
+          hold: delegationGivenUpHold(proposalId),
+          replacesCauseKeys: [causeKey],
+          createdAt: new Date(nowMs).toISOString(),
+        });
+      }).pipe(
+        Effect.catch((error) =>
+          Effect.logWarning("given-up delegated task was not held", {
+            proposalId,
+            threadId,
+            error: error.message,
+          }),
+        ),
+      );
+
+    /** Finishes a cancel whose removal from the task's queue was lost; true once it is done. */
     const removeCancelled = (
       proposalId: AgentControlProposalId,
       threadId: ThreadId,
@@ -312,13 +422,14 @@ export const makeDelegationSlots = (deps: DelegationSlotDeps) =>
           messageIds,
           createdAt: new Date(nowMs).toISOString(),
         });
+        return true;
       }).pipe(
         Effect.catch((error) =>
           Effect.logWarning("cancelled delegated task was not taken out of its queue", {
             proposalId,
             threadId,
             error: error.message,
-          }),
+          }).pipe(Effect.as(false)),
         ),
       );
 
@@ -350,16 +461,25 @@ export const makeDelegationSlots = (deps: DelegationSlotDeps) =>
             ),
         );
         for (const task of tasks) {
+          if (task.state !== "cancelled") continue;
+          // A lost removal is retried first: once the slot's cause is gone, no pass comes back.
           if (
-            task.state === "cancelled" &&
-            task.removals !== undefined &&
-            task.removals.length > 0
+            task.removals.length > 0 &&
+            !(yield* removeCancelled(proposalId, task.threadId, task.removals))
           ) {
-            yield* removeCancelled(proposalId, task.threadId, task.removals);
+            continue;
           }
+          yield* giveUp(proposalId, task.threadId, causeKey);
         }
-        for (const threadId of tasksToRelease(tasks, cap)) {
-          yield* release(proposalId, threadId, causeKey);
+        let free = freeSlots(tasks, cap);
+        for (const task of tasks) {
+          if (free === 0) break;
+          if (task.state !== "waiting") continue;
+          const next = yield* startable(task.record);
+          if (next === "give-up") yield* giveUp(proposalId, task.threadId, causeKey);
+          if (next !== "start") continue;
+          yield* release(proposalId, task.threadId, causeKey);
+          free -= 1;
         }
       }).pipe(
         Effect.catchCause((cause) =>
@@ -380,9 +500,12 @@ export const makeDelegationSlots = (deps: DelegationSlotDeps) =>
       // A request with no task left waiting needs no cap any more.
       for (const proposalId of caps.keys())
         if (!waiting.includes(proposalId)) caps.delete(proposalId);
+      seen.clear();
       for (const proposalId of waiting) {
         yield* passRequest(threads, proposalId, nowMs);
       }
+      for (const threadId of goalIdleSince.keys())
+        if (!seen.has(threadId)) goalIdleSince.delete(threadId);
     });
 
     return { pass, taskState, passRequest };

@@ -36,17 +36,20 @@ import {
 import { threadsQueuedAtBoot } from "../orchestration/Layers/ServerQueueDrain.ts";
 import { anyLiveTaskWaitsForSlot } from "./Layers/AgentControlDelegationSlots.ts";
 import {
+  delegationGivenUpCommandId,
+  delegationGivenUpHold,
   delegationSlotReleaseCommandId,
+  freeSlots,
   isDelegationSlotWakeEvent,
   makeDelegationSlots,
   runDelegationSlots,
-  tasksToRelease,
   waitingRequestIds,
   type DelegationSlotDeps,
 } from "./delegationSlotRuntime.ts";
 
 const proposalId = AgentControlProposalId.make("proposal-capped");
 const slotKey = `delegation-slot:${proposalId}`;
+const givenUpKey = `delegation-given-up:${proposalId}`;
 const CODEX = ProviderInstanceId.make("codex");
 const at = "2026-10-29T10:00:00.000Z";
 const taskId = (index: number) => ThreadId.make(`thread-task-${index}`);
@@ -54,6 +57,7 @@ const PARENT = ThreadId.make("thread-parent");
 
 type Resume = Extract<ClientOrchestrationCommand, { type: "thread.queue.resume" }>;
 type Remove = Extract<ClientOrchestrationCommand, { type: "thread.queue.remove" }>;
+type HoldRecord = Parameters<DelegationSlotDeps["recordHold"]>[0];
 
 const firstMessage = (index: number): QueuedFollowUp => ({
   messageId: MessageId.make(`message-agent-control-op-create-${index}`),
@@ -120,8 +124,9 @@ const world = (input: { readonly cap: number | undefined; readonly count: number
   let loseReply = false;
   let loseRemoval = false;
   const known = { proposal: true };
-  /** The delegating chat. */
-  const parent = { state: "live" as "live" | "archived" | "gone" };
+  /** The delegating chat; `stopped`: the person stopped it after the request's approval. */
+  const parent = { state: "live" as "live" | "archived" | "gone", stopped: false };
+  const holdRecords: HoldRecord[] = [];
 
   const thread = (entry: Task) => ({
     id: entry.id,
@@ -223,6 +228,26 @@ const world = (input: { readonly cap: number | undefined; readonly count: number
           ? Effect.fail(new OrchestrationDispatchCommandError({ message: "reply lost" }))
           : Effect.succeed({ sequence: 1 });
       }),
+    // The decider: the hold takes the replaced causes' place in one event; an empty queue keeps
+    // none. A seen command id replays its receipt.
+    recordHold: (command) =>
+      Effect.sync(() => {
+        holdRecords.push(command);
+        if (receipts.has(command.commandId)) return { sequence: 1 };
+        receipts.set(command.commandId, "accepted");
+        const queue = tasks.find((candidate) => candidate.id === command.threadId)!.queue;
+        if (queue === undefined || queue.entries.length === 0) return { sequence: 1 };
+        const kept = (queue.hold?.causeKeys ?? []).filter(
+          (key) => !(command.replacesCauseKeys ?? []).includes(key),
+        );
+        queue.hold = {
+          reason: command.hold.reason,
+          detail: command.hold.detail,
+          causeKeys: [...kept, ...command.hold.causeKeys],
+          heldAt: queue.hold?.heldAt ?? at,
+        };
+        return { sequence: 1 };
+      }),
     causePrefix: DELEGATION_SLOT_CAUSE_PREFIX,
     getCompletionReturn: (id) =>
       Effect.sync(() => {
@@ -236,6 +261,7 @@ const world = (input: { readonly cap: number | undefined; readonly count: number
       }),
     noLongerAwaited,
     cancelledByDelegatingChat,
+    waitingGivenUp: () => Effect.sync(() => parent.stopped),
     cancelCommandId: delegationSlotCancelCommandId,
     noUserMessageSent,
     cancelledTaskEntryIds,
@@ -266,6 +292,7 @@ const world = (input: { readonly cap: number | undefined; readonly count: number
     reads,
     known,
     removals,
+    holdRecords,
     refuse,
     operation,
     parent,
@@ -273,6 +300,24 @@ const world = (input: { readonly cap: number | undefined; readonly count: number
     loseRemoval: (value: boolean) => (loseRemoval = value),
   };
 };
+
+/** A person's goal the server pursues, on a task whose turn ended cleanly at second 1. */
+const goalShell = {
+  goal: {
+    status: "active",
+    synchronization: { state: "unsupported" },
+    updatedAt: "1970-01-01T00:00:00.000Z",
+  },
+  archivedAt: null,
+  lineage: null,
+  interactionMode: "default",
+  hasActionableProposedPlan: false,
+  latestTurn: {
+    turnId: "turn-1",
+    state: "completed",
+    completedAt: "1970-01-01T00:00:01.000Z",
+  },
+} as unknown as Partial<OrchestrationThreadShell>;
 
 describe("delegation slots", () => {
   it.effect("a task that stops working releases exactly the next waiting one", () =>
@@ -473,13 +518,91 @@ describe("delegation slots", () => {
         w.task(2).returnStatus = "ready";
         w.task(0).busy = false;
         yield* slots.pass;
-        // Neither starts; the slot goes to task 3. Their messages stay queued: a Stop, an
-        // archive or a delete can be undone, and the person can still resume them by hand.
+        // Neither starts; the slot goes to task 3. Their messages stay queued, held for the
+        // person's Resume instead of a slot.
         assert.deepEqual(w.released(), [taskId(3)]);
         assert.deepEqual(w.removals, []);
-        assert.lengthOf(w.task(1).queue?.entries ?? [], 1);
-        assert.lengthOf(w.task(2).queue?.entries ?? [], 1);
+        for (const index of [1, 2]) {
+          assert.lengthOf(w.task(index).queue?.entries ?? [], 1);
+          assert.deepEqual(w.task(index).queue?.hold, {
+            ...delegationGivenUpHold(proposalId),
+            heldAt: at,
+          });
+        }
       }),
+  );
+
+  it.effect("a given-up task waits for a person's Resume, and no pass looks at it again", () =>
+    Effect.gen(function* () {
+      const w = world({ cap: 1, count: 2 });
+      const slots = yield* makeDelegationSlots(w.deps);
+      w.task(1).returnStatus = "cancelled";
+      yield* slots.pass;
+      // Its slot's cause became a hold of its own, in one command: nothing waits for a slot any
+      // more, so a restart neither loads the runtime nor treats the queue as the node's own.
+      assert.deepEqual(
+        w.holdRecords.map((command) => [command.commandId, command.replacesCauseKeys]),
+        [[delegationGivenUpCommandId(proposalId, taskId(1)), [slotKey]]],
+      );
+      assert.deepEqual(w.task(1).queue?.hold?.causeKeys, [givenUpKey]);
+      const { threads } = yield* w.deps.readModel;
+      assert.deepEqual(waitingRequestIds(threads, DELEGATION_SLOT_CAUSE_PREFIX), []);
+      assert.isFalse(anyLiveTaskWaitsForSlot(threads));
+      assert.isFalse(heldOnlyForDelegationSlot(w.task(1).queue?.hold));
+      assert.deepEqual(threadsQueuedAtBoot(threads), [taskId(1)]);
+      assert.include(
+        delegationGivenUpHold(proposalId).detail ?? "",
+        "Its chat stopped waiting for it",
+      );
+      // The person resumes it by hand: the drain sends it, and no pass holds it again.
+      yield* w.deps.dispatch({
+        type: "thread.queue.resume",
+        commandId: delegationSlotReleaseCommandId(proposalId, taskId(1), "person"),
+        threadId: taskId(1),
+        acknowledgeCauseKeys: [givenUpKey],
+        createdAt: at,
+      });
+      yield* slots.passRequest((yield* w.deps.readModel).threads, proposalId, 0);
+      yield* (yield* makeDelegationSlots(w.deps)).passRequest(
+        (yield* w.deps.readModel).threads,
+        proposalId,
+        0,
+      );
+      assert.isNull(w.task(1).queue?.hold);
+    }),
+  );
+
+  it.effect("a Stop after approval gives waiting tasks up before a freed slot starts one", () =>
+    Effect.gen(function* () {
+      const w = world({ cap: 1, count: 3 });
+      const slots = yield* makeDelegationSlots(w.deps);
+      // The person stopped the delegating chat; the delivery has not marked the returns yet when
+      // the running task ends.
+      w.parent.stopped = true;
+      w.task(0).busy = false;
+      yield* slots.pass;
+      assert.deepEqual(w.released(), []);
+      for (const index of [1, 2])
+        assert.deepEqual(w.task(index).queue?.hold?.causeKeys, [givenUpKey]);
+    }),
+  );
+
+  it.effect("a released task not sent yet is held again once the chat is stopped", () =>
+    Effect.gen(function* () {
+      const w = world({ cap: 1, count: 3 });
+      const slots = yield* makeDelegationSlots(w.deps);
+      w.task(0).busy = false;
+      yield* slots.pass;
+      assert.deepEqual(w.released(), [taskId(1)]);
+      // The drain has not sent it (the cold-start budget is full, say) when the person stops the
+      // chat: it is held again before the drain can, and the next task is given up too.
+      assert.isNull(w.task(1).queue?.hold);
+      w.parent.stopped = true;
+      yield* slots.pass;
+      assert.deepEqual(w.task(1).queue?.hold?.causeKeys, [givenUpKey]);
+      assert.deepEqual(w.task(2).queue?.hold?.causeKeys, [givenUpKey]);
+      assert.deepEqual(w.released(), [taskId(1)]);
+    }),
   );
 
   it.effect("releases no slot once the delegating chat was archived or deleted", () =>
@@ -507,27 +630,40 @@ describe("delegation slots", () => {
       // does not pursue goals: its turn just ended cleanly, and the goal starts the next one
       // after its grace.
       w.task(0).busy = false;
-      w.task(0).shell = {
-        goal: {
-          status: "active",
-          synchronization: { state: "unsupported" },
-          updatedAt: "1970-01-01T00:00:00.000Z",
-        },
-        archivedAt: null,
-        lineage: null,
-        interactionMode: "default",
-        hasActionableProposedPlan: false,
-        latestTurn: {
-          turnId: "turn-1",
-          state: "completed",
-          completedAt: "1970-01-01T00:00:01.000Z",
-        },
-      } as unknown as Partial<OrchestrationThreadShell>;
+      w.task(0).shell = goalShell;
       const slots = yield* makeDelegationSlots(w.deps);
       yield* TestClock.adjust("10 seconds");
       yield* slots.pass;
       assert.deepEqual(w.released(), []);
       // No next turn came (its provider has no Agent Control tools, say): the slot frees.
+      yield* TestClock.adjust("1 minute");
+      yield* slots.pass;
+      assert.deepEqual(w.released(), [taskId(1)]);
+    }),
+  );
+
+  it.effect("a goal's grace counts from when its task is first idle, not from its turn's end", () =>
+    Effect.gen(function* () {
+      const w = world({ cap: 1, count: 2 });
+      w.task(0).shell = goalShell;
+      const slots = yield* makeDelegationSlots(w.deps);
+      // Background work keeps the task busy for two minutes after its turn ended.
+      yield* TestClock.adjust("2 minutes");
+      yield* slots.pass;
+      assert.deepEqual(w.released(), []);
+      // Now idle: the goal's grace starts only now, and its next turn follows within it.
+      w.task(0).busy = false;
+      yield* slots.pass;
+      yield* TestClock.adjust("50 seconds");
+      yield* slots.pass;
+      assert.deepEqual(w.released(), []);
+      // Busy again (the goal's turn was held), then idle: a fresh grace.
+      w.task(0).busy = true;
+      yield* slots.pass;
+      w.task(0).busy = false;
+      yield* TestClock.adjust("20 seconds");
+      yield* slots.pass;
+      assert.deepEqual(w.released(), []);
       yield* TestClock.adjust("1 minute");
       yield* slots.pass;
       assert.deepEqual(w.released(), [taskId(1)]);
@@ -632,7 +768,8 @@ describe("delegation slots", () => {
         w.task(1).queue?.entries.map((entry) => String(entry.messageId)),
         ["person-entry"],
       );
-      assert.include(w.task(1).queue?.hold?.causeKeys ?? [], slotKey);
+      // The person's entry waits for their Resume, no longer for a slot.
+      assert.deepEqual(w.task(1).queue?.hold?.causeKeys, [givenUpKey]);
       w.started(2);
       w.task(2).busy = false;
       yield* slots.pass;
@@ -727,17 +864,17 @@ describe("delegation slots", () => {
 });
 
 describe("delegation slot rules", () => {
-  it("releases the first waiting tasks while fewer than the cap work", () => {
+  it("frees a slot for each task fewer than the cap that works", () => {
     const tasks = [
-      { threadId: taskId(0), state: "working" as const },
-      { threadId: taskId(1), state: "idle" as const },
-      { threadId: taskId(2), state: "waiting" as const },
-      { threadId: taskId(3), state: "gone" as const },
-      { threadId: taskId(4), state: "waiting" as const },
-      { threadId: taskId(5), state: "waiting" as const },
+      { state: "working" as const },
+      { state: "idle" as const },
+      { state: "waiting" as const },
+      { state: "gone" as const },
+      { state: "cancelled" as const },
+      { state: "waiting" as const },
     ];
-    assert.deepEqual(tasksToRelease(tasks, 3), [taskId(2), taskId(4)]);
-    assert.deepEqual(tasksToRelease(tasks, 1), []);
+    assert.strictEqual(freeSlots(tasks, 3), 2);
+    assert.strictEqual(freeSlots(tasks, 1), 0);
   });
 
   it("wakes on what can end a task's work, not on its progress", () => {
@@ -770,8 +907,14 @@ describe("delegation slot rules", () => {
       thread("slot", [slotKey]),
       thread("slot-and-paused", [slotKey, "paused:x"]),
       thread("paused", ["paused:x"]),
+      thread("given-up", [givenUpKey]),
     ] as unknown as OrchestrationReadModel["threads"];
-    assert.deepEqual(threadsQueuedAtBoot(threads), ["unheld", "slot-and-paused", "paused"]);
+    assert.deepEqual(threadsQueuedAtBoot(threads), [
+      "unheld",
+      "slot-and-paused",
+      "paused",
+      "given-up",
+    ]);
     assert.isTrue(heldOnlyForDelegationSlot({ causeKeys: [slotKey] }));
     assert.isFalse(heldOnlyForDelegationSlot({ causeKeys: [] }));
     assert.isFalse(heldOnlyForDelegationSlot(null));

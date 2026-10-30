@@ -37,6 +37,7 @@ import {
   isQueueFailureCauseExempt,
   mergeQueueHold,
   pausedCauseKey,
+  QUEUE_HOLD_RANK,
   queueHoldsEqual,
   removeQueueHoldCauses,
   sessionErrorCauseKey,
@@ -252,14 +253,35 @@ const hasContent = (entry: {
   readonly attachments: ReadonlyArray<unknown>;
 }) => entry.text.trim().length > 0 || entry.attachments.length > 0;
 
-/** The queue's hold after `input`, or null when it already covers it. */
+/**
+ * `input` merged into the hold, after the `replaces` causes left it. It takes their place: on an
+ * equal rank its own reason and detail show, so no detail of a cause that left stays behind.
+ */
+function replacedHold(
+  hold: FollowUpQueueHold | null,
+  input: FollowUpQueueHoldInput,
+  replaces: ReadonlyArray<string>,
+  occurredAt: string,
+) {
+  const base =
+    hold === null || replaces.length === 0 ? hold : removeQueueHoldCauses(hold, replaces);
+  const merged = mergeQueueHold(base, input, occurredAt);
+  return base === hold ||
+    base === null ||
+    QUEUE_HOLD_RANK[input.reason] < QUEUE_HOLD_RANK[base.reason]
+    ? merged
+    : { ...merged, reason: input.reason, detail: input.detail };
+}
+
+/** The queue's hold after `input` (in place of `replaces`), or null when it already covers it. */
 function heldDraft(
   threadId: ThreadId,
   hold: FollowUpQueueHold | null,
   input: FollowUpQueueHoldInput,
   occurredAt: string,
+  replaces: ReadonlyArray<string> = [],
 ): FollowUpQueueEventDraft | null {
-  const merged = mergeQueueHold(hold, input, occurredAt);
+  const merged = replacedHold(hold, input, replaces, occurredAt);
   if (queueHoldsEqual(merged, hold)) return null;
   return {
     type: "thread.queue-held",
@@ -674,7 +696,13 @@ function decideQueueCommand(
 
     case "thread.queue.hold.record": {
       if (queue.entries.length === 0) return NO_CHANGE;
-      const held = heldDraft(thread.id, queue.hold, command.hold, command.createdAt);
+      const held = heldDraft(
+        thread.id,
+        queue.hold,
+        command.hold,
+        command.createdAt,
+        command.replacesCauseKeys,
+      );
       return held === null ? NO_CHANGE : record(held);
     }
   }

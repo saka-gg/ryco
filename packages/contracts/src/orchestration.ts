@@ -3102,6 +3102,13 @@ const ThreadQueueHoldRecordCommand = Schema.Struct({
   commandId: CommandId,
   threadId: ThreadId,
   hold: FollowUpQueueHoldInput,
+  /**
+   * Causes the hold takes the place of, released in the same event (the queue never runs in
+   * between); on an equal rank its own reason and detail show.
+   */
+  replacesCauseKeys: Schema.optional(
+    Schema.Array(Schema.String).check(Schema.isMaxLength(FOLLOW_UP_QUEUE_MAX_CAUSE_KEYS)),
+  ),
   createdAt: IsoDateTime,
 });
 

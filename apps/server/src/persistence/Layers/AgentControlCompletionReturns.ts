@@ -571,8 +571,6 @@ export const makeCompletionReturnRepository = Effect.gen(function* () {
     readonly sinceSequence: number;
     readonly delegatingMessageId: MessageId | null;
     readonly wakesSince: string;
-    /** Only Stops at or after this time count (absent: any). */
-    readonly stoppedSince?: string;
   }) =>
     safe(
       sql`
@@ -588,7 +586,6 @@ export const makeCompletionReturnRepository = Effect.gen(function* () {
       AND stop.sequence > ${input.sinceSequence}
       AND stop.event_type = 'thread.turn-interrupt-requested'
       AND stop.actor_kind = 'client'
-      AND (${input.stoppedSince ?? null} IS NULL OR stop.occurred_at >= ${input.stoppedSince ?? null})
       AND (stop.command_id IS NULL OR stop.command_id NOT LIKE 'agent-control:%')
       AND ((${input.delegatingMessageId} IS NOT NULL
             AND json_extract(start.payload_json, '$.messageId') = ${input.delegatingMessageId})
@@ -597,6 +594,35 @@ export const makeCompletionReturnRepository = Effect.gen(function* () {
     LIMIT 1
   `.pipe(Effect.map((rows) => rows.length > 0)),
     );
+  /**
+   * The first event of any returnToOrigin task of request `proposalId`: its first task's
+   * creation, which follows the request's approval in the server's own event order.
+   */
+  const requestStartSequence = (proposalId: AgentControlProposalId) =>
+    safe(
+      sql<{ sequence: number | null }>`
+    SELECT min((SELECT e.sequence FROM orchestration_events e
+      WHERE e.aggregate_kind = 'thread' AND e.stream_id = r.child_thread_id
+      ORDER BY e.sequence ASC LIMIT 1)) AS sequence
+    FROM agent_control_completion_returns r WHERE r.proposal_id = ${proposalId}
+  `.pipe(Effect.map((rows) => rows[0]?.sequence ?? null)),
+    );
+  /**
+   * `cohortUserStop` for a task of a capped request (`maxConcurrent`): only Stops after the
+   * request's approval count (`requestStartSequence`), and after `afterSequence`. A Stop pressed
+   * while the request waited for approval does not keep its waiting tasks from starting, so it
+   * does not end their results either. The delivery and the slot runtime both decide with it.
+   */
+  const userStoppedAfterApproval = (record: CompletionReturnRecord, afterSequence: number) =>
+    Effect.gen(function* () {
+      const start = yield* requestStartSequence(record.proposalId);
+      return yield* cohortUserStop({
+        threadId: record.parentThreadId,
+        sinceSequence: Math.max(start ?? 0, afterSequence),
+        delegatingMessageId: yield* turnMessageId(record.parentThreadId, record.parentTurnId),
+        wakesSince: record.createdAt,
+      });
+    });
   /**
    * Whether a checkpoint revert on `threadId` after `sinceSequence` dropped `turnId`
    * (rollback-correctness: `thread.reverted` names the turns it dropped). The delegating
@@ -706,6 +732,7 @@ export const makeCompletionReturnRepository = Effect.gen(function* () {
     lastEventSequence,
     worktreeArchived,
     cohortUserStop,
+    userStoppedAfterApproval,
     turnDroppedByRevert,
     startFailed,
     turnStartSequence,

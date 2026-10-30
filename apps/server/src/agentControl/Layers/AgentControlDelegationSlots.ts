@@ -94,9 +94,17 @@ export const AgentControlDelegationSlotsLive = Layer.effectDiscard(
             getProposal: proposals.getById,
             getOperation: operations.getByProposalId,
             dispatch: application.apply,
+            recordHold: application.applyInternal,
             causePrefix: DELEGATION_SLOT_CAUSE_PREFIX,
             ...(Option.isSome(completionReturns)
-              ? { getCompletionReturn: completionReturns.value.get }
+              ? {
+                  getCompletionReturn: completionReturns.value.get,
+                  waitingGivenUp: (record) =>
+                    completionReturns.value.userStoppedAfterApproval(
+                      record,
+                      record.sinceSequence ?? 0,
+                    ),
+                }
               : {}),
             noLongerAwaited,
             cancelledByDelegatingChat,

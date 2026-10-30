@@ -581,6 +581,63 @@ describe("follow-up queue decider: pause and resume", () => {
     expect(await decide(released.model, resume(["restart:7"]))).toEqual([]);
   });
 
+  it("records a node hold in place of causes it replaces, in one event", async () => {
+    const slot = delegationSlotHold("proposal-capped", 2);
+    const waiting = await apply(await queued(["a"]), {
+      type: "thread.queue.hold.record",
+      commandId: nextCommandId("slot"),
+      threadId,
+      hold: slot,
+      createdAt: at(2),
+    });
+    const givenUp = {
+      reason: "paused" as const,
+      causeKeys: ["delegation-given-up:proposal-capped"],
+      detail: "Given up.",
+    };
+    const swap = (): OrchestrationCommand => ({
+      type: "thread.queue.hold.record",
+      commandId: nextCommandId("swap"),
+      threadId,
+      hold: givenUp,
+      replacesCauseKeys: slot.causeKeys,
+      createdAt: at(3),
+    });
+    // Never released in between: one held event, with the new hold's own detail.
+    const swapped = await apply(waiting.model, swap());
+    expect(types(swapped.events)).toEqual(["thread.queue-held"]);
+    expect(queueOf(swapped.model)?.hold).toEqual({
+      reason: "paused",
+      detail: "Given up.",
+      causeKeys: givenUp.causeKeys,
+      heldAt: at(3),
+    });
+    expect(await decide(swapped.model, swap())).toEqual([]);
+    // Beside a person's Pause, the replaced cause's detail does not stay either.
+    const paused = await apply(waiting.model, {
+      type: "thread.queue.hold",
+      commandId: nextCommandId("pause"),
+      threadId,
+      createdAt: at(2),
+    });
+    expect(queueOf(paused.model)?.hold?.detail).toBe(slot.detail);
+    const both = await apply(paused.model, swap());
+    expect(queueOf(both.model)?.hold).toMatchObject({
+      detail: "Given up.",
+      causeKeys: [`paused:${at(2)}`, ...givenUp.causeKeys],
+      heldAt: at(2),
+    });
+    // A Resume of what the person sees releases it.
+    const resumed = await apply(both.model, {
+      type: "thread.queue.resume",
+      commandId: nextCommandId("resume"),
+      threadId,
+      acknowledgeCauseKeys: queueOf(both.model)!.hold!.causeKeys,
+      createdAt: at(4),
+    });
+    expect(queueOf(resumed.model)?.hold).toBeNull();
+  });
+
   it("records nothing for a node hold on an empty queue or one it already covers", async () => {
     const record: OrchestrationCommand = {
       type: "thread.queue.hold.record",

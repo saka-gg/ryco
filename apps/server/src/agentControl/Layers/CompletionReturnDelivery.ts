@@ -163,6 +163,22 @@ export function normalizeLegacyCompletionReturn(
   return next;
 }
 
+/** Per-pass memo of the Stop checks: delegating messages, and which requests are capped. */
+interface StopCache {
+  readonly messages: Map<TurnId, MessageId | null>;
+  readonly capped: Map<AgentControlProposalId, boolean>;
+}
+const stopCache = (): StopCache => ({ messages: new Map(), capped: new Map() });
+const isCappedRequest = (proposal: Option.Option<AgentControlProposal>) =>
+  Option.isSome(proposal) &&
+  proposal.value.plan.kind === "createThreads" &&
+  proposal.value.plan.maxConcurrent !== undefined;
+/**
+ * A remembered Stop check left this long unused belongs to a row that stopped waiting elsewhere
+ * (`ryco_task_cancel`): a waiting row is checked every scan, at least once a minute.
+ */
+const STOP_CHECK_FORGET_MS = 10 * 60 * 1000;
+
 interface ScanContext {
   readonly now: string;
   readonly nowMs: number;
@@ -196,9 +212,14 @@ export const makeCompletionReturnDelivery = Effect.gen(function* () {
   const wakesAppliedHere = new Map<MessageId, number>();
   /**
    * Waiting rows of unstarted tasks → the parent event sequence their Stop check read through, so
-   * the next check reads only newer events. Lost on restart (the next check reads it all once).
+   * the next check reads only newer events, and when. Lost on restart (the next check reads it
+   * all once). Dropped when the row's next status is not `waiting`, and after
+   * `STOP_CHECK_FORGET_MS` without a check (a row `ryco_task_cancel` ended).
    */
-  const waitingStopCheckedThrough = new Map<ThreadId, number>();
+  const waitingStopCheckedThrough = new Map<
+    ThreadId,
+    { readonly sequence: number; readonly checkedMs: number }
+  >();
 
   const publish = (proposalIds: Iterable<AgentControlProposalId>) =>
     Effect.forEach(
@@ -225,6 +246,7 @@ export const makeCompletionReturnDelivery = Effect.gen(function* () {
   ) =>
     Effect.gen(function* () {
       const next = patch(record, fields, now);
+      if (next.status !== "waiting") waitingStopCheckedThrough.delete(next.childThreadId);
       if (!(yield* repository.save(record, next))) return false;
       if (visibleChange(record, next)) yield* publish([next.proposalId]);
       return true;
@@ -361,16 +383,22 @@ export const makeCompletionReturnDelivery = Effect.gen(function* () {
     );
 
   /** The delegating message of a row's parent turn, cached per delivery pass. */
-  const delegatingMessage = (
-    cache: Map<TurnId, MessageId | null>,
-    record: CompletionReturnRecord,
-  ) =>
+  const delegatingMessage = (cache: StopCache, record: CompletionReturnRecord) =>
     Effect.gen(function* () {
-      const known = cache.get(record.parentTurnId);
+      const known = cache.messages.get(record.parentTurnId);
       if (known !== undefined) return known;
       const messageId = yield* repository.turnMessageId(record.parentThreadId, record.parentTurnId);
-      cache.set(record.parentTurnId, messageId);
+      cache.messages.set(record.parentTurnId, messageId);
       return messageId;
+    });
+  /** Whether a row's request is capped (`maxConcurrent`), cached per delivery pass. */
+  const cappedRequest = (cache: StopCache, proposalId: AgentControlProposalId) =>
+    Effect.gen(function* () {
+      const known = cache.capped.get(proposalId);
+      if (known !== undefined) return known;
+      const capped = isCappedRequest(yield* proposals.getById({ proposalId }));
+      cache.capped.set(proposalId, capped);
+      return capped;
     });
   /**
    * Fill `sinceSequence` lazily with the delegating turn's own start, so a Stop pressed before
@@ -378,10 +406,7 @@ export const makeCompletionReturnDelivery = Effect.gen(function* () {
    * only wakes after the row's creation can be cohort turns, so the child's first event bounds
    * the scan just as well. Persisted with the row's next save.
    */
-  const withStopBound = <R extends CompletionReturnRecord>(
-    record: R,
-    cache: Map<TurnId, MessageId | null>,
-  ) =>
+  const withStopBound = <R extends CompletionReturnRecord>(record: R, cache: StopCache) =>
     Effect.gen(function* () {
       if (record.sinceSequence !== undefined && record.sinceSequence !== null) return record;
       const delegating = yield* delegatingMessage(cache, record);
@@ -393,26 +418,28 @@ export const makeCompletionReturnDelivery = Effect.gen(function* () {
         start ?? (yield* repository.firstEventSequence(record.childThreadId)) ?? 0;
       return { ...record, sinceSequence };
     });
-  /** §3.1 user stop, decided per row in SQL (no shared limit can hide a matching stop). */
-  const userStoppedRows = (
-    parentThreadId: ThreadId,
-    rows: ReadonlyArray<CompletionReturnRecord>,
-    cache: Map<TurnId, MessageId | null>,
-  ) =>
+  /**
+   * §3.1 user stop of one row after `afterSequence`, decided in SQL (no shared limit can hide a
+   * matching stop). A capped request's waiting tasks start after a Stop pressed before its
+   * approval, so for its rows only later Stops count (`userStoppedAfterApproval`), whether the
+   * task still waits for its slot or its result is due.
+   */
+  const userStopped = (row: CompletionReturnRecord, afterSequence: number, cache: StopCache) =>
+    Effect.gen(function* () {
+      if (yield* cappedRequest(cache, row.proposalId))
+        return yield* repository.userStoppedAfterApproval(row, afterSequence);
+      return yield* repository.cohortUserStop({
+        threadId: row.parentThreadId,
+        sinceSequence: afterSequence,
+        delegatingMessageId: yield* delegatingMessage(cache, row),
+        wakesSince: row.createdAt,
+      });
+    });
+  const userStoppedRows = (rows: ReadonlyArray<CompletionReturnRecord>, cache: StopCache) =>
     Effect.gen(function* () {
       const stopped = new Set<ThreadId>();
-      for (const row of rows) {
-        const delegatingMessageId = yield* delegatingMessage(cache, row);
-        if (
-          yield* repository.cohortUserStop({
-            threadId: parentThreadId,
-            sinceSequence: row.sinceSequence ?? 0,
-            delegatingMessageId,
-            wakesSince: row.createdAt,
-          })
-        )
-          stopped.add(row.childThreadId);
-      }
+      for (const row of rows)
+        if (yield* userStopped(row, row.sinceSequence ?? 0, cache)) stopped.add(row.childThreadId);
       return stopped;
     });
 
@@ -685,10 +712,10 @@ export const makeCompletionReturnDelivery = Effect.gen(function* () {
         // A replay re-joins the wake, so it passes the same user-stop and scope checks as a
         // new batch. The frozen command was never applied (no receipt), so releasing the
         // rows to `ready` cannot duplicate it: user-stopped rows end, the rest re-batch.
-        const cache = new Map<TurnId, MessageId | null>();
+        const cache = stopCache();
         const bounded: CompletionReturnRecord[] = [];
         for (const row of rows) bounded.push(yield* withStopBound(row, cache));
-        const stopped = yield* userStoppedRows(parent.value.id, bounded, cache);
+        const stopped = yield* userStoppedRows(bounded, cache);
         if (stopped.size > 0 || bounded.some((row) => !inScope(row, parent.value))) {
           yield* saveAll(
             bounded.map(
@@ -919,26 +946,23 @@ export const makeCompletionReturnDelivery = Effect.gen(function* () {
         return yield* notice(record, "request-failed", ctx);
       if (proposal.value.status !== "completed") return yield* hold(record, now);
       // A task still waiting for its slot never starts once the person stopped the delegating
-      // chat after approving the request. Each check reads only the parent's events since the
-      // last one: waiting rows are looked at every few seconds, a parent's history is long.
+      // chat after approving the request (`userStopped`, as for its result). Each check reads
+      // only the parent's events since the last one: waiting rows are looked at every few
+      // seconds, a parent's history is long.
       if (startedAt === null) {
-        const cache = new Map<TurnId, MessageId | null>();
+        const cache = stopCache();
+        cache.capped.set(record.proposalId, isCappedRequest(proposal));
         record = yield* withStopBound(record, cache);
-        const checkedThrough = waitingStopCheckedThrough.get(record.childThreadId);
+        const checked = waitingStopCheckedThrough.get(record.childThreadId);
         const latest = yield* repository.lastEventSequence(record.parentThreadId);
-        const delegatingMessageId = yield* delegatingMessage(cache, record);
-        const stopped = yield* repository.cohortUserStop({
-          threadId: record.parentThreadId,
-          sinceSequence: Math.max(record.sinceSequence ?? 0, checkedThrough ?? 0),
-          delegatingMessageId,
-          wakesSince: record.createdAt,
-          stoppedSince: proposal.value.decidedAt ?? proposal.value.createdAt,
-        });
-        if (stopped) {
-          waitingStopCheckedThrough.delete(record.childThreadId);
+        const afterSequence = Math.max(record.sinceSequence ?? 0, checked?.sequence ?? 0);
+        if (yield* userStopped(record, afterSequence, cache))
           return yield* finish(record, "cancelled", DETAIL.userStoppedBeforeStart, now);
-        }
-        if (latest !== null) waitingStopCheckedThrough.set(record.childThreadId, latest);
+        if (latest !== null)
+          waitingStopCheckedThrough.set(record.childThreadId, {
+            sequence: latest,
+            checkedMs: ctx.nowMs,
+          });
       } else {
         waitingStopCheckedThrough.delete(record.childThreadId);
       }
@@ -1022,10 +1046,10 @@ export const makeCompletionReturnDelivery = Effect.gen(function* () {
 
       // The user-stop decision is persisted as a terminal status, so later event retention
       // cannot undo it. sinceSequence only bounds the scan and is persisted lazily.
-      const cache = new Map<TurnId, MessageId | null>();
+      const cache = stopCache();
       const bounded: CapturedRecord[] = [];
       for (const row of scoped) bounded.push(yield* withStopBound(row, cache));
-      const stopped = yield* userStoppedRows(parentThreadId, bounded, cache);
+      const stopped = yield* userStoppedRows(bounded, cache);
       for (const row of bounded)
         if (stopped.has(row.childThreadId))
           yield* finish(row, "cancelled", DETAIL.userStopped, now);
@@ -1123,6 +1147,9 @@ export const makeCompletionReturnDelivery = Effect.gen(function* () {
         for (const [messageId, appliedMs] of wakesAppliedHere)
           if (ctx.nowMs - appliedMs > WAITING_EXPIRY_MS + CAPTURE_EXPIRY_MS)
             wakesAppliedHere.delete(messageId);
+        for (const [childThreadId, checked] of waitingStopCheckedThrough)
+          if (ctx.nowMs - checked.checkedMs > STOP_CHECK_FORGET_MS)
+            waitingStopCheckedThrough.delete(childThreadId);
         for (const record of yield* repository.listDue(now)) {
           yield* processDue(record, ctx).pipe(
             Effect.catch(() =>
@@ -1152,7 +1179,11 @@ export const makeCompletionReturnDelivery = Effect.gen(function* () {
         }
       }),
     );
-  return { scan };
+  return {
+    scan,
+    /** For tests: the unstarted rows whose Stop check is remembered. */
+    stopChecksRemembered: () => waitingStopCheckedThrough.size,
+  };
 });
 /** The shortest pause between scans, and the scan cadence while a pending row is held. */
 const SCAN_MIN_DELAY_MS = 2_000;
