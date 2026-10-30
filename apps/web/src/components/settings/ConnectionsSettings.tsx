@@ -18,6 +18,7 @@ import {
   type EnvironmentId,
 } from "@ryco/contracts";
 import { DateTime } from "effect";
+import { describeHostFreeze } from "@ryco/client-runtime/connection";
 
 import { useCopyToClipboard } from "../../hooks/useCopyToClipboard";
 import { cn } from "../../lib/utils";
@@ -1399,6 +1400,8 @@ function SavedBackendListRow({
   const displayLabel = descriptorLabel ?? record.label;
   const statusTooltip = getSavedBackendStatusTooltip(runtime, record, nowMs);
   const versionMismatch = resolveServerConfigVersionMismatch(runtime?.serverConfig);
+  // Why it just dropped, when it froze: the node reports its last long stall for five minutes.
+  const freezeNotice = describeHostFreeze(runtime?.serverConfig?.lastEventLoopStall);
   const metadataBits = [
     record.desktopSsh ? `SSH ${formatDesktopSshTarget(record.desktopSsh)}` : null,
     roleLabel,
@@ -1431,6 +1434,12 @@ function SavedBackendListRow({
               <TriangleAlertIcon className="size-3.5 shrink-0" />
               Version drift: client {versionMismatch.clientVersion}, server{" "}
               {versionMismatch.serverVersion}.
+            </p>
+          ) : null}
+          {freezeNotice ? (
+            <p className="flex items-center gap-1 text-warning text-xs">
+              <TriangleAlertIcon className="size-3.5 shrink-0" />
+              {freezeNotice}.
             </p>
           ) : null}
         </div>

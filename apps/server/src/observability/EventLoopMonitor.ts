@@ -57,6 +57,7 @@ import {
   serverEventLoopStallsTotal,
   serverEventLoopUtilization,
 } from "./Metrics.ts";
+import { noteEventLoopStall } from "./NoticeableStall.ts";
 
 export const EVENT_LOOP_TICK_MS = 1_000;
 export const THREADPOOL_STALL_THRESHOLD_MS = 2_000;
@@ -446,6 +447,13 @@ export const makeEventLoopSampler = (deps: EventLoopSamplerDeps): EventLoopSampl
         if (loopGaps.length > LOOP_GAP_HISTORY_LIMIT) loopGaps.shift();
       }
       if (verdict.kind === "stall") {
+        // Clients see the long ones after they reconnect (`NoticeableStall.ts`).
+        noteEventLoopStall({
+          startedAtMs: verdict.startedAtWallMs,
+          durationMs: verdict.durationMs,
+          loadAverage1m: readOptional(deps.loadAverage1m),
+          cpuCount: deps.cpuCount,
+        });
         const line = window.add(
           evidence(
             {

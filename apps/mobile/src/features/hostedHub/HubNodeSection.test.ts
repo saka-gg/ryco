@@ -23,6 +23,7 @@ const hostedMock = vi.hoisted(() => ({
   available: true,
   e2eeStatus: "unavailable" as HostedE2eeChannelStatus,
   state: undefined as HostedHubState | undefined,
+  serverConfigs: new Map<string, { readonly lastEventLoopStall?: unknown }>(),
   controller: {
     selectNode: vi.fn(),
     returnToDirectory: vi.fn(),
@@ -86,6 +87,9 @@ vi.mock("../../hostedHub/acquireNode", () => ({
 // `ensureMobileHostedSession()` call and its own state, so it is mocked here
 // rather than re-implemented.
 vi.mock("./useHostedMode", () => ({ useHostedModeAvailable: () => hostedMock.available }));
+vi.mock("../../state/environmentServerConfigs", () => ({
+  useEnvironmentServerConfigs: () => hostedMock.serverConfigs,
+}));
 // The §13 projection seam, for the same reason: this renderer invokes function
 // components directly, so a `useSyncExternalStore` hook has no dispatcher.
 vi.mock("../e2ee/useMobileE2eeSession", () => ({
@@ -262,6 +266,23 @@ beforeEach(() => {
 });
 
 describe("Hub node selection guard", () => {
+  it("says on a node's row when it just froze, from the config it sent", () => {
+    const selected = node();
+    const withStall = deriveHubNodeSectionModel({
+      state: state({ selectedNode: selected }),
+      available: true,
+      e2eeStatus: "unavailable",
+      actions: hostedMock.controller,
+      onSignIn: navigationMock.navigate,
+      lastEventLoopStall: (environmentId) =>
+        environmentId === selected.environmentId
+          ? { startedAt: "2026-10-30T14:02:00.000Z", durationMs: 7_000, cpuCount: 8 }
+          : undefined,
+    });
+    expect(withStall.rows[0]?.freezeNotice).toMatch(/^Froze for 7 s at \d{2}:\d{2}$/u);
+    expect(model().rows[0]?.freezeNotice ?? null).toBeNull();
+  });
+
   it("mirrors the controller's fail-closed guard", () => {
     expect(canSelectHubNode(state(), node())).toBe(true);
     expect(canSelectHubNode(state({ directoryStatus: "stale" }), node())).toBe(false);

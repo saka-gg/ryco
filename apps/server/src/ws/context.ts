@@ -1,5 +1,6 @@
 import { makeClientWorkspaceUse } from "../workspace/clientWorkspaceUse.ts";
 import { isRemovedChatFolder, restoreChatFolder } from "../project/chatFolderRestore.ts";
+import { readNoticeableStall } from "../observability/NoticeableStall.ts";
 import { LocalTaskService } from "../tasks/LocalTaskService.ts";
 import { PullRequestWatchService } from "../sourceControl/PullRequestWatchService.ts";
 import { WorktreeNotesService } from "../notes/WorktreeNotesService.ts";
@@ -1237,9 +1238,11 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
       const localMetrics = yield* loadDiagnosticsMetrics;
       const chats = Option.isSome(chatFolders) ? yield* chatFolders.value.capability : undefined;
 
+      const lastEventLoopStall = readNoticeableStall(Date.now());
       return {
         environment,
         auth,
+        ...(lastEventLoopStall !== undefined ? { lastEventLoopStall } : {}),
         cwd: config.cwd,
         ...(config.workspaceAccessRoot !== undefined
           ? { workspaceAccessRoot: config.workspaceAccessRoot }

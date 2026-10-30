@@ -20,6 +20,8 @@ export interface NodeRowProps {
   readonly platformOs?: string | undefined;
   readonly label: string;
   readonly detail: string;
+  /** Why the machine just dropped, when the node reported it froze. */
+  readonly freezeNotice?: string | null | undefined;
   readonly transportLabel: string;
   readonly statusTone: StatusTone;
   readonly selected: boolean;
@@ -57,6 +59,11 @@ function NodeRowContent(props: NodeRowProps) {
         <Text className="text-xs font-ryco-medium text-foreground-muted" numberOfLines={2}>
           {props.transportLabel} · {props.detail}
         </Text>
+        {props.freezeNotice ? (
+          <Text className="text-xs font-ryco-medium text-warning" numberOfLines={2}>
+            {props.freezeNotice}
+          </Text>
+        ) : null}
       </View>
       <StatusPill
         size="compact"
@@ -102,7 +109,7 @@ export function NodeRow(props: NodeRowProps) {
     props.showDivider && "border-t border-border-subtle",
     props.disabled && "opacity-45",
   );
-  const accessibilityLabel = `${props.label}, ${props.transportLabel}, ${props.detail}, ${props.statusTone.label}`;
+  const accessibilityLabel = `${props.label}, ${props.transportLabel}, ${props.detail}, ${props.statusTone.label}${props.freezeNotice ? `, ${props.freezeNotice}` : ""}`;
 
   return (
     <View className={className}>
