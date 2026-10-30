@@ -1,5 +1,6 @@
 import {
   configureHostedRuntime,
+  HOSTED_ACCOUNT_DELETION_UNSUPPORTED_MESSAGE,
   HOSTED_RECOVERY_CODES_UNDISPLAYED_MESSAGE,
   HostedHubApiError,
   hostedAccountStore,
@@ -23,6 +24,7 @@ import {
   createHostedRefusalMatcher,
   deriveHostedAccountManagementView,
   HOSTED_ACCOUNT_INTENTS,
+  hostedAccountDraftSurvives,
   isHostedPasskeySessionMessage,
   isHostedStepUpMessage,
   leaseHostedRecoveryCodeDisplay,
@@ -132,6 +134,7 @@ const PROMPT_IDS: ReadonlyArray<HostedAccountPromptId> = [
   "verify-email",
   "connect-github",
   "disconnect-github",
+  "delete-account",
 ];
 
 interface Harness {
@@ -221,6 +224,7 @@ function harness(initial?: {
     connectExternalIdentity: vi.fn(async () => commit()),
     disconnectExternalIdentity: vi.fn(async () => commit()),
     cancelExternalIdentityConnection: vi.fn(),
+    deleteAccount: vi.fn(async () => commit()),
     dismissTotpEnrollment: vi.fn(() => {
       hub = { ...hub, totpEnrollment: null };
     }),
@@ -999,6 +1003,70 @@ describe("recovery codes", () => {
   });
 });
 
+/** A restored Hub session for the tests that drive the real controller. */
+const session: HostedHubSessionResponse = {
+  account: {
+    id: "acct_01J8ZQ5V2N7X0000000000",
+    displayName: "Ada Lovelace",
+    role: "owner",
+    createdAt: 1,
+    disabledAt: null,
+  },
+  session: {
+    id: "sess_01J8ZQ5V2N7X1111111111",
+    accountId: "acct_01J8ZQ5V2N7X0000000000",
+    createdAt: 1,
+    expiresAt: 2,
+    lastSeenAt: 1,
+    revokedAt: null,
+    revocationReasonCode: null,
+  },
+  csrfToken: "csrf-sensitive-canary",
+};
+
+/** Every platform service the recovery-code path must not reach. */
+const unusedService = new Proxy(
+  {},
+  {
+    get() {
+      throw new Error("the hosted account surface must not reach a platform service");
+    },
+  },
+) as never;
+
+const nodeLifecycle: HostedNodeLifecycle = {
+  activate: vi.fn(async () => undefined),
+  suspend: vi.fn(async () => undefined),
+  deactivate: vi.fn(async () => undefined),
+  clearNodeScopedState: vi.fn(),
+  writePrimaryEnvironmentDescriptor: vi.fn(),
+  connectPrimaryEnvironment: vi.fn(),
+  disconnectPrimaryEnvironment: vi.fn(async () => undefined),
+  setActiveEnvironmentId: vi.fn(),
+};
+
+function runtime(): HostedRuntimeConfiguration {
+  return {
+    endpoint: unusedService,
+    httpClient: unusedService,
+    passkeyCeremony: unusedService,
+    sessionCredentials: unusedService,
+    nodeLifecycle,
+    timers: {
+      now: () => Date.now(),
+      setTimeout: (callback, delayMs) => globalThis.setTimeout(callback, delayMs),
+      clearTimeout: (timer) => globalThis.clearTimeout(timer),
+      queueMicrotask: (callback) => globalThis.queueMicrotask(callback),
+    },
+    isForeground: () => true,
+    subscribeForeground: () => () => undefined,
+    hasPendingRelayRequests: () => false,
+    resetRelayAttemptFactory: () => undefined,
+    relayUrl: () => "wss://hub.example.test/v1/relay/client",
+    createRelaySocket: () => ({}),
+  };
+}
+
 /**
  * The account surface's ownership of the two one-shot secrets it renders,
  * asserted against the **real** `hostedHubController` over a fake transport.
@@ -1025,47 +1093,6 @@ describe("the account surface owns the display, not the secrets", () => {
     provisioningUri: "otpauth://totp/Ryco:ada?secret=TOTPSECRETSENSITIVECANARY",
   } as const;
 
-  const session: HostedHubSessionResponse = {
-    account: {
-      id: "acct_01J8ZQ5V2N7X0000000000",
-      displayName: "Ada Lovelace",
-      role: "owner",
-      createdAt: 1,
-      disabledAt: null,
-    },
-    session: {
-      id: "sess_01J8ZQ5V2N7X1111111111",
-      accountId: "acct_01J8ZQ5V2N7X0000000000",
-      createdAt: 1,
-      expiresAt: 2,
-      lastSeenAt: 1,
-      revokedAt: null,
-      revocationReasonCode: null,
-    },
-    csrfToken: "csrf-sensitive-canary",
-  };
-
-  /** Every platform service the recovery-code path must not reach. */
-  const unusedService = new Proxy(
-    {},
-    {
-      get() {
-        throw new Error("the hosted account surface must not reach a platform service");
-      },
-    },
-  ) as never;
-
-  const nodeLifecycle: HostedNodeLifecycle = {
-    activate: vi.fn(async () => undefined),
-    suspend: vi.fn(async () => undefined),
-    deactivate: vi.fn(async () => undefined),
-    clearNodeScopedState: vi.fn(),
-    writePrimaryEnvironmentDescriptor: vi.fn(),
-    connectPrimaryEnvironment: vi.fn(),
-    disconnectPrimaryEnvironment: vi.fn(async () => undefined),
-    setActiveEnvironmentId: vi.fn(),
-  };
-
   /** The Hub, and nothing else about the runtime, replaced by fakes. */
   function hubApi(overrides?: Partial<Record<keyof HostedHubApi, unknown>>): HostedHubApi {
     return {
@@ -1077,28 +1104,6 @@ describe("the account surface owns the display, not the secrets", () => {
       clearSessionMaterial: vi.fn(),
       ...overrides,
     } as unknown as HostedHubApi;
-  }
-
-  function runtime(): HostedRuntimeConfiguration {
-    return {
-      endpoint: unusedService,
-      httpClient: unusedService,
-      passkeyCeremony: unusedService,
-      sessionCredentials: unusedService,
-      nodeLifecycle,
-      timers: {
-        now: () => Date.now(),
-        setTimeout: (callback, delayMs) => globalThis.setTimeout(callback, delayMs),
-        clearTimeout: (timer) => globalThis.clearTimeout(timer),
-        queueMicrotask: (callback) => globalThis.queueMicrotask(callback),
-      },
-      isForeground: () => true,
-      subscribeForeground: () => () => undefined,
-      hasPendingRelayRequests: () => false,
-      resetRelayAttemptFactory: () => undefined,
-      relayUrl: () => "wss://hub.example.test/v1/relay/client",
-      createRelaySocket: () => ({}),
-    };
   }
 
   /** Sign in for real, the way `bootstrap()` does on a restored session. */
@@ -1460,6 +1465,116 @@ describe("email verification", () => {
     }
     test.type({ text: "ada@example.com" });
     expect(test.prompt().submit?.disabled).toBe(false);
+  });
+});
+
+describe("deleting the account", () => {
+  it("is offered last, apart from the credential sections, and only while signed in", () => {
+    const view = harness().view();
+    expect(view.sections.map((section) => section.id)).not.toContain("delete-account");
+    expect(view.deleteAccount?.rows.map((row) => [row.id, row.label, row.destructive])).toEqual([
+      ["delete-account", "Delete account…", true],
+    ]);
+    expect(view.deleteAccount?.footnote).toContain("Chats and projects on your nodes stay there.");
+    expect(harness({ hub: { accountStatus: "signed-out" } }).view().deleteAccount).toBeNull();
+    expect(
+      harness({ account: { actionStatus: "setting-password" } }).view().deleteAccount?.rows[0]
+        ?.disabled,
+    ).toBe(true);
+  });
+
+  it("stays inert until the email or username is typed, then sends what was typed", async () => {
+    const test = harness();
+    test.view().deleteAccount?.rows[0]?.run();
+    expect(test.prompt().id).toBe("delete-account");
+    expect(test.prompt().destructive).toBe(true);
+    expect(test.prompt().fields.map((field) => field.key)).toEqual(["text"]);
+
+    test.prompt().submit?.run();
+    test.type({ text: "   " });
+    test.prompt().submit?.run();
+    await flush();
+    expect(test.prompt().submit?.disabled).toBe(true);
+    expect(test.actions.deleteAccount).not.toHaveBeenCalled();
+
+    test.type({ text: "ada@example.test" });
+    test.prompt().submit?.run();
+    await flush();
+    // The Hub checks that it is the account's own; the runtime trims it.
+    expect(test.actions.deleteAccount).toHaveBeenCalledWith({ identifier: "ada@example.test" });
+  });
+
+  it("asks a fallback session for an authenticator code and sends it along", async () => {
+    const test = harness();
+    test.open("delete-account");
+    test.type({ text: "ada" });
+    test.nextOutcome(STEP_UP_MESSAGE);
+    test.prompt().submit?.run();
+    await flush();
+    expect(test.prompt().fields.map((field) => field.key)).toEqual(["text", "stepUpCode"]);
+    expect(test.prompt().submit?.disabled).toBe(true);
+
+    test.type({ stepUpCode: "123456" });
+    test.prompt().submit?.run();
+    await flush();
+    expect(test.actions.deleteAccount).toHaveBeenLastCalledWith({
+      identifier: "ada",
+      totpCode: "123456",
+    });
+  });
+
+  it("closes the confirmation for good once the account session ends", () => {
+    // A committed deletion signs this device out; the screen can stay mounted,
+    // and signing in again must not reopen the sheet with the typed identifier.
+    expect(hostedAccountDraftSurvives(hubState())).toBe(true);
+    for (const patch of [
+      { accountStatus: "signed-out" as const },
+      { accountStatus: "session-expired" as const },
+      { account: null },
+    ]) {
+      expect(hostedAccountDraftSurvives(hubState(patch))).toBe(false);
+    }
+  });
+
+  it("says so in the prompt when the Hub cannot delete accounts yet", async () => {
+    const deleteAccount = vi.fn(async () => {
+      throw new HostedHubApiError("not_found", 404, undefined, "delete-account");
+    });
+    configureHostedRuntime(runtime(), {
+      restoreSession: vi.fn(async () => session),
+      listNodes: vi.fn(async () => []),
+      listPasskeys: vi.fn(async () => []),
+      clearSessionMaterial: vi.fn(),
+      deleteAccount,
+    } as unknown as HostedHubApi);
+    try {
+      await hostedHubController.bootstrap();
+      let draft: HostedAccountPromptDraft | null = createHostedAccountPromptDraft("delete-account");
+      const view = () =>
+        deriveHostedAccountManagementView({
+          state: hostedHubStore.getState(),
+          accountState: hostedAccountStore.getState(),
+          draft,
+          actions: hostedHubController,
+          readAccountState: () => hostedAccountStore.getState(),
+          readHubState: () => hostedHubStore.getState(),
+          readDraft: () => draft,
+          onDraftChange: (next) => {
+            draft = next;
+          },
+        });
+      view().prompt?.fields[0]?.onChangeText("ada@example.test");
+      view().prompt?.submit?.run();
+      await vi.waitFor(() => expect(view().prompt?.errorMessage).not.toBeNull());
+
+      expect(deleteAccount).toHaveBeenCalledTimes(1);
+      expect(view().prompt?.errorMessage).toBe(HOSTED_ACCOUNT_DELETION_UNSUPPORTED_MESSAGE);
+      // Nothing was deleted, so this device stays signed in.
+      expect(hostedHubStore.getState().accountStatus).toBe("authenticated");
+      expect(view().prompt?.submit).not.toBeNull();
+    } finally {
+      hostedHubController.resetForTests();
+    }
   });
 });
 
