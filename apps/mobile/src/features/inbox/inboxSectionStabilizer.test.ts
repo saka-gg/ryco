@@ -108,11 +108,12 @@ describe("inbox row menu", () => {
     ).not.toContain("evening");
   });
 
-  it("lists settle first, then the snooze presets, gated by the row", () => {
+  it("lists settle first, then the snooze presets and Custom…, gated by the row", () => {
     const presets = [{ id: "hour", label: "In 1 hour" }];
     expect(buildInboxRowMenuActions(row("a", { canSnooze: false }), presets)).toEqual([
       { id: "settle", title: "Settle task", attributes: { disabled: false } },
       { id: "hour", title: "In 1 hour", attributes: { disabled: true } },
+      { id: "snooze-custom", title: "Custom…", attributes: { disabled: true } },
     ]);
     expect(
       buildInboxRowMenuActions(

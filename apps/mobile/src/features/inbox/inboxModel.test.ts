@@ -5,6 +5,7 @@ import type {
   SidebarThreadSummary,
   SidebarWorktreeSummary,
 } from "@ryco/client-runtime/state/threads";
+import { scopedThreadKey, scopeThreadRef } from "@ryco/client-runtime/scoped";
 import type { EnvironmentId } from "@ryco/contracts";
 import { ORPHANED_PROVIDER_SESSION_ERROR } from "@ryco/shared/restartContinuation";
 
@@ -772,6 +773,68 @@ describe("inbox errors", () => {
     expect(rowFor("Provider exited (code 1)")).toMatchObject({
       state: "error",
       statusLabel: "Error",
+    });
+  });
+});
+
+describe("inbox Woke mark", () => {
+  const snoozedAt = "2026-09-12T08:00:00.000Z";
+  const snoozedUntil = "2026-09-12T11:00:00.000Z";
+  const nowMs = Date.parse("2026-09-12T12:00:00.000Z");
+  const environment: InboxEnvironment = {
+    environmentId: NODE_A,
+    label: "Mac",
+    connectionState: "connected",
+    threadSettlementSupported: true,
+    threadSnoozeSupported: true,
+    mutationReady: true,
+    shellCurrent: true,
+  };
+  function row(
+    overrides: Partial<SidebarThreadSummary> = {},
+    input: Partial<Parameters<typeof buildInboxSections>[0]> = {},
+  ) {
+    return buildInboxSections({
+      projects: [project(NODE_A, "p", "Ryco")],
+      worktrees: [],
+      environments: [environment],
+      threads: [
+        thread(NODE_A, "t", "p", {
+          updatedAt: "2026-09-12T08:00:00.000Z",
+          snoozedAt,
+          snoozedUntil,
+          ...overrides,
+        }),
+      ],
+      nowMs,
+      ...input,
+    }).flatMap((section) => section.rows)[0];
+  }
+
+  it("marks an idle thread whose snooze ran out until this device sees it", () => {
+    expect(row()).toMatchObject({ attentionState: "active", wokeAt: snoozedUntil, woke: true });
+    expect(
+      row(
+        {},
+        {
+          wokeSeenAtByThreadKey: {
+            [scopedThreadKey(scopeThreadRef(NODE_A, "t" as never))]: snoozedUntil,
+          },
+        },
+      ),
+    ).toMatchObject({ wokeAt: snoozedUntil, woke: false });
+  });
+
+  it("does not mark a thread still snoozed, one that needs the user, or one never snoozed", () => {
+    expect(row({}, { nowMs: Date.parse(snoozedUntil) - 1 })).toMatchObject({
+      attentionState: "snoozed",
+      wokeAt: null,
+      woke: false,
+    });
+    expect(row({ hasPendingApprovals: true })).toMatchObject({ state: "needs-input", woke: false });
+    expect(row({ snoozedAt: null, snoozedUntil: null })).toMatchObject({
+      wokeAt: null,
+      woke: false,
     });
   });
 });

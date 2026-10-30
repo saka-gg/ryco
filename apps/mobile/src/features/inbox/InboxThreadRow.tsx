@@ -62,11 +62,13 @@ export const InboxThreadRow = memo(function InboxThreadRow(props: {
   // A chat works in one plain folder: no branch or worktree glyph to imply Git.
   const WorkspaceIcon = row.isChat ? IconFolder : row.isWorktree ? IconGitFork : IconGitBranch;
   const showStatus = row.state !== "idle" && row.state !== "settled";
+  // Set only on idle rows: the snooze ran out and this device has not opened the thread since.
+  const woke = row.woke === true;
   const accessibilityLabel = [
     row.title,
     row.contextLabel,
     row.isChat ? null : row.isWorktree ? "Worktree" : "Original directory",
-    row.statusLabel,
+    woke ? "Woke from snooze" : row.statusLabel,
     row.roleLabel,
     // The queue's sentence, not its short mark: "2 queued follow-ups: Paused after an error".
     row.followUpQueue?.title,
@@ -85,7 +87,11 @@ export const InboxThreadRow = memo(function InboxThreadRow(props: {
       className="mx-4 mb-2 gap-2 rounded-2xl bg-card px-3.5 py-3 active:bg-card-alt"
     >
       <View className="flex-row items-start gap-2">
-        <View className={`mt-1.5 h-2 w-2 shrink-0 rounded-full ${statusDotClassName(row.state)}`} />
+        <View
+          className={`mt-1.5 h-2 w-2 shrink-0 rounded-full ${
+            woke ? "bg-warning" : statusDotClassName(row.state)
+          }`}
+        />
         <Text
           className="min-w-0 flex-1 font-ryco-medium text-[15px] leading-[20px] text-foreground"
           numberOfLines={2}
@@ -140,8 +146,9 @@ export const InboxThreadRow = memo(function InboxThreadRow(props: {
           </Text>
         </View>
       </View>
-      {showStatus || row.roleLabel || row.followUpQueue || row.snoozedUntil ? (
+      {showStatus || woke || row.roleLabel || row.followUpQueue || row.snoozedUntil ? (
         <View className="flex-row flex-wrap items-center gap-2">
+          {woke ? <Text className="text-xs font-ryco-medium text-warning">Woke</Text> : null}
           {showStatus ? (
             <Text className={`text-xs font-ryco-medium ${statusTextClassName(row.state)}`}>
               {row.statusLabel}

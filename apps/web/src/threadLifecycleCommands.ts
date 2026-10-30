@@ -86,6 +86,25 @@ export async function dispatchThreadSnooze(
 }
 
 /**
+ * Asks for a custom snooze time ("Custom…" in a snooze menu): a local date and
+ * time, or a duration. Resolves the wake instant, or null when dismissed. The
+ * dialog loads on first use, so the menus offering it add nothing to boot.
+ */
+export async function requestCustomSnooze(): Promise<string | null> {
+  try {
+    const dialog = await import("./components/CustomSnoozeDialog");
+    return await dialog.openCustomSnoozeDialog();
+  } catch (error) {
+    toastManager.add({
+      type: "error",
+      title: "Could not open custom snooze",
+      description: errorDescription(error, "The request failed."),
+    });
+    return null;
+  }
+}
+
+/**
  * Sends `command` to each thread with one Undo notice. The batch code and its
  * copy (threadLifecycleBatch.ts) load with the first bulk action. Never rejects.
  */

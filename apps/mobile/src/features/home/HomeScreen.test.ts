@@ -56,6 +56,11 @@ vi.mock("./useAutoSettleRuleHandOver", () => ({ useAutoSettleRuleHandOver: () =>
 // preferencesStore reaches expo-sqlite's KV store; it must stop at the module
 // boundary in the node test environment.
 vi.mock("../../state/preferencesStore", () => ({ usePreferences: () => ({}) }));
+vi.mock("../../state/snoozeWokeSeen", () => ({
+  markSnoozeWokeSeen: () => undefined,
+  useSnoozeWokeSeen: () => ({}),
+}));
+vi.mock("../inbox/CustomSnoozeSheet", () => ({ CustomSnoozeSheetHost: "CustomSnoozeSheetHost" }));
 vi.mock("../connection/useConnectionController", () => ({
   useSavedEnvironments: () => ({ rows: [], isLoading: false }),
 }));

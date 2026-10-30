@@ -13,6 +13,7 @@ export type InboxGlyphKind =
   | "working"
   | "connecting"
   | "completed"
+  | "woke"
   | "limited"
   | "error"
   | "offline"
@@ -20,9 +21,11 @@ export type InboxGlyphKind =
 
 type GlyphRow = Pick<InboxSidebarRow, "state" | "attention" | "statusLabel">;
 
+/** `woke`: an idle row that woke from its snooze and was not opened since; it wins over unseen. */
 export function resolveInboxGlyph(
   row: Pick<InboxSidebarRow, "state">,
   unseen: boolean,
+  woke = false,
 ): InboxGlyphKind {
   switch (row.state) {
     case "needs-input":
@@ -40,7 +43,7 @@ export function resolveInboxGlyph(
     case "offline":
       return "offline";
     case "idle":
-      return unseen ? "completed" : "idle";
+      return woke ? "woke" : unseen ? "completed" : "idle";
   }
 }
 
@@ -51,9 +54,9 @@ const ATTENTION_LABEL = {
   plan: "Plan ready",
 } as const;
 
-export function inboxGlyphLabel(row: GlyphRow, unseen: boolean): string {
+export function inboxGlyphLabel(row: GlyphRow, unseen: boolean, woke = false): string {
   if (row.state === "needs-input") return ATTENTION_LABEL[row.attention ?? "input"];
-  if (row.state === "idle") return unseen ? "Completed" : "Idle";
+  if (row.state === "idle") return woke ? "Woke" : unseen ? "Completed" : "Idle";
   return row.statusLabel;
 }
 
@@ -64,6 +67,7 @@ export function inboxGlyphLabel(row: GlyphRow, unseen: boolean): string {
  */
 export type InboxStateLine =
   | { readonly kind: "attention"; readonly text: string }
+  | { readonly kind: "woke"; readonly text: string }
   | { readonly kind: "error"; readonly text: string }
   | { readonly kind: "status"; readonly text: string }
   | { readonly kind: "workspace" };
@@ -110,6 +114,7 @@ export function resolveInboxStateLine(
   row: Pick<InboxSidebarRow, "state" | "attention" | "errorDetail" | "statusLabel"> & {
     readonly usageLimit?: InboxSidebarRow["usageLimit"];
   },
+  woke = false,
 ): InboxStateLine {
   switch (row.state) {
     case "needs-input":
@@ -124,8 +129,9 @@ export function resolveInboxStateLine(
     case "reconnecting":
     case "offline":
       return { kind: "status", text: row.statusLabel };
-    case "working":
     case "idle":
+      return woke ? { kind: "woke", text: "Woke" } : { kind: "workspace" };
+    case "working":
       return { kind: "workspace" };
   }
 }
@@ -182,10 +188,14 @@ export function inboxGlyphHint(
   row: Pick<
     InboxSidebarRow,
     "state" | "attention" | "statusLabel" | "errorDetail" | "runningSince" | "latestTurnCompletedAt"
-  > & { readonly usageLimit?: InboxSidebarRow["usageLimit"] } & DelegatedStateRow,
+  > & {
+    readonly usageLimit?: InboxSidebarRow["usageLimit"];
+    readonly wokeAt?: InboxSidebarRow["wokeAt"];
+  } & DelegatedStateRow,
   unseen: boolean,
+  woke = false,
 ): string {
-  const label = inboxGlyphLabel(row, unseen);
+  const label = inboxGlyphLabel(row, unseen, woke);
   const where = row.delegatedState ? " in a delegated thread" : "";
   switch (row.state) {
     case "limited":
@@ -199,6 +209,8 @@ export function inboxGlyphHint(
     case "error":
       return `${label} · ${row.errorDetail ?? ERROR_FALLBACK}`;
     case "idle":
+      if (woke && row.wokeAt)
+        return `Woke from snooze ${formatInboxDayTime(row.wokeAt)} · not opened yet`;
       return unseen && row.latestTurnCompletedAt
         ? `${label} ${formatRelativeTimeLabel(row.latestTurnCompletedAt)} · not opened yet`
         : `${label} · nothing running`;

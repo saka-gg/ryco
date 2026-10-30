@@ -26,7 +26,8 @@ Active and Unsnooze have no Undo, in bulk or for one thread.
 In the Inbox, Cmd-click (Ctrl-click off Mac) adds or removes a row and Shift-click selects the
 displayed range, as in the project sidebar. The context or ... menu of a selected row offers
 Settle, Move to Active, Snooze, Unsnooze, Mark unread and Delete for every selected row that
-allows it, with the count in each item. Rows the list stops showing leave the selection. The
+allows it, with the count in each item. Snooze offers the same times as one row's menu, Custom…
+included (see [Snooze](user/snooze.md)). Rows the list stops showing leave the selection. The
 Recent header's Settle finished button, shown on hover or focus, settles every finished thread
 there whose result you have seen, oldest first, folded delegated threads included; unseen
 results stay. Bulk Settle and Snooze, Settle finished included, use the notice above; Delete

@@ -1,5 +1,5 @@
 import { scopeThreadRef } from "@ryco/client-runtime/scoped";
-import { resolveSnoozePresets } from "@ryco/shared/threadSnooze";
+import { isThreadWokeUnseen, resolveSnoozePresets } from "@ryco/shared/threadSnooze";
 import {
   CheckIcon,
   ClockIcon,
@@ -92,6 +92,7 @@ export type InboxThreadActions = Pick<
 
 const LINE_TONE: Record<InboxStateLine["kind"], string> = {
   attention: "font-medium text-warning-foreground",
+  woke: "font-medium text-warning-foreground",
   error: "text-destructive-foreground",
   status: "text-muted-foreground",
   workspace: "text-muted-foreground",
@@ -246,9 +247,14 @@ export const InboxThreadRow = memo(function InboxThreadRow(props: {
     !resting &&
     !props.active &&
     isCompletionUnseen(row.latestTurnCompletedAt, lastVisitedAt);
-  const glyph = settling ? "completed" : resolveInboxGlyph(row, unseen);
-  const glyphLabel = inboxGlyphLabel(row, unseen);
-  const line = resolveInboxStateLine(row);
+  // The model sets `wokeAt` only on awake, unsettled rows.
+  const woke =
+    row.state === "idle" &&
+    !props.active &&
+    isThreadWokeUnseen({ wokeAt: row.wokeAt, lastVisitedAt });
+  const glyph = settling ? "completed" : resolveInboxGlyph(row, unseen, woke);
+  const glyphLabel = inboxGlyphLabel(row, unseen, woke);
+  const line = resolveInboxStateLine(row, woke);
   const terminalStatus = useThreadTerminalStatus(threadRef);
   const terminalIndicator = terminalStatus ? (
     <InboxHint className="flex shrink-0" label={terminalStatus.label}>
@@ -262,13 +268,23 @@ export const InboxThreadRow = memo(function InboxThreadRow(props: {
     () => ({
       row,
       unseen,
+      woke,
       timestamp,
       pullRequests,
       changeRequestShortName,
       sourceControlName,
       changeStats,
     }),
-    [row, unseen, timestamp, pullRequests, changeRequestShortName, sourceControlName, changeStats],
+    [
+      row,
+      unseen,
+      woke,
+      timestamp,
+      pullRequests,
+      changeRequestShortName,
+      sourceControlName,
+      changeStats,
+    ],
   );
 
   const actionLabel = row.settled ? "Move to Active" : "Settle";
@@ -420,7 +436,7 @@ export const InboxThreadRow = memo(function InboxThreadRow(props: {
             <InboxProjectIcon row={row} />
           </InboxHint>
         ) : (
-          <InboxHint className="flex" label={inboxGlyphHint(row, unseen)}>
+          <InboxHint className="flex" label={inboxGlyphHint(row, unseen, woke)}>
             <InboxStatusGlyph key={glyph} kind={glyph} label={glyphLabel} />
           </InboxHint>
         )}
@@ -433,7 +449,7 @@ export const InboxThreadRow = memo(function InboxThreadRow(props: {
             ? "text-xs leading-[18px] text-muted-foreground group-hover/inbox-row:pr-3 group-focus-within/inbox-row:pr-3"
             : "text-[13px] leading-[18px] group-hover/inbox-row:pr-11 group-focus-within/inbox-row:pr-11",
           !resting &&
-            (unseen
+            (unseen || woke
               ? "font-semibold text-sidebar-foreground"
               : settling
                 ? "text-muted-foreground"

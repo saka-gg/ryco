@@ -2086,6 +2086,26 @@ describe("current thread lifecycle", () => {
     expect(current({ ...idle, archivedAt: "2026-08-23T11:00:00.000Z" })).toBeNull();
   });
 
+  it("carries when a snooze ran out on the awake row, and nothing while it lasts", () => {
+    const snooze = {
+      snoozedAt: "2026-08-23T11:00:00.000Z",
+      snoozedUntil: "2026-08-23T11:30:00.000Z",
+    };
+    const rowOf = (value: SidebarThreadSummary, at = nowMs) =>
+      build({ threads: [value], environments: [live], nowMs: at }).flatMap(
+        (section) => section.rows,
+      )[0];
+    expect(rowOf(used("woke", snooze))).toMatchObject({
+      snoozedUntil: null,
+      wokeAt: "2026-08-23T11:30:00.000Z",
+    });
+    expect(rowOf(used("dozing", snooze), Date.parse("2026-08-23T11:29:00.000Z"))).toMatchObject({
+      snoozedUntil: "2026-08-23T11:30:00.000Z",
+      wokeAt: null,
+    });
+    expect(rowOf(idle)).toMatchObject({ wokeAt: null });
+  });
+
   it("decides each thread exactly as its inbox row does", () => {
     const threads = [
       idle,

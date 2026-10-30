@@ -128,6 +128,7 @@ import {
   selectSidebarThreadsAcrossEnvironments,
   useStore,
 } from "../store";
+import { requestCustomSnooze } from "../threadLifecycleCommands";
 import { isUnarchivedThreadEntry } from "../types";
 import { buildThreadRouteParams } from "../threadRoutes";
 import { useUiStateStore } from "../uiStateStore";
@@ -1496,6 +1497,7 @@ function OpenCommandPaletteDialog() {
               archive: <ArchiveIcon className={ITEM_ICON_CLASS} />,
               markUnread: <CircleDotIcon className={ITEM_ICON_CLASS} />,
             },
+            pickCustomSnooze: requestCustomSnooze,
           })
         : null,
     [currentThreadLifecycle],

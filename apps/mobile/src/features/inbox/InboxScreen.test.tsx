@@ -2,7 +2,12 @@ import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import type { ReactElement } from "react";
 import type { InboxThreadRow } from "./inboxModel";
 
-const rpc = vi.hoisted(() => ({ dispatch: vi.fn(), lookup: vi.fn(), alert: vi.fn() }));
+const rpc = vi.hoisted(() => ({
+  dispatch: vi.fn(),
+  lookup: vi.fn(),
+  alert: vi.fn(),
+  customSnooze: vi.fn(),
+}));
 vi.mock("react", async (original) => ({
   ...(await original<typeof import("react")>()),
   useCallback: <T,>(callback: T) => callback,
@@ -27,6 +32,7 @@ vi.mock("../../components/AppText", () => ({ AppText: "Text" }));
 vi.mock("../../components/AppSymbol", () => ({ SymbolView: "SymbolView" }));
 vi.mock("../../components/EmptyState", () => ({ EmptyState: "EmptyState" }));
 vi.mock("./InboxThreadRow", () => ({ InboxThreadRow: "InboxThreadRow" }));
+vi.mock("./customSnoozeModel", () => ({ requestCustomSnooze: rpc.customSnooze }));
 vi.mock("../home/WorkspaceConnectionStatus", () => ({
   WorkspaceConnectionStatus: "WorkspaceConnectionStatus",
 }));
@@ -105,5 +111,36 @@ describe("inbox settlement action guards", () => {
     });
     menu().onPressAction({ nativeEvent: { event: "settle" } });
     expect(rpc.alert).toHaveBeenCalledWith("Could not update task", "Disconnected");
+  });
+});
+
+describe("inbox snooze menu", () => {
+  it("offers three hours and a custom time after the presets", () => {
+    const ids = menu().actions.map((action) => action.id);
+    expect(ids.slice(0, 3)).toEqual(["settle", "hour", "three-hours"]);
+    expect(ids.at(-1)).toBe("snooze-custom");
+  });
+
+  it("snoozes until the custom time the sheet returns", async () => {
+    rpc.customSnooze.mockResolvedValueOnce("2026-10-14T08:30:00.000Z");
+    menu().onPressAction({ nativeEvent: { event: "snooze-custom" } });
+    await vi.waitFor(() =>
+      expect(rpc.dispatch).toHaveBeenCalledWith({
+        type: "thread.snooze",
+        threadId: "task",
+        commandId: "command",
+        snoozedUntil: "2026-10-14T08:30:00.000Z",
+      }),
+    );
+  });
+
+  it("sends nothing when the sheet is dismissed or the row cannot snooze", async () => {
+    rpc.customSnooze.mockResolvedValueOnce(null);
+    menu().onPressAction({ nativeEvent: { event: "snooze-custom" } });
+    await Promise.resolve();
+    await Promise.resolve();
+    menu({ canSnooze: false }).onPressAction({ nativeEvent: { event: "snooze-custom" } });
+    expect(rpc.customSnooze).toHaveBeenCalledTimes(1);
+    expect(rpc.dispatch).not.toHaveBeenCalled();
   });
 });

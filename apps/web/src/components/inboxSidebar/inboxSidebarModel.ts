@@ -16,6 +16,7 @@ import {
 } from "@ryco/client-runtime/state/message-queue/queueBadge";
 import { CHAT_WORKSPACE_LABEL, projectDisplayLabel } from "@ryco/client-runtime/state/composer";
 import { isChatProject } from "@ryco/shared/projectKind";
+import { threadSnoozeWokeAt } from "@ryco/shared/threadSnooze";
 import type { SavedEnvironmentRuntimeState } from "@ryco/client-runtime/connection";
 import {
   resolveEnvironmentThreadCapabilities,
@@ -251,6 +252,11 @@ export interface InboxSidebarRow {
   readonly followUpQueue: FollowUpQueueBadge | null;
   readonly settled: boolean;
   readonly snoozedUntil: string | null;
+  /**
+   * When an awake, unsettled thread woke from its snooze by the timer; the row
+   * shows "Woke" until the user visits it after that.
+   */
+  readonly wokeAt: string | null;
   readonly canSnooze: boolean;
   readonly canUnsnooze: boolean;
   readonly settlementActionEnabled: boolean;
@@ -1161,6 +1167,7 @@ export function buildInboxSidebarModel(input: BuildInboxSidebarInput): InboxSide
       followUpQueue: followUpQueueBadgeOf(thread.followUpQueueSummary),
       settled,
       snoozedUntil: snoozed ? (thread.snoozedUntil ?? null) : null,
+      wokeAt: snoozed || settled ? null : threadSnoozeWokeAt(thread, nowMs),
       // The snooze toggle: Snooze on an awake row, Unsnooze on a snoozed one.
       canSnooze: !snoozed && availability.snooze.enabled,
       canUnsnooze: snoozed && availability.snooze.enabled,

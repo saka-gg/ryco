@@ -782,6 +782,62 @@ describe("ChatView Navigation (full app)", () => {
     }
   });
 
+  it("reads a thread whose snooze ran out at its wake, clearing its Woke mark", async () => {
+    const snapshot = createLifecycleSnapshot();
+    const wokeAt = new Date(Date.now() - 10_000).toISOString();
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot: {
+        ...snapshot,
+        threads: snapshot.threads.map((thread) => ({
+          ...thread,
+          snoozedAt: new Date(Date.parse(LIFECYCLE_TURN_COMPLETED_AT) + 1_000).toISOString(),
+          snoozedUntil: wokeAt,
+        })),
+      },
+      configureFixture: enableThreadLifecycle,
+    });
+    try {
+      await waitForServerConfigToApply();
+      await vi.waitFor(() =>
+        expect(useUiStateStore.getState().threadLastVisitedAtById[THREAD_KEY]).toBe(wokeAt),
+      );
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("explains a snoozed thread above the composer and wakes it with Return now", async () => {
+    const snapshot = createLifecycleSnapshot();
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot: {
+        ...snapshot,
+        threads: snapshot.threads.map((thread) => ({
+          ...thread,
+          // After the fixture's messages and turn: nothing woke it since.
+          snoozedAt: new Date().toISOString(),
+          snoozedUntil: new Date(Date.now() + 2 * 3_600_000 + 30 * 60_000).toISOString(),
+        })),
+      },
+      configureFixture: enableThreadLifecycle,
+    });
+    try {
+      await waitForServerConfigToApply();
+      await vi.waitFor(() => {
+        expect(document.body.textContent).toContain("Sending a message ends the snooze.");
+        expect(document.body.textContent).toMatch(/Returns .+ · 2 hr 29 min left/u);
+      });
+      // Another notice may sit in front of it in the banner stack.
+      Array.from(document.querySelectorAll<HTMLButtonElement>("button"))
+        .find((button) => button.textContent === "Return now")
+        ?.click();
+      await vi.waitFor(() => expect(dispatchedCommandTypes()).toContain("thread.unsnooze"));
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
   it("does not consume chat.new when there is no project context", async () => {
     const mounted = await mountChatView({
       viewport: DEFAULT_VIEWPORT,

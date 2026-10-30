@@ -22,8 +22,10 @@ import {
   type InboxListItem,
 } from "./inboxListModel";
 import { InboxThreadRow as ThreadRow } from "./InboxThreadRow";
+import { requestCustomSnooze } from "./customSnoozeModel";
 import {
   buildInboxRowMenuActions,
+  CUSTOM_SNOOZE_ACTION_ID,
   resolveSnoozeMenuPresets,
   snoozeMenuPresetsFromKey,
   snoozeMenuPresetsKey,
@@ -92,12 +94,25 @@ function dispatchRowMenuAction(row: InboxThreadRow, event: string): void {
     })();
     return;
   }
+  if (event === CUSTOM_SNOOZE_ACTION_ID) {
+    if (!row.canSnooze) return;
+    void requestCustomSnooze().then((until) => {
+      if (until) dispatchRowSnooze(row, until);
+    });
+    return;
+  }
   // The snooze instant is resolved at press time, not from the rendered list.
   const until =
     event === "unsnooze"
       ? null
       : resolveSnoozePresets(new Date()).find((preset) => preset.id === event)?.snoozedUntil;
-  if (until === undefined || !(until ? row.canSnooze : row.canUnsnooze)) return;
+  if (until === undefined) return;
+  dispatchRowSnooze(row, until);
+}
+
+/** Snoozes the row's thread until `until`, or wakes it with null. */
+function dispatchRowSnooze(row: InboxThreadRow, until: string | null): void {
+  if (!(until ? row.canSnooze : row.canUnsnooze)) return;
   void (async () => {
     try {
       await sidebarUndo.dispatch(

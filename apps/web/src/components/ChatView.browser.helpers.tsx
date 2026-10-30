@@ -760,6 +760,9 @@ function toShellThread(thread: OrchestrationReadModel["threads"][number]) {
     archivedAt: thread.archivedAt,
     settledOverride: thread.settledOverride,
     settledAt: thread.settledAt,
+    ...(thread.snoozedUntil != null
+      ? { snoozedUntil: thread.snoozedUntil, snoozedAt: thread.snoozedAt ?? null }
+      : {}),
     session: thread.session,
     ...(thread.lineage ? { lineage: thread.lineage } : {}),
     latestUserMessageAt:

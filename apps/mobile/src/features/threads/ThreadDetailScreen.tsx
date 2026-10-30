@@ -124,6 +124,7 @@ import {
   type ChatMessage,
 } from "@ryco/client-runtime/state/threads";
 import { isChatProject } from "@ryco/shared/projectKind";
+import { threadSnoozeWokeAt } from "@ryco/shared/threadSnooze";
 import type { CommandId, ThreadForkResult } from "@ryco/contracts";
 import { EnvironmentId, MessageId, ThreadId } from "@ryco/contracts/base-schemas";
 import { DEFAULT_AGENT_TOKEN_MODE, type ModelSelection } from "@ryco/contracts/orchestration";
@@ -166,6 +167,7 @@ import { useEnvironmentServerConfigs } from "../../state/environmentServerConfig
 import { useHomeWorkspaceData } from "../../state/homeData";
 import { useMessageQueueStore } from "../../state/messageQueueStore";
 import { isClaudeResumeReviewEnabled, usePreferences } from "../../state/preferencesStore";
+import { markSnoozeWokeSeen } from "../../state/snoozeWokeSeen";
 import {
   useWsConnectionStatusForEnvironment,
   wsUiStateForEnvironment,
@@ -889,6 +891,23 @@ export function ThreadDetailScreen(props: {
     const timer = setTimeout(() => setSettlementNowMs(Date.now()), delayMs);
     return () => clearTimeout(timer);
   }, [settlementModel?.nextSettlementEvaluationAtMs]);
+  // Seeing a thread whose snooze ran out, or runs out while it is open (the
+  // settlement clock re-reads at the wake), clears its Inbox "Woke" mark.
+  const summarySnoozedUntil =
+    sidebarThread && !isArchivedThreadStub(sidebarThread)
+      ? (sidebarThread.snoozedUntil ?? null)
+      : null;
+  const summarySnoozedAt =
+    sidebarThread && !isArchivedThreadStub(sidebarThread)
+      ? (sidebarThread.snoozedAt ?? null)
+      : null;
+  useEffect(() => {
+    const wokeAt = threadSnoozeWokeAt(
+      { snoozedUntil: summarySnoozedUntil, snoozedAt: summarySnoozedAt },
+      Math.max(settlementNowMs, Date.now()),
+    );
+    if (wokeAt !== null) markSnoozeWokeSeen(outboxThreadKey, wokeAt);
+  }, [outboxThreadKey, settlementNowMs, summarySnoozedAt, summarySnoozedUntil]);
   const settlementEntry =
     settlementModel?.active[0] ??
     settlementModel?.settled[0] ??
