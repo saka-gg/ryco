@@ -9,6 +9,8 @@ const mocks = vi.hoisted(() => ({
   clearDiffs: vi.fn(),
   icons: vi.fn(),
   clearIcons: vi.fn(),
+  pullRequests: vi.fn(),
+  clearPullRequests: vi.fn(),
 }));
 vi.mock("./environmentSnapshotPersistence", () => ({
   listEnvironmentCacheStorage: mocks.snapshots,
@@ -22,6 +24,10 @@ vi.mock("../rpc/checkpointDiffAtoms", () => ({
   checkpointDiffCacheBytes: mocks.diffs,
   clearCheckpointDiffCacheForEnvironment: mocks.clearDiffs,
 }));
+vi.mock("../rpc/pullRequestAtoms", () => ({
+  pullRequestCacheBytes: mocks.pullRequests,
+  clearPullRequestCache: mocks.clearPullRequests,
+}));
 vi.mock("@ryco/client-runtime/connection", () => ({
   projectIconCacheBytes: mocks.icons,
   clearProjectIconCache: mocks.clearIcons,
@@ -34,6 +40,7 @@ beforeEach(() => {
   mocks.files.mockReturnValue({ images: 20, files: 30 });
   mocks.diffs.mockReturnValue(40);
   mocks.icons.mockReturnValue(10);
+  mocks.pullRequests.mockReturnValue(5);
 });
 it("accounts for each category and includes snapshots from devices no longer in the catalog", async () => {
   mocks.snapshots.mockResolvedValue([
@@ -45,17 +52,23 @@ it("accounts for each category and includes snapshots from devices no longer in 
       label: "Cached device",
       snapshotBytes: 100,
       imageBytes: 30,
-      fileBytes: 70,
+      fileBytes: 75,
       threads: 2,
       projects: 1,
-      totalBytes: 200,
+      totalBytes: 205,
     },
   ]);
 });
 it("clears only the selected device and its own image source cache", async () => {
   // The artwork cache is keyed by device, so a disconnected device clears too.
   await clearDeviceCache(device);
-  for (const clear of [mocks.purge, mocks.clearFiles, mocks.clearDiffs, mocks.clearIcons]) {
+  for (const clear of [
+    mocks.purge,
+    mocks.clearFiles,
+    mocks.clearDiffs,
+    mocks.clearPullRequests,
+    mocks.clearIcons,
+  ]) {
     expect(clear).toHaveBeenCalledExactlyOnceWith(device);
   }
 });

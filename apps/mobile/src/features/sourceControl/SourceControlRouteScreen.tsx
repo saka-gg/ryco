@@ -152,6 +152,12 @@ export function SourceControlRouteScreen(props: SourceControlRouteProps) {
     );
   }
 
+  const currentPullRequestNumber = status?.pr?.number ?? null;
+  const openPullRequest = (number: number | null) => {
+    if (number === null) return;
+    navigation.navigate("ProjectPullRequest", { environmentId, projectId, number: String(number) });
+  };
+
   const files = [
     ...(status?.workingTree.files ?? []).map((file) => ({
       path: file.path,
@@ -222,7 +228,12 @@ export function SourceControlRouteScreen(props: SourceControlRouteProps) {
       </View>
 
       {status?.pr ? (
-        <View className="rounded-2xl bg-card p-4">
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel={`Open pull request ${status.pr.number}`}
+          onPress={() => openPullRequest(currentPullRequestNumber)}
+          className="rounded-2xl bg-card p-4 active:bg-card-alt"
+        >
           <Text className="text-xs font-ryco-bold uppercase tracking-wide text-foreground-muted">
             Pull request #{status.pr.number} · {status.pr.state}
           </Text>
@@ -230,8 +241,15 @@ export function SourceControlRouteScreen(props: SourceControlRouteProps) {
           <Text className="mt-1 text-xs text-foreground-muted">
             {status.pr.headRef} → {status.pr.baseRef}
           </Text>
-        </View>
+        </Pressable>
       ) : null}
+      <Pressable
+        accessibilityRole="button"
+        onPress={() => navigation.navigate("ProjectPullRequests", { environmentId, projectId })}
+        className="self-start px-1 active:opacity-70"
+      >
+        <Text className="text-sm font-ryco-bold text-primary">All pull requests</Text>
+      </Pressable>
 
       <View className="gap-2">
         <Text className="px-1 text-sm font-ryco-bold text-foreground-muted">

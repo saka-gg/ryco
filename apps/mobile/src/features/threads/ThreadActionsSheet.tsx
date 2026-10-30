@@ -160,6 +160,8 @@ export function ThreadActionsSheet(props: {
   readonly onToggleSettlement: () => void;
   readonly onToggleArchive: () => void;
   readonly onReview: () => void;
+  /** Opens the worktree's pull request; absent where the thread has no project to read it through. */
+  readonly onOpenPullRequest?: (() => void) | undefined;
 }) {
   const [title, setTitle] = useState(props.model.title);
   const placeholderColor = useThemeColor("--color-placeholder");
@@ -266,6 +268,14 @@ export function ThreadActionsSheet(props: {
         </View>
 
         <View className="overflow-hidden rounded-2xl bg-card">
+          {props.model.pullRequestNumber !== null && props.onOpenPullRequest ? (
+            <ActionRow
+              icon="arrow.triangle.pull"
+              label={`Open pull request #${props.model.pullRequestNumber}`}
+              detail="Read its conversation, checks and files."
+              onPress={props.onOpenPullRequest}
+            />
+          ) : null}
           {props.model.reviewVisible ? (
             <ActionRow
               icon="doc.text"

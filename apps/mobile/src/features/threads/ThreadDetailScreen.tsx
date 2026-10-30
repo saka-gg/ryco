@@ -2930,6 +2930,18 @@ export function ThreadDetailScreen(props: {
             setActionsVisible(false);
             openReview();
           }}
+          onOpenPullRequest={
+            thread && headerModel.pullRequestNumber !== null
+              ? () => {
+                  setActionsVisible(false);
+                  navigation.navigate("ProjectPullRequest", {
+                    environmentId,
+                    projectId: thread.projectId,
+                    number: String(headerModel.pullRequestNumber),
+                  });
+                }
+              : undefined
+          }
         />
       ) : null}
 

@@ -109,6 +109,8 @@ export interface ThreadHeaderModel {
   readonly moreActions: ReadonlyArray<ThreadMoreAction>;
   /** Last known pull request / work item for the thread's worktree, if any. */
   readonly changeRequest: ChangeRequestBadge | null;
+  /** The worktree's pull request, which the task sheet opens on the phone; null without one. */
+  readonly pullRequestNumber: number | null;
   readonly settlementAction: ThreadSettlementActionModel | null;
   /** Null on nodes without pull request watches, and when there is no pull request. */
   readonly pullRequestWatch: ThreadHeaderPullRequestWatch | null;
@@ -388,6 +390,7 @@ export function buildThreadHeaderModel(input: {
     terminalVisible: workspaceRoot !== null && input.thread.archivedAt === null,
     moreActions,
     changeRequest: buildChangeRequestBadge(input.worktree),
+    pullRequestNumber: input.worktree?.prNumber ?? null,
     settlementAction,
     pullRequestWatch,
     compactAction: compactAction(input.thread),

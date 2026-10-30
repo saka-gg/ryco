@@ -34,11 +34,7 @@ import { NavigationHeaderButton } from "../../components/NavigationHeaderButton"
 import { CopyTextButton } from "../../components/CopyTextButton";
 import { EmptyState } from "../../components/EmptyState";
 import { cn } from "../../lib/cn";
-import {
-  resolveMobileCodeSurface,
-  resolveNativeMarkdownTypography,
-} from "../../lib/appearancePreferences";
-import { useFontFamily } from "../../lib/useFontFamily";
+import { resolveMobileCodeSurface } from "../../lib/appearancePreferences";
 import { useThemeColor } from "../../lib/useThemeColor";
 import { useProjectReadFile, useProjectReadFileBinary } from "../../rpc/useProjectFiles";
 import {
@@ -55,10 +51,9 @@ import {
 import {
   hasNativeSelectableMarkdownText,
   SelectableMarkdownText,
-  type NativeMarkdownTextStyle,
 } from "../../native/SelectableMarkdownText";
+import { useNativeMarkdownTextStyle } from "../../native/useNativeMarkdownTextStyle";
 import { useAppearancePreferences } from "../settings/appearance/AppearancePreferencesProvider";
-import { useScaledTextRole } from "../settings/appearance/useScaledTextRole";
 import {
   highlightSourceFile,
   type ReviewDiffTheme,
@@ -381,30 +376,7 @@ function MarkdownFileView(props: {
   readonly refreshing: boolean;
   readonly onRefresh: () => void;
 }) {
-  const bodyText = useScaledTextRole("body");
-  const typography = resolveNativeMarkdownTypography(bodyText.fontSize);
-  const regularFont = useFontFamily("regular");
-  const boldFont = useFontFamily("bold");
-  const markdownStyle: NativeMarkdownTextStyle = {
-    color: String(useThemeColor("--color-md-body")),
-    strongColor: String(useThemeColor("--color-md-strong")),
-    mutedColor: String(useThemeColor("--color-foreground-muted")),
-    linkColor: String(useThemeColor("--color-md-link")),
-    inlineCodeColor: String(useThemeColor("--color-md-code-text")),
-    codeColor: String(useThemeColor("--color-md-code-text")),
-    codeBackgroundColor: String(useThemeColor("--color-md-code-bg")),
-    codeBlockBackgroundColor: String(useThemeColor("--color-card-alt")),
-    fileTextColor: String(useThemeColor("--color-md-link")),
-    skillTextColor: String(useThemeColor("--color-inline-skill-foreground")),
-    quoteMarkerColor: String(useThemeColor("--color-md-blockquote-border")),
-    dividerColor: String(useThemeColor("--color-md-hr")),
-    fontSize: typography.fontSize,
-    lineHeight: typography.lineHeight,
-    fontFamily: regularFont,
-    headingFontFamily: boldFont,
-    boldFontFamily: boldFont,
-    headingFontSizes: typography.headingFontSizes,
-  };
+  const markdownStyle = useNativeMarkdownTextStyle();
 
   return (
     <ScrollView

@@ -24,6 +24,9 @@ describe("MVP route config", () => {
         "NewTask",
         "NotFound",
         "Project",
+        "ProjectPullRequest",
+        "ProjectPullRequestFile",
+        "ProjectPullRequests",
         "ProjectSourceControl",
         "SettingsSheet",
         "Thread",
@@ -52,6 +55,15 @@ describe("MVP route config", () => {
     expect(MVP_ROOT_ROUTES.Project.linking).toBe("projects/:environmentId/:projectId");
     expect(MVP_ROOT_ROUTES.ProjectSourceControl.linking).toBe(
       "projects/:environmentId/:projectId/source-control/:worktreeId?",
+    );
+    expect(MVP_ROOT_ROUTES.ProjectPullRequests.linking).toBe(
+      "projects/:environmentId/:projectId/pull-requests",
+    );
+    expect(MVP_ROOT_ROUTES.ProjectPullRequest.linking).toBe(
+      "projects/:environmentId/:projectId/pull-requests/:number",
+    );
+    expect(MVP_ROOT_ROUTES.ProjectPullRequestFile.linking).toBe(
+      "projects/:environmentId/:projectId/pull-requests/:number/files/:path*",
     );
     expect(MVP_ROOT_ROUTES.NewTask.linking).toBe("tasks/new");
     expect(MVP_ROOT_ROUTES.Thread.linking).toBe("threads/:environmentId/:threadId");

@@ -36,15 +36,12 @@ import { Image, Pressable, ScrollView, Share, View } from "react-native";
 import { SymbolView } from "../../components/AppSymbol";
 import { AppText as Text } from "../../components/AppText";
 import { CopyTextButton } from "../../components/CopyTextButton";
-import { resolveNativeMarkdownTypography } from "../../lib/appearancePreferences";
-import { useFontFamily } from "../../lib/useFontFamily";
 import { useThemeColor } from "../../lib/useThemeColor";
 import {
   hasNativeSelectableMarkdownText,
   SelectableMarkdownText,
-  type NativeMarkdownTextStyle,
 } from "../../native/SelectableMarkdownText";
-import { useScaledTextRole } from "../settings/appearance/useScaledTextRole";
+import { useNativeMarkdownTextStyle } from "../../native/useNativeMarkdownTextStyle";
 import { HtmlRenderCards } from "./HtmlRenderCards";
 import { ThreadHtmlRender } from "./ThreadHtmlRender";
 import type { TurnHtmlRender } from "./threadActivityFold";
@@ -296,42 +293,8 @@ export function ThreadMessage(props: {
   const sentAt = isUser ? Date.parse(props.message.createdAt) : Number.NaN;
   const sentLabel = Number.isFinite(sentAt) ? sentTimeFormatter.format(sentAt) : null;
   const presentation = threadMessagePresentation(isUser ? "user" : "assistant");
-  const bodyText = useScaledTextRole("body");
-  const typography = resolveNativeMarkdownTypography(bodyText.fontSize);
-  const regularFont = useFontFamily("regular");
-  const boldFont = useFontFamily("bold");
-  const bodyColor = useThemeColor("--color-md-body");
-  const strongColor = useThemeColor("--color-md-strong");
-  const mutedColor = useThemeColor("--color-foreground-muted");
   const metadataColor = useThemeColor("--color-foreground-tertiary");
-  const linkColor = useThemeColor("--color-md-link");
-  const codeColor = useThemeColor("--color-md-code-text");
-  const codeBackground = useThemeColor("--color-md-code-bg");
-  const codeBlockBackground = useThemeColor("--color-card-alt");
-  const fileTextColor = useThemeColor("--color-md-link");
-  const skillTextColor = useThemeColor("--color-inline-skill-foreground");
-  const quoteMarkerColor = useThemeColor("--color-md-blockquote-border");
-  const dividerColor = useThemeColor("--color-md-hr");
-  const markdownStyle: NativeMarkdownTextStyle = {
-    color: String(bodyColor),
-    strongColor: String(strongColor),
-    mutedColor: String(mutedColor),
-    linkColor: String(linkColor),
-    inlineCodeColor: String(codeColor),
-    codeColor: String(codeColor),
-    codeBackgroundColor: String(codeBackground),
-    codeBlockBackgroundColor: String(codeBlockBackground),
-    fileTextColor: String(fileTextColor),
-    skillTextColor: String(skillTextColor),
-    quoteMarkerColor: String(quoteMarkerColor),
-    dividerColor: String(dividerColor),
-    fontSize: typography.fontSize,
-    lineHeight: typography.lineHeight,
-    fontFamily: regularFont,
-    headingFontFamily: boldFont,
-    boldFontFamily: boldFont,
-    headingFontSizes: typography.headingFontSizes,
-  };
+  const markdownStyle = useNativeMarkdownTextStyle();
   // A sent prompt's context blocks show as chips, not as raw text, and its
   // quotes read as plain quoted lines; copying keeps the text as sent.
   const sentContexts = isUser ? deriveDisplayedUserMessageContext(props.message.text) : null;

@@ -51,6 +51,7 @@ function model(pullRequestWatch: ThreadHeaderModel["pullRequestWatch"]): ThreadH
       tone: "open",
       accessibilityLabel: "Pull request 42, open. Last known state.",
     },
+    pullRequestNumber: 42,
     settlementAction: null,
     compactAction: null,
     pullRequestWatch,

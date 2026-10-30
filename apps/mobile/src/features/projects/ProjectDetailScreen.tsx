@@ -351,19 +351,34 @@ export function ProjectDetailScreen(props: {
           </Pressable>
         </View>
 
-        <Pressable
-          accessibilityRole="button"
-          accessibilityLabel="Open project Source Control"
-          onPress={() =>
-            navigation.navigate("ProjectSourceControl", {
-              environmentId: props.environmentId,
-              projectId: props.projectId,
-            })
-          }
-          className="h-12 items-center justify-center rounded-full bg-card px-4 active:bg-card-alt"
-        >
-          <Text className="text-sm font-ryco-bold text-foreground">Source Control</Text>
-        </Pressable>
+        <View className="flex-row gap-3">
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Open project Source Control"
+            onPress={() =>
+              navigation.navigate("ProjectSourceControl", {
+                environmentId: props.environmentId,
+                projectId: props.projectId,
+              })
+            }
+            className="h-12 flex-1 items-center justify-center rounded-full bg-card px-4 active:bg-card-alt"
+          >
+            <Text className="text-sm font-ryco-bold text-foreground">Source Control</Text>
+          </Pressable>
+          <Pressable
+            accessibilityRole="button"
+            accessibilityLabel="Open the project's pull requests"
+            onPress={() =>
+              navigation.navigate("ProjectPullRequests", {
+                environmentId: props.environmentId,
+                projectId: props.projectId,
+              })
+            }
+            className="h-12 flex-1 items-center justify-center rounded-full bg-card px-4 active:bg-card-alt"
+          >
+            <Text className="text-sm font-ryco-bold text-foreground">Pull requests</Text>
+          </Pressable>
+        </View>
 
         <View className="gap-3">
           <Text className="px-1 text-sm font-ryco-bold text-foreground-muted">Worktrees</Text>
