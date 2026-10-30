@@ -3,7 +3,7 @@ import { appAtomRegistry, wsConnectionOpenedCountAtom } from "@ryco/client-runti
 import { mobileKV } from "../../platform/kv";
 import { useStore } from "../../state/threadsRuntime";
 import { readThreadOutboxEnvironment } from "../../state/use-thread-outbox-drain";
-import { createNewTaskLaunchDeps } from "./newTaskLaunchRuntime";
+import { createNewTaskLaunchDeps, isNewTaskThreadStarted } from "./newTaskLaunchRuntime";
 import { createNewTaskOutboxPersistence, drainNewTaskOutbox } from "./newTaskOutbox";
 
 const DRAIN_DEBOUNCE_MS = 50;
@@ -24,6 +24,7 @@ export function startNewTaskOutboxDrain(): () => void {
       isEnvironmentReady: (environmentId) =>
         readThreadOutboxEnvironment(environmentId).mutationReady,
       depsFor: createNewTaskLaunchDeps,
+      isThreadStarted: isNewTaskThreadStarted,
     });
   };
   const schedule = () => {

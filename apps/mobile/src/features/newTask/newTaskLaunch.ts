@@ -117,6 +117,7 @@ async function run(key: string, deps: NewTaskLaunchDeps): Promise<void> {
         attempt: result.attempt,
         status: "started",
         failure: null,
+        interrupted: false,
       }));
       return;
     }
@@ -133,6 +134,8 @@ async function run(key: string, deps: NewTaskLaunchDeps): Promise<void> {
         message: result.message,
         deliveryUncertain: result.deliveryUncertain,
       },
+      // This run's outcome says what the node may hold now.
+      interrupted: false,
     }));
   } finally {
     running.delete(key);
@@ -167,6 +170,7 @@ function addLaunch(
     status,
     failure: null,
     queuedAt: attempt.createdAt,
+    ...(status === "queued" ? { fromOutbox: true } : {}),
   };
   useNewTaskLaunchStore.setState((state) => ({
     launchesByKey: pruneStarted({ ...state.launchesByKey, [key]: launch }),
@@ -185,11 +189,23 @@ export function queueNewTaskLaunch(input: {
   return addLaunch(input.attempt, input.draft, "queued");
 }
 
-/** Start a queued launch now that its machine is live. */
+/**
+ * Start a queued launch now that its machine is live. One that failed before
+ * (Retry while its machine was away) starts again the way Retry would.
+ */
 export function startQueuedNewTaskLaunch(key: string, deps: NewTaskLaunchDeps): void {
   const launch = readNewTaskLaunch(key);
-  if (!launch || launch.status !== "queued" || running.has(key)) return;
-  const next: NewTaskLaunch = { ...launch, status: "starting" };
+  if (!launch || launch.status !== "queued" || launch.editing === true || running.has(key)) {
+    return;
+  }
+  const next: NewTaskLaunch = {
+    ...launch,
+    attempt: launch.failure
+      ? prepareNewTaskRetry(launch.attempt, launch.failure, deps.newCommandId)
+      : launch.attempt,
+    status: "starting",
+    failure: null,
+  };
   patchLaunch(key, () => next);
   beginWorktreeFeed(next, deps.feedApi);
   void run(key, deps);
@@ -221,14 +237,16 @@ export function retryNewTaskLaunch(key: string, deps: NewTaskLaunchDeps): void {
  */
 export function canEditNewTaskLaunch(launch: NewTaskLaunch): boolean {
   if (launch.interrupted === true) return false;
-  if (launch.status === "queued") return true;
+  if (launch.status !== "queued" && launch.status !== "failed") return false;
+  // Queued and never sent: nothing of it is on the node.
+  if (launch.status === "queued" && launch.failure === null) return true;
+  // Failed, or queued again after a failure.
   const { attempt } = launch;
   // A new project the node took but this device has not seen yet: editing
   // would create it a second time under another id.
   const projectUnconfirmed =
     attempt.project.kind === "new" && attempt.projectCommandAccepted && !attempt.projectReady;
   return (
-    launch.status === "failed" &&
     !attempt.threadCommandAccepted &&
     !projectUnconfirmed &&
     launch.failure?.deliveryUncertain !== true
@@ -251,9 +269,42 @@ export function readNewTaskLaunchDraftForEdit(key: string): NewTaskLaunchDraft |
     : draft;
 }
 
-export function discardNewTaskLaunch(key: string): void {
+/**
+ * Retry while the machine is away: the launch waits in the outbox again and
+ * starts, as Retry would, once the machine is live.
+ */
+export function requeueNewTaskLaunch(key: string): void {
+  patchLaunch(key, (launch) =>
+    launch.status === "failed" ? { ...launch, status: "queued", fromOutbox: true } : launch,
+  );
+}
+
+/**
+ * Hold a launch while its draft is open on the New Task sheet (true), or let
+ * the outbox have it again (false): a queued task must not start under the
+ * user's edit and then be sent a second time as the edited one.
+ */
+export function setNewTaskLaunchEditing(key: string, editing: boolean): void {
+  patchLaunch(key, (launch) =>
+    (launch.editing === true) === editing ? launch : { ...launch, editing },
+  );
+}
+
+/** The node shows the task's thread with its turn: nothing is left to send. */
+export function markNewTaskLaunchStarted(key: string): void {
+  patchLaunch(key, (launch) =>
+    running.has(key) || launch.status === "started"
+      ? launch
+      : { ...launch, status: "started", failure: null, interrupted: false },
+  );
+}
+
+/** Forget a launch. Refused while its attempt is running: that outcome must land somewhere. */
+export function discardNewTaskLaunch(key: string): boolean {
+  if (running.has(key)) return false;
   dropWorktreeFeed(key);
   patchLaunch(key, () => null);
+  return true;
 }
 
 /* -------------------------------------------------------------------------- */
@@ -365,6 +416,10 @@ export function deriveNewTaskLaunchView(input: {
 
   const queued = launch.status === "queued";
   const canEdit = canEditNewTaskLaunch(launch);
+  // Remove is always offered once nothing runs: a launch that may be on the
+  // node already says so in its failure text, and Home must never keep a row
+  // the user cannot clear.
+  const canRemove = queued || failed;
   return {
     queued,
     title: inferTaskTitle(attempt.prompt),
@@ -385,6 +440,6 @@ export function deriveNewTaskLaunchView(input: {
     failureMessage: failed ? (launch.failure?.message ?? null) : null,
     canRetry: failed,
     canEdit,
-    canRemove: canEdit,
+    canRemove,
   };
 }

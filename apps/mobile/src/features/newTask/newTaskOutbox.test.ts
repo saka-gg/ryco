@@ -13,10 +13,14 @@ import { afterEach, describe, expect, it } from "vite-plus/test";
 import { createNewTaskAttempt, type NewTaskStableIds } from "./newTaskController";
 import {
   deriveNewTaskLaunchView,
+  discardNewTaskLaunch,
   newTaskLaunchKey,
   queueNewTaskLaunch,
   readNewTaskLaunch,
   readNewTaskLaunchDraftForEdit,
+  requeueNewTaskLaunch,
+  setNewTaskLaunchEditing,
+  startNewTaskLaunch,
   useNewTaskLaunchStore,
   type NewTaskLaunch,
   type NewTaskLaunchDeps,
@@ -146,6 +150,7 @@ describe("New Task outbox", () => {
     const started = drainNewTaskOutbox({
       isEnvironmentReady: (environmentId) => environmentId === away,
       depsFor: () => remote.deps,
+      isThreadStarted: () => false,
     });
     expect(started).toBe(1);
     await settle();
@@ -161,6 +166,7 @@ describe("New Task outbox", () => {
       drainNewTaskOutbox({
         isEnvironmentReady: (environmentId) => environmentId === away,
         depsFor: () => remote.deps,
+        isThreadStarted: () => false,
       }),
     ).toBe(0);
   });
@@ -263,5 +269,175 @@ describe("New Task outbox", () => {
       ["Task a", "Starts when Studio Mac is back", false],
       ["Task b", "Starts when its machine is back", false],
     ]);
+  });
+
+  it("clears a waiting row once the node shows the task's turn, whatever this device thought", () => {
+    const queuedKey = queue(away, "a", "2026-10-30T08:00:00.000Z");
+    const remote = node();
+    drainNewTaskOutbox({
+      isEnvironmentReady: () => false,
+      depsFor: () => remote.deps,
+      isThreadStarted: (_environmentId, threadId) => threadId === "thread-a",
+    });
+    expect(readNewTaskLaunch(queuedKey)?.status).toBe("started");
+    expect(remote.commands).toEqual([]);
+    expect(
+      buildWaitingTaskRows({
+        launches: useNewTaskLaunchStore.getState().launchesByKey,
+        machineLabel: () => null,
+      }),
+    ).toEqual([]);
+  });
+
+  it("leaves a task alone while its draft is open for editing", async () => {
+    const key = queue(away, "a", "2026-10-30T08:00:00.000Z");
+    setNewTaskLaunchEditing(key, true);
+    const remote = node();
+    const drain = () =>
+      drainNewTaskOutbox({
+        isEnvironmentReady: () => true,
+        depsFor: () => remote.deps,
+        isThreadStarted: () => false,
+      });
+    expect(drain()).toBe(0);
+    expect(readNewTaskLaunch(key)?.status).toBe("queued");
+
+    // Backing out of the sheet hands it back to the outbox.
+    setNewTaskLaunchEditing(key, false);
+    expect(drain()).toBe(1);
+    await settle();
+    expect(readNewTaskLaunch(key)?.status).toBe("started");
+  });
+
+  it("waits in the outbox again when Retry finds the machine away, then retries there", async () => {
+    let refuse = true;
+    const remote = node();
+    const refusingDeps: NewTaskLaunchDeps = {
+      ...remote.deps,
+      controller: {
+        ...remote.deps.controller,
+        dispatch: async (command) => {
+          remote.commands.push(command);
+          if (refuse && command.type === "thread.create") {
+            refuse = false;
+            throw Object.assign(new Error("Not now."), {
+              _tag: "OrchestrationDispatchCommandError",
+            });
+          }
+        },
+      },
+    };
+    const key = startNewTaskLaunch({
+      attempt: attempt(away, "a", "2026-10-30T08:00:00.000Z"),
+      draft: draft(away, "Task a"),
+      deps: refusingDeps,
+    });
+    await settle();
+    expect(readNewTaskLaunch(key)?.status).toBe("failed");
+
+    requeueNewTaskLaunch(key);
+    expect(readNewTaskLaunch(key)).toMatchObject({ status: "queued", fromOutbox: true });
+    drainNewTaskOutbox({
+      isEnvironmentReady: () => true,
+      depsFor: () => refusingDeps,
+      isThreadStarted: () => false,
+    });
+    await settle();
+    expect(readNewTaskLaunch(key)?.status).toBe("started");
+    // The refused thread.create went again under a fresh id, as Retry would.
+    expect(
+      remote.commands
+        .filter((command) => command.type === "thread.create")
+        .map((command) => command.commandId),
+    ).toEqual(["command-thread-a", "command-fresh"]);
+  });
+
+  it("keeps only outbox tasks, with their images stored once, and never a running one's outcome lost", async () => {
+    const storage = memoryKv();
+    const persistence = createNewTaskOutboxPersistence(storage.kv);
+    disposers.push(persistence.dispose);
+    await persistence.hydrate();
+    const image = {
+      type: "image" as const,
+      name: "shot.png",
+      mimeType: "image/png",
+      sizeBytes: 3,
+      dataUrl: "data:image/png;base64,AAA",
+    };
+    const key = queueNewTaskLaunch({
+      attempt: createNewTaskAttempt({
+        environmentId: away,
+        prompt: "With a picture",
+        project: {
+          kind: "existing",
+          projectId: ProjectId.make("project"),
+          workspaceRoot: "/code/app",
+        },
+        worktree: { kind: "local" },
+        attachments: [image],
+        createdAt: "2026-10-30T08:00:00.000Z",
+        ids: ids("a"),
+      }),
+      draft: {
+        ...draft(away, "With a picture"),
+        attachments: [{ ...image, id: "x", previewUri: "file:///x" }],
+      },
+    });
+    // A task sent online is not the outbox's.
+    const remote = node();
+    startNewTaskLaunch({
+      attempt: attempt(away, "b", "2026-10-30T08:01:00.000Z"),
+      draft: draft(away, "Online"),
+      deps: remote.deps,
+    });
+    await settle();
+
+    const stored = storage.values.get(STORAGE_KEY)!;
+    expect(JSON.parse(stored).launches.map((launch: NewTaskLaunch) => launch.key)).toEqual([key]);
+    expect(stored.split("data:image/png;base64,AAA").length - 1).toBe(1);
+
+    // Restored, the draft shows the image again from the one stored copy.
+    persistence.dispose();
+    useNewTaskLaunchStore.setState({ launchesByKey: {} });
+    const restarted = createNewTaskOutboxPersistence(storage.kv);
+    disposers.push(restarted.dispose);
+    await restarted.hydrate();
+    expect(readNewTaskLaunch(key)?.draft.attachments).toEqual([
+      { ...image, id: `${key}:attachment-0`, previewUri: image.dataUrl },
+    ]);
+  });
+
+  it("does not write over a stored outbox it could not read", async () => {
+    const stored = JSON.stringify({ version: 1, launches: [] });
+    let reads = 0;
+    const values = new Map([[STORAGE_KEY, stored]]);
+    const kv: KVService = {
+      getItem: async (key) => {
+        reads += 1;
+        if (reads === 1) throw new Error("busy");
+        return values.get(key) ?? null;
+      },
+      setItem: async (key, value) => {
+        values.set(key, value);
+      },
+      removeItem: async (key) => {
+        values.delete(key);
+      },
+    };
+    const persistence = createNewTaskOutboxPersistence(kv, { retryDelayMs: 0 });
+    disposers.push(persistence.dispose);
+    await persistence.hydrate();
+    expect(reads).toBe(2);
+  });
+
+  it("refuses to forget a launch whose attempt is still running", () => {
+    const remote = node();
+    const key = startNewTaskLaunch({
+      attempt: attempt(away, "a", "2026-10-30T08:00:00.000Z"),
+      draft: draft(away, "Task a"),
+      deps: remote.deps,
+    });
+    expect(discardNewTaskLaunch(key)).toBe(false);
+    expect(readNewTaskLaunch(key)).not.toBeNull();
   });
 });

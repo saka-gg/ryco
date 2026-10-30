@@ -216,6 +216,8 @@ import {
   deriveNewTaskLaunchView,
   discardNewTaskLaunch,
   newTaskLaunchKey,
+  requeueNewTaskLaunch,
+  setNewTaskLaunchEditing,
   retryNewTaskLaunch,
   useNewTaskLaunchStore,
 } from "../newTask/newTaskLaunch";
@@ -2569,15 +2571,27 @@ export function ThreadDetailScreen(props: {
             launchView ? (
               <NewTaskLaunchCard
                 view={launchView}
-                onRetry={() =>
-                  retryNewTaskLaunch(launchKey, createNewTaskLaunchDeps(environmentId))
-                }
-                onEdit={() =>
-                  navigation.dispatch(StackActions.replace("NewTask", { editLaunchKey: launchKey }))
-                }
+                onRetry={() => {
+                  let deps: ReturnType<typeof createNewTaskLaunchDeps>;
+                  try {
+                    deps = createNewTaskLaunchDeps(environmentId);
+                  } catch {
+                    // The machine is away: wait in the outbox and start once it is back.
+                    requeueNewTaskLaunch(launchKey);
+                    return;
+                  }
+                  retryNewTaskLaunch(launchKey, deps);
+                }}
+                onEdit={() => {
+                  // Held from the tap on: the outbox must not start it under the edit.
+                  setNewTaskLaunchEditing(launchKey, true);
+                  navigation.dispatch(
+                    StackActions.replace("NewTask", { editLaunchKey: launchKey }),
+                  );
+                }}
                 onRemove={() => {
-                  discardNewTaskLaunch(launchKey);
-                  if (navigation.canGoBack()) navigation.goBack();
+                  if (discardNewTaskLaunch(launchKey) && navigation.canGoBack())
+                    navigation.goBack();
                 }}
               />
             ) : (

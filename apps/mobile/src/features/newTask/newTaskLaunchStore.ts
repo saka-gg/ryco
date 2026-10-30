@@ -65,6 +65,13 @@ export interface NewTaskLaunch {
    * answers those from its receipts) and is never handed back for editing.
    */
   readonly interrupted?: boolean;
+  /**
+   * Written while its machine was away. Only these are kept across restarts:
+   * a task sent online lives as long as its thread screen needs it.
+   */
+  readonly fromOutbox?: boolean;
+  /** Its draft is open on the New Task sheet: the outbox leaves it alone meanwhile. */
+  readonly editing?: boolean;
   /** When the user sent it. */
   readonly queuedAt: string;
 }

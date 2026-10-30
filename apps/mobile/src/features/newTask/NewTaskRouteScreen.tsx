@@ -52,6 +52,7 @@ import {
   discardNewTaskLaunch,
   queueNewTaskLaunch,
   readNewTaskLaunchDraftForEdit,
+  setNewTaskLaunchEditing,
   startNewTaskLaunch,
   type NewTaskLaunchDraft,
 } from "./newTaskLaunch";
@@ -133,10 +134,16 @@ function NewTaskContent(props: NewTaskRouteScreenProps) {
   ]);
   const editLaunchKey = firstParam(props.route.params?.editLaunchKey);
   // Read once: the draft a failed launch hands back. The launch itself stays
-  // until the edited task is sent, so backing out of the sheet loses nothing.
+  // until the edited task is sent, so backing out of the sheet loses nothing;
+  // until then it is held, so the outbox cannot start it under the edit.
   const [restored] = useState<NewTaskLaunchDraft | null>(() =>
     editLaunchKey ? readNewTaskLaunchDraftForEdit(editLaunchKey) : null,
   );
+  useEffect(() => {
+    if (!restored || !editLaunchKey) return;
+    setNewTaskLaunchEditing(editLaunchKey, true);
+    return () => setNewTaskLaunchEditing(editLaunchKey, false);
+  }, [editLaunchKey, restored]);
   const initialized = useRef(restored !== null);
   const modelEdited = useRef(restored !== null);
   const locationEdited = useRef(restored !== null);
