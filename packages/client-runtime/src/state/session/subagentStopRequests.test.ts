@@ -1,8 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
-import { createStopRequestRegistry, type StopRequestReports } from "./agentStopRequests";
-
-const TIMEOUT_MS = 20_000;
+import {
+  createStopRequestRegistry,
+  STOP_UNCONFIRMED_MS as TIMEOUT_MS,
+  type StopRequestReports,
+} from "./subagentStop.ts";
 
 function deferred() {
   let resolve!: () => void;

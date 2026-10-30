@@ -1,13 +1,20 @@
+import { selectCompletionReturnsByChildThreadId } from "@ryco/client-runtime/state/agentControl";
 import {
   deriveThreadAgentPanelModel,
   deriveThreadSubagents,
+  emptyAgentPanelModel,
+  hasThreadAgentActivity,
   isThreadAgentSessionLive,
 } from "@ryco/client-runtime/state/session";
-import type { SubagentStopIdentity } from "@ryco/client-runtime/state/session/subagentStop";
+import {
+  subagentStopKey,
+  type SubagentStopIdentity,
+} from "@ryco/client-runtime/state/session/subagentStop";
 import { scopeThreadRef } from "@ryco/client-runtime/scoped";
 import type { EnvironmentId, ThreadId } from "@ryco/contracts";
-import { useEffect, useMemo, useState } from "react";
-import { Alert, Modal, Pressable, ScrollView, View } from "react-native";
+import type { AgentControlProposal } from "@ryco/contracts/agent-control";
+import { useEffect, useMemo, useState, useSyncExternalStore } from "react";
+import { Alert, Modal, Platform, Pressable, ScrollView, View } from "react-native";
 import { useShallow } from "zustand/react/shallow";
 
 import { AppText as Text } from "../../components/AppText";
@@ -24,15 +31,25 @@ import {
 } from "../../state/threadsRuntime";
 import type { InboxEnvironment } from "../inbox/inboxModel";
 import { stopThreadSubagent } from "./sessionActions";
+import { startSubagentStop, subagentStopRequests } from "./subagentStopRequests";
 import {
   buildThreadAgentsEntry,
   buildThreadAgentsSheetModel,
+  threadAgentsSheetSummary,
   type ThreadAgentRow,
   type ThreadAgentsEntry,
   type ThreadAgentSection,
   type ThreadAgentsSheetInput,
   type ThreadAgentTone,
 } from "./threadAgentsSheetModel";
+import {
+  chooseThreadAgentsSheetTask,
+  closeThreadAgentsSheet,
+  isThreadAgentsSheetMounted,
+  openThreadAgentsSheet,
+  THREAD_AGENTS_SHEET_CLOSED,
+  threadAgentsSheetDismissed,
+} from "./threadAgentsSheetState";
 
 const DOT_CLASS: Readonly<Record<ThreadAgentTone, string>> = {
   working: "bg-accent",
@@ -57,22 +74,24 @@ function useThreadAgentsSource(input: {
   readonly environmentId: EnvironmentId;
   readonly threadId: ThreadId;
   readonly thread: Thread | undefined;
-}): Pick<ThreadAgentsSheetInput, "panel" | "delegatedChildren"> {
+  readonly agentControlProposals: ReadonlyArray<AgentControlProposal>;
+}): Pick<ThreadAgentsSheetInput, "panel" | "delegatedChildren" | "completionReturns"> {
   const activities = input.thread?.activities;
-  const session = input.thread?.session;
+  // The liveness word, not the session: a session update that keeps it never re-derives.
+  const sessionLive = isThreadAgentSessionLive(input.thread?.session);
   const parentTurnState = input.thread?.latestTurn?.state ?? null;
-  // The same fold-and-derive composition as web's Agents panel.
+  // The same fold-and-derive composition as web's Agents panel, skipped while the chat's
+  // activities hold nothing an agent derives from (most chats, on every streamed update).
   const panel = useMemo(() => {
-    const sessionLive = isThreadAgentSessionLive(session);
+    if (activities === undefined || !hasThreadAgentActivity(activities)) {
+      return emptyAgentPanelModel();
+    }
     return deriveThreadAgentPanelModel({
-      activities: activities ?? [],
-      transcriptSubagents: deriveThreadSubagents(activities ?? [], {
-        sessionLive,
-        parentTurnState,
-      }),
+      activities,
+      transcriptSubagents: deriveThreadSubagents(activities, { sessionLive, parentTurnState }),
       sessionLive,
     });
-  }, [activities, parentTurnState, session]);
+  }, [activities, parentTurnState, sessionLive]);
   // Shallow: without the parent's shell the store answers with a fresh array each time.
   const childRows = useStore(
     useShallow((state) =>
@@ -88,7 +107,12 @@ function useThreadAgentsSource(input: {
     );
     return full.length > 0 ? full : NO_CHILDREN;
   }, [childRows]);
-  return { panel, delegatedChildren };
+  // Where each delegated task's result to this chat stands, as web's dock reads it.
+  const completionReturns = useMemo(
+    () => selectCompletionReturnsByChildThreadId(input.agentControlProposals, input.threadId),
+    [input.agentControlProposals, input.threadId],
+  );
+  return { panel, delegatedChildren, completionReturns };
 }
 
 /** The thread screen's way into the sheet: how many agents work, or worked, for this chat. */
@@ -175,7 +199,7 @@ export function ThreadAgentRowView(props: {
             <Text
               className={cn(
                 "text-xs",
-                row.tone === "failed" ? "text-danger-foreground" : "text-foreground-muted",
+                row.activityFailed ? "text-danger-foreground" : "text-foreground-muted",
               )}
               numberOfLines={props.expanded ? undefined : 2}
             >
@@ -251,7 +275,8 @@ export function ThreadAgentRowView(props: {
 function SectionView(props: {
   readonly section: ThreadAgentSection;
   readonly expandedKeys: ReadonlySet<string>;
-  readonly stoppingKeys: ReadonlySet<string>;
+  /** Whether a stop for the row's agent is on its way. */
+  readonly isStopping: (row: ThreadAgentRow) => boolean;
   readonly onRowPress: (row: ThreadAgentRow) => void;
   readonly onStop: (row: ThreadAgentRow, stop: SubagentStopIdentity) => void;
 }) {
@@ -272,7 +297,7 @@ function SectionView(props: {
             row={row}
             divided={index > 0}
             expanded={props.expandedKeys.has(row.key)}
-            stopping={props.stoppingKeys.has(row.key)}
+            stopping={props.isStopping(row)}
             onPress={() => props.onRowPress(row)}
             onStop={() => {
               if (row.stop) props.onStop(row, row.stop);
@@ -298,13 +323,16 @@ export function ThreadAgents(props: {
   readonly environment: InboxEnvironment | null;
   /** The node takes changes now: Stop is offered only then. */
   readonly stopReady: boolean;
+  /** The screen shows a cached or degraded snapshot (its header reads Offline). */
+  readonly offline: boolean;
+  /** The chat's Agent Control proposals, which carry its delegated tasks' result returns. */
+  readonly agentControlProposals: ReadonlyArray<AgentControlProposal>;
   readonly onOpenThread: (threadId: ThreadId) => void;
 }) {
   const source = useThreadAgentsSource(props);
-  const [visible, setVisible] = useState(false);
+  const [sheet, setSheet] = useState(THREAD_AGENTS_SHEET_CLOSED);
   const [nowMs, setNowMs] = useState(() => Date.now());
   const [expandedKeys, setExpandedKeys] = useState<ReadonlySet<string>>(() => new Set());
-  const [stoppingKeys, setStoppingKeys] = useState<ReadonlySet<string>>(() => new Set());
   const runtimeSessionId = props.thread?.session?.runtimeSessionId ?? null;
   const model = useMemo(
     () =>
@@ -313,26 +341,55 @@ export function ThreadAgents(props: {
         environment: props.environment ?? undefined,
         runtimeSessionId,
         stopReady: props.stopReady,
+        offline: props.offline,
         nowMs,
       }),
-    [nowMs, props.environment, props.stopReady, runtimeSessionId, source],
+    [nowMs, props.environment, props.offline, props.stopReady, runtimeSessionId, source],
   );
   const entry = buildThreadAgentsEntry(model);
-  // The clock ticks only while the sheet shows it; the control reads counts alone.
-  const ticking = visible && model.live > 0;
+  const hasAgents = entry !== null;
+  // A chat that runs out of agents closes the sheet, so its next agent never reopens it.
+  useEffect(() => {
+    if (!hasAgents) setSheet(closeThreadAgentsSheet);
+  }, [hasAgents]);
+  // The clock ticks only while the sheet shows it; offline, nothing is live, so it stays put.
+  const ticking = sheet.open && model.live > 0;
   useEffect(() => {
     if (!ticking) return undefined;
     const timer = setInterval(() => setNowMs(Date.now()), 1000);
     return () => clearInterval(timer);
   }, [ticking]);
 
-  if (entry === null) return null;
+  // A stop stays pending, across sheets and reopenings, until its agent settles or it times out.
+  const threadRef = useMemo(
+    () => scopeThreadRef(props.environmentId, props.threadId),
+    [props.environmentId, props.threadId],
+  );
+  const stopKeys = model.sections
+    .flatMap((section) => section.rows)
+    .flatMap((row) => (row.stop ? [subagentStopKey(threadRef, row.stop)] : []));
+  const shownStopKeys = sheet.open ? stopKeys.join("\n") : "";
+  const pendingStopKeys = useSyncExternalStore(subagentStopRequests.subscribe, () =>
+    stopKeys.filter((key) => subagentStopRequests.isPending(key)).join("\n"),
+  );
+  // A stop that times out is reported only while its Stop shows.
+  useEffect(() => {
+    if (shownStopKeys === "") return undefined;
+    const unwatch = shownStopKeys.split("\n").map((key) => subagentStopRequests.watch(key));
+    return () => {
+      for (const stopWatching of unwatch) stopWatching();
+    };
+  }, [shownStopKeys]);
 
-  const close = () => setVisible(false);
+  if (!isThreadAgentsSheetMounted(sheet, hasAgents)) return null;
+
+  const close = () => setSheet(closeThreadAgentsSheet);
   const onRowPress = (row: ThreadAgentRow) => {
     if (row.childThreadId !== null) {
-      close();
-      props.onOpenThread(row.childThreadId);
+      // iOS reports the sheet gone (`onDismiss`); the task opens then, not under its slide.
+      const next = chooseThreadAgentsSheetTask(row.childThreadId, Platform.OS === "ios");
+      setSheet(next.state);
+      if (next.openNow !== null) props.onOpenThread(next.openNow);
       return;
     }
     setExpandedKeys((current) => {
@@ -341,43 +398,40 @@ export function ThreadAgents(props: {
       return next;
     });
   };
-  const onStop = (row: ThreadAgentRow, stop: SubagentStopIdentity) => {
-    setStoppingKeys((current) => new Set(current).add(row.key));
-    // A promise chain, not try/finally: React Compiler cannot compile a finally clause.
-    void Promise.resolve()
-      .then(() =>
+  const onDismiss = () => {
+    const next = threadAgentsSheetDismissed(sheet);
+    setSheet(next.state);
+    if (next.openNow !== null) props.onOpenThread(next.openNow);
+  };
+  const isStopping = (row: ThreadAgentRow) =>
+    row.stop !== null && pendingStopKeys.split("\n").includes(subagentStopKey(threadRef, row.stop));
+  const onStop = (_row: ThreadAgentRow, stop: SubagentStopIdentity) => {
+    startSubagentStop({
+      registry: subagentStopRequests,
+      key: subagentStopKey(threadRef, stop),
+      send: () =>
         stopThreadSubagent(ensureEnvironmentApi(props.environmentId), props.threadId, stop),
-      )
-      .catch((error: unknown) => {
-        Alert.alert(
-          "Could not stop the agent",
-          error instanceof Error ? error.message : "The request failed.",
-        );
-      })
-      .then(() => {
-        // The row itself settles once the provider reports the task stopped.
-        setStoppingKeys((current) => {
-          const next = new Set(current);
-          next.delete(row.key);
-          return next;
-        });
-      });
+      alert: ({ title, message }) => Alert.alert(title, message),
+    });
   };
 
   return (
     <>
-      <ThreadAgentsButton
-        entry={entry}
-        onPress={() => {
-          setNowMs(Date.now());
-          setVisible(true);
-        }}
-      />
+      {entry ? (
+        <ThreadAgentsButton
+          entry={entry}
+          onPress={() => {
+            setNowMs(Date.now());
+            setSheet(openThreadAgentsSheet());
+          }}
+        />
+      ) : null}
       <Modal
-        visible={visible}
+        visible={sheet.open}
         animationType="slide"
         presentationStyle="pageSheet"
         onRequestClose={close}
+        onDismiss={onDismiss}
       >
         <ScrollView
           contentInsetAdjustmentBehavior="automatic"
@@ -404,16 +458,14 @@ export function ThreadAgents(props: {
             <View className="h-11 min-w-11" />
           </View>
           <Text className="px-1 text-xs text-foreground-tertiary">
-            {model.live > 0
-              ? `${model.live} active · ${model.total} in all`
-              : `${model.total} in all`}
+            {threadAgentsSheetSummary(model)}
           </Text>
           {model.sections.map((section) => (
             <SectionView
               key={section.key}
               section={section}
               expandedKeys={expandedKeys}
-              stoppingKeys={stoppingKeys}
+              isStopping={isStopping}
               onRowPress={onRowPress}
               onStop={onStop}
             />

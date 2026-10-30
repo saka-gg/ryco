@@ -1,8 +1,19 @@
 import { describe, expect, it } from "vite-plus/test";
-import type { OrchestrationThreadActivity } from "@ryco/contracts";
+import {
+  EnvironmentId,
+  OrchestrationStopBackgroundTaskError,
+  ThreadId,
+  type OrchestrationThreadActivity,
+} from "@ryco/contracts";
 
+import { scopeThreadRef } from "../../scoped.ts";
 import { deriveThreadAgentPanelModel, foldSubagentActivities } from "./subagentRuntime.ts";
-import { subagentStopIdentity, subagentStopRequest } from "./subagentStop.ts";
+import {
+  describeSubagentStopFailure,
+  subagentStopIdentity,
+  subagentStopKey,
+  subagentStopRequest,
+} from "./subagentStop.ts";
 import { deriveThreadSubagents } from "./threadWorkspaceViewModel.ts";
 
 let sequence = 0;
@@ -147,5 +158,59 @@ describe("subagentStopRequest", () => {
       taskId: "agent-1",
       expected: { runtimeSessionId: "rt-1", attempt: 2 },
     });
+  });
+});
+
+describe("describeSubagentStopFailure", () => {
+  function nodeError(reason: OrchestrationStopBackgroundTaskError["reason"]) {
+    return new OrchestrationStopBackgroundTaskError({ reason, threadId: "thread-1", taskId: "t1" });
+  }
+
+  it("speaks of the agent for each reason the node gives", () => {
+    expect(describeSubagentStopFailure(nodeError("unsupported"))).toBe(
+      "This provider can't stop a single agent.",
+    );
+    expect(describeSubagentStopFailure(nodeError("session-not-found"))).toBe(
+      "This agent's session has ended.",
+    );
+    expect(describeSubagentStopFailure(nodeError("stop-failed"))).toBe(
+      "The agent did not stop. Try again.",
+    );
+  });
+
+  it("keeps any other error's message", () => {
+    expect(describeSubagentStopFailure(new Error("This environment can't stop agents."))).toBe(
+      "This environment can't stop agents.",
+    );
+    expect(
+      describeSubagentStopFailure({
+        _tag: "OrchestrationStopBackgroundTaskError",
+        reason: "from-a-newer-node",
+        message: "Stopping the background task failed.",
+      }),
+    ).toBe("Stopping the background task failed.");
+  });
+
+  it("falls back when there is nothing to show", () => {
+    for (const cause of [new Error("  "), "boom", undefined, null, 42]) {
+      expect(describeSubagentStopFailure(cause)).toBe("Could not stop this agent.");
+    }
+  });
+});
+
+describe("subagentStopKey", () => {
+  it("tells activations of the same task, and the same task of other threads, apart", () => {
+    const thread = scopeThreadRef(EnvironmentId.make("env-1"), ThreadId.make("thread-1"));
+    const identity = { taskId: "t1", runtimeSessionId: "rt-1", attempt: 0 };
+    const key = subagentStopKey(thread, identity);
+    expect(key).toBe("env-1:thread-1:rt-1:t1:0");
+    expect(subagentStopKey(thread, { ...identity, runtimeSessionId: "rt-2" })).not.toBe(key);
+    expect(subagentStopKey(thread, { ...identity, attempt: 1 })).not.toBe(key);
+    expect(
+      subagentStopKey(scopeThreadRef(thread.environmentId, ThreadId.make("thread-2")), identity),
+    ).not.toBe(key);
+    expect(
+      subagentStopKey(scopeThreadRef(EnvironmentId.make("env-2"), thread.threadId), identity),
+    ).not.toBe(key);
   });
 });

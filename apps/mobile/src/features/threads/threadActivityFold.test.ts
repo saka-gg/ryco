@@ -250,24 +250,27 @@ describe("live thought", () => {
 
   it("closes the rows while the agent is still thinking", () => {
     const [fold] = folds(
-      build([work("read", { completed: true }), thinking("t1", "Next, both clients.")], {
-        runningTurnId: "turn-1",
-      }),
+      build(
+        [work("read", { completed: true }), thinking("t1", "Next, both clients. Then the relay")],
+        { runningTurnId: "turn-1" },
+      ),
     );
+    // Only the sentence the block already closed, never the one it is still writing.
     expect(fold?.liveThought).toEqual({ text: "Next, both clients.", beforeRowId: null });
   });
 
   it("belongs only to the work going on now", () => {
-    const entries = [thinking("t1", "Reading first."), work("read")];
+    const entries = [thinking("t1", "Reading first.", { completed: true }), work("read")];
     // A settled turn has no live thought.
     expect(folds(build(entries))[0]?.liveThought).toBeNull();
     // A reply already follows this fold: the agent moved on.
     const answered = build([...entries, message("m")], { runningTurnId: "turn-1" });
     expect(folds(answered)[0]?.liveThought).toBeNull();
     // Only the turn's newest fold, at the end of the feed, carries it.
-    const resumed = build([...entries, message("m"), thinking("t2", "Now the tests."), work("b")], {
-      runningTurnId: "turn-1",
-    });
+    const resumed = build(
+      [...entries, message("m"), thinking("t2", "Now the tests.", { completed: true }), work("b")],
+      { runningTurnId: "turn-1" },
+    );
     expect(folds(resumed).map((fold) => fold.liveThought?.text ?? null)).toEqual([
       null,
       "Now the tests.",

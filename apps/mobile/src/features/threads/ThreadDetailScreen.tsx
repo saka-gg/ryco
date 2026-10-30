@@ -2492,6 +2492,8 @@ export function ThreadDetailScreen(props: {
         thread={thread}
         environment={environmentRow}
         stopReady={(environmentRow?.mutationReady ?? false) && !cachedView.actionsDisabled}
+        offline={cachedView.headerForcedOffline}
+        agentControlProposals={agentControlProposals}
         onOpenThread={openThread}
       />
       {cachedView.banner ? (

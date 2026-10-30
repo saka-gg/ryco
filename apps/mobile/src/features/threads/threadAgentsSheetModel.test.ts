@@ -6,12 +6,15 @@ import {
   type RuntimeSubagent,
 } from "@ryco/client-runtime/state/session";
 import type { SidebarThreadSummary } from "@ryco/client-runtime/state/threads";
-import type { EnvironmentId } from "@ryco/contracts";
+import type { EnvironmentId, ThreadId } from "@ryco/contracts";
+import type { AgentControlCompletionReturn } from "@ryco/contracts/agent-control";
 
 import {
   buildThreadAgentsEntry,
   buildThreadAgentsSheetModel,
+  threadAgentsSheetSummary,
   type ThreadAgentsSheetInput,
+  type ThreadAgentsSheetModel,
 } from "./threadAgentsSheetModel";
 
 const NODE = "node-a" as EnvironmentId;
@@ -88,13 +91,15 @@ function turn(state: "running" | "completed", startedAt: string, completedAt: st
   } as never;
 }
 
-function build(overrides: Partial<ThreadAgentsSheetInput> = {}) {
+function build(overrides: Partial<ThreadAgentsSheetInput> = {}): ThreadAgentsSheetModel {
   return buildThreadAgentsSheetModel({
     panel: emptyAgentPanelModel(),
     delegatedChildren: [],
     environment: { environmentId: NODE, label: "Studio", connectionState: "connected" },
     runtimeSessionId: "rt-1",
     stopReady: true,
+    offline: false,
+    completionReturns: new Map(),
     nowMs: NOW,
     ...overrides,
   });
@@ -103,7 +108,12 @@ function build(overrides: Partial<ThreadAgentsSheetInput> = {}) {
 describe("thread agents sheet", () => {
   it("lists nothing, and offers no way in, while the chat set no agents working", () => {
     const model = build();
-    expect(model).toEqual({ sections: [], total: 0, live: 0 });
+    expect(model).toEqual({
+      sections: [],
+      total: 0,
+      live: 0,
+      offline: false,
+    });
     expect(buildThreadAgentsEntry(model)).toBeNull();
   });
 
@@ -288,5 +298,114 @@ describe("thread agents sheet", () => {
       live: false,
       accessibilityLabel: "2 agents. Show agents.",
     });
+  });
+
+  it("reads a delegated task by the dock's rules: finished, and a failed return", () => {
+    const completionReturn = (
+      childId: string,
+      status: AgentControlCompletionReturn["status"],
+    ): AgentControlCompletionReturn =>
+      ({
+        revision: 1,
+        childThreadId: childId,
+        initialMessageId: `initial-${childId}`,
+        parentThreadId: "parent",
+        parentTurnId: "origin",
+        childTurnId: null,
+        status,
+        detail: `${status} detail`,
+        updatedAt: T0,
+      }) as never;
+    const model = build({
+      delegatedChildren: [
+        // Finished a turn before; its newest turn has no completion yet (web's latestCompletedTurnAt).
+        child("earlier", { latestCompletedTurnAt: "2026-08-10T09:52:05.000Z" }),
+        child("blocked", {
+          latestTurn: turn("completed", "2026-08-10T09:50:00.000Z", "2026-08-10T09:52:05.000Z"),
+        }),
+        child("returned", {
+          latestTurn: turn("completed", "2026-08-10T09:50:00.000Z", "2026-08-10T09:51:00.000Z"),
+        }),
+      ],
+      completionReturns: new Map<ThreadId, AgentControlCompletionReturn>([
+        ["blocked" as ThreadId, completionReturn("blocked", "blocked")],
+        ["returned" as ThreadId, completionReturn("returned", "delivered")],
+      ]),
+    });
+    const [earlier, blocked, returned] = model.sections[0]!.rows;
+    expect(earlier).toMatchObject({ statusLabel: "Done", tone: "done", activity: null });
+    expect(blocked).toMatchObject({
+      statusLabel: "Done",
+      tone: "done",
+      activity: "Return blocked",
+      activityFailed: true,
+    });
+    expect(returned).toMatchObject({ activity: "Returned", activityFailed: false });
+    // A blocked return counts as failed, as the dock counts it.
+    expect(model.sections[0]!.status).toBe("1 failed");
+  });
+
+  it("shows an offline chat's agents as last known: nothing live, no clock, no Stop", () => {
+    const panel = deriveAgentPanelModel({
+      agents: [
+        agent("a", { canStop: true, runtimeSessionId: "rt-1", progress: "Reading ws.ts" }),
+        agent("b", { status: "completed", completedAt: "2026-08-10T10:00:40.000Z" }),
+      ],
+    });
+    const model = build({
+      panel,
+      offline: true,
+      delegatedChildren: [
+        child("working", { latestTurn: turn("running", "2026-08-10T10:00:30.000Z", null) }),
+        child("done", {
+          latestTurn: turn("completed", "2026-08-10T09:50:00.000Z", "2026-08-10T09:52:05.000Z"),
+        }),
+      ],
+    });
+    const [running, settled] = model.sections[0]!.rows;
+    expect(running).toMatchObject({
+      statusLabel: "Offline",
+      tone: "muted",
+      elapsed: null,
+      stop: null,
+      activity: "Reading ws.ts",
+    });
+    // What settled stays a fact.
+    expect(settled).toMatchObject({ statusLabel: "Completed", tone: "done", elapsed: "40s" });
+    const [working, done] = model.sections[1]!.rows;
+    expect(working).toMatchObject({ statusLabel: "Offline", tone: "muted", elapsed: null });
+    expect(done).toMatchObject({ statusLabel: "Done", tone: "done" });
+    expect(model.sections.map((section) => section.status)).toEqual([null, null]);
+    expect(model).toMatchObject({ live: 0, total: 4, offline: true });
+    expect(buildThreadAgentsEntry(model)).toEqual({
+      label: "4 agents",
+      live: false,
+      accessibilityLabel: "4 agents, offline. Show agents.",
+    });
+    expect(threadAgentsSheetSummary(model)).toBe("Offline · 4 in all");
+  });
+
+  it("counts a delegated task held by a usage limit, as the dock does, as not active", () => {
+    const model = build({
+      delegatedChildren: [
+        child("limited", {
+          modelSelection: { instanceId: "codex", model: "gpt-5" } as never,
+          usageLimit: {
+            limitId: "usage-limit:limited:turn-1",
+            provider: "codex",
+            providerInstanceId: "codex",
+            turnId: "turn-1",
+            message: "Usage limit reached",
+            limitedAt: T0,
+            resetAt: "2026-08-10T10:05:00.000Z",
+            autoResume: null,
+            updatedAt: T0,
+          } as never,
+        }),
+      ],
+    });
+    expect(model.sections[0]!.rows[0]).toMatchObject({ statusLabel: "Limited", tone: "attention" });
+    expect(model.live).toBe(0);
+    expect(buildThreadAgentsEntry(model)).toMatchObject({ label: "1 agent", live: false });
   });
 });

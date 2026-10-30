@@ -17,7 +17,12 @@ function entry(id: string, overrides: Partial<WorkLogEntry> = {}): WorkLogEntry 
   return { id, createdAt: "2026-01-01T00:00:00Z", label: "Tool call", tone: "tool", ...overrides };
 }
 
-function thought(id: string, output: string, overrides: Partial<WorkLogEntry> = {}): WorkLogEntry {
+/** A reasoning block the provider is still writing. */
+function streamingThought(
+  id: string,
+  output: string,
+  overrides: Partial<WorkLogEntry> = {},
+): WorkLogEntry {
   return entry(id, {
     tone: "thinking",
     itemType: "reasoning",
@@ -25,6 +30,11 @@ function thought(id: string, output: string, overrides: Partial<WorkLogEntry> = 
     output,
     ...overrides,
   });
+}
+
+/** A reasoning block that closed, with its whole text. */
+function thought(id: string, output: string, overrides: Partial<WorkLogEntry> = {}): WorkLogEntry {
+  return streamingThought(id, output, { completed: true, ...overrides });
 }
 
 const tool = (id: string, overrides: Partial<WorkLogEntry> = {}) =>
@@ -53,7 +63,8 @@ describe("live work steps", () => {
 
   it("counts unsettled tool calls and streaming reasoning, not settled or failed ones", () => {
     expect(isLiveWorkStep(tool("read"))).toBe(true);
-    expect(isLiveWorkStep(thought("think", "Hmm"))).toBe(true);
+    expect(isLiveWorkStep(streamingThought("think", "Hmm"))).toBe(true);
+    expect(isLiveWorkStep(thought("thought", "Hmm."))).toBe(false);
     expect(isLiveWorkStep(tool("done", { completed: true }))).toBe(false);
     expect(isLiveWorkStep(tool("failed", { completed: true, exitCode: 1 }))).toBe(false);
   });
@@ -93,6 +104,37 @@ describe("firstThoughtSentence", () => {
     );
     // No whole sentence after the cut yet: the fragment is all there is.
     expect(firstThoughtSentence("…and then the socket closes")).toBe("…and then the socket closes");
+  });
+
+  it("does not end a sentence at an abbreviation or before a lowercase word", () => {
+    expect(firstThoughtSentence("Use e.g. GitHub's retry helper. Then test.")).toBe(
+      "Use e.g. GitHub's retry helper.",
+    );
+    expect(firstThoughtSentence("Check ws.ts and i.e. the relay. Then.")).toBe(
+      "Check ws.ts and i.e. the relay.",
+    );
+    expect(firstThoughtSentence("It works... mostly. Next the docs.")).toBe("It works... mostly.");
+  });
+
+  it("shows only sentences a streaming block already closed", () => {
+    // The sentence still being written never shows.
+    expect(
+      firstThoughtSentence("Let me check the socket. Next I patch the retry loop and", {
+        streaming: true,
+      }),
+    ).toBe("Let me check the socket.");
+    expect(firstThoughtSentence("I should check the rel", { streaming: true })).toBeNull();
+    // Its last period may not end the sentence yet ("v1." of "v1.2"): it waits for the next word.
+    expect(firstThoughtSentence("Bump the pin to v1.", { streaming: true })).toBeNull();
+    // The streaming tail's cut-off start, with nothing whole after it, is no thought either.
+    expect(
+      firstThoughtSentence("…ing the socket. Next I patch the retry loop and", { streaming: true }),
+    ).toBeNull();
+    expect(
+      firstThoughtSentence("…ing the socket. Next I patch the retry loop. Then I", {
+        streaming: true,
+      }),
+    ).toBe("Next I patch the retry loop.");
   });
 
   it("caps a long sentence at a word with an ellipsis", () => {
@@ -140,6 +182,26 @@ describe("deriveLiveThought", () => {
         tool("read"),
       ]),
     ).toEqual({ text: "Inspecting the relay", reasoningEntryId: "t1", runningStepId: "read" });
+  });
+
+  it("keeps the previous whole thought while the newest block writes its first sentence", () => {
+    const steps = [
+      thought("t1", "First I read the config. Then the client."),
+      tool("read", { completed: true }),
+      streamingThought("t2", "I should check the rel"),
+    ];
+    expect(deriveLiveThought(steps)).toEqual({
+      text: "First I read the config.",
+      reasoningEntryId: "t1",
+      runningStepId: null,
+    });
+    // Once the block closes its first sentence, that sentence is the thought.
+    expect(
+      deriveLiveThought([
+        ...steps.slice(0, 2),
+        streamingThought("t2", "I should check the relay. It may"),
+      ]),
+    ).toMatchObject({ text: "I should check the relay.", reasoningEntryId: "t2" });
   });
 
   it("is null without readable reasoning", () => {

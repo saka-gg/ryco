@@ -3,7 +3,12 @@ import { describe, expect, it } from "vite-plus/test";
 
 import { deriveAgentTimeline } from "./agentActivity.ts";
 import { deriveWorkLogEntries } from "./session-logic.ts";
-import { deriveThreadSubagents, findThreadSubagent } from "./threadWorkspaceViewModel.ts";
+import { deriveThreadAgentPanelModel } from "./subagentRuntime.ts";
+import {
+  deriveThreadSubagents,
+  findThreadSubagent,
+  hasThreadAgentActivity,
+} from "./threadWorkspaceViewModel.ts";
 
 function makeActivity(overrides: {
   id?: string;
@@ -832,6 +837,46 @@ describe("deriveThreadSubagents", () => {
     expect(keys).toContain("subagent:task-a");
     expect(keys).toContain("subagent:task-b");
     expect(keys).toContain("subagent:toolu-shared");
+  });
+});
+
+describe("hasThreadAgentActivity", () => {
+  const derivesAgents = (activities: ReadonlyArray<OrchestrationThreadActivity>) =>
+    deriveThreadAgentPanelModel({
+      activities,
+      transcriptSubagents: deriveThreadSubagents(activities, { sessionLive: true }),
+      sessionLive: true,
+    }).hasAgents;
+
+  it("is false only where the agent derivations find no agents", () => {
+    const plainWork = [
+      makeActivity({ kind: "tool.started", payload: { itemType: "command_execution" } }),
+      makeActivity({ kind: "tool.completed", payload: { itemType: "dynamic_tool_call" } }),
+      makeActivity({ kind: "reasoning", payload: { text: "Thinking." } }),
+    ];
+    expect(hasThreadAgentActivity(plainWork)).toBe(false);
+    expect(derivesAgents(plainWork)).toBe(false);
+    expect(hasThreadAgentActivity([])).toBe(false);
+
+    const withTask = [
+      ...plainWork,
+      makeActivity({
+        kind: "task.started",
+        payload: { taskId: "t1", taskType: "local_agent", agentKind: "agent", title: "Map it" },
+      }),
+    ];
+    expect(hasThreadAgentActivity(withTask)).toBe(true);
+    expect(derivesAgents(withTask)).toBe(true);
+
+    const withCollab = [
+      ...plainWork,
+      makeActivity({
+        kind: "tool.started",
+        payload: { itemType: "collab_agent_tool_call", status: "inProgress", title: "Review" },
+      }),
+    ];
+    expect(hasThreadAgentActivity(withCollab)).toBe(true);
+    expect(derivesAgents(withCollab)).toBe(true);
   });
 });
 

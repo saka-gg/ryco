@@ -79,8 +79,47 @@ export function reasoningTail(text: string, maxChars = 72): string {
 /** Longest thought line; a longer first sentence ends in an ellipsis at a word. */
 const THOUGHT_LINE_MAX_CHARS = 140;
 
-/** Ends a sentence: terminal punctuation (and closing quotes) before a space, or a line break. */
-const SENTENCE_END = /[.!?…]["'”’)\]]*(?=\s|$)|\n/u;
+/** Where a sentence may end: a line break, or terminal punctuation and any closing quotes after it. */
+const SENTENCE_BOUNDARY = /\n|[.!?…]["'”’)\]]*/gu;
+
+/** The whitespace after a boundary and the character that follows it ("" at the text's end). */
+const AFTER_BOUNDARY = /\s+(\S?)/uy;
+
+/** Abbreviations whose period ends no sentence ("Use e.g. GitHub's retry"). */
+const NON_TERMINAL_ABBREVIATION = /(?:^|[^\p{L}])(?:e\.g|i\.e|cf|vs)\.$/iu;
+
+/**
+ * Where each sentence of `text` ends: the index after its punctuation, or a
+ * line break's own index. Punctuation ends a sentence only before whitespace
+ * and a word that does not carry on in lowercase, and never after an
+ * abbreviation. A whole text also ends a sentence where it stops; a streaming
+ * one does not, since its next words may still carry the sentence on.
+ */
+function sentenceEnds(text: string, whole: boolean): number[] {
+  const ends: number[] = [];
+  for (const match of text.matchAll(SENTENCE_BOUNDARY)) {
+    const at = match.index;
+    if (match[0] === "\n") {
+      ends.push(at);
+      continue;
+    }
+    const after = at + match[0].length;
+    if (after === text.length) {
+      if (whole) ends.push(after);
+      continue;
+    }
+    AFTER_BOUNDARY.lastIndex = after;
+    const following = AFTER_BOUNDARY.exec(text);
+    // "ws.ts", "3.5": punctuation inside a word ends nothing.
+    if (following === null) continue;
+    const next = following[1] ?? "";
+    if (/\p{Ll}/u.test(next)) continue;
+    if (NON_TERMINAL_ABBREVIATION.test(text.slice(Math.max(0, at - 5), at + 1))) continue;
+    ends.push(after);
+  }
+  if (whole && (ends.at(-1) ?? 0) < text.length) ends.push(text.length);
+  return ends;
+}
 
 /** Peels the markdown a thought may carry so the line reads as plain prose. */
 function plainThoughtText(text: string): string {
@@ -100,24 +139,33 @@ function capThoughtLine(line: string): string {
 }
 
 /**
- * The first sentence of a reasoning text, on one line. A streaming block
- * carries only the end of its text, cut mid-sentence behind a leading "…":
- * that fragment is skipped for the first whole sentence after it, and kept
- * only while no whole sentence follows yet.
+ * The first whole sentence of a reasoning text, on one line. A streaming
+ * block's text is unfinished: only sentences it already closed count, and one
+ * it is still writing never shows. Its text may also be just the end of the
+ * block, cut mid-sentence behind a leading "…": that fragment is skipped for
+ * the first whole sentence after it. A streaming text without a whole
+ * sentence yet has none (null), so the reader falls back to an earlier thought.
  */
-export function firstThoughtSentence(text: string): string | null {
-  let body = plainThoughtText(text).trim();
+export function firstThoughtSentence(
+  text: string,
+  options?: { readonly streaming?: boolean },
+): string | null {
+  const streaming = options?.streaming === true;
+  const body = plainThoughtText(text).trim();
+  const ends = sentenceEnds(body, !streaming);
+  let first = 0;
   if (body.startsWith("…")) {
-    const fragmentEnd = SENTENCE_END.exec(body);
-    const rest =
-      fragmentEnd === null ? "" : body.slice(fragmentEnd.index + fragmentEnd[0].length).trim();
-    if (rest.length > 0) body = rest;
+    // A whole text that only is that fragment still says it; a streaming one waits for more.
+    if (ends.length > 1) first = 1;
+    else if (streaming) return null;
   }
-  const end = SENTENCE_END.exec(body);
-  const sentence = (end === null ? body : body.slice(0, end.index + end[0].length))
-    .replace(/\s+/g, " ")
-    .trim();
-  return sentence.length > 0 ? capThoughtLine(sentence) : null;
+  let start = first === 0 ? 0 : ends[0]!;
+  for (const end of ends.slice(first)) {
+    const sentence = body.slice(start, end).replace(/\s+/g, " ").trim();
+    if (sentence.length > 0) return capThoughtLine(sentence);
+    start = end;
+  }
+  return null;
 }
 
 /** The agent's latest thought while it works, for a line above the step it is on. */
@@ -137,15 +185,16 @@ export interface LiveThought {
 function thoughtLineOf(entry: WorkLogEntry): string | null {
   const headline = reasoningEntryHeadline(entry);
   return headline === null
-    ? firstThoughtSentence(reasoningEntryText(entry))
+    ? firstThoughtSentence(reasoningEntryText(entry), { streaming: entry.completed !== true })
     : capThoughtLine(headline.replace(/\s+/g, " "));
 }
 
 /**
  * The latest thought among a working turn's steps, in their order: the newest
- * reasoning block that says anything (a block that just opened has no text
- * yet, so the thought before it still stands), and the running step it leads
- * to. Null when the steps hold no readable reasoning.
+ * reasoning block that says anything whole (a block that just opened, or is
+ * still writing its first sentence, has none yet, so the thought before it
+ * still stands), and the running step it leads to. Null when the steps hold no
+ * readable reasoning.
  */
 export function deriveLiveThought(entries: ReadonlyArray<WorkLogEntry>): LiveThought | null {
   for (let index = entries.length - 1; index >= 0; index -= 1) {

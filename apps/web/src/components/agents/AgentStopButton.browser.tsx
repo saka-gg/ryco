@@ -1,7 +1,10 @@
 import "../../index.css";
 
 import { scopeThreadRef } from "@ryco/client-runtime/scoped";
-import type { SubagentStopAction } from "@ryco/client-runtime/state/session/subagentStop";
+import {
+  STOP_UNCONFIRMED_MS,
+  type SubagentStopAction,
+} from "@ryco/client-runtime/state/session/subagentStop";
 import { EnvironmentId, OrchestrationStopBackgroundTaskError, ThreadId } from "@ryco/contracts";
 import { page } from "vite-plus/test/browser";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
@@ -12,7 +15,6 @@ import { deriveAgentPanelModel, type RuntimeSubagent } from "../../threadWorkspa
 import { AgentRosterProvider, AgentRow, AgentRowList } from "./agentRoster";
 import { makeRuntimeAgent } from "./agentRosterTestFixtures";
 import { AgentStopButton, makeAgentStopDecorator } from "./AgentStopButton";
-import { STOP_UNCONFIRMED_MS } from "./agentStop.logic";
 import { agentStopRequests } from "./agentStopRequests";
 
 const THREAD_REF = scopeThreadRef(

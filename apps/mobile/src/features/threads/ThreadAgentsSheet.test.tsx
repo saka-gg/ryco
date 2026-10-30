@@ -50,6 +50,7 @@ const row: ThreadAgentRow = {
   statusLabel: "Running",
   tone: "working",
   activity: "Reading ws.ts",
+  activityFailed: false,
   elapsed: "1m 05s",
   childThreadId: null,
   details: {
