@@ -1,8 +1,9 @@
 /**
  * The bounded transcript page `ryco_read_thread` returns and `ryco thread read`
  * prints: a thread summary and its messages, each message capped and the page
- * held to one text budget, a cut message with a continuation. No services, so the CLI loads it
- * without the read services; the paging rules that cut a text load on first use.
+ * held to one text budget, a cut message with a continuation, and on a first page the
+ * thread's follow-up queue. No services, so the CLI loads it without the read services;
+ * the paging rules that cut a text load on first use.
  *
  * @module agentControl/Mcp/threadTranscript
  */
@@ -11,18 +12,23 @@ import {
   AGENT_CONTROL_MCP_MESSAGE_LIMIT_MAX,
   AGENT_CONTROL_MCP_MESSAGE_PAGE_MAX_CHARS,
   AGENT_CONTROL_MCP_MESSAGE_TEXT_MAX_CHARS,
+  AGENT_CONTROL_MCP_QUEUED_TEXT_MAX_CHARS,
   AGENT_CONTROL_MCP_READ_THREAD_TEXT_BUDGET_CHARS,
   AGENT_CONTROL_TASK_RESULT_MAX_CHARS,
   AgentControlMcpReadThreadResult,
   type AgentControlMcpMessage,
+  type AgentControlMcpQueuedFollowUp,
   type AgentControlMcpThreadSummary,
   type OrchestrationMessage,
   type OrchestrationThreadHistoryPageInfo,
   type OrchestrationThreadShell,
+  type ThreadFollowUpQueue,
 } from "@ryco/contracts";
+import { redactDiagnosticText } from "@ryco/shared/diagnosticRedaction";
 import { Effect, Schema } from "effect";
 
 import type { PageLimits } from "../messagePages.ts";
+import { redactAgentControlSecretText } from "../secretRedaction.ts";
 
 /** Paging rules, loaded on the first read that cuts a text so they stay off the boot path. */
 export const loadMessagePages = Effect.promise(() => import("../messagePages.ts"));
@@ -59,6 +65,16 @@ export const toThreadSummary = (shell: ThreadSummarySource): AgentControlMcpThre
   updatedAt: shell.updatedAt,
 });
 
+const toWholeMcpMessage = (message: OrchestrationMessage): AgentControlMcpMessage => ({
+  messageId: message.id,
+  role: message.role,
+  text: message.text,
+  truncated: false,
+  turnId: message.turnId,
+  attachmentCount: message.attachments?.length ?? 0,
+  createdAt: message.createdAt,
+});
+
 /**
  * Messages of a page as they are, or null when one of them must be cut (longer than the
  * per-message cap, or past the page's text budget): those pages go through the lazy
@@ -73,34 +89,70 @@ const wholeMcpMessages = (
     if (message.text.length > AGENT_CONTROL_MCP_MESSAGE_TEXT_MAX_CHARS) return null;
   }
   if (total > AGENT_CONTROL_MCP_READ_THREAD_TEXT_BUDGET_CHARS) return null;
-  return messages.map((message) => ({
-    messageId: message.id,
-    role: message.role,
-    text: message.text,
-    truncated: false,
-    turnId: message.turnId,
-    attachmentCount: message.attachments?.length ?? 0,
-    createdAt: message.createdAt,
-  }));
+  return messages.map(toWholeMcpMessage);
 };
+
+/**
+ * A thread's follow-up queue as a page shows it: who queued what, each text cut short. A hold's
+ * detail can be a provider's raw error, so it is redacted like other diagnostics an agent reads.
+ */
+const toMcpFollowUpQueue = (
+  queue: ThreadFollowUpQueue,
+): NonNullable<AgentControlMcpReadThreadResult["followUpQueue"]> => ({
+  hold:
+    queue.hold === null
+      ? null
+      : {
+          reason: queue.hold.reason,
+          detail:
+            queue.hold.detail === null
+              ? null
+              : redactDiagnosticText(
+                  redactAgentControlSecretText(queue.hold.detail.slice(0, 2_000)),
+                ),
+          heldAt: queue.hold.heldAt,
+        },
+  entries: queue.entries.map((entry): AgentControlMcpQueuedFollowUp => {
+    const truncated = entry.text.length > AGENT_CONTROL_MCP_QUEUED_TEXT_MAX_CHARS;
+    return {
+      messageId: entry.messageId,
+      author: entry.author,
+      status: entry.status,
+      text: truncated ? entry.text.slice(0, AGENT_CONTROL_MCP_QUEUED_TEXT_MAX_CHARS) : entry.text,
+      ...(truncated ? { textTruncated: true as const } : {}),
+      attachmentCount: entry.attachments.length,
+      createdAt: entry.createdAt,
+    };
+  }),
+});
 
 /** A bounded transcript page, as `ryco_read_thread` returns it and `ryco thread read` prints it. */
 export const toReadThreadResult = (input: {
   readonly shell: ThreadSummarySource;
   readonly messages: ReadonlyArray<OrchestrationMessage>;
   readonly pageInfo: OrchestrationThreadHistoryPageInfo;
-  /** The thread's queued follow-ups, on a first page only. */
-  readonly followUpQueue?: AgentControlMcpReadThreadResult["followUpQueue"];
+  /** The thread's follow-up queue, on a first page only; shown unless it is empty. */
+  readonly followUpQueue?: ThreadFollowUpQueue | undefined;
+  /**
+   * Every message whole, none cut: `ryco thread read` holds the messages in full already, and
+   * prints them so (no page budget applies to it).
+   */
+  readonly wholeMessages?: boolean;
 }) =>
   Effect.gen(function* () {
     const messages =
-      wholeMcpMessages(input.messages) ??
-      (yield* loadMessagePages).toBudgetedMcpMessages(input.messages, MESSAGE_PAGE_LIMITS);
+      input.wholeMessages === true
+        ? input.messages.map(toWholeMcpMessage)
+        : (wholeMcpMessages(input.messages) ??
+          (yield* loadMessagePages).toBudgetedMcpMessages(input.messages, MESSAGE_PAGE_LIMITS));
+    const queue = input.followUpQueue;
     return Schema.encodeSync(AgentControlMcpReadThreadResult)({
       thread: toThreadSummary(input.shell),
       messages,
       hasMoreBefore: input.pageInfo.hasMoreBefore,
       nextCursor: input.pageInfo.hasMoreBefore ? input.pageInfo.oldestCursor : null,
-      ...(input.followUpQueue === undefined ? {} : { followUpQueue: input.followUpQueue }),
+      ...(queue === undefined || queue.entries.length === 0
+        ? {}
+        : { followUpQueue: toMcpFollowUpQueue(queue) }),
     });
   });

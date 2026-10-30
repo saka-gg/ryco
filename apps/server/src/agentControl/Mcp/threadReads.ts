@@ -18,7 +18,6 @@ import type {
 import {
   AGENT_CONTROL_MCP_LIST_LIMIT_DEFAULT,
   AGENT_CONTROL_MCP_LIST_LIMIT_MAX,
-  AGENT_CONTROL_MCP_QUEUED_TEXT_MAX_CHARS,
   AgentControlMcpListThreadsResult,
   AgentControlMcpReadThreadResult,
   OrchestrationThreadActivity,
@@ -26,7 +25,6 @@ import {
   MessageId,
   type AgentControlMcpListThreadsInput,
   type AgentControlMcpMessageContinuation,
-  type AgentControlMcpQueuedFollowUp,
   type AgentControlMcpReadThreadInput,
   type OrchestrationMessage,
   type OrchestrationProjectShell,
@@ -410,47 +408,8 @@ export const readThreadPage = (
       pageInfo = historyPage.page;
     }
 
-    return yield* toReadThreadResult({
-      shell,
-      messages,
-      pageInfo,
-      ...(followUpQueue === undefined || followUpQueue.entries.length === 0
-        ? {}
-        : { followUpQueue: toMcpFollowUpQueue(followUpQueue) }),
-    });
+    return yield* toReadThreadResult({ shell, messages, pageInfo, followUpQueue });
   });
-
-/**
- * A thread's follow-up queue for an agent: who queued what, each text cut short. A hold's detail
- * can be a provider's raw error, so it is redacted like other diagnostics an agent reads.
- */
-const toMcpFollowUpQueue = (queue: ThreadFollowUpQueue) => ({
-  hold:
-    queue.hold === null
-      ? null
-      : {
-          reason: queue.hold.reason,
-          detail:
-            queue.hold.detail === null
-              ? null
-              : redactDiagnosticText(
-                  String(redactAgentControlSecrets(queue.hold.detail.slice(0, 2_000))),
-                ),
-          heldAt: queue.hold.heldAt,
-        },
-  entries: queue.entries.map((entry): AgentControlMcpQueuedFollowUp => {
-    const truncated = entry.text.length > AGENT_CONTROL_MCP_QUEUED_TEXT_MAX_CHARS;
-    return {
-      messageId: entry.messageId,
-      author: entry.author,
-      status: entry.status,
-      text: truncated ? entry.text.slice(0, AGENT_CONTROL_MCP_QUEUED_TEXT_MAX_CHARS) : entry.text,
-      ...(truncated ? { textTruncated: true as const } : {}),
-      attachmentCount: entry.attachments.length,
-      createdAt: entry.createdAt,
-    };
-  }),
-});
 
 const WAIT_THREADS_TIMEOUT_MS_DEFAULT = 30_000;
 const WAIT_THREADS_TIMEOUT_MS_MAX = 45_000;

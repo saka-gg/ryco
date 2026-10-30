@@ -171,7 +171,7 @@ ryco remote send <name> <thread-id> <message>
 ryco thread start --project <id|path> [--title] [--model <instance/model>] [--runtime-mode] [--wait] [--json] <prompt|->
 ryco thread send <thread-id> [--wait] [--json] <prompt|->
 ryco thread wait <thread-id> [--turn <turn-id>] [--timeout 30m] [--json]
-ryco thread read <thread-id> [--limit 20] [--json]
+ryco thread read <thread-id> [--limit 20] [--json] [--full]
 ```
 
 ### Threads from scripts
@@ -183,17 +183,25 @@ when the command ends (Ctrl-C included); no token is printed or written to disk.
 - `start` creates a thread in a project and starts its first turn, with the project's default
   model and checkout (a new worktree when the project's threads start in one). `--runtime-mode`
   may not be above the default the apps start a thread with.
-- `send` queues the message behind a running turn: it starts as the next turn once the thread is
-  idle, with the thread's own model and modes. It never steers the running turn.
+- `send` queues the message behind a running turn, with the thread's own model and modes. It
+  never steers the running turn. A node that keeps follow-up queues takes it at the end of the
+  thread's queue, as the apps queue a message sent while the thread is busy, so it goes after
+  the follow-ups queued before it and shows in the apps' queue; an older node gets it as the
+  next turn once the thread is idle.
 - `wait` waits for the turn `send` printed (`--turn`), else the running or latest turn.
-- `read` prints the thread's latest messages.
+- `read` prints the thread's latest messages, each in full, and its queued follow-ups. `--json`
+  prints the page `ryco_read_thread` returns (a long message cut, with its continuation);
+  `--json --full` prints every message whole.
 
 `start` prints the thread id and `send` the turn id once the turn has started. With `--wait`
 (and always for `wait`) the command waits for exactly that turn and prints its final reply on
 stdout; diagnostics go to stderr. `--json` prints one line: `{ threadId, turnId, state, reply,
 error }`. Exit codes: 0 replied (or started), 1 failed or stopped, 2 needs an approval or an
-answer, 3 a node restart cut the turn off, 4 timed out (`--timeout`), 5 the turn ended but a later
-turn replaced it before the command saw how (`wait --turn` on an old turn).
+answer, or (`send`, state `held`) the thread's follow-up queue is held after a Stop, a failure,
+a usage limit or Pause, or waits for a Retry, 3 a node restart cut the turn off, 4 timed out
+(`--timeout`), 5 the turn ended but a later turn replaced it before the command saw how (`wait
+--turn` on an old turn). A message `send` queued on the node stays queued when the command exits
+2 or 4, and goes out once the queue is resumed or the thread is free.
 
 ```bash
 thread=$(ryco thread start --project . "Fix the failing tests")
