@@ -82,7 +82,10 @@ interface VcsCalls {
 
 interface HarnessOptions {
   readonly reactor?: ThreadGitMetadataOptions;
-  /** What the stubbed `refreshLocalStatus` answers (the git fallback); default: a repo on `main`. */
+  /**
+   * What the stubbed `refreshLocalStatus` answers (the git fallback); default: a repo on `main`.
+   * `call` counts this `cwd`'s calls: other checkouts' refreshes (the barrier's) may come first.
+   */
   readonly localStatus?: (cwd: string, call: number) => Effect.Effect<VcsStatusLocalResult>;
   readonly wrapSnapshotQuery?: (
     query: ProjectionSnapshotQueryShape,
@@ -138,14 +141,12 @@ async function createHarness(options: HarnessOptions = {}) {
   } as unknown as ProviderServiceShape;
 
   const calls: VcsCalls = { local: [], full: [] };
-  let localCall = 0;
   const vcsStatusLayer = Layer.succeed(VcsStatusBroadcaster, {
     getStatus: () => Effect.die("getStatus is not used by the reactor"),
     refreshLocalStatus: (cwd: string) => {
       calls.local.push(cwd);
-      localCall += 1;
       return (
-        options.localStatus?.(cwd, localCall) ??
+        options.localStatus?.(cwd, calls.local.filter((entry) => entry === cwd).length) ??
         Effect.succeed({
           isRepo: true,
           hasPrimaryRemote: false,
