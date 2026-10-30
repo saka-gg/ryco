@@ -3,6 +3,7 @@ import { describe, expect, it } from "vite-plus/test";
 import type {
   RelayChannelId,
   RelayChannelOpenFrame,
+  RelayCloseReason,
   RelayEffectiveRole,
   RelayFrame,
   RelayLimits,
@@ -65,6 +66,12 @@ function harness(
     readonly preparing?: (input: ChannelOpenInput) => Promise<void> | undefined;
     /** Sessions keep what they receive queued, as a consumer that has not read it yet. */
     readonly queueReceived?: boolean;
+    /** Sessions observe the peer's close; the session's close count at that moment is passed. */
+    readonly onPeerClose?: (
+      input: ChannelOpenInput,
+      reason: RelayCloseReason | undefined,
+      closesSoFar: number,
+    ) => void;
   } = {},
 ) {
   const sent: Uint8Array[] = [];
@@ -121,6 +128,12 @@ function harness(
           ...(options.onAccepted === undefined
             ? {}
             : { onAccepted: () => options.onAccepted?.(input) }),
+          ...(options.onPeerClose === undefined
+            ? {}
+            : {
+                onPeerClose: (reason: RelayCloseReason | undefined) =>
+                  options.onPeerClose?.(input, reason, session.closes),
+              }),
         };
         sessions.set(channelId as string, session);
         return session;
@@ -644,6 +657,34 @@ describe("RelayChannelRegistry", () => {
     sendQueue.flush();
     expect(sent).toEqual([]);
     expect(sendQueue.queuedBytes).toBe(0);
+  });
+
+  it("tells a session the peer's close reason before tearing the channel down", async () => {
+    const seen: Array<{ channelId: string; reason: string | undefined; closesSoFar: number }> = [];
+    const { registry, sessions } = harness({
+      onPeerClose: (input, reason, closesSoFar) => {
+        seen.push({ channelId: input.channelId as string, reason, closesSoFar });
+        if (input.channelId === channelB) throw new Error("an observer that throws");
+      },
+    });
+    await registry.handle(openFrame(channelA));
+    await registry.handle(openFrame(channelB));
+
+    await registry.handle({
+      type: "channel.close",
+      ...version,
+      channelId: channelA,
+      reason: "grant_revoked",
+    });
+    await registry.handle({ type: "channel.close", ...version, channelId: channelB });
+
+    expect(seen).toEqual([
+      { channelId: channelA, reason: "grant_revoked", closesSoFar: 0 },
+      { channelId: channelB, reason: undefined, closesSoFar: 0 },
+    ]);
+    // A throwing observer does not keep the channel open.
+    expect(sessions.get(channelA as string)!.closes).toBe(1);
+    expect(sessions.get(channelB as string)!.closes).toBe(1);
   });
 
   it("reports a refused send without disturbing the channel", async () => {

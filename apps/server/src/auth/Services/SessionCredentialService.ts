@@ -34,6 +34,20 @@ export interface VerifiedSession {
   readonly link: AuthAccessLink | null;
 }
 
+export type LinkedSessionSelector =
+  | { readonly enrollmentId: string }
+  | {
+      readonly clientFingerprint: string;
+      /** Only links of this trust source. */
+      readonly trustSource?: AuthAccessLink["trustSource"];
+      /** Only links of this Hub enrollment; `null` for links that name none. */
+      readonly enrollmentId?: string | null;
+      /** Only links of this Hub account; `null` for links that name none. */
+      readonly accountId?: string | null;
+      /** Only sessions linked at one of these roles. */
+      readonly roles?: ReadonlyArray<AuthAccessLink["role"]>;
+    };
+
 export type SessionCredentialChange =
   | {
       readonly type: "clientUpserted";
@@ -142,12 +156,13 @@ export interface SessionCredentialServiceShape {
   readonly streamChanges: Stream.Stream<SessionCredentialChange>;
   readonly revoke: (sessionId: AuthSessionId) => Effect.Effect<boolean, SessionCredentialError>;
   /**
-   * Ends every Hub-linked session of one device: its Hub enrollment was
-   * revoked, or its local client authorization withdrawn. Returns how many
-   * pairings it revoked.
+   * Ends Hub-linked sessions of one device: its Hub enrollment was revoked, its
+   * local client authorization withdrawn, or its Hub access ended or narrowed
+   * (`accountId` and `roles` narrow the selection). Returns how many pairings
+   * it revoked.
    */
   readonly revokeLinked: (
-    selector: { readonly enrollmentId: string } | { readonly clientFingerprint: string },
+    selector: LinkedSessionSelector,
   ) => Effect.Effect<number, SessionCredentialError>;
   /** Revokes every pairing but this session's own; returns how many pairings it revoked. */
   readonly revokeAllExcept: (

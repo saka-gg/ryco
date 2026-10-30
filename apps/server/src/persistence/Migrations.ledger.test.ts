@@ -192,6 +192,7 @@ const undoRepairEffect: Record<string, string | ReadonlyArray<string>> = {
   "drop-thread-priority-tables": "CREATE TABLE thread_priority_batches (slot INTEGER)",
   "pull-request-watches": "DROP INDEX idx_projection_thread_pull_request_watches_active",
   "follow-up-queue": "DROP INDEX idx_projection_thread_queue_entries_position",
+  "auth-access-link-account": "ALTER TABLE auth_sessions DROP COLUMN link_account_id",
 };
 
 it.effect("finds exactly the repair whose effect a database from before the records lacks", () =>

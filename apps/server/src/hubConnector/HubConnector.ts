@@ -228,6 +228,9 @@ export class HubConnector {
   readonly #onE2eeEnrollmentRevoked: (
     frame: RelayE2eeEnrollmentRevokedFrame,
   ) => void | Promise<void>;
+  readonly #features: ReadonlyArray<string>;
+  readonly #onOnline: () => void;
+  readonly #onLinkedAccessChanged: () => void;
   readonly #networkFingerprint: () => string;
   readonly #livenessWatchEnabled: boolean;
   readonly #processLock: HubIdentityProcessLock | undefined;
@@ -325,6 +328,15 @@ export class HubConnector {
     readonly onE2eeEnrollmentRevoked?: (
       frame: RelayE2eeEnrollmentRevokedFrame,
     ) => void | Promise<void>;
+    /** Hub features this node understands, listed in its relay auth (`RelayNodeFeature`). */
+    readonly features?: ReadonlyArray<string>;
+    /** Each time a connection authenticates and goes online. Must not block. */
+    readonly onOnline?: () => void;
+    /**
+     * The Hub's `node.linked-access.changed`: ask it which linked direct sessions still stand.
+     * Must not block: it runs in the connection's frame order.
+     */
+    readonly onLinkedAccessChanged?: () => void;
     /** Injectable for tests; see `defaultNetworkFingerprint`. */
     readonly networkFingerprint?: () => string;
     /** Watch for wake and network changes; see `nudge`. On unless a test opts out. */
@@ -361,6 +373,9 @@ export class HubConnector {
       authorization: this.#identity.e2eeClientAuthorization,
     });
     this.#onE2eeEnrollmentRevoked = options.onE2eeEnrollmentRevoked ?? (() => undefined);
+    this.#features = options.features ?? [];
+    this.#onOnline = options.onOnline ?? (() => undefined);
+    this.#onLinkedAccessChanged = options.onLinkedAccessChanged ?? (() => undefined);
     this.#networkFingerprint = options.networkFingerprint ?? defaultNetworkFingerprint;
     this.#livenessWatchEnabled = options.livenessWatch ?? true;
     this.#processLock = options.processLock;
@@ -1029,6 +1044,7 @@ export class HubConnector {
       now: this.#scheduler.now,
       proofFirst: this.#proofFirst,
       clientVersion: this.#enrollmentMetadata.clientVersion,
+      features: this.#features,
       onFrame: (frame) => {
         if (!this.#state.isCurrent(generation) || this.#stopping) return;
         // Heartbeats describe this socket, not a channel. Key custody during
@@ -1129,6 +1145,7 @@ export class HubConnector {
       );
       this.#scheduleStableReset(generation);
       this.#scheduleHeartbeatTimeout(generation, ready.limits.deadConnectionTimeoutMs);
+      this.#onOnline();
     } catch (error: unknown) {
       if (session.proofRefused) this.#proofFirst = true;
       if (!this.#state.isCurrent(generation) || this.#stopping) return;
@@ -1359,6 +1376,8 @@ export class HubConnector {
       if (result === "invalid") throw new RelayChannelProtocolError();
       if (result === "stale") return;
       await this.#onE2eeEnrollmentRevoked(frame);
+    } else if (frame.type === "node.linked-access.changed") {
+      this.#onLinkedAccessChanged();
     } else if (
       frame.type === "channel.open" ||
       frame.type === "data" ||

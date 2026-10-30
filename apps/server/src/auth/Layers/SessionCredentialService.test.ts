@@ -596,6 +596,77 @@ it.layer(NodeServices.layer)("SessionCredentialServiceLive", (it) => {
     }).pipe(Effect.provide(withClock())),
   );
 
+  it.effect("narrows a linked revocation by trust source, enrollment, account and role", () =>
+    Effect.gen(function* () {
+      const sessions = yield* SessionCredentialService;
+      const issueLinked = (input: {
+        readonly accountId?: string;
+        readonly role: "viewer" | "operator" | "owner";
+      }) =>
+        sessions.issue({
+          method: "bearer-session-token",
+          subject: "hub-linked",
+          link: {
+            trustSource: "account-enrolled",
+            enrollmentId: "enr_studio",
+            clientFingerprint: "fp-studio",
+            role: input.role,
+            ...(input.accountId === undefined ? {} : { accountId: input.accountId }),
+          },
+        });
+      // One device, signed in to two accounts, linked twice under the first.
+      const asOwner = yield* issueLinked({ accountId: "acct_a", role: "owner" });
+      const asViewer = yield* issueLinked({ accountId: "acct_a", role: "viewer" });
+      const otherAccount = yield* issueLinked({ accountId: "acct_b", role: "operator" });
+      const beforeAccounts = yield* issueLinked({ role: "operator" });
+      yield* sessions.issue({ method: "bearer-session-token", subject: "paired" });
+
+      // Account A lowered to viewer: only its sessions above viewer end.
+      expect(
+        yield* sessions.revokeLinked({
+          clientFingerprint: "fp-studio",
+          accountId: "acct_a",
+          roles: ["operator", "owner"],
+        }),
+      ).toBe(1);
+      expect((yield* Effect.flip(sessions.verify(asOwner.token))).message).toContain("revoked");
+      yield* sessions.verify(asViewer.token);
+      yield* sessions.verify(otherAccount.token);
+      // The same key, locally verified on this node: not the Hub's to end.
+      const localLink = yield* sessions.issue({
+        method: "bearer-session-token",
+        subject: "hub-linked",
+        link: {
+          trustSource: "locally-verified",
+          enrollmentId: null,
+          clientFingerprint: "fp-studio",
+          role: "operator",
+        },
+      });
+      // Links from before nodes kept the account are selected by `null`.
+      expect(
+        yield* sessions.revokeLinked({
+          clientFingerprint: "fp-studio",
+          trustSource: "account-enrolled",
+          enrollmentId: "enr_studio",
+          accountId: null,
+        }),
+      ).toBe(1);
+      yield* sessions.verify(localLink.token);
+      expect(
+        yield* sessions.revokeLinked({
+          clientFingerprint: "fp-studio",
+          trustSource: "account-enrolled",
+          enrollmentId: "enr_other",
+        }),
+      ).toBe(0);
+      expect((yield* Effect.flip(sessions.verify(beforeAccounts.token))).message).toContain(
+        "revoked",
+      );
+      yield* sessions.verify(otherAccount.token);
+    }).pipe(Effect.provide(withClock())),
+  );
+
   it.effect("refuses to rotate a browser cookie session or one renewed within the hour", () =>
     Effect.gen(function* () {
       const sessions = yield* SessionCredentialService;

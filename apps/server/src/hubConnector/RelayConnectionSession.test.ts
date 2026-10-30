@@ -340,6 +340,28 @@ describe("RelayConnectionSession", () => {
     session.close();
   });
 
+  it("lists the node's features beside the proof, leaving out names the schema refuses", async () => {
+    const socket = new FakeSocket();
+    const session = new RelayConnectionSession({
+      identity: identity(),
+      transport: { open: () => socket },
+      hubOrigin: "https://relay.example",
+      features: ["linked-access-check", " padded", "x".repeat(65)],
+      onFrame: () => undefined,
+      onTerminal: () => undefined,
+    });
+    void session.authenticate().catch(() => undefined);
+    await proofPrepared();
+    socket.emit("open", {} as Event);
+    await proofPrepared();
+    const decoded = decodeRelayFrame(socket.sent[0]!);
+    expect(decoded).toMatchObject({
+      ok: true,
+      value: { type: "auth", peer: "node", features: ["linked-access-check"] },
+    });
+    session.close();
+  });
+
   it("negotiates minor 2 when a minor-3 node meets an older Hub", async () => {
     const socket = new FakeSocket();
     const routed: RelayFrame[] = [];

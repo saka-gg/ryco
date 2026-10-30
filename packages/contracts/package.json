@@ -26,6 +26,11 @@
       "import": "./src/pushHub.ts",
       "require": "./src/pushHub.ts"
     },
+    "./node-linked-access": {
+      "types": "./src/nodeLinkedAccess.ts",
+      "import": "./src/nodeLinkedAccess.ts",
+      "require": "./src/nodeLinkedAccess.ts"
+    },
     "./settings": {
       "types": "./src/settings.ts",
       "import": "./src/settings.ts",

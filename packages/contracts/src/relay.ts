@@ -79,6 +79,7 @@ export const RELAY_FRAME_TYPES = [
   "node.e2ee.statement.ack",
   "e2ee.verifier-keys",
   "e2ee.enrollment-revoked",
+  "node.linked-access.changed",
 ] as const;
 
 export const RELAY_PROTOCOL_ERROR_CODES = [
@@ -298,6 +299,18 @@ export const RelayNodeClientVersion = Schema.String.check(
   Schema.isTrimmed(),
 );
 
+/**
+ * A Hub feature the node understands, so the Hub may send it the frames that come with it.
+ * Open strings: a node or Hub ignores names it does not know. Hubs that predate the field
+ * ignore it, and like `clientVersion` it is not part of the signed transcript.
+ */
+export const RelayNodeFeature = Schema.String.check(
+  Schema.isNonEmpty(),
+  Schema.isMaxLength(64),
+  Schema.isTrimmed(),
+);
+export const RELAY_NODE_FEATURES_MAX = 16;
+
 export const RelayNodeAuthHandshake = Schema.Struct({
   type: Schema.Literal("auth"),
   peer: Schema.Literal("node"),
@@ -306,6 +319,9 @@ export const RelayNodeAuthHandshake = Schema.Struct({
   nonce: RelayAuthenticationNonce,
   signature: RelaySignatureMaterial,
   clientVersion: Schema.optionalKey(RelayNodeClientVersion),
+  features: Schema.optionalKey(
+    Schema.Array(RelayNodeFeature).check(Schema.isMaxLength(RELAY_NODE_FEATURES_MAX)),
+  ),
 });
 export type RelayNodeAuthHandshake = typeof RelayNodeAuthHandshake.Type;
 
@@ -406,6 +422,17 @@ export const RelayE2eeEnrollmentRevokedFrame = minor3Frame({
   deviceAuthEpoch: E2eeAuthorizationEpoch,
 });
 export type RelayE2eeEnrollmentRevokedFrame = typeof RelayE2eeEnrollmentRevokedFrame.Type;
+
+/**
+ * Hub → node: a member's access to this node may have changed. It names nothing; the node
+ * asks its Hub which linked direct sessions still stand (`@ryco/contracts/node-linked-access`).
+ * Sent only on a connection whose auth listed the `linked-access-check` feature, so a node
+ * that predates the type never receives it.
+ */
+export const RelayNodeLinkedAccessChangedFrame = minor3Frame({
+  type: Schema.Literal("node.linked-access.changed"),
+});
+export type RelayNodeLinkedAccessChangedFrame = typeof RelayNodeLinkedAccessChangedFrame.Type;
 
 export const RelayChannelAcceptFrame = Schema.Struct({
   type: Schema.Literal("channel.accept"),
@@ -541,6 +568,7 @@ export const RelayControlFrame = Schema.Union([
   RelayNodeE2eeStatementAckFrame,
   RelayE2eeVerifierKeysFrame,
   RelayE2eeEnrollmentRevokedFrame,
+  RelayNodeLinkedAccessChangedFrame,
 ]);
 export type RelayControlFrame = typeof RelayControlFrame.Type;
 
