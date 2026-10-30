@@ -19,14 +19,17 @@ import {
   initialRunFacts,
   isBusyTurnStartRejection,
   latestRunFacts,
+  observeQueuedRunWindow,
   observeRunEvent,
   queueGate,
   queuedMessageBlocker,
+  queuedRunLeftUnseen,
   resolveStartModel,
   resolveStartRuntimeMode,
   runExitCode,
   threadTitleFromPrompt,
   waitsInFollowUpQueue,
+  wakesRun,
   type RunFacts,
   type RunState,
 } from "./threadRun.ts";
@@ -116,6 +119,18 @@ const sessionSet = (
       : { releasedTurn: { ...released, completedAt: T2, reason: "test" } }),
   });
 
+const userMessageSent = (messageId: MessageId, turnId: TurnId | null) =>
+  event("thread.message-sent", {
+    threadId: "thread-1",
+    messageId,
+    role: "user",
+    text: "Next",
+    ...(turnId === null ? {} : { dispatchMode: "steer" }),
+    turnId,
+    streaming: false,
+    createdAt: T1,
+    updatedAt: T1,
+  });
 const fold = (facts: RunFacts, events: ReadonlyArray<OrchestrationEvent>) =>
   events.reduce(observeRunEvent, facts);
 
@@ -435,16 +450,11 @@ describe("a message in the node's follow-up queue", () => {
     );
     assert.deepInclude(evaluation, { done: true, state: "stopped", turnId: null });
 
-    const steered = fold(queued(), [
-      event("thread.turn-steer-accepted", {
-        threadId: "thread-1",
-        messageId: ours,
-        expectedTurnId: earlierTurn,
-        turnId: earlierTurn,
-        resolvedAt: T1,
-      }),
-      removed("steered"),
-    ]);
+    // What a thread subscription forwards of a steer: the message, carrying its turn (never
+    // `thread.turn-steer-accepted`).
+    const steeredMessage = userMessageSent(ours, earlierTurn);
+    assert.isTrue(wakesRun(steeredMessage));
+    const steered = fold(queued(), [steeredMessage, removed("steered")]);
     assert.strictEqual(steered.turnId, earlierTurn);
     assert.deepInclude(
       evaluateRun(
@@ -456,6 +466,76 @@ describe("a message in the node's follow-up queue", () => {
       ),
       { done: false, turnId: earlierTurn },
     );
+  });
+
+  it("wakes on user messages only, and binds no turn from a message without one", () => {
+    assert.isFalse(
+      wakesRun(
+        event("thread.message-sent", {
+          threadId: "thread-1",
+          messageId: theirs,
+          role: "assistant",
+          turnId: earlierTurn,
+        }),
+      ),
+    );
+    assert.isNull(fold(queued(), [userMessageSent(ours, null)]).turnId);
+    assert.isNull(fold(queued(), [userMessageSent(theirs, earlierTurn)]).turnId);
+  });
+
+  it("notices on a fresh window that the message left the queue unseen", () => {
+    const stillQueued = observeQueuedRunWindow(queued(), {
+      entries: [entry(theirs), entry(ours)],
+      hold: null,
+    } as never);
+    assert.isTrue(waitsInFollowUpQueue(stillQueued));
+    for (const queue of [undefined, { entries: [entry(theirs)], hold: null } as never]) {
+      const left = observeQueuedRunWindow(queued(), queue);
+      assert.isTrue(left.queueLeftUnseen);
+      assert.isFalse(waitsInFollowUpQueue(left));
+    }
+    // A message not sent through the queue, or one whose exit was seen, is left alone.
+    const plain = initialRunFacts({ messageId: ours });
+    assert.strictEqual(observeQueuedRunWindow(plain, undefined), plain);
+    const exited = fold(queued(), [removed("dispatched")]);
+    assert.strictEqual(observeQueuedRunWindow(exited, undefined), exited);
+  });
+
+  it("finds where a message that left unseen went", () => {
+    const idle = shell({
+      session: session("ready"),
+      latestTurn: latestTurn(laterTurn, "completed"),
+    });
+    const message = (turnId: TurnId | null) => [
+      { id: theirs, turnId: earlierTurn },
+      { id: ours, turnId },
+    ];
+    // It carries its turn (steered): follow that turn.
+    assert.strictEqual(queuedRunLeftUnseen(idle, ours, message(earlierTurn), true), earlierTurn);
+    // Gone from the thread's whole history: removed; from a partial page: not known.
+    assert.deepInclude(queuedRunLeftUnseen(idle, ours, message(null).slice(0, 1), true) as never, {
+      done: true,
+      state: "stopped",
+    });
+    assert.deepInclude(queuedRunLeftUnseen(idle, ours, message(null).slice(0, 1), false) as never, {
+      done: true,
+      state: "unknown",
+    });
+    // Sent as a turn start: while a turn starts or runs the shell binds it, after that a
+    // later turn replaced it.
+    for (const busy of [
+      shell({ session: session("starting"), latestTurn: latestTurn(laterTurn, "completed") }),
+      shell({
+        session: session("running", laterTurn),
+        latestTurn: latestTurn(laterTurn, "running"),
+      }),
+    ]) {
+      assert.isNull(queuedRunLeftUnseen(busy, ours, message(null), true));
+    }
+    assert.deepInclude(queuedRunLeftUnseen(idle, ours, message(null), true) as never, {
+      done: true,
+      state: "unknown",
+    });
   });
 
   it("is blocked by a hold or a head waiting for Retry, never by a hold the node lifts", () => {

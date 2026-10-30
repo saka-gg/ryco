@@ -132,6 +132,11 @@ export interface RunFacts {
    * waits there. Undefined for a message sent as a turn start.
    */
   readonly queueExit?: FollowUpQueueRemovalReason | null;
+  /**
+   * A fresh window (a reconnect the node could not replay) no longer had the queued message in
+   * the queue: it left while its events were missed ({@link queuedRunLeftUnseen} finds where).
+   */
+  readonly queueLeftUnseen?: boolean;
 }
 
 export const initialRunFacts = (input: {
@@ -235,9 +240,13 @@ export const observeRunEvent = (facts: RunFacts, event: OrchestrationEvent): Run
         event.payload.messageIds.includes(facts.messageId)
         ? { ...facts, queueExit: event.payload.reason }
         : facts;
-    case "thread.turn-steer-accepted":
-      // A person sent the queued message into the running turn: that turn answers it.
-      return facts.turnId === null && event.payload.messageId === facts.messageId
+    case "thread.message-sent":
+      // A person steered the queued message into the running turn: the message carries that
+      // turn (a thread subscription forwards no `thread.turn-steer-accepted`).
+      return facts.turnId === null &&
+        event.payload.role === "user" &&
+        event.payload.messageId === facts.messageId &&
+        event.payload.turnId !== null
         ? { ...facts, turnId: event.payload.turnId }
         : facts;
     default:
@@ -247,11 +256,11 @@ export const observeRunEvent = (facts: RunFacts, event: OrchestrationEvent): Run
 
 /**
  * Whether an event of the run's thread can move the run, so the wait re-reads the thread:
- * any but the streaming text of a reply. A burst of other events costs a few reads at most
- * (the wait spaces them).
+ * any but the text of a reply (a user message may be the run's, steered). A burst of other
+ * events costs a few reads at most (the wait spaces them).
  */
 export const wakesRun = (event: OrchestrationEvent): boolean =>
-  event.type !== "thread.message-sent";
+  event.type !== "thread.message-sent" || event.payload.role === "user";
 
 // ── Deciding the run's state ──────────────────────────────────────────
 
@@ -365,7 +374,61 @@ export const evaluateRun = (
 
 /** The message `send` queued still waits in the node's queue: nothing took it out yet. */
 export const waitsInFollowUpQueue = (facts: RunFacts): boolean =>
-  facts.queueExit === null && facts.turnId === null && facts.pendingMessageId !== facts.messageId;
+  facts.queueExit === null &&
+  facts.queueLeftUnseen !== true &&
+  facts.turnId === null &&
+  facts.pendingMessageId !== facts.messageId;
+
+/**
+ * A fresh window of the thread (the first, or one a reconnect got instead of a replay) while
+ * the message `send` queued waits: gone from the queue it carries (absent while empty), the
+ * message left while its events were missed.
+ */
+export const observeQueuedRunWindow = (
+  facts: RunFacts,
+  queue: ThreadFollowUpQueue | undefined,
+): RunFacts =>
+  facts.messageId !== null &&
+  waitsInFollowUpQueue(facts) &&
+  !(queue?.entries ?? []).some((entry) => entry.messageId === facts.messageId)
+    ? { ...facts, queueLeftUnseen: true }
+    : facts;
+
+/**
+ * Where the message that left the queue unseen went, from the thread's newest messages
+ * (`reachesBack`: they go back to the thread's start). Its turn when the message carries
+ * one, an end when it is gone or its turn cannot be told any more, else null: its turn is
+ * still starting, and the shell binds it.
+ */
+export const queuedRunLeftUnseen = (
+  shell: OrchestrationThreadShell,
+  messageId: MessageId,
+  messages: ReadonlyArray<{ readonly id: MessageId; readonly turnId: TurnId | null }>,
+  reachesBack: boolean,
+): TurnId | RunEvaluation | null => {
+  const message = messages.find((candidate) => candidate.id === messageId);
+  if (message === undefined) {
+    return reachesBack
+      ? ended("stopped", null, "The queued message was removed before it was sent.")
+      : ended(
+          "unknown",
+          null,
+          "The queued message left the queue while this command was disconnected; where it went is not known.",
+        );
+  }
+  if (message.turnId !== null) return message.turnId;
+  if (
+    shell.session?.status === "starting" ||
+    isThreadTurnRunning(shell.session, shell.latestTurn)
+  ) {
+    return null;
+  }
+  return ended(
+    "unknown",
+    null,
+    "The queued message went out while this command was disconnected, and a later turn ran since; how its turn ended is not known.",
+  );
+};
 
 /** What of a follow-up queue says whether it sends: a shell's summary or the queue itself. */
 export interface FollowUpQueueState {

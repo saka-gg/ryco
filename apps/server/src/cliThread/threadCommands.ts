@@ -99,10 +99,12 @@ import {
   initialRunFacts,
   isBusyTurnStartRejection,
   latestRunFacts,
+  observeQueuedRunWindow,
   observeRunActivity,
   observeRunEvent,
   queueGate,
   queuedMessageBlocker,
+  queuedRunLeftUnseen,
   resolveStartModel,
   resolveStartRuntimeMode,
   type RunEvaluation,
@@ -345,9 +347,12 @@ const observeWindowItem = (
   if (isUnknownUnionMember(item)) return false;
   if (item.kind === "snapshot") {
     tracker.lastSequence = Math.max(tracker.lastSequence ?? 0, item.snapshot.snapshotSequence);
-    tracker.facts = item.snapshot.thread.activities.reduce<RunFacts>(
-      (facts, activity: OrchestrationThreadActivity) => observeRunActivity(facts, activity),
-      tracker.facts,
+    tracker.facts = observeQueuedRunWindow(
+      item.snapshot.thread.activities.reduce<RunFacts>(
+        (facts, activity: OrchestrationThreadActivity) => observeRunActivity(facts, activity),
+        tracker.facts,
+      ),
+      item.snapshot.thread.followUpQueue,
     );
     return true;
   }
@@ -464,6 +469,27 @@ const queuedRunHold = (
     );
   });
 
+/** {@link queuedRunLeftUnseen} from the thread's newest page of messages. */
+const queuedRunLeftUnseenFromWindow = (
+  client: CliRemoteRpcClient,
+  threadId: ThreadId,
+  shell: OrchestrationThreadShell,
+  messageId: MessageId,
+) =>
+  client[ORCHESTRATION_WS_METHODS.getThreadWindow]({
+    threadId,
+    limits: { messages: REPLY_PAGE_MESSAGES, proposedPlans: 1, activities: 1, checkpoints: 1 },
+  }).pipe(
+    Effect.map((window) =>
+      queuedRunLeftUnseen(
+        shell,
+        messageId,
+        window.thread.messages,
+        !window.history.messages.hasMoreBefore,
+      ),
+    ),
+  );
+
 /**
  * Follows the tracker's run until it ends (`ended`) or, for a command without `--wait`,
  * until its turn has started (`started`), or the deadline passes.
@@ -482,6 +508,26 @@ const followRun = (
         yield* requireLiveFeed(tracker);
         const shell = yield* readThreadShell(client, threadId, tracker);
         let evaluation: RunEvaluation = evaluateRun(shell, tracker.facts);
+        if (
+          !evaluation.done &&
+          evaluation.turnId === null &&
+          shell !== null &&
+          tracker.facts.queueLeftUnseen === true &&
+          tracker.facts.messageId !== null
+        ) {
+          const left = yield* queuedRunLeftUnseenFromWindow(
+            client,
+            threadId,
+            shell,
+            tracker.facts.messageId,
+          );
+          if (typeof left === "string") {
+            tracker.facts = { ...tracker.facts, turnId: left };
+            evaluation = evaluateRun(shell, tracker.facts);
+          } else if (left !== null) {
+            evaluation = left;
+          }
+        }
         if (!evaluation.done && evaluation.turnId === null && shell !== null) {
           const held = yield* queuedRunHold(client, threadId, shell, tracker.facts);
           if (held !== null) evaluation = { done: true, state: "held", turnId: null, error: held };

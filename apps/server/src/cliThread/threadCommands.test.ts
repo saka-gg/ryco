@@ -4,7 +4,7 @@ import { join } from "node:path";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { NetService } from "@ryco/shared/Net";
-import { TurnId } from "@ryco/contracts";
+import { TurnId, type OrchestrationEvent } from "@ryco/contracts";
 import { ORPHANED_PROVIDER_SESSION_ERROR } from "@ryco/shared/restartContinuation";
 import { assert, describe, it } from "@effect/vitest";
 import { Cause, Effect, Exit, Fiber, Layer, Queue, References, Stream } from "effect";
@@ -31,6 +31,7 @@ import {
   waitForThread,
   type ThreadCliTarget,
 } from "./threadCommands.ts";
+import { isThreadDetailEvent } from "../ws/context/orchestrationEvents.ts";
 import { formatTranscript, runExitCode, type RunResult } from "./threadRun.ts";
 
 const AT = "2026-10-28T10:00:00.000Z";
@@ -128,6 +129,8 @@ const makeNode = Effect.sync(() => {
     capabilities: {} as Json,
     /** The thread's follow-up queue, as its window carries it. */
     queue: null as { entries: Json[]; hold: Json | null } | null,
+    /** Whether a resubscribe replays the events it missed; false sends a fresh window. */
+    replays: true,
     /** Answers a turn start; defaults to accepting it. */
     onDispatch: (_command: Json): Error | null => null,
   };
@@ -147,7 +150,8 @@ const makeNode = Effect.sync(() => {
       payload,
     };
     node.log.push(event);
-    if (node.online) {
+    // As the node's thread subscription forwards them: thread detail and its queue only.
+    if (node.online && isThreadDetailEvent(event as unknown as OrchestrationEvent)) {
       for (const queue of node.subscribers) Queue.offerUnsafe(queue, { kind: "event", event });
     }
   };
@@ -178,19 +182,27 @@ const makeNode = Effect.sync(() => {
           if (!node.online) return Stream.fail(new SocketClosed("closed"));
           const queue = yield* Queue.unbounded<unknown, SocketClosed | Cause.Done>();
           node.resumes.push(input.resumeFromSequence);
-          if (input.resumeFromSequence === undefined) {
+          if (input.resumeFromSequence === undefined || !node.replays) {
             Queue.offerUnsafe(queue, {
               kind: "snapshot",
               snapshot: {
                 snapshotSequence: node.sequence,
-                thread: { ...node.shell, messages: [], activities: [] },
+                thread: {
+                  ...node.shell,
+                  messages: [],
+                  activities: [],
+                  ...(node.queue === null ? {} : { followUpQueue: node.queue }),
+                },
                 history: {},
               },
             });
           } else {
             Queue.offerUnsafe(queue, { kind: "resumed", fromSequence: input.resumeFromSequence });
             for (const event of node.log) {
-              if ((event.sequence as number) > input.resumeFromSequence) {
+              if (
+                (event.sequence as number) > input.resumeFromSequence &&
+                isThreadDetailEvent(event as unknown as OrchestrationEvent)
+              ) {
                 Queue.offerUnsafe(queue, { kind: "event", event });
               }
             }
@@ -610,6 +622,120 @@ describe("ryco thread send on a node that keeps follow-up queues", () => {
         error: null,
       } as RunResult);
       assert.lengthOf(node.dispatched, 1);
+    }),
+  );
+
+  it.effect("follows the running turn a person steers its queued message into", () =>
+    Effect.gen(function* () {
+      const { node, publish, target } = yield* makeNode;
+      node.capabilities = { serverFollowUpQueue: true };
+      node.shell = baseShell(THREAD, {
+        session: session("running", "turn-earlier"),
+        latestTurn: turn("turn-earlier", "running", "message-earlier"),
+      });
+      const fiber = yield* Effect.forkChild(
+        sendToThread(target, {
+          threadId: THREAD,
+          prompt: "Also check the docs",
+          wait: true,
+          deadlineMs: Number.POSITIVE_INFINITY,
+        }),
+      );
+      yield* advance();
+      const messageId = (node.dispatched[0]!.entry as Json).messageId as string;
+      // The steer, as the node records it: the message joins the running turn, the accepted
+      // event (which a thread subscription does not forward), and the queue's removal.
+      node.queue = null;
+      publish("thread.message-sent", {
+        threadId: THREAD,
+        messageId,
+        role: "user",
+        text: "Also check the docs",
+        dispatchMode: "steer",
+        turnId: "turn-earlier",
+        streaming: false,
+        createdAt: AT,
+        updatedAt: AT,
+      });
+      publish("thread.turn-steer-accepted", {
+        threadId: THREAD,
+        messageId,
+        expectedTurnId: "turn-earlier",
+        turnId: "turn-earlier",
+        resolvedAt: AT,
+      });
+      publish("thread.queue-entries-removed", {
+        threadId: THREAD,
+        messageIds: [messageId],
+        reason: "steered",
+        updatedAt: AT,
+      });
+      yield* advance();
+      assert.isUndefined(fiber.pollUnsafe());
+      node.messages = [
+        {
+          id: "assistant-1",
+          role: "assistant",
+          text: "The docs are fine too.",
+          turnId: "turn-earlier",
+          streaming: false,
+          createdAt: LATER,
+          updatedAt: LATER,
+        },
+      ];
+      node.shell = baseShell(THREAD, {
+        session: session("ready", null, { updatedAt: LATER }),
+        latestTurn: turn("turn-earlier", "completed", "message-earlier"),
+      });
+      publish("thread.session-set", releasedSessionSet("ready", "turn-earlier", "completed"));
+      yield* advance();
+      assert.deepEqual(yield* Fiber.join(fiber), {
+        threadId: THREAD,
+        turnId: "turn-earlier",
+        state: "completed",
+        reply: "The docs are fine too.",
+        error: null,
+      } as RunResult);
+    }),
+  );
+
+  it.effect("ends once a fresh window shows its queued message removed while away (1)", () =>
+    Effect.gen(function* () {
+      const { node, publish, drop, target } = yield* makeNode;
+      node.capabilities = { serverFollowUpQueue: true };
+      node.shell = baseShell(THREAD, {
+        session: session("running", "turn-earlier"),
+        latestTurn: turn("turn-earlier", "running"),
+      });
+      node.queue = { entries: [personEntry], hold: null };
+      const fiber = yield* Effect.forkChild(
+        sendToThread(target, {
+          threadId: THREAD,
+          prompt: "Then run the tests",
+          wait: true,
+          deadlineMs: Number.POSITIVE_INFINITY,
+        }),
+      );
+      yield* advance();
+      const messageId = (node.dispatched[0]!.entry as Json).messageId as string;
+      yield* drop;
+      // While the CLI is away a person removes the message, and the node cannot replay that.
+      node.queue = { entries: [personEntry], hold: null };
+      publish("thread.queue-entries-removed", {
+        threadId: THREAD,
+        messageIds: [messageId],
+        reason: "user",
+        updatedAt: AT,
+      });
+      node.replays = false;
+      node.online = true;
+      yield* advance(8);
+      const result = yield* Fiber.join(fiber);
+      assert.deepInclude(result, {
+        state: "stopped",
+        error: "The queued message was removed before it was sent.",
+      });
+      assert.strictEqual(runExitCode(result.state), 1);
     }),
   );
 
