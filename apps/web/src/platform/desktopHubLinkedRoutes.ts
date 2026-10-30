@@ -2,14 +2,10 @@ import type { EnvironmentId } from "@ryco/contracts";
 import {
   BETTER_ROUTE_CHECK_INTERVAL_MS,
   RELAY_ROUTE,
-  checkEnvironmentRoutes,
   createEnvironmentRouteUpgrader,
   environmentRouteKey,
-  linkedDirectRoutes,
-  routeCheckAccepted,
-  type EnvironmentRoute,
 } from "@ryco/client-runtime/connection";
-import { proveDirectRouteIdentity } from "@ryco/client-runtime/connection/directRouteIdentity";
+import { createHubLinkedRoutes } from "@ryco/client-runtime/connection/hubLinkedRoutes";
 
 import {
   fetchRemoteEnvironmentDescriptor,
@@ -25,6 +21,7 @@ import {
   waitForSavedEnvironmentRegistryHydration,
   type SavedEnvironmentRecord,
 } from "../environments/runtime/catalog";
+import { haltDesktopLinking } from "./desktopHubLinkedDirectAccess";
 import type { DesktopWorkspaceDirectRoutes } from "./desktopWorkspaceSocket";
 
 /**
@@ -32,100 +29,43 @@ import type { DesktopWorkspaceDirectRoutes } from "./desktopWorkspaceSocket";
  *
  * The machine stays one environment under its Hub id. Its linked direct access
  * (a saved record carrying `hubLink`) is a route of that environment, never an
- * environment of its own: each connection attempt to the machine checks those
- * addresses first and takes the best one that answers as the machine's own
- * direct id and then proves, with a fresh challenge, that it holds the node
- * identity key the link names; only then does the linked bearer go there.
- * Otherwise the relay, which the Electron workspace transport owns as before.
- * The relay's credentials never reach a direct address and the linked bearer
- * never reaches the relay.
+ * environment of its own: each connection attempt to the machine walks those
+ * addresses first (`@ryco/client-runtime/connection/hubLinkedRoutes`, shared
+ * with the phone) and takes the best one that answers as the machine and
+ * proves its identity key, with the linked bearer. Otherwise the relay, which
+ * the Electron workspace transport owns as before. Addresses that refused the
+ * bearer or the proof stay out until their link changes
+ * (`requestDesktopHubRouteCheck`), never on a timer: trying one again would
+ * only drop a healthy relay connection for the same refusal.
  */
-
-/**
- * Addresses that refused the linked bearer or failed the identity proof. Each
- * stays out until its link changes (renewed or removed:
- * `requestDesktopHubRouteCheck`), never on a timer: trying it again would only
- * drop a healthy relay connection for the same refusal.
- */
-const refusedRoutes = new Set<string>();
-
-function readLinkedRoutes(hubEnvironmentId: EnvironmentId, nowMs: number) {
-  return linkedDirectRoutes({
-    records: listLinkedDirectRecords(),
-    hubEnvironmentId,
-    nowMs,
-  }).filter((route) => !refusedRoutes.has(environmentRouteKey(route)));
-}
-
-const fetchDescriptorId = async (httpBaseUrl: string, signal: AbortSignal) =>
-  (await fetchRemoteEnvironmentDescriptor({ httpBaseUrl, signal })).environmentId;
-
-class DirectRouteIdentityRefused extends Error {}
-
-/**
- * The socket URL of a direct route, with a one-time token from the linked
- * bearer, once the address proved it holds the machine's identity key.
- */
-async function directSocketUrl(
-  route: Extract<EnvironmentRoute, { kind: "direct" }>,
-  signal: AbortSignal,
-): Promise<string | null> {
-  if (route.nodeIdentityPublicKey === undefined) return null;
-  const proof = await proveDirectRouteIdentity({
-    httpBaseUrl: route.httpBaseUrl,
-    environmentId: route.expectedDescriptorId,
-    nodeIdentityPublicKey: route.nodeIdentityPublicKey,
-    requestProof: requestWebDirectRouteIdentityProof,
-    signal,
-  });
-  if (proof === "refused") throw new DirectRouteIdentityRefused();
-  if (proof !== "proven" || signal.aborted) return null;
-  const bearerToken = await readSavedEnvironmentBearerToken(route.expectedDescriptorId);
-  if (!bearerToken) return null;
-  const raw = await resolveRemoteWebSocketConnectionUrl({
-    wsBaseUrl: route.wsBaseUrl,
-    httpBaseUrl: route.httpBaseUrl,
-    bearerToken,
-    signal,
-  });
-  const url = new URL(raw, globalThis.location?.origin);
-  url.pathname = "/ws";
-  return url.toString();
-}
+const linkedRoutes = createHubLinkedRoutes({
+  listLinkedRecords: listLinkedDirectRecords,
+  readBearerToken: readSavedEnvironmentBearerToken,
+  fetchDescriptorId: async (httpBaseUrl, signal) =>
+    (await fetchRemoteEnvironmentDescriptor({ httpBaseUrl, signal })).environmentId,
+  requestProof: requestWebDirectRouteIdentityProof,
+  socketUrl: ({ route, bearerToken, signal }) =>
+    resolveRemoteWebSocketConnectionUrl({
+      wsBaseUrl: route.wsBaseUrl,
+      httpBaseUrl: route.httpBaseUrl,
+      bearerToken,
+      signal,
+    }),
+  isBearerRefused: isRemoteEnvironmentAuthHttpError,
+});
 
 /** The route walk each attempt to `hubEnvironmentId` makes before falling back to the relay. */
 export function createDesktopHubLinkedRoutes(
   hubEnvironmentId: EnvironmentId,
   options?: {
-    /** The node refused the linked bearer: link again over the relay. */
+    /** The node refused the linked bearer or the identity proof: link again over the relay. */
     readonly onRefused?: () => void;
   },
 ): DesktopWorkspaceDirectRoutes {
   return {
     resolve: async (signal) => {
-      const routes = readLinkedRoutes(hubEnvironmentId, Date.now());
-      if (routes.length === 0) return null;
-      const results = await checkEnvironmentRoutes({ routes, fetchDescriptorId, signal });
-      for (const route of routes) {
-        if (route.kind !== "direct" || signal.aborted) continue;
-        const result = results.get(environmentRouteKey(route));
-        if (result === undefined || !routeCheckAccepted(route, result)) continue;
-        try {
-          const url = await directSocketUrl(route, signal);
-          if (url !== null) return { routeKey: environmentRouteKey(route), url };
-        } catch (error) {
-          // A refused bearer or identity waits for the link to change; an
-          // unreachable address is simply skipped this time.
-          if (
-            error instanceof DirectRouteIdentityRefused ||
-            isRemoteEnvironmentAuthHttpError(error)
-          ) {
-            refusedRoutes.add(environmentRouteKey(route));
-            options?.onRefused?.();
-          }
-        }
-      }
-      return null;
+      const attempt = await linkedRoutes.resolve(hubEnvironmentId, signal, options?.onRefused);
+      return attempt === null ? null : { routeKey: attempt.routeKey, url: attempt.url };
     },
   };
 }
@@ -147,9 +87,9 @@ export function keepDesktopHubRouteUpgraded(input: {
   readonly onRelay?: () => void;
 }): () => void {
   const upgrader = createEnvironmentRouteUpgrader({
-    readRoutes: () => [...readLinkedRoutes(input.hubEnvironmentId, Date.now()), RELAY_ROUTE],
+    readRoutes: () => [...linkedRoutes.routesFor(input.hubEnvironmentId), RELAY_ROUTE],
     readActiveRouteKey: input.readActiveRouteKey,
-    checkRoutes: (routes, signal) => checkEnvironmentRoutes({ routes, fetchDescriptorId, signal }),
+    checkRoutes: linkedRoutes.checkRoutes,
     reconnect: () => {
       if (input.mayUpgrade()) input.reconnect();
     },
@@ -184,11 +124,7 @@ export function keepDesktopHubRouteUpgraded(input: {
 
 /** A machine's routes changed (linked, renewed, removed): check them now. */
 export function requestDesktopHubRouteCheck(hubEnvironmentId: string): void {
-  for (const record of listLinkedDirectRecords()) {
-    if (record.hubLink?.hubEnvironmentId === hubEnvironmentId) {
-      refusedRoutes.delete(record.httpBaseUrl);
-    }
-  }
+  linkedRoutes.clearRefusals(hubEnvironmentId);
   upgradeChecksByHubId.get(hubEnvironmentId)?.();
 }
 
@@ -198,15 +134,17 @@ export function requestDesktopHubRouteCheck(hubEnvironmentId: string): void {
  * bearers go; the machines' connections leave any direct route they were on.
  */
 export async function forgetDesktopHubLinkedDirectAccess(hubEnvironmentId?: string): Promise<void> {
+  const linkingHalted = await haltDesktopLinking();
   const hubs = new Set<string>();
   for (const record of listLinkedDirectRecords()) {
     const hub = record.hubLink?.hubEnvironmentId;
     if (hub === undefined || (hubEnvironmentId !== undefined && hub !== hubEnvironmentId)) continue;
     hubs.add(hub);
     useSavedEnvironmentRegistryStore.getState().remove(record.environmentId);
-    refusedRoutes.delete(record.httpBaseUrl);
+    linkedRoutes.forgetRefusal(record.httpBaseUrl);
     await removeSavedEnvironmentBearerToken(record.environmentId).catch(() => undefined);
   }
+  linkingHalted();
   for (const hub of hubs) upgradeChecksByHubId.get(hub)?.();
 }
 

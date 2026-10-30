@@ -283,6 +283,7 @@ export const makeServerAuth = Effect.gen(function* () {
             role: session.role,
             sessionMethod: session.method,
             ...(session.expiresAt ? { expiresAt: DateTime.toUtc(session.expiresAt) } : {}),
+            ...(session.link ? { linkedRole: session.link.role } : {}),
           }) satisfies AuthSessionState,
       ),
       // A missing or rejected credential is an answer; a credential that could

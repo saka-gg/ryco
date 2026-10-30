@@ -22,6 +22,11 @@ import { AppText as Text } from "../../components/AppText";
 import { EmptyState } from "../../components/EmptyState";
 import { StatusPill, type StatusTone } from "../../components/StatusPill";
 import { acquireMobileHostedNode } from "../../hostedHub/acquireNode";
+import {
+  addMobileDirectAccessLazily,
+  removeMobileDirectAccessLazily,
+  useMobileLinkedDirectAccess,
+} from "../../hostedHub/useLinkedDirectAccess";
 import type { MobileHostedConnectionState } from "../../connection/hostedConnectionCoordinator";
 import {
   hostedHubController,
@@ -86,6 +91,18 @@ export interface HubNodeSectionActions {
   readonly retrySelectedNode: () => unknown;
   readonly renameNode?: (node: HostedHubNode) => void;
   readonly openNodeSecurity?: (node: HostedHubNode) => unknown;
+  readonly addDirectAccess?: (node: HostedHubNode) => unknown;
+  readonly removeDirectAccess?: (node: HostedHubNode) => unknown;
+}
+
+/** Linked direct access as the rows show it (`hostedHub/linkedDirectAccessState.ts`). */
+export interface HubNodeDirectAccess {
+  /** Hub environment ids with a link. */
+  readonly linked: Readonly<Record<string, true>>;
+  readonly linking: Readonly<Record<string, true>>;
+  /** Machines whose latest attempt took a direct route. */
+  readonly directRoute: Readonly<Record<string, string>>;
+  readonly notice: Readonly<Record<string, string>>;
 }
 
 export interface HubNodeRowModel {
@@ -94,12 +111,14 @@ export interface HubNodeRowModel {
   readonly platformOs?: string;
   readonly nodeId: string;
   readonly rename?: (() => void) | undefined;
+  /** "Add direct access" or "Remove direct access", when either applies. */
+  readonly directAccess?: { readonly label: string; readonly onPress: () => void } | undefined;
   readonly label: string;
   /** Bounded presence/role summary. Never an id, token, ticket, or raw error. */
   readonly detail: string;
   /** Why the node just dropped, when it reported a long freeze (`describeHostFreeze`). */
   readonly freezeNotice: string | null;
-  readonly transportLabel: "Hub relay";
+  readonly transportLabel: "Hub relay" | "Direct";
   readonly tone: StatusTone;
   readonly selected: boolean;
   readonly disabled: boolean;
@@ -175,6 +194,7 @@ export function deriveHubNodeSectionModel(input: {
   readonly query?: string;
   readonly connections?: ReadonlyArray<MobileHostedConnectionState>;
   readonly trustByEnvironmentId?: ReadonlyMap<string, WorkspaceNativeTrustState>;
+  readonly directAccess?: HubNodeDirectAccess;
   /** Each node's last noticeable freeze, from the config it sent on connecting, read at `nowMs`. */
   readonly hostFreeze?: {
     readonly lastEventLoopStall: (
@@ -271,6 +291,30 @@ export function deriveHubNodeSectionModel(input: {
       const connection = input.connections?.find(
         (current) => current.environmentId === node.environmentId && current.nodeId === node.id,
       );
+      const direct = input.directAccess;
+      const linked = direct?.linked[node.environmentId] === true;
+      const linking = direct?.linking[node.environmentId] === true;
+      const onDirectRoute = direct?.directRoute[node.environmentId] !== undefined;
+      // Linking asks the machine over its relay channel, so it is offered only
+      // while that channel is up and its session ready; removing works any time.
+      const directAccess =
+        linked && actions.removeDirectAccess
+          ? {
+              label: "Remove direct access",
+              onPress: () => void actions.removeDirectAccess?.(node),
+            }
+          : !linked &&
+              !linking &&
+              trusted &&
+              node.revokedAt === null &&
+              connection?.transportStatus === "online" &&
+              connection.sessionStatus === "ready" &&
+              actions.addDirectAccess
+            ? { label: "Add direct access", onPress: () => void actions.addDirectAccess?.(node) }
+            : undefined;
+      const directDetail = linking
+        ? "Adding direct access…"
+        : (direct?.notice[node.environmentId] ?? null);
       return {
         nodeId: node.id,
         environmentId: node.environmentId,
@@ -298,14 +342,17 @@ export function deriveHubNodeSectionModel(input: {
           actions.renameNode
             ? () => actions.renameNode?.(node)
             : undefined,
+        directAccess,
         label: node.label,
-        detail: trustDetail ? `${trustDetail} · ${rowDetail(node)}` : rowDetail(node),
+        detail: [trustDetail, rowDetail(node), directDetail]
+          .filter((part): part is string => part !== null)
+          .join(" · "),
         freezeNotice: input.hostFreeze
           ? describeHostFreeze(input.hostFreeze.lastEventLoopStall(node.environmentId), {
               nowMs: input.hostFreeze.nowMs,
             })
           : null,
-        transportLabel: "Hub relay",
+        transportLabel: onDirectRoute ? "Direct" : "Hub relay",
         // The selected node's row shows the live connection status; every other
         // row shows directory presence, which is all the directory knows.
         tone:
@@ -395,7 +442,10 @@ export function HubNodeSectionView(props: { readonly model: HubNodeSectionModel 
               disabled={row.disabled}
               showDivider={index > 0}
               onPress={row.onPress}
-              actions={row.rename ? [{ label: "Rename", onPress: row.rename }] : []}
+              actions={[
+                ...(row.rename ? [{ label: "Rename", onPress: row.rename }] : []),
+                ...(row.directAccess ? [row.directAccess] : []),
+              ]}
             />
           ))}
         </View>
@@ -457,6 +507,9 @@ export function HubNodeSection(props: { readonly query?: string } = {}) {
     e2eeStatus,
     nativeDeviceSecurityStatus,
   };
+  // Linked direct access as the hosted runtime publishes it: this section never
+  // reads the direct catalog, where the links themselves are kept.
+  const directAccess = useMobileLinkedDirectAccess();
   const serverConfigs = useEnvironmentServerConfigs();
   const freezeNowMs = useHostFreezeNowMs(
     Array.from(serverConfigs.values(), (config) => config.lastEventLoopStall),
@@ -481,6 +534,8 @@ export function HubNodeSection(props: { readonly query?: string } = {}) {
     actions: {
       renameNode: setRenameTarget,
       selectNode: acquireMobileHostedNode,
+      addDirectAccess: addMobileDirectAccessLazily,
+      removeDirectAccess: removeMobileDirectAccessLazily,
       returnToDirectory: () => hostedHubController.returnToDirectory(),
       refreshDirectory: () => hostedHubController.refreshDirectory(),
       retrySelectedNode: () => hostedHubController.retrySelectedNode(),
@@ -499,6 +554,7 @@ export function HubNodeSection(props: { readonly query?: string } = {}) {
     onSignIn: () => navigation.navigate("Access"),
     query: props.query,
     trustByEnvironmentId,
+    directAccess,
   });
 
   return (

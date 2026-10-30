@@ -21,10 +21,14 @@ const DEVICE_LABEL = "Ryco Desktop";
  * answers as the machine and proves its identity key, and save the link
  * (`desktopHubLinkedDirectAccess.ts`).
  */
-export async function linkDesktopMachine(machine: {
-  readonly environmentId: EnvironmentId;
-  readonly label: string;
-}): Promise<DesktopHubLinkOutcome> {
+export async function linkDesktopMachine(
+  machine: {
+    readonly environmentId: EnvironmentId;
+    readonly label: string;
+  },
+  /** False once the links were forgotten meanwhile: nothing is saved then. */
+  stillWanted: () => boolean = () => true,
+): Promise<DesktopHubLinkOutcome> {
   const connection = await connectDesktopWorkspaceEnvironment(machine);
   const access = await connection.client.server.issueLinkedDirectAccess({
     deviceLabel: DEVICE_LABEL,
@@ -45,6 +49,7 @@ export async function linkDesktopMachine(machine: {
       proveDirectRouteIdentity({ ...input, requestProof: requestWebDirectRouteIdentityProof }),
   });
   if (target === null) return "unreachable";
+  if (!stillWanted()) throw new Error("Direct access was removed while it was added.");
   await addSavedEnvironment({
     label: machine.label,
     host: target.httpBaseUrl,

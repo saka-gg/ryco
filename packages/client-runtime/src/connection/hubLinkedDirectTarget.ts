@@ -13,6 +13,39 @@ import { directAddressAuthenticatesMachine } from "./environmentRoutes.ts";
  * and never with the app's first paint.
  */
 
+/** What adding direct access to a Hub machine came to, on Desktop or the phone. */
+export type HubLinkOutcome =
+  | "linked"
+  /** The owner paired this machine by hand; that pairing is left alone. */
+  | "already-paired"
+  /** The machine listens on loopback only. */
+  | "no-direct-endpoint"
+  /** The machine is older than the direct identity proof: it names no key to prove. */
+  | "node-update-required"
+  /** None of its HTTPS or Tailscale addresses answered as the machine from this network. */
+  | "unreachable";
+
+/** What "Add direct access" reports. `null` once linked: the row then says so itself. */
+export function describeHubLinkOutcome(
+  label: string,
+  outcome: HubLinkOutcome | "failed",
+): string | null {
+  switch (outcome) {
+    case "linked":
+      return null;
+    case "already-paired":
+      return `${label} is already paired directly on this device.`;
+    case "no-direct-endpoint":
+      return `${label} only listens on its own loopback address, so no other device can reach it directly.`;
+    case "node-update-required":
+      return `Update Ryco on ${label} first: this version can't prove which machine answers at its direct address.`;
+    case "unreachable":
+      return `None of ${label}'s Tailscale or HTTPS addresses answered as ${label} from this network.`;
+    case "failed":
+      return `Direct access to ${label} could not be set up. Try again in a moment.`;
+  }
+}
+
 /** Each endpoint probe; a slow LAN address must not hold up the relay connection. */
 export const HUB_LINKED_DIRECT_ACCESS_PROBE_TIMEOUT_MS = 3_000;
 

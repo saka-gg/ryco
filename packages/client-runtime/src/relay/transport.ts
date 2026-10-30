@@ -19,6 +19,7 @@ import { hostedHubController, hostedHubStore } from "../authorization/state.ts";
 import type {
   HostedEarlyRelaySocket,
   HostedRelayFailure,
+  HostedRelayFailureKind,
   HostedRelayTransportStatus,
   HostedRycoSessionStatus,
   HostedServerAuthenticatedRelayInput,
@@ -173,6 +174,37 @@ export function ticketFailure(error: HostedHubApiError): HostedRelayFailure {
  * is mandatory (see `createHostedEnvironmentAttemptFactory`): the selection's
  * binding would admit one environment's requests on another's session.
  */
+/**
+ * A linked direct route for one attempt (`docs/environment-routes.md`, phase 3):
+ * an address that answered as the machine and proved its node identity key
+ * just now, with a one-time socket token from the linked bearer.
+ */
+export interface HostedDirectRoute {
+  /** The route's address, as the route upgrader names it. */
+  readonly routeKey: string;
+  /** The socket URL; its token is good for this one socket. */
+  readonly url: string;
+  /** The linked session's role on the node, read with the same bearer for this attempt. */
+  readonly role: RelayEffectiveRole;
+}
+
+/** The plain WebSocket a direct route opens; only its lifecycle events are read here. */
+export interface HostedDirectSocket {
+  addEventListener(
+    type: "open" | "close",
+    listener: (event: { readonly code?: number }) => void,
+  ): void;
+}
+
+/** The relay's own refusals of the machine: no direct route may go around them. */
+const RELAY_REFUSALS: ReadonlySet<HostedRelayFailureKind> = new Set([
+  "authentication",
+  "session-expired",
+  "revoked",
+  "authorization-removed",
+  "incompatible",
+]);
+
 export interface HostedRelayAttemptBinding {
   readonly nodeId: () => string | null;
   readonly generation: () => number | null;
@@ -227,6 +259,28 @@ export interface HostedRelayAttemptBinding {
   readonly createServerAuthenticatedRelaySocket?: (
     input: HostedServerAuthenticatedRelayInput,
   ) => unknown;
+  /**
+   * Native clients only (`docs/environment-routes.md`, phase 3): the best linked
+   * direct route that proved the machine's identity key now, or `null` for the
+   * relay. Asked at the start of every attempt, after the same admission checks
+   * as a relay attempt, and never while a relay refusal holds. The attempt, its
+   * generation fence, its readiness and its role stay this factory's, exactly as
+   * for a relay attempt; the route only changes which socket carries it. The
+   * hosted browser binds none, so it never sees a route.
+   */
+  readonly resolveDirectRoute?: (signal: AbortSignal) => Promise<HostedDirectRoute | null>;
+  /** Opens a direct route's socket; bound together with {@link resolveDirectRoute}. */
+  readonly createDirectSocket?: (url: string) => HostedDirectSocket;
+  /**
+   * Where the relay-refusal hold on direct routes lives, when it must outlive
+   * this factory: a released and reacquired environment gets a new factory,
+   * and must not take a direct route the relay just refused. Absent, the hold
+   * is this factory's own.
+   */
+  readonly directRouteHold?: {
+    readonly held: () => boolean;
+    readonly set: (held: boolean) => void;
+  };
   /**
    * A server-authenticated channel was refused for its session: the counterpart of an HTTP ticket
    * request answered 401. Hand the session to its lifecycle owner to revalidate, which expires it
@@ -403,6 +457,20 @@ export class HostedRelayAttemptFactory {
   readonly #unansweredRequests = new Map<string, number>();
   #stallTimer: ReturnType<typeof setTimeout> | null = null;
   #pendingTicket: PendingTicket | null = null;
+  #pendingDirect: {
+    readonly route: HostedDirectRoute;
+    readonly generation: number;
+  } | null = null;
+  /** The route check of the attempt being prepared; aborted when the attempt is. */
+  #directCheck: AbortController | null = null;
+  /**
+   * A relay attempt was refused (authorization withdrawn, not verified, update
+   * required): direct routes wait until a relay socket opens again, so no route
+   * goes around the Hub's verdict.
+   */
+  #directHeld = false;
+  /** The route the current socket took: `relay`, a direct route's key, or none. */
+  #activeRouteKey: string | null = null;
   #lastRetryAfterMs: number | undefined;
   #activeGeneration: number | null = null;
   #nextAttemptId = 0;
@@ -453,8 +521,14 @@ export class HostedRelayAttemptFactory {
       this.#binding.isCurrent(generation) &&
       this.#binding.nodeId() === nodeId;
     this.#activeGeneration = generation;
-    this.#binding.transportStatus(generation, "requesting-ticket");
     this.#discardPendingTicket();
+    // A binding without routes (the hosted browser's) takes the relay with no
+    // extra step at all.
+    if (this.#directRoutesOpen()) {
+      const direct = await this.#resolveDirectRoute(generation, isCurrent);
+      if (direct !== null) return direct;
+    }
+    this.#binding.transportStatus(generation, "requesting-ticket");
     let preparedSocketContext: unknown;
     let earlySocket =
       this.#ticketStageFailed || this.#serverAuthenticatedAvailable()
@@ -533,7 +607,135 @@ export class HostedRelayAttemptFactory {
     }
   }
 
+  /**
+   * The direct route for this attempt, when the binding has routes and no relay
+   * refusal holds: its URL, with the route kept for {@link createSocket}.
+   * `null` for the relay.
+   */
+  /** Whether the next attempt may take a direct route: the binding has routes and no relay refusal holds. */
+  mayTakeDirectRoutes(): boolean {
+    return this.#directRoutesOpen();
+  }
+
+  #directRoutesOpen(): boolean {
+    return (
+      this.#binding.resolveDirectRoute !== undefined &&
+      this.#binding.createDirectSocket !== undefined &&
+      !this.#isDirectHeld()
+    );
+  }
+
+  #isDirectHeld(): boolean {
+    return this.#binding.directRouteHold?.held() ?? this.#directHeld;
+  }
+
+  #setDirectHeld(held: boolean): void {
+    this.#directHeld = held;
+    this.#binding.directRouteHold?.set(held);
+  }
+
+  async #resolveDirectRoute(generation: number, isCurrent: () => boolean): Promise<string | null> {
+    const resolve = this.#binding.resolveDirectRoute;
+    if (resolve === undefined) return null;
+    this.#binding.transportStatus(generation, "connecting");
+    const check = new AbortController();
+    this.#directCheck = check;
+    let route: HostedDirectRoute | null;
+    try {
+      route = await resolve(check.signal);
+    } catch {
+      // A broken route check never stops the machine: the relay carries it.
+      route = null;
+    } finally {
+      if (this.#directCheck === check) this.#directCheck = null;
+    }
+    if (!isCurrent() || check.signal.aborted) {
+      throw new Error("Hosted node selection changed.");
+    }
+    if (route === null || this.#isDirectHeld()) return null;
+    this.#pendingDirect = { route, generation };
+    return route.url;
+  }
+
+  /** The route the current socket took: `relay`, a direct route's key, or `null` before one. */
+  activeRouteKey(): string | null {
+    return this.#activeRouteKey;
+  }
+
+  /** Opens the direct route {@link nextUrl} chose; same fences and callbacks as a relay socket. */
+  #createDirectSocket(
+    url: string,
+    pending: { readonly route: HostedDirectRoute; readonly generation: number },
+  ): unknown {
+    const create = this.#binding.createDirectSocket;
+    if (
+      create === undefined ||
+      this.#disposed ||
+      url !== pending.route.url ||
+      !this.#binding.isCurrent(pending.generation)
+    ) {
+      throw new Error("A fresh direct route is required for every connection attempt.");
+    }
+    const generation = pending.generation;
+    const attemptId = this.#nextAttemptId + 1;
+    this.#nextAttemptId = attemptId;
+    this.#activeAttemptId = attemptId;
+    const revision = this.#revision;
+    const isCurrentAttempt = () =>
+      !this.#disposed &&
+      revision === this.#revision &&
+      this.#activeAttemptId === attemptId &&
+      this.#binding.isCurrent(generation);
+    this.#activeGeneration = generation;
+    let opened = false;
+    let socket: HostedDirectSocket;
+    try {
+      socket = create(url);
+    } catch (error) {
+      this.#activeAttemptId = null;
+      throw error;
+    }
+    socket.addEventListener("open", () => {
+      if (!isCurrentAttempt()) return;
+      opened = true;
+      // The order a relay channel reports in: its role at open, then online.
+      this.#binding.role(generation, pending.route.role);
+      this.#binding.transportStatus(generation, "online");
+      if (this.#recoveringAfterClose) {
+        this.#recoveringAfterClose = false;
+        this.#binding.connectionRecovered?.(generation);
+      }
+      this.#binding.sessionStatus(generation, "synchronizing");
+    });
+    socket.addEventListener("close", (event) => {
+      if (!isCurrentAttempt()) return;
+      this.#binding.role(generation, null);
+      if (opened && event.code === 1000) {
+        this.#binding.sessionStatus(generation, "closed");
+        return;
+      }
+      // A direct address that dropped or never opened: the next attempt checks
+      // the routes again and falls back to the relay when none answers.
+      this.#retryable = true;
+      this.#reconnect.closed();
+      if (this.#pendingRequests.size > 0) {
+        this.#binding.markDeliveryUnknown(generation);
+        this.#pendingRequests.clear();
+      }
+      this.#binding.failure(generation, { kind: "network", retryable: true });
+    });
+    this.#activeSocket = socket;
+    this.#activeRouteKey = pending.route.routeKey;
+    return socket;
+  }
+
   createSocket(url: string): unknown {
+    const direct = this.#pendingDirect;
+    if (direct !== null) {
+      this.#pendingDirect = null;
+      this.#discardPendingTicket();
+      return this.#createDirectSocket(url, direct);
+    }
     const pending = this.#pendingTicket;
     this.#pendingTicket = null;
     if (
@@ -565,6 +767,7 @@ export class HostedRelayAttemptFactory {
     const callbacks = {
       onTransportStatus: (status: HostedRelayTransportStatus) => {
         if (!isCurrentAttempt()) return;
+        if (status === "online") this.#setDirectHeld(false);
         this.#binding.transportStatus(generation, status);
         if (status === "online" && this.#recoveringAfterClose) {
           this.#recoveringAfterClose = false;
@@ -579,6 +782,7 @@ export class HostedRelayAttemptFactory {
       },
       onFailure: (failure: HostedRelayFailure) => {
         if (!isCurrentAttempt()) return;
+        if (RELAY_REFUSALS.has(failure.kind)) this.#setDirectHeld(true);
         this.#retryable = failure.retryable;
         this.#lastRetryAfterMs = failure.retryAfterMs;
         if (failure.compressionFailed === true) this.#compressionDisabled = true;
@@ -628,7 +832,10 @@ export class HostedRelayAttemptFactory {
           ? this.#binding.createRelaySocket(input)
           : getHostedRuntimeConfiguration().createRelaySocket(input);
       }
-      if (isCurrentAttempt()) this.#activeSocket = socket;
+      if (isCurrentAttempt()) {
+        this.#activeSocket = socket;
+        this.#activeRouteKey = "relay";
+      }
       return socket;
     } catch (error) {
       this.#disposeSocketContext(pending.preparedSocketContext);
@@ -807,6 +1014,7 @@ export class HostedRelayAttemptFactory {
     this.#activeGeneration = null;
     this.#activeAttemptId = null;
     this.#activeSocket = null;
+    this.#activeRouteKey = null;
     this.#recoveringAfterClose = false;
   }
 
@@ -823,6 +1031,7 @@ export class HostedRelayAttemptFactory {
     this.#activeSocket = null;
     this.#recoveringAfterClose = false;
     this.#ticketStageFailed = false;
+    this.#directHeld = false;
     this.#reconnect.reset();
   }
 
@@ -836,6 +1045,9 @@ export class HostedRelayAttemptFactory {
   }
 
   #discardPendingTicket(): void {
+    this.#pendingDirect = null;
+    this.#directCheck?.abort();
+    this.#directCheck = null;
     const pending = this.#pendingTicket;
     this.#pendingTicket = null;
     if (pending !== null) {

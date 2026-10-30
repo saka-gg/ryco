@@ -268,6 +268,12 @@ export const AuthSessionState = Schema.Struct({
   role: Schema.optionalKey(AuthSessionRole),
   sessionMethod: Schema.optionalKey(ServerAuthSessionMethod),
   expiresAt: Schema.optionalKey(Schema.DateTimeUtc),
+  /**
+   * A Hub-linked session only: the role its relay channel had when the link
+   * was issued, which the node enforces on this session. A phone on a linked
+   * direct route reads it, since no relay reports a role there.
+   */
+  linkedRole: Schema.optionalKey(Schema.Literals(["viewer", "operator", "owner"])),
 });
 export type AuthSessionState = typeof AuthSessionState.Type;
 
