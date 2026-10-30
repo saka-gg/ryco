@@ -1,6 +1,6 @@
 import "../../index.css";
 
-import { EnvironmentId } from "@ryco/contracts";
+import { EnvironmentId, ThreadId } from "@ryco/contracts";
 import type { ComponentProps } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { page } from "vite-plus/test/browser";
@@ -13,16 +13,21 @@ const chunk = vi.hoisted(() => ({
   loaded: false,
   fail: false,
   loads: 0,
+  /** Every `open` the popover rendered with, in order. */
+  opens: [] as boolean[],
 }));
 const notifySurfaceLoadFailure = vi.hoisted(() => vi.fn());
 
 vi.mock("./lazyWorktreeDialogs", () => {
   let failure: { readonly error: unknown } | null = null;
-  const Popover = (props: WorkspacePullRequestsPopoverProps) => (
-    <div role="dialog" aria-label="Pull requests" data-open={String(props.open)}>
-      {props.workspaceTitle}
-    </div>
-  );
+  const Popover = (props: WorkspacePullRequestsPopoverProps) => {
+    chunk.opens.push(props.open);
+    return (
+      <div role="dialog" aria-label="Pull requests" data-open={String(props.open)}>
+        {props.workspaceTitle}
+      </div>
+    );
+  };
   return {
     LazyWorkspacePullRequestsPopover: Object.assign(Popover, {
       preload: () => {
@@ -40,6 +45,11 @@ vi.mock("../ui/surfaceLoadFailure", () => ({ notifySurfaceLoadFailure }));
 
 const { WorkspacePullRequestsPopoverOnDemand } =
   await import("./WorkspacePullRequestsPopoverOnDemand");
+
+const THREAD_REF = {
+  environmentId: EnvironmentId.make("environment-1"),
+  threadId: ThreadId.make("thread-1"),
+};
 
 const props = (
   overrides: Partial<ComponentProps<typeof WorkspacePullRequestsPopoverOnDemand>> = {},
@@ -72,6 +82,7 @@ describe("WorkspacePullRequestsPopoverOnDemand", () => {
     chunk.loaded = false;
     chunk.fail = false;
     chunk.loads = 0;
+    chunk.opens = [];
     notifySurfaceLoadFailure.mockReset();
   });
 
@@ -92,6 +103,11 @@ describe("WorkspacePullRequestsPopoverOnDemand", () => {
     await mounted.rerender(<WorkspacePullRequestsPopoverOnDemand {...props({ open: true })} />);
     await expect.element(page.getByRole("dialog", { name: "Pull requests" })).toBeVisible();
     expect(chunk.loads).toBe(1);
+    // Its first mount is closed, so the first open animates in like every later one.
+    await expect
+      .element(page.getByRole("dialog", { name: "Pull requests" }))
+      .toHaveAttribute("data-open", "true");
+    expect(chunk.opens[0]).toBe(false);
 
     await mounted.rerender(<WorkspacePullRequestsPopoverOnDemand {...props({ open: false })} />);
     expect(document.querySelector('[role="dialog"]')?.getAttribute("data-open")).toBe("false");
@@ -103,14 +119,16 @@ describe("WorkspacePullRequestsPopoverOnDemand", () => {
     const onViewChange = vi.fn();
     mounted = await render(
       <WorkspacePullRequestsPopoverOnDemand
-        {...props({ open: true, view: "link", onOpenChange, onViewChange })}
+        {...props({ open: true, view: "link", onOpenChange, onViewChange, threadRef: THREAD_REF })}
       />,
     );
     await vi.waitFor(() => expect(notifySurfaceLoadFailure).toHaveBeenCalledOnce());
     expect(onOpenChange).toHaveBeenCalledWith(false);
     expect(document.querySelector('[role="dialog"]')).toBeNull();
-    const [surface, , retry] = notifySurfaceLoadFailure.mock.calls[0]!;
+    const [surface, , retry, threadRef] = notifySurfaceLoadFailure.mock.calls[0]!;
     expect(surface).toBe("pull requests");
+    // The Retry toast belongs to the surface's thread.
+    expect(threadRef).toEqual(THREAD_REF);
     (retry as () => void)();
     expect(onViewChange).toHaveBeenCalledWith("link");
     expect(onOpenChange).toHaveBeenLastCalledWith(true);

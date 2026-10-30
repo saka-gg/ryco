@@ -3227,6 +3227,7 @@ export default function ChatView(props: ChatViewProps) {
   const headerPullRequestsPopover =
     openPullRequestInApp && headerPullRequestNumber !== null ? (
       <WorkspacePullRequestsPopoverOnDemand
+        threadRef={routeThreadRef}
         environmentId={environmentId}
         worktreeId={
           headerPullRequestsEditing.supported ? (activeWorktreeSummary?.id ?? null) : null

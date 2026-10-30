@@ -88,6 +88,7 @@ import { KeyHint } from "./pullRequests/primitives";
 import { useWorkspacePullRequestEditing } from "./worktrees/useWorkspacePullRequestEditing";
 import type { WorkspacePullRequestsView } from "./worktrees/WorkspacePullRequestsPopover";
 import { WorkspacePullRequestsPopoverOnDemand } from "./worktrees/WorkspacePullRequestsPopoverOnDemand";
+import { preloadWorkspacePullRequestsPopover } from "./worktrees/lazyWorktreeDialogs";
 import { formatLiveAgentCount, LiveAgentCountBadge } from "./LiveAgentCountBadge";
 import { buildTabs, type WorkspaceTab } from "../threadWorkspaceTabs";
 import { readEnvironmentApi } from "../environmentApi";
@@ -1444,6 +1445,8 @@ export default function ThreadWorkspacePanel(props: {
                           data-popup-open={pullRequestsOpen ? "" : undefined}
                           className="flex size-5 shrink-0 items-center justify-center rounded-md text-muted-foreground/60 transition-colors hover:bg-background/60 hover:text-foreground data-popup-open:bg-background/60 data-popup-open:text-foreground"
                           onClick={togglePullRequestSwitcher}
+                          onPointerEnter={preloadWorkspacePullRequestsPopover}
+                          onFocus={preloadWorkspacePullRequestsPopover}
                         />
                       }
                     >
@@ -1482,6 +1485,7 @@ export default function ThreadWorkspacePanel(props: {
           {/* Portaled: renders nothing in the tab list itself. */}
           {!isPhoneSurface && threadChangeRequest.worktree !== null ? (
             <WorkspacePullRequestsPopoverOnDemand
+              threadRef={workspaceThreadRef}
               environmentId={threadChangeRequest.environmentId}
               worktreeId={pullRequestEditing.supported ? threadChangeRequest.worktree.id : null}
               cwd={threadChangeRequest.cwd}

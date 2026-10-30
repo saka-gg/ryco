@@ -13,6 +13,7 @@ import {
   type StateBadgeVariant,
 } from "../sourceControl/stateBadgeVariants";
 import type { LinkedWorktreeItem } from "./LinkedWorktreeItemDialog";
+import { preloadWorkspacePullRequestsPopover } from "./lazyWorktreeDialogs";
 import {
   describeOtherPullRequests,
   groupWorkspacePullRequests,
@@ -183,6 +184,11 @@ function PullRequestsToggleBadge({
   toggle: WorktreePullRequestsToggle;
   onIntent: (() => void) | undefined;
 }) {
+  // The badge toggles the pull requests popover, which mounts on its first open.
+  const intent = () => {
+    props.onIntent?.();
+    preloadWorkspacePullRequestsPopover();
+  };
   const variant = resolveStateBadgeVariant({
     kind: "pr",
     state: props.prState,
@@ -220,8 +226,8 @@ function PullRequestsToggleBadge({
         props.toggle.onToggle();
       }}
       onKeyDown={stopRowActivation}
-      onPointerEnter={props.onIntent}
-      onFocus={props.onIntent}
+      onPointerEnter={intent}
+      onFocus={intent}
     >
       <Icon className={props.density === "header" ? "size-3" : "size-2.5"} />
       <span>{props.labelStyle === "kind" ? `PR #${props.prNumber}` : `#${props.prNumber}`}</span>

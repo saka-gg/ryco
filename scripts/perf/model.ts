@@ -328,7 +328,6 @@ const SERVER_ONLY_SOURCES: readonly ForbiddenBundleSource[] = [
   },
 ];
 
-/** The thread routes (server thread and draft) share their chat graph. */
 /**
  * A workspace's pull requests popover (its list, the stack, the link picker) mounts on its first
  * open (`WorkspacePullRequestsPopoverOnDemand`) in the sidebar, the chat header, the workspace
@@ -341,6 +340,7 @@ const PULL_REQUESTS_POPOVER_SOURCES: readonly ForbiddenBundleSource[] = [
   },
 ];
 
+/** The thread routes (server thread and draft) share their chat graph. */
 const CHAT_ROUTE_FORBIDDEN_SOURCES: readonly ForbiddenBundleSource[] = [
   ...HOSTED_RUNTIME_SOURCES,
   ...DIFF_RENDERER_SOURCES,
@@ -361,8 +361,8 @@ const CHAT_ROUTE_FORBIDDEN_SOURCES: readonly ForbiddenBundleSource[] = [
  * shrank, but losing the dialog as an icon importer regrouped the shared
  * lucide chunks, and one now carries 26 icons the route does not use
  * (+2.7 KiB; the grouping is entries-aware, see `CHAT_ROUTE_MAX_FILES`).
- * 2026-10-30 later: the pull requests popover mounts on its first open (measured
- * below in the PR that made it so).
+ * 2026-10-30 later: 749 KiB and 150 files once the pull requests popover mounted
+ * on its first open.
  */
 const CHAT_ROUTE_GZIP_BUDGET = 765 * KIB;
 /**
