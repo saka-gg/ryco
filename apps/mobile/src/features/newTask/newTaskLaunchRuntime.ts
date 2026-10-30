@@ -1,4 +1,5 @@
 import { scopeProjectRef, scopeThreadRef } from "@ryco/client-runtime/scoped";
+import { isArchivedThreadStub } from "@ryco/client-runtime/state/threads";
 import type { EnvironmentId } from "@ryco/contracts";
 
 import { ensureEnvironmentApi } from "../../connection/environmentApi";
@@ -32,8 +33,17 @@ export function createNewTaskLaunchDeps(environmentId: EnvironmentId): NewTaskLa
     newCommandId,
     controller: {
       dispatch: (command) => api.orchestration.dispatchCommand(command),
-      threadExists: (threadId) =>
-        selectThreadExistsByRef(useStore.getState(), scopeThreadRef(environmentId, threadId)),
+      threadStarted: (threadId) => {
+        const summary = selectSidebarThreadSummaryByRef(
+          useStore.getState(),
+          scopeThreadRef(environmentId, threadId),
+        );
+        return (
+          summary !== undefined &&
+          !isArchivedThreadStub(summary) &&
+          (summary.latestTurn !== null || summary.latestUserMessageAt !== null)
+        );
+      },
       waitForProject: (projectId) =>
         waitForAuthoritative(
           () =>

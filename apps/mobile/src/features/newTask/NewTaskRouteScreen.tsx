@@ -127,14 +127,11 @@ function NewTaskContent(props: NewTaskRouteScreenProps) {
     threads,
   ]);
   const editLaunchKey = firstParam(props.route.params?.editLaunchKey);
-  // Read once: the draft a failed launch hands back. The launch is dropped
-  // after the first commit, so a second mount starts from the defaults.
+  // Read once: the draft a failed launch hands back. The launch itself stays
+  // until the edited task is sent, so backing out of the sheet loses nothing.
   const [restored] = useState<NewTaskLaunchDraft | null>(() =>
     editLaunchKey ? readNewTaskLaunchDraftForEdit(editLaunchKey) : null,
   );
-  useEffect(() => {
-    if (restored && editLaunchKey) discardNewTaskLaunch(editLaunchKey);
-  }, [editLaunchKey, restored]);
   const initialized = useRef(restored !== null);
   const modelEdited = useRef(restored !== null);
   const locationEdited = useRef(restored !== null);
@@ -482,6 +479,8 @@ function NewTaskContent(props: NewTaskRouteScreenProps) {
       },
       deps: createNewTaskLaunchDeps(attempt.environmentId),
     });
+    // The edited task replaces the one it came from, now that it is on its way.
+    if (restored && editLaunchKey) discardNewTaskLaunch(editLaunchKey);
     useStore.getState().setActiveEnvironmentId(attempt.environmentId);
     navigation.dispatch(
       StackActions.replace("Thread", {

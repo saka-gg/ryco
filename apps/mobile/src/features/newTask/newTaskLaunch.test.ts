@@ -29,6 +29,11 @@ import {
   type NewTaskLaunchDraft,
 } from "./newTaskLaunch";
 
+/** The node's typed refusal, as the RPC client decodes it: a definite answer. */
+function nodeRefusal(message: string): Error {
+  return Object.assign(new Error(message), { _tag: "OrchestrationDispatchCommandError" });
+}
+
 const environmentId = EnvironmentId.make("environment");
 const projectId = ProjectId.make("project-existing");
 const ids: NewTaskStableIds = {
@@ -112,7 +117,9 @@ function node(options?: {
         held = null;
         if (wait !== null) await wait;
         const refusal = options?.refuse?.(command) ?? null;
-        if (refusal) throw new Error(refusal);
+        // A dropped socket is no answer; anything else is the node refusing.
+        if (refusal?.startsWith("SocketCloseError")) throw new Error(refusal);
+        if (refusal) throw nodeRefusal(refusal);
       },
       waitForProject: async () => undefined,
       waitForThread: async () => undefined,
@@ -331,6 +338,32 @@ describe("New Task launch", () => {
     });
     // Reading takes nothing; the sheet discards the launch once it shows the draft.
     expect(readNewTaskLaunch(key)).not.toBeNull();
+  });
+
+  it("offers no Edit task while a new project the node took is not confirmed yet", async () => {
+    const remote = node();
+    startNewTaskLaunch({
+      attempt: attempt({ project: { kind: "new", workspaceRoot: "/code/fresh" } }),
+      draft: { ...draft, projectId: null, newProjectPath: "/code/fresh" },
+      deps: {
+        ...remote.deps,
+        controller: {
+          ...remote.deps.controller,
+          waitForProject: async () => {
+            throw new Error("Project was not confirmed");
+          },
+        },
+      },
+    });
+    await settle();
+
+    expect(readNewTaskLaunch(key)?.failure).toMatchObject({
+      step: "project",
+      deliveryUncertain: false,
+    });
+    // Editing would create the project a second time under another id.
+    expect(view()).toMatchObject({ canRetry: true, canEdit: false });
+    expect(readNewTaskLaunchDraftForEdit(key)).toBeNull();
   });
 
   it("drops a result that lands after the launch was discarded", async () => {

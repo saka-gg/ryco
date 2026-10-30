@@ -9,7 +9,7 @@ import {
   composeOutgoingPrompt,
   type SendTurnBootstrap,
 } from "@ryco/client-runtime/state/composer";
-import { isTransportConnectionErrorMessage } from "@ryco/client-runtime/errors";
+import { isDefiniteDispatchFailure } from "@ryco/client-runtime/rpc";
 import type { Project, SidebarThreadOrStub } from "@ryco/client-runtime/state/threads";
 import type {
   CommandId,
@@ -207,6 +207,8 @@ export interface NewTaskAttempt {
   readonly threadCommandAccepted: boolean;
   readonly threadReady: boolean;
   readonly worktreeAttached: boolean;
+  /** The attach command was answered; only its confirmation may still be missing. */
+  readonly attachCommandAccepted?: boolean;
   readonly turnStarted: boolean;
 }
 
@@ -225,12 +227,13 @@ export type NewTaskRunResult =
 export interface NewTaskControllerDeps {
   readonly dispatch: (command: ClientOrchestrationCommand) => Promise<unknown>;
   /**
-   * Whether the node already shows this thread. A turn start that prepares a
-   * worktree is not answered from a command receipt: sent again after it went
-   * through, the node would try to set the worktree up a second time. Its
-   * thread exists only once that turn start succeeded, so it is the evidence.
+   * Whether the node shows this thread with its first turn under way. A turn
+   * start that prepares a worktree is not answered from a command receipt:
+   * sent again after it went through, the node would set the worktree up a
+   * second time. Its thread alone is no proof (the node creates it before the
+   * turn and deletes it when the turn start fails); a started turn is.
    */
-  readonly threadExists?: (threadId: ThreadId) => boolean;
+  readonly threadStarted?: (threadId: ThreadId) => boolean;
   readonly waitForProject: (projectId: ProjectId) => Promise<void>;
   readonly waitForThread: (input: {
     readonly threadId: ThreadId;
@@ -315,18 +318,25 @@ function errorMessage(error: unknown): string | null {
 }
 
 /**
- * A step whose command threw. A lost connection may still have delivered it,
- * so that failure is uncertain and keeps the step's own text; a refusal the
- * node answered created nothing, and its reason is shown as it came.
+ * A step whose command threw. Only a definite answer (`isDefiniteDispatchFailure`:
+ * this client refused to send it, or the node answered with its typed error)
+ * created nothing, and its reason is shown as it came. Anything else (a lost
+ * connection, an interrupted call, a relay that could not confirm delivery)
+ * may have reached the node: that failure is uncertain and keeps the step's
+ * own cautious text.
  */
 function refused(
   attempt: NewTaskAttempt,
   step: NewTaskFailureStep,
   error: unknown,
 ): NewTaskRunResult {
-  const message = errorMessage(error);
-  const uncertain = message === null || isTransportConnectionErrorMessage(message);
-  return failed(attempt, step, uncertain, uncertain ? null : message);
+  if (!isDefiniteDispatchFailure(error)) return failed(attempt, step, true);
+  return failed(attempt, step, false, errorMessage(error));
+}
+
+/** A check this client makes before sending anything: its failure is certain. */
+function invalid(attempt: NewTaskAttempt, step: NewTaskFailureStep, error: unknown) {
+  return failed(attempt, step, false, errorMessage(error));
 }
 
 /** The turn start every New Task sends, through the shared command builder. */
@@ -376,11 +386,19 @@ export function prepareNewTaskRetry(
         ? attempt
         : { ...attempt, ids: { ...ids, turnCommandId: newCommandId() } };
     case "thread":
-      return attempt.threadCommandAccepted
-        ? attempt
-        : { ...attempt, ids: { ...ids, threadCommandId: newCommandId() } };
+      if (!attempt.threadCommandAccepted) {
+        return { ...attempt, ids: { ...ids, threadCommandId: newCommandId() } };
+      }
+      // The thread is there; a refused attach to its worktree goes again.
+      return attempt.worktree.kind === "existing" &&
+        !attempt.worktreeAttached &&
+        attempt.attachCommandAccepted !== true
+        ? { ...attempt, ids: { ...ids, attachCommandId: newCommandId() } }
+        : attempt;
     case "turn":
-      return attempt;
+      return attempt.turnStarted
+        ? attempt
+        : { ...attempt, ids: { ...ids, turnCommandId: newCommandId() } };
   }
 }
 
@@ -391,9 +409,14 @@ export async function runNewTaskAttempt(
   let next = attempt;
 
   if (!next.projectReady) {
+    let workspaceRoot: string;
+    try {
+      workspaceRoot = validateNodeWorkspacePath(next.project.workspaceRoot);
+    } catch (error) {
+      return invalid(next, "project", error);
+    }
     try {
       if (!next.projectCommandAccepted) {
-        const workspaceRoot = validateNodeWorkspacePath(next.project.workspaceRoot);
         await deps.dispatch({
           type: "project.create",
           commandId: next.ids.projectCommandId,
@@ -423,12 +446,18 @@ export async function runNewTaskAttempt(
   // open at once and follow the node's setup feed for it.
   const worktree = next.worktree;
   if (worktree.kind === "new") {
-    if (!next.turnStarted && deps.threadExists?.(next.threadId) === true) {
+    if (!next.turnStarted && deps.threadStarted?.(next.threadId) === true) {
       next = { ...next, turnStarted: true };
     }
     if (!next.turnStarted) {
       const branch = worktree.branch.trim();
       if (!branch) return failed(next, "worktree", false);
+      let projectCwd: string;
+      try {
+        projectCwd = validateNodeWorkspacePath(next.project.workspaceRoot);
+      } catch (error) {
+        return invalid(next, "worktree", error);
+      }
       try {
         await deps.dispatch(
           turnStartCommand(next, {
@@ -444,7 +473,7 @@ export async function runNewTaskAttempt(
               createdAt: next.createdAt,
             },
             prepareWorktree: {
-              projectCwd: validateNodeWorkspacePath(next.project.workspaceRoot),
+              projectCwd,
               baseBranch: worktree.baseBranch,
               branch,
               fetchOrigin: worktree.fetchOrigin,
@@ -497,22 +526,24 @@ export async function runNewTaskAttempt(
     }
   }
 
-  if (next.worktree.kind === "existing" && !next.worktreeAttached) {
+  const attachTo = next.worktree;
+  if (attachTo.kind === "existing" && !next.worktreeAttached) {
     try {
-      await deps.dispatch({
-        type: "thread.attach-to-worktree",
-        commandId: next.ids.attachCommandId,
-        threadId: next.threadId,
-        worktreeId: next.worktree.worktreeId,
-        attachedAt: next.createdAt,
-      });
-      await deps.waitForThread({
-        threadId: next.threadId,
-        worktreeId: next.worktree.worktreeId,
-      });
+      if (next.attachCommandAccepted !== true) {
+        await deps.dispatch({
+          type: "thread.attach-to-worktree",
+          commandId: next.ids.attachCommandId,
+          threadId: next.threadId,
+          worktreeId: attachTo.worktreeId,
+          attachedAt: next.createdAt,
+        });
+        next = { ...next, attachCommandAccepted: true };
+      }
+      await deps.waitForThread({ threadId: next.threadId, worktreeId: attachTo.worktreeId });
       next = { ...next, worktreeAttached: true };
-    } catch {
-      return failed(next, "thread", false);
+    } catch (error) {
+      if (next.attachCommandAccepted === true) return failed(next, "thread", false);
+      return refused(next, "thread", error);
     }
   }
 
@@ -520,8 +551,8 @@ export async function runNewTaskAttempt(
     try {
       await deps.dispatch(turnStartCommand(next));
       next = { ...next, turnStarted: true };
-    } catch {
-      return failed(next, "turn", true);
+    } catch (error) {
+      return refused(next, "turn", error);
     }
   }
 

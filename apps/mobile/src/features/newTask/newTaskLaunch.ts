@@ -231,9 +231,15 @@ export function retryNewTaskLaunch(key: string, deps: NewTaskLaunchDeps): void {
  * thread for it, so editing can never leave the task behind as a second one.
  */
 export function canEditNewTaskLaunch(launch: NewTaskLaunch): boolean {
+  const { attempt } = launch;
+  // A new project the node took but this device has not seen yet: editing
+  // would create it a second time under another id.
+  const projectUnconfirmed =
+    attempt.project.kind === "new" && attempt.projectCommandAccepted && !attempt.projectReady;
   return (
     launch.status === "failed" &&
-    !launch.attempt.threadCommandAccepted &&
+    !attempt.threadCommandAccepted &&
+    !projectUnconfirmed &&
     launch.failure?.deliveryUncertain !== true
   );
 }

@@ -27,6 +27,11 @@ const ids: NewTaskStableIds = {
   turnCommandId: CommandId.make("command-turn"),
   messageId: MessageId.make("message-new"),
 };
+/** The node's typed refusal, as the RPC client decodes it: a definite answer. */
+function nodeRefusal(message: string): Error {
+  return Object.assign(new Error(message), { _tag: "OrchestrationDispatchCommandError" });
+}
+
 const environmentId = EnvironmentId.make("environment");
 const existingProjectId = ProjectId.make("project-existing");
 const createdAt = "2026-07-26T09:00:00.000Z";
@@ -223,7 +228,7 @@ describe("New Task controller", () => {
         runtime.commands.push(command);
         if (refuse) {
           refuse = false;
-          throw new Error("A branch named 'feat/mobile' already exists.");
+          throw nodeRefusal("A branch named 'feat/mobile' already exists.");
         }
       },
     });
@@ -254,8 +259,8 @@ describe("New Task controller", () => {
     ]);
   });
 
-  it("never sends a worktree-preparing turn start again once its thread exists", async () => {
-    const runtime = deps({ threadExists: (threadId) => threadId === ids.threadId });
+  it("never sends a worktree-preparing turn start again once its thread has started", async () => {
+    const runtime = deps({ threadStarted: (threadId) => threadId === ids.threadId });
     const result = await runNewTaskAttempt(
       createNewTaskAttempt({
         environmentId,
@@ -337,7 +342,7 @@ describe("New Task controller", () => {
   it("shows the node's refusal of a step as certain, and a lost connection as uncertain", async () => {
     const refusing = deps({
       dispatch: async (command) => {
-        if (command.type === "thread.create") throw new Error("This project is archived.");
+        if (command.type === "thread.create") throw nodeRefusal("This project is archived.");
       },
     });
     const refusal = await runNewTaskAttempt(
@@ -399,6 +404,101 @@ describe("New Task controller", () => {
     expect(
       prepareNewTaskRetry(threadSent, { step: "thread", deliveryUncertain: false }, fresh),
     ).toBe(threadSent);
+  });
+
+  it.each([
+    "All fibers interrupted without error",
+    "The Hub could not confirm the command reached the machine.",
+    "SocketCloseError: closed",
+  ])("calls a drop that is not the node's answer uncertain: %s", async (message) => {
+    const result = await runNewTaskAttempt(
+      createNewTaskAttempt({
+        environmentId,
+        prompt: "Start here",
+        project: { kind: "existing", projectId: existingProjectId, workspaceRoot: "/code/ryco" },
+        worktree: { kind: "local" },
+        createdAt,
+        ids,
+      }),
+      deps({
+        dispatch: async () => {
+          throw new Error(message);
+        },
+      }),
+    );
+    if (result.ok) throw new Error("expected failure");
+    expect(result).toMatchObject({ step: "thread", deliveryUncertain: true });
+    expect(result.message).not.toContain(message);
+  });
+
+  it("refuses a bad workspace path before sending anything, as certain", async () => {
+    const runtime = deps();
+    const result = await runNewTaskAttempt(
+      createNewTaskAttempt({
+        environmentId,
+        prompt: "Start here",
+        project: { kind: "new", workspaceRoot: "relative/path" },
+        worktree: { kind: "local" },
+        createdAt,
+        ids,
+      }),
+      runtime,
+    );
+    if (result.ok) throw new Error("expected failure");
+    expect(result).toMatchObject({ step: "project", deliveryUncertain: false });
+    expect(runtime.commands).toEqual([]);
+  });
+
+  it("renews a refused turn start's and a refused attach's command id for a retry", async () => {
+    const turnRefused = await runNewTaskAttempt(
+      createNewTaskAttempt({
+        environmentId,
+        prompt: "Start here",
+        project: { kind: "existing", projectId: existingProjectId, workspaceRoot: "/code/ryco" },
+        worktree: { kind: "local" },
+        createdAt,
+        ids,
+      }),
+      deps({
+        dispatch: async (command) => {
+          if (command.type === "thread.turn.start") throw nodeRefusal("Model unavailable.");
+        },
+      }),
+    );
+    if (turnRefused.ok) throw new Error("expected failure");
+    expect(turnRefused).toMatchObject({ step: "turn", deliveryUncertain: false });
+    const fresh = () => CommandId.make("command-fresh");
+    expect(prepareNewTaskRetry(turnRefused.attempt, turnRefused, fresh).ids).toEqual({
+      ...ids,
+      turnCommandId: "command-fresh",
+    });
+
+    const attachRefused = await runNewTaskAttempt(
+      createNewTaskAttempt({
+        environmentId,
+        prompt: "Start here",
+        project: { kind: "existing", projectId: existingProjectId, workspaceRoot: "/code/ryco" },
+        worktree: {
+          kind: "existing",
+          worktreeId: "worktree-1" as never,
+          branch: "feat/x",
+          worktreePath: "/code/ryco-x",
+        },
+        createdAt,
+        ids,
+      }),
+      deps({
+        dispatch: async (command) => {
+          if (command.type === "thread.attach-to-worktree") throw nodeRefusal("Worktree gone.");
+        },
+      }),
+    );
+    if (attachRefused.ok) throw new Error("expected failure");
+    expect(attachRefused).toMatchObject({ step: "thread", deliveryUncertain: false });
+    expect(prepareNewTaskRetry(attachRefused.attempt, attachRefused, fresh).ids).toEqual({
+      ...ids,
+      attachCommandId: "command-fresh",
+    });
   });
 
   it("reports uncertain turn delivery without dropping the authoritative thread", async () => {
