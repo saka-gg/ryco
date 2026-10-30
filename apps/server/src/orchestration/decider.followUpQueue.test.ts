@@ -907,6 +907,124 @@ describe("follow-up queue decider: holds other commands record", () => {
     expect(queueOf(exempt.model)?.hold).toBeNull();
   });
 
+  it("a head moved to another instance releases that instance's error; a Stop stays held", async () => {
+    const failedSession = (lastError: string): OrchestrationCommand =>
+      ({
+        type: "thread.session.set",
+        commandId: nextCommandId("session"),
+        threadId,
+        session: { ...running.session, status: "error", activeTurnId: null, lastError },
+        createdAt: at(8),
+      }) as OrchestrationCommand;
+    const errorKey = `error:${runningTurn}:Provider died.`;
+    const failed = await apply(await queued(["a", "b"], running), failedSession("Provider died."));
+    expect(queueOf(failed.model)?.hold?.causeKeys).toEqual([errorKey]);
+    const entryB = queueOf(failed.model)!.entries[1]!;
+    // Editing the second follow-up keeps the head, and the hold.
+    const editB = (instanceId: ProviderInstanceId, revision: number): OrchestrationCommand => ({
+      type: "thread.queue.edit",
+      commandId: nextCommandId("edit"),
+      threadId,
+      messageId: entryB.messageId,
+      expectedRevision: revision,
+      text: "text b",
+      attachments: [],
+      modelSelection: { instanceId, model: instanceId === CLAUDE ? "sonnet" : "gpt-5.4" },
+      runtimeMode: "approval-required",
+      interactionMode: "plan",
+      createdAt: at(9),
+    });
+    const edited = await apply(failed.model, editB(CLAUDE, entryB.revision));
+    expect(types(edited.events)).toEqual(["thread.queue-entry-edited"]);
+    // Moving it to the front recovers on Claude: Codex's error no longer holds the queue.
+    const moved = await apply(edited.model, {
+      type: "thread.queue.move",
+      commandId: nextCommandId("move"),
+      threadId,
+      messageId: entryB.messageId,
+      beforeMessageId: MessageId.make("a"),
+      createdAt: at(10),
+    });
+    expect(types(moved.events)).toEqual(["thread.queue-reordered", "thread.queue-released"]);
+    expect(queueOf(moved.model)?.hold).toBeNull();
+
+    // With a Stop in the same hold, only the error's cause goes.
+    const stopped = await apply(failed.model, {
+      type: "thread.queue.hold.record",
+      commandId: nextCommandId("hold"),
+      threadId,
+      hold: { reason: "interrupted", causeKeys: [`interrupt:${runningTurn}`], detail: null },
+      createdAt: at(9),
+    } as OrchestrationCommand);
+    const headOnClaude = await apply(stopped.model, {
+      ...editB(CLAUDE, entryB.revision),
+      messageId: MessageId.make("a"),
+      expectedRevision: 1,
+    } as OrchestrationCommand);
+    expect(queueOf(headOnClaude.model)?.hold?.causeKeys).toEqual([`interrupt:${runningTurn}`]);
+
+    // A restart's error names no provider failure: a head for Claude does not release it.
+    const restarted = await apply(
+      await queued(["a", "b"], running),
+      failedSession(ORPHANED_PROVIDER_SESSION_ERROR),
+    );
+    const restartHold = {
+      reason: "error" as const,
+      causeKeys: [`error:${runningTurn}:${ORPHANED_PROVIDER_SESSION_ERROR}`],
+      detail: null,
+    };
+    const heldAtRestart = await apply(restarted.model, {
+      type: "thread.queue.hold.record",
+      commandId: nextCommandId("hold"),
+      threadId,
+      hold: restartHold,
+      createdAt: at(9),
+    } as OrchestrationCommand);
+    const claudeAfterRestart = await apply(heldAtRestart.model, {
+      ...editB(CLAUDE, entryB.revision),
+      messageId: MessageId.make("a"),
+      expectedRevision: 1,
+    } as OrchestrationCommand);
+    expect(queueOf(claudeAfterRestart.model)?.hold?.causeKeys).toEqual(restartHold.causeKeys);
+  });
+
+  it("a head moved to another instance releases that instance's usage limit", async () => {
+    const limited = {
+      latestTurn: { ...running.latestTurn, state: "error" as const, completedAt: at(1) },
+      session: { ...running.session, status: "ready" as const, activeTurnId: null },
+    };
+    const held = await apply(await queued(["a"], limited), {
+      type: "thread.usage-limit.record",
+      commandId: nextCommandId("limit"),
+      threadId,
+      limitId: "limit-1",
+      provider: "codex",
+      providerInstanceId: CODEX,
+      turnId: runningTurn,
+      message: "Usage limit reached.",
+      resetAt: null,
+      createdAt: at(7),
+    } as unknown as OrchestrationCommand);
+    expect(queueOf(held.model)?.hold?.reason).toBe("limit");
+    const claudeAtHead = await apply(
+      held.model,
+      addCommand(
+        "c",
+        { position: "head" },
+        {
+          modelSelection: { instanceId: CLAUDE, model: "sonnet" },
+        },
+      ),
+    );
+    expect(types(claudeAtHead.events)).toEqual([
+      "thread.queue-entry-added",
+      "thread.queue-released",
+    ]);
+    // A follow-up for Codex added behind it changes nothing.
+    const codexBehind = await apply(held.model, addCommand("d"));
+    expect(types(codexBehind.events)).toEqual(["thread.queue-entry-added"]);
+  });
+
   it("Trash pauses the queue, a restore keeps the pause, and deletion ends it", async () => {
     const model = await queued(["a", "b"]);
     const trash = await apply(model, {

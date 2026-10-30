@@ -3,6 +3,7 @@ import { Schema } from "effect";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  headExemptCauseKeys,
   createInterruptQueueHold,
   deriveQueueFailureCauses,
   describeQueueHold,
@@ -136,5 +137,68 @@ describe("holds a device hands to the node", () => {
 
   it("reads a Trash cause as a pause", () => {
     expect(queueHoldReasonForCauseKey(trashedCauseKey(at))).toBe("paused");
+  });
+});
+
+describe("headExemptCauseKeys", () => {
+  const hold = (causeKeys: string[]) => ({
+    reason: "error" as const,
+    detail: null,
+    causeKeys,
+    heldAt: "2026-10-30T10:00:00.000Z",
+  });
+  const died = sessionErrorCauseKey("turn-1", "Died.");
+  const codexError = { causeKey: died, providerInstanceId: "codex" };
+
+  it("releases the current session's error and another instance's limit, with the limited turn's error", () => {
+    expect(
+      headExemptCauseKeys({
+        hold: hold(["limit:turn-2", "error:turn-2:Limit.", died, "interrupt:turn-1"]),
+        headProviderInstanceId: "claude",
+        sessionError: codexError,
+        usageLimit: { turnId: "turn-2", providerInstanceId: "codex" },
+      }),
+    ).toEqual(["limit:turn-2", "error:turn-2:Limit.", died]);
+  });
+
+  it("keeps the head's own instance's causes, older errors, a failed start and a Stop", () => {
+    const older = sessionErrorCauseKey("turn-0", "Died before.");
+    const keys = [died, older, "start-failed:activity-1", "interrupt:turn-1"];
+    // The head goes to the instance that failed.
+    expect(
+      headExemptCauseKeys({
+        hold: hold(keys),
+        headProviderInstanceId: "codex",
+        sessionError: codexError,
+        usageLimit: null,
+      }),
+    ).toEqual([]);
+    // Only the error the session still shows names its instance.
+    expect(
+      headExemptCauseKeys({
+        hold: hold(keys),
+        headProviderInstanceId: "claude",
+        sessionError: codexError,
+        usageLimit: null,
+      }),
+    ).toEqual([died]);
+    // The chat moved on to another session (a direct send): its error's instance is unknown.
+    expect(
+      headExemptCauseKeys({
+        hold: hold(keys),
+        headProviderInstanceId: "codex",
+        sessionError: null,
+        usageLimit: null,
+      }),
+    ).toEqual([]);
+    // No head: nothing.
+    expect(
+      headExemptCauseKeys({
+        hold: hold(keys),
+        headProviderInstanceId: null,
+        sessionError: codexError,
+        usageLimit: null,
+      }),
+    ).toEqual([]);
   });
 });
