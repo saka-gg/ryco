@@ -69,6 +69,16 @@ describe("app default keybindings", () => {
     }
   });
 
+  it("gives the side chat toggle a client-only mod+alt+s, apart from snooze's mod+alt+shift+s", () => {
+    expect(NODE_DEFAULT_KEYBINDINGS.some((rule) => rule.command === "sideChat.toggle")).toBe(false);
+    expect(APP_DEFAULT_KEYBINDINGS).toContainEqual({
+      key: "mod+alt+s",
+      command: "sideChat.toggle",
+      when: "!terminalFocus",
+    });
+    expect(APP_DEFAULT_KEYBINDINGS.filter((rule) => rule.key === "mod+alt+s")).toHaveLength(1);
+  });
+
   it("gives quick open mod+p, find in files mod+shift+f and the Files panel mod+shift+e in this app only", () => {
     const nodeFilesRule = { key: "mod+p", command: "workspace.files", when: "!terminalFocus" };
     // Nodes keep serving mod+p for the Files panel to apps that predate quick open.

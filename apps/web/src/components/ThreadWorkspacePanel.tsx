@@ -808,6 +808,10 @@ function WorkspaceLauncher(props: {
     () => shortcutLabelForCommand(keybindings, "workspace.simulator"),
     [keybindings],
   );
+  const sideChatShortcutLabel = useMemo(
+    () => shortcutLabelForCommand(keybindings, "sideChat.toggle"),
+    [keybindings],
+  );
   const agentTabs = props.tabs.filter((tab) => tab.mode === "agent");
   const compact = !props.isPhoneSurface;
 
@@ -826,6 +830,7 @@ function WorkspaceLauncher(props: {
         label="Side chat"
         description="Start a side conversation"
         icon={MessageSquarePlusIcon}
+        shortcutLabel={props.isPhoneSurface ? null : sideChatShortcutLabel}
         compact={compact}
         disabled={props.isPhoneSurface || !props.activeThread}
         onClick={props.onOpenSideChat}

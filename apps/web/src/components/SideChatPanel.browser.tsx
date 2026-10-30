@@ -119,13 +119,61 @@ describe("SideChatPanel", () => {
     mounted = undefined;
     document.body.innerHTML = "";
   });
-  const mount = async (connected = true) => {
+  const mount = async (
+    connected = true,
+    onContinueAsThread?: ((trigger: HTMLElement) => void) | undefined,
+  ) => {
     mounted = await render(
       <div className="relative h-[650px] w-[800px]">
-        <SideChatPanel threadRef={threadRef} providers={providers} connected={connected} />
+        <SideChatPanel
+          threadRef={threadRef}
+          providers={providers}
+          connected={connected}
+          onContinueAsThread={onContinueAsThread}
+        />
       </div>,
     );
   };
+  it("offers Continue as thread once there is an answer, and not while one is on its way", async () => {
+    let finish!: (result: { requestId: string; answer: string }) => void;
+    mocks.ask.mockImplementation(
+      (input) =>
+        new Promise((resolve) => {
+          finish = (result) => resolve({ ...result, requestId: input.requestId });
+        }),
+    );
+    const onContinue = vi.fn();
+    await mount(true, onContinue);
+    const continueButton = page.getByRole("button", { name: "Continue as thread" });
+    await expect.element(page.getByRole("button", { name: "New chat" })).toBeVisible();
+    await expect.element(continueButton).not.toBeInTheDocument();
+    await page.getByLabelText("Side question").fill("Why?");
+    await page.getByRole("button", { name: "Ask", exact: true }).click();
+    // Nothing answered yet: a question on its way is not side history.
+    await expect.element(page.getByText("Thinking", { exact: true })).toBeVisible();
+    await expect.element(continueButton).not.toBeInTheDocument();
+    finish({ requestId: "", answer: "Because." });
+    await expect.element(continueButton).toBeEnabled();
+    await page.getByLabelText("Side question").fill("And then?");
+    await page.getByRole("button", { name: "Ask", exact: true }).click();
+    await expect.element(continueButton).toBeDisabled();
+    finish({ requestId: "", answer: "Then this." });
+    await expect.element(continueButton).toBeEnabled();
+    await continueButton.click();
+    // The dialog grows out of the button that opened it.
+    expect(onContinue).toHaveBeenCalledExactlyOnceWith(continueButton.element());
+    expect(useSideChatStore.getState().chatsByThreadKey[key]?.exchanges).toHaveLength(2);
+  });
+  it("never offers Continue as thread where the thread cannot be forked", async () => {
+    mocks.ask.mockImplementation(async (input) => ({ requestId: input.requestId, answer: "Yes." }));
+    await mount();
+    await page.getByLabelText("Side question").fill("Why?");
+    await page.getByRole("button", { name: "Ask", exact: true }).click();
+    await expect.element(page.getByText("Yes.", { exact: true })).toBeVisible();
+    await expect
+      .element(page.getByRole("button", { name: "Continue as thread" }))
+      .not.toBeInTheDocument();
+  });
   it("sends independent model/reasoning choices and successful follow-up history", async () => {
     mocks.ask.mockImplementation(async (input) => ({
       requestId: input.requestId,

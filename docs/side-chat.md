@@ -52,8 +52,10 @@ behavior. Live authenticated provider billing calls are not part of local tests.
 
 ## Interface and limits
 
-Web and desktop expose Side chat from the workspace launcher and `/btw question`
-from the composer. `/btw` alone reopens it. Native mobile has the same command and
+Web and desktop expose Side chat from the workspace launcher, `/btw question`
+from the composer, and `mod+alt+s` (⌘⌥S on macOS, Ctrl+Alt+S elsewhere; see
+[keybindings](../KEYBINDINGS.md#side-chat)), which opens the side chat or minimizes it
+again. `/btw` alone reopens it. Native mobile has the same command and
 a dedicated composer button. Minimize preserves the side conversation in memory;
 New chat clears it. Reloading or leaving a native thread discards the conversation.
 Only successful side exchanges enter follow-up history. Stop restores the pending
@@ -61,6 +63,24 @@ question as a draft, while a late response cannot replace current state. If a ne
 exists, the unsent question is retained separately until explicitly restored or discarded;
 another ask is blocked until that recovery decision. Web and native expose the same
 controls. See [selection to chat](selection-to-chat.md) for quotation transfer.
+
+## Continue as thread
+
+When a side exchange is worth keeping, **Continue as thread** in the side chat's header
+(web and desktop) turns it into a real thread through [forking](thread-forks.md). It
+opens the fork dialog at the thread's newest reply that **Fork from here** is offered
+on, so the fork inherits the conversation the side chat read. Once the fork is created
+and opens, its composer holds the side chat as a draft: each answered question and its
+answer as plain `Q:` and `A:` lines, ready to edit. Nothing is sent until you send it,
+and the side chat itself stays as it was. A question still waiting for its answer, or
+one that failed, is left out.
+
+It is offered once the side chat has at least one answer, where the thread offers
+**Fork from here** (a node that supports forks and operator access), and not while an
+answer is pending. If no reply can be forked yet, it says so and opens nothing. The
+frozen web phone layout has no side chat panel; native mobile does not offer it yet.
+
+## Requests and context
 
 Requests use the existing authenticated RPC transport and shared role/lifecycle
 policy. Side questions are not queued for later execution after reconnecting.

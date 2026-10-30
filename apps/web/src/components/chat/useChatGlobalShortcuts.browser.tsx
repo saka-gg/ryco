@@ -19,6 +19,7 @@ const KEYBINDINGS: ResolvedKeybindingsConfig = [
     ...PANEL_SHORTCUTS,
     { command: "thread.interrupt", key: "." },
     { command: "thread.copyReference", key: "c" },
+    { command: "sideChat.toggle", key: "x" },
   ].map(({ command, key }) => ({
     command,
     shortcut: { key, metaKey: false, ctrlKey: false, shiftKey: true, altKey: true, modKey: false },
@@ -60,6 +61,8 @@ function createInput(): UseChatGlobalShortcutsInput {
     onInterruptTurn: vi.fn(),
     copyReferenceTarget: { kind: "thread", value: "thread-shortcuts" },
     onCopyReference: vi.fn(),
+    sideChatAvailable: true,
+    onToggleSideChat: vi.fn(),
   };
 }
 
@@ -193,6 +196,49 @@ describe("useChatGlobalShortcuts", () => {
       expect(draftInput.onCopyReference).not.toHaveBeenCalled();
     } finally {
       await draftHook.unmount();
+    }
+  });
+
+  it("opens or minimizes the side chat while typing, once per press", async () => {
+    const input = createInput();
+    const hook = await renderHook(() => useChatGlobalShortcuts(input));
+    try {
+      // From the composer, and from the side question field that the same key minimizes.
+      expect(pressInEditable("x", {}, { composer: true })).toBe(true);
+      expect(pressInEditable("x")).toBe(true);
+      expect(pressInEditable("x", { repeat: true })).toBe(true);
+      expect(input.onToggleSideChat).toHaveBeenCalledTimes(2);
+      window.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "x", altKey: true, shiftKey: true, bubbles: true }),
+      );
+      expect(input.onToggleSideChat).toHaveBeenCalledTimes(3);
+    } finally {
+      await hook.unmount();
+    }
+  });
+
+  it("leaves the side chat key alone where the thread has no side chat or a dialog is open", async () => {
+    const input = { ...createInput(), sideChatAvailable: false };
+    const hook = await renderHook(() => useChatGlobalShortcuts(input));
+    try {
+      expect(pressInEditable("x")).toBe(false);
+      expect(input.onToggleSideChat).not.toHaveBeenCalled();
+    } finally {
+      await hook.unmount();
+    }
+
+    const dialogInput = createInput();
+    const dialogHook = await renderHook(() => useChatGlobalShortcuts(dialogInput));
+    const dialog = document.createElement("div");
+    dialog.setAttribute("role", "dialog");
+    dialog.textContent = "Open dialog";
+    document.body.append(dialog);
+    try {
+      expect(pressInEditable("x")).toBe(false);
+      expect(dialogInput.onToggleSideChat).not.toHaveBeenCalled();
+    } finally {
+      dialog.remove();
+      await dialogHook.unmount();
     }
   });
 

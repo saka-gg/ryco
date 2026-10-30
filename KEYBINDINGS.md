@@ -217,6 +217,18 @@ These defaults live in the app, not on the node, so older apps have no keys for 
 browser tab keeps `mod+w` and `mod+shift+t` for itself and never passes them to Ryco, so there use
 `mod+alt+w` and `mod+alt+shift+t`. The desktop app and an installed web app get all four.
 
+#### Side chat
+
+- `sideChat.toggle`: open the current thread's [side chat](docs/side-chat.md), or minimize it when
+  it is open (`mod+alt+s` outside the terminal: ⌘⌥S on macOS, Ctrl+Alt+S elsewhere). A new side
+  chat starts on the thread's model, as from the workspace launcher. Opening moves the typing into
+  the side question; minimizing moves it back to the composer and never stops a pending answer. It
+  also works while you type, in the composer and in the side question, but not in a dialog. Where
+  the thread has no side chat (a draft, the frozen phone layout, or no access to side questions on
+  its machine), the key goes to the focused control.
+
+This default lives in the app, not on the node, so older apps have no key for it.
+
 #### Scripts
 
 - `projectScript.{environment}/{project}/{id}.run`: a locally assigned script shortcut. The app constructs these scoped IDs; legacy `script.{id}.run` rules are supported only through explicit import.

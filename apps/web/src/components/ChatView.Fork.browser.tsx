@@ -3,6 +3,7 @@ import {
   EventId,
   MessageId,
   ORCHESTRATION_WS_METHODS,
+  ProviderInstanceId,
   THREAD_FORKED_ACTIVITY_KIND,
   ThreadForkError,
   ThreadId,
@@ -24,8 +25,10 @@ import { page } from "vite-plus/test/browser";
 import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import { setGitStatusForCwdForTests, setGitStatusForTests } from "../../test/gitStatusStateMock";
+import { useComposerDraftStore } from "../composerDraftStore";
 import { WsRpcFailure, type NormalizedWsRpcRequestBody } from "../../test/wsRpcHarness";
 import { __setEnvironmentApiOverrideForTests, readEnvironmentApi } from "../environmentApi";
+import { useSideChatStore } from "../sideChatStore";
 import { useStore } from "../store";
 import {
   DEFAULT_VIEWPORT,
@@ -34,6 +37,7 @@ import {
   PHONE_VIEWPORT,
   PROJECT_ID,
   THREAD_ID,
+  THREAD_KEY,
   THREAD_TITLE,
   clickEnabledButton,
   createSnapshotForTargetUser,
@@ -897,6 +901,84 @@ describe("Fork from here (full app)", () => {
       expect(forkRequests()).toHaveLength(0);
       expect(mounted.router.state.location.pathname).toBe(`/${LOCAL_ENVIRONMENT_ID}/${THREAD_ID}`);
     } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("continues a side chat as a fork of the newest reply, with the side chat as its unsent draft", async () => {
+    const mounted = await mountForkSource({ resolveFork: () => publishForkThread() });
+    try {
+      await vi.waitFor(() =>
+        expect(document.querySelectorAll("button[data-fork-from-message]")).toHaveLength(2),
+      );
+      useSideChatStore.getState().open(THREAD_KEY, {
+        instanceId: ProviderInstanceId.make("codex"),
+        model: "gpt-5",
+      });
+      useSideChatStore.setState((state) => ({
+        chatsByThreadKey: {
+          ...state.chatsByThreadKey,
+          [THREAD_KEY]: {
+            ...state.chatsByThreadKey[THREAD_KEY]!,
+            exchanges: [
+              {
+                requestId: "side-1",
+                question: "Why split the auth module first?",
+                answer: "It has the fewest dependents.",
+              },
+            ],
+          },
+        },
+      }));
+      const continueButton = await waitForElement(
+        () => document.querySelector<HTMLButtonElement>('button[aria-label="Continue as thread"]'),
+        "The side chat never offered Continue as thread.",
+      );
+      await clickEnabledButton(continueButton, "Continue as thread stayed disabled.");
+      await expect.element(page.getByTestId("fork-thread-dialog")).toBeVisible();
+      // The newest forkable reply, so the fork holds everything the side chat read.
+      await expectTextIn("fork-thread-boundary", "Done, the module is split.");
+      await expectTextIn("fork-thread-draft-seed", "This side chat (1 question)");
+      await page.getByTestId("fork-thread-submit").click();
+
+      await vi.waitFor(() => expect(forkRequests()).toHaveLength(1));
+      expect(forkRequests()[0]).toMatchObject({
+        sourceThreadId: THREAD_ID,
+        sourceMessageId: REPLY_2,
+        destination: { kind: "current-checkout" },
+      });
+      await waitForURL(
+        mounted.router,
+        (pathname) => pathname === `/${LOCAL_ENVIRONMENT_ID}/${FORK_THREAD_ID}`,
+        "The fork never opened.",
+      );
+      const seed = [
+        "From a side chat about this thread:",
+        "",
+        "Q: Why split the auth module first?",
+        "A: It has the fewest dependents.",
+      ].join("\n");
+      const forkRef = scopeThreadRef(LOCAL_ENVIRONMENT_ID, FORK_THREAD_ID);
+      expect(useComposerDraftStore.getState().getComposerDraft(forkRef)?.prompt).toBe(
+        `${seed}\n\n`,
+      );
+      // Ready to edit in the fork's composer; nothing was sent.
+      await vi.waitFor(() =>
+        expect(
+          document.querySelector('[data-testid="composer-editor"]')?.textContent ?? "",
+        ).toContain("Q: Why split the auth module first?"),
+      );
+      expect(
+        wsRequests.filter(
+          (request) =>
+            request._tag === ORCHESTRATION_WS_METHODS.dispatchCommand &&
+            (request as { type?: unknown }).type === "thread.turn.start",
+        ),
+      ).toEqual([]);
+      // The side chat itself stays with the original thread.
+      expect(useSideChatStore.getState().chatsByThreadKey[THREAD_KEY]?.exchanges).toHaveLength(1);
+    } finally {
+      useSideChatStore.setState({ chatsByThreadKey: {} });
       await mounted.cleanup();
     }
   });

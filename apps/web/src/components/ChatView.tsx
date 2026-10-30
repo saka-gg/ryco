@@ -59,7 +59,11 @@ import {
 import { useWsConnectionStatusForEnvironment } from "../rpc/wsConnectionState";
 import { readEnvironmentConnection } from "../environments/runtime";
 import { useSideChatStore } from "../sideChatStore";
-import { parseSideQuestionCommand } from "@ryco/client-runtime/state/side-chat";
+import {
+  parseSideQuestionCommand,
+  SIDE_CHAT_CONTINUE_COPY,
+  sideChatThreadSeed,
+} from "@ryco/client-runtime/state/side-chat";
 import { useDeviceName } from "../deviceName";
 import {
   type CommandId,
@@ -295,7 +299,11 @@ import { PersistentThreadTerminalDrawer } from "./chat/ChatTerminalShell";
 import type { LinkedWorktreeItem } from "./worktrees/LinkedWorktreeItemDialog";
 import { MessagesTimeline } from "./chat/MessagesTimeline";
 import type { ReadingPositionOutcome } from "./chat/useTimelineReadingPosition";
-import { openForkThreadDialog, useCanForkThread } from "./chat/forkThreadDialogStore";
+import {
+  type ForkThreadDialogRequest,
+  openForkThreadDialog,
+  useCanForkThread,
+} from "./chat/forkThreadDialogStore";
 import {
   deriveRevertTurnCountByUserMessageId,
   type TimelineForkRequest,
@@ -352,6 +360,7 @@ import {
   isMaterializableCheckpointSummary,
   resolveThreadReferenceCopyTarget,
   resolveThreadWorkspacePullRequestLink,
+  selectLatestForkableReply,
   threadForkBoundaryQuote,
   selectEnvironmentShellLive,
   selectThreadDetailLoaded,
@@ -767,6 +776,7 @@ export default function ChatView(props: ChatViewProps) {
   const paneFocused = usePaneFocus();
   const paneThreadRef = usePaneThreadRef();
   const paneFocusedRef = usePaneFocusRef();
+  const chatShellRef = useRef<HTMLDivElement | null>(null);
   const {
     environmentId,
     threadId,
@@ -4574,6 +4584,31 @@ export default function ChatView(props: ChatViewProps) {
     [copyThreadReference],
   );
 
+  // Side chat beside a server thread; the frozen phone tier has none (AGENTS.md).
+  const sideChatAvailable =
+    presentationTier !== "phone" && isServerThread && sideChatCapability.allowed;
+  // An opened side chat takes the typing on the next frame, in this pane only.
+  const focusSideQuestion = useCallback(() => {
+    window.requestAnimationFrame(
+      () =>
+        paneFocusedRef.current &&
+        chatShellRef.current
+          ?.querySelector<HTMLTextAreaElement>('[aria-label="Side question"]')
+          ?.focus({ preventScroll: true }),
+    );
+  }, [paneFocusedRef]);
+  // Stable, so a streaming render keeps the key listener.
+  const onToggleSideChat = useEvent(() => {
+    const modelSelection = activeThread?.modelSelection;
+    if (!activeThreadRef || !modelSelection) return;
+    // A new side chat starts on the thread's model, as the launcher's does.
+    const opened = useSideChatStore
+      .getState()
+      .toggle(scopedThreadKey(activeThreadRef), modelSelection);
+    if (opened) focusSideQuestion();
+    else scheduleComposerFocus();
+  });
+
   useChatGlobalShortcuts({
     activeThreadId,
     keybindings,
@@ -4597,6 +4632,8 @@ export default function ChatView(props: ChatViewProps) {
     onInterruptTurn: worktreeSetupRunning ? cancelWorktreeSetup : onInterrupt,
     copyReferenceTarget,
     onCopyReference,
+    sideChatAvailable,
+    onToggleSideChat,
   });
 
   const conversationRevertSupported = useEnvironmentServerConfigSelector(
@@ -6792,23 +6829,60 @@ export default function ChatView(props: ChatViewProps) {
   const offerThreadFork = threadForkSupported && isServerThread && presentationTier !== "phone";
   const forkSourceRef = useRef({ thread: activeThread, turnDiffSummaries });
   forkSourceRef.current = { thread: activeThread, turnDiffSummaries };
-  const onForkFromMessage = useCallback(
-    (request: TimelineForkRequest, trigger: HTMLButtonElement) => {
+  const openForkDialogAt = useCallback(
+    (
+      reply: TimelineForkRequest,
+      trigger: HTMLElement,
+      draftSeed?: ForkThreadDialogRequest["draftSeed"],
+    ) => {
       const { thread, turnDiffSummaries: summaries } = forkSourceRef.current;
       if (!thread) return;
       openForkThreadDialog({
         sourceThreadRef: scopeThreadRef(thread.environmentId, thread.id),
-        sourceMessageId: request.messageId,
-        sourceTurnId: request.turnId,
+        sourceMessageId: reply.messageId,
+        sourceTurnId: reply.turnId,
         // A page-only turn, or a blank reply under a page, quotes what the turn published.
-        boundaryText: threadForkBoundaryQuote(thread.messages, request.messageId),
+        boundaryText: threadForkBoundaryQuote(thread.messages, reply.messageId),
         checkpointAvailable: isMaterializableCheckpointSummary(
-          summaries.find((summary) => summary.turnId === request.turnId),
+          summaries.find((summary) => summary.turnId === reply.turnId),
         ),
+        draftSeed,
         origin: trigger,
       });
     },
     [],
+  );
+  const onForkFromMessage = useCallback(
+    (request: TimelineForkRequest, trigger: HTMLButtonElement) =>
+      openForkDialogAt(request, trigger),
+    [openForkDialogAt],
+  );
+  // "Continue as thread" in the side chat: forks from the thread's newest forkable reply (the
+  // rule "Fork from here" follows), with the side chat as the fork's draft.
+  const onContinueSideChatAsThread = useCallback(
+    (trigger: HTMLElement) => {
+      const { thread } = forkSourceRef.current;
+      if (!thread) return;
+      const side =
+        useSideChatStore.getState().chatsByThreadKey[
+          scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id))
+        ];
+      if (!side || side.exchanges.length === 0) return;
+      const reply = selectLatestForkableReply({
+        messages: thread.messages,
+        latestTurn: thread.latestTurn,
+        session: thread.session,
+      });
+      if (!reply) {
+        toastManager.add({ type: "info", title: SIDE_CHAT_CONTINUE_COPY.noReply });
+        return;
+      }
+      openForkDialogAt({ messageId: reply.id, turnId: reply.turnId }, trigger, {
+        text: sideChatThreadSeed(side.exchanges),
+        note: SIDE_CHAT_CONTINUE_COPY.seedNote(side.exchanges.length),
+      });
+    },
+    [openForkDialogAt],
   );
 
   useEffect(() => {
@@ -6941,10 +7015,7 @@ export default function ChatView(props: ChatViewProps) {
   });
   // Opening a side chat focuses its field on the next frame, so the panel is
   // warmed in idle time wherever a side chat can be started.
-  usePreloadWhenIdle(
-    LazySideChatPanel,
-    !isPhoneTier && isServerThread && sideChatCapability.allowed,
-  );
+  usePreloadWhenIdle(LazySideChatPanel, sideChatAvailable);
 
   // Delegation and Agent Control dock on the composer; off the frozen phone
   // tier (apps/mobile owns the native surface). Memoised for the composer's `memo`.
@@ -7005,7 +7076,6 @@ export default function ChatView(props: ChatViewProps) {
   // in-flow layout, where the variable stays unset and the old spacers apply.
   const composerOverlayActive = presentationTier !== "phone" && !showNewThreadSurface;
   const headerOverlayActive = presentationTier !== "phone";
-  const chatShellRef = useRef<HTMLDivElement | null>(null);
   const headerOverlayRef = useRef<HTMLElement | null>(null);
   // The overlay elements exist while a thread is on screen and keep their
   // identity across thread switches, so one observer serves every switch.
@@ -7107,13 +7177,7 @@ export default function ChatView(props: ChatViewProps) {
                 text: citation.selector.exact,
               }),
             );
-            requestAnimationFrame(
-              () =>
-                paneFocusedRef.current &&
-                chatShellRef.current
-                  ?.querySelector<HTMLTextAreaElement>('[aria-label="Side question"]')
-                  ?.focus(),
-            );
+            focusSideQuestion();
           }}
           onNew={async ({ citation, prompt, envMode, intent, requestKey }) => {
             const context = readComposer()?.getSendContext();
@@ -7158,6 +7222,7 @@ export default function ChatView(props: ChatViewProps) {
           key={`side-chat:${activeThreadKey}`}
           threadRef={activeThreadRef}
           providers={providerStatuses}
+          onContinueAsThread={offerThreadFork ? onContinueSideChatAsThread : undefined}
           connected={
             sideChatConnection.phase === "connected" &&
             !isConnecting &&
