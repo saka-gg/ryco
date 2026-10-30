@@ -447,9 +447,11 @@ export const makeEventLoopSampler = (deps: EventLoopSamplerDeps): EventLoopSampl
         if (loopGaps.length > LOOP_GAP_HISTORY_LIMIT) loopGaps.shift();
       }
       if (verdict.kind === "stall") {
-        // Clients see the long ones after they reconnect (`NoticeableStall.ts`).
+        // Clients see the long ones after they reconnect (`NoticeableStall.ts`). Its start is
+        // when the busy time began, not the previous tick: after a sleep, that tick is the
+        // moment the machine went to sleep.
         noteEventLoopStall({
-          startedAtMs: verdict.startedAtWallMs,
+          startedAtMs: current.wallMs - verdict.durationMs,
           durationMs: verdict.durationMs,
           loadAverage1m: readOptional(deps.loadAverage1m),
           cpuCount: deps.cpuCount,

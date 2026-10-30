@@ -35,6 +35,7 @@ import { exactNodeRouteParams } from "../e2ee/exactNodeRouteModel";
 import { useAuthoritativeNodeTrust } from "../home/useAuthoritativeNodeTrust";
 import { NodeRow } from "../nodes/NodeRow";
 import { useEnvironmentServerConfigs } from "../../state/environmentServerConfigs";
+import { useHostFreezeNowMs } from "../../state/useHostFreezeNowMs";
 import { hostedStatusTone } from "./hostedAuthModel";
 import { hostedSelectionKey, type SettledHostedStatus } from "./settledHostedStatus";
 import { useHostedModeAvailable } from "./useHostedMode";
@@ -174,10 +175,13 @@ export function deriveHubNodeSectionModel(input: {
   readonly query?: string;
   readonly connections?: ReadonlyArray<MobileHostedConnectionState>;
   readonly trustByEnvironmentId?: ReadonlyMap<string, WorkspaceNativeTrustState>;
-  /** Each node's last noticeable freeze, from the config it sent on connecting. */
-  readonly lastEventLoopStall?: (
-    environmentId: HostedHubNode["environmentId"],
-  ) => ServerEventLoopStall | undefined;
+  /** Each node's last noticeable freeze, from the config it sent on connecting, read at `nowMs`. */
+  readonly hostFreeze?: {
+    readonly lastEventLoopStall: (
+      environmentId: HostedHubNode["environmentId"],
+    ) => ServerEventLoopStall | undefined;
+    readonly nowMs: number;
+  };
 }): HubNodeSectionModel {
   const { state, available, actions, onSignIn } = input;
   const statusInput = {
@@ -296,7 +300,11 @@ export function deriveHubNodeSectionModel(input: {
             : undefined,
         label: node.label,
         detail: trustDetail ? `${trustDetail} · ${rowDetail(node)}` : rowDetail(node),
-        freezeNotice: describeHostFreeze(input.lastEventLoopStall?.(node.environmentId)),
+        freezeNotice: input.hostFreeze
+          ? describeHostFreeze(input.hostFreeze.lastEventLoopStall(node.environmentId), {
+              nowMs: input.hostFreeze.nowMs,
+            })
+          : null,
         transportLabel: "Hub relay",
         // The selected node's row shows the live connection status; every other
         // row shows directory presence, which is all the directory knows.
@@ -450,6 +458,9 @@ export function HubNodeSection(props: { readonly query?: string } = {}) {
     nativeDeviceSecurityStatus,
   };
   const serverConfigs = useEnvironmentServerConfigs();
+  const freezeNowMs = useHostFreezeNowMs(
+    Array.from(serverConfigs.values(), (config) => config.lastEventLoopStall),
+  );
   const settledStatus = useSettledHostedStatus({
     indicator: deriveHostedConnectionStatusIndicator(statusInput),
     statusText: deriveHostedConnectionStatusText(statusInput),
@@ -459,7 +470,10 @@ export function HubNodeSection(props: { readonly query?: string } = {}) {
   const model = deriveHubNodeSectionModel({
     state,
     connections,
-    lastEventLoopStall: (environmentId) => serverConfigs.get(environmentId)?.lastEventLoopStall,
+    hostFreeze: {
+      lastEventLoopStall: (environmentId) => serverConfigs.get(environmentId)?.lastEventLoopStall,
+      nowMs: freezeNowMs,
+    },
     available,
     e2eeStatus,
     nativeDeviceSecurityStatus,

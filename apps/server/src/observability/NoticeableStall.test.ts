@@ -59,4 +59,20 @@ describe("noticeable event-loop stall", () => {
     });
     expect(readNoticeableStall(AT + NOTICEABLE_STALL_MAX_AGE_MS + 2)?.durationMs).toBe(5_500);
   });
+
+  it("reports a later, shorter stall once the longer one has aged out", () => {
+    noteEventLoopStall({ startedAtMs: AT, durationMs: 12_000, loadAverage1m: 9, cpuCount: 8 });
+    noteEventLoopStall({
+      startedAtMs: AT + 4 * 60_000,
+      durationMs: 5_500,
+      loadAverage1m: 2,
+      cpuCount: 8,
+    });
+    expect(readNoticeableStall(AT + 4 * 60_000 + 1_000)?.durationMs).toBe(12_000);
+    // A client reconnecting two minutes after the latest freeze still hears of it.
+    expect(readNoticeableStall(AT + 6 * 60_000)).toMatchObject({
+      startedAt: "2026-10-30T14:06:00.000Z",
+      durationMs: 5_500,
+    });
+  });
 });

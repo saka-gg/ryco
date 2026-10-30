@@ -22,21 +22,21 @@ export interface NoticeableStall {
   readonly cpuCount: number | undefined;
 }
 
-let last: NoticeableStall | null = null;
+// The longest stall still within its five minutes, and the latest one: a shorter stall seen
+// later does not hide a long one, and is reported once the long one ages out.
+let longest: NoticeableStall | null = null;
+let latest: NoticeableStall | null = null;
+
+const reportedAt = (stall: NoticeableStall | null, nowMs: number): stall is NoticeableStall =>
+  stall !== null && nowMs - stall.startedAtMs <= NOTICEABLE_STALL_MAX_AGE_MS;
 
 /** The monitor saw a stall; only one of five seconds or more is kept. */
 export function noteEventLoopStall(stall: NoticeableStall): void {
   if (!(stall.durationMs >= NOTICEABLE_STALL_MS) || !Number.isFinite(stall.startedAtMs)) return;
-  // A shorter stall seen later does not hide a long one still within its five minutes.
-  if (
-    last !== null &&
-    stall.startedAtMs - last.startedAtMs < NOTICEABLE_STALL_MAX_AGE_MS &&
-    stall.durationMs < last.durationMs &&
-    stall.startedAtMs >= last.startedAtMs
-  ) {
-    return;
+  if (latest === null || stall.startedAtMs >= latest.startedAtMs) latest = stall;
+  if (!reportedAt(longest, stall.startedAtMs) || stall.durationMs >= longest.durationMs) {
+    longest = stall;
   }
-  last = stall;
 }
 
 /** The stall to report now, as the config carries it, or undefined. */
@@ -48,17 +48,19 @@ export function readNoticeableStall(nowMs: number):
       readonly cpuCount?: number;
     }
   | undefined {
-  if (last === null || nowMs - last.startedAtMs > NOTICEABLE_STALL_MAX_AGE_MS) return undefined;
+  const stall = reportedAt(longest, nowMs) ? longest : reportedAt(latest, nowMs) ? latest : null;
+  if (stall === null) return undefined;
   return {
-    startedAt: new Date(last.startedAtMs).toISOString(),
-    durationMs: Math.round(last.durationMs),
-    ...(last.loadAverage1m !== undefined && Number.isFinite(last.loadAverage1m)
-      ? { loadAverage1m: Math.round(last.loadAverage1m * 10) / 10 }
+    startedAt: new Date(stall.startedAtMs).toISOString(),
+    durationMs: Math.round(stall.durationMs),
+    ...(stall.loadAverage1m !== undefined && Number.isFinite(stall.loadAverage1m)
+      ? { loadAverage1m: Math.round(stall.loadAverage1m * 10) / 10 }
       : {}),
-    ...(last.cpuCount !== undefined && last.cpuCount > 0 ? { cpuCount: last.cpuCount } : {}),
+    ...(stall.cpuCount !== undefined && stall.cpuCount > 0 ? { cpuCount: stall.cpuCount } : {}),
   };
 }
 
 export function resetNoticeableStallForTests(): void {
-  last = null;
+  longest = null;
+  latest = null;
 }

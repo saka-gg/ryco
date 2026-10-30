@@ -266,7 +266,22 @@ describe("makeEventLoopSampler", () => {
       );
       asleep.tick();
       asleep.tick();
+      // Read inside any window the ten minutes could have opened, from either end.
+      expect(readNoticeableStall(WALL_ZERO + 1_000)).toBeUndefined();
       expect(readNoticeableStall(WALL_ZERO + 601_000)).toBeUndefined();
+
+      // Asleep, then busy for six seconds on waking: the freeze is the six seconds before the
+      // tick that saw it, not the moment the machine went to sleep.
+      const woke = makeEventLoopSampler(
+        samplerDeps([reading(0, 0), reading(1_000, 10), reading(601_000, 6_010)]),
+      );
+      woke.tick();
+      woke.tick();
+      expect(readNoticeableStall(WALL_ZERO + 601_000)).toMatchObject({
+        startedAt: new Date(WALL_ZERO + 595_000).toISOString(),
+        durationMs: 6_000,
+      });
+      resetNoticeableStallForTests();
 
       // Busy for six seconds: a stall long enough to drop clients.
       const busy = makeEventLoopSampler(

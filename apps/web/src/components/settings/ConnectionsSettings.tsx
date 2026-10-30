@@ -1400,8 +1400,8 @@ function SavedBackendListRow({
   const displayLabel = descriptorLabel ?? record.label;
   const statusTooltip = getSavedBackendStatusTooltip(runtime, record, nowMs);
   const versionMismatch = resolveServerConfigVersionMismatch(runtime?.serverConfig);
-  // Why it just dropped, when it froze: the node reports its last long stall for five minutes.
-  const freezeNotice = describeHostFreeze(runtime?.serverConfig?.lastEventLoopStall);
+  // Why it just dropped, when it froze: shown for five minutes after the stall.
+  const freezeNotice = describeHostFreeze(runtime?.serverConfig?.lastEventLoopStall, { nowMs });
   const metadataBits = [
     record.desktopSsh ? `SSH ${formatDesktopSshTarget(record.desktopSsh)}` : null,
     roleLabel,

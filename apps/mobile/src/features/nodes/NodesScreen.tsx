@@ -13,6 +13,7 @@ import { NavigationHeaderButton } from "../../components/NavigationHeaderButton"
 import { useThemeColor } from "../../lib/useThemeColor";
 import { useStore } from "../../state/threadsRuntime";
 import { useEnvironmentServerConfigs } from "../../state/environmentServerConfigs";
+import { useHostFreezeNowMs } from "../../state/useHostFreezeNowMs";
 import {
   type ConnectionRow,
   useConnectionActions,
@@ -103,6 +104,9 @@ export function NodesScreen(props: {
   const navigation = useNavigation();
   const { rows } = useSavedEnvironments();
   const serverConfigs = useEnvironmentServerConfigs();
+  const freezeNowMs = useHostFreezeNowMs(
+    Array.from(serverConfigs.values(), (config) => config.lastEventLoopStall),
+  );
   const actions = useConnectionActions();
   const activeEnvironmentId = useStore((state) => state.activeEnvironmentId);
   const [busy, setBusy] = useState<EnvironmentId | null>(null);
@@ -267,6 +271,7 @@ export function NodesScreen(props: {
                 detail={`${directRoleLabel(row.runtime.role)} · ${endpointLabel(row.record.httpBaseUrl)}`}
                 freezeNotice={describeHostFreeze(
                   serverConfigs.get(row.record.environmentId)?.lastEventLoopStall,
+                  { nowMs: freezeNowMs },
                 )}
                 transportLabel={directTransportLabel(row.record.httpBaseUrl)}
                 statusTone={{ ...row.tone, label: row.statusLabel }}

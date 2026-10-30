@@ -268,18 +268,27 @@ beforeEach(() => {
 describe("Hub node selection guard", () => {
   it("says on a node's row when it just froze, from the config it sent", () => {
     const selected = node();
-    const withStall = deriveHubNodeSectionModel({
-      state: state({ selectedNode: selected }),
-      available: true,
-      e2eeStatus: "unavailable",
-      actions: hostedMock.controller,
-      onSignIn: navigationMock.navigate,
-      lastEventLoopStall: (environmentId) =>
-        environmentId === selected.environmentId
-          ? { startedAt: "2026-10-30T14:02:00.000Z", durationMs: 7_000, cpuCount: 8 }
-          : undefined,
-    });
-    expect(withStall.rows[0]?.freezeNotice).toMatch(/^Froze for 7 s at \d{2}:\d{2}$/u);
+    const withStall = (nowMs: number) =>
+      deriveHubNodeSectionModel({
+        state: state({ selectedNode: selected }),
+        available: true,
+        e2eeStatus: "unavailable",
+        actions: hostedMock.controller,
+        onSignIn: navigationMock.navigate,
+        hostFreeze: {
+          lastEventLoopStall: (environmentId) =>
+            environmentId === selected.environmentId
+              ? { startedAt: "2026-10-30T14:02:00.000Z", durationMs: 7_000, cpuCount: 8 }
+              : undefined,
+          nowMs,
+        },
+      });
+    const frozeAt = Date.parse("2026-10-30T14:02:00.000Z");
+    expect(withStall(frozeAt + 60_000).rows[0]?.freezeNotice).toMatch(
+      /^Froze for 7 s at \d{2}:\d{2}$/u,
+    );
+    // Gone five minutes on, though the config the node sent still holds it.
+    expect(withStall(frozeAt + 5 * 60_000 + 1).rows[0]?.freezeNotice ?? null).toBeNull();
     expect(model().rows[0]?.freezeNotice ?? null).toBeNull();
   });
 
