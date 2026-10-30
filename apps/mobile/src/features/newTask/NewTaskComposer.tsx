@@ -61,6 +61,8 @@ export function NewTaskComposer(props: {
   readonly busy: boolean;
   readonly canSend: boolean;
   readonly sendDisabledReason: string | null;
+  /** Set while the task will wait for its machine instead of starting now. */
+  readonly queueNotice?: string | null;
   readonly onChangePrompt: (prompt: string) => void;
   readonly onRemoveAttachment: (id: string) => void;
   readonly onPickAttachments: () => void;
@@ -296,7 +298,9 @@ export function NewTaskComposer(props: {
             </ComposerAccessMenu>
             <ComposerToolbarButton
               icon={props.busy ? "ellipsis" : "arrow.up"}
-              accessibilityLabel={props.busy ? "Starting task" : "Start task"}
+              accessibilityLabel={
+                props.busy ? "Starting task" : props.queueNotice ? "Queue task" : "Start task"
+              }
               showChevron={false}
               variant="primary"
               disabled={!props.canSend || props.busy}
@@ -306,6 +310,8 @@ export function NewTaskComposer(props: {
         </GlassSurface>
         {!props.canSend && props.sendDisabledReason ? (
           <Text className="px-3 text-sm text-danger-foreground">{props.sendDisabledReason}</Text>
+        ) : props.queueNotice ? (
+          <Text className="px-3 text-sm text-foreground-muted">{props.queueNotice}</Text>
         ) : null}
       </View>
     </View>

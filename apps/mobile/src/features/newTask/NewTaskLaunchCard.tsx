@@ -26,13 +26,15 @@ function StepGlyph(props: { readonly status: NewTaskLaunchStepView["status"] }) 
 
 /**
  * A New Task on its thread screen before the node's own thread shows it: the
- * task as sent, the steps the node takes for it, and after a failure Retry
- * and (while nothing was created for it) Edit task.
+ * task as sent, the steps the node takes for it, and after a failure Retry.
+ * While the node holds nothing for it (queued, or refused) it can also be
+ * edited or removed.
  */
 export function NewTaskLaunchCard(props: {
   readonly view: NewTaskLaunchView;
   readonly onRetry: () => void;
   readonly onEdit: () => void;
+  readonly onRemove: () => void;
 }) {
   const { view } = props;
   return (
@@ -70,7 +72,7 @@ export function NewTaskLaunchCard(props: {
         {view.failureMessage ? (
           <Text className="font-sans text-sm text-danger-foreground">{view.failureMessage}</Text>
         ) : null}
-        {view.canRetry || view.canEdit ? (
+        {view.canRetry || view.canEdit || view.canRemove ? (
           <View className="mt-1 flex-row gap-2">
             {view.canRetry ? (
               <Pressable
@@ -88,6 +90,15 @@ export function NewTaskLaunchCard(props: {
                 className="h-10 items-center justify-center rounded-full bg-subtle px-4"
               >
                 <Text className="font-ryco-bold text-sm text-foreground">Edit task</Text>
+              </Pressable>
+            ) : null}
+            {view.canRemove ? (
+              <Pressable
+                accessibilityRole="button"
+                onPress={props.onRemove}
+                className="h-10 items-center justify-center rounded-full px-4"
+              >
+                <Text className="font-ryco-bold text-sm text-danger-foreground">Remove</Text>
               </Pressable>
             ) : null}
           </View>

@@ -1,4 +1,3 @@
-import { scopeThreadRef, scopedThreadKey } from "@ryco/client-runtime/scoped";
 import {
   resolveWorktreeSetupStages,
   startWorktreeLaunchFeed,
@@ -7,19 +6,8 @@ import {
   type WorktreeLaunch,
   type WorktreeSetupFeedApi,
 } from "@ryco/client-runtime/state/worktree-setup";
-import type {
-  CommandId,
-  EnvironmentId,
-  ModelSelection,
-  ProjectId,
-  ProviderInteractionMode,
-  RuntimeMode,
-  ThreadId,
-  WorktreeId,
-} from "@ryco/contracts";
-import { create } from "zustand";
+import type { CommandId } from "@ryco/contracts";
 
-import type { DraftComposerImageAttachment } from "../../lib/composerImages";
 import {
   prepareNewTaskRetry,
   runNewTaskAttempt,
@@ -28,6 +16,23 @@ import {
   type NewTaskFailureStep,
 } from "./newTaskController";
 import { inferTaskTitle } from "./newTaskModel";
+import {
+  newTaskLaunchKey,
+  readNewTaskLaunch,
+  useNewTaskLaunchStore,
+  type NewTaskLaunch,
+  type NewTaskLaunchDraft,
+} from "./newTaskLaunchStore";
+
+export {
+  newTaskLaunchKey,
+  readNewTaskLaunch,
+  useNewTaskLaunchStore,
+  type NewTaskLaunch,
+  type NewTaskLaunchDraft,
+  type NewTaskLaunchFailure,
+  type NewTaskLaunchStatus,
+} from "./newTaskLaunchStore";
 
 /**
  * A New Task the phone has handed to its thread screen before the node
@@ -37,60 +42,13 @@ import { inferTaskTitle } from "./newTaskModel";
  * worktree setup feed for it lives in the shared `useWorktreeLaunchStore`
  * under the same key, exactly as web's first send keeps it.
  *
- * Nothing here is persisted: a task the app forgets mid-launch is still on the
- * node once its command went out, and reappears there.
+ * A task sent while its machine is offline waits here as `queued` and is
+ * started once the machine is live again (`newTaskOutbox.ts` persists those,
+ * and launches still starting or failed, across app restarts).
  */
-
-/** What Edit task puts back on the New Task sheet. */
-export interface NewTaskLaunchDraft {
-  readonly environmentId: EnvironmentId;
-  readonly projectId: ProjectId | null;
-  readonly newProjectPath: string;
-  readonly newProjectTitle: string;
-  readonly worktree:
-    | { readonly kind: "local" }
-    | { readonly kind: "existing"; readonly worktreeId: WorktreeId }
-    | { readonly kind: "new" };
-  readonly newBranch: string;
-  readonly baseBranch: string;
-  readonly prompt: string;
-  readonly attachments: ReadonlyArray<DraftComposerImageAttachment>;
-  readonly modelSelection: ModelSelection;
-  readonly runtimeMode: RuntimeMode;
-  readonly interactionMode: ProviderInteractionMode;
-}
-
-export interface NewTaskLaunchFailure {
-  readonly step: NewTaskFailureStep;
-  readonly message: string;
-  readonly deliveryUncertain: boolean;
-}
-
-export interface NewTaskLaunch {
-  readonly key: string;
-  readonly attempt: NewTaskAttempt;
-  readonly draft: NewTaskLaunchDraft;
-  /** `started` once the node took the task: its thread takes over from here. */
-  readonly status: "starting" | "started" | "failed";
-  readonly failure: NewTaskLaunchFailure | null;
-}
 
 /** Started launches kept for a thread screen still waiting for the node's rows. */
 const MAX_STARTED_LAUNCHES = 8;
-
-interface NewTaskLaunchStore {
-  readonly launchesByKey: Readonly<Record<string, NewTaskLaunch>>;
-}
-
-export const useNewTaskLaunchStore = create<NewTaskLaunchStore>(() => ({ launchesByKey: {} }));
-
-export function newTaskLaunchKey(environmentId: EnvironmentId, threadId: ThreadId): string {
-  return scopedThreadKey(scopeThreadRef(environmentId, threadId));
-}
-
-export function readNewTaskLaunch(key: string): NewTaskLaunch | null {
-  return useNewTaskLaunchStore.getState().launchesByKey[key] ?? null;
-}
 
 function patchLaunch(key: string, change: (launch: NewTaskLaunch) => NewTaskLaunch | null): void {
   useNewTaskLaunchStore.setState((state) => {
@@ -190,20 +148,51 @@ export function startNewTaskLaunch(input: {
   readonly draft: NewTaskLaunchDraft;
   readonly deps: NewTaskLaunchDeps;
 }): string {
-  const key = newTaskLaunchKey(input.attempt.environmentId, input.attempt.threadId);
+  const key = addLaunch(input.attempt, input.draft, "starting");
+  beginWorktreeFeed(readNewTaskLaunch(key)!, input.deps.feedApi);
+  void run(key, input.deps);
+  return key;
+}
+
+function addLaunch(
+  attempt: NewTaskAttempt,
+  draft: NewTaskLaunchDraft,
+  status: "queued" | "starting",
+): string {
+  const key = newTaskLaunchKey(attempt.environmentId, attempt.threadId);
   const launch: NewTaskLaunch = {
     key,
-    attempt: input.attempt,
-    draft: input.draft,
-    status: "starting",
+    attempt,
+    draft,
+    status,
     failure: null,
+    queuedAt: attempt.createdAt,
   };
   useNewTaskLaunchStore.setState((state) => ({
     launchesByKey: pruneStarted({ ...state.launchesByKey, [key]: launch }),
   }));
-  beginWorktreeFeed(launch, input.deps.feedApi);
-  void run(key, input.deps);
   return key;
+}
+
+/**
+ * Keep a New Task on this device until its machine is live: nothing is sent
+ * until {@link startQueuedNewTaskLaunch}. Returns the launch's key.
+ */
+export function queueNewTaskLaunch(input: {
+  readonly attempt: NewTaskAttempt;
+  readonly draft: NewTaskLaunchDraft;
+}): string {
+  return addLaunch(input.attempt, input.draft, "queued");
+}
+
+/** Start a queued launch now that its machine is live. */
+export function startQueuedNewTaskLaunch(key: string, deps: NewTaskLaunchDeps): void {
+  const launch = readNewTaskLaunch(key);
+  if (!launch || launch.status !== "queued" || running.has(key)) return;
+  const next: NewTaskLaunch = { ...launch, status: "starting" };
+  patchLaunch(key, () => next);
+  beginWorktreeFeed(next, deps.feedApi);
+  void run(key, deps);
 }
 
 /**
@@ -231,6 +220,8 @@ export function retryNewTaskLaunch(key: string, deps: NewTaskLaunchDeps): void {
  * thread for it, so editing can never leave the task behind as a second one.
  */
 export function canEditNewTaskLaunch(launch: NewTaskLaunch): boolean {
+  if (launch.interrupted === true) return false;
+  if (launch.status === "queued") return true;
   const { attempt } = launch;
   // A new project the node took but this device has not seen yet: editing
   // would create it a second time under another id.
@@ -279,6 +270,7 @@ export interface NewTaskLaunchStepView {
 }
 
 export interface NewTaskLaunchView {
+  readonly queued: boolean;
   readonly title: string;
   readonly prompt: string;
   readonly attachmentCount: number;
@@ -287,6 +279,8 @@ export interface NewTaskLaunchView {
   readonly failureMessage: string | null;
   readonly canRetry: boolean;
   readonly canEdit: boolean;
+  /** Drop the task: only while the node holds nothing for it (as for Edit task). */
+  readonly canRemove: boolean;
 }
 
 /**
@@ -299,6 +293,8 @@ export function deriveNewTaskLaunchView(input: {
   readonly launch: NewTaskLaunch | null | undefined;
   readonly worktreeLaunch: WorktreeLaunch | null | undefined;
   readonly threadHasMessages: boolean;
+  /** The machine's name, for a queued task's status. */
+  readonly machineLabel?: string | null;
 }): NewTaskLaunchView | null {
   const { launch } = input;
   if (!launch || input.threadHasMessages) return null;
@@ -367,20 +363,28 @@ export function deriveNewTaskLaunchView(input: {
     });
   }
 
+  const queued = launch.status === "queued";
+  const canEdit = canEditNewTaskLaunch(launch);
   return {
+    queued,
     title: inferTaskTitle(attempt.prompt),
     prompt: attempt.prompt,
     attachmentCount: attempt.attachments.length,
-    statusLabel: failed
-      ? "Not started"
-      : launch.status === "started"
-        ? "Started"
-        : attempt.worktree.kind === "new"
-          ? "Setting up a worktree"
-          : "Starting",
-    steps,
+    statusLabel: queued
+      ? `Queued: starts when ${input.machineLabel?.trim() || "its machine"} is back`
+      : failed
+        ? "Not started"
+        : launch.status === "started"
+          ? "Started"
+          : attempt.worktree.kind === "new"
+            ? "Setting up a worktree"
+            : "Starting",
+    steps: queued
+      ? steps.map((step) => (step.status === "running" ? { ...step, status: "pending" } : step))
+      : steps,
     failureMessage: failed ? (launch.failure?.message ?? null) : null,
     canRetry: failed,
-    canEdit: canEditNewTaskLaunch(launch),
+    canEdit,
+    canRemove: canEdit,
   };
 }
