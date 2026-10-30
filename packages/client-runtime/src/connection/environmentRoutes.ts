@@ -269,15 +269,31 @@ export function routeReachForBaseUrl(httpBaseUrl: string): EnvironmentRouteReach
   if (host.endsWith(".ts.net")) return url.protocol === "https:" ? "tailnet-https" : "tailnet";
   const ipv4 = isPrivateIpv4(host);
   if (ipv4 !== null) return ipv4;
-  if (host.startsWith("fd") && host.includes(":")) return "tailnet";
+  // Tailscale's own IPv6 range; any other unique-local address is a LAN.
+  if (host.startsWith("fd7a:115c:a1e0:")) return "tailnet";
   if (host.endsWith(".local") || host.startsWith("fe80:")) return "lan";
   return "public";
 }
 
 /**
+ * Whether a direct address's transport itself proves which machine answers:
+ * HTTPS (the certificate names the host), or a Tailscale address (WireGuard
+ * names the peer). A plain LAN or public address does not: anyone on that
+ * network could answer with the machine's public descriptor and collect the
+ * linked bearer, so such an address never carries a Hub machine, whose relay
+ * route is end-to-end encrypted with a pinned identity.
+ */
+export function directRouteAuthenticatesMachine(route: EnvironmentRoute): boolean {
+  return (
+    route.kind === "direct" && (route.httpBaseUrl.startsWith("https:") || route.reach === "tailnet")
+  );
+}
+
+/**
  * The direct routes a Hub machine's linked direct access gives it: one per
- * linked record that names this Hub environment and is still within its
- * usable age (an older one waits for its renewal over the relay).
+ * linked record that names this Hub environment, is still within its usable
+ * age (an older one waits for its renewal over the relay), and whose
+ * transport authenticates the machine ({@link directRouteAuthenticatesMachine}).
  */
 export function linkedDirectRoutes(input: {
   readonly records: ReadonlyArray<SavedEnvironmentRecord>;
@@ -293,14 +309,15 @@ export function linkedDirectRoutes(input: {
     }
     const reach = routeReachForBaseUrl(record.httpBaseUrl);
     if (reach === null) continue;
-    routes.push({
+    const route: EnvironmentRoute = {
       kind: "direct",
       httpBaseUrl: record.httpBaseUrl,
       wsBaseUrl: record.wsBaseUrl,
       reach,
       expectedDescriptorId: record.environmentId,
       source: "linked",
-    });
+    };
+    if (directRouteAuthenticatesMachine(route)) routes.push(route);
   }
   return orderEnvironmentRoutes(routes);
 }

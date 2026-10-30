@@ -95,6 +95,17 @@ export function linkDesktopMachineDirectAccess(machine: {
   return linkOnce(machine);
 }
 
+/**
+ * The owner's "Remove direct access": the link and its bearer go, and the
+ * machine's connection leaves the direct route for the relay.
+ */
+export async function unlinkDesktopMachineDirectAccess(
+  hubEnvironmentId: EnvironmentId,
+): Promise<void> {
+  const { forgetDesktopHubLinkedDirectAccess } = await import("./desktopHubLinkedRoutes");
+  await forgetDesktopHubLinkedDirectAccess(hubEnvironmentId);
+}
+
 /** The direct environment linked to a Hub machine, if any. */
 export function readDesktopMachineDirectLink(hubEnvironmentId: EnvironmentId) {
   return (
@@ -109,13 +120,20 @@ export function readDesktopMachineDirectLink(hubEnvironmentId: EnvironmentId) {
  * has aged, well within the node's seven days. Machines never linked are left
  * alone, and a failure waits before the next connect tries again.
  */
-export function renewDesktopMachineDirectAccess(machine: {
-  readonly environmentId: EnvironmentId;
-  readonly label: string;
-}): void {
+export function renewDesktopMachineDirectAccess(
+  machine: {
+    readonly environmentId: EnvironmentId;
+    readonly label: string;
+  },
+  options?: {
+    /** The node refused the link's bearer: renew whatever its age. */
+    readonly force?: boolean;
+  },
+): void {
   if (readDesktopMachineDirectLink(machine.environmentId) === null) return;
   const nowMs = Date.now();
   if (
+    options?.force !== true &&
     !hubLinkedDirectAccessDue({
       hubEnvironmentId: machine.environmentId,
       records: listLinkedDirectRecords(),

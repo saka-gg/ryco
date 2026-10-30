@@ -64,14 +64,32 @@ relay lifecycle owner and never sees a route. `canAdoptHostedEnvironmentSession`
      kept under the direct id is dropped once;
    - linking again rewrites the stored address and bearer in place and asks the machine's
      connection to check its routes;
+   - only addresses whose transport proves which machine answers may carry a Hub machine: HTTPS
+     (the certificate names the host) or a Tailscale address (WireGuard names the peer). A plain
+     LAN or public address never does: anyone on that network could answer with the machine's
+     public descriptor and collect the linked bearer, while the relay is end-to-end encrypted with
+     a pinned identity. The direct route does not re-check that identity key itself; the transport
+     stands in for it;
    - the Hub connection's socket factory walks the routes on every attempt
      (`apps/web/src/platform/desktopHubLinkedRoutes.ts`): linked addresses are checked in
      parallel, the best one that answers as the machine's direct id gets a one-time socket token
-     from the linked bearer, else the relay Desktop main owns; a refused bearer holds its address
-     back until the link changes;
+     from the linked bearer, else the relay Desktop main owns;
+   - a relay refusal (authorization withdrawn, not verified, update required) blocks every direct
+     route and upgrade until a relay socket opens again: no route goes around the Hub's verdict;
+   - a refused bearer holds its address until the link changes (no timer) and asks for a renewal
+     over the relay;
    - while on the relay, better routes are checked every minute, when the network comes back and
-     when the window is shown, and a new attempt is made when one answers;
-   - a link older than three days is not used, so the relay carries the machine and renews it.
+     when the window is shown, and a new attempt is made when one answers; each check on the relay
+     also renews a link that is due;
+   - a link older than three days is not used, so the relay carries the machine and renews it;
+   - a linked session's work has the same owner as the device's relay channel, so a Git action
+     survives a route switch;
+   - Hub settings offer "Remove direct access"; signing out of the Hub (or another account)
+     forgets every link and its bearer; linking a machine again replaces an older link under
+     another direct id.
+   - Not done: an upgrade drops the open socket before the new route has proven itself (turns
+     run on the node and resume, but in-flight requests fail and retry); a linked session keeps
+     the role it was linked with until it is renewed.
 3. Mobile: ask for linked direct access over the relay through the shared helpers. Its adapter
    only supplies network changes.
 4. Optionally, the node pushes its direct endpoints in its config, and Desktop mode includes

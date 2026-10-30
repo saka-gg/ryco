@@ -51,6 +51,7 @@ const mockUpsert = vi.fn((record: Record<string, unknown>) => {
   ];
 });
 const mockListSavedEnvironmentRecords = vi.fn(() => mockSavedRecords);
+const mockListLinkedDirectRecords = vi.fn((): Array<Record<string, unknown>> => []);
 const mockEnsureSshEnvironment = vi.fn();
 const mockDisconnectSshEnvironment = vi.fn();
 const mockFetchSshEnvironmentDescriptor = vi.fn();
@@ -90,7 +91,7 @@ vi.mock("~/localApi", () => ({
 vi.mock("./catalog", () => ({
   getSavedEnvironmentRecord: mockGetSavedEnvironmentRecord,
   getLinkedDirectRecord: vi.fn(() => null),
-  listLinkedDirectRecords: vi.fn(() => []),
+  listLinkedDirectRecords: mockListLinkedDirectRecords,
   hasSavedEnvironmentRegistryHydrated: vi.fn(),
   listSavedEnvironmentRecords: mockListSavedEnvironmentRecords,
   persistSavedEnvironmentRecord: mockPersistSavedEnvironmentRecord,
@@ -312,6 +313,35 @@ describe("addSavedEnvironment", () => {
     // What a direct copy of the machine held under this id is forgotten.
     expect(mockClearRuntime).toHaveBeenCalledWith(EnvironmentId.make("environment-1"));
 
+    await resetEnvironmentServiceForTests();
+  }, 15_000);
+
+  it("keeps the Hub-linked routes in storage when a failed pairing is rolled back", async () => {
+    const linked = {
+      environmentId: EnvironmentId.make("environment-linked"),
+      label: "Studio",
+      httpBaseUrl: "https://studio.tail1.ts.net/",
+      wsBaseUrl: "wss://studio.tail1.ts.net/",
+      createdAt: "2026-10-20T00:00:00.000Z",
+      lastConnectedAt: null,
+      hubLink: { hubEnvironmentId: "env_hub", linkedAt: "2026-10-29T00:00:00.000Z" },
+    };
+    mockListLinkedDirectRecords.mockReturnValue([linked]);
+    const { addSavedEnvironment, resetEnvironmentServiceForTests } = await import("./service");
+
+    await expect(
+      addSavedEnvironment({
+        label: "Remote environment",
+        host: "remote.example.com",
+        pairingCode: "123456",
+      }),
+    ).rejects.toThrow("Unable to persist saved environment credentials.");
+
+    expect(mockSetSavedEnvironmentRegistry).toHaveBeenCalledWith([linked]);
+    expect(mockRegistrySetState).toHaveBeenCalledWith(
+      expect.objectContaining({ linkedById: { [linked.environmentId]: linked } }),
+    );
+    mockListLinkedDirectRecords.mockReturnValue([]);
     await resetEnvironmentServiceForTests();
   }, 15_000);
 

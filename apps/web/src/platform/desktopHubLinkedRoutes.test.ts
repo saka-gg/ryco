@@ -7,8 +7,9 @@ const remote = vi.hoisted(() => ({
   authError: class AuthError extends Error {},
 }));
 const catalog = vi.hoisted(() => ({
-  linked: [] as unknown[],
+  linked: [] as Array<Record<string, unknown>>,
   bearers: new Map<string, string>(),
+  removed: [] as string[],
 }));
 
 vi.mock("../environments/remote/api", () => ({
@@ -24,11 +25,23 @@ vi.mock("../environments/runtime/catalog", () => ({
   listLinkedDirectRecords: () => catalog.linked,
   readSavedEnvironmentBearerToken: async (environmentId: string) =>
     catalog.bearers.get(environmentId) ?? null,
+  removeSavedEnvironmentBearerToken: async (environmentId: string) => {
+    catalog.bearers.delete(environmentId);
+  },
+  useSavedEnvironmentRegistryStore: {
+    getState: () => ({
+      remove: (environmentId: string) => {
+        catalog.removed.push(environmentId);
+        catalog.linked = catalog.linked.filter((record) => record.environmentId !== environmentId);
+      },
+    }),
+  },
 }));
 
 import {
   createDesktopHubLinkedRoutes,
   requestDesktopHubRouteCheck,
+  forgetDesktopHubLinkedDirectAccess,
 } from "./desktopHubLinkedRoutes";
 
 const HUB = EnvironmentId.make("env_hub");
@@ -57,6 +70,7 @@ beforeEach(() => {
       `${wsBaseUrl}/anything?wsToken=${bearerToken}-token`,
   );
   catalog.linked = [];
+  catalog.removed = [];
   catalog.bearers = new Map([[DIRECT, "linked-bearer"]]);
 });
 
@@ -66,8 +80,8 @@ afterEach(() => {
 
 describe("Desktop's routes to a Hub machine", () => {
   it("takes the best linked address that answers as the machine, with the linked bearer", async () => {
-    catalog.linked = [linked("http://192.168.1.20:3773"), linked("https://studio.tail1.ts.net")];
-    remote.descriptors.set("http://192.168.1.20:3773", DIRECT);
+    catalog.linked = [linked("http://100.64.1.20:3773"), linked("https://studio.tail1.ts.net")];
+    remote.descriptors.set("http://100.64.1.20:3773", DIRECT);
     remote.descriptors.set("https://studio.tail1.ts.net", DIRECT);
 
     const route = await createDesktopHubLinkedRoutes(HUB).resolve(signal());
@@ -82,8 +96,8 @@ describe("Desktop's routes to a Hub machine", () => {
   });
 
   it("sends no credential to an address that answers as another machine, and falls back to the relay", async () => {
-    catalog.linked = [linked("http://192.168.1.20:3773")];
-    remote.descriptors.set("http://192.168.1.20:3773", "env-someone-else");
+    catalog.linked = [linked("http://100.64.1.20:3773")];
+    remote.descriptors.set("http://100.64.1.20:3773", "env-someone-else");
 
     expect(await createDesktopHubLinkedRoutes(HUB).resolve(signal())).toBeNull();
     expect(remote.wsUrl).not.toHaveBeenCalled();
@@ -91,31 +105,74 @@ describe("Desktop's routes to a Hub machine", () => {
 
   it("uses no link that names another Hub machine or is due for renewal", async () => {
     catalog.linked = [
-      linked("http://192.168.1.20:3773", {
+      linked("http://100.64.1.20:3773", {
         hubLink: { hubEnvironmentId: "env_other", linkedAt: new Date().toISOString() },
       }),
-      linked("http://192.168.1.21:3773", {
+      linked("http://100.64.1.21:3773", {
         hubLink: { hubEnvironmentId: HUB, linkedAt: "2026-01-01T00:00:00.000Z" },
       }),
     ];
-    remote.descriptors.set("http://192.168.1.20:3773", DIRECT);
-    remote.descriptors.set("http://192.168.1.21:3773", DIRECT);
+    remote.descriptors.set("http://100.64.1.20:3773", DIRECT);
+    remote.descriptors.set("http://100.64.1.21:3773", DIRECT);
 
     expect(await createDesktopHubLinkedRoutes(HUB).resolve(signal())).toBeNull();
   });
 
   it("holds back an address whose bearer the machine refused until the link changes", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      catalog.linked = [linked("http://100.64.1.20:3773")];
+      remote.descriptors.set("http://100.64.1.20:3773", DIRECT);
+      remote.wsUrl.mockRejectedValueOnce(new remote.authError("401"));
+      const onRefused = vi.fn();
+      const routes = createDesktopHubLinkedRoutes(HUB, { onRefused });
+
+      expect(await routes.resolve(signal())).toBeNull();
+      expect(onRefused).toHaveBeenCalledTimes(1);
+      // Not on a timer: hours later it is still held, so a healthy relay
+      // connection is never dropped for the same refusal.
+      vi.setSystemTime(Date.now() + 6 * 60 * 60 * 1000);
+      catalog.linked = [
+        linked("http://100.64.1.20:3773", {
+          hubLink: { hubEnvironmentId: HUB, linkedAt: new Date(Date.now() - 60_000).toISOString() },
+        }),
+      ];
+      expect(await routes.resolve(signal())).toBeNull();
+      expect(remote.wsUrl).toHaveBeenCalledTimes(1);
+
+      // Relinked (renewed over the relay): the address is tried again.
+      requestDesktopHubRouteCheck(HUB);
+      expect(await routes.resolve(signal())).not.toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it("never sends the bearer to a plain LAN address, even one that answers as the machine", async () => {
     catalog.linked = [linked("http://192.168.1.20:3773")];
     remote.descriptors.set("http://192.168.1.20:3773", DIRECT);
-    remote.wsUrl.mockRejectedValueOnce(new remote.authError("401"));
-    const routes = createDesktopHubLinkedRoutes(HUB);
 
-    expect(await routes.resolve(signal())).toBeNull();
-    expect(await routes.resolve(signal())).toBeNull();
-    expect(remote.wsUrl).toHaveBeenCalledTimes(1);
+    expect(await createDesktopHubLinkedRoutes(HUB).resolve(signal())).toBeNull();
+    expect(remote.wsUrl).not.toHaveBeenCalled();
+  });
 
-    // Relinked (renewed over the relay): the address is tried again.
-    requestDesktopHubRouteCheck(HUB);
-    expect(await routes.resolve(signal())).not.toBeNull();
+  it("forgets a machine's links and their bearers on Remove direct access, or all on sign-out", async () => {
+    catalog.linked = [
+      linked("http://100.64.1.20:3773"),
+      linked("http://100.64.1.30:3773", {
+        environmentId: "env-other-direct",
+        hubLink: { hubEnvironmentId: "env_other_hub", linkedAt: new Date().toISOString() },
+      }),
+    ];
+    catalog.bearers.set("env-other-direct", "other-bearer");
+
+    await forgetDesktopHubLinkedDirectAccess(HUB);
+    expect(catalog.removed).toEqual([DIRECT]);
+    expect(catalog.bearers.has(DIRECT)).toBe(false);
+    expect(catalog.bearers.get("env-other-direct")).toBe("other-bearer");
+
+    await forgetDesktopHubLinkedDirectAccess();
+    expect(catalog.removed).toEqual([DIRECT, "env-other-direct"]);
+    expect(catalog.bearers.size).toBe(0);
   });
 });

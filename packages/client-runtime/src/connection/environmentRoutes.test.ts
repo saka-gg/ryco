@@ -9,6 +9,7 @@ import {
   INITIAL_BETTER_ROUTE_STATE,
   RELAY_ROUTE,
   checkEnvironmentRoutes,
+  directRouteAuthenticatesMachine,
   directRoutesFromEndpoints,
   environmentRouteKey,
   linkedDirectRoutes,
@@ -206,7 +207,10 @@ describe("linked direct routes", () => {
       hubEnvironmentId: "env_hub" as EnvironmentId,
       nowMs: NOW,
       records: [
-        record({ httpBaseUrl: "http://192.168.1.20:3773", wsBaseUrl: "ws://192.168.1.20:3773" }),
+        record({
+          httpBaseUrl: "http://100.101.102.103:3773",
+          wsBaseUrl: "ws://100.101.102.103:3773",
+        }),
         record({}),
         record({
           environmentId: "env-other" as EnvironmentId,
@@ -217,14 +221,45 @@ describe("linked direct routes", () => {
           httpBaseUrl: "http://100.64.0.9:3773",
           hubLink: { hubEnvironmentId: "env_hub", linkedAt: "2026-10-27T11:59:00.000Z" },
         }),
-        record({ hubLink: undefined, httpBaseUrl: "http://10.0.0.2:3773" }),
+        record({ hubLink: undefined, httpBaseUrl: "http://100.64.0.10:3773" }),
       ],
     });
     expect(routes.map((route) => (route.kind === "direct" ? route.httpBaseUrl : "relay"))).toEqual([
       "https://studio.tail1234.ts.net",
-      "http://192.168.1.20:3773",
+      "http://100.101.102.103:3773",
     ]);
     expect(routes[0]).toMatchObject({ expectedDescriptorId: "env-direct", source: "linked" });
+  });
+
+  // The relay is end-to-end encrypted with a pinned identity; a direct address
+  // may carry the Hub machine only when its transport proves who answers.
+  it("never lets a plain LAN or public address carry a Hub machine", () => {
+    const routes = linkedDirectRoutes({
+      hubEnvironmentId: "env_hub" as EnvironmentId,
+      nowMs: NOW,
+      records: [
+        record({ httpBaseUrl: "http://192.168.1.20:3773" }),
+        record({ httpBaseUrl: "http://studio.local:3773" }),
+        record({ httpBaseUrl: "http://ryco.example.com" }),
+        record({ httpBaseUrl: "http://[fd12:3456::1]:3773" }),
+        record({ httpBaseUrl: "http://[fd7a:115c:a1e0::5]:3773" }),
+        record({ httpBaseUrl: "https://ryco.example.com" }),
+      ],
+    });
+    expect(routes.map((route) => (route.kind === "direct" ? route.httpBaseUrl : ""))).toEqual([
+      "http://[fd7a:115c:a1e0::5]:3773",
+      "https://ryco.example.com",
+    ]);
+    expect(
+      directRouteAuthenticatesMachine({
+        kind: "direct",
+        httpBaseUrl: "http://192.168.1.20:3773",
+        wsBaseUrl: "ws://192.168.1.20:3773",
+        reach: "lan",
+        expectedDescriptorId: "env-direct" as EnvironmentId,
+        source: "linked",
+      }),
+    ).toBe(false);
   });
 
   it("checks routes at once, sends no credential, and times out a silent one", async () => {

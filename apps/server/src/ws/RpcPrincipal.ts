@@ -39,6 +39,12 @@ export interface RpcPrincipal {
    */
   readonly peer?: "local" | "remote";
   readonly canManageLocalAccess: boolean;
+  /**
+   * Hub-linked direct sessions only: the hex fingerprint of the device whose relay channel the
+   * link was issued on. That device's work keeps one owner whichever route it reaches the node
+   * by (see {@link rpcPrincipalOwnerKey}).
+   */
+  readonly linkedDeviceFingerprintHex?: string;
   /** Relay channels only; see {@link RelayChannelAuthority}. */
   readonly relayAuthority?: () => RelayChannelAuthority;
 }
@@ -65,6 +71,10 @@ export const directRpcPrincipal = (session: AuthenticatedSession): RpcPrincipal 
         directSessionId: session.sessionId,
         directChainId: session.chainId,
         canManageLocalAccess: false,
+        linkedDeviceFingerprintHex: Buffer.from(
+          session.link.clientFingerprint,
+          "base64url",
+        ).toString("hex"),
       };
 
 export const relayRpcPrincipal = (
@@ -95,6 +105,11 @@ export const RELAY_UNIDENTIFIED_OWNER_KEY = "relay-unidentified";
  * every request is still authorized on its own.
  */
 export function rpcPrincipalOwnerKey(principal: RpcPrincipal): string {
+  // A device that reaches the node over its Hub relay and over a linked direct address is one
+  // owner: a Git action started on one route is resumed or cancelled on the other.
+  if (principal.transport === "direct" && principal.linkedDeviceFingerprintHex) {
+    return `relay-device:${principal.linkedDeviceFingerprintHex}`;
+  }
   if (principal.transport === "direct") {
     return directPairingOwnerKey(
       principal.directChainId ?? principal.directSessionId ?? principal.scopeId,

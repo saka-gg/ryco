@@ -14,7 +14,10 @@ import {
   type VisibilityAwarePoller,
 } from "../../lib/visibilityPolling";
 import { webAppLifecycle } from "../../platform/appLifecycle";
-import { linkDesktopMachineDirectAccess } from "../../platform/desktopHubLinkedDirectAccess";
+import {
+  linkDesktopMachineDirectAccess,
+  unlinkDesktopMachineDirectAccess,
+} from "../../platform/desktopHubLinkedDirectAccess";
 import { useSavedEnvironmentRegistryStore } from "../../environments/runtime";
 import {
   retainDesktopWorkspaceInteractiveScope,
@@ -966,6 +969,19 @@ export function HubSection({
                           {linkingEnvironmentId === machine.environmentId
                             ? "Adding direct access…"
                             : "Add direct access"}
+                        </Button>
+                      ) : null}
+                      {presentation.removeDirectAccessAction ? (
+                        <Button
+                          size="xs"
+                          variant="ghost"
+                          onClick={() =>
+                            void unlinkDesktopMachineDirectAccess(machine.environmentId).catch(
+                              () => undefined,
+                            )
+                          }
+                        >
+                          Remove direct access
                         </Button>
                       ) : null}
                       {presentation.connectionActions ? (

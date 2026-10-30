@@ -229,6 +229,12 @@ export class DesktopWorkspaceIpcSocketFactory {
   #pendingDirect: { readonly routeKey: string; readonly url: string } | null = null;
   #pendingRouteCheck: AbortController | null = null;
   #activeRoute: DesktopWorkspaceActiveRoute | null = null;
+  /**
+   * The relay ended this machine for good (authorization withdrawn, not
+   * verified, update required). Until a relay socket opens again, no attempt
+   * may take a direct route around that verdict, and no upgrade may start one.
+   */
+  #relayRefused = false;
   #generation = 0;
   #disposed = false;
   #retryable = true;
@@ -244,6 +250,7 @@ export class DesktopWorkspaceIpcSocketFactory {
     onOpen: () => {
       this.#retryAfterMs = undefined;
       this.#policy.opened();
+      if (this.#activeRoute === "relay") this.#relayRefused = false;
     },
     onClose: () => this.#policy.closed(),
     isSocketCurrent: (socket) => socket === (this.#currentSocket as unknown),
@@ -286,12 +293,17 @@ export class DesktopWorkspaceIpcSocketFactory {
     return this.#activeRoute;
   }
 
+  /** Whether a better route may be tried now: never past the relay's own refusal. */
+  get mayUpgrade(): boolean {
+    return !this.#disposed && this.#retryable && !this.#relayRefused;
+  }
+
   async nextUrl(): Promise<string> {
     if (this.#disposed || !this.#retryable)
       throw new Error("Desktop workspace requires attention.");
     const generation = this.#generation;
     this.#pendingDirect = null;
-    if (this.#directRoutes) {
+    if (this.#directRoutes && !this.#relayRefused) {
       // Each attempt walks the routes again: a direct route that answers as
       // this machine wins, otherwise the relay below. The walk belongs to this
       // attempt; a newer one or a dispose abandons it.
@@ -351,6 +363,7 @@ export class DesktopWorkspaceIpcSocketFactory {
       onClose: (event) => {
         if (this.#currentSocket !== socket) return;
         this.#retryable = event.retryable ?? true;
+        if (event.retryable === false) this.#relayRefused = true;
         this.#retryAfterMs = event.retryAfterMs;
       },
     });

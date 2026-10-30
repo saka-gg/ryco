@@ -133,10 +133,15 @@ export function createRemoteEnvironmentApi(httpClient: HttpClientService, baseOr
         bearerToken: input.bearerToken,
         ...(input.signal === undefined ? {} : { signal: input.signal }),
       }),
-    fetchRemoteEnvironmentDescriptor: async (input: { readonly httpBaseUrl: string }) =>
+    fetchRemoteEnvironmentDescriptor: async (input: {
+      readonly httpBaseUrl: string;
+      /** Abandons the request, e.g. a route check that timed out or was overtaken. */
+      readonly signal?: AbortSignal;
+    }) =>
       fetchRemoteJson<ExecutionEnvironmentDescriptor>(httpClient, {
         httpBaseUrl: input.httpBaseUrl,
         pathname: "/.well-known/ryco/environment",
+        ...(input.signal === undefined ? {} : { signal: input.signal }),
       }),
     issueRemoteWebSocketToken: async (input: {
       readonly httpBaseUrl: string;

@@ -359,5 +359,53 @@ describe("desktop transport frame buffers", () => {
       await factory.nextUrl();
       expect(() => factory.createSocket("ws://evil.example/ws")).toThrow("route changed");
     });
+
+    it("takes no direct route around the relay's refusal until the relay accepts the machine again", async () => {
+      let listener: ((event: DesktopWorkspaceTransportEvent) => void) | undefined;
+      let sequence = 0;
+      const bridge = {
+        ...relayBridge(),
+        prepareDesktopWorkspaceTransport: vi.fn(async () => ({
+          transportId: String(++sequence).padStart(32, "R"),
+        })),
+        onDesktopWorkspaceTransportEvent: vi.fn((next) => {
+          listener = next;
+          return () => undefined;
+        }),
+      };
+      const resolve = vi.fn(async (): Promise<{ routeKey: string; url: string } | null> => ({
+        routeKey: "http://100.64.1.20:3773",
+        url: "ws://100.64.1.20:3773/ws?wsToken=t",
+      }));
+      const factory = new DesktopWorkspaceIpcSocketFactory(EnvironmentId.make("env_hub"), bridge, {
+        resolve,
+      });
+      // The first attempt fell back to the relay, which then ended the machine for good.
+      resolve.mockResolvedValueOnce(null);
+      const relayUrl = await factory.nextUrl();
+      factory.createSocket(relayUrl);
+      await Promise.resolve();
+      listener?.({
+        type: "close",
+        transportId: "1".padStart(32, "R"),
+        code: 4403,
+        reason: "authorization withdrawn",
+        retryable: false,
+      } as DesktopWorkspaceTransportEvent);
+      expect(factory.mayUpgrade).toBe(false);
+
+      // An explicit new session (the user's Reconnect) still goes to the relay first.
+      factory.lifecycleHandlers.onSessionStart?.();
+      expect(factory.mayUpgrade).toBe(false);
+      const next = await factory.nextUrl();
+      expect(next).toBe(`ws://desktop-workspace.invalid/${"2".padStart(32, "R")}`);
+      expect(resolve).toHaveBeenCalledTimes(1);
+
+      // Once the relay takes the machine again, direct routes are back.
+      factory.createSocket(next);
+      factory.lifecycleHandlers.onOpen?.();
+      expect(factory.mayUpgrade).toBe(true);
+      expect(await factory.nextUrl()).toBe("ws://100.64.1.20:3773/ws?wsToken=t");
+    });
   });
 });
