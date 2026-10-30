@@ -1,6 +1,6 @@
 import { WS_METHODS } from "@ryco/contracts/rpc";
-import { hostedRoleAllows } from "@ryco/shared/rpcAccessPolicy";
 
+import { nodeRoleAllows } from "../../connection/nodeRoleAccess";
 import type { InboxEnvironment } from "../inbox/inboxModel";
 import type { TerminalConnectionState } from "./terminalScreenModel";
 
@@ -10,8 +10,7 @@ import type { TerminalConnectionState } from "./terminalScreenModel";
  * is a viewer to it; an unknown role is not assumed to be enough.
  */
 export function terminalRoleAllowed(role: InboxEnvironment["role"]): boolean {
-  if (role === undefined) return false;
-  return hostedRoleAllows(role === "client" ? "viewer" : role, WS_METHODS.terminalWrite);
+  return role !== undefined && nodeRoleAllows(role, WS_METHODS.terminalWrite);
 }
 
 export interface TerminalEnvironmentAccess {

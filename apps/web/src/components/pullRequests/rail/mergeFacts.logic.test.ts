@@ -25,10 +25,7 @@ import {
   deriveNextActionButton,
   deriveNextActionMenu,
   hostSupportsCommand,
-  isHeadMovedError,
-  mergeMethodOptions,
   nextUnresolvedThread,
-  resolveMergeMethod,
   sameCommand,
   stackMergeCount,
   type MergeFactsInput,
@@ -531,40 +528,13 @@ describe("deriveMergeStatusLines without check rollups", () => {
   });
 });
 
-describe("merge method helpers", () => {
-  it("falls back to the first allowed method", () => {
-    const detail = fixtureDetail(701);
-    expect(mergeMethodOptions(detail).find((option) => option.method === "merge")).toMatchObject({
-      disabledReason: "Not allowed in this repository",
-    });
-    expect(resolveMergeMethod(detail, "merge")).toBe("squash");
-    expect(resolveMergeMethod(detail, "rebase")).toBe("rebase");
-    expect(resolveMergeMethod(detail, null)).toBe("squash");
-  });
-
-  it("leaves out methods the host cannot merge with", () => {
-    const detail = fixtureDetail(701);
-    const hostMethods = new Set(["rebase"] as const);
-    expect(mergeMethodOptions(detail, hostMethods).map((option) => option.method)).toEqual([
-      "rebase",
-    ]);
-    expect(resolveMergeMethod(detail, "squash", hostMethods)).toBe("rebase");
-  });
-
+describe("merge fact helpers", () => {
   it("reads job ids from Actions URLs only", () => {
     expect(
       checkJobId({ kind: "check-run", url: "https://github.com/o/r/actions/runs/12/job/34" }),
     ).toBe("34");
     expect(checkJobId({ kind: "status-context", url: "https://ci.example/34" })).toBeNull();
     expect(checkJobId({ kind: "check-run", url: null })).toBeNull();
-  });
-
-  it("recognizes a merge refused because the head moved", () => {
-    expect(
-      isHeadMovedError(new Error("Head branch was modified. Review and try the merge again.")),
-    ).toBe(true);
-    expect(isHeadMovedError(new Error("Pull request head changed since it was loaded"))).toBe(true);
-    expect(isHeadMovedError(new Error("Required status check is failing"))).toBe(false);
   });
 
   it("prefers the named authors' unresolved thread", () => {

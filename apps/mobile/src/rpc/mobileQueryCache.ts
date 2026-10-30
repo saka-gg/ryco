@@ -62,6 +62,12 @@ export interface MobileQueryCache {
    * again in the background (their previous data stays visible).
    */
   readonly invalidate: () => void;
+  /**
+   * After a change the reader made: every entry whose key parts (`[label,
+   * ...buildKey parts]`) match is marked stale and fenced, and the observed
+   * ones read again in the background.
+   */
+  readonly refreshMatching: (matches: (parts: ReadonlyArray<string>) => boolean) => void;
   /** Environment teardown: forget everything the cache holds for one node. */
   readonly clearEnvironment: (environmentId: EnvironmentId) => void;
   /** Cache-only eviction of one node's unobserved entries; an entry on screen stays. */
@@ -181,19 +187,26 @@ export function createMobileQueryCache(labelPrefix: string): MobileQueryCache {
     return { ...query, watch };
   }
 
+  function refreshController(controller: Parameters<typeof registry.cancel>[0]): void {
+    controller.lastFetchedAt = 0;
+    // Fence any response already in flight before asking an observed query
+    // for fresh node-owned state. The registry otherwise joins duplicate
+    // callers, which would let the refresh wait on the stale request.
+    registry.cancel(controller);
+    if (controller.subscriberCount > 0) {
+      void registry.runController(controller);
+    }
+  }
+
   return {
     defineQuery,
-    invalidate: () => {
-      for (const controller of registry.controllers.values()) {
-        controller.lastFetchedAt = 0;
-        // Fence any response already in flight before asking an observed query
-        // for fresh node-owned state. The registry otherwise joins duplicate
-        // callers, which would let the invalidation wait on the stale request.
-        registry.cancel(controller);
-        if (controller.subscriberCount > 0) {
-          void registry.runController(controller);
-        }
+    refreshMatching: (matches) => {
+      for (const [compositeKey, controller] of registry.controllers) {
+        if (matches(compositeKey.split(KEY_SEP))) refreshController(controller);
       }
+    },
+    invalidate: () => {
+      for (const controller of registry.controllers.values()) refreshController(controller);
     },
     clearEnvironment: (environmentId) => {
       // The registry-global helper runs first — this is the single mobile teardown

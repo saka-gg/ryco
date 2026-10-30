@@ -104,6 +104,7 @@ export const CLIENT_RUNTIME_PURE_TEST_FILES = [
   "src/state/pull-request-review/listModel.test.ts",
   "src/state/pull-request-review/listReadiness.test.ts",
   "src/state/pull-request-review/listStacks.test.ts",
+  "src/state/pull-request-review/merge.test.ts",
   "src/state/pull-request-review/mutationRefresh.test.ts",
   "src/state/pull-request-review/nextAction.test.ts",
   "src/state/pull-request-review/readiness.test.ts",

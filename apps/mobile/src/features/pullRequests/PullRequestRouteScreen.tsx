@@ -12,7 +12,6 @@ import { LoadingStrip } from "../../components/LoadingStrip";
 import { cn } from "../../lib/cn";
 import { openWebLink } from "../../lib/openWebLink";
 import {
-  derivePullRequestDetailItems,
   derivePullRequestHeader,
   describePullRequestNextStep,
   parsePullRequestNumberParam,
@@ -26,6 +25,8 @@ import {
   type PullRequestNextStep,
   type PullRequestThreadModel,
 } from "./pullRequestDetailModel";
+import { useHomeEnvironments } from "../home/useHomeEnvironments";
+import { PullRequestActionsPanel } from "./PullRequestActionsPanel";
 import {
   ActorLine,
   CheckDot,
@@ -35,9 +36,11 @@ import {
   PullRequestStatePill,
   SectionTitle,
 } from "./PullRequestParts";
+import { usePullRequestActions } from "./usePullRequestActions";
 import {
   usePullRequest,
   usePullRequestCheckout,
+  usePullRequestDetailItems,
   usePullRequestDiff,
   useSourceControlProvider,
 } from "./usePullRequestData";
@@ -280,7 +283,10 @@ function FileRow(props: {
   );
 }
 
-/** One pull request: header, conversation, checks and files, read-only. */
+/**
+ * One pull request: header, conversation, checks and files, plus review,
+ * merge and branch update where the host, the viewer and the node allow them.
+ */
 export function PullRequestRouteScreen(props: PullRequestRouteProps) {
   const navigation = useNavigation();
   const environmentIdRaw = firstParam(props.route.params.environmentId);
@@ -299,6 +305,38 @@ export function PullRequestRouteScreen(props: PullRequestRouteProps) {
     detail: pullRequest.detail.data,
     enabled: tab === "files" && pullRequest.capabilities.diff,
   });
+  const detail = pullRequest.detail.data;
+  const hostName = resolveChangeRequestPresentationForKind(
+    detail?.provider ?? "github",
+  ).providerName;
+  const items = usePullRequestDetailItems({
+    tab,
+    hostName,
+    hostKnown: provider !== null,
+    pullRequest,
+    diff,
+  });
+
+  // The same readiness the thread screen sends with: connected, allowed to
+  // change things, and not a cached view. A role the node refuses changes to
+  // (a viewer) is offered none.
+  const environments = useHomeEnvironments();
+  const environment = environments.find((entry) => entry.environmentId === environmentId);
+  const actions = usePullRequestActions({
+    environmentId,
+    cwd: checkout.cwd,
+    number,
+    detail,
+    viewer: pullRequest.activity.data?.viewer ?? null,
+    nextAction: pullRequest.nextAction,
+    capabilities: pullRequest.capabilities,
+    mutationReady: environment?.mutationReady === true,
+    role: environment?.role,
+    // A review the viewer started on the host only counts where the host reports it.
+    hostPendingComments: pullRequest.capabilities.submitReview.pendingReview
+      ? (pullRequest.activity.data?.pendingReview?.commentsCount ?? 0)
+      : 0,
+  });
 
   useEffect(() => {
     if (number !== null) navigation.setOptions({ title: `#${number}` });
@@ -316,11 +354,7 @@ export function PullRequestRouteScreen(props: PullRequestRouteProps) {
     );
   }
 
-  const detail = pullRequest.detail.data;
   const header = derivePullRequestHeader(detail, null);
-  const hostName = resolveChangeRequestPresentationForKind(
-    detail?.provider ?? "github",
-  ).providerName;
 
   const openFile = (path: string) =>
     navigation.navigate("ProjectPullRequestFile", {
@@ -329,18 +363,6 @@ export function PullRequestRouteScreen(props: PullRequestRouteProps) {
       number: String(number),
       path: [...relativePathToRouteSegments(path)],
     });
-
-  const items = derivePullRequestDetailItems({
-    tab,
-    header,
-    hostName,
-    detail,
-    activity: pullRequest.activity.data,
-    activitySupported: pullRequest.capabilities.activity,
-    hostKnown: provider !== null,
-    checks: pullRequest.checks,
-    diff,
-  });
 
   const loadError = pullRequest.detail.error?.message ?? null;
   const refreshing =
@@ -356,6 +378,7 @@ export function PullRequestRouteScreen(props: PullRequestRouteProps) {
           hostName={hostName}
         />
       ) : null}
+      <PullRequestActionsPanel control={actions} />
       {loadError && detail === null ? (
         <View className="px-4 pt-3">
           <ErrorBanner message={loadError} />

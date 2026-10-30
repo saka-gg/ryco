@@ -4,7 +4,10 @@ import type {
   SourceControlChangeRequestDetail,
   SourceControlChangeRequestMergeMethod,
 } from "@ryco/contracts";
-import type { ChangeRequestNextAction } from "@ryco/client-runtime/state/pull-request-review";
+import {
+  resolveMergeMethod,
+  type ChangeRequestNextAction,
+} from "@ryco/client-runtime/state/pull-request-review";
 import { useMemo } from "react";
 
 import { preferredUpdateBranchMethod } from "@ryco/shared/changeRequestHostCapabilities";
@@ -17,7 +20,6 @@ import {
   deriveNextActionButton,
   deriveNextActionMenu,
   hostSupportsCommand,
-  resolveMergeMethod,
   type MergeStatusLine,
   type MergeVerdict,
   type NextActionButtonSpec,

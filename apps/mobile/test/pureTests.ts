@@ -21,6 +21,7 @@ export const MOBILE_PURE_TEST_FILES = [
   "src/components/anchoredMenuModel.test.ts",
   "src/connection/clientRuntimeMetroResolution.test.ts",
   "src/connection/metroStartupConfig.test.ts",
+  "src/connection/nodeRoleAccess.test.ts",
   "src/connection/savedSessionHints.test.ts",
   "src/features/access/appAccessModel.test.ts",
   "src/features/access/directCredentialAccess.test.ts",
