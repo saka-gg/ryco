@@ -1,5 +1,6 @@
 import type {
   AgentTokenMode,
+  ChatAttachment,
   ScopedThreadRef,
   ClientOrchestrationCommand,
   CommandId,
@@ -249,6 +250,72 @@ export function buildFollowUpQueueAddCommand(
     ...(input.position === undefined ? {} : { position: input.position }),
     ...(input.hold ? { hold: toFollowUpQueueHoldInput(input.hold) } : {}),
     createdAt: input.createdAt,
+  };
+}
+
+/**
+ * The node's queued entry a composer is editing (web and mobile): the next send saves it in
+ * place (`thread.queue.edit` at the revision shown). Its stored attachments stay unless the
+ * person drops them while editing; ones added in the composer are uploaded and added.
+ */
+export interface FollowUpQueueEdit {
+  readonly threadKey: string;
+  readonly messageId: MessageId;
+  /** The revision the person edited; a save at it is refused once the entry changed. */
+  readonly revision: number;
+  /** The entry's stored attachments that stay. */
+  readonly keptAttachmentIds: NonNullable<FollowUpQueueEditCommand["keptAttachmentIds"]>;
+}
+
+/** Starts editing `entry`: every stored attachment it has stays until dropped. */
+export function followUpQueueEditOf(
+  threadKey: string,
+  entry: Pick<QueuedFollowUp, "messageId" | "revision" | "attachments">,
+): FollowUpQueueEdit {
+  return {
+    threadKey,
+    messageId: entry.messageId,
+    revision: entry.revision,
+    keptAttachmentIds: entry.attachments.flatMap((attachment) =>
+      attachment.id === undefined ? [] : [attachment.id],
+    ),
+  };
+}
+
+/** A stored attachment the edit keeps, as the composer shows it. */
+export interface FollowUpQueueEditAttachment {
+  readonly id: NonNullable<ChatAttachment["id"]>;
+  readonly name: string;
+  readonly kind: "image" | "file";
+}
+
+/** The stored attachments `edit` still keeps, in the entry's order, for the composer to show. */
+export function followUpQueueEditAttachments(
+  edit: Pick<FollowUpQueueEdit, "keptAttachmentIds">,
+  entry: Pick<QueuedFollowUp, "attachments"> | null | undefined,
+): ReadonlyArray<FollowUpQueueEditAttachment> {
+  const kept = new Set<string>(edit.keptAttachmentIds);
+  return (entry?.attachments ?? []).flatMap((attachment) =>
+    attachment.id === undefined || !kept.has(attachment.id)
+      ? []
+      : [
+          {
+            id: attachment.id,
+            name: attachment.name ?? (attachment.type === "image" ? "Image" : "File"),
+            kind: attachment.type === "image" ? ("image" as const) : ("file" as const),
+          },
+        ],
+  );
+}
+
+/** The edit without one stored attachment: saving it then drops that attachment. */
+export function withoutFollowUpQueueEditAttachment<E extends FollowUpQueueEdit>(
+  edit: E,
+  attachmentId: string,
+): E {
+  return {
+    ...edit,
+    keptAttachmentIds: edit.keptAttachmentIds.filter((id) => id !== attachmentId),
   };
 }
 

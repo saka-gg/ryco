@@ -93,6 +93,10 @@ import {
 } from "@ryco/client-runtime/scoped";
 import {
   buildFollowUpQueueEditCommand,
+  followUpQueueEditAttachments,
+  followUpQueueEditOf,
+  type FollowUpQueueEdit,
+  withoutFollowUpQueueEditAttachment,
   buildFollowUpQueueMoveCommand,
   buildFollowUpQueuePauseCommand,
   buildFollowUpQueueRemoveCommand,
@@ -538,16 +542,6 @@ const EMPTY_QUEUED_MESSAGES: readonly QueuedMessage[] = Object.freeze([]);
 const EMPTY_PENDING_FOLLOW_UPS: readonly PendingFollowUpAdd[] = Object.freeze([]);
 const EMPTY_STEER_ATTEMPTS: QueuedMessageSteerAttempts = Object.freeze({});
 
-/** The node's queued entry the composer is editing; saving the composer saves it. */
-interface ServerQueueEdit {
-  readonly threadKey: string;
-  readonly messageId: MessageId;
-  readonly revision: number;
-  /** The entry's stored attachments, kept as they are. */
-  readonly keptAttachmentIds: NonNullable<
-    Parameters<typeof buildFollowUpQueueEditCommand>[0]["keptAttachmentIds"]
-  >;
-}
 /** A launch handed off this recently is still being carried over by a new view. */
 const CONTINUED_LAUNCH_WINDOW_MS = 5_000;
 
@@ -1425,8 +1419,10 @@ export default function ChatView(props: ChatViewProps) {
   );
   // The tab entry whose add to the node's queue is on its way: no Edit or Steer until it landed.
   const movingQueuedMessageId = useMovingQueuedMessageId(activeThreadKey);
-  const [serverQueueEdit, setServerQueueEdit] = useState<ServerQueueEdit | null>(null);
-  const [savingServerQueueEdit, setSavingServerQueueEdit] = useState<ServerQueueEdit | null>(null);
+  const [serverQueueEdit, setServerQueueEdit] = useState<FollowUpQueueEdit | null>(null);
+  const [savingServerQueueEdit, setSavingServerQueueEdit] = useState<FollowUpQueueEdit | null>(
+    null,
+  );
   const shownServerQueueEdit =
     serverQueueEdit !== null && serverQueueEdit.threadKey === activeThreadKey
       ? serverQueueEdit
@@ -3494,14 +3490,7 @@ export default function ChatView(props: ChatViewProps) {
         composerFileReferencesRef,
       };
       if (!entry || entry.status === "steering" || composerRefsHaveContent(refs)) return;
-      setServerQueueEdit({
-        threadKey: activeThreadKey,
-        messageId: entry.messageId,
-        revision: entry.revision,
-        keptAttachmentIds: entry.attachments.flatMap((attachment) =>
-          attachment.id === undefined ? [] : [attachment.id],
-        ) as ServerQueueEdit["keptAttachmentIds"],
-      });
+      setServerQueueEdit(followUpQueueEditOf(activeThreadKey, entry));
       restoreComposerContent({
         refs,
         composerHandle: { readComposer },
@@ -7529,6 +7518,26 @@ export default function ChatView(props: ChatViewProps) {
                 getSteerUnavailableReason={getQueuedSteerUnavailableReason}
                 onSteer={(row) => void handleSteerQueuedMessage(row)}
                 editingId={activeServerQueueEdit?.messageId ?? null}
+                editingAttachments={
+                  activeServerQueueEdit === null
+                    ? undefined
+                    : followUpQueueEditAttachments(
+                        activeServerQueueEdit,
+                        serverFollowUpQueue?.entries.find(
+                          (entry) => entry.messageId === activeServerQueueEdit.messageId,
+                        ),
+                      )
+                }
+                onDropEditingAttachment={
+                  activeServerQueueEdit === null || savingServerQueueEdit === activeServerQueueEdit
+                    ? undefined
+                    : (attachmentId) =>
+                        setServerQueueEdit((current) =>
+                          current === activeServerQueueEdit
+                            ? withoutFollowUpQueueEditAttachment(current, attachmentId)
+                            : current,
+                        )
+                }
                 onCancelEdit={cancelServerQueueEdit}
               />
               <div ref={composerBoxRef} className="relative z-10">

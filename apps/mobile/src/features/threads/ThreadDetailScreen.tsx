@@ -98,7 +98,11 @@ import {
   selectServerFollowUpQueueSupported,
   selectThreadFollowUpQueue,
   shouldQueueFollowUpOnServer,
+  followUpQueueEditAttachments,
+  followUpQueueEditOf,
+  withoutFollowUpQueueEditAttachment,
   type FollowUpQueueCommand,
+  type FollowUpQueueEdit,
   type FollowUpQueueRow,
   type PendingFollowUpAdd,
   type QueuedMessageSteerAttempt,
@@ -265,11 +269,7 @@ import {
   selectThreadDeliveryRecord,
 } from "./threadDeliveryNoticeModel";
 import { ThreadQueuedMessages } from "./ThreadQueuedMessages";
-import {
-  clearCancelledServerQueueEdit,
-  serverQueueEditOf,
-  type ServerQueueEdit,
-} from "./serverQueueEdit";
+import { clearCancelledServerQueueEdit } from "./serverQueueEdit";
 import type { ThreadComposerHandle } from "./ThreadComposer";
 import { ThreadContextBar } from "./ThreadContextBar";
 import {
@@ -702,8 +702,10 @@ export function ThreadDetailScreen(props: {
       steeringMessageIds,
     ],
   );
-  const [serverQueueEdit, setServerQueueEdit] = useState<ServerQueueEdit | null>(null);
-  const [savingServerQueueEdit, setSavingServerQueueEdit] = useState<ServerQueueEdit | null>(null);
+  const [serverQueueEdit, setServerQueueEdit] = useState<FollowUpQueueEdit | null>(null);
+  const [savingServerQueueEdit, setSavingServerQueueEdit] = useState<FollowUpQueueEdit | null>(
+    null,
+  );
   const shownServerQueueEdit =
     serverQueueEdit !== null && serverQueueEdit.threadKey === outboxThreadKey
       ? serverQueueEdit
@@ -1900,7 +1902,7 @@ export function ThreadDetailScreen(props: {
       setSendError(unavailableReason);
       return;
     }
-    setServerQueueEdit(serverQueueEditOf(outboxThreadKey, entry));
+    setServerQueueEdit(followUpQueueEditOf(outboxThreadKey, entry));
     setSendError(null);
     composerRef.current?.setText(entry.text);
     composerRef.current?.focus();
@@ -2709,6 +2711,26 @@ export function ThreadDetailScreen(props: {
             }
           : {})}
         editingId={activeServerQueueEdit?.messageId ?? null}
+        {...(activeServerQueueEdit === null
+          ? {}
+          : {
+              editingAttachments: followUpQueueEditAttachments(
+                activeServerQueueEdit,
+                serverFollowUpQueue?.entries.find(
+                  (entry) => entry.messageId === activeServerQueueEdit.messageId,
+                ),
+              ),
+              ...(savingServerQueueEdit === activeServerQueueEdit
+                ? {}
+                : {
+                    onDropEditingAttachment: (attachmentId: string) =>
+                      setServerQueueEdit((current) =>
+                        current === activeServerQueueEdit
+                          ? withoutFollowUpQueueEditAttachment(current, attachmentId)
+                          : current,
+                      ),
+                  }),
+            })}
         onCancelEdit={cancelServerQueueEdit}
       />
 
