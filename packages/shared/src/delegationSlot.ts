@@ -1,7 +1,8 @@
 /**
- * The hold a capped `ryco_create_threads` request puts on a task waiting for a free slot, as both
- * the node (`delegationSlotHold.ts`) and clients (the queue badge) tell it from other holds. Its
- * own module, so a client's boot does not carry it.
+ * The holds a capped `ryco_create_threads` request puts on its tasks (one waiting for a free
+ * slot, and one its delegating chat gave up before it started), as both the node
+ * (`delegationSlotHold.ts`) and clients (the queue badge) tell them from other holds. Its own
+ * module, so a client's boot does not carry it.
  *
  * @module delegationSlot
  */

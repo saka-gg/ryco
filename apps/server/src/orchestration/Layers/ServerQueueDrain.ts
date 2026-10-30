@@ -3,7 +3,8 @@
  *
  * The boot path holds only this layer: it notes which queues held entries when the process
  * started (a restart never sends them without a Resume; a task that waits only for a free slot of
- * its delegation request is left to that request) and, once commands are admitted, loads
+ * its delegation request is left to that request, and one its delegating chat gave up already
+ * waits for a Resume) and, once commands are admitted, loads
  * the drain itself (`serverQueueDrainRuntime.ts`) with `import()` and runs it. Until a client
  * queues a follow-up the runtime has nothing to send, so it stays off the boot closure
  * (serverBundleBoundaries.test.ts).
@@ -42,7 +43,9 @@ const loadRuntime = Effect.promise(() => import("../serverQueueDrainRuntime.ts")
 
 /**
  * The threads whose queue an earlier process left with entries. A task that waits only for a
- * free slot of its delegation request is not among them: the node releases it, not a Resume.
+ * free slot of its delegation request is not among them: the node releases it, not a Resume. Nor
+ * is one held only by its given-up pause: it already waits for a Resume, and a restart hold would
+ * only change its banner.
  */
 export const threadsQueuedAtBoot = (threads: OrchestrationReadModel["threads"]) =>
   threads

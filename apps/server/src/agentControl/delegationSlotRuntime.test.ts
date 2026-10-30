@@ -608,6 +608,23 @@ describe("delegation slots", () => {
     }),
   );
 
+  it.effect("holds the last released task too, when no other task of the request waits", () =>
+    Effect.gen(function* () {
+      const w = world({ cap: 1, count: 2 });
+      const slots = yield* makeDelegationSlots(w.deps);
+      w.task(0).busy = false;
+      yield* slots.pass;
+      assert.deepEqual(w.released(), [taskId(1)]);
+      // Nothing of the request waits for a slot any more, but task 1 is not sent yet when the
+      // person stops the chat: its return says it stays paused, so it must not start on its own.
+      assert.isNull(w.task(1).queue?.hold);
+      w.parent.stopped = true;
+      yield* slots.pass;
+      assert.deepEqual(w.task(1).queue?.hold?.causeKeys, [givenUpKey]);
+      assert.deepEqual(w.released(), [taskId(1)]);
+    }),
+  );
+
   it.effect("releases no slot once the delegating chat was archived or deleted", () =>
     Effect.gen(function* () {
       const w = world({ cap: 1, count: 3 });

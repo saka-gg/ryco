@@ -335,7 +335,7 @@ export const makeDelegationSlots = (deps: DelegationSlotDeps) =>
           };
         }
         if (waiting) return { state: "waiting" as const, record };
-        if (unsent) return { state: "working" as const };
+        if (unsent) return { state: "working" as const, unsent: true };
         const shell = yield* deps.getThreadShellById(threadId);
         if (Option.isNone(shell)) return { state: "gone" as const };
         // Running, starting, a start not bound yet, a question or approval, background work, or
@@ -446,15 +446,15 @@ export const makeDelegationSlots = (deps: DelegationSlotDeps) =>
       Effect.gen(function* () {
         const cap = yield* capOf(proposalId);
         // Not a capped request of this node: its holds are left to the person.
-        if (cap === null) return;
+        if (cap === null) return false;
         const operation = yield* deps.getOperation(proposalId);
-        if (Option.isNone(operation)) return;
+        if (Option.isNone(operation)) return false;
         const status = operation.value.status;
         // Still creating its tasks (its completion wakes a pass), or rolled back: a failed or
         // cancelled request never starts its waiting tasks, which its rollback deletes or archives.
         if (status !== "completed") {
           if (status === "failed" || status === "cancelled") caps.set(proposalId, null);
-          return;
+          return false;
         }
         const causeKey = `${deps.causePrefix}${proposalId}`;
         const tasks = yield* Effect.forEach(
@@ -476,6 +476,7 @@ export const makeDelegationSlots = (deps: DelegationSlotDeps) =>
           yield* giveUp(proposalId, task.threadId, causeKey);
         }
         let free = freeSlots(tasks, cap);
+        let releasedNow = false;
         for (const task of tasks) {
           if (free === 0) break;
           if (task.state !== "waiting") continue;
@@ -483,8 +484,12 @@ export const makeDelegationSlots = (deps: DelegationSlotDeps) =>
           if (next === "give-up") yield* giveUp(proposalId, task.threadId, causeKey);
           if (next !== "start") continue;
           yield* release(proposalId, task.threadId, causeKey);
+          releasedNow = true;
           free -= 1;
         }
+        // A released task the drain has not sent yet still needs this request's passes: a
+        // Stop before it is sent gives it up, though no task of the request waits any more.
+        return releasedNow || tasks.some((task) => "unsent" in task && task.unsent === true);
       }).pipe(
         Effect.catchCause((cause) =>
           Cause.hasInterruptsOnly(cause)
@@ -492,21 +497,29 @@ export const makeDelegationSlots = (deps: DelegationSlotDeps) =>
             : Effect.logWarning("delegation slots will be checked again", {
                 proposalId,
                 cause: Cause.pretty(cause),
-              }),
+              }).pipe(Effect.as(true)),
         ),
       );
 
-    /** One pass over every request with a waiting task. */
+    /**
+     * Requests with a task released but not sent yet. Kept in memory only: after a restart an
+     * unsent queue gets the node's restart hold, and nothing sends it on its own.
+     */
+    const releasedUnsent = new Set<AgentControlProposalId>();
+
+    /** One pass over every request with a waiting task, or a released one not sent yet. */
     const pass = Effect.gen(function* () {
       const { threads } = yield* deps.readModel;
       const nowMs = yield* Clock.currentTimeMillis;
       const waiting = waitingRequestIds(threads, deps.causePrefix);
-      // A request with no task left waiting needs no cap any more.
+      const requests = [...new Set([...waiting, ...releasedUnsent])];
+      // A request with no task left waiting or unsent needs no cap any more.
       for (const proposalId of caps.keys())
-        if (!waiting.includes(proposalId)) caps.delete(proposalId);
+        if (!requests.includes(proposalId)) caps.delete(proposalId);
       seen.clear();
-      for (const proposalId of waiting) {
-        yield* passRequest(threads, proposalId, nowMs);
+      for (const proposalId of requests) {
+        if (yield* passRequest(threads, proposalId, nowMs)) releasedUnsent.add(proposalId);
+        else releasedUnsent.delete(proposalId);
       }
       for (const threadId of goalIdleSince.keys())
         if (!seen.has(threadId)) goalIdleSince.delete(threadId);
