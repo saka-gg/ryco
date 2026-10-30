@@ -1,14 +1,10 @@
-import {
-  HostedHubApiError,
-  nativePushHubSupport,
-  type HostedHubApi,
-  type NativePushHubSupport,
-} from "@ryco/client-runtime/authorization";
-import type { WsRpcClient } from "@ryco/client-runtime/rpc";
-import type { EnvironmentId } from "@ryco/contracts";
-import type { PushAlertKind, PushPresence } from "@ryco/contracts/push";
+import type { EnvironmentId } from "@ryco/contracts/base-schemas";
+import type { PushAlertKind, PushKeyId, PushPresence, PushPublicKey } from "@ryco/contracts/push";
 import type { NativePushEnvironment, NativePushPlatform } from "@ryco/contracts/push-hub";
 
+import { HostedHubApiError, type HostedHubApi } from "../../authorization/api.ts";
+import { nativePushHubSupport, type NativePushHubSupport } from "../../authorization/nativePush.ts";
+import type { WsRpcClient } from "../../rpc/wsRpcClient.ts";
 import {
   BACKGROUND_ALERT_KINDS,
   HUB_PUSH_CAPABILITY_RECHECK_MS,
@@ -23,8 +19,30 @@ import {
   type BackgroundAlertsSnapshot,
   type BackgroundAlertsSupport,
   type EnvironmentPushState,
-} from "./backgroundAlertsModel";
-import type { PushKey, PushKeyStore } from "./pushKeyStore";
+} from "./backgroundAlertsModel.ts";
+
+/** This installation's push key, as the native key store describes it. */
+export interface PushKey {
+  readonly publicKey: PushPublicKey;
+  readonly keyId: PushKeyId;
+  /** The Hub enrollment alerts are opened with, as last recorded; null before the first. */
+  readonly enrollmentId: string | null;
+}
+
+/** The native push key (`docs/push-alerts.md`); only its public half crosses into JavaScript. */
+export interface PushKeyStore {
+  readonly available: boolean;
+  /** The key, created if absent. */
+  readonly ensureKey: () => Promise<PushKey>;
+  /** The key if one exists; never creates one. */
+  readonly readKey: () => Promise<PushKey | null>;
+  /** Records what the extension opens alerts with: the Hub enrollment and the sound setting. */
+  readonly setRegistration: (input: {
+    readonly enrollmentId: string;
+    readonly sound: boolean;
+  }) => Promise<void>;
+  readonly deleteKey: () => Promise<void>;
+}
 
 /** One node connection, as background alerts see it. */
 export interface BackgroundAlertsConnection {

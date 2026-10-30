@@ -1,10 +1,6 @@
+import type { PushKey, PushKeyStore } from "@ryco/client-runtime/notifications/push";
 import { decodeBase64Url, encodeBase64Url } from "@ryco/client-runtime/relay/base64url";
-import {
-  PushKeyId,
-  PushPublicKey,
-  type PushKeyId as PushKeyIdType,
-  type PushPublicKey as PushPublicKeyType,
-} from "@ryco/contracts/push";
+import { PushKeyId, PushPublicKey } from "@ryco/contracts/push";
 import { pushKeyIdBytes } from "@ryco/shared/pushSeal";
 import * as Schema from "effect/Schema";
 
@@ -28,25 +24,6 @@ export interface RycoPushNativeModule {
 interface NativePushKey {
   readonly publicKey: string;
   readonly enrollmentId: string | null;
-}
-
-export interface PushKey {
-  readonly publicKey: PushPublicKeyType;
-  readonly keyId: PushKeyIdType;
-  /** The Hub enrollment alerts are opened with, as last recorded; null before the first. */
-  readonly enrollmentId: string | null;
-}
-
-/** The push key as background alerts use it; tests pass their own. */
-export interface PushKeyStore {
-  readonly available: boolean;
-  readonly ensureKey: () => Promise<PushKey>;
-  readonly readKey: () => Promise<PushKey | null>;
-  readonly setRegistration: (input: {
-    readonly enrollmentId: string;
-    readonly sound: boolean;
-  }) => Promise<void>;
-  readonly deleteKey: () => Promise<void>;
 }
 
 const unavailable = () => Promise.reject(new Error("This build cannot receive background alerts."));

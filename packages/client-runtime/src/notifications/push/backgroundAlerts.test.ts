@@ -1,17 +1,20 @@
-import { HostedHubApiError } from "@ryco/client-runtime/authorization";
-import type { WsRpcClient } from "@ryco/client-runtime/rpc";
 import { EnvironmentId } from "@ryco/contracts";
 import { PushRpcError, type PushDeviceStatus } from "@ryco/contracts/push";
 import type { NativePushCapability } from "@ryco/contracts/push-hub";
 import { describe, expect, it, vi } from "vite-plus/test";
 
+import { HostedHubApiError } from "../../authorization/api.ts";
+import type { WsRpcClient } from "../../rpc/wsRpcClient.ts";
 import {
   createBackgroundAlerts,
   type BackgroundAlertsAccount,
   type BackgroundAlertsConnection,
-} from "./backgroundAlerts";
-import { HUB_PUSH_CAPABILITY_RECHECK_MS, PUSH_PRESENCE_REFRESH_MS } from "./backgroundAlertsModel";
-import type { PushKey } from "./pushKeyStore";
+  type PushKey,
+} from "./backgroundAlerts.ts";
+import {
+  HUB_PUSH_CAPABILITY_RECHECK_MS,
+  PUSH_PRESENCE_REFRESH_MS,
+} from "./backgroundAlertsModel.ts";
 
 const ACCOUNT = "acct_aaaaaaaaaaaaaaaaaaaaaa";
 const ENROLLMENT = `enr_${"e".repeat(22)}`;

@@ -1,4 +1,10 @@
 import { getHostedHubApi, hostedHubStore } from "@ryco/client-runtime/authorization";
+import {
+  createBackgroundAlerts,
+  type BackgroundAlerts,
+  type BackgroundAlertsAccount,
+  type BackgroundAlertsConnection,
+} from "@ryco/client-runtime/notifications/push";
 import type { EnvironmentConnection } from "@ryco/client-runtime/connection";
 import { requireOptionalNativeModule } from "expo";
 import * as Notifications from "expo-notifications";
@@ -12,12 +18,6 @@ import { readMobileNativePlatform, readMobilePushBuild } from "../../platform/co
 import { createMobileConnectionRegistry } from "../../runtime/bootstrap";
 import { getPreferencesSnapshot, subscribePreferences } from "../../state/preferencesStore";
 import { readThreadAlertPermission } from "../threadAlerts";
-import {
-  createBackgroundAlerts,
-  type BackgroundAlerts,
-  type BackgroundAlertsAccount,
-  type BackgroundAlertsConnection,
-} from "./backgroundAlerts";
 import { backgroundAlertsSupport } from "./backgroundAlertsModel";
 import { createPushKeyStore, type RycoPushNativeModule } from "./pushKeyStore";
 

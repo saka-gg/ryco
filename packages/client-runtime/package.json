@@ -74,6 +74,10 @@
       "types": "./src/authorization/nodeMutationLease.ts",
       "import": "./src/authorization/nodeMutationLease.ts"
     },
+    "./notifications/push": {
+      "types": "./src/notifications/push/index.ts",
+      "import": "./src/notifications/push/index.ts"
+    },
     "./usage": {
       "types": "./src/usage/index.ts",
       "import": "./src/usage/index.ts"

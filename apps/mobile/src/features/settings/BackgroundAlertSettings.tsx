@@ -1,10 +1,8 @@
+import type { BackgroundAlertsSnapshot } from "@ryco/client-runtime/notifications/push";
 import { useEffect, useRef, useState } from "react";
 
 import { useHostedHubStore } from "../../hostedHub/state";
-import {
-  describeBackgroundAlerts,
-  type BackgroundAlertsSnapshot,
-} from "../../notifications/push/backgroundAlertsModel";
+import { describeBackgroundAlerts } from "../../notifications/push/backgroundAlertsModel";
 import { updatePreferences, usePreferences } from "../../state/preferencesStore";
 import { SettingsSwitchRow } from "./components/SettingsSwitchRow";
 
