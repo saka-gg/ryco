@@ -102,6 +102,7 @@ export const makeNodePushRegistry = (options: {
         update((current) => {
           const next = registerPushDevice(current, {
             enrollmentId: device.enrollmentId,
+            accountId: device.accountId,
             role: device.role,
             input,
             newSalt: newSalt(),
@@ -109,11 +110,13 @@ export const makeNodePushRegistry = (options: {
           });
           return { state: next, value: toStatus(find(next, device.enrollmentId), hubDelivery) };
         }).pipe(Effect.orDie),
-      unregister: (device, keyId) =>
+      unregister: (device, input) =>
         update((current) => {
           const result = unregisterPushDevice(current, {
             enrollmentId: device.enrollmentId,
-            keyId,
+            accountId: device.accountId,
+            keyId: input.keyId,
+            publicKey: input.publicKey,
           });
           return { state: result.state, value: { removed: result.removed } };
         }).pipe(Effect.orDie),
@@ -124,7 +127,17 @@ export const makeNodePushRegistry = (options: {
           } else {
             foregroundUntil.delete(device.enrollmentId);
           }
-        }),
+        }).pipe(
+          // Read, never written: a presence tick must not rewrite the registration file.
+          Effect.andThen(lock.withPermits(1)(load)),
+          Effect.map((current) =>
+            toStatus(
+              find(prunePushRegistrations(current, now()), device.enrollmentId),
+              hubDelivery,
+            ),
+          ),
+          Effect.orDie,
+        ),
       list: lock
         .withPermits(1)(load)
         .pipe(

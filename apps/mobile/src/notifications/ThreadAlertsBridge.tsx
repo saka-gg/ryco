@@ -28,21 +28,26 @@ const loadPushKeyCustody = () => import("./push/pushKeyCustody");
  * was ever touched, and keep running after it is turned off so they can remove
  * the registration again. Only the push key's install check runs on every
  * launch: after a reinstall the preferences are empty, and a key the earlier
- * installation left must still go.
+ * installation left must still go. They also load while that key waits to be
+ * retired on its machines, which may still push for it.
  */
 export function ThreadAlertsBridge() {
   const { driver } = useConnectionRegistry();
   const preferences = usePreferences();
   // Unset until the switch is first turned on; off afterwards is `false`.
   const enabled = preferences.threadAlerts !== undefined;
-  const backgroundEnabled = preferences.backgroundAlerts !== undefined;
+  const [retiringEarlierKey, setRetiringEarlierKey] = useState(false);
+  const backgroundEnabled = preferences.backgroundAlerts !== undefined || retiringEarlierKey;
   const [alertsModule, setAlertsModule] = useState<ThreadAlertsModule | null>(null);
   const [backgroundModule, setBackgroundModule] = useState<BackgroundAlertsModule | null>(null);
   const backgroundRef = useRef<BackgroundAlertsModule | null>(null);
 
   useEffect(() => {
     void loadPushKeyCustody()
-      .then(({ ensureMobilePushKeyCustody }) => ensureMobilePushKeyCustody())
+      .then(({ checkMobilePushKeyAtLaunch }) => checkMobilePushKeyAtLaunch())
+      .then((launch) => {
+        if (launch.retireEarlierKey) setRetiringEarlierKey(true);
+      })
       .catch((error: unknown) => console.warn("The push key install check failed.", error));
   }, []);
 

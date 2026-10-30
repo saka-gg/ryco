@@ -24,6 +24,7 @@ const register = (
   state = EMPTY_PUSH_REGISTRATION_STATE,
   overrides: Partial<{
     enrollmentId: string;
+    accountId: string;
     keyId: string;
     role: "viewer" | "operator" | "owner";
     newSalt: string;
@@ -32,6 +33,7 @@ const register = (
 ) =>
   registerPushDevice(state, {
     enrollmentId: overrides.enrollmentId ?? "enr_device",
+    accountId: overrides.accountId ?? "acct_alice",
     role: overrides.role ?? "owner",
     input: {
       keyId: overrides.keyId ?? KEY_A,
@@ -81,6 +83,55 @@ describe("push registrations", () => {
     const result = unregisterPushDevice(state, { enrollmentId: "enr_device", keyId: KEY_A });
     expect(result.removed).toBe(true);
     expect(result.state.registrations).toEqual([]);
+  });
+
+  it("retires a key an earlier installation of the same account left, by its public key", () => {
+    // The reinstalled app is a new enrollment of the same account; it names the key its
+    // earlier installation left.
+    const state = register(register(), { enrollmentId: "enr_new", keyId: KEY_B });
+    const otherPublic = "y".repeat(43);
+    expect(
+      unregisterPushDevice(state, {
+        enrollmentId: "enr_new",
+        accountId: "acct_alice",
+        keyId: KEY_A,
+        publicKey: otherPublic,
+      }).removed,
+    ).toBe(false);
+    const result = unregisterPushDevice(state, {
+      enrollmentId: "enr_new",
+      accountId: "acct_alice",
+      keyId: KEY_A,
+      publicKey: PUBLIC,
+    });
+    expect(result.removed).toBe(true);
+    expect(result.state.registrations.map((entry) => entry.enrollmentId)).toEqual(["enr_new"]);
+  });
+
+  it("never lets another account remove a registration by its public key", () => {
+    // Bob reads Alice's public key from a node he owns, where Alice's phone registered too,
+    // and names it on a node where he has a viewer grant.
+    const state = register();
+    expect(
+      unregisterPushDevice(state, {
+        enrollmentId: "enr_bob",
+        accountId: "acct_bob",
+        keyId: KEY_A,
+        publicKey: PUBLIC,
+      }).removed,
+    ).toBe(false);
+    // Nor a caller whose account is unknown, nor a registration from before accounts were kept.
+    expect(
+      unregisterPushDevice(state, { enrollmentId: "enr_new", keyId: KEY_A, publicKey: PUBLIC })
+        .removed,
+    ).toBe(false);
+    const { accountId: _dropped, ...legacy } = state.registrations[0]!;
+    expect(
+      unregisterPushDevice(
+        { ...state, registrations: [legacy] },
+        { enrollmentId: "enr_new", accountId: "acct_alice", keyId: KEY_A, publicKey: PUBLIC },
+      ).removed,
+    ).toBe(false);
   });
 
   it("drops stale registrations and keeps the most recent within the cap", () => {

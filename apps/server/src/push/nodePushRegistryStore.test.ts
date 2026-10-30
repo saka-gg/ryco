@@ -78,6 +78,36 @@ describe("node push registry store", () => {
     expect(await run(registry.foregroundEnrollments(now.value))).toEqual(new Set());
   });
 
+  it("answers presence with the device's registration as held now, without writing it", async () => {
+    const now = { value: 1_000 };
+    const { registry, filePath } = await store(now);
+    expect(await run(registry.setPresence(device, "foreground"))).toEqual({
+      eligible: true,
+      registered: false,
+      keyId: null,
+      kinds: [],
+      hubDelivery: "offline",
+    });
+    await run(registry.register(device, input));
+    const written = readFileSync(filePath, "utf8");
+    now.value += 60_000;
+    await run(registry.setHubDelivery("available"));
+    expect(await run(registry.setPresence(device, "foreground"))).toEqual({
+      eligible: true,
+      registered: true,
+      keyId: input.keyId,
+      kinds: ["completed"],
+      hubDelivery: "available",
+    });
+    expect(readFileSync(filePath, "utf8")).toBe(written);
+    // The node left its Hub: the device hears its registration is gone.
+    await run(registry.clear);
+    expect(await run(registry.setPresence(device, "background"))).toMatchObject({
+      registered: false,
+      keyId: null,
+    });
+  });
+
   it("forgets revoked enrollments and everything on clear, but keeps the sequence growing", async () => {
     const now = { value: 1_000 };
     const { registry } = await store(now);

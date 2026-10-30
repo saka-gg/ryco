@@ -42,11 +42,11 @@ export function makePushHandlers(ctx: WsRpcContext) {
       ),
     [WS_METHODS.pushUnregisterDevice]: (input) =>
       forDevice(WS_METHODS.pushUnregisterDevice, (registry, device) =>
-        registry.unregister(device, input.keyId),
+        registry.unregister(device, input),
       ),
     [WS_METHODS.pushSetPresence]: (input) =>
       forDevice(WS_METHODS.pushSetPresence, (registry, device) =>
-        registry.setPresence(device, input.state).pipe(Effect.as({})),
+        registry.setPresence(device, input.state).pipe(Effect.map((status) => ({ status }))),
       ),
   });
 }

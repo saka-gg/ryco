@@ -1,5 +1,9 @@
 import { EnvironmentId } from "@ryco/contracts";
-import { PushRpcError, type PushDeviceStatus } from "@ryco/contracts/push";
+import {
+  PushRpcError,
+  type PushDeviceStatus,
+  type PushSetPresenceResult,
+} from "@ryco/contracts/push";
 import type { NativePushCapability } from "@ryco/contracts/push-hub";
 import { describe, expect, it, vi } from "vite-plus/test";
 
@@ -50,10 +54,12 @@ function fakeConnection(id: string, options: { readonly viaHub?: boolean } = {})
   let ready: object | null = {};
   const listeners = new Set<() => void>();
   let answer: () => Promise<PushDeviceStatus> = async () => nodeStatus();
+  // An older node answers presence with nothing; a newer one with the registration it holds.
+  let presence: () => Promise<PushSetPresenceResult> = async () => ({});
   const push = {
     registerDevice: vi.fn((_input: unknown) => answer()),
     unregisterDevice: vi.fn(async (_input: unknown) => ({ removed: true })),
-    setPresence: vi.fn(async (_input: unknown) => ({})),
+    setPresence: vi.fn((_input: unknown) => presence()),
   };
   const view: BackgroundAlertsConnection = {
     environmentId: EnvironmentId.make(id),
@@ -71,6 +77,12 @@ function fakeConnection(id: string, options: { readonly viaHub?: boolean } = {})
     answer: (next: () => Promise<PushDeviceStatus>) => {
       answer = next;
     },
+    presence: (next: () => Promise<PushSetPresenceResult>) => {
+      presence = next;
+    },
+    drop: () => {
+      ready = null;
+    },
     reconnect: () => {
       ready = {};
       for (const listener of listeners) listener();
@@ -87,6 +99,8 @@ function harness(
     readonly storedKey?: PushKey | null;
     /** What survives a restart: the key and the owed Hub removal. */
     readonly device?: { storedKey: PushKey | null; hubRemovalOwed: string | null };
+    /** The key an earlier installation left, as the install check saved it. */
+    readonly earlierInstallKey?: PushKey | null;
   } = {},
 ) {
   let preferences = { enabled: options.enabled ?? true, sound: false };
@@ -134,6 +148,10 @@ function harness(
       device.hubRemovalOwed = accountId;
     }),
   };
+  const earlier = { key: options.earlierInstallKey ?? null };
+  const earlierInstallKey = {
+    read: vi.fn(async () => earlier.key),
+  };
   const notifications = {
     readPermission: vi.fn(async () => options.permission ?? true),
     readDeviceToken: vi.fn(async () => TOKEN),
@@ -166,6 +184,7 @@ function harness(
     },
     pushKey,
     hubRemoval,
+    earlierInstallKey,
     notifications,
     app: {
       isActive: () => active,
@@ -191,6 +210,8 @@ function harness(
     hub,
     pushKey,
     hubRemoval,
+    earlier,
+    earlierInstallKey,
     device,
     notifications,
     intervals,
@@ -427,7 +448,7 @@ describe("background alerts on a Hub that sends push", () => {
     expect(local.push.registerDevice).toHaveBeenCalledTimes(1);
   });
 
-  it("ask a machine again while in front until its Hub confirmed delivery, and never count offline as covered", async () => {
+  it("ask a machine that reports nothing on presence (an older node) again while in front until its Hub confirmed delivery, and never count offline as covered", async () => {
     const test = harness();
     const node = fakeConnection("env-a");
     // A node that just restarted reports offline until its first delivered signal.
@@ -487,6 +508,75 @@ describe("background alerts on a Hub that sends push", () => {
     await settle();
     expect(node.push.registerDevice).toHaveBeenCalledTimes(2);
     expect(test.alerts.isConfirmed(env("env-a"), "completed")).toBe(true);
+  });
+
+  it("take a node's presence answer for its registration, and register again only when it lost it", async () => {
+    const test = harness();
+    const node = fakeConnection("env-a");
+    // A node that just restarted reports offline until its first delivered signal.
+    node.answer(async () => nodeStatus({ hubDelivery: "offline" }));
+    node.presence(async () => ({ status: nodeStatus({ hubDelivery: "offline" }) }));
+    test.setConnections([node]);
+    test.alerts.start();
+    await settle();
+    expect(node.push.registerDevice).toHaveBeenCalledTimes(1);
+    expect(test.alerts.isConfirmed(env("env-a"), "completed")).toBe(false);
+    // The current presence timer (leaving and coming back starts a new one).
+    const tick = () => test.intervals.at(-1)!();
+
+    // Presence ticks and coming back ask nothing more of it: no registration file rewrites.
+    tick();
+    await settle();
+    test.setActive(false);
+    test.setActive(true);
+    await settle();
+    expect(node.push.registerDevice).toHaveBeenCalledTimes(1);
+    expect(test.alerts.isConfirmed(env("env-a"), "completed")).toBe(false);
+
+    // Its Hub delivered a signal: the next answer says so, and push covers the machine.
+    node.presence(async () => ({ status: nodeStatus() }));
+    tick();
+    await settle();
+    expect(test.alerts.isConfirmed(env("env-a"), "completed")).toBe(true);
+    expect(node.push.registerDevice).toHaveBeenCalledTimes(1);
+
+    // The node left its Hub and came back: it lost the registration, so the app registers again.
+    node.presence(async () => ({
+      status: nodeStatus({ registered: false, keyId: null, kinds: [], hubDelivery: "offline" }),
+    }));
+    tick();
+    await settle();
+    expect(node.push.registerDevice).toHaveBeenCalledTimes(2);
+    expect(test.alerts.getSnapshot().environments.get(env("env-a"))?.status).toBe("registered");
+
+    // So does a registration of another key (the node kept an older one).
+    node.presence(async () => ({
+      status: nodeStatus({ keyId: "AAAAAAAAAAAAAAAAAAAAAA" as PushKey["keyId"] }),
+    }));
+    tick();
+    await settle();
+    expect(node.push.registerDevice).toHaveBeenCalledTimes(3);
+  });
+
+  it("count a lost registration as not covered until the node took it again", async () => {
+    const test = harness();
+    const node = fakeConnection("env-a");
+    node.presence(async () => ({ status: nodeStatus() }));
+    test.setConnections([node]);
+    test.alerts.start();
+    await settle();
+    expect(test.alerts.isConfirmed(env("env-a"), "completed")).toBe(true);
+    const tick = () => test.intervals.at(-1)!();
+
+    node.answer(async () => {
+      throw new Error("SocketCloseError");
+    });
+    node.presence(async () => ({ status: nodeStatus({ registered: false, keyId: null }) }));
+    tick();
+    await settle();
+    expect(node.push.registerDevice).toHaveBeenCalledTimes(2);
+    expect(test.alerts.isConfirmed(env("env-a"), "completed")).toBe(false);
+    expect(test.alerts.getSnapshot().environments.get(env("env-a"))?.status).toBe("failed");
   });
 
   it("keep the presence current while in front and say when the app leaves", async () => {
@@ -583,7 +673,10 @@ describe("turning background alerts off", () => {
     test.setPreferences({ enabled: false });
     await settle();
     expect(test.hub.unregisterNativePush).toHaveBeenCalledTimes(1);
-    expect(node.push.unregisterDevice).toHaveBeenCalledWith({ keyId: KEY.keyId });
+    expect(node.push.unregisterDevice).toHaveBeenCalledWith({
+      keyId: KEY.keyId,
+      publicKey: KEY.publicKey,
+    });
     expect(test.pushKey.deleteKey).toHaveBeenCalledTimes(1);
     expect(test.alerts.isConfirmed(env("env-a"), "completed")).toBe(false);
     expect(test.alerts.getSnapshot().environments.size).toBe(0);
@@ -674,7 +767,10 @@ describe("turning background alerts off", () => {
     test.setConnections([node, direct]);
     test.alerts.start();
     await settle();
-    expect(node.push.unregisterDevice).toHaveBeenCalledWith({ keyId: KEY.keyId });
+    expect(node.push.unregisterDevice).toHaveBeenCalledWith({
+      keyId: KEY.keyId,
+      publicKey: KEY.publicKey,
+    });
     expect(direct.push.unregisterDevice).not.toHaveBeenCalled();
     expect(test.pushKey.deleteKey).toHaveBeenCalledTimes(1);
   });
@@ -696,6 +792,64 @@ describe("turning background alerts off", () => {
     expect(turnedOn.hub.unregisterNativePush).not.toHaveBeenCalled();
     expect(turnedOn.hub.registerNativePush).toHaveBeenCalledTimes(1);
     expect(turnedOn.device.hubRemovalOwed).toBeNull();
+  });
+});
+
+describe("the key an earlier installation left", () => {
+  const EARLIER: PushKey = {
+    publicKey: "0123456789abcdefghijklmnopqrstuvwxyzABCDEFG" as PushKey["publicKey"],
+    keyId: "EEEEEEEEEEEEEEEEEEEEEE" as PushKey["keyId"],
+    enrollmentId: null,
+  };
+
+  it("is retired by its public key on every Hub machine it connects to, whether or not alerts are on here", async () => {
+    const test = harness({ enabled: false, earlierInstallKey: EARLIER });
+    const node = fakeConnection("env-a");
+    const later = fakeConnection("env-b");
+    later.drop();
+    const direct = fakeConnection("env-direct", { viaHub: false });
+    test.setConnections([node, later, direct]);
+    test.alerts.start();
+    await settle();
+    const retire = { keyId: EARLIER.keyId, publicKey: EARLIER.publicKey };
+    expect(node.push.unregisterDevice).toHaveBeenCalledWith(retire);
+    expect(direct.push.unregisterDevice).not.toHaveBeenCalled();
+    // Nothing else happens while alerts are off here.
+    expect(test.hub.getNativePushCapability).not.toHaveBeenCalled();
+    expect(test.hub.unregisterNativePush).not.toHaveBeenCalled();
+
+    later.reconnect();
+    await settle();
+    expect(later.push.unregisterDevice).toHaveBeenCalledWith(retire);
+    expect(node.push.unregisterDevice).toHaveBeenCalledTimes(1);
+
+    // Every machine the app listed answered, but the app lists only the machines
+    // it is connected to: the key stays remembered, and a new connect asks again.
+    expect(test.earlier.key).not.toBeNull();
+    node.reconnect();
+    await settle();
+    expect(node.push.unregisterDevice).toHaveBeenCalledTimes(2);
+  });
+
+  it("asks a machine again when retiring it failed, and an older node's answer once per connection", async () => {
+    const test = harness({ earlierInstallKey: EARLIER });
+    const flaky = fakeConnection("env-a");
+    const older = fakeConnection("env-b");
+    // An older node ignores the public key and finds no registration of this device's to remove.
+    older.push.unregisterDevice.mockResolvedValue({ removed: false });
+    flaky.push.unregisterDevice.mockRejectedValueOnce(new Error("SocketCloseError"));
+    test.setConnections([flaky, older]);
+    test.alerts.start();
+    await settle();
+    expect(test.earlier.key).not.toBeNull();
+    // This installation still registers as usual.
+    expect(flaky.push.registerDevice).toHaveBeenCalledTimes(1);
+
+    flaky.reconnect();
+    await settle();
+    expect(flaky.push.unregisterDevice).toHaveBeenCalledTimes(2);
+    expect(older.push.unregisterDevice).toHaveBeenCalledTimes(1);
+    expect(test.earlier.key).not.toBeNull();
   });
 });
 

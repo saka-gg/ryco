@@ -49,6 +49,7 @@ export function relayChannelAuthority(
       : {
           trustSource: "account-enrolled",
           enrollmentId: grant.enrollmentId,
+          accountId: grant.accountId,
           clientIdentityFingerprint: grant.clientIdentityFingerprint,
           role,
           nodeIdentityPublicKey: session.nodeIdentityPublicKey,

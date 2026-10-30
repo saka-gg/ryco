@@ -33,6 +33,12 @@ const IsoMillis = Schema.Number.check(
 
 export const PushRegistration = Schema.Struct({
   enrollmentId: Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(64)),
+  /**
+   * The Hub account that registered it. Only a device of the same account may
+   * remove it by its public key from another enrollment; a registration from
+   * before this field has none, and only its own enrollment removes it.
+   */
+  accountId: Schema.optionalKey(Schema.String.check(Schema.isMinLength(1), Schema.isMaxLength(64))),
   keyId: PushKeyId,
   publicKey: PushPublicKey,
   role: Schema.Literals(["viewer", "operator", "owner"]),
@@ -105,6 +111,7 @@ export function registerPushDevice(
   state: PushRegistrationState,
   device: {
     readonly enrollmentId: string;
+    readonly accountId?: string | undefined;
     readonly role: RpcPrincipalRole;
     readonly input: PushRegisterDeviceInput;
     readonly newSalt: string;
@@ -117,6 +124,7 @@ export function registerPushDevice(
   const sameKey = previous?.keyId === device.input.keyId;
   const next: PushRegistration = {
     enrollmentId: device.enrollmentId,
+    ...(device.accountId === undefined ? {} : { accountId: device.accountId }),
     keyId: device.input.keyId,
     publicKey: device.input.publicKey,
     role: device.role,
@@ -140,15 +148,34 @@ export function registerPushDevice(
   );
 }
 
-/** Removes the device's registration if it still holds `keyId`. */
+/**
+ * Removes the device's registration if it still holds `keyId`. Given the key's
+ * `publicKey` too, it also removes a registration holding exactly that key
+ * under another enrollment of the same Hub account: the key an earlier
+ * installation of the same app left. Never another account's: a public key is
+ * no secret (every node a phone registers with stores it, and a node's owner
+ * may be someone else), so naming one proves nothing about whose it is.
+ */
 export function unregisterPushDevice(
   state: PushRegistrationState,
-  device: { readonly enrollmentId: string; readonly keyId: string },
+  device: {
+    readonly enrollmentId: string;
+    readonly accountId?: string | undefined;
+    readonly keyId: string;
+    readonly publicKey?: string | undefined;
+  },
 ): { readonly state: PushRegistrationState; readonly removed: boolean } {
-  const registrations = state.registrations.filter(
-    (registration) =>
-      registration.enrollmentId !== device.enrollmentId || registration.keyId !== device.keyId,
-  );
+  const removes = (registration: PushRegistration) => {
+    if (registration.keyId !== device.keyId) return false;
+    if (registration.enrollmentId === device.enrollmentId) return true;
+    return (
+      device.publicKey !== undefined &&
+      registration.publicKey === device.publicKey &&
+      device.accountId !== undefined &&
+      registration.accountId === device.accountId
+    );
+  };
+  const registrations = state.registrations.filter((registration) => !removes(registration));
   return registrations.length === state.registrations.length
     ? { state, removed: false }
     : { state: { ...state, registrations }, removed: true };

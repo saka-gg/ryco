@@ -1,5 +1,11 @@
 import type { EnvironmentId } from "@ryco/contracts/base-schemas";
-import type { PushAlertKind, PushKeyId, PushPresence, PushPublicKey } from "@ryco/contracts/push";
+import type {
+  PushAlertKind,
+  PushKeyId,
+  PushPresence,
+  PushPublicKey,
+  PushSetPresenceResult,
+} from "@ryco/contracts/push";
 import type { NativePushEnvironment, NativePushPlatform } from "@ryco/contracts/push-hub";
 
 import { HostedHubApiError, type HostedHubApi } from "../../authorization/api.ts";
@@ -106,6 +112,17 @@ export interface BackgroundAlertsPorts {
     readonly read: () => Promise<string | null>;
     readonly write: (accountId: string | null) => Promise<void>;
   };
+  /**
+   * Survives a restart: the push key an earlier installation of the app left,
+   * read before the install check deleted it. Its node registrations are
+   * retired by its public key (they sit under that installation's enrollment,
+   * which this one cannot speak for); null when there is none, or it is older
+   * than a node keeps a registration nobody refreshes.
+   */
+  /** Read once; the memo itself drops a key past `EARLIER_INSTALL_KEY_RETIRE_MS`. */
+  readonly earlierInstallKey: {
+    readonly read: () => Promise<PushKey | null>;
+  };
   readonly notifications: {
     readonly readPermission: () => Promise<boolean>;
     /** The APNs device token, hex. */
@@ -148,6 +165,12 @@ interface NodeAttempt {
   readonly state: EnvironmentPushState;
   /** When it ran, or null once a presence tick or a foreground asked for it again. */
   readonly at: number | null;
+  /**
+   * The node answers presence with this device's registration, so it is asked
+   * again only when that says the registration is gone. An older node answers
+   * nothing and is asked again until its Hub confirmed delivery.
+   */
+  readonly reportsStatus: boolean;
 }
 
 /**
@@ -161,8 +184,11 @@ interface NodeAttempt {
  * `push.registerDevice` once per connection on every Hub channel, and
  * `push.setPresence` while the app is in front. Each connection's answer is
  * kept: a refusal is not asked again until the next connect, a failure not
- * before a minute or the next foreground, and a node that cannot confirm its
- * Hub's delivery yet is asked again while the app is in front.
+ * before a minute or the next foreground. A node answers presence with this
+ * device's registration, so it is registered again only when it lost it; an
+ * older node that cannot confirm its Hub's delivery yet is asked again while
+ * the app is in front. A key an earlier installation left is retired on every
+ * Hub machine by its public key.
  *
  * Turned off, it removes the Hub registration, the live nodes' registrations
  * and the key; a Hub removal that failed is owed, across restarts, until the
@@ -194,6 +220,10 @@ export function createBackgroundAlerts(ports: BackgroundAlertsPorts): Background
   let hubRetryAt = 0;
   /** The same for a failed Hub removal; a failed registration never holds a removal back. */
   let hubRemovalRetryAt = 0;
+  /** The earlier installation's key, once read (null: none); undefined until read. */
+  let earlierKey: PushKey | null | undefined;
+  /** Connections that answered its retirement, by the connect that did. */
+  const earlierKeyRetired = new Map<EnvironmentId, object>();
 
   let running = false;
   let rerun = false;
@@ -307,22 +337,71 @@ export function createBackgroundAlerts(ports: BackgroundAlertsPorts): Background
     return capabilityInFlight;
   };
 
-  const sendPresence = (presence: PushPresence, nodes: Iterable<NodeAttempt>) => {
+  /**
+   * A node's answer to presence. One that reports this device's registration
+   * speaks for it: one it still holds refreshes what the app knows (its Hub may
+   * deliver now) without registering again, which would rewrite the node's
+   * registration file, and one it lost is registered again at once. An older
+   * node answers `{}`.
+   */
+  const onPresenceAnswer = (
+    attempt: NodeAttempt,
+    answer: PushSetPresenceResult,
+    afterRegistering: boolean,
+  ) => {
+    const environmentId = attempt.connection.environmentId;
+    const status = answer.status;
+    if (status === undefined || attempts.get(environmentId) !== attempt || !isLive(attempt)) {
+      return;
+    }
+    if (!status.registered || status.keyId !== attempt.keyId) {
+      // The node took it a moment ago: a contradicting answer waits for the next tick, so a
+      // node that keeps saying so is asked at most once a tick.
+      if (afterRegistering) return;
+      // Lost (the node left its Hub, or dropped it): not covered until registered again.
+      const lost: NodeAttempt = {
+        ...attempt,
+        state: { status: "registering" },
+        at: null,
+        reportsStatus: true,
+      };
+      attempts.set(environmentId, lost);
+      setEnvironment(environmentId, lost.state);
+      syncPresenceTimer();
+      request();
+      return;
+    }
+    const state = environmentPushStateFromStatus(status);
+    attempts.set(environmentId, { ...attempt, state, reportsStatus: true });
+    setEnvironment(environmentId, state);
+  };
+
+  const sendPresence = (
+    presence: PushPresence,
+    nodes: Iterable<NodeAttempt>,
+    afterRegistering = false,
+  ) => {
     for (const attempt of nodes) {
       if (!isLive(attempt)) continue;
       void attempt.connection.push
         .setPresence({ state: presence })
+        .then((answer) => onPresenceAnswer(attempt, answer, afterRegistering))
         .catch((error: unknown) => report("Sending push presence failed", error));
     }
   };
+
+  /** A node that cannot say whether its Hub delivers is asked by registering again. */
+  const awaitsReregistration = (attempt: NodeAttempt) =>
+    !attempt.reportsStatus && awaitsHubDelivery(attempt.state);
 
   const syncPresenceTimer = () => {
     const wanted = started > 0 && ports.app.isActive() && registeredNodes().length > 0;
     if (wanted && presenceTimer === null) {
       presenceTimer = ports.timers.setInterval(() => {
+        // A node that reports its registration answers this; an older one
+        // that could not confirm its Hub's delivery yet is asked again.
         sendPresence("foreground", registeredNodes());
-        // A node that could not confirm its Hub's delivery yet is asked again.
-        if (askAgain((attempt) => awaitsHubDelivery(attempt.state))) request();
+        if (askAgain(awaitsReregistration)) request();
       }, PUSH_PRESENCE_REFRESH_MS);
     } else if (!wanted && presenceTimer !== null) {
       ports.timers.clearInterval(presenceTimer);
@@ -331,10 +410,13 @@ export function createBackgroundAlerts(ports: BackgroundAlertsPorts): Background
   };
 
   /**
-   * Asks the live Hub channels holding `keyId` to forget it: those that took
-   * it this run, or, for a key an earlier run left, every one that is up.
+   * Asks the live Hub channels holding the key to forget it: those that took
+   * it this run, or, for a key an earlier run left, every one that is up. The
+   * public key lets a node remove it also when this device registered it under
+   * an enrollment it had before.
    */
-  const unregisterNodes = async (keyId: PushKey["keyId"], leftover: boolean) => {
+  const unregisterNodes = async (pushKey: PushKey, leftover: boolean) => {
+    const { keyId, publicKey } = pushKey;
     const connections = leftover
       ? ports.connections
           .list()
@@ -344,7 +426,7 @@ export function createBackgroundAlerts(ports: BackgroundAlertsPorts): Background
           .map((attempt) => attempt.connection);
     await Promise.all(
       connections.map((connection) =>
-        connection.push.unregisterDevice({ keyId }).catch((error: unknown) => {
+        connection.push.unregisterDevice({ keyId, publicKey }).catch((error: unknown) => {
           // An older node, or a channel that never could register, has nothing to remove.
           if (environmentPushStateFromError(error).status === "failed") {
             report("Removing a node push registration failed", error);
@@ -386,8 +468,48 @@ export function createBackgroundAlerts(ports: BackgroundAlertsPorts): Background
       }
     }
     if (key !== null) {
-      await unregisterNodes(key.keyId, leftover);
+      await unregisterNodes(key, leftover);
       await deleteKey();
+    }
+  };
+
+  /**
+   * Retires the key an earlier installation left on every Hub channel that is
+   * up, by its public key: those registrations sit under that installation's
+   * enrollment, so nothing else this installation can do removes them. Each
+   * channel is asked once per connection, for as long as the key is
+   * remembered (`EARLIER_INSTALL_KEY_RETIRE_MS`, the nodes' own drop): the app
+   * lists only the machines it is connected to now, so "every machine
+   * answered" is never known, and a refusal now may be a channel not ready yet.
+   */
+  const retireEarlierInstallKey = async () => {
+    if (earlierKey === undefined) {
+      try {
+        earlierKey = await ports.earlierInstallKey.read();
+      } catch (error) {
+        report("Reading the earlier installation's push key failed", error);
+        earlierKey = null;
+      }
+    }
+    const retired = earlierKey;
+    if (retired === null) return;
+    const hubConnections = ports.connections.list().filter((connection) => connection.viaHub);
+    for (const connection of hubConnections) {
+      const ready = connection.readReady();
+      if (ready === null || earlierKeyRetired.get(connection.environmentId) === ready) continue;
+      try {
+        await connection.push.unregisterDevice({
+          keyId: retired.keyId,
+          publicKey: retired.publicKey,
+        });
+      } catch (error) {
+        // A channel that cannot take it never will; a failure is asked again.
+        if (environmentPushStateFromError(error).status === "failed") {
+          report("Retiring the earlier installation's push key failed", error);
+          continue;
+        }
+      }
+      earlierKeyRetired.set(connection.environmentId, ready);
     }
   };
 
@@ -436,12 +558,21 @@ export function createBackgroundAlerts(ports: BackgroundAlertsPorts): Background
       // A refresh that did not get through leaves the registration as it was:
       // the presence keeps going, and the next tick asks again.
       if (refreshed !== null && state.status === "failed") state = refreshed.state;
-      const attempt = { connection, ready, keyId: pushKey.keyId, sound, state, at: ports.now() };
+      const attempt: NodeAttempt = {
+        connection,
+        ready,
+        keyId: pushKey.keyId,
+        sound,
+        state,
+        at: ports.now(),
+        // Known for this connect; a reconnect may reach an updated (or older) node.
+        reportsStatus: same && previous.reportsStatus,
+      };
       attempts.set(connection.environmentId, attempt);
       setEnvironment(connection.environmentId, state);
       // The node pushes nothing to a device in front; local alerts cover it.
       if (state.status === "registered" && refreshed === null && ports.app.isActive()) {
-        sendPresence("foreground", [attempt]);
+        sendPresence("foreground", [attempt], true);
       }
     }
     // A connection that is down keeps its state until it is back; one that left
@@ -478,6 +609,8 @@ export function createBackgroundAlerts(ports: BackgroundAlertsPorts): Background
       setHub("signed-out");
       return;
     }
+    // Whether or not alerts are on here: the earlier installation's may still be.
+    await retireEarlierInstallKey();
 
     if (!preferences.enabled) {
       await turnOff(account.accountId);
@@ -630,9 +763,7 @@ export function createBackgroundAlerts(ports: BackgroundAlertsPorts): Background
         hubRemovalRetryAt = 0;
         permission = null;
         if (capability?.support === "unreachable") capability = null;
-        askAgain(
-          (attempt) => attempt.state.status === "failed" || awaitsHubDelivery(attempt.state),
-        );
+        askAgain((attempt) => attempt.state.status === "failed" || awaitsReregistration(attempt));
         request();
       };
       const unsubscribes = [
