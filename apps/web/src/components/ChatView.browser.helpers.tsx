@@ -2280,7 +2280,7 @@ async function openCommandPaletteFromTrigger(): Promise<void> {
   );
 }
 
-async function openNewWorkspaceDialog(): Promise<void> {
+async function openNewWorkspaceDraft(): Promise<void> {
   const newThreadButton = page.getByTestId("new-thread-button");
   await expect.element(newThreadButton).toBeInTheDocument();
   // The action only takes pointer events while its project header is hovered,
@@ -2288,41 +2288,6 @@ async function openNewWorkspaceDialog(): Promise<void> {
   const projectHeader = newThreadButton.element().closest<HTMLElement>(".group\\/project-header");
   await page.elementLocator(projectHeader!).hover();
   await newThreadButton.click();
-  await expect.element(page.getByText("New worktree", { exact: true })).toBeInTheDocument();
-}
-
-async function expectVisibleComboboxPopupToBeOpaqueAndClipped(): Promise<void> {
-  const popup = await waitForElement(
-    () =>
-      Array.from(document.querySelectorAll<HTMLElement>('[data-slot="combobox-popup"]')).find(
-        (element) => element.getBoundingClientRect().width > 0,
-      ) ?? null,
-    "Unable to find the visible combobox popup.",
-  );
-  const popupShell = popup.parentElement as HTMLElement | null;
-
-  expect(popupShell).toBeTruthy();
-  if (!popupShell) {
-    throw new Error("Unable to find the combobox popup shell.");
-  }
-
-  const popupShellStyles = window.getComputedStyle(popupShell);
-  const popupStyles = window.getComputedStyle(popup);
-
-  // Opacity is the shell's job alone. `combobox.tsx` deliberately leaves the
-  // inner popup transparent so the two do not both paint a glass layer (see
-  // "kill glass-on-glass"), so asserting a background on the popup would pin
-  // the exact bug that change removed. What the user can observe — that the
-  // list is not see-through — is the shell's background plus its clipping.
-  expect(popupShellStyles.backgroundColor).not.toBe("rgba(0, 0, 0, 0)");
-  expect(popupShellStyles.overflow).toBe("hidden");
-  expect(popupStyles.backgroundColor).toBe("rgba(0, 0, 0, 0)");
-
-  const popupShellRect = popupShell.getBoundingClientRect();
-  const popupRect = popup.getBoundingClientRect();
-
-  expect(popupRect.left).toBeGreaterThanOrEqual(popupShellRect.left - 1);
-  expect(popupRect.right).toBeLessThanOrEqual(popupShellRect.right + 1);
 }
 
 async function createDraftFromChatNewLocalShortcut(
@@ -3005,8 +2970,7 @@ export {
   enableComposerStashShortcut,
   configureContextHandoffProviders,
   openCommandPaletteFromTrigger,
-  openNewWorkspaceDialog,
-  expectVisibleComboboxPopupToBeOpaqueAndClipped,
+  openNewWorkspaceDraft,
   createDraftFromChatNewLocalShortcut,
   createDraftFromChatNewShortcut,
   waitForCommandPaletteShortcutLabel,

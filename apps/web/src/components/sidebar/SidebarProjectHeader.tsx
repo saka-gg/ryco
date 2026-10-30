@@ -44,8 +44,6 @@ export function SidebarProjectHeader(props: {
   onContextMenu: (event: React.MouseEvent<HTMLButtonElement>) => void;
   onOpenProjectOverviewClick: (event: React.MouseEvent<HTMLButtonElement>) => void;
   onOpenNewWorktreeClick: (event: React.MouseEvent<HTMLButtonElement>) => void;
-  /** The pointer entered or focus reached "New workspace": its dialog may load now. */
-  onOpenNewWorktreeIntent: () => void;
   onOpenNewThreadClick: (event: React.MouseEvent<HTMLButtonElement>) => void;
   onCopyPath: (member: SidebarProjectGroupMember) => void;
   onGrouping: (member: SidebarProjectGroupMember) => void;
@@ -71,7 +69,6 @@ export function SidebarProjectHeader(props: {
     onContextMenu,
     onOpenProjectOverviewClick,
     onOpenNewWorktreeClick,
-    onOpenNewWorktreeIntent,
     onOpenNewThreadClick,
   } = props;
 
@@ -214,8 +211,8 @@ export function SidebarProjectHeader(props: {
                 data-testid="new-thread-button"
                 className={`inline-flex size-5 cursor-pointer items-center justify-center rounded-md text-muted-foreground/60 hover:bg-secondary hover:text-foreground focus-visible:outline-hidden focus-visible:ring-1 focus-visible:ring-ring ${SIDEBAR_ROW_ACTION_COARSE_CLASS_NAME}`}
                 onClick={onOpenNewWorktreeClick}
-                onPointerEnter={onOpenNewWorktreeIntent}
-                onFocus={onOpenNewWorktreeIntent}
+                onPointerEnter={preloadDraftRoute}
+                onFocus={preloadDraftRoute}
               >
                 <PlusIcon className="size-3.5" />
               </button>

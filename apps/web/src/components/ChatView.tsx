@@ -222,9 +222,7 @@ import {
   hasOpenDialogShortcutTarget,
   isDialogShortcutTarget,
   isEditableShortcutTarget,
-  matchesExactModShortcut,
   resolveShortcutCommand,
-  shouldIgnoreGlobalNavigationShortcut,
   shortcutLabelForCommand,
 } from "../keybindings";
 import {
@@ -282,7 +280,6 @@ import { selectThreadTerminalState, useTerminalStateStore } from "../terminalSta
 import type { ModelPickMeta } from "./chat/modelPickerTuningBridge";
 import { ChatComposer, type ChatComposerHandle, type ComposerIntent } from "./chat/ChatComposer";
 import { PersistentThreadTerminalDrawer } from "./chat/ChatTerminalShell";
-import type { NewWorktreeDialogTab } from "./worktrees/NewWorktreeDialog";
 import type { LinkedWorktreeItem } from "./worktrees/LinkedWorktreeItemDialog";
 import { MessagesTimeline } from "./chat/MessagesTimeline";
 import type { ReadingPositionOutcome } from "./chat/useTimelineReadingPosition";
@@ -359,10 +356,7 @@ import {
   LazySideChatPanel,
 } from "./chat/chatViewLazySurfaces";
 import { notifySurfaceLoadFailure } from "./ui/surfaceLoadFailure";
-import {
-  LazyLinkedWorktreeItemDialog,
-  LazyNewWorktreeDialog,
-} from "./worktrees/lazyWorktreeDialogs";
+import { LazyLinkedWorktreeItemDialog } from "./worktrees/lazyWorktreeDialogs";
 import { usePostPushWorkflowWatch } from "./chat/usePostPushWorkflowWatch";
 import { useLazyComponentReady, usePreloadWhenIdle } from "../lib/preloadableLazy";
 import {
@@ -1019,11 +1013,6 @@ export default function ChatView(props: ChatViewProps) {
   const [terminalFocusRequestId, setTerminalFocusRequestId] = useState(0);
   const [pullRequestDialogState, setPullRequestDialogState] =
     useState<PullRequestDialogState | null>(null);
-  const [projectExplorerOpen, setProjectExplorerOpen] = useState(false);
-  const projectExplorerOpenRef = useRef(projectExplorerOpen);
-  projectExplorerOpenRef.current = projectExplorerOpen;
-  const [projectExplorerInitialTab, setProjectExplorerInitialTab] =
-    useState<NewWorktreeDialogTab>("prs");
   const [terminalLaunchContext, setTerminalLaunchContext] = useState<TerminalLaunchContext | null>(
     null,
   );
@@ -4454,31 +4443,6 @@ export default function ChatView(props: ChatViewProps) {
     terminalState.terminalOpen,
   ]);
 
-  usePaneEffect(() => {
-    const handler = (event: globalThis.KeyboardEvent) => {
-      if (event.defaultPrevented) return;
-      if (shouldIgnoreGlobalNavigationShortcut(event) && !projectExplorerOpenRef.current) return;
-      const isToggleProjectExplorer = matchesExactModShortcut(event, "p", {
-        shiftKey: true,
-      });
-      if (!isToggleProjectExplorer) return;
-      event.preventDefault();
-      event.stopPropagation();
-      setProjectExplorerInitialTab("prs");
-      setProjectExplorerOpen((value) => !value);
-    };
-    window.addEventListener("keydown", handler, true);
-    return () => window.removeEventListener("keydown", handler, true);
-  }, []);
-
-  // The branch toolbar's inline chips cover the fast path (base branch + create
-  // on send); this opens the full picker for worktrees sourced from a PR,
-  // issue, or Jira item.
-  const openWorktreeSources = useCallback(() => {
-    setProjectExplorerInitialTab("prs");
-    setProjectExplorerOpen(true);
-  }, []);
-
   // Until the thread's own view takes over after the hand-off, the draft's
   // keeps offering Stop, not a busy send button.
   const composerWorktreeSetupRunning =
@@ -6835,21 +6799,6 @@ export default function ChatView(props: ChatViewProps) {
       },
     },
   );
-  const newWorktreeDialogReady = useLazyComponentReady(
-    LazyNewWorktreeDialog,
-    paneFocused && projectExplorerOpen,
-    {
-      onLoadError: (error) => {
-        setProjectExplorerOpen(false);
-        notifySurfaceLoadFailure(
-          "new worktree dialog",
-          error,
-          () => setProjectExplorerOpen(true),
-          activeThreadRef,
-        );
-      },
-    },
-  );
   const linkedItemDialogReady = useLazyComponentReady(
     LazyLinkedWorktreeItemDialog,
     paneFocused && headerLinkedItem !== null,
@@ -7722,7 +7671,6 @@ export default function ChatView(props: ChatViewProps) {
                       }
                     : {})}
                   onComposerFocusRequest={scheduleComposerFocus}
-                  onOpenWorktreeSources={openWorktreeSources}
                   contextControlsHoisted={showNewThreadSurface}
                   {...(canCheckoutPullRequestIntoThread
                     ? { onCheckoutPullRequestRequest: openPullRequestDialog }
@@ -7763,25 +7711,6 @@ export default function ChatView(props: ChatViewProps) {
                 }
               }}
               onPrepared={handlePreparedPullRequestThread}
-            />
-          ) : null}
-          {newWorktreeDialogReady ? (
-            <LazyNewWorktreeDialog
-              open={paneFocused && projectExplorerOpen}
-              environmentId={activeThread.environmentId}
-              projectId={activeProject?.id ?? null}
-              cwd={activeProject?.cwd ?? null}
-              initialTab={projectExplorerInitialTab}
-              onCreated={(result) => {
-                void navigate({
-                  to: "/$environmentId/$threadId",
-                  params: {
-                    environmentId: activeThread.environmentId,
-                    threadId: result.sessionId,
-                  },
-                });
-              }}
-              onOpenChange={setProjectExplorerOpen}
             />
           ) : null}
           {!isPhoneTier && expandedImage && expandedImageDialogReady ? (

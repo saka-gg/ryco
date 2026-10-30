@@ -1,11 +1,11 @@
 import { scopedThreadKey, scopeProjectRef, scopeThreadRef } from "@ryco/client-runtime/scoped";
 import { isWorkspaceDeleted } from "@ryco/client-runtime/state/lifecycle";
 import { ThreadId, WS_METHODS } from "@ryco/contracts";
-import { useRouter } from "@tanstack/react-router";
 import { ChevronRightIcon, FolderIcon, GitBranchIcon, MapIcon, RefreshCwIcon } from "lucide-react";
 import { useMemo, useState, type ReactNode } from "react";
 import { useShallow } from "zustand/react/shallow";
 
+import { useNewThreadHandler } from "../../../hooks/useHandleNewThread";
 import { useThreadActions } from "../../../hooks/useThreadActions";
 import { useHostedRpcCapability } from "../../../hostedHub/capabilities";
 import {
@@ -20,7 +20,6 @@ import {
   selectSidebarWorktreesForProjectRef,
   useStore,
 } from "../../../store";
-import { buildThreadRouteParams } from "../../../threadRoutes";
 import { formatRelativeTimeLabel } from "../../../timestampFormat";
 import { useUiStateStore } from "../../../uiStateStore";
 import {
@@ -35,7 +34,6 @@ import { SETTINGS_INSET_CLASS, SettingsBlock, SettingsRow } from "../../settings
 import { SettingsSelect } from "../../settings/SettingsSelect";
 import { Button } from "../../ui/button";
 import { stackedThreadToast, toastManager } from "../../ui/toast";
-import { NewWorktreeDialog } from "../../worktrees/NewWorktreeDialog";
 import { useProjectsPage } from "../ProjectsPageContext";
 import {
   diskSizeOf,
@@ -409,7 +407,6 @@ export function ProjectWorkspacesSection({ member, canEdit, canManageNode }: Pro
   // (it bails on a ternary inside a logical test). Oxc can, but its render
   // reads have not been audited for purity yet. Remove after that audit.
   "use no memo";
-  const router = useRouter();
   const { nav } = useProjectsPage();
   const ref = useMemo(() => scopeProjectRef(member.environmentId, member.id), [member]);
   const threads = useStore(useShallow((state) => selectSidebarThreadsForProjectRef(state, ref)));
@@ -431,10 +428,6 @@ export function ProjectWorkspacesSection({ member, canEdit, canManageNode }: Pro
     WS_METHODS.lifecycleApplyWorkspace,
     member.environmentId,
   );
-  const createCapability = useHostedRpcCapability(
-    WS_METHODS.gitCreateWorktreeForProject,
-    member.environmentId,
-  );
   const signature = useMemo(() => workspaceInspectionSignature(worktrees), [worktrees]);
   const { inspection, reinspect } = useProjectWorkspaceInspection({
     environmentId: member.environmentId,
@@ -444,7 +437,7 @@ export function ProjectWorkspacesSection({ member, canEdit, canManageNode }: Pro
     suggestionsEnabled: suggestionsCapability.allowed,
   });
   const canMutate = canEdit && applyCapability.allowed;
-  const [dialogOpen, setDialogOpen] = useState(false);
+  const { handleNewThread } = useNewThreadHandler();
 
   const live = worktrees.filter((worktree) => worktree.archivedAt == null).length;
   const archived = worktrees.length - live;
@@ -472,8 +465,8 @@ export function ProjectWorkspacesSection({ member, canEdit, canManageNode }: Pro
         <Button
           size="sm"
           variant="outline"
-          disabled={!canEdit || !createCapability.allowed}
-          onClick={() => setDialogOpen(true)}
+          disabled={!canEdit}
+          onClick={() => void handleNewThread(ref, { envMode: "worktree", worktreePath: null })}
         >
           <GitBranchIcon className="size-3.5" />
           New worktree
@@ -514,20 +507,6 @@ export function ProjectWorkspacesSection({ member, canEdit, canManageNode }: Pro
           <CleanupSuggestionSettings member={member} />
         </ProjectNodeSettingsScope>
       ) : null}
-      <NewWorktreeDialog
-        open={dialogOpen}
-        environmentId={member.environmentId}
-        projectId={member.id}
-        cwd={member.cwd}
-        initialTab="branches"
-        onCreated={(result) =>
-          void router.navigate({
-            to: "/$environmentId/$threadId",
-            params: buildThreadRouteParams(scopeThreadRef(member.environmentId, result.sessionId)),
-          })
-        }
-        onOpenChange={setDialogOpen}
-      />
     </ProjectSection>
   );
 }

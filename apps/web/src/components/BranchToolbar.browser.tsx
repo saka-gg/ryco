@@ -6,14 +6,13 @@ import type { ComponentProps } from "react";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
 /*
- * The toolbar's intent preloads: hovering or focusing the terminal toggle
- * fetches the drawer's chunk (code only, never a PTY), and "From PR / issue"
- * fetches the new-worktree dialog it opens. The stores and the heavy child
- * selectors are stubbed; only the toolbar's own wiring is under test.
+ * The toolbar's intent preload: hovering or focusing the terminal toggle
+ * fetches the drawer's chunk (code only, never a PTY). The stores and the
+ * heavy child selectors are stubbed; only the toolbar's own wiring is under
+ * test.
  */
-const { loadThreadTerminalDrawer, preloadNewWorktreeDialog, ids } = vi.hoisted(() => ({
+const { loadThreadTerminalDrawer, ids } = vi.hoisted(() => ({
   loadThreadTerminalDrawer: vi.fn(() => Promise.resolve()),
-  preloadNewWorktreeDialog: vi.fn(() => Promise.resolve()),
   ids: {
     environmentId: "environment-branch-toolbar",
     projectId: "project-branch-toolbar",
@@ -28,9 +27,6 @@ const DRAFT_ID = "draft-branch-toolbar" as NonNullable<
 >;
 
 vi.mock("../workspacePanelPreload", () => ({ loadThreadTerminalDrawer }));
-vi.mock("./worktrees/lazyWorktreeDialogs", () => ({
-  LazyNewWorktreeDialog: { preload: preloadNewWorktreeDialog },
-}));
 vi.mock("../store", () => ({
   useStore: (selector: (state: unknown) => unknown) => selector({}),
 }));
@@ -78,7 +74,6 @@ function Toolbar(props: { readonly terminalOpen: boolean }) {
       threadId={THREAD_ID}
       draftId={DRAFT_ID}
       envLocked={false}
-      onOpenWorktreeSources={() => undefined}
       terminalAvailable
       terminalOpen={props.terminalOpen}
       terminalToggleShortcutLabel={null}
@@ -92,7 +87,6 @@ function Toolbar(props: { readonly terminalOpen: boolean }) {
 describe("BranchToolbar intent preloads", () => {
   afterEach(() => {
     loadThreadTerminalDrawer.mockClear();
-    preloadNewWorktreeDialog.mockClear();
   });
 
   it("fetches the terminal drawer's chunk on hover and focus while the drawer is closed", async () => {
@@ -117,17 +111,6 @@ describe("BranchToolbar intent preloads", () => {
       await toggle.hover();
       (toggle.element() as HTMLElement).focus();
       await userEvent.unhover(toggle);
-      expect(loadThreadTerminalDrawer).not.toHaveBeenCalled();
-    } finally {
-      await screen.unmount();
-    }
-  });
-
-  it("fetches the new-worktree dialog's chunk on hover over From PR / issue", async () => {
-    const screen = await render(<Toolbar terminalOpen={false} />);
-    try {
-      await page.getByTestId("branch-toolbar-worktree-sources").hover();
-      await vi.waitFor(() => expect(preloadNewWorktreeDialog).toHaveBeenCalled());
       expect(loadThreadTerminalDrawer).not.toHaveBeenCalled();
     } finally {
       await screen.unmount();
