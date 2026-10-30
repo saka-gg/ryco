@@ -402,8 +402,22 @@ export const ServerPullRequestWatchCapability = Schema.Struct({
 });
 export type ServerPullRequestWatchCapability = typeof ServerPullRequestWatchCapability.Type;
 
+/**
+ * The node's last event-loop stall of five seconds or more within the last five minutes: the
+ * likely reason its clients just lost it. Time it froze, for how long, and how loaded the machine
+ * was (`loadAverage1m` is absent on Windows). Absent when there was none, and on older nodes.
+ */
+export const ServerEventLoopStall = Schema.Struct({
+  startedAt: IsoDateTime,
+  durationMs: NonNegativeInt,
+  loadAverage1m: Schema.optionalKey(Schema.Number),
+  cpuCount: Schema.optionalKey(PositiveInt),
+});
+export type ServerEventLoopStall = typeof ServerEventLoopStall.Type;
+
 export const ServerConfig = Schema.Struct({
   usageContractVersion: Schema.optional(NonNegativeInt),
+  lastEventLoopStall: Schema.optionalKey(ServerEventLoopStall),
   environment: ExecutionEnvironmentDescriptor,
   auth: ServerAuthDescriptor,
   cwd: TrimmedNonEmptyString,

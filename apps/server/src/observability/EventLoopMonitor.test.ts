@@ -25,6 +25,7 @@ import {
   type StallEvidence,
 } from "./EventLoopMonitor.ts";
 import { parseStallLog } from "./EventLoopStallHistory.ts";
+import { readNoticeableStall, resetNoticeableStallForTests } from "./NoticeableStall.ts";
 import { EVENT_LOOP_STALL_LOG_FILE_NAME, type EventLoopStallLine } from "./EventLoopStallLog.ts";
 
 const WALL_ZERO = Date.parse("2026-10-23T08:00:00.000Z");
@@ -256,6 +257,48 @@ describe("makeStallWindow", () => {
 });
 
 describe("makeEventLoopSampler", () => {
+  it("notes a stall clients will have noticed, but never time spent asleep", () => {
+    resetNoticeableStallForTests();
+    try {
+      // Asleep for ten minutes: no work happened, so it is no freeze.
+      const asleep = makeEventLoopSampler(
+        samplerDeps([reading(0, 0), reading(1_000, 10), reading(601_000, 20)]),
+      );
+      asleep.tick();
+      asleep.tick();
+      // Read inside any window the ten minutes could have opened, from either end.
+      expect(readNoticeableStall(WALL_ZERO + 1_000)).toBeUndefined();
+      expect(readNoticeableStall(WALL_ZERO + 601_000)).toBeUndefined();
+
+      // Asleep, then busy for six seconds on waking: the freeze is the six seconds before the
+      // tick that saw it, not the moment the machine went to sleep.
+      const woke = makeEventLoopSampler(
+        samplerDeps([reading(0, 0), reading(1_000, 10), reading(601_000, 6_010)]),
+      );
+      woke.tick();
+      woke.tick();
+      expect(readNoticeableStall(WALL_ZERO + 601_000)).toMatchObject({
+        startedAt: new Date(WALL_ZERO + 595_000).toISOString(),
+        durationMs: 6_000,
+      });
+      resetNoticeableStallForTests();
+
+      // Busy for six seconds: a stall long enough to drop clients.
+      const busy = makeEventLoopSampler(
+        samplerDeps([reading(0, 0), reading(1_000, 10), reading(7_000, 6_010)]),
+      );
+      busy.tick();
+      busy.tick();
+      expect(readNoticeableStall(WALL_ZERO + 7_000)).toMatchObject({
+        loadAverage1m: 1.5,
+        cpuCount: 8,
+      });
+      expect(readNoticeableStall(WALL_ZERO + 7_000)?.durationMs).toBeGreaterThanOrEqual(5_000);
+    } finally {
+      resetNoticeableStallForTests();
+    }
+  });
+
   it("drops a threadpool canary that spanned a machine sleep", () => {
     const sampler = makeEventLoopSampler(
       samplerDeps([reading(0, 0), reading(1_000, 10), reading(601_000, 900)], {

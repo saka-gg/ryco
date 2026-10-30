@@ -3,7 +3,8 @@ import { DeviceRenameSheet } from "../nodes/DeviceRenameSheet";
 import { useNavigation } from "@react-navigation/native";
 import { Pressable, View } from "react-native";
 
-import type { RelayEffectiveRole } from "@ryco/contracts";
+import type { RelayEffectiveRole, ServerEventLoopStall } from "@ryco/contracts";
+import { describeHostFreeze } from "@ryco/client-runtime/connection";
 import { WS_METHODS } from "@ryco/contracts/rpc";
 import type { WorkspaceNativeTrustState } from "@ryco/client-runtime/state/workspace";
 import {
@@ -33,6 +34,8 @@ import { acquireBeforeNodeSecurity } from "../e2ee/acquireBeforeNodeSecurity";
 import { exactNodeRouteParams } from "../e2ee/exactNodeRouteModel";
 import { useAuthoritativeNodeTrust } from "../home/useAuthoritativeNodeTrust";
 import { NodeRow } from "../nodes/NodeRow";
+import { useEnvironmentServerConfigs } from "../../state/environmentServerConfigs";
+import { useHostFreezeNowMs } from "../../state/useHostFreezeNowMs";
 import { hostedStatusTone } from "./hostedAuthModel";
 import { hostedSelectionKey, type SettledHostedStatus } from "./settledHostedStatus";
 import { useHostedModeAvailable } from "./useHostedMode";
@@ -94,6 +97,8 @@ export interface HubNodeRowModel {
   readonly label: string;
   /** Bounded presence/role summary. Never an id, token, ticket, or raw error. */
   readonly detail: string;
+  /** Why the node just dropped, when it reported a long freeze (`describeHostFreeze`). */
+  readonly freezeNotice: string | null;
   readonly transportLabel: "Hub relay";
   readonly tone: StatusTone;
   readonly selected: boolean;
@@ -170,6 +175,13 @@ export function deriveHubNodeSectionModel(input: {
   readonly query?: string;
   readonly connections?: ReadonlyArray<MobileHostedConnectionState>;
   readonly trustByEnvironmentId?: ReadonlyMap<string, WorkspaceNativeTrustState>;
+  /** Each node's last noticeable freeze, from the config it sent on connecting, read at `nowMs`. */
+  readonly hostFreeze?: {
+    readonly lastEventLoopStall: (
+      environmentId: HostedHubNode["environmentId"],
+    ) => ServerEventLoopStall | undefined;
+    readonly nowMs: number;
+  };
 }): HubNodeSectionModel {
   const { state, available, actions, onSignIn } = input;
   const statusInput = {
@@ -288,6 +300,11 @@ export function deriveHubNodeSectionModel(input: {
             : undefined,
         label: node.label,
         detail: trustDetail ? `${trustDetail} · ${rowDetail(node)}` : rowDetail(node),
+        freezeNotice: input.hostFreeze
+          ? describeHostFreeze(input.hostFreeze.lastEventLoopStall(node.environmentId), {
+              nowMs: input.hostFreeze.nowMs,
+            })
+          : null,
         transportLabel: "Hub relay",
         // The selected node's row shows the live connection status; every other
         // row shows directory presence, which is all the directory knows.
@@ -370,6 +387,7 @@ export function HubNodeSectionView(props: { readonly model: HubNodeSectionModel 
               canEditIcon={row.canEditIcon}
               label={row.label}
               detail={row.detail}
+              freezeNotice={row.freezeNotice}
               transportLabel={row.transportLabel}
               statusTone={row.tone}
               selected={row.selected}
@@ -439,6 +457,10 @@ export function HubNodeSection(props: { readonly query?: string } = {}) {
     e2eeStatus,
     nativeDeviceSecurityStatus,
   };
+  const serverConfigs = useEnvironmentServerConfigs();
+  const freezeNowMs = useHostFreezeNowMs(
+    Array.from(serverConfigs.values(), (config) => config.lastEventLoopStall),
+  );
   const settledStatus = useSettledHostedStatus({
     indicator: deriveHostedConnectionStatusIndicator(statusInput),
     statusText: deriveHostedConnectionStatusText(statusInput),
@@ -448,6 +470,10 @@ export function HubNodeSection(props: { readonly query?: string } = {}) {
   const model = deriveHubNodeSectionModel({
     state,
     connections,
+    hostFreeze: {
+      lastEventLoopStall: (environmentId) => serverConfigs.get(environmentId)?.lastEventLoopStall,
+      nowMs: freezeNowMs,
+    },
     available,
     e2eeStatus,
     nativeDeviceSecurityStatus,
