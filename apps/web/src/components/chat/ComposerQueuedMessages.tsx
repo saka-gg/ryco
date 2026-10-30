@@ -226,6 +226,7 @@ export const ComposerQueuedMessages = memo(function ComposerQueuedMessages({
                       type="button"
                       className={textButtonClass}
                       onClick={onCancelEdit}
+                      data-cancel-edit=""
                       aria-label={`Cancel editing ${rowLabel}`}
                     >
                       Cancel
@@ -304,21 +305,36 @@ export const ComposerQueuedMessages = memo(function ComposerQueuedMessages({
               {editing && editingAttachments && editingAttachments.length > 0 ? (
                 <ul
                   className="flex basis-full flex-wrap items-center gap-1 pt-0.5"
-                  aria-label="Attachments it keeps"
+                  aria-label={`Attachments kept with ${rowLabel}`}
                 >
-                  {editingAttachments.map((attachment) => (
+                  {editingAttachments.map((attachment, attachmentIndex) => (
                     <li
                       key={attachment.id}
-                      className="inline-flex max-w-48 items-center gap-0.5 rounded border border-border/70 py-px pr-0.5 pl-1.5 text-[11px] text-muted-foreground"
+                      className="inline-flex max-w-48 items-center gap-0.5 rounded border border-border/70 py-px pl-1.5 text-[11px] text-muted-foreground"
                     >
                       <span className="truncate" title={attachment.name}>
                         {attachment.name}
                       </span>
                       <button
                         type="button"
-                        className="inline-flex size-4 shrink-0 items-center justify-center rounded hover:text-foreground disabled:opacity-40"
+                        className={iconButtonClass}
                         disabled={!onDropEditingAttachment}
-                        onClick={() => onDropEditingAttachment?.(attachment.id)}
+                        onClick={(event) => {
+                          // Keyboard focus moves to the next attachment's button, else to the
+                          // row's Cancel, instead of falling to the page.
+                          const list = event.currentTarget.closest("ul");
+                          const row = list?.closest("li");
+                          onDropEditingAttachment?.(attachment.id);
+                          requestAnimationFrame(() => {
+                            const remaining = list?.isConnected
+                              ? [...list.querySelectorAll<HTMLButtonElement>("button")]
+                              : [];
+                            const next =
+                              remaining[Math.min(attachmentIndex, remaining.length - 1)] ??
+                              row?.querySelector<HTMLButtonElement>("[data-cancel-edit]");
+                            next?.focus();
+                          });
+                        }}
                         aria-label={`Drop ${attachment.name} from ${rowLabel}`}
                       >
                         <XIcon className="size-3" />

@@ -2025,6 +2025,9 @@ export function ThreadDetailScreen(props: {
     // Editing the node's queued entry: the send saves it in place, busy or not.
     if (activeServerQueueEdit !== null) {
       const edit = activeServerQueueEdit;
+      // Saving from here on: the attachments it keeps are fixed (no drop replaces the edit
+      // mid-save), and the revision this save raises is not someone else's change.
+      setSavingServerQueueEdit(edit);
       return runWhileBusy(setSendBusy, async () => {
         const edited: QueuedThreadMessage = {
           environmentId,
@@ -2047,9 +2050,10 @@ export function ThreadDetailScreen(props: {
             return null;
           },
         );
-        if (content === null) return false;
-        // The revision this save raises is not someone else's change.
-        setSavingServerQueueEdit(edit);
+        if (content === null) {
+          setSavingServerQueueEdit((current) => (current === edit ? null : current));
+          return false;
+        }
         const saved = await runServerQueueCommand((base) =>
           buildFollowUpQueueEditCommand({
             ...base,

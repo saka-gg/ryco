@@ -259,6 +259,7 @@ export function ThreadQueuedMessages(props: {
                       accessibilityLabel={`Drop ${attachment.name} from the queued message`}
                       disabled={props.onDropEditingAttachment === undefined}
                       onPress={() => props.onDropEditingAttachment?.(attachment.id)}
+                      hitSlop={6}
                       className="h-7 w-7 items-center justify-center rounded-full active:bg-subtle-strong disabled:opacity-40"
                     >
                       <SymbolView name="xmark" size={11} tintColor={mutedColor} type="monochrome" />

@@ -5804,10 +5804,14 @@ export default function ChatView(props: ChatViewProps) {
     if (activeServerQueueEdit !== null) {
       const edit = activeServerQueueEdit;
       const composerChangedDuringSave = captureComposerContentGuard();
+      // Saving from here on: the attachments it keeps are fixed (no drop replaces the edit
+      // mid-save), and the revision this save raises is not someone else's change.
+      setSavingServerQueueEdit(edit);
       let content: Awaited<ReturnType<typeof buildWebFollowUpContent>>;
       try {
         content = await buildWebFollowUpContent(composerSnapshot, settingsSnapshot);
       } catch (error) {
+        setSavingServerQueueEdit((current) => (current === edit ? null : current));
         toastManager.add(
           stackedThreadToast({
             type: "error",
@@ -5817,8 +5821,6 @@ export default function ChatView(props: ChatViewProps) {
         );
         return;
       }
-      // The revision this save raises is not someone else's change.
-      setSavingServerQueueEdit(edit);
       const saved = await runServerQueueCommand("Could not save the queued message", (base) =>
         buildFollowUpQueueEditCommand({
           ...base,
