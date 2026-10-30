@@ -227,7 +227,7 @@ const providerSessionDirectoryTestLayer = Layer.succeed(ProviderSessionDirectory
   upsert: () => Effect.void,
   getProvider: () => Effect.die(new Error("getProvider unused")),
   getBinding: () => Effect.succeed(Option.none()),
-  listThreadIds: () => Effect.succeed([]),
+  listActiveBindings: () => Effect.succeed([]),
   listBindings: () => Effect.succeed([]),
 });
 

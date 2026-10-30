@@ -58,12 +58,17 @@ export interface ProviderSessionDirectoryShape {
     threadId: ThreadId,
   ) => Effect.Effect<Option.Option<ProviderRuntimeBinding>, ProviderSessionDirectoryReadError>;
 
-  readonly listThreadIds: () => Effect.Effect<
-    ReadonlyArray<ThreadId>,
+  /** Every binding the node has ever recorded, stopped ones included. */
+  readonly listBindings: () => Effect.Effect<
+    ReadonlyArray<ProviderRuntimeBindingWithMetadata>,
     ProviderSessionDirectoryPersistenceError
   >;
 
-  readonly listBindings: () => Effect.Effect<
+  /**
+   * The bindings that are not stopped: their session may still hold a provider process.
+   * Grows with the sessions in use, not with the node's history.
+   */
+  readonly listActiveBindings: () => Effect.Effect<
     ReadonlyArray<ProviderRuntimeBindingWithMetadata>,
     ProviderSessionDirectoryPersistenceError
   >;

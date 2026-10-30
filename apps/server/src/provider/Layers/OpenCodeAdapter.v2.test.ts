@@ -144,7 +144,7 @@ function adapterOn(server: RecordedServer) {
         upsert: () => Effect.void,
         getProvider: () => Effect.die(new Error("unused")),
         getBinding: () => Effect.succeed(Option.none()),
-        listThreadIds: () => Effect.succeed([]),
+        listActiveBindings: () => Effect.succeed([]),
         listBindings: () => Effect.succeed([]),
       }),
     ),
