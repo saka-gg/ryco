@@ -1,4 +1,6 @@
-import type { ScopedThreadRef } from "@ryco/contracts";
+import type { ScopedThreadRef, ThreadId } from "@ryco/contracts";
+import { RuntimeSessionId } from "@ryco/contracts/base-schemas";
+import type { OrchestrationStopBackgroundTaskInput } from "@ryco/contracts/orchestration";
 
 import { isActiveSubagentStatus, type RuntimeSubagent } from "./subagentRuntime.ts";
 
@@ -57,5 +59,23 @@ export function subagentStopIdentity(
     taskId: agent.id,
     runtimeSessionId: agent.runtimeSessionId,
     attempt: agent.attempt ?? 0,
+  };
+}
+
+/**
+ * The node request that stops exactly `identity`'s task: the node refuses it
+ * once that task's runtime or attempt moved on, and it never interrupts the turn.
+ */
+export function subagentStopRequest(
+  threadId: ThreadId,
+  identity: SubagentStopIdentity,
+): OrchestrationStopBackgroundTaskInput {
+  return {
+    threadId,
+    taskId: identity.taskId,
+    expected: {
+      runtimeSessionId: RuntimeSessionId.make(identity.runtimeSessionId),
+      attempt: identity.attempt,
+    },
   };
 }

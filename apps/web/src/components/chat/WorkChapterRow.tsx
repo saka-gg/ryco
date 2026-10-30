@@ -23,7 +23,7 @@ import {
 import { memo, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { type EnvironmentId, type ServerProviderSkill } from "@ryco/contracts";
 
-import { type WorkLogEntry } from "../../session-logic";
+import { isReasoningWorkEntry, reasoningEntryText, type WorkLogEntry } from "../../session-logic";
 import { cn } from "~/lib/utils";
 import { useUiStateStore } from "~/uiStateStore";
 import { visibleSecondTicker } from "../../lib/perf/ticker";
@@ -46,8 +46,6 @@ import {
   deriveChapterTallies,
   describeTally,
   formatChapterDuration,
-  isReasoningWorkEntry,
-  reasoningEntryText,
   selectTickerEntries,
   type ChapterStepDisplay,
   type ChapterTallies,

@@ -40,6 +40,7 @@ import {
   agentWorkflowStatusText,
   canonicalSubagentIdentityKey,
   isActiveSubagentStatus,
+  SUBAGENT_STATUS_TEXT,
   type ThreadSubagentView,
   formatSubagentModelLabel,
   formatSubagentTokenCount,
@@ -53,7 +54,6 @@ import { cn } from "~/lib/utils";
 import { AgentActivityTimeline } from "./AgentActivityTimeline";
 import { AgentStopButton, makeAgentStopDecorator } from "./agents/AgentStopButton";
 import {
-  AGENT_STATUS_VISUALS,
   AgentElapsed,
   AgentLabel,
   AgentMonogramStack,
@@ -485,7 +485,7 @@ function AgentDetailView({
             <AgentLabel label={label} wrap className="text-sm font-semibold" />
           </h3>
           <span className="shrink-0 text-xs text-muted-foreground">
-            {AGENT_STATUS_VISUALS[selected.status].label}
+            {SUBAGENT_STATUS_TEXT[selected.status].label}
           </span>
           {stopAgent ? (
             <AgentStopButton agent={selected} action={stopAgent} variant="labeled" />

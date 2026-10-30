@@ -3,7 +3,7 @@ import {
   completionReturnPresentation,
   type AgentControlStatusTone,
 } from "@ryco/client-runtime/state/agentControl";
-import type { SidebarThreadSummary } from "@ryco/client-runtime/state/threads";
+import { resolveRunningSince, type SidebarThreadSummary } from "@ryco/client-runtime/state/threads";
 import type { ThreadId } from "@ryco/contracts";
 import type {
   AgentControlCompletionReturn,
@@ -14,7 +14,6 @@ import { formatRelativeTime } from "../../timestampFormat";
 import { inboxGlyphLabel } from "../inboxSidebar/inboxRowPresentation";
 import {
   resolveInboxThreadStatus,
-  resolveRunningSince,
   type InboxSidebarThreadState,
 } from "../inboxSidebar/inboxSidebarModel";
 

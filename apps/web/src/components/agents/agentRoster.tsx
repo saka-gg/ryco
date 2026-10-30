@@ -21,61 +21,44 @@ import {
 import { cn } from "~/lib/utils";
 import { subagentAvatarColor } from "../sidebar/SubagentAvatar";
 import {
+  agentActivityText,
   buildAgentRosterIdentity,
+  elapsedBetween,
   resolveAgentRowIdentity,
+  settledDuration,
   splitSubagentLabelScope,
   subagentMonogramInitials,
+  SUBAGENT_STATUS_TEXT,
   type AgentPanelModel,
   type AgentRosterIdentity,
   type RuntimeSubagent,
 } from "../../threadWorkspaceViewModel";
-import {
-  agentActivityText,
-  elapsedBetween,
-  monogramInkColor,
-  settledDuration,
-} from "./agentRoster.logic";
+import { monogramInkColor } from "./agentRoster.logic";
 
 /**
- * Provider phases remain distinct, including resumable idle agents. `word` is
- * the status a row spells out next to its time: running and completed read
- * from the dot and the ticking/frozen time alone, every other state is named
- * so it never depends on color (or on a stale activity line).
+ * Status dot colors. Provider phases remain distinct, including resumable idle
+ * agents; their words are the shared {@link SUBAGENT_STATUS_TEXT}, whose `word`
+ * a row spells out next to its time: running and completed read from the dot
+ * and the ticking/frozen time alone, every other state is named so it never
+ * depends on color (or on a stale activity line).
  */
-export const AGENT_STATUS_VISUALS: Record<
-  RuntimeSubagent["status"],
-  { dotClass: string; label: string; word: { text: string; className: string } | null }
-> = {
-  pending: { dotClass: "bg-info", label: "Queued", word: { text: "Queued", className: "" } },
-  running: { dotClass: "bg-info", label: "Running", word: null },
-  waiting: {
-    dotClass: "bg-info",
-    label: "Waiting",
-    word: { text: "Waiting", className: "text-info-foreground" },
-  },
+const AGENT_STATUS_DOT_CLASS: Record<RuntimeSubagent["status"], string> = {
+  pending: "bg-info",
+  running: "bg-info",
+  waiting: "bg-info",
   // Idle reads as settled (muted, not sky): a resting Codex child looks done
   // unless resumed.
-  idle: {
-    dotClass: "bg-muted-foreground/50",
-    label: "Idle · resumable",
-    word: { text: "Idle", className: "" },
-  },
-  completed: { dotClass: "bg-success", label: "Completed", word: null },
-  failed: {
-    dotClass: "bg-destructive",
-    label: "Failed",
-    word: { text: "Failed", className: "text-destructive-foreground" },
-  },
-  cancelled: {
-    dotClass: "bg-muted-foreground/60",
-    label: "Stopped",
-    word: { text: "Stopped", className: "" },
-  },
-  interrupted: {
-    dotClass: "bg-muted-foreground/60",
-    label: "Interrupted",
-    word: { text: "Interrupted", className: "" },
-  },
+  idle: "bg-muted-foreground/50",
+  completed: "bg-success",
+  failed: "bg-destructive",
+  cancelled: "bg-muted-foreground/60",
+  interrupted: "bg-muted-foreground/60",
+};
+
+/** Status words in their own color; the rest take the row's muted aside color. */
+const AGENT_STATUS_WORD_CLASS: Partial<Record<RuntimeSubagent["status"], string>> = {
+  waiting: "text-info-foreground",
+  failed: "text-destructive-foreground",
 };
 
 /**
@@ -151,11 +134,7 @@ export function AgentStatusDot({
   return (
     <span
       aria-hidden
-      className={cn(
-        "size-1.5 shrink-0 rounded-full",
-        AGENT_STATUS_VISUALS[status].dotClass,
-        className,
-      )}
+      className={cn("size-1.5 shrink-0 rounded-full", AGENT_STATUS_DOT_CLASS[status], className)}
     />
   );
 }
@@ -191,7 +170,7 @@ export function AgentMonogram({
         data-slot="agent-status-badge"
         className={cn(
           "absolute -right-0.5 -bottom-0.5 size-[7px] rounded-full ring-[1.5px] ring-background",
-          AGENT_STATUS_VISUALS[agent.status].dotClass,
+          AGENT_STATUS_DOT_CLASS[agent.status],
         )}
       />
     </span>
@@ -390,19 +369,21 @@ export function AgentRow({
 }) {
   const { onOpenAgent, decorateRow } = use(AgentRosterContext);
   const { label, role } = useAgentRowIdentity(agent);
-  const visuals = AGENT_STATUS_VISUALS[agent.status];
+  const statusText = SUBAGENT_STATUS_TEXT[agent.status];
   const activity = agentActivityText(agent);
   // A named status already says what a quiet row is doing; do not repeat it.
-  const activityLine = activity ?? (visuals.word ? "" : visuals.label);
+  const activityLine = activity ?? (statusText.word ? "" : statusText.label);
   const activityTone =
     agent.status === "failed" ? "text-destructive-foreground" : "text-muted-foreground";
-  const statusWord = visuals.word ? (
-    <span className={cn("font-sans", visuals.word.className)}>{visuals.word.text}</span>
+  const statusWord = statusText.word ? (
+    <span className={cn("font-sans", AGENT_STATUS_WORD_CLASS[agent.status])}>
+      {statusText.word}
+    </span>
   ) : null;
   // Rows without a visible status word still name their status (buttons
   // carry it in their accessible name instead).
   const srStatus =
-    visuals.word || onOpenAgent ? null : <span className="sr-only">{visuals.label}</span>;
+    statusText.word || onOpenAgent ? null : <span className="sr-only">{statusText.label}</span>;
 
   let content: ReactNode;
   if (density === "compact" || density === "mini") {
@@ -484,7 +465,7 @@ export function AgentRow({
       data-agent-id={agent.id}
       {...densityAttribute}
       onClick={() => onOpenAgent(agent.id)}
-      aria-label={`Open ${label}${role ? `, ${role}` : ""} transcript. ${visuals.label}.`}
+      aria-label={`Open ${label}${role ? `, ${role}` : ""} transcript. ${statusText.label}.`}
     >
       {content}
     </button>

@@ -2,7 +2,7 @@ import { describe, expect, it } from "vite-plus/test";
 import type { OrchestrationThreadActivity } from "@ryco/contracts";
 
 import { deriveThreadAgentPanelModel, foldSubagentActivities } from "./subagentRuntime.ts";
-import { subagentStopIdentity } from "./subagentStop.ts";
+import { subagentStopIdentity, subagentStopRequest } from "./subagentStop.ts";
 import { deriveThreadSubagents } from "./threadWorkspaceViewModel.ts";
 
 let sequence = 0;
@@ -131,5 +131,21 @@ describe("subagentStopIdentity", () => {
     const [agent] = model.directAgents;
     expect(agent?.status).toBe("running");
     expect(subagentStopIdentity(agent!, "rt-1")).toBeNull();
+  });
+});
+
+describe("subagentStopRequest", () => {
+  it("asks the node to stop exactly that task activation", () => {
+    expect(
+      subagentStopRequest("thread-1" as never, {
+        taskId: "agent-1",
+        runtimeSessionId: "rt-1",
+        attempt: 2,
+      }),
+    ).toEqual({
+      threadId: "thread-1",
+      taskId: "agent-1",
+      expected: { runtimeSessionId: "rt-1", attempt: 2 },
+    });
   });
 });

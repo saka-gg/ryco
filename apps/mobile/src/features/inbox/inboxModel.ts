@@ -193,6 +193,19 @@ function statusLabel(state: InboxThreadState): string {
   }
 }
 
+/**
+ * One thread's state and its words as its inbox row shows them, for a surface
+ * that lists the thread outside the inbox (a chat's delegated tasks).
+ */
+export function inboxThreadStatus(
+  thread: SidebarThreadSummary,
+  environment: InboxEnvironment | undefined,
+  nowMs: number,
+): { readonly state: InboxThreadState; readonly label: string } {
+  const state = threadState(thread, environment, new Set(), nowMs);
+  return { state, label: statusLabel(state) };
+}
+
 function timestamp(thread: SidebarThreadSummary): string {
   return thread.updatedAt ?? thread.latestUserMessageAt ?? thread.createdAt;
 }

@@ -163,11 +163,11 @@ import {
   deriveReadableCommandDisplay,
   normalizeToolTextForComparison,
   resolveCommandVisualKind,
+  resolveWorkEntryStatus,
 } from "@ryco/client-runtime/state/session";
 import {
   formatWorkEntryElapsed,
   formatWorkEntryStatusLabel,
-  resolveWorkEntryStatus,
   workEntryActivityMeta,
 } from "./workEntryActivity";
 import {

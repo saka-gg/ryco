@@ -11,6 +11,7 @@ import {
   respondToThreadUserInput,
   setThreadArchived,
   setThreadSettled,
+  stopThreadSubagent,
 } from "./sessionActions";
 
 const THREAD_ID = "thread-1" as ThreadId;
@@ -178,5 +179,35 @@ describe("sessionActions", () => {
     };
     expect(command.type).toBe("thread.user-input.respond");
     expect(command.answers).toEqual({ q1: "yes" });
+  });
+
+  it("stops one subagent's task activation, never the turn", async () => {
+    const stopBackgroundTask = vi.fn(async (_input: unknown) => ({}));
+    const { api, dispatchCommand } = fakeApi();
+    const withStop = {
+      orchestration: { ...api.orchestration, stopBackgroundTask },
+    } as unknown as EnvironmentApi;
+    await stopThreadSubagent(withStop, THREAD_ID, {
+      taskId: "agent-1",
+      runtimeSessionId: "rt-1",
+      attempt: 0,
+    });
+    expect(stopBackgroundTask).toHaveBeenCalledWith({
+      threadId: THREAD_ID,
+      taskId: "agent-1",
+      expected: { runtimeSessionId: "rt-1", attempt: 0 },
+    });
+    expect(dispatchCommand).not.toHaveBeenCalled();
+  });
+
+  it("refuses to stop an agent on a node that can't", async () => {
+    const { api } = fakeApi();
+    await expect(
+      stopThreadSubagent(api, THREAD_ID, {
+        taskId: "agent-1",
+        runtimeSessionId: "rt-1",
+        attempt: 0,
+      }),
+    ).rejects.toThrow("This node can't stop single agents.");
   });
 });
