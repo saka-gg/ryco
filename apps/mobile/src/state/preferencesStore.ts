@@ -42,6 +42,11 @@ export interface Preferences {
   /** Thread alerts play the system sound. Unset means off. */
   readonly threadAlertSound?: boolean;
   /**
+   * Thread alerts also reach this device while Ryco is closed, through the Hub
+   * (`docs/push-alerts.md`). Unset means never turned on.
+   */
+  readonly backgroundAlerts?: boolean;
+  /**
    * Review a send that resumes a large, idle Claude conversation first; "Don't ask
    * again" turns it off. Unset means on.
    */
@@ -65,6 +70,7 @@ export function sanitizePreferences(parsed: Preferences): Preferences {
     rememberThreadContent?: boolean;
     threadAlerts?: boolean;
     threadAlertSound?: boolean;
+    backgroundAlerts?: boolean;
     claudeResumeReview?: boolean;
   } = {};
 
@@ -113,6 +119,9 @@ export function sanitizePreferences(parsed: Preferences): Preferences {
   if (typeof parsed.threadAlerts === "boolean") preferences.threadAlerts = parsed.threadAlerts;
   if (typeof parsed.threadAlertSound === "boolean") {
     preferences.threadAlertSound = parsed.threadAlertSound;
+  }
+  if (typeof parsed.backgroundAlerts === "boolean") {
+    preferences.backgroundAlerts = parsed.backgroundAlerts;
   }
   if (typeof parsed.claudeResumeReview === "boolean") {
     preferences.claudeResumeReview = parsed.claudeResumeReview;

@@ -1,4 +1,5 @@
 import type { EnvironmentId, ScopedThreadRef } from "@ryco/contracts";
+import type { PushAlertKind } from "@ryco/contracts/push";
 import {
   startThreadNotificationFeed,
   type SidebarThreadOrStub,
@@ -14,6 +15,7 @@ import { AppState, Platform } from "react-native";
 import type { Preferences } from "../state/preferencesStore";
 import {
   planMobileThreadAlert,
+  presentsInForeground,
   threadAlertLinkPath,
   threadAlertModeOf,
   threadAlertRefOf,
@@ -29,6 +31,11 @@ export interface MobileThreadAlertsDeps {
   readonly readPreferences: () => Preferences;
   readonly subscribePreferences: (listener: () => void) => () => void;
   readonly readVisibleThread: () => ScopedThreadRef | null;
+  /**
+   * Background push brings this environment's alerts of this kind while the
+   * app is in the background, so the app does not post its own.
+   */
+  readonly isBackgroundPushActive?: (environmentId: EnvironmentId, kind: PushAlertKind) => boolean;
 }
 
 /** The native notification APIs alerts use; tests replace them. */
@@ -65,7 +72,12 @@ function ensureThreadAlertChannel(): Promise<void> {
   return threadAlertChannel;
 }
 
-export function createExpoThreadAlertsPlatform(): MobileThreadAlertsPlatform {
+export function createExpoThreadAlertsPlatform(
+  options: {
+    /** The app holds a live connection to this machine. */
+    readonly isEnvironmentLive?: (environmentId: EnvironmentId) => boolean;
+  } = {},
+): MobileThreadAlertsPlatform {
   let lastOpened: string | null = null;
   return {
     isAppActive: () => AppState.currentState === "active",
@@ -87,12 +99,24 @@ export function createExpoThreadAlertsPlatform(): MobileThreadAlertsPlatform {
       Notifications.setNotificationHandler({
         // The notification's own sound setting decides; refusing sound here
         // would also hide the banner on Android.
-        handleNotification: async () => ({
-          shouldShowBanner: true,
-          shouldShowList: true,
-          shouldPlaySound: true,
-          shouldSetBadge: false,
-        }),
+        handleNotification: async (notification) => {
+          // Typed as a trigger input; a delivered push carries `{ type: "push" }`.
+          const trigger: unknown = notification.request.trigger;
+          const show = presentsInForeground({
+            remote:
+              typeof trigger === "object" &&
+              trigger !== null &&
+              (trigger as { readonly type?: unknown }).type === "push",
+            data: notification.request.content.data,
+            isEnvironmentLive: options.isEnvironmentLive ?? (() => false),
+          });
+          return {
+            shouldShowBanner: show,
+            shouldShowList: show,
+            shouldPlaySound: show,
+            shouldSetBadge: false,
+          };
+        },
       });
       return () => Notifications.setNotificationHandler(null);
     },
@@ -156,11 +180,16 @@ export function startMobileThreadAlerts(
   let stopped = false;
 
   const deliver = (candidate: ThreadNotificationCandidate) => {
+    const appActive = platform.isAppActive();
     const alert = planMobileThreadAlert({
       candidate,
       mode: threadAlertModeOf(deps.readPreferences()),
-      appActive: platform.isAppActive(),
+      appActive,
       visibleThread: deps.readVisibleThread(),
+      pushCovers:
+        !appActive &&
+        deps.isBackgroundPushActive?.(candidate.event.ref.environmentId, candidate.event.kind) ===
+          true,
     });
     if (stopped || alert === null) return;
     void platform

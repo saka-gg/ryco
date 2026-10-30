@@ -8,6 +8,7 @@ export function SettingsSwitchRow(props: {
   readonly onValueChange: (value: boolean) => void;
   readonly detail?: string;
   readonly first?: boolean;
+  readonly disabled?: boolean;
 }) {
   return (
     <View
@@ -21,7 +22,11 @@ export function SettingsSwitchRow(props: {
           </Text>
         ) : null}
       </View>
-      <Switch value={props.value} onValueChange={props.onValueChange} />
+      <Switch
+        value={props.value}
+        onValueChange={props.onValueChange}
+        disabled={props.disabled === true}
+      />
     </View>
   );
 }

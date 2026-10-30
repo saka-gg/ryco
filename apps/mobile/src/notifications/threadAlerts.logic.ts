@@ -39,15 +39,19 @@ export interface MobileThreadAlert {
 /**
  * The notification a candidate shows, or null when it stays quiet. The app has
  * no in-app toast, so in front its banner takes the toast's place and shows
- * unless the thread is on screen; in the background it is the system alert.
+ * unless the thread is on screen; in the background it is the system alert,
+ * unless background push already brings it (`pushCovers`): the node then
+ * sends the same alert through the Hub, and the two must not double up.
  */
 export function planMobileThreadAlert(input: {
   readonly candidate: ThreadNotificationCandidate;
   readonly mode: ThreadNotificationMode;
   readonly appActive: boolean;
   readonly visibleThread: ScopedThreadRef | null;
+  readonly pushCovers?: boolean;
 }): MobileThreadAlert | null {
   const { event, delegated } = input.candidate;
+  if (!input.appActive && input.pushCovers === true) return null;
   const plan = planThreadAlert({
     mode: input.mode,
     toasts: hasThreadSystemNotifications(input.mode),
@@ -79,4 +83,20 @@ const decodeThreadRef = Schema.decodeUnknownOption(ScopedThreadRef);
 /** The thread a tapped notification's data names, or null when it is not a thread alert. */
 export function threadAlertRefOf(data: unknown): ScopedThreadRef | null {
   return Option.getOrNull(decodeThreadRef(data));
+}
+
+/**
+ * Whether a notification arriving while the app is in front shows its banner.
+ * A background push for a machine the app is connected to stays quiet: the
+ * app's own alert for it already ran through the rules above (the node holds
+ * pushes for a device in front, so this only catches a race).
+ */
+export function presentsInForeground(input: {
+  readonly remote: boolean;
+  readonly data: unknown;
+  readonly isEnvironmentLive: (environmentId: ScopedThreadRef["environmentId"]) => boolean;
+}): boolean {
+  if (!input.remote) return true;
+  const ref = threadAlertRefOf(input.data);
+  return ref === null || !input.isEnvironmentLive(ref.environmentId);
 }

@@ -390,7 +390,9 @@ const TRACING_EXPORTER_SOURCES: readonly ForbiddenBundleSource[] = [
  * paint path. 527 KiB with the push alert device RPCs, whose schemas the
  * boot RPC client carries. 528 KiB with the follow-up queue's commands and
  * events in the orchestration contracts that boot decodes. 529 KiB with the
- * threads store applying the queue's events.
+ * threads store applying the queue's events. 530 KiB with the push alert
+ * device methods on the boot RPC client, which the phone's background alerts
+ * call (about 0.1 KiB), after Desktop's linked direct routes took the rest.
  */
 export const DEFAULT_BUNDLE_BUDGET_POLICY: BundleBudgetPolicy = {
   bootChunk: "main",
@@ -399,7 +401,7 @@ export const DEFAULT_BUNDLE_BUDGET_POLICY: BundleBudgetPolicy = {
       name: "boot",
       chunk: "main",
       beyondBoot: false,
-      maxGzipBytes: 529 * KIB,
+      maxGzipBytes: 530 * KIB,
       forbiddenSources: [
         ...HOSTED_RUNTIME_SOURCES,
         ...MARKDOWN_SOURCES,

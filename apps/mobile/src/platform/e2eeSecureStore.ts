@@ -2,6 +2,7 @@ import type { KVService } from "@ryco/client-runtime/platform";
 import * as SecureStore from "expo-secure-store";
 import { Platform } from "react-native";
 
+import { createInstallCustody } from "./installCustody";
 import { mobileKV } from "./kv";
 import { sanitizeSecretKey } from "./secretKv";
 
@@ -225,35 +226,17 @@ export function createE2eeSecureStore(
   };
 
   /**
-   * §6.3's clone/restore check, run before the namespace is touched at all.
-   *
-   * Ordering is the whole point of it: destroy first, mark second. Marking first
-   * and then failing to destroy would declare a resurrected key adopted, which is
-   * the one outcome §6.3 forbids — and it forbids it "even while its
-   * cross-signature remains unexpired", so no validity check may short-circuit
-   * this. Destroying first and then failing to mark costs a redundant destroy on
-   * the next launch and nothing else.
-   *
-   * Nothing is read to decide: a missing marker destroys unconditionally, so no
-   * value from the previous installation is ever loaded, parsed, or used — not
-   * even to find out whether one exists.
+   * §6.3's clone/restore check, run before the namespace is touched at all
+   * (`installCustody.ts`). It forbids adopting a resurrected key "even while
+   * its cross-signature remains unexpired", so no validity check may
+   * short-circuit it. Until it completes, no accessor below reaches the store.
    */
-  let custody: Promise<void> | undefined;
-  const ensureDeviceCustody = async (): Promise<void> => {
-    custody ??= (async () => {
-      const marker = await kv.getItem(E2EE_INSTALL_MARKER_KEY);
-      if (marker === E2EE_INSTALL_MARKER_VALUE) return;
-      await destroyEntries();
-      await kv.setItem(E2EE_INSTALL_MARKER_KEY, E2EE_INSTALL_MARKER_VALUE);
-    })().catch((cause: unknown) => {
-      // Not memoized on failure: an unreadable marker is a condition to retry,
-      // and every retry runs the whole destroy-then-mark sequence again. Until
-      // one completes, no accessor below reaches the store at all.
-      custody = undefined;
-      throw cause;
-    });
-    return await custody;
-  };
+  const ensureDeviceCustody = createInstallCustody({
+    kv,
+    markerKey: E2EE_INSTALL_MARKER_KEY,
+    markerValue: E2EE_INSTALL_MARKER_VALUE,
+    destroy: destroyEntries,
+  });
 
   const bounded = async <A>(operation: () => Promise<A>): Promise<A> => {
     try {

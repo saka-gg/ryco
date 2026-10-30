@@ -143,7 +143,38 @@ The Hub sends an `alert` push (`apns-priority: 10`, `apns-collapse-id` from the 
 The extension reads `ryco`, opens `s` with the push key and the associated data from `e`, `q` and
 `n`, and checks that the payload's `e` and `q` match. It then shows the thread title, a line for the
 kind, and stacks alerts per thread (`threadIdentifier` `<environment>/<thread>`). On any failure, or
-past its time limit, the generic text stays and a tap opens the app.
+past its time limit, the generic text stays and a tap opens the app: the extension also drops the
+Hub's own `body` and `url`, so only an opened payload can name the thread a tap opens.
+
+## The iPhone app
+
+Settings → Inbox → Alerts has a **When Ryco is closed** switch under thread alerts. Until the user
+turns it on, the app asks the Hub only for its capability, to explain the row. Once on, and only
+when the Hub can send to this build's bundle id:
+
+1. the `ryco-push` native module creates the push key; the `RycoNotificationService` extension
+   shares its keychain group (both added by `plugins/withIosNotificationServiceExtension.cjs`);
+2. the app records its enrollment id and the sound setting with the key, for the extension;
+3. it reads the APNs token, registers it with the Hub, then calls `push.registerDevice` once on every
+   Hub channel each time it connects, and `push.setPresence` while it is in front. A node's answer is
+   kept for that connection: an older node or a channel that cannot receive push is asked again on
+   the next connect, a failure after a minute or on the next foreground;
+4. once the Hub took the token and a node reports `hubDelivery: available` for a kind, the app stops
+   posting its own background alert of that kind for that machine, so the two never double up. In
+   front nothing changes. A node reports `offline` from its start until its first delivered signal;
+   while it has not confirmed delivery, the app asks it again with each presence refresh and on
+   coming back, and keeps posting its own alerts, since a missed alert is worse than a double one.
+
+Turning it off removes the Hub registration, the connected nodes' registrations and the key. Any key
+means a Hub registration may exist, so its removal is recorded in the app's storage before the key
+goes and retried on the next foreground or launch until the Hub confirms it (a 404 counts as
+removed). Signing out, or into another account, deletes the key, and the Hub drops the registration
+with the session.
+
+The key belongs to the installation. The keychain keeps it across a delete and reinstall, so it has
+an install marker in the app's storage, like the E2EE keys: at every launch, also when the new
+installation never turned background alerts on, a key without the marker is deleted before anything
+uses it.
 
 ## Versions
 
