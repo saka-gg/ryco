@@ -962,6 +962,30 @@ describe("follow-up queue decider: holds other commands record", () => {
       expectedRevision: 1,
     } as OrchestrationCommand);
     expect(queueOf(headOnClaude.model)?.hold?.causeKeys).toEqual([`interrupt:${runningTurn}`]);
+
+    // A restart's error names no provider failure: a head for Claude does not release it.
+    const restarted = await apply(
+      await queued(["a", "b"], running),
+      failedSession(ORPHANED_PROVIDER_SESSION_ERROR),
+    );
+    const restartHold = {
+      reason: "error" as const,
+      causeKeys: [`error:${runningTurn}:${ORPHANED_PROVIDER_SESSION_ERROR}`],
+      detail: null,
+    };
+    const heldAtRestart = await apply(restarted.model, {
+      type: "thread.queue.hold.record",
+      commandId: nextCommandId("hold"),
+      threadId,
+      hold: restartHold,
+      createdAt: at(9),
+    } as OrchestrationCommand);
+    const claudeAfterRestart = await apply(heldAtRestart.model, {
+      ...editB(CLAUDE, entryB.revision),
+      messageId: MessageId.make("a"),
+      expectedRevision: 1,
+    } as OrchestrationCommand);
+    expect(queueOf(claudeAfterRestart.model)?.hold?.causeKeys).toEqual(restartHold.causeKeys);
   });
 
   it("a head moved to another instance releases that instance's usage limit", async () => {

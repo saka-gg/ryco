@@ -349,7 +349,9 @@ export function decideFollowUpQueueCommand(
   command: FollowUpQueueCommand,
 ): FollowUpQueueDecision {
   const decision = decideQueueCommand(host, readModel, thread, command);
-  return "refused" in decision ? decision : withHeadExemptions(thread, decision, command.createdAt);
+  return "refused" in decision
+    ? decision
+    : withHeadExemptions(host, thread, decision, command.createdAt);
 }
 
 /**
@@ -358,6 +360,7 @@ export function decideFollowUpQueueCommand(
  * instance's error or usage limit (`headExemptCauseKeys`).
  */
 function withHeadExemptions(
+  host: FollowUpQueueHost,
   thread: Thread,
   decision: Extract<FollowUpQueueDecision, { readonly drafts: unknown }>,
   occurredAt: string,
@@ -377,12 +380,37 @@ function withHeadExemptions(
     headExemptCauseKeys({
       hold: after.hold,
       headProviderInstanceId: headInstance(after),
-      sessionProviderInstanceId: thread.session?.providerInstanceId ?? null,
+      sessionError: currentSessionError(host, thread),
       usageLimit: thread.usageLimit ?? null,
     }),
     occurredAt,
   );
   return released === null ? decision : { drafts: [...decision.drafts, released] };
+}
+
+/**
+ * The `error:` cause the thread's session still accounts for (the key `followUpQueueFollowOns`
+ * held it under), with its instance; null without one, or after a restart, which is no provider
+ * failure.
+ */
+function currentSessionError(
+  host: FollowUpQueueHost,
+  thread: Thread,
+): { readonly causeKey: string; readonly providerInstanceId: string } | null {
+  const session = thread.session;
+  if (
+    session === null ||
+    session.lastError === null ||
+    session.lastError === host.orphanedSessionError ||
+    session.providerInstanceId === undefined ||
+    session.providerInstanceId === null
+  ) {
+    return null;
+  }
+  return {
+    causeKey: sessionErrorCauseKey(thread.latestTurn?.turnId ?? null, session.lastError),
+    providerInstanceId: session.providerInstanceId,
+  };
 }
 
 function decideQueueCommand(

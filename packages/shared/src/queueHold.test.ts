@@ -19,7 +19,6 @@ import {
   turnStartFailedCauseKey,
   type QueueHoldThreadView,
 } from "./queueHold.ts";
-import { ORPHANED_PROVIDER_SESSION_ERROR } from "./restartContinuation.ts";
 
 const at = "2026-10-24T10:00:00.000Z";
 
@@ -148,61 +147,56 @@ describe("headExemptCauseKeys", () => {
     causeKeys,
     heldAt: "2026-10-30T10:00:00.000Z",
   });
-  const restartError = sessionErrorCauseKey("turn-1", ORPHANED_PROVIDER_SESSION_ERROR);
+  const died = sessionErrorCauseKey("turn-1", "Died.");
+  const codexError = { causeKey: died, providerInstanceId: "codex" };
 
-  it("releases another instance's session error and usage limit, with the limited turn's error", () => {
+  it("releases the current session's error and another instance's limit, with the limited turn's error", () => {
     expect(
       headExemptCauseKeys({
-        hold: hold([
-          "limit:turn-2",
-          "error:turn-2:Limit.",
-          "error:turn-1:Died.",
-          "interrupt:turn-1",
-        ]),
+        hold: hold(["limit:turn-2", "error:turn-2:Limit.", died, "interrupt:turn-1"]),
         headProviderInstanceId: "claude",
-        sessionProviderInstanceId: "codex",
+        sessionError: codexError,
         usageLimit: { turnId: "turn-2", providerInstanceId: "codex" },
       }),
-    ).toEqual(["limit:turn-2", "error:turn-2:Limit.", "error:turn-1:Died."]);
+    ).toEqual(["limit:turn-2", "error:turn-2:Limit.", died]);
   });
 
-  it("keeps causes of the head's own instance, a restart, a failed start and a Stop", () => {
-    const keys = [
-      "error:turn-1:Died.",
-      restartError,
-      "start-failed:activity-1",
-      "interrupt:turn-1",
-    ];
+  it("keeps the head's own instance's causes, older errors, a failed start and a Stop", () => {
+    const older = sessionErrorCauseKey("turn-0", "Died before.");
+    const keys = [died, older, "start-failed:activity-1", "interrupt:turn-1"];
+    // The head goes to the instance that failed.
     expect(
       headExemptCauseKeys({
         hold: hold(keys),
         headProviderInstanceId: "codex",
-        sessionProviderInstanceId: "codex",
+        sessionError: codexError,
         usageLimit: null,
       }),
     ).toEqual([]);
+    // Only the error the session still shows names its instance.
     expect(
       headExemptCauseKeys({
         hold: hold(keys),
         headProviderInstanceId: "claude",
-        sessionProviderInstanceId: "codex",
+        sessionError: codexError,
         usageLimit: null,
       }),
-    ).toEqual(["error:turn-1:Died."]);
-    // No head, or no known instance: nothing is exempt.
+    ).toEqual([died]);
+    // The chat moved on to another session (a direct send): its error's instance is unknown.
+    expect(
+      headExemptCauseKeys({
+        hold: hold(keys),
+        headProviderInstanceId: "codex",
+        sessionError: null,
+        usageLimit: null,
+      }),
+    ).toEqual([]);
+    // No head: nothing.
     expect(
       headExemptCauseKeys({
         hold: hold(keys),
         headProviderInstanceId: null,
-        sessionProviderInstanceId: "codex",
-        usageLimit: null,
-      }),
-    ).toEqual([]);
-    expect(
-      headExemptCauseKeys({
-        hold: hold(keys),
-        headProviderInstanceId: "claude",
-        sessionProviderInstanceId: null,
+        sessionError: codexError,
         usageLimit: null,
       }),
     ).toEqual([]);

@@ -320,18 +320,21 @@ const INTERRUPT_CAUSE_PREFIX = "interrupt:";
  * provider instance than the one the head targets (`isQueueFailureCauseExempt`). Sending the head
  * is how a person recovers from those, so the server queue releases them once its head changes
  * (an edit, a move, an add at the head, a removal), as it never holds for them when the head
- * already targets another instance. A restart's error, a failed start and stops stay held.
+ * already targets another instance. A cause key does not name its instance, so only what the
+ * thread still shows can be released: the error of its current session (`sessionError`, null
+ * after a restart) and the limit it records, with the limited turn's own errors. An older error,
+ * a failed start and stops stay held.
  */
 export function headExemptCauseKeys(input: {
   readonly hold: QueueHold | null;
   readonly headProviderInstanceId: string | null;
-  /** The instance of the thread's session, whose `error:` causes the hold records. */
-  readonly sessionProviderInstanceId: string | null;
+  /** The `error:` cause the thread's current session accounts for, and that session's instance. */
+  readonly sessionError: { readonly causeKey: string; readonly providerInstanceId: string } | null;
   /** The thread's usage limit, whose `limit:` cause names its turn. */
   readonly usageLimit: { readonly turnId: string; readonly providerInstanceId: string } | null;
 }): string[] {
   if (input.hold === null || input.headProviderInstanceId === null) return [];
-  const exempt = (providerInstanceId: string | null) =>
+  const exempt = (providerInstanceId: string) =>
     isQueueFailureCauseExempt(
       { reason: "error", providerInstanceId },
       input.headProviderInstanceId,
@@ -349,12 +352,21 @@ export function headExemptCauseKeys(input: {
   }
   const limitedTurnError = (key: string) =>
     [...limitTurns].some((turnId) => key.startsWith(`${ERROR_CAUSE_PREFIX}${turnId}:`));
+  const sessionError = input.sessionError;
   for (const key of input.hold.causeKeys) {
-    if (!key.startsWith(ERROR_CAUSE_PREFIX) || key.endsWith(restartErrorCauseSuffix())) continue;
-    if (limitedTurnError(key) || exempt(input.sessionProviderInstanceId)) keys.push(key);
+    if (!key.startsWith(ERROR_CAUSE_PREFIX)) continue;
+    if (
+      limitedTurnError(key) ||
+      (sessionError !== null &&
+        key === sessionError.causeKey &&
+        exempt(sessionError.providerInstanceId))
+    ) {
+      keys.push(key);
+    }
   }
   return keys;
 }
+
 /**
  * Built on use rather than at load, so a bundle that never calls the restart rules (the server's
  * queue rules) does not reference the restart module at all.
