@@ -8,14 +8,22 @@
  * compress about 2x on their own, so everything from 512 B is compressed;
  * below that the saving is a few bytes. Level 1 keeps the CPU small.
  *
- * Every message is compressed with a fresh context on both sides (no context
- * takeover). A context shared across messages would shrink live frames about
- * twice as much again, but compressed lengths would then show whether a
- * message repeats content of earlier ones, so content an attacker can steer
- * (a fetched page, a file) could probe a secret printed in another message to
- * anyone who sees the encrypted lengths. Per-message contexts confine that to
- * one message, as for the relay (docs/relay-e2ee-protocol.md §4.6.6). The
- * threshold is not a defense either way. The desktop's own
+ * Compressing before encryption makes a message's length depend on how its
+ * content repeats itself: the CRIME/BREACH length side channel, against anyone
+ * who sees encrypted lengths (on the path of a TLS, Tailscale or SSH link; a
+ * plain `ws://` link is readable anyway). Every message is compressed with a
+ * fresh context on both sides (no context takeover), so a message's length
+ * never depends on earlier messages and no message can probe another. Within
+ * one message the channel remains: unlike the relay (docs/relay-e2ee-protocol.md
+ * §4.6.6), the direct socket has no allowlist and no padding, so events,
+ * deltas, terminal output and thread windows compress at their exact lengths.
+ * A guess and a secret must then share one message, next to a known prefix,
+ * over hundreds of observed messages; that residual risk is accepted for
+ * direct links. A context shared across messages would shrink live frames
+ * about twice as much again but would let one message probe another, so it
+ * stays off. permessage-deflate runs on libuv's thread pool and holds the
+ * socket's later frames until it finishes, which is one more reason the
+ * server sizes that pool (bin.ts). The desktop's own
  * renderer talks over loopback, where compression is pure CPU, so desktop
  * backends drop the extension offer from direct loopback peers (a local proxy
  * relaying a remote client keeps it). Other servers keep it for loopback too:

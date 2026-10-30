@@ -41,6 +41,10 @@ const externalMcpArgs = (): {
   return { action: process.argv[3], integrationId, stateDir };
 };
 
+// libuv's pool, sized before anything starts it (it starts lazily, on its first job). The desktop
+// sets the same size for its backend (DESKTOP_BACKEND_UV_THREADPOOL_SIZE, with the reasons); this
+// covers `ryco serve` and the service, where permessage-deflate on live frames also runs on it.
+if (!process.env.UV_THREADPOOL_SIZE?.trim()) process.env.UV_THREADPOOL_SIZE = "16";
 enableCompileCacheBestEffort();
 
 const external = externalMcpArgs();

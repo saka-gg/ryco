@@ -48,7 +48,8 @@ async function negotiatedExtensions(
 
 /**
  * Sends `messages` from the server over a connection that negotiated permessage-deflate and
- * returns how many bytes each one took on the wire (frame headers included).
+ * returns how many bytes each one took on the wire (frame headers included). The server sends
+ * the next message only once the client has counted the previous one, so no read mixes two.
  */
 async function wireBytesPerMessage(messages: ReadonlyArray<string>): Promise<number[]> {
   const server = Http.createServer();
@@ -57,14 +58,14 @@ async function wireBytesPerMessage(messages: ReadonlyArray<string>): Promise<num
     perMessageDeflate: WEBSOCKET_PER_MESSAGE_DEFLATE,
   });
   server.on("upgrade", (request, socket, head) => {
-    wss.handleUpgrade(request, socket, head, async (ws) => {
-      for (const message of messages) {
-        await new Promise<void>((resolve, reject) =>
-          ws.send(message, (error) => (error ? reject(error) : resolve())),
-        );
-        // One message per read on the client side.
-        await new Promise((resolve) => setTimeout(resolve, 20));
-      }
+    wss.handleUpgrade(request, socket, head, (ws) => {
+      let next = 0;
+      // The client asks for each message once it has counted the one before.
+      ws.on("message", () => {
+        const message = messages[next];
+        next += 1;
+        if (message !== undefined) ws.send(message);
+      });
     });
   });
   await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -76,19 +77,20 @@ async function wireBytesPerMessage(messages: ReadonlyArray<string>): Promise<num
       });
       const sizes: number[] = [];
       let pending = 0;
-      client.once("open", () => {
-        const socket = (client as unknown as { readonly _socket: import("node:net").Socket })
-          ._socket;
-        socket.prependListener("data", (chunk: Buffer) => {
+      client.once("upgrade", (response) => {
+        response.socket.prependListener("data", (chunk: Buffer) => {
           pending += chunk.length;
         });
       });
+      client.once("open", () => client.send("next"));
       client.on("message", () => {
         sizes.push(pending);
         pending = 0;
         if (sizes.length === messages.length) {
           client.close();
           resolve(sizes);
+        } else {
+          client.send("next");
         }
       });
       client.once("error", reject);
