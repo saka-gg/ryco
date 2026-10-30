@@ -3,7 +3,11 @@ import type {
   ChangeRequestTimelineItem,
   SourceControlIssueComment,
 } from "@ryco/contracts";
-import { groupChangeRequestTimeline } from "@ryco/client-runtime/state/pull-request-review";
+import {
+  buildConversationTimeline,
+  groupChangeRequestTimeline,
+  type ConversationTimelineEntry,
+} from "@ryco/client-runtime/state/pull-request-review";
 import { ArrowUpRightIcon, HistoryIcon } from "lucide-react";
 import { memo, useMemo, type Ref } from "react";
 
@@ -12,10 +16,6 @@ import { invalidateSourceControl } from "../../../rpc/useSourceControl";
 import { formatSourceControlPause } from "../../../sourceControlPause";
 import { Skeleton } from "../../ui/skeleton";
 import { usePullRequestSelection, usePullRequestsPage } from "../PullRequestsPageContext";
-import {
-  buildConversationTimeline,
-  type ConversationTimelineEntry,
-} from "./conversationTimeline.logic";
 import { TimelineComposer, type TimelineComposerHandle } from "./TimelineComposer";
 import {
   CommitRunEntry,

@@ -1,5 +1,6 @@
 import { ChevronRightIcon, CopyIcon, ExternalLinkIcon, MoreHorizontalIcon } from "lucide-react";
 import { memo } from "react";
+import { splitFilePath } from "@ryco/client-runtime/state/pull-request-review";
 
 import { openExternalLink } from "../../../lib/openExternalLink";
 import { cn } from "../../../lib/utils";
@@ -7,7 +8,7 @@ import { Menu, MenuItem, MenuPopup, MenuTrigger } from "../../ui/menu";
 import { DiffStat } from "../primitives";
 import { FileThreadCount, StaleViewedDot, ViewedCheckbox } from "./FileMarks";
 import type { FileThreadCounts } from "./FileTreePane";
-import { splitFilePath, type FileViewedState } from "./pullRequestFiles.logic";
+import type { FileViewedState } from "./pullRequestFiles.logic";
 import type { PullRequestDiffFile } from "./usePullRequestDiffFiles";
 
 const STATUS_WORD: Partial<Record<PullRequestDiffFile["status"], string>> = {

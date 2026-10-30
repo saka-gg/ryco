@@ -9,17 +9,17 @@ import {
   type KeyboardEvent,
   type RefObject,
 } from "react";
-
-import { cn } from "../../../lib/utils";
-import { KeyHint } from "../primitives";
-import { FileStatusLetter, FileThreadCount, StaleViewedDot, ViewedCheckbox } from "./FileMarks";
 import {
   buildReviewFileTree,
   filterFilePaths,
   flattenReviewFileTree,
-  viewedProgress,
   type ReviewFileTreeNode,
-} from "./pullRequestFiles.logic";
+} from "@ryco/client-runtime/state/pull-request-review";
+
+import { cn } from "../../../lib/utils";
+import { KeyHint } from "../primitives";
+import { FileStatusLetter, FileThreadCount, StaleViewedDot, ViewedCheckbox } from "./FileMarks";
+import { viewedProgress } from "./pullRequestFiles.logic";
 import type { FilesViewedModel } from "./useFilesViewed";
 import type { PullRequestDiffFiles } from "./usePullRequestDiffFiles";
 

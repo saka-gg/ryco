@@ -7,18 +7,19 @@
  */
 import type { ChangeRequestInvolvement, EnvironmentId } from "@ryco/contracts";
 import { isChatProject, type ProjectKindCarrier } from "@ryco/shared/projectKind";
+import {
+  derivePullRequestsCapabilities,
+  PULL_REQUESTS_LIST_LIMIT,
+  resolvePullRequestsStateFilter,
+  shouldReadInvolvementLists,
+} from "@ryco/client-runtime/state/pull-request-review";
 
 import { getGitStatusSnapshot } from "../../lib/gitStatusState";
 import { projectCheckoutKey } from "../../projectCheckouts.logic";
 import { changeRequestListBinding } from "../../rpc/sourceControlAtoms";
 import { selectProjectsAcrossEnvironments, useStore } from "../../store";
 import { usePullRequestsLayoutStore } from "./pullRequestsLayoutStore";
-import {
-  derivePullRequestsCapabilities,
-  PULL_REQUESTS_LIST_LIMIT,
-  shouldReadInvolvementLists,
-} from "./pullRequestsModel.logic";
-import { resolvePullRequestsStateFilter, type PullRequestsSearch } from "./pullRequestsSearch";
+import type { PullRequestsSearch } from "./pullRequestsSearch";
 
 export interface PullRequestListPrefetchTarget {
   readonly environmentId: EnvironmentId;

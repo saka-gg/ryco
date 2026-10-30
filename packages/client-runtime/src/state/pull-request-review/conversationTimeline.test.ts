@@ -1,5 +1,4 @@
 import type { ChangeRequestReviewThread, ChangeRequestTimelineItem } from "@ryco/contracts";
-import { groupChangeRequestTimeline } from "@ryco/client-runtime/state/pull-request-review";
 import { DateTime } from "effect";
 import { describe, expect, it } from "vitest";
 
@@ -8,7 +7,8 @@ import {
   commitChecksOverall,
   sameRepositoryPullNumber,
   toggleCommentReaction,
-} from "./conversationTimeline.logic";
+} from "./conversationTimeline.ts";
+import { groupChangeRequestTimeline } from "./timeline.ts";
 
 function at(minute: number): DateTime.Utc {
   return DateTime.makeUnsafe(Date.UTC(2026, 9, 1, 10, minute));

@@ -1,9 +1,13 @@
+import {
+  CHECK_STATE_LABEL,
+  checkStateOverall,
+} from "@ryco/client-runtime/state/pull-request-review";
 import { ArrowUpRightIcon } from "lucide-react";
 import { memo } from "react";
 
 import { openExternalLink } from "../../../lib/openExternalLink";
 import { CheckStateGlyph, RelativeTime } from "../primitives";
-import { CHECK_STATE_LABEL, checkStateOverall, type ChecksStatusEntry } from "./checksModel";
+import type { ChecksStatusEntry } from "./checksModel";
 import { RequiredTag } from "./checksUi";
 
 /**

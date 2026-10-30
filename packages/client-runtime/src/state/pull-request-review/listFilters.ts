@@ -1,17 +1,37 @@
 import type { SourceControlLabel } from "@ryco/contracts";
 
-import type {
-  PullRequestsOnlyFilter,
-  PullRequestsSearch,
-  PullRequestsSort,
-  PullRequestsStateFilter,
-} from "../pullRequestsSearch";
-
 /**
- * The list's filters (state, "only", labels, sort) as menu options and as the
- * chips shown while any of them is off its default. Defaults stay out of the
- * URL, so "not set" and "default" are the same thing here.
+ * The pull request list's filters (state, "only", labels, sort) as menu
+ * options and as the chips shown while any of them is off its default, for
+ * every client's list. Defaults stay unset (out of the web URL), so "not set"
+ * and "default" are the same thing here.
  */
+
+export type PullRequestsStateFilter = "open" | "closed" | "merged" | "all";
+/** Quick narrowing of the list: review requested from you, failing checks, or authored by you. */
+export type PullRequestsOnlyFilter = "review" | "failing" | "mine";
+export type PullRequestsSort = "readiness" | "updated";
+
+/** The list-shaping part of a client's pull request page state (the web keeps it in the URL). */
+export interface PullRequestListFilters {
+  readonly state?: PullRequestsStateFilter | undefined;
+  readonly q?: string | undefined;
+  readonly only?: PullRequestsOnlyFilter | undefined;
+  readonly label?: readonly string[] | undefined;
+  readonly sort?: PullRequestsSort | undefined;
+}
+
+export function resolvePullRequestsStateFilter(
+  filters: Pick<PullRequestListFilters, "state">,
+): PullRequestsStateFilter {
+  return filters.state ?? "open";
+}
+
+export function resolvePullRequestsSort(
+  filters: Pick<PullRequestListFilters, "sort">,
+): PullRequestsSort {
+  return filters.sort ?? "readiness";
+}
 
 export const PULL_REQUEST_STATE_OPTIONS: ReadonlyArray<{
   readonly value: PullRequestsStateFilter;
@@ -57,7 +77,7 @@ export const PULL_REQUEST_SORT_OPTIONS: ReadonlyArray<{
 ];
 
 /** Patch that puts every list filter back to its default. */
-export const PULL_REQUEST_FILTER_RESET: Partial<PullRequestsSearch> = {
+export const PULL_REQUEST_FILTER_RESET: Partial<PullRequestListFilters> = {
   state: undefined,
   only: undefined,
   label: undefined,
@@ -70,11 +90,11 @@ export interface PullRequestFilterChip {
   /** Label colour (hex without `#`), for label chips. */
   readonly color?: string | undefined;
   /** Patch that removes just this filter. */
-  readonly clear: Partial<PullRequestsSearch>;
+  readonly clear: Partial<PullRequestListFilters>;
 }
 
 export function pullRequestFilterChips(
-  search: Pick<PullRequestsSearch, "state" | "only" | "label" | "sort">,
+  search: Pick<PullRequestListFilters, "state" | "only" | "label" | "sort">,
   labels: ReadonlyArray<SourceControlLabel> = [],
 ): ReadonlyArray<PullRequestFilterChip> {
   const chips: PullRequestFilterChip[] = [];

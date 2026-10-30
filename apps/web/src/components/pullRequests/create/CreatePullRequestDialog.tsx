@@ -15,6 +15,7 @@ import {
 } from "@ryco/shared/changeRequestHostCapabilities";
 import { CircleAlertIcon } from "lucide-react";
 import { useRef, useState, type KeyboardEvent, type RefObject } from "react";
+import { PULL_REQUESTS_LIST_LIMIT } from "@ryco/client-runtime/state/pull-request-review";
 
 import { cn } from "../../../lib/utils";
 import { refreshGitStatus, useGitBranches, useGitStatus } from "../../../rpc/useGit";
@@ -41,7 +42,6 @@ import {
   errorText,
   SubmitKeyHint,
 } from "../conversation/MarkdownEditor";
-import { PULL_REQUESTS_LIST_LIMIT } from "../pullRequestsModel.logic";
 import { BranchPicker } from "./BranchPicker";
 import {
   buildCreatePullRequestInput,

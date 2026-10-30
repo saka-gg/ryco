@@ -5,7 +5,10 @@ import type {
   SourceControlCommentReactionContent,
   SourceControlReviewState,
 } from "@ryco/contracts";
-import type { ChangeRequestTimelineReviewItem } from "@ryco/client-runtime/state/pull-request-review";
+import {
+  toggleCommentReaction,
+  type ChangeRequestTimelineReviewItem,
+} from "@ryco/client-runtime/state/pull-request-review";
 import { DateTime } from "effect";
 import {
   CircleCheckIcon,
@@ -46,7 +49,6 @@ import { stackedThreadToast, toastManager } from "../../ui/toast";
 import { RelativeTime } from "../primitives";
 import { usePullRequestSelection, usePullRequestsPage } from "../PullRequestsPageContext";
 import { ReviewThread } from "../threads/ReviewThread";
-import { toggleCommentReaction } from "./conversationTimeline.logic";
 import { PROSE_CLASS } from "./DescriptionBlock";
 import { errorText, MarkdownEditor } from "./MarkdownEditor";
 import {

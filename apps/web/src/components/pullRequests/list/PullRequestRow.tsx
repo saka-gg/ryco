@@ -1,5 +1,13 @@
 import type { ChangeRequest, SourceControlLabel } from "@ryco/contracts";
-import { summarizeChangeRequestChecks } from "@ryco/client-runtime/state/pull-request-review";
+import {
+  stackFootParts,
+  summarizeChangeRequestChecks,
+  type PullRequestReadiness,
+  type PullRequestReadinessTone,
+  type PullRequestRowSpine,
+  type PullRequestStackFoot,
+  type StackFootPartTone,
+} from "@ryco/client-runtime/state/pull-request-review";
 import { CopyIcon, ExternalLinkIcon, FolderGit2Icon } from "lucide-react";
 import { memo } from "react";
 
@@ -17,13 +25,6 @@ import {
   RelativeTime,
   changeRequestStateLabel,
 } from "../primitives";
-import type { PullRequestReadiness, PullRequestReadinessTone } from "./pullRequestListRows.logic";
-import {
-  stackFootParts,
-  type PullRequestRowSpine,
-  type PullRequestStackFoot,
-  type StackFootPartTone,
-} from "./pullRequestListStacks.logic";
 
 /**
  * One pull request in the list. Line 1: the glyph column (state over checks),

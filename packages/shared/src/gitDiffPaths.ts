@@ -1,3 +1,9 @@
+/**
+ * The repository paths a Git file diff segment names, resolved once from its
+ * headers for every client that reads patches (the web's diff panels, the
+ * phone's pull request files).
+ */
+
 /** Decode exactly one Git C-quoted header path. Unquoted backslashes are literal. */
 function decodeHeaderPath(raw: string): string | null {
   if (!raw.startsWith('"')) return raw;
