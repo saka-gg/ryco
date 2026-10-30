@@ -57,6 +57,7 @@ import {
   readMobileClientRuntimeConfig,
   readMobileHostedConfig,
   readMobileNativePlatform,
+  readMobilePushBuild,
 } from "./config";
 
 const NODE = { httpBaseUrl: "http://node.local:44342", wsBaseUrl: "ws://node.local:44342" };
@@ -95,6 +96,29 @@ describe("native enrollment metadata", () => {
     expect(readMobileNativePlatform()).toBe("ios");
     constantsHolder.platform = {};
     expect(readMobileNativePlatform()).toBe("android");
+  });
+});
+
+describe("the push build", () => {
+  it("reads the APNs topic and gateway, and whether a Personal Team signed the build", () => {
+    setExtra({ push: { topic: "dev.ryco.app.dev", apnsEnvironment: "sandbox" } });
+    expect(readMobilePushBuild()).toEqual({
+      topic: "dev.ryco.app.dev",
+      apnsEnvironment: "sandbox",
+      personalTeamBuild: false,
+    });
+    setExtra({ iosPersonalTeamBuild: true, push: { topic: " ", apnsEnvironment: "staging" } });
+    expect(readMobilePushBuild()).toEqual({
+      topic: null,
+      apnsEnvironment: "production",
+      personalTeamBuild: true,
+    });
+    setExtra({ push: "dev.ryco.app" });
+    expect(readMobilePushBuild()).toEqual({
+      topic: null,
+      apnsEnvironment: "production",
+      personalTeamBuild: false,
+    });
   });
 });
 

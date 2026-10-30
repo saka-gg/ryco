@@ -24,7 +24,11 @@ vi.mock("react-native", () => ({}));
 
 import type { Preferences } from "../state/preferencesStore";
 import type { MobileThreadAlert } from "./threadAlerts.logic";
-import { startMobileThreadAlerts, type MobileThreadAlertsPlatform } from "./threadAlerts";
+import {
+  startMobileThreadAlerts,
+  type MobileThreadAlertsDeps,
+  type MobileThreadAlertsPlatform,
+} from "./threadAlerts";
 
 const env = EnvironmentId.make("environment-alerts");
 const T0 = "2026-10-20T10:00:00.000Z";
@@ -77,7 +81,12 @@ const ref = (id: string): ScopedThreadRef => ({ environmentId: env, threadId: Th
  * One connected environment whose accepted shell is current, the app's
  * preferences and screen, and a native platform that records what it posts.
  */
-function harness(input: { readonly threads?: ReadonlyArray<OrchestrationThreadShell> } = {}) {
+function harness(
+  input: {
+    readonly threads?: ReadonlyArray<OrchestrationThreadShell>;
+    readonly isBackgroundPushActive?: MobileThreadAlertsDeps["isBackgroundPushActive"];
+  } = {},
+) {
   let token: object | null = {};
   let sequence = 10;
   const rows = new Map<ThreadId, SidebarThreadOrStub>();
@@ -135,6 +144,9 @@ function harness(input: { readonly threads?: ReadonlyArray<OrchestrationThreadSh
             return () => preferenceListeners.delete(listener);
           },
           readVisibleThread: () => visibleThread,
+          ...(input.isBackgroundPushActive
+            ? { isBackgroundPushActive: input.isBackgroundPushActive }
+            : {}),
         },
         platform,
       ),
@@ -278,6 +290,27 @@ describe("mobile thread alerts", () => {
     alerts.stop();
     test.open({ environmentId: env, threadId: "thread-d" });
     expect(test.platform.openThread).toHaveBeenCalledTimes(2);
+  });
+
+  it("leaves background alerts to push where it is confirmed, and only those", async () => {
+    const isBackgroundPushActive = vi.fn(
+      (_environmentId: EnvironmentId, kind: string) => kind === "completed",
+    );
+    const test = harness({ threads: [shell("b"), shell("c"), shell("d")], isBackgroundPushActive });
+    test.start();
+
+    // In front, the app's own banner shows: the node holds pushes for a device in front.
+    test.accept(finished("b"));
+    await test.settle();
+    expect(test.presented.map((alert) => alert.body)).toEqual(["Thread b"]);
+
+    test.setAppActive(false);
+    test.accept(finished("c"));
+    test.accept(shell("d", { hasPendingApprovals: true }));
+    await test.settle();
+    expect(test.presented.map((alert) => alert.title)).toEqual(["Finished", "Needs approval"]);
+    expect(isBackgroundPushActive).toHaveBeenCalledWith(env, "completed");
+    expect(isBackgroundPushActive).toHaveBeenCalledWith(env, "approval");
   });
 
   it("posts nothing once stopped", async () => {

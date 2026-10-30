@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from "react";
 
 import { updatePreferences, usePreferences } from "../../state/preferencesStore";
+import { BackgroundAlertSettings } from "./BackgroundAlertSettings";
 import { SettingsSection } from "./components/SettingsSection";
 import { SettingsSwitchRow } from "./components/SettingsSwitchRow";
 
@@ -73,6 +74,7 @@ export function ThreadAlertSettings() {
           onValueChange={(threadAlertSound) => updatePreferences({ threadAlertSound })}
         />
       ) : null}
+      {alertsOn ? <BackgroundAlertSettings /> : null}
     </SettingsSection>
   );
 }

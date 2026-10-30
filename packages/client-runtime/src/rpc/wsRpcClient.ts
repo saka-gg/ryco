@@ -597,6 +597,16 @@ export interface WsRpcClient {
     readonly list: RpcUnaryMethod<typeof WS_METHODS.notesList>;
     readonly command: RpcUnaryMethod<typeof WS_METHODS.notesCommand>;
   };
+  /**
+   * Background push alerts for this device (`docs/push-alerts.md`). The node
+   * accepts them only on a Hub relay channel of an account-enrolled device, and
+   * takes the device from that channel, never from the request.
+   */
+  readonly push: {
+    readonly registerDevice: RpcUnaryMethod<typeof WS_METHODS.pushRegisterDevice>;
+    readonly unregisterDevice: RpcUnaryMethod<typeof WS_METHODS.pushUnregisterDevice>;
+    readonly setPresence: RpcUnaryMethod<typeof WS_METHODS.pushSetPresence>;
+  };
   readonly agentControl: {
     readonly listProposals: RpcUnaryMethod<typeof AGENT_CONTROL_WS_METHODS.listProposals>;
     readonly getProposal: RpcUnaryMethod<typeof AGENT_CONTROL_WS_METHODS.getProposal>;
@@ -1292,6 +1302,14 @@ export function createWsRpcClient(transport: WsTransport, device?: DeviceRpcClie
     notes: {
       list: (input) => transport.request((client) => client[WS_METHODS.notesList](input)),
       command: (input) => transport.request((client) => client[WS_METHODS.notesCommand](input)),
+    },
+    push: {
+      registerDevice: (input) =>
+        transport.request((client) => client[WS_METHODS.pushRegisterDevice](input)),
+      unregisterDevice: (input) =>
+        transport.request((client) => client[WS_METHODS.pushUnregisterDevice](input)),
+      setPresence: (input) =>
+        transport.request((client) => client[WS_METHODS.pushSetPresence](input)),
     },
     agentControl: {
       listProposals: (input) =>

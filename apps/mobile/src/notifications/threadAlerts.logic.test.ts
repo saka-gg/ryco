@@ -10,6 +10,7 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   planMobileThreadAlert,
+  presentsInForeground,
   threadAlertLinkPath,
   threadAlertModeOf,
   threadAlertRefOf,
@@ -196,5 +197,48 @@ describe("opening a thread alert", () => {
     ]) {
       expect(threadAlertRefOf(data)).toBeNull();
     }
+  });
+});
+
+describe("background push and the app's own alerts", () => {
+  it("leaves a background alert to push once push covers it, and keeps the banner in front", () => {
+    for (const kind of ["approval", "completed", "stopped"] as const) {
+      expect(
+        planMobileThreadAlert({
+          candidate: candidate(kind),
+          mode: "notifications",
+          appActive: false,
+          visibleThread: null,
+          pushCovers: true,
+        }),
+      ).toBeNull();
+      expect(
+        planMobileThreadAlert({
+          candidate: candidate(kind),
+          mode: "notifications",
+          appActive: false,
+          visibleThread: null,
+          pushCovers: false,
+        }),
+      ).not.toBeNull();
+    }
+    expect(
+      planMobileThreadAlert({
+        candidate: candidate("completed"),
+        mode: "notifications",
+        ...quietScreen,
+        pushCovers: true,
+      }),
+    ).not.toBeNull();
+  });
+
+  it("hides a push that arrives in front for a machine the app is connected to", () => {
+    const data = { environmentId: "environment-alerts", threadId: "thread-b" };
+    const live = (environmentId: string) => environmentId === "environment-alerts";
+    expect(presentsInForeground({ remote: true, data, isEnvironmentLive: live })).toBe(false);
+    expect(presentsInForeground({ remote: true, data, isEnvironmentLive: () => false })).toBe(true);
+    // The app's own alerts, and a push it could not open, show as before.
+    expect(presentsInForeground({ remote: false, data, isEnvironmentLive: live })).toBe(true);
+    expect(presentsInForeground({ remote: true, data: {}, isEnvironmentLive: live })).toBe(true);
   });
 });

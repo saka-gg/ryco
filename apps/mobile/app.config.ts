@@ -308,7 +308,11 @@ const config: ExpoConfig = {
     ],
     "./plugins/withIosCocoaPodsUuidCache.cjs",
     "./plugins/withIosSceneLifecycle.cjs",
-    ...(isIosPersonalTeamBuild ? ["./plugins/withIosPersonalTeamCapabilities.cjs"] : []),
+    // Personal Team builds strip APNs and cannot sign the extension or its
+    // keychain group, so background push alerts are off there.
+    ...(isIosPersonalTeamBuild
+      ? ["./plugins/withIosPersonalTeamCapabilities.cjs"]
+      : ["./plugins/withIosNotificationServiceExtension.cjs"]),
     "./plugins/withAndroidCleartextTraffic.cjs",
     "./plugins/withAndroidSecureStoreBackupExclusion.cjs",
     "./plugins/withAndroidGradleHeap.cjs",
@@ -320,6 +324,12 @@ const config: ExpoConfig = {
     ...(mobileUpdates.projectId ? { eas: { projectId: mobileUpdates.projectId } } : {}),
     appVariant: APP_VARIANT,
     iosPersonalTeamBuild: isIosPersonalTeamBuild,
+    // Background push alerts (docs/push-alerts.md): the APNs topic is the
+    // bundle id, and the environment follows expo-notifications' entitlement.
+    push: {
+      topic: iosBundleIdentifier,
+      apnsEnvironment: APP_VARIANT === "development" ? "sandbox" : "production",
+    },
     // Optional default node origin for local testing; pairing overrides it.
     node: {
       httpBaseUrl: repoEnv.EXPO_PUBLIC_RYCO_HTTP_URL ?? null,
