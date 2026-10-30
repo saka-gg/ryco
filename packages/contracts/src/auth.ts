@@ -294,6 +294,13 @@ export const AuthLinkedDirectAccess = Schema.Union([
     /** Single use; redeem with `POST /api/auth/bootstrap/bearer` before `expiresAt`. */
     credential: TrimmedNonEmptyString,
     expiresAt: Schema.DateTimeUtc,
+    /**
+     * The node identity key (Ed25519, base64url) this relay channel's E2EE
+     * handshake verified. A direct endpoint must prove it holds this key before
+     * the code or the bearer goes there (`@ryco/shared/directRouteIdentity`).
+     * Absent from nodes older than the proof, whose direct routes stay unused.
+     */
+    nodeIdentityPublicKey: Schema.optionalKey(TrimmedNonEmptyString),
   }),
   Schema.Struct({
     kind: Schema.Literal("unavailable"),

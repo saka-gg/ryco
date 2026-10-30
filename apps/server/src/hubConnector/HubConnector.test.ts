@@ -101,6 +101,7 @@ function identity(overrides: Partial<HubIdentityRuntimeShape> = {}): HubIdentity
       },
     },
     nativeNodeClaim: stubNativeNodeClaimService(),
+    proveDirectRouteIdentity: async () => undefined,
     crossDeviceApproval: stubCrossDeviceApprovalService(),
     readPendingEnrollment: async () => null,
     leave: async () => undefined,

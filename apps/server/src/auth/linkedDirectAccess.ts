@@ -85,5 +85,8 @@ export const issueLinkedDirectAccess = (input: {
       endpoints,
       credential: issued.credential,
       expiresAt: issued.expiresAt,
+      ...(authority.nodeIdentityPublicKey === undefined
+        ? {}
+        : { nodeIdentityPublicKey: base64UrlEncode(authority.nodeIdentityPublicKey) }),
     } as const;
   });

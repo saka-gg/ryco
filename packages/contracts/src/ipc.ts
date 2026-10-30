@@ -452,6 +452,12 @@ export interface SavedEnvironmentHubLink {
   hubEnvironmentId: string;
   /** When the direct credential was last issued; it is renewed through the Hub. */
   linkedAt: string;
+  /**
+   * The node identity key (Ed25519, base64url) the grant named: each direct
+   * address must prove it before the bearer goes there. A link saved before
+   * the proof existed has none, so it is never used and is renewed instead.
+   */
+  nodeIdentityPublicKey?: string;
 }
 
 export interface PersistedSavedEnvironmentRecord {

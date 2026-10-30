@@ -56,6 +56,11 @@
       "import": "./src/hostedIdentity.ts",
       "require": "./src/hostedIdentity.ts"
     },
+    "./direct-route-identity": {
+      "types": "./src/directRouteIdentity.ts",
+      "import": "./src/directRouteIdentity.ts",
+      "require": "./src/directRouteIdentity.ts"
+    },
     "./native-e2ee": {
       "types": "./src/nativeE2ee.ts",
       "import": "./src/nativeE2ee.ts",

@@ -34,6 +34,11 @@ export type EnvironmentRoute =
       /** The machine's direct environment id; a route answering with another id is refused. */
       readonly expectedDescriptorId: EnvironmentId;
       readonly source: EnvironmentRouteSource;
+      /**
+       * The node identity key (base64url) the route must prove before any
+       * credential goes there (`directRouteIdentity.ts`). Every linked route has it.
+       */
+      readonly nodeIdentityPublicKey?: string;
     };
 
 export const RELAY_ROUTE: EnvironmentRoute = Object.freeze({ kind: "relay" });
@@ -290,10 +295,21 @@ export function directRouteAuthenticatesMachine(route: EnvironmentRoute): boolea
 }
 
 /**
+ * {@link directRouteAuthenticatesMachine} for an address alone, read from its
+ * URL: where a linked code may be redeemed at all. Linking over an address no
+ * route will ever use would only send the code where anyone could read it.
+ */
+export function directAddressAuthenticatesMachine(httpBaseUrl: string): boolean {
+  const reach = routeReachForBaseUrl(httpBaseUrl);
+  return reach !== null && (httpBaseUrl.startsWith("https:") || reach === "tailnet");
+}
+
+/**
  * The direct routes a Hub machine's linked direct access gives it: one per
- * linked record that names this Hub environment, is still within its usable
- * age (an older one waits for its renewal over the relay), and whose
- * transport authenticates the machine ({@link directRouteAuthenticatesMachine}).
+ * linked record that names this Hub environment, carries the node identity
+ * key its address must prove, is still within its usable age (an older one
+ * waits for its renewal over the relay), and whose transport authenticates
+ * the machine ({@link directRouteAuthenticatesMachine}).
  */
 export function linkedDirectRoutes(input: {
   readonly records: ReadonlyArray<SavedEnvironmentRecord>;
@@ -303,6 +319,10 @@ export function linkedDirectRoutes(input: {
   const routes: EnvironmentRoute[] = [];
   for (const record of input.records) {
     if (record.hubLink?.hubEnvironmentId !== input.hubEnvironmentId) continue;
+    // Linked before the identity proof: nothing to prove it against, so it
+    // waits for its renewal over the relay.
+    const nodeIdentityPublicKey = record.hubLink.nodeIdentityPublicKey;
+    if (nodeIdentityPublicKey === undefined) continue;
     const linkedAtMs = Date.parse(record.hubLink.linkedAt);
     if (!Number.isFinite(linkedAtMs) || input.nowMs - linkedAtMs >= LINKED_ROUTE_USABLE_FOR_MS) {
       continue;
@@ -316,6 +336,7 @@ export function linkedDirectRoutes(input: {
       reach,
       expectedDescriptorId: record.environmentId,
       source: "linked",
+      nodeIdentityPublicKey,
     };
     if (directRouteAuthenticatesMachine(route)) routes.push(route);
   }

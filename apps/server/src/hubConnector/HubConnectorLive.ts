@@ -172,6 +172,8 @@ const offlineE2eeSurface = {
     sign: e2eeOperatorUnavailable,
     commit: e2eeOperatorUnavailable,
   },
+  // No identity to prove; the route answers as it does for a node never enrolled.
+  proveDirectRouteIdentity: async () => undefined,
   // 0 is the generation that has never been issued, which is the truthful
   // reading for a runtime that must not advertise at all (§5.7).
   e2eeGeneration: () => 0,
@@ -201,6 +203,7 @@ const offlineE2eeSurface = {
   | "crossDeviceApproval"
   | "localIntroduction"
   | "nativeNodeClaim"
+  | "proveDirectRouteIdentity"
   | "e2eeGeneration"
   | "applyE2eePolicy"
   | "previewE2eePolicy"
@@ -877,6 +880,12 @@ const makeHubConnectorService = (dependencies: HubConnectorLiveDependencies) =>
         sign: (input) => asIdentityOwner(() => identity.nativeNodeClaim.sign(input)),
         commit: (input) => asIdentityOwner(() => identity.nativeNodeClaim.commit(input)),
       },
+      // Only the process that owns the identity speaks for it; a standby
+      // backend answers as a node without one.
+      proveDirectRouteIdentity: (input) =>
+        connectorConfig.enabled
+          ? asIdentityOwner(() => identity.proveDirectRouteIdentity(input))
+          : Promise.resolve(undefined),
       e2ee: makeNodeE2eeOperator({
         identity,
         sessions: sessionDirectory,

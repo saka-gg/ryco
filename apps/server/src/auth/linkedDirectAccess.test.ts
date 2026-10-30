@@ -115,6 +115,25 @@ describe("issueLinkedDirectAccess", () => {
     });
   });
 
+  it("names the node identity key the channel's handshake verified, for the direct proof", async () => {
+    const result = await Effect.runPromise(
+      issueLinkedDirectAccess({
+        authority: {
+          trustSource: "account-enrolled",
+          enrollmentId: "enr_laptop",
+          clientIdentityFingerprint: Uint8Array.from([1, 2, 3]),
+          role: "owner",
+          nodeIdentityPublicKey: Uint8Array.from([0xfb, 0xff, 0x01]),
+        },
+        deviceLabel: "Studio Mac",
+        environment,
+        endpoints: ENDPOINTS,
+        bootstrapCredentials,
+      }),
+    );
+    expect(result).toMatchObject({ kind: "issued", nodeIdentityPublicKey: "-_8B" });
+  });
+
   it("issues nothing for a channel without a native device or a node without a direct endpoint", async () => {
     const before = issued.length;
     expect(

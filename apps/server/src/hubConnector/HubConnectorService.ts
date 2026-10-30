@@ -143,6 +143,11 @@ export interface HubConnectorServiceShape {
   readonly localIntroduction: NodeLocalIntroductionService;
   /** Desktop-main-only automatic node claim; never exposed through WS RPC. */
   readonly nativeNodeClaim: NodeNativeClaimService;
+  /** The direct-route identity proof (`directRouteIdentityHttp.ts`); undefined without an identity. */
+  readonly proveDirectRouteIdentity: (input: {
+    readonly environmentId: string;
+    readonly challenge: Uint8Array;
+  }) => Promise<Uint8Array | undefined>;
   readonly e2ee: HubConnectorE2eeOperator;
 }
 

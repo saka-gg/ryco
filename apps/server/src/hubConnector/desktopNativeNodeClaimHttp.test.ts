@@ -93,6 +93,7 @@ function connector(
     stop: async () => undefined,
     localIntroduction: stubLocalIntroductionService(),
     nativeNodeClaim,
+    proveDirectRouteIdentity: async () => undefined,
     e2ee: stubE2eeOperator(),
   };
 }

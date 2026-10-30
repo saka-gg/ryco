@@ -3,6 +3,7 @@ import { basename, dirname, join } from "node:path";
 import { Context, Effect, Layer } from "effect";
 
 import type { RelayNodeAuthHandshake } from "@ryco/contracts/relay";
+import { encodeDirectRouteIdentityTranscript } from "@ryco/shared/directRouteIdentity";
 import { canonicalizeHubOrigin, formatNodePublicKeyFingerprint } from "@ryco/shared/nodeIdentity";
 import type { NodeIdentityContinuityChainEntry } from "@ryco/shared/relayE2eeTranscripts";
 
@@ -237,6 +238,16 @@ export interface HubIdentityRuntimeShape {
   readonly cancelEnrollment: (hubOrigin: string) => Promise<void>;
   /** Exact-child automatic claim, reachable only from Desktop's private control channel. */
   readonly nativeNodeClaim: NodeNativeClaimService;
+  /**
+   * A direct address proving it is this node (`@ryco/shared/directRouteIdentity`):
+   * the authentication key's signature over a client's challenge for the
+   * node's own direct environment id. Undefined when the node has no enrolled
+   * identity. It signs that one transcript only, never caller-chosen bytes.
+   */
+  readonly proveDirectRouteIdentity: (input: {
+    readonly environmentId: string;
+    readonly challenge: Uint8Array;
+  }) => Promise<Uint8Array | undefined>;
   readonly createRelayAuthenticationFrame: (
     hubOrigin: string,
     protocol: { readonly protocolMajor: number; readonly protocolMinor: number },
@@ -1536,6 +1547,16 @@ export async function makeHubIdentityRuntime(options: {
         await maintainPrekeyQuietly();
         return active;
       },
+    },
+    proveDirectRouteIdentity: async ({ environmentId, challenge }) => {
+      // Encoded first: a challenge of the wrong size never reaches key custody.
+      const transcript = encodeDirectRouteIdentityTranscript({ environmentId, challenge });
+      const active = (await stateStore.readOrCreate()).activeNode;
+      if (active === null) return undefined;
+      // The selector the relay proof and the capability statement use, so the
+      // key that signs here is the one a channel's handshake advertises.
+      const selected = await rotation.authenticationKey(active.hubOrigin);
+      return signingIdentity.sign(selected.secretName, transcript);
     },
     createRelayAuthenticationFrame: async (hubOrigin, protocol) => {
       try {

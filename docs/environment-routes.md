@@ -20,6 +20,30 @@ This page is the design. Phase 1, the route model and its policy, is in
 - The only proof that a direct id and a Hub id are the same machine is the linked direct grant,
   issued over the E2EE relay. A public descriptor proves nothing on its own, so a route is never
   learned from one.
+- The grant names the node identity key that relay channel's handshake verified. Before a client
+  redeems the grant's code or presents its bearer at a direct address, it posts a fresh random
+  challenge to `/.well-known/ryco/environment/identity`; the node signs
+  `["ryco.direct-route-identity.proof.v1", directEnvironmentId, challenge]` with that key
+  (`@ryco/shared/directRouteIdentity`). An address that cannot sign gets nothing and is held until
+  the link is renewed over the relay (a rotated key arrives that way). A link from a node older
+  than the proof names no key, so it is never used and is renewed instead.
+
+### Why direct routes still need HTTPS or Tailscale
+
+The proof shows that the far end of the request holds the machine's key, now. It cannot show that
+nobody sits in between: the socket that follows is not bound to the key, so on plain HTTP someone on
+the network can pass the challenge through to the real machine, then read and change everything
+after it, bearer included. Only an encrypted channel tied to the key (the relay's E2EE, or the same
+E2EE over the direct socket) would close that. HTTPS and Tailscale close it at the transport: the
+certificate names the host, WireGuard the peer. So the two checks are complementary:
+
+- the transport rules out someone in between;
+- the proof rules out the wrong machine at the end: an address that now belongs to another device
+  (a reused Tailscale or DHCP address, a renamed host with a valid certificate, a tunnel name
+  handed to someone else), or another node serving a copy of the public descriptor.
+
+Plain LAN and public addresses therefore stay out, and linking no longer redeems a code at one.
+Running the relay's E2EE over the direct socket would let them in; it is not built.
 
 ## Routes
 
@@ -68,12 +92,12 @@ relay lifecycle owner and never sees a route. `canAdoptHostedEnvironmentSession`
      (the certificate names the host) or a Tailscale address (WireGuard names the peer). A plain
      LAN or public address never does: anyone on that network could answer with the machine's
      public descriptor and collect the linked bearer, while the relay is end-to-end encrypted with
-     a pinned identity. The direct route does not re-check that identity key itself; the transport
-     stands in for it;
+     a pinned identity. Since the identity proof (above), each route also proves the key before
+     the bearer goes there;
    - the Hub connection's socket factory walks the routes on every attempt
      (`apps/web/src/platform/desktopHubLinkedRoutes.ts`): linked addresses are checked in
-     parallel, the best one that answers as the machine's direct id gets a one-time socket token
-     from the linked bearer, else the relay Desktop main owns;
+     parallel, the best one that answers as the machine's direct id and proves its identity key
+     gets a one-time socket token from the linked bearer, else the relay Desktop main owns;
    - a relay refusal (authorization withdrawn, not verified, update required) blocks every direct
      route and upgrade until a relay socket opens again: no route goes around the Hub's verdict;
    - a refused bearer holds its address until the link changes (no timer) and asks for a renewal

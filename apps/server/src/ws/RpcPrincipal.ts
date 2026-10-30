@@ -18,11 +18,23 @@ export type RelayChannelAuthority =
       readonly enrollmentId: string;
       readonly clientIdentityFingerprint: Uint8Array;
       readonly role: RpcPrincipalRole;
+      /**
+       * The node identity key this channel's handshake advertised and the
+       * client verified; a linked direct grant names it so a direct address
+       * can be made to prove it (`@ryco/shared/directRouteIdentity`).
+       */
+      readonly nodeIdentityPublicKey?: Uint8Array;
     }
   | {
       readonly trustSource: "locally-verified";
       readonly clientIdentityFingerprint: Uint8Array;
       readonly role: RpcPrincipalRole;
+      /**
+       * The node identity key this channel's handshake advertised and the
+       * client verified; a linked direct grant names it so a direct address
+       * can be made to prove it (`@ryco/shared/directRouteIdentity`).
+       */
+      readonly nodeIdentityPublicKey?: Uint8Array;
     }
   | { readonly trustSource: "none" };
 

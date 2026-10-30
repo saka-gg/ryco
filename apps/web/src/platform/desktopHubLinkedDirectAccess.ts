@@ -1,16 +1,6 @@
 import type { EnvironmentId } from "@ryco/contracts";
-import {
-  hubLinkedDirectAccessDue,
-  isManuallyPairedEnvironment,
-  resolveHubLinkedDirectTarget,
-} from "@ryco/client-runtime/connection";
+import { hubLinkedDirectAccessDue } from "@ryco/client-runtime/connection";
 
-import { fetchRemoteEnvironmentDescriptor } from "../environments/remote/api";
-import {
-  addSavedEnvironment,
-  connectDesktopWorkspaceEnvironment,
-  listSavedEnvironmentRecords,
-} from "../environments/runtime";
 import { listLinkedDirectRecords } from "../environments/runtime/catalog";
 
 /**
@@ -19,8 +9,9 @@ import { listLinkedDirectRecords } from "../environments/runtime/catalog";
  *
  * The owner adds direct access to a Hub machine with one action: the machine
  * issues a one-time code over the trusted relay channel Desktop already holds,
- * Desktop checks which of its direct addresses answers as that machine, and
- * saves the connection — no pairing link, no approval on the machine. A linked
+ * Desktop checks which of its direct addresses answers as that machine and
+ * proves it holds the identity key the relay channel verified, and saves the
+ * connection — no pairing link, no approval on the machine. A linked
  * connection is renewed through the relay whenever Desktop reconnects to the
  * machine and the link has aged.
  *
@@ -36,42 +27,20 @@ export type DesktopHubLinkOutcome =
   | "already-paired"
   /** The machine listens on loopback only. */
   | "no-direct-endpoint"
-  /** None of its direct addresses answered from this network. */
+  /** The machine is older than the direct identity proof: it names no key to prove. */
+  | "node-update-required"
+  /** None of its HTTPS or Tailscale addresses answered as the machine from this network. */
   | "unreachable";
 
-const DEVICE_LABEL = "Ryco Desktop";
 /** After a failed automatic renewal, the next attempt waits at least this long. */
 const AUTOMATIC_RENEWAL_RETRY_MS = 15 * 60 * 1000;
 
 const inFlight = new Map<EnvironmentId, Promise<DesktopHubLinkOutcome>>();
 const lastAutomaticAttemptAt = new Map<EnvironmentId, number>();
 
-async function link(machine: {
-  readonly environmentId: EnvironmentId;
-  readonly label: string;
-}): Promise<DesktopHubLinkOutcome> {
-  const connection = await connectDesktopWorkspaceEnvironment(machine);
-  const access = await connection.client.server.issueLinkedDirectAccess({
-    deviceLabel: DEVICE_LABEL,
-  });
-  if (access.kind === "unavailable") return "no-direct-endpoint";
-  // A machine the user paired by hand stays theirs: an environment of its own.
-  if (isManuallyPairedEnvironment(listSavedEnvironmentRecords(), access.environmentId)) {
-    return "already-paired";
-  }
-  const target = await resolveHubLinkedDirectTarget({
-    access,
-    fetchDescriptor: (httpBaseUrl) => fetchRemoteEnvironmentDescriptor({ httpBaseUrl }),
-  });
-  if (target === null) return "unreachable";
-  await addSavedEnvironment({
-    label: machine.label,
-    host: target.httpBaseUrl,
-    pairingCode: target.credential,
-    hubLink: { hubEnvironmentId: machine.environmentId, linkedAt: new Date().toISOString() },
-  });
-  return "linked";
-}
+/** The link itself loads on first use: Desktop's workspace state, and so boot, imports this module. */
+const link = (machine: { readonly environmentId: EnvironmentId; readonly label: string }) =>
+  import("./desktopHubLinkedDirectLink").then((module) => module.linkDesktopMachine(machine));
 
 /** One link per machine at a time; a second request joins the first. */
 function linkOnce(machine: {

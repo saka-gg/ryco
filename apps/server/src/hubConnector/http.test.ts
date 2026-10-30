@@ -100,6 +100,7 @@ const makeConnectorStub = (stub: ConnectorStub) => {
     stop: async () => undefined,
     localIntroduction: stubLocalIntroductionService(),
     nativeNodeClaim: stubNativeNodeClaimService(),
+    proveDirectRouteIdentity: async () => undefined,
     e2ee: stubE2eeOperator(stub.e2ee ?? {}),
   };
   return {

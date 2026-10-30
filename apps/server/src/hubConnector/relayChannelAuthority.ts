@@ -38,6 +38,7 @@ export function relayChannelAuthority(
     readonly trustSource: NativeE2eeTrustSource;
     readonly admittedAuthority: E2eeAdmittedAuthoritySnapshot | undefined;
     readonly accountGrantAuthority: E2eeAccountGrantAuthoritySnapshot | undefined;
+    readonly nodeIdentityPublicKey: Uint8Array;
   },
 ): RelayChannelAuthority {
   if (session.trustSource === "account-enrolled" && session.accountGrantAuthority !== undefined) {
@@ -50,6 +51,7 @@ export function relayChannelAuthority(
           enrollmentId: grant.enrollmentId,
           clientIdentityFingerprint: grant.clientIdentityFingerprint,
           role,
+          nodeIdentityPublicKey: session.nodeIdentityPublicKey,
         };
   }
   if (
@@ -65,6 +67,7 @@ export function relayChannelAuthority(
           trustSource: "locally-verified",
           clientIdentityFingerprint: local.clientIdentityFingerprint,
           role,
+          nodeIdentityPublicKey: session.nodeIdentityPublicKey,
         };
   }
   return { trustSource: "none" };
