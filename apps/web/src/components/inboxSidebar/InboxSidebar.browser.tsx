@@ -167,6 +167,88 @@ describe("Inbox sidebar rendering and settlement", () => {
     }
   });
 
+  it("marks queued and held follow-ups as the project sidebar does, but not on the phone", async () => {
+    const queues: Record<string, SidebarThreadSummary["followUpQueueSummary"]> = {
+      "No queue": undefined,
+      "Two queued": { count: 2, hold: null, headStatus: "queued", headPreview: "Next" },
+      "One held": {
+        count: 1,
+        hold: {
+          reason: "error",
+          detail: "Provider died.",
+          causeKeys: ["error:turn-1:Provider died."],
+          heldAt: "2026-09-01T00:00:00.000Z",
+        },
+        headStatus: "queued",
+        headPreview: "Next",
+      },
+    };
+    const props: InboxSidebarProps = {
+      projects: [],
+      worktrees: [],
+      environments: [],
+      threads: Object.entries(queues).map(([title, followUpQueueSummary], index) => {
+        const thread: SidebarThreadSummary = {
+          id: ThreadId.make(title),
+          environmentId: ENVIRONMENT_ID,
+          projectId: PROJECT_ID,
+          title,
+          interactionMode: "default",
+          session: null,
+          createdAt: `2026-09-01T00:0${index}:00.000Z`,
+          archivedAt: null,
+          latestTurn: null,
+          branch: null,
+          worktreePath: null,
+          latestUserMessageAt: null,
+          hasPendingApprovals: false,
+          hasPendingUserInput: false,
+          hasActionableProposedPlan: false,
+        };
+        if (followUpQueueSummary) thread.followUpQueueSummary = followUpQueueSummary;
+        return thread;
+      }),
+      deliveryUnknownThreadKeys: new Set(),
+      localQueuedThreadKeys: new Set(),
+      activeThreadKey: null,
+      autoSettleAfterDays: null,
+      pinnedThreadKeys: new Set(),
+      onOpenThread: vi.fn(),
+    };
+    await page.viewport(1280, 800);
+    const mounted = await render(<InboxSidebar {...props} />);
+    try {
+      const markOf = (title: string) =>
+        [...document.querySelectorAll('[data-testid="inbox-thread-row"]')]
+          .find((element) => element.textContent?.includes(title))
+          ?.querySelector("[data-follow-up-queue-badge]");
+      await expect.poll(() => markOf("Two queued")).not.toBeFalsy();
+      expect(markOf("No queue")).toBeFalsy();
+      // What it shows, and the reason a screen reader reads instead: words, not color alone.
+      const shown = (mark: Element | null | undefined) =>
+        mark?.querySelector('[aria-hidden="true"]')?.textContent;
+      const spoken = (mark: Element | null | undefined) =>
+        mark?.querySelector(".sr-only")?.textContent;
+      expect(shown(markOf("Two queued"))).toBe("2 queued");
+      expect(spoken(markOf("Two queued"))).toBe("2 queued follow-ups");
+      expect(markOf("Two queued")?.getAttribute("data-follow-up-queue-badge")).toBe("queued");
+      expect(shown(markOf("One held"))).toBe("1 held");
+      expect(spoken(markOf("One held"))).toBe("1 queued follow-up: Paused after an error");
+      expect(markOf("One held")?.getAttribute("data-follow-up-queue-badge")).toBe("held");
+      expect(markOf("One held")?.getAttribute("title")).toBe(
+        "1 queued follow-up: Paused after an error",
+      );
+
+      // The frozen phone tier gets no new UI.
+      await page.viewport(390, 844);
+      await expect.poll(() => document.querySelector("[data-follow-up-queue-badge]")).toBeNull();
+      expect(document.body.textContent).toContain("One held");
+    } finally {
+      await mounted.unmount();
+      await page.viewport(1280, 800);
+    }
+  });
+
   it("offers Add project from the empty state only while no project exists", async () => {
     const onAddProject = vi.fn();
     const props: InboxSidebarProps = {

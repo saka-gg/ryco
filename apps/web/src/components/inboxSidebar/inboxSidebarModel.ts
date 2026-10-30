@@ -10,6 +10,10 @@ import {
   type UsageLimitStatus,
 } from "@ryco/client-runtime/state/threads";
 import { scopedThreadKey, scopeThreadRef } from "@ryco/client-runtime/scoped";
+import {
+  followUpQueueBadgeOf,
+  type FollowUpQueueBadge,
+} from "@ryco/client-runtime/state/message-queue/queueBadge";
 import { CHAT_WORKSPACE_LABEL, projectDisplayLabel } from "@ryco/client-runtime/state/composer";
 import { isChatProject } from "@ryco/shared/projectKind";
 import type { SavedEnvironmentRuntimeState } from "@ryco/client-runtime/connection";
@@ -240,6 +244,11 @@ export interface InboxSidebarRow {
   readonly changeRequestStateLabel: string | null;
   readonly trustLabel: "Not verified" | "Encrypted · Account trusted" | "Identity conflict" | null;
   readonly roleLabel: "Viewer" | null;
+  /**
+   * The node's follow-up queue for this thread, as the project sidebar marks it: "2 queued", or
+   * "2 held" when nothing goes out without the person. Null while it holds none.
+   */
+  readonly followUpQueue: FollowUpQueueBadge | null;
   readonly settled: boolean;
   readonly snoozedUntil: string | null;
   readonly canSnooze: boolean;
@@ -1149,6 +1158,7 @@ export function buildInboxSidebarModel(input: BuildInboxSidebarInput): InboxSide
               ? "Identity conflict"
               : null,
       roleLabel: environment?.role === "viewer" ? "Viewer" : null,
+      followUpQueue: followUpQueueBadgeOf(thread.followUpQueueSummary),
       settled,
       snoozedUntil: snoozed ? (thread.snoozedUntil ?? null) : null,
       // The snooze toggle: Snooze on an awake row, Unsnooze on a snoozed one.

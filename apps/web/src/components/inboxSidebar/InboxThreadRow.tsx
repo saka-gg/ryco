@@ -33,6 +33,7 @@ import { useUiStateStore } from "../../uiStateStore";
 import { DeviceIcon } from "../DeviceIcon";
 import { isCompletionUnseen } from "../Sidebar.logic";
 import { ThreadTerminalIndicator, useThreadTerminalStatus } from "../ThreadTerminalStatus";
+import { FollowUpQueueMark } from "../sidebar/FollowUpQueueMark";
 import type { useThreadMenuActions } from "../sidebar/hooks/useThreadMenuActions";
 import {
   SOURCE_CONTROL_VISIBILITY_HYSTERESIS,
@@ -363,6 +364,11 @@ export const InboxThreadRow = memo(function InboxThreadRow(props: {
   );
 
   const trustWarning = row.trustLabel === "Not verified" || row.trustLabel === "Identity conflict";
+  // As in the project sidebar; the frozen phone tier gains nothing new.
+  const queueMark =
+    row.followUpQueue && !isPhone ? (
+      <FollowUpQueueMark badge={row.followUpQueue} className="shrink-0" />
+    ) : null;
   const navigationButton = (
     <button
       ref={setVisibilityNode}
@@ -443,6 +449,7 @@ export const InboxThreadRow = memo(function InboxThreadRow(props: {
           {row.showProject ? (
             <span className="max-w-20 truncate text-muted-foreground/60">{row.projectLabel}</span>
           ) : null}
+          {queueMark}
           {terminalIndicator}
           <InboxHint className="flex items-center gap-1" label={inboxTimeHint(row, timestamp)}>
             {row.snoozedUntil ? (
@@ -502,6 +509,7 @@ export const InboxThreadRow = memo(function InboxThreadRow(props: {
               shortName={changeRequestShortName}
               variant="inline"
             />
+            {queueMark}
             {terminalIndicator}
             <InboxHint
               className="shrink-0 tabular-nums text-muted-foreground/70"

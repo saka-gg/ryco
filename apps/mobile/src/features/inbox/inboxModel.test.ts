@@ -631,6 +631,55 @@ describe("mobile settlement and attention policy", () => {
   });
 });
 
+describe("inbox follow-up queue mark", () => {
+  const stopped = {
+    reason: "interrupted" as const,
+    detail: null,
+    causeKeys: ["interrupt:turn-1"],
+    heldAt: "2026-07-26T08:00:00.000Z",
+  };
+
+  it("marks queued and held follow-ups as web's sidebar does, and nothing without a queue", () => {
+    const rows = buildInboxSections({
+      projects: [project(NODE_A, "project-a", "Ryco")],
+      worktrees: [],
+      threads: [
+        thread(NODE_A, "queued", "project-a", {
+          followUpQueueSummary: { count: 2, hold: null, headStatus: "queued", headPreview: "a" },
+        }),
+        thread(NODE_A, "held", "project-a", {
+          followUpQueueSummary: { count: 1, hold: stopped, headStatus: "queued", headPreview: "b" },
+        }),
+        thread(NODE_A, "retry", "project-a", {
+          followUpQueueSummary: { count: 3, hold: null, headStatus: "failed", headPreview: "c" },
+        }),
+        thread(NODE_A, "plain", "project-a"),
+      ],
+      environments: [{ environmentId: NODE_A, label: "Studio", connectionState: "connected" }],
+    }).flatMap((section) => section.rows);
+    const [queued, held, retry, plain] = ["queued", "held", "retry", "plain"].map((id) =>
+      rows.find((row) => row.threadId === id),
+    );
+    expect(plain?.followUpQueue).toBeNull();
+    expect(queued?.followUpQueue).toEqual({
+      label: "2 queued",
+      title: "2 queued follow-ups",
+      held: false,
+    });
+    // Held reads as words, not only as a color.
+    expect(held?.followUpQueue).toEqual({
+      label: "1 held",
+      title: "1 queued follow-up: Paused after Stop",
+      held: true,
+    });
+    expect(retry?.followUpQueue).toEqual({
+      label: "3 held",
+      title: "3 queued follow-ups: The next one waits for Retry",
+      held: true,
+    });
+  });
+});
+
 describe("inbox usage limits", () => {
   const limitedThread = (instanceId: string) =>
     thread(NODE_A, "limited", "project-a", {
