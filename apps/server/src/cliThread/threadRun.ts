@@ -6,7 +6,8 @@
  * A command waits for exactly the turn it started. It binds the user message it
  * sent to the turn the node starts for it (the node records the message on that
  * turn), so a turn that was already running, or one another client starts later,
- * never stands in for it.
+ * never stands in for it. A message `send` queued on the node keeps its id when the
+ * node sends it, so the same binding finds its turn.
  *
  * @module cliThread/threadRun
  */
@@ -15,6 +16,9 @@ import path from "node:path";
 import {
   type AgentControlMcpReadThreadResult,
   DEFAULT_RUNTIME_MODE,
+  type FollowUpQueueEntryStatus,
+  type FollowUpQueueHold,
+  type FollowUpQueueRemovalReason,
   type MessageId,
   type ModelSelection,
   type OrchestrationEvent,
@@ -23,9 +27,11 @@ import {
   type OrchestrationThreadShell,
   ProviderInstanceId,
   type RuntimeMode,
+  type ThreadFollowUpQueue,
   type TurnId,
 } from "@ryco/contracts";
 import { isChatProject } from "@ryco/shared/projectKind";
+import { describeQueueHold } from "@ryco/shared/queueHold";
 import { isRestartReleasedSession } from "@ryco/shared/restartContinuation";
 import { isRuntimeModeAbove } from "@ryco/shared/runtimeMode";
 import { truncate } from "@ryco/shared/String";
@@ -37,7 +43,8 @@ import { Option, Schema } from "effect";
 
 /**
  * How a run ended, as `--json` names it. `started`: the command returned once the
- * turn had started, without `--wait`.
+ * turn had started, without `--wait`. `held`: the message `send` queued on the node
+ * waits in a follow-up queue that does not send by itself (it stays queued).
  */
 export type RunState =
   | "started"
@@ -46,6 +53,7 @@ export type RunState =
   | "stopped"
   | "needs-approval"
   | "needs-input"
+  | "held"
   | "restarted"
   | "timed-out"
   | "unknown";
@@ -55,9 +63,10 @@ export type EndedRunState = Exclude<RunState, "started" | "timed-out">;
 
 /**
  * The exit code a script sees: 0 a reply (or a started turn without `--wait`), 1 the
- * turn failed or was stopped, 2 it needs a person (an approval or an answer), 3 a node
- * restart cut it off, 4 the command timed out, 5 the turn ended but how is not known (a
- * later turn replaced it before the CLI saw its end; no read tells a past turn's outcome).
+ * turn failed or was stopped, 2 it needs a person (an approval, an answer, or a held
+ * follow-up queue to resume), 3 a node restart cut it off, 4 the command timed out, 5 the
+ * turn ended but how is not known (a later turn replaced it before the CLI saw its end; no
+ * read tells a past turn's outcome).
  */
 export const runExitCode = (state: RunState): number => {
   switch (state) {
@@ -66,6 +75,7 @@ export const runExitCode = (state: RunState): number => {
       return 0;
     case "needs-approval":
     case "needs-input":
+    case "held":
       return 2;
     case "restarted":
       return 3;
@@ -117,12 +127,19 @@ export interface RunFacts {
   readonly released: ReleasedRun | null;
   /** The node ended the message's turn start before any turn ran. */
   readonly startEnded: { readonly cancelled: boolean; readonly detail: string | null } | null;
+  /**
+   * `send` through the node's follow-up queue: why the message left the queue, null while it
+   * waits there. Undefined for a message sent as a turn start.
+   */
+  readonly queueExit?: FollowUpQueueRemovalReason | null;
 }
 
 export const initialRunFacts = (input: {
   readonly messageId?: MessageId | null;
   readonly turnId?: TurnId | null;
   readonly nextTurnAfter?: TurnId | null;
+  /** The message waits in the node's follow-up queue. */
+  readonly queued?: boolean;
 }): RunFacts => ({
   messageId: input.messageId ?? null,
   ...(input.nextTurnAfter === undefined ? {} : { nextTurnAfter: input.nextTurnAfter }),
@@ -130,6 +147,7 @@ export const initialRunFacts = (input: {
   turnId: input.turnId ?? null,
   released: null,
   startEnded: null,
+  ...(input.queued === true ? { queueExit: null } : {}),
 });
 
 /**
@@ -211,6 +229,17 @@ export const observeRunEvent = (facts: RunFacts, event: OrchestrationEvent): Run
     }
     case "thread.activity-appended":
       return observeRunActivity(facts, event.payload.activity);
+    case "thread.queue-entries-removed":
+      return facts.queueExit === null &&
+        facts.messageId !== null &&
+        event.payload.messageIds.includes(facts.messageId)
+        ? { ...facts, queueExit: event.payload.reason }
+        : facts;
+    case "thread.turn-steer-accepted":
+      // A person sent the queued message into the running turn: that turn answers it.
+      return facts.turnId === null && event.payload.messageId === facts.messageId
+        ? { ...facts, turnId: event.payload.turnId }
+        : facts;
     default:
       return facts;
   }
@@ -280,6 +309,12 @@ export const evaluateRun = (
         ? ended("stopped", null, facts.startEnded.detail ?? "The turn was stopped before it began.")
         : ended("failed", null, facts.startEnded.detail ?? "The turn could not start.");
     }
+    if (facts.queueExit === "user") {
+      return ended("stopped", null, "The queued message was removed before it was sent.");
+    }
+    if (facts.queueExit === "thread-ended") {
+      return ended("failed", null, "The thread was deleted before the queued message was sent.");
+    }
     // `wait` saw a turn start pending, and the thread settled without running a turn.
     if (facts.nextTurnAfter !== undefined && !isThreadTurnRunning(session, shell.latestTurn)) {
       return ended("failed", null, "The pending turn did not start.");
@@ -326,6 +361,49 @@ export const evaluateRun = (
   );
 };
 
+// ── A message in the node's follow-up queue ───────────────────────────
+
+/** The message `send` queued still waits in the node's queue: nothing took it out yet. */
+export const waitsInFollowUpQueue = (facts: RunFacts): boolean =>
+  facts.queueExit === null && facts.turnId === null && facts.pendingMessageId !== facts.messageId;
+
+/** What of a follow-up queue says whether it sends: a shell's summary or the queue itself. */
+export interface FollowUpQueueState {
+  readonly hold: FollowUpQueueHold | null;
+  readonly headStatus: FollowUpQueueEntryStatus | null;
+}
+
+/**
+ * Why a follow-up queue does not send by itself, or null: it is held (after a Stop, a failed turn,
+ * a usage limit, Pause or a node restart, until Resume or the limit's end) or its head waits for
+ * Retry. A hold only the node's delegation slots make (`releasedByNode`: a delegated task waiting
+ * for a free slot) is waited out like a running turn: the node lifts it as earlier tasks finish.
+ */
+export const followUpQueueBlocker = (
+  queue: FollowUpQueueState | null,
+  releasedByNode: (hold: FollowUpQueueHold) => boolean,
+): string | null => {
+  if (queue === null) return null;
+  if (queue.hold !== null && !releasedByNode(queue.hold)) {
+    const { title, detail } = describeQueueHold(queue.hold);
+    return detail === null ? `${title}.` : `${title}: ${detail}`;
+  }
+  return queue.headStatus === "failed" ? "A queued message waits for Retry." : null;
+};
+
+/** {@link followUpQueueBlocker} of the queue that holds `messageId`; null once it left the queue. */
+export const queuedMessageBlocker = (
+  queue: ThreadFollowUpQueue | undefined,
+  messageId: MessageId,
+  releasedByNode: (hold: FollowUpQueueHold) => boolean,
+): string | null =>
+  queue === undefined || !queue.entries.some((entry) => entry.messageId === messageId)
+    ? null
+    : followUpQueueBlocker(
+        { hold: queue.hold, headStatus: queue.entries[0]?.status ?? null },
+        releasedByNode,
+      );
+
 /** Whether `ryco thread send` can start its turn now or must wait. */
 export type QueueGate =
   | { readonly kind: "ready"; readonly shell: OrchestrationThreadShell }
@@ -333,9 +411,10 @@ export type QueueGate =
   | { readonly kind: "unavailable"; readonly reason: string };
 
 /**
- * A queued message goes out once the thread's turn is over, as the apps' follow-up queue
- * sends it (`isThreadTurnRunning`), and a pending approval or question holds it until a
- * person answers, as it holds theirs.
+ * On a node without a follow-up queue of its own, the CLI queues the message itself: it goes
+ * out once the thread's turn is over, as the apps' device queue sends it
+ * (`isThreadTurnRunning`), and a pending approval or question holds it until a person
+ * answers, as it holds theirs.
  */
 export const queueGate = (shell: OrchestrationThreadShell | null): QueueGate => {
   if (shell === null) return { kind: "unavailable", reason: "The thread was not found." };
@@ -469,12 +548,17 @@ export const describeRunResult = (result: RunResult): string | null => {
       return `Thread ${result.threadId} is waiting for an approval. Open it in Ryco to answer.`;
     case "needs-input":
       return `Thread ${result.threadId} is waiting for an answer. Open it in Ryco to reply.`;
+    case "held":
+      return `The message waits in the follow-up queue of thread ${result.threadId}, which does not send it by itself: ${result.error} Open the thread in Ryco to go on.`;
     case "restarted":
       return "A node restart cut the turn off. Send a new message to continue.";
     case "timed-out":
-      return result.turnId === null
-        ? "Timed out before the turn started."
-        : "Timed out; the turn is still running.";
+      return (
+        result.error ??
+        (result.turnId === null
+          ? "Timed out before the turn started."
+          : "Timed out; the turn is still running.")
+      );
     case "failed":
     case "stopped":
     case "unknown":
@@ -482,12 +566,30 @@ export const describeRunResult = (result: RunResult): string | null => {
   }
 };
 
-/** A `ryco thread read` page for a person: the title, then each message under its role. */
+/**
+ * A `ryco thread read` page for a person: the title, then each message under its role, then
+ * the follow-up queue (next first) and why it waits, when it is held.
+ */
 export const formatTranscript = (page: typeof AgentControlMcpReadThreadResult.Encoded): string => {
   const lines = [page.thread.title, `${page.thread.threadId}  ${page.thread.status}`];
   if (page.hasMoreBefore) lines.push("(Earlier messages are not shown.)");
   for (const message of page.messages) {
     lines.push("", `[${message.role}]`, message.truncated ? `${message.text} […]` : message.text);
+  }
+  const queue = page.followUpQueue;
+  if (queue !== undefined) {
+    const hold = queue.hold === null ? null : describeQueueHold({ ...queue.hold, causeKeys: [] });
+    lines.push(
+      "",
+      hold === null
+        ? "[queued]"
+        : `[queued, held: ${hold.title}${hold.detail === null ? "" : `: ${hold.detail}`}]`,
+    );
+    queue.entries.forEach((entry, index) => {
+      const label = entry.status === "queued" ? entry.author : `${entry.author}, ${entry.status}`;
+      const text = entry.textTruncated === true ? `${entry.text} […]` : entry.text;
+      lines.push(`${index + 1}. (${label}) ${text}`);
+    });
   }
   return lines.join("\n");
 };

@@ -11,6 +11,10 @@ import { Cause, Effect, Exit, Fiber, Layer, Queue, References, Stream } from "ef
 import { Command } from "effect/cli";
 import { TestClock, TestConsole } from "effect/testing";
 
+import {
+  readThreadMessageLimit,
+  toReadThreadResult,
+} from "../agentControl/Mcp/threadTranscript.ts";
 import { AuthControlPlaneRuntimeLive } from "../auth/Layers/AuthControlPlane.ts";
 import { AuthControlPlane } from "../auth/Services/AuthControlPlane.ts";
 import { cli } from "../cli.ts";
@@ -20,13 +24,14 @@ import {
   localProjectPath,
   localThreadTarget,
   readPrompt,
+  readThread,
   sendToThread,
   startThread,
   ThreadCliError,
   waitForThread,
   type ThreadCliTarget,
 } from "./threadCommands.ts";
-import { runExitCode, type RunResult } from "./threadRun.ts";
+import { formatTranscript, runExitCode, type RunResult } from "./threadRun.ts";
 
 const AT = "2026-10-28T10:00:00.000Z";
 const LATER = "2026-10-28T10:05:00.000Z";
@@ -62,6 +67,21 @@ const turn = (turnId: string, state: string, userMessageId?: string) => ({
   assistantMessageId: null,
   ...(userMessageId === undefined ? {} : { userMessageId }),
 });
+
+/** A follow-up a person queued on the thread. */
+const personEntry = {
+  messageId: "message-person",
+  text: "Fix the typo first",
+  attachments: [],
+  modelSelection: { instanceId: "codex", model: "gpt-5.5" },
+  runtimeMode: "auto",
+  interactionMode: "plan",
+  createdAt: AT,
+  updatedAt: AT,
+  revision: 1,
+  status: "queued",
+  author: "user",
+};
 
 const baseShell = (id: string, extra: Json = {}): Json => ({
   id,
@@ -104,6 +124,10 @@ const makeNode = Effect.sync(() => {
     projects: [
       { id: "project-1", title: "App", workspaceRoot: "/work/app", scripts: [] },
     ] as Json[],
+    /** The environment's capabilities; `serverFollowUpQueue` makes `send` queue on the node. */
+    capabilities: {} as Json,
+    /** The thread's follow-up queue, as its window carries it. */
+    queue: null as { entries: Json[]; hold: Json | null } | null,
     /** Answers a turn start; defaults to accepting it. */
     onDispatch: (_command: Json): Error | null => null,
   };
@@ -181,6 +205,19 @@ const makeNode = Effect.sync(() => {
         node.dispatched.push(command);
         const refusal = node.onDispatch(command);
         if (refusal !== null) return Effect.fail(refusal);
+        if (command.type === "thread.queue.add") {
+          const entry = {
+            ...(command.entry as Json),
+            createdAt: AT,
+            updatedAt: AT,
+            revision: 1,
+            status: "queued",
+            author: "user",
+          };
+          node.queue = { entries: [...(node.queue?.entries ?? []), entry], hold: null };
+          publish("thread.queue-entry-added", { threadId: THREAD, entry, beforeMessageId: null });
+          return Effect.succeed({ sequence: node.sequence });
+        }
         const message = command.message as Json;
         publish("thread.turn-start-requested", {
           threadId: command.threadId,
@@ -192,7 +229,12 @@ const makeNode = Effect.sync(() => {
     "orchestration.getThreadWindow": () =>
       offline(() => ({
         snapshotSequence: node.sequence,
-        thread: { ...node.shell, messages: node.messages, activities: [] },
+        thread: {
+          ...node.shell,
+          messages: node.messages,
+          activities: [],
+          ...(node.queue === null ? {} : { followUpQueue: node.queue }),
+        },
         history: {
           messages: { oldestCursor: null, newestCursor: null, hasMoreBefore: false },
         },
@@ -207,6 +249,7 @@ const makeNode = Effect.sync(() => {
         archivedThreadCount: 0,
       }),
     "server.getSettings": () => offline(() => ({ defaultAgentTokenMode: "balanced" })),
+    "server.getConfig": () => offline(() => ({ environment: { capabilities: node.capabilities } })),
     "server.getProjectPreferences": () =>
       offline(() => ({
         initialModelSelection: {
@@ -231,7 +274,28 @@ const makeNode = Effect.sync(() => {
     }),
     local: false,
   };
-  return { node, publish, drop, endFeeds, target };
+  /** The node's drain sends the queue's head: out of the queue and into a turn start. */
+  const sendQueueHead = (turnId: string) => {
+    const [head, ...rest] = node.queue!.entries as [Json, ...Json[]];
+    node.queue = rest.length === 0 ? null : { ...node.queue!, entries: rest };
+    publish("thread.queue-entries-removed", {
+      threadId: THREAD,
+      messageIds: [head.messageId],
+      reason: "dispatched",
+      updatedAt: AT,
+    });
+    publish("thread.turn-start-requested", {
+      threadId: THREAD,
+      messageId: head.messageId,
+      createdAt: AT,
+    });
+    node.shell = baseShell(THREAD, {
+      session: session("running", turnId),
+      latestTurn: turn(turnId, "running", head.messageId as string),
+    });
+    publish("thread.session-set", { threadId: THREAD, session: session("running", turnId) });
+  };
+  return { node, publish, drop, endFeeds, sendQueueHead, target };
 });
 
 /** Lets the command's fibers run, and its waits re-check, for `seconds` of test time. */
@@ -455,6 +519,226 @@ describe("ryco thread send binding", () => {
       yield* advance();
       const result = yield* Fiber.join(fiber);
       assert.deepInclude(result, { state: "completed", turnId: TurnId.make("turn-ours") });
+    }),
+  );
+});
+
+describe("ryco thread send on a node that keeps follow-up queues", () => {
+  it.effect("queues behind a person's follow-ups instead of starting a turn when idle", () =>
+    Effect.gen(function* () {
+      const { node, publish, sendQueueHead, target } = yield* makeNode;
+      node.capabilities = { serverFollowUpQueue: true };
+      node.shell = baseShell(THREAD, {
+        session: session("running", "turn-earlier"),
+        latestTurn: turn("turn-earlier", "running"),
+      });
+      node.queue = { entries: [personEntry], hold: null };
+      const fiber = yield* Effect.forkChild(
+        sendToThread(target, {
+          threadId: THREAD,
+          prompt: "Then run the tests",
+          wait: true,
+          deadlineMs: Number.POSITIVE_INFINITY,
+        }),
+      );
+      yield* advance();
+      assert.lengthOf(node.dispatched, 1);
+      const command = node.dispatched[0]!;
+      // The end of the thread's queue, with the thread's own model and modes, as a person's
+      // busy send queues; the node, not the CLI, decides when it goes.
+      assert.strictEqual(command.type, "thread.queue.add");
+      assert.notProperty(command, "position");
+      assert.notProperty(command, "hold");
+      assert.deepInclude(command.entry as Json, {
+        text: "Then run the tests",
+        attachments: [],
+        modelSelection: { instanceId: "codex", model: "gpt-5.5" },
+        runtimeMode: "auto",
+        interactionMode: "plan",
+        tokenMode: "off",
+      });
+      const messageId = (command.entry as Json).messageId as string;
+      assert.deepEqual(
+        node.queue?.entries.map((entry) => entry.messageId),
+        ["message-person", messageId],
+      );
+
+      // The running turn ends: the CLI starts nothing itself (the person's follow-up goes first).
+      node.shell = baseShell(THREAD, {
+        session: session("ready", null, { updatedAt: LATER }),
+        latestTurn: turn("turn-earlier", "completed"),
+      });
+      publish("thread.session-set", releasedSessionSet("ready", "turn-earlier", "completed"));
+      yield* advance();
+      assert.lengthOf(node.dispatched, 1);
+      sendQueueHead("turn-person");
+      yield* advance();
+      node.shell = baseShell(THREAD, {
+        session: session("ready", null, { updatedAt: LATER }),
+        latestTurn: turn("turn-person", "completed", "message-person"),
+      });
+      publish("thread.session-set", releasedSessionSet("ready", "turn-person", "completed"));
+      yield* advance();
+      assert.isUndefined(fiber.pollUnsafe(), "the person's turn is not this run");
+
+      // Then the node sends this message, under its own id: that turn is the run.
+      sendQueueHead("turn-ours");
+      yield* advance();
+      assert.isUndefined(fiber.pollUnsafe());
+      node.messages = [
+        {
+          id: "assistant-1",
+          role: "assistant",
+          text: "All tests pass.",
+          turnId: "turn-ours",
+          streaming: false,
+          createdAt: LATER,
+          updatedAt: LATER,
+        },
+      ];
+      node.shell = baseShell(THREAD, {
+        session: session("ready", null, { updatedAt: LATER }),
+        latestTurn: turn("turn-ours", "completed", messageId),
+      });
+      publish("thread.session-set", releasedSessionSet("ready", "turn-ours", "completed"));
+      yield* advance();
+      assert.deepEqual(yield* Fiber.join(fiber), {
+        threadId: THREAD,
+        turnId: "turn-ours",
+        state: "completed",
+        reply: "All tests pass.",
+        error: null,
+      } as RunResult);
+      assert.lengthOf(node.dispatched, 1);
+    }),
+  );
+
+  it.effect("exits 2 once the queue holding its message is held, and leaves it queued", () =>
+    Effect.gen(function* () {
+      const { node, publish, target } = yield* makeNode;
+      node.capabilities = { serverFollowUpQueue: true };
+      node.shell = baseShell(THREAD, {
+        session: session("running", "turn-earlier"),
+        latestTurn: turn("turn-earlier", "running"),
+      });
+      const fiber = yield* Effect.forkChild(
+        sendToThread(target, {
+          threadId: THREAD,
+          prompt: "Next",
+          wait: false,
+          deadlineMs: Number.POSITIVE_INFINITY,
+        }),
+      );
+      yield* advance();
+      assert.lengthOf(node.queue?.entries ?? [], 1);
+      const summary = (hold: Json) => ({
+        count: 1,
+        hold,
+        headStatus: "queued",
+        headPreview: "Next",
+      });
+
+      // A delegated task's wait for a free slot: the node lifts it itself.
+      const slot = {
+        reason: "paused",
+        detail: "Waiting for a free slot.",
+        causeKeys: ["delegation-slot:proposal-1"],
+        heldAt: LATER,
+      };
+      node.queue = { ...node.queue!, hold: slot };
+      node.shell = { ...node.shell, followUpQueueSummary: summary(slot) };
+      publish("thread.queue-held", { threadId: THREAD, hold: slot, updatedAt: LATER });
+      yield* advance();
+      assert.isUndefined(fiber.pollUnsafe());
+
+      // The running turn fails: the node holds the queue until a person resumes it.
+      const failed = {
+        reason: "error",
+        detail: "The provider crashed.",
+        causeKeys: ["error:turn-earlier:The provider crashed."],
+        heldAt: LATER,
+      };
+      node.queue = { ...node.queue!, hold: failed };
+      node.shell = baseShell(THREAD, {
+        session: session("error", null, { updatedAt: LATER, lastError: "The provider crashed." }),
+        latestTurn: turn("turn-earlier", "error"),
+        followUpQueueSummary: summary(failed),
+      });
+      publish(
+        "thread.session-set",
+        releasedSessionSet("error", "turn-earlier", "error", "The provider crashed."),
+      );
+      publish("thread.queue-held", { threadId: THREAD, hold: failed, updatedAt: LATER });
+      yield* advance();
+      const result = yield* Fiber.join(fiber);
+      assert.deepEqual(result, {
+        threadId: THREAD,
+        turnId: null,
+        state: "held",
+        reply: null,
+        error: "Paused after an error: The provider crashed.",
+      } as RunResult);
+      assert.strictEqual(runExitCode(result.state), 2);
+      assert.lengthOf(node.queue?.entries ?? [], 1, "the message stays queued");
+      assert.lengthOf(node.dispatched, 1);
+    }),
+  );
+});
+
+describe("ryco thread read", () => {
+  const transcript = { toReadThreadResult, readThreadMessageLimit };
+  const longReply = `${"a".repeat(8_500)}THE END`;
+
+  it.effect("prints the queue and every message whole; --json keeps ryco_read_thread's page", () =>
+    Effect.gen(function* () {
+      const { node, target } = yield* makeNode;
+      node.shell = baseShell(THREAD, { session: session("running", "turn-ours") });
+      node.messages = [
+        {
+          id: "user-1",
+          role: "user",
+          text: "Write it all down",
+          turnId: "turn-ours",
+          streaming: false,
+          createdAt: AT,
+          updatedAt: AT,
+        },
+        {
+          id: "assistant-1",
+          role: "assistant",
+          text: longReply,
+          turnId: "turn-ours",
+          streaming: false,
+          createdAt: LATER,
+          updatedAt: LATER,
+        },
+      ];
+      node.queue = {
+        entries: [{ ...personEntry, text: "Then run the tests" }],
+        hold: null,
+      };
+      const read = (wholeMessages: boolean) =>
+        readThread(target, { threadId: THREAD, limit: undefined, wholeMessages, transcript });
+
+      const text = formatTranscript(yield* read(true));
+      assert.include(text, longReply);
+      assert.notInclude(text, "[…]");
+      assert.isTrue(text.endsWith("[queued]\n1. (user) Then run the tests"), text);
+
+      const page = yield* read(false);
+      const cut = page.messages[1]!;
+      assert.deepInclude(cut, {
+        messageId: "assistant-1",
+        truncated: true,
+        offsetChars: 0,
+        totalChars: longReply.length,
+        nextOffsetChars: 8_000,
+      });
+      assert.lengthOf(cut.text, 8_000);
+      assert.deepEqual(
+        page.followUpQueue?.entries.map((entry) => [entry.author, entry.text]),
+        [["user", "Then run the tests"]],
+      );
     }),
   );
 });
@@ -904,7 +1188,9 @@ it.layer(NodeServices.layer)("ryco thread commands", (it) => {
         assert.include(start, flag);
       }
       assert.include(yield* helpOf(["thread", "wait"]), "--turn");
-      assert.include(yield* helpOf(["thread", "read"]), "--limit");
+      const read = yield* helpOf(["thread", "read"]);
+      assert.include(read, "--limit");
+      assert.include(read, "--full");
     }),
   );
 

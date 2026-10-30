@@ -4,8 +4,12 @@
  *
  * The CLI is one more client of a node: it speaks the WebSocket RPC the apps
  * use, to this machine's node or to a paired remote (`--remote`), and builds
- * its turn starts with the apps' own builders (`buildTurnStartCommand`,
- * `buildSendTurnBootstrap`). On this machine it signs in as a short-lived owner
+ * its commands with the apps' own builders (`buildTurnStartCommand`,
+ * `buildSendTurnBootstrap`, `buildFollowUpQueueAddCommand`). A `send` to a node
+ * that keeps follow-up queues (`serverFollowUpQueue`) goes to the end of the
+ * thread's queue, as the apps' busy send does, so it never goes ahead of what a
+ * person queued; an older node gets a turn start once the thread is idle. On this
+ * machine it signs in as a short-lived owner
  * session, issued like `ryco auth session issue` issues one and revoked when the
  * command ends (Ctrl-C included); the token is never printed or written down.
  *
@@ -29,6 +33,10 @@ import {
   composeOutgoingPrompt,
   outgoingPromptOverflow,
 } from "@ryco/client-runtime/state/composer/sendEngine";
+import {
+  buildFollowUpQueueAddCommand,
+  selectServerFollowUpQueueSupported,
+} from "@ryco/client-runtime/state/message-queue/serverQueue";
 import {
   CommandId,
   type EffectiveProjectPreferences,
@@ -79,11 +87,13 @@ import {
   type CliRemoteRpcClient,
 } from "../cliRemote/remotes.ts";
 import { loadRemoteShell } from "../cliRemote/threads.ts";
+import { heldOnlyForDelegationSlot } from "../orchestration/delegationSlotHold.ts";
 import { resolveProjectPreferences } from "../project/projectPreferences.ts";
 import {
   describeRunResult,
   evaluateRun,
   findProject,
+  followUpQueueBlocker,
   formatRunResult,
   formatTranscript,
   initialRunFacts,
@@ -92,6 +102,7 @@ import {
   observeRunActivity,
   observeRunEvent,
   queueGate,
+  queuedMessageBlocker,
   resolveStartModel,
   resolveStartRuntimeMode,
   type RunEvaluation,
@@ -99,6 +110,7 @@ import {
   type RunResult,
   runExitCode,
   threadTitleFromPrompt,
+  waitsInFollowUpQueue,
   wakesRun,
 } from "./threadRun.ts";
 
@@ -421,6 +433,38 @@ const readTurnReply = (client: CliRemoteRpcClient, threadId: ThreadId, turnId: T
   });
 
 /**
+ * Why the follow-up queue keeps the message `send` queued from going out by itself, or null.
+ * The shell's summary says when the queue is held or its head waits for Retry; the thread's
+ * queue then confirms the message still waits in it (the node may have just sent it).
+ */
+const queuedRunHold = (
+  client: CliRemoteRpcClient,
+  threadId: ThreadId,
+  shell: OrchestrationThreadShell,
+  facts: RunFacts,
+) =>
+  Effect.gen(function* () {
+    const summary = shell.followUpQueueSummary;
+    if (
+      facts.messageId === null ||
+      !waitsInFollowUpQueue(facts) ||
+      summary === undefined ||
+      followUpQueueBlocker(summary, heldOnlyForDelegationSlot) === null
+    ) {
+      return null;
+    }
+    const window = yield* client[ORCHESTRATION_WS_METHODS.getThreadWindow]({
+      threadId,
+      limits: { messages: 1, proposedPlans: 1, activities: 1, checkpoints: 1 },
+    });
+    return queuedMessageBlocker(
+      window.thread.followUpQueue,
+      facts.messageId,
+      heldOnlyForDelegationSlot,
+    );
+  });
+
+/**
  * Follows the tracker's run until it ends (`ended`) or, for a command without `--wait`,
  * until its turn has started (`started`), or the deadline passes.
  */
@@ -437,7 +481,11 @@ const followRun = (
       check: Effect.gen(function* () {
         yield* requireLiveFeed(tracker);
         const shell = yield* readThreadShell(client, threadId, tracker);
-        const evaluation: RunEvaluation = evaluateRun(shell, tracker.facts);
+        let evaluation: RunEvaluation = evaluateRun(shell, tracker.facts);
+        if (!evaluation.done && evaluation.turnId === null && shell !== null) {
+          const held = yield* queuedRunHold(client, threadId, shell, tracker.facts);
+          if (held !== null) evaluation = { done: true, state: "held", turnId: null, error: held };
+        }
         if (evaluation.turnId !== null && tracker.facts.turnId === null) {
           tracker.facts = { ...tracker.facts, turnId: evaluation.turnId };
         }
@@ -454,6 +502,13 @@ const followRun = (
     const { evaluation, ended } = value;
     const base = { threadId, turnId: evaluation.turnId, reply: null, error: null };
     if (!ended || !evaluation.done) {
+      if (timedOut && waitsInFollowUpQueue(tracker.facts)) {
+        return {
+          ...base,
+          state: "timed-out",
+          error: "Timed out; the message is still queued and goes out when the thread is free.",
+        } satisfies RunResult;
+      }
       return { ...base, state: timedOut ? "timed-out" : "started" } satisfies RunResult;
     }
     const reply =
@@ -709,22 +764,75 @@ export interface SendToThreadInput {
   readonly deadlineMs: number;
 }
 
+/** Whether the node keeps follow-up queues itself (`thread.queue.*`), as its descriptor says. */
+const readServerFollowUpQueue = (client: CliRemoteRpcClient) =>
+  Effect.map(client[WS_METHODS.serverGetConfig]({}), selectServerFollowUpQueueSupported);
+
 /**
- * Queues a message behind the thread's running turn: it starts as the next turn once the
- * thread is idle, with the thread's own model and modes, as the apps' follow-up queue sends
- * it. It never steers the running turn.
+ * Queues the message at the end of the thread's follow-up queue on the node, with the thread's
+ * own model and modes, as the apps queue a send while the thread is busy: the node sends it at
+ * the next idle moment, after the follow-ups queued before it. The add is idempotent on the
+ * message id, so sending it again after a lost reply never queues it twice.
+ */
+const queueOnNode = (
+  client: CliRemoteRpcClient,
+  threadId: ThreadId,
+  messageId: MessageId,
+  prompt: string,
+  tracker: RunTracker,
+) =>
+  Effect.gen(function* () {
+    const shell = yield* readThreadShell(client, threadId, tracker);
+    if (shell === null) return yield* fail("The thread was not found.");
+    if (shell.archivedAt !== null) return yield* fail("The thread is archived.");
+    const result = yield* client[ORCHESTRATION_WS_METHODS.dispatchCommand](
+      buildFollowUpQueueAddCommand({
+        commandId: CommandId.make(`cli-thread-send:${messageId}`),
+        threadId,
+        messageId,
+        content: {
+          text: prompt,
+          attachments: [],
+          modelSelection: shell.modelSelection,
+          runtimeMode: shell.runtimeMode,
+          interactionMode: shell.interactionMode,
+          tokenMode: shell.tokenMode,
+        },
+        createdAt: new Date().toISOString(),
+      }),
+    );
+    // The node sends it later: the events after the add bind its turn.
+    tracker.lastSequence = Math.max(tracker.lastSequence ?? 0, result.sequence);
+  });
+
+/**
+ * Queues a message behind the thread's running turn: it starts as a later turn, with the
+ * thread's own model and modes, as the apps' follow-up queue sends it. It never steers the
+ * running turn. A node that keeps follow-up queues holds it in the thread's queue, behind the
+ * follow-ups queued before it (`queueOnNode`); an older node gets a turn start from here once
+ * the thread is idle.
  */
 export const sendToThread = (target: ThreadCliTarget, input: SendToThreadInput) =>
   Effect.gen(function* () {
     const threadId = yield* decodeThreadId(input.threadId);
     const messageId = MessageId.make(crypto.randomUUID());
     const tracker = newTracker(initialRunFacts({ messageId }));
+    /** Read on the first connect, so a reconnect never changes how the message was sent. */
+    let serverQueue: boolean | null = null;
     // A refused start records its command id as rejected: each new try needs its own.
     let attempt = 0;
     let dispatching = false;
     let dispatched = false;
     return yield* withThreadConnection(target, (client) =>
       Effect.gen(function* () {
+        if (serverQueue === null) {
+          serverQueue = yield* readServerFollowUpQueue(client);
+          if (serverQueue) tracker.facts = initialRunFacts({ messageId, queued: true });
+        }
+        if (serverQueue && !dispatched) {
+          yield* queueOnNode(client, threadId, messageId, input.prompt, tracker);
+          dispatched = true;
+        }
         while (!dispatched) {
           let shell: OrchestrationThreadShell | null = null;
           if (!dispatching) {
@@ -822,12 +930,17 @@ export const waitForThread = (target: ThreadCliTarget, input: WaitForThreadInput
     );
   });
 
-/** A bounded page of the thread's latest messages, as `ryco_read_thread` returns it. */
+/**
+ * The thread's latest messages and its follow-up queue, as `ryco_read_thread` returns its first
+ * page. `wholeMessages` prints every message whole instead of cutting a long one with a
+ * continuation: the node sends them whole, so there is nothing to read on.
+ */
 export const readThread = (
   target: ThreadCliTarget,
   input: {
     readonly threadId: string;
     readonly limit: number | undefined;
+    readonly wholeMessages: boolean;
     readonly transcript: ThreadCliTranscript;
   },
 ) =>
@@ -846,6 +959,8 @@ export const readThread = (
             shell: window.thread,
             messages: window.thread.messages,
             pageInfo: window.history.messages,
+            followUpQueue: window.thread.followUpQueue,
+            wholeMessages: input.wholeMessages,
           }),
         ),
       ),
@@ -880,7 +995,13 @@ export type ThreadCliCommand =
       readonly turnId: Option.Option<string>;
       readonly timeout: Option.Option<Duration.Duration>;
     }
-  | { readonly kind: "read"; readonly threadId: string; readonly limit: Option.Option<number> };
+  | {
+      readonly kind: "read";
+      readonly threadId: string;
+      readonly limit: Option.Option<number>;
+      /** Under `--json`, every message whole too (the text output always prints them so). */
+      readonly full: boolean;
+    };
 
 export interface ThreadCliContext<E, R, EL, RL, EA, RA> {
   readonly json: boolean;
@@ -920,6 +1041,8 @@ export const runThreadCli = <E, R, EL, RL, EA, RA>(
           transcript: context.transcript,
           threadId: command.threadId,
           limit: Option.getOrUndefined(command.limit),
+          // `--json` keeps `ryco_read_thread`'s page, a long message cut with its continuation.
+          wholeMessages: !context.json || command.full,
         });
         yield* Console.log(context.json ? JSON.stringify(page) : formatTranscript(page));
         return;

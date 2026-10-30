@@ -3911,7 +3911,7 @@ const threadPromptArgument = Argument.String("prompt").pipe(
 
 const threadWaitFlag = Flag.Boolean("wait").pipe(
   Flag.withDescription(
-    "Wait for the turn to end and print its reply. Exit 1 failed or stopped, 2 needs an approval or answer, 3 cut off by a node restart, 5 outcome unknown.",
+    "Wait for the turn to end and print its reply. Exit 1 failed or stopped, 2 needs an approval or answer (or, for send, the thread's follow-up queue is held or waits for a Retry), 3 cut off by a node restart, 5 outcome unknown.",
   ),
   Flag.withDefault(false),
 );
@@ -3955,7 +3955,7 @@ const threadSendCommand = Command.make("send", {
   prompt: threadPromptArgument,
 }).pipe(
   Command.withDescription(
-    "Queue a message: it starts as the thread's next turn once the running one ends. Prints the turn's id.",
+    "Queue a message: it starts as a later turn once the running one ends, after the follow-ups queued before it. Prints the turn's id. Exits 2 while the thread's follow-up queue is held (after a Stop, a failure, a usage limit or Pause) or waits for a Retry; the message stays queued.",
   ),
   Command.withHandler((flags) => runThreadCli(flags, { kind: "send", ...flags })),
 );
@@ -3983,9 +3983,15 @@ const threadReadCommand = Command.make("read", {
     Flag.withDescription("How many of the latest messages to print (at most 50)."),
     Flag.optional,
   ),
+  full: Flag.Boolean("full").pipe(
+    Flag.withDescription(
+      "With --json, print every message whole instead of cutting long ones as ryco_read_thread does. The text output always prints them whole.",
+    ),
+    Flag.withDefault(false),
+  ),
   threadId: threadIdArgument,
 }).pipe(
-  Command.withDescription("Print a thread's latest messages."),
+  Command.withDescription("Print a thread's latest messages and its queued follow-ups."),
   Command.withHandler((flags) => runThreadCli(flags, { kind: "read", ...flags })),
 );
 

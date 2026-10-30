@@ -10,18 +10,23 @@ import { ORPHANED_PROVIDER_SESSION_ERROR } from "@ryco/shared/restartContinuatio
 import { assert, describe, it } from "@effect/vitest";
 
 import {
+  describeRunResult,
   evaluateRun,
   findProject,
+  followUpQueueBlocker,
   formatRunResult,
+  formatTranscript,
   initialRunFacts,
   isBusyTurnStartRejection,
   latestRunFacts,
   observeRunEvent,
   queueGate,
+  queuedMessageBlocker,
   resolveStartModel,
   resolveStartRuntimeMode,
   runExitCode,
   threadTitleFromPrompt,
+  waitsInFollowUpQueue,
   type RunFacts,
   type RunState,
 } from "./threadRun.ts";
@@ -124,6 +129,7 @@ describe("runExitCode", () => {
       unknown: 5,
       "needs-approval": 2,
       "needs-input": 2,
+      held: 2,
       restarted: 3,
       "timed-out": 4,
     };
@@ -395,6 +401,118 @@ describe("queueing behind a running turn", () => {
   });
 });
 
+describe("a message in the node's follow-up queue", () => {
+  const queued = () => initialRunFacts({ messageId: ours, queued: true });
+  const removed = (reason: string) =>
+    event("thread.queue-entries-removed", {
+      threadId: "thread-1",
+      messageIds: [ours],
+      reason,
+      updatedAt: T1,
+    });
+  const hold = (reason: string, causeKeys: ReadonlyArray<string>, detail: string | null = null) =>
+    ({ reason, detail, causeKeys, heldAt: T1 }) as never;
+  const entry = (messageId: MessageId, status = "queued") =>
+    ({ messageId, status, text: "Next", author: "user", attachments: [] }) as never;
+  const bySlotOnly = (value: { readonly causeKeys: ReadonlyArray<string> }) =>
+    value.causeKeys.every((key) => key.startsWith("delegation-slot:"));
+
+  it("waits in the queue until the node sends it, and binds the turn the node starts", () => {
+    let facts = queued();
+    assert.isTrue(waitsInFollowUpQueue(facts));
+    assert.isFalse(waitsInFollowUpQueue(initialRunFacts({ messageId: ours })));
+    // The drain's turn start takes it out of the queue in one batch.
+    facts = fold(facts, [removed("dispatched"), turnStartRequested(ours)]);
+    assert.isFalse(waitsInFollowUpQueue(facts));
+    facts = fold(facts, [sessionSet("running", ourTurn)]);
+    assert.strictEqual(facts.turnId, ourTurn);
+  });
+
+  it("ends when a person removes it, and follows the turn it was steered into", () => {
+    const evaluation = evaluateRun(
+      shell({ session: session("running", earlierTurn) }),
+      fold(queued(), [removed("user")]),
+    );
+    assert.deepInclude(evaluation, { done: true, state: "stopped", turnId: null });
+
+    const steered = fold(queued(), [
+      event("thread.turn-steer-accepted", {
+        threadId: "thread-1",
+        messageId: ours,
+        expectedTurnId: earlierTurn,
+        turnId: earlierTurn,
+        resolvedAt: T1,
+      }),
+      removed("steered"),
+    ]);
+    assert.strictEqual(steered.turnId, earlierTurn);
+    assert.deepInclude(
+      evaluateRun(
+        shell({
+          session: session("running", earlierTurn),
+          latestTurn: latestTurn(earlierTurn, "running"),
+        }),
+        steered,
+      ),
+      { done: false, turnId: earlierTurn },
+    );
+  });
+
+  it("is blocked by a hold or a head waiting for Retry, never by a hold the node lifts", () => {
+    assert.isNull(followUpQueueBlocker(null, bySlotOnly));
+    assert.isNull(followUpQueueBlocker({ hold: null, headStatus: "queued" }, bySlotOnly));
+    assert.isNull(followUpQueueBlocker({ hold: null, headStatus: "steering" }, bySlotOnly));
+    assert.strictEqual(
+      followUpQueueBlocker(
+        { hold: hold("error", ["error:turn-1:boom"], "The provider crashed."), headStatus: null },
+        bySlotOnly,
+      ),
+      "Paused after an error: The provider crashed.",
+    );
+    assert.strictEqual(
+      followUpQueueBlocker(
+        { hold: hold("interrupted", ["interrupt:turn-1"]), headStatus: "queued" },
+        bySlotOnly,
+      ),
+      "Paused after Stop.",
+    );
+    assert.strictEqual(
+      followUpQueueBlocker({ hold: null, headStatus: "failed" }, bySlotOnly),
+      "A queued message waits for Retry.",
+    );
+    assert.isNull(
+      followUpQueueBlocker(
+        {
+          hold: hold("paused", ["delegation-slot:proposal-1"], "Waiting for a free slot."),
+          headStatus: "queued",
+        },
+        bySlotOnly,
+      ),
+    );
+    // Only while the message itself is still in the queue.
+    const paused = { entries: [entry(theirs), entry(ours)], hold: hold("paused", ["paused:1"]) };
+    assert.strictEqual(queuedMessageBlocker(paused as never, ours, bySlotOnly), "Paused.");
+    assert.isNull(
+      queuedMessageBlocker({ ...paused, entries: [entry(theirs)] } as never, ours, bySlotOnly),
+    );
+    assert.isNull(queuedMessageBlocker(undefined, ours, bySlotOnly));
+  });
+
+  it("tells a person the message stays queued", () => {
+    const result = {
+      threadId: "thread-1",
+      turnId: null,
+      state: "held" as const,
+      reply: null,
+      error: "Paused after Stop.",
+    };
+    assert.strictEqual(runExitCode(result.state), 2);
+    const note = describeRunResult(result) ?? "";
+    assert.include(note, "Paused after Stop.");
+    assert.include(note, "waits in the follow-up queue of thread thread-1");
+  });
+});
+
 describe("starting a thread", () => {
   const projectDefault = {
     instanceId: ProviderInstanceId.make("codex"),
@@ -467,6 +585,71 @@ describe("output", () => {
       reply: "Done.",
       error: null,
     });
+  });
+
+  it("prints a page's messages and its follow-up queue, next first", () => {
+    const text = formatTranscript({
+      thread: {
+        threadId: "thread-1",
+        projectId: "project-1",
+        title: "Thread",
+        status: "running",
+        activeTurnId: ourTurn,
+        providerInstanceId: null,
+        archived: false,
+        createdAt: T0,
+        updatedAt: T1,
+      },
+      messages: [
+        {
+          messageId: "message-1",
+          role: "user",
+          text: "Fix it",
+          truncated: false,
+          turnId: ourTurn,
+          attachmentCount: 0,
+          createdAt: T0,
+        },
+      ],
+      hasMoreBefore: false,
+      nextCursor: null,
+      followUpQueue: {
+        hold: { reason: "error", detail: "The provider crashed.", heldAt: T1 },
+        entries: [
+          {
+            messageId: "message-2",
+            author: "user",
+            status: "queued",
+            text: "Then run the tests",
+            attachmentCount: 0,
+            createdAt: T1,
+          },
+          {
+            messageId: "message-3",
+            author: "agent",
+            status: "failed",
+            text: "Check",
+            textTruncated: true,
+            attachmentCount: 0,
+            createdAt: T1,
+          },
+        ],
+      },
+    });
+    assert.strictEqual(
+      text,
+      [
+        "Thread",
+        "thread-1  running",
+        "",
+        "[user]",
+        "Fix it",
+        "",
+        "[queued, held: Paused after an error: The provider crashed.]",
+        "1. (user) Then run the tests",
+        "2. (agent, failed) Check […]",
+      ].join("\n"),
+    );
   });
 
   it("prints the id a script passes on for a run it did not wait for", () => {

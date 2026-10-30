@@ -190,6 +190,10 @@
       "types": "./src/state/message-queue/index.ts",
       "import": "./src/state/message-queue/index.ts"
     },
+    "./state/message-queue/serverQueue": {
+      "types": "./src/state/message-queue/serverQueue.ts",
+      "import": "./src/state/message-queue/serverQueue.ts"
+    },
     "./state/settings": {
       "types": "./src/state/settings/index.ts",
       "import": "./src/state/settings/index.ts"
