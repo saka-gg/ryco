@@ -1,13 +1,17 @@
+import type { UpdateEverythingItemKey } from "@ryco/client-runtime/updates";
 import { CheckIcon, CopyIcon } from "lucide-react";
-import type { ReactNode } from "react";
+import { useId, type ReactNode } from "react";
 
 import { useCopyToClipboard } from "../../hooks/useCopyToClipboard";
 import { cn } from "../../lib/utils";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
+import { Checkbox } from "../ui/checkbox";
 import { stackedThreadToast, toastManager } from "../ui/toast";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
-import type { UpdateDeviceCardView, UpdateDotTone } from "./updateEverything.logic";
+import type { UpdateDeviceCardView, UpdateDotTone, UpdateItemView } from "./updateEverything.logic";
+
+type ToggleUpdateItem = (key: UpdateEverythingItemKey, selected: boolean) => void;
 
 const DOT_CLASS: Readonly<Record<UpdateDotTone, string>> = {
   muted: "bg-muted-foreground",
@@ -89,6 +93,48 @@ export function CopyableCommand({ command }: { command: string }) {
   );
 }
 
+/** A one-click update's line, with its checkbox when it can be left out now. */
+function UpdateItemLine({
+  item,
+  onToggle,
+  className,
+  children,
+}: {
+  item: UpdateItemView | null;
+  onToggle: ToggleUpdateItem | undefined;
+  className: string;
+  children: ReactNode;
+}) {
+  const nameId = useId();
+  const content = (
+    <span
+      className={cn(
+        "flex min-w-0 flex-1 items-center gap-1.5",
+        item?.selected === false && "opacity-50",
+      )}
+    >
+      {children}
+    </span>
+  );
+  if (item === null || onToggle === undefined) {
+    return <span className={className}>{content}</span>;
+  }
+  return (
+    <label className={cn("cursor-pointer", className)}>
+      {content}
+      {/* Named by this, not by the whole line the label wraps (versions read oddly). */}
+      <span id={nameId} className="sr-only">
+        {item.label}
+      </span>
+      <Checkbox
+        aria-labelledby={nameId}
+        checked={item.selected}
+        onCheckedChange={(checked) => onToggle(item.key, checked === true)}
+      />
+    </label>
+  );
+}
+
 /**
  * One device in "Update everything": its Ryco release, the providers one click
  * updates there, chats a restart affects, what needs a hand, and during a run its
@@ -98,6 +144,7 @@ export function UpdateDeviceCard({
   view,
   meta,
   action,
+  onToggleItem,
   className,
 }: {
   view: UpdateDeviceCardView;
@@ -105,6 +152,8 @@ export function UpdateDeviceCard({
   meta?: string | null;
   /** A trailing control on the name row (Settings: update just this device). */
   action?: ReactNode;
+  /** Shows a checkbox on each one-click update (the plan dialog). */
+  onToggleItem?: ToggleUpdateItem;
   className?: string;
 }) {
   const { version, status } = view;
@@ -137,12 +186,18 @@ export function UpdateDeviceCard({
         ) : null}
         <span className="ml-auto" />
         {version?.kind === "change" ? (
-          <VersionChange
-            from={version.from}
-            to={version.to}
-            emphasize={version.emphasize}
-            className="text-[11.5px]"
-          />
+          <UpdateItemLine
+            item={view.nodeItem}
+            onToggle={onToggleItem}
+            className="flex shrink-0 items-center gap-2"
+          >
+            <VersionChange
+              from={version.from}
+              to={version.to}
+              emphasize={version.emphasize}
+              className="text-[11.5px]"
+            />
+          </UpdateItemLine>
         ) : version?.kind === "current" ? (
           <span className="shrink-0 font-mono text-[11.5px] text-muted-foreground">
             {version.version}
@@ -174,14 +229,20 @@ export function UpdateDeviceCard({
           className="mt-1.5 flex flex-col text-xs text-muted-foreground"
         >
           {view.providers.map((provider) => (
-            <li key={provider.key} className="flex min-w-0 items-center gap-1.5 py-0.5">
-              <span className="min-w-0 truncate">{provider.name}</span>
-              <VersionChange
-                from={provider.from}
-                to={provider.to}
-                emphasize={false}
-                className="ml-auto text-[11px]"
-              />
+            <li key={provider.key} className="flex min-w-0">
+              <UpdateItemLine
+                item={provider.item}
+                onToggle={onToggleItem}
+                className="flex min-w-0 flex-1 items-center gap-2 py-0.5"
+              >
+                <span className="min-w-0 truncate">{provider.name}</span>
+                <VersionChange
+                  from={provider.from}
+                  to={provider.to}
+                  emphasize={false}
+                  className="ml-auto text-[11px]"
+                />
+              </UpdateItemLine>
             </li>
           ))}
         </ul>

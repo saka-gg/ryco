@@ -99,10 +99,17 @@ export interface UpdateEverythingPlan {
   readonly hasWork: boolean;
 }
 
+/**
+ * One one-click update in a plan, stable across re-plans: a device's own Ryco
+ * (`updateEverythingNodeItem`) or one of its providers (`updateEverythingProviderItem`).
+ */
+export type UpdateEverythingItemKey = string;
+
 export const NODE_TOO_OLD_TO_UPDATE_REASON =
   "This node's Ryco is too old to update itself. Update it once by hand.";
 export const DEVICE_OFFLINE_REASON = "Not connected right now.";
 export const DEVICE_NOT_OWNER_REASON = "Only this node's owner can update it.";
+export const NOT_SELECTED_REASON = "Not selected.";
 
 const RUNNING_NODE_UPDATE_STATUSES: ReadonlySet<NodeUpdateState["run"]["status"]> = new Set([
   "preparing",
@@ -285,8 +292,21 @@ function skippedReasonFor(environment: UpdateEverythingEnvironmentInput): string
 }
 
 /** Whether running the plan updates this node (`one-click` or `this-app`). */
-export function isOneClickNodeUpdate(node: PlannedNodeUpdate): boolean {
+export function isOneClickNodeUpdate(
+  node: PlannedNodeUpdate,
+): node is Extract<PlannedNodeUpdate, { readonly kind: "one-click" | "this-app" }> {
   return node.kind === "one-click" || node.kind === "this-app";
+}
+
+export function updateEverythingNodeItem(environmentId: EnvironmentId): UpdateEverythingItemKey {
+  return JSON.stringify([environmentId, "ryco"]);
+}
+
+export function updateEverythingProviderItem(
+  environmentId: EnvironmentId,
+  instanceId: ProviderInstanceId,
+): UpdateEverythingItemKey {
+  return JSON.stringify([environmentId, "provider", instanceId]);
 }
 
 function planDevice(
@@ -337,7 +357,10 @@ export function buildUpdateEverythingPlan(input: {
           ? 1
           : 0),
   );
-  const devices = ordered.map((environment) => planDevice(environment, input.localApp));
+  return summarizePlan(ordered.map((environment) => planDevice(environment, input.localApp)));
+}
+
+function summarizePlan(devices: ReadonlyArray<UpdateEverythingDevicePlan>): UpdateEverythingPlan {
   let oneClickCount = 0;
   let manualCount = 0;
   for (const device of devices) {
@@ -350,4 +373,42 @@ export function buildUpdateEverythingPlan(input: {
     manualCount,
     hasWork: oneClickCount > 0,
   });
+}
+
+function excludeFromDevice(
+  device: UpdateEverythingDevicePlan,
+  excluded: ReadonlySet<UpdateEverythingItemKey>,
+): UpdateEverythingDevicePlan {
+  if (device.skippedReason !== null) return device;
+  const providers = device.providers.filter(
+    (provider) =>
+      !excluded.has(updateEverythingProviderItem(device.environmentId, provider.instanceId)),
+  );
+  const node: PlannedNodeUpdate =
+    isOneClickNodeUpdate(device.node) &&
+    excluded.has(updateEverythingNodeItem(device.environmentId))
+      ? { kind: "unknown", version: device.node.fromVersion, reason: NOT_SELECTED_REASON }
+      : device.node;
+  if (node === device.node && providers.length === device.providers.length) return device;
+  return Object.freeze({
+    ...device,
+    node: Object.freeze(node),
+    providers: Object.freeze(providers),
+    // Nothing left to run here: the run lists it as skipped, like an offline device.
+    skippedReason:
+      providers.length === 0 && !isOneClickNodeUpdate(node) ? NOT_SELECTED_REASON : null,
+  });
+}
+
+/**
+ * The plan without the one-click updates someone left out: their providers drop
+ * out, their node update stays listed without running, a device left with
+ * nothing to run is skipped, and the counts follow.
+ */
+export function excludeFromUpdateEverythingPlan(
+  plan: UpdateEverythingPlan,
+  excluded: ReadonlySet<UpdateEverythingItemKey>,
+): UpdateEverythingPlan {
+  if (excluded.size === 0) return plan;
+  return summarizePlan(plan.devices.map((device) => excludeFromDevice(device, excluded)));
 }

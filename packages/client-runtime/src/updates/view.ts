@@ -8,9 +8,12 @@
 import {
   describeUpdateEverythingResult,
   isOneClickNodeUpdate,
+  updateEverythingNodeItem,
+  updateEverythingProviderItem,
   type UpdateEverythingDevicePlan,
   type UpdateEverythingDeviceRunState,
   type UpdateEverythingDeviceStatus,
+  type UpdateEverythingItemKey,
   type UpdateEverythingPlan,
   type UpdateEverythingResult,
   type UpdateEverythingRunState,
@@ -51,6 +54,18 @@ function planUpdatesThisApp(plan: UpdateEverythingPlan): boolean {
 export function updateEverythingSubtitle(plan: UpdateEverythingPlan): string {
   const order = "Providers update first, then each node restarts on the new Ryco.";
   return planUpdatesThisApp(plan) ? `${order} This app restarts last.` : order;
+}
+
+/**
+ * "3 of 5 updates selected" when some one-click updates are left out of
+ * `selected` (the plan without them); `null` when every one runs.
+ */
+export function updateEverythingSelectionSummary(
+  plan: UpdateEverythingPlan,
+  selected: UpdateEverythingPlan,
+): string | null {
+  if (selected.oneClickCount >= plan.oneClickCount) return null;
+  return `${selected.oneClickCount} of ${plural(plan.oneClickCount, "update")} selected`;
 }
 
 /** One sentence for what the plan would do; the pill's tooltip and the settings toolbar. */
@@ -260,11 +275,21 @@ export type DeviceVersionView =
     }
   | { readonly kind: "current"; readonly version: string };
 
+/** A one-click update someone can leave out of the run. */
+export interface UpdateItemView {
+  readonly key: UpdateEverythingItemKey;
+  readonly selected: boolean;
+  /** Its checkbox's accessible name: "Update Codex on MacBook Pro M4". */
+  readonly label: string;
+}
+
 export interface DeviceProviderLineView {
   readonly key: string;
   readonly name: string;
   readonly from: string | null;
   readonly to: string | null;
+  /** `null` when one click can't update it now. */
+  readonly item: UpdateItemView | null;
 }
 
 export interface DeviceManualItemView {
@@ -288,6 +313,8 @@ export interface UpdateDeviceCardView {
   readonly dot: UpdateDotTone;
   readonly pulse: boolean;
   readonly version: DeviceVersionView | null;
+  /** The device's own Ryco update, when one click runs it. */
+  readonly nodeItem: UpdateItemView | null;
   readonly providers: ReadonlyArray<DeviceProviderLineView>;
   readonly chatWarning: string | null;
   /** Plain lines: why nothing runs there, or that it is up to date. */
@@ -299,12 +326,15 @@ export interface UpdateDeviceCardView {
   readonly canUpdate: boolean;
 }
 
-function nodeVersionView(device: UpdateEverythingDevicePlan): DeviceVersionView | null {
+function nodeVersionView(
+  device: UpdateEverythingDevicePlan,
+  selected: boolean,
+): DeviceVersionView | null {
   const node = device.node;
   switch (node.kind) {
     case "one-click":
     case "this-app":
-      return { kind: "change", from: node.fromVersion, to: node.toVersion, emphasize: true };
+      return { kind: "change", from: node.fromVersion, to: node.toVersion, emphasize: selected };
     case "manual":
       if (node.toVersion !== null) {
         return { kind: "change", from: node.fromVersion, to: node.toVersion, emphasize: false };
@@ -369,7 +399,21 @@ export function describeDeviceStatus(run: UpdateEverythingDeviceRunState): Devic
   };
 }
 
-export function describeDeviceCard(entry: UpdateEverythingDeviceEntry): UpdateDeviceCardView {
+const NOTHING_EXCLUDED: ReadonlySet<UpdateEverythingItemKey> = new Set();
+
+function itemView(
+  key: UpdateEverythingItemKey,
+  label: string,
+  excluded: ReadonlySet<UpdateEverythingItemKey>,
+): UpdateItemView {
+  return { key, selected: !excluded.has(key), label };
+}
+
+/** `excluded`: the one-click updates left out of the run (all selected by default). */
+export function describeDeviceCard(
+  entry: UpdateEverythingDeviceEntry,
+  excluded: ReadonlySet<UpdateEverythingItemKey> = NOTHING_EXCLUDED,
+): UpdateDeviceCardView {
   const { device, run } = entry;
   const status = run === null ? null : describeDeviceStatus(run);
   if (device === null) {
@@ -380,6 +424,7 @@ export function describeDeviceCard(entry: UpdateEverythingDeviceEntry): UpdateDe
       dot: status?.tone ?? "muted",
       pulse: status?.active ?? false,
       version: null,
+      nodeItem: null,
       providers: [],
       chatWarning: null,
       notes: [],
@@ -389,21 +434,37 @@ export function describeDeviceCard(entry: UpdateEverythingDeviceEntry): UpdateDe
     };
   }
   const manual = manualItems(device);
-  const restarts = device.skippedReason === null && isOneClickNodeUpdate(device.node);
+  const runnable = device.skippedReason === null;
+  const nodeItem =
+    runnable && isOneClickNodeUpdate(device.node)
+      ? itemView(
+          updateEverythingNodeItem(device.environmentId),
+          `Update Ryco on ${device.label}`,
+          excluded,
+        )
+      : null;
   return {
     environmentId: device.environmentId,
     label: device.label,
     installationLabel: device.installationLabel,
     dot: status?.tone ?? idleDot(device, manual.length),
     pulse: status?.active ?? false,
-    version: nodeVersionView(device),
+    version: nodeVersionView(device, nodeItem?.selected ?? true),
+    nodeItem,
     providers: device.providers.map((provider) => ({
       key: provider.instanceId,
       name: provider.displayName,
       from: provider.fromVersion,
       to: provider.toVersion,
+      item: runnable
+        ? itemView(
+            updateEverythingProviderItem(device.environmentId, provider.instanceId),
+            `Update ${provider.displayName} on ${device.label}`,
+            excluded,
+          )
+        : null,
     })),
-    chatWarning: restarts
+    chatWarning: nodeItem?.selected
       ? chatRestartWarning(device.runningChatCount, device.continuesChatsAfterRestart)
       : null,
     // The run's own message already says it ("Skipped · Up to date.").

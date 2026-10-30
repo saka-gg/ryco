@@ -11,7 +11,11 @@ import {
   describeNodeInstallation,
   DEVICE_NOT_OWNER_REASON,
   DEVICE_OFFLINE_REASON,
+  excludeFromUpdateEverythingPlan,
   NODE_TOO_OLD_TO_UPDATE_REASON,
+  NOT_SELECTED_REASON,
+  updateEverythingNodeItem,
+  updateEverythingProviderItem,
   type UpdateEverythingEnvironmentInput,
   type UpdateEverythingLocalApp,
 } from "./plan.ts";
@@ -273,5 +277,73 @@ describe("buildUpdateEverythingPlan devices", () => {
     expect(describeNodeInstallation({ hostedByThisApp: false, installation: null })).toBe(
       "Unknown install",
     );
+  });
+});
+
+describe("excludeFromUpdateEverythingPlan", () => {
+  const plan = buildUpdateEverythingPlan({
+    environments: [
+      environment("Server", { providers: [provider("codex"), provider("claudeAgent")] }),
+      environment("Laptop", {
+        nodeUpdate: nodeState({ availability: "current" }),
+        providers: [provider("codex")],
+      }),
+      environment("Offline", { connected: false, providers: [provider("codex")] }),
+    ],
+    localApp: null,
+  });
+  const [laptop, offline, server] = plan.devices;
+  const codex = ProviderInstanceId.make("codex");
+
+  it("drops excluded providers, keeps an excluded node update listed, and recounts", () => {
+    const selected = excludeFromUpdateEverythingPlan(
+      plan,
+      new Set([
+        updateEverythingNodeItem(server!.environmentId),
+        updateEverythingProviderItem(server!.environmentId, codex),
+      ]),
+    );
+    expect(selected.devices[2]).toMatchObject({
+      node: { kind: "unknown", version: "0.1.35", reason: NOT_SELECTED_REASON },
+      providers: [{ instanceId: "claudeAgent" }],
+      skippedReason: null,
+    });
+    expect(selected.devices[0]).toBe(laptop);
+    expect(selected.devices[1]).toBe(offline);
+    expect(plan).toMatchObject({ oneClickCount: 4, hasWork: true });
+    expect(selected).toMatchObject({ oneClickCount: 2, manualCount: 0, hasWork: true });
+  });
+
+  it("skips a device left with nothing to run, and the plan with none", () => {
+    const selected = excludeFromUpdateEverythingPlan(
+      plan,
+      new Set([
+        updateEverythingProviderItem(laptop!.environmentId, codex),
+        updateEverythingNodeItem(server!.environmentId),
+        updateEverythingProviderItem(server!.environmentId, codex),
+        updateEverythingProviderItem(server!.environmentId, ProviderInstanceId.make("claudeAgent")),
+      ]),
+    );
+    expect(selected.devices[0]).toMatchObject({
+      node: { kind: "current" },
+      providers: [],
+      skippedReason: NOT_SELECTED_REASON,
+    });
+    expect(selected.devices[2]).toMatchObject({ skippedReason: NOT_SELECTED_REASON });
+    expect(selected).toMatchObject({ oneClickCount: 0, hasWork: false });
+  });
+
+  it("keeps the plan as it is without exclusions or with ones it doesn't hold", () => {
+    expect(excludeFromUpdateEverythingPlan(plan, new Set())).toBe(plan);
+    const unknown = excludeFromUpdateEverythingPlan(
+      plan,
+      new Set([
+        updateEverythingNodeItem(laptop!.environmentId),
+        updateEverythingProviderItem(offline!.environmentId, codex),
+      ]),
+    );
+    expect(unknown.devices).toEqual(plan.devices);
+    expect(unknown.devices.every((device, index) => device === plan.devices[index])).toBe(true);
+    expect(unknown.oneClickCount).toBe(plan.oneClickCount);
   });
 });
