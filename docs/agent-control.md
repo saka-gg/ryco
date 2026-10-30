@@ -28,7 +28,10 @@ called. This matters for clients such as Codex that cache the initial MCP catalo
   archived, moved to Trash or deleted). Waiting tasks start in entry order, once the request has
   created all its tasks, with the chat's current model and modes (never above the runtime mode the
   task was created with), and the cap holds across a restart. Resuming a waiting task by hand starts it at once;
-  it then counts against the cap.
+  it then counts against the cap. A task whose goal will continue its last turn keeps its slot
+  through the goal's grace before that turn. A waiting returnToOrigin task never starts once the
+  chat no longer waits for it: stopping, archiving or deleting the chat, `ryco_task_cancel`, or
+  its time limit.
 - `ryco_list_artifacts`: the caller's own thread's artifacts, newest first, with the ids a
   handover takes. Needs the `read` grant.
 - `ryco_send_message`, `ryco_interrupt_thread`, `ryco_update_thread`: queue/steer work (a queued
@@ -121,7 +124,8 @@ chat with one automatic message, a normal queued turn that starts or resumes its
   instructions or approval. A task that was
   interrupted, stopped (for example by a restart; it is not resumed), failed to start, received
   someone else's follow-up, was archived or deleted, whose request failed, or that did not finish
-  within 24 hours returns a server-written notice instead, with no child text. A task that itself
+  within 24 hours of starting (or within 7 days of being created, for a task that waited for a
+  free slot) returns a server-written notice instead, with no child text. A task that itself
   delegated returns its output after its own delegated work came back; if that follow-up run fails
   to start, or a restart cuts it off and none of its own delegated work is left to wake it again,
   it returns a stopped notice.
@@ -135,13 +139,15 @@ chat with one automatic message, a normal queued turn that starts or resumes its
   while Agent Control is disabled. A captured return that cannot be delivered within 24 hours fails
   without a message; open the child instead.
 - **Stopping.** If you stop the chat while it is delegating or processing a delegation message,
-  the remaining results are not sent automatically. Interrupts from agents, startup reconciliation
+  the remaining results are not sent automatically, and tasks still waiting for a free slot never
+  start. Interrupts from agents, startup reconciliation
   and the server do not count. Deleting or archiving the chat, or archiving its worktree, cancels
   its returns too.
 - **Task tools.** `ryco_task_status` lists up to 20 of this chat's returnToOrigin tasks (or one by
   `taskId`) with the run state, the return status and the redacted, untrusted result, or the
   notice for a task that ended without one. A task still waiting for a free slot of a capped
-  request reports the run state `waiting`, with why; its 24 hours count from its creation. Pending questions are reported only as a flag. Reading
+  request reports the run state `waiting`, with why; its 24 hours count from when it starts, within
+  7 days of its creation. Pending questions are reported only as a flag. Reading
   one finished task by `taskId` during the chat's own turn acknowledges it, so no separate
   automatic message is sent for it; a list never acknowledges, because a long list may not reach
   the agent in full. `ryco_task_cancel` stops the automatic return first and then interrupts the

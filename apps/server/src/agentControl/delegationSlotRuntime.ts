@@ -21,10 +21,15 @@
  * nothing, so no task is released twice. A person who resumes a waiting task by hand just takes a
  * slot.
  *
- * A task the delegating chat cancelled (`ryco_task_cancel`) before its first message was sent
- * never starts and takes no slot: its slot's cause is never released. The cancel takes that
- * message and the agent's own follow-ups out of its queue; should that removal be lost (a restart
- * in between), a pass removes them itself under the cancel's own id.
+ * A task its delegating chat no longer waits for before its first message was sent never starts
+ * and takes no slot: one cancelled with `ryco_task_cancel`, by the chat's Stop, archive or delete,
+ * or past its return's time limit. Its slot's cause is never released, and its first message and
+ * the agent's own follow-ups leave its queue (the cancel takes them out itself; should that removal
+ * be lost, a restart in between, a pass removes them under the cancel's own id).
+ *
+ * A task whose goal will continue its last turn (a person's goal on a task an integration created;
+ * a delegated task's own goal never continues) works through the goal's grace: the slot stays
+ * taken until the next turn starts or the goal stops.
  *
  * It imports no value from a module the server's boot graph loads (only `effect`, which is split
  * already); everything else comes in through `DelegationSlotDeps`.
@@ -56,6 +61,7 @@ import type {
 import type { OrchestrationEngineShape } from "../orchestration/Services/OrchestrationEngine.ts";
 import type { ProjectionSnapshotQueryShape } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 import type { ServerWakeFenceShape } from "../orchestration/Services/ServerWakeFence.ts";
+import { goalContinuationPending } from "../orchestration/goalContinuation.ts";
 
 /** A pass over every waiting request at least this often (a start's grace, background work). */
 export const DELEGATION_SLOT_SWEEP_INTERVAL = Duration.seconds(30);
@@ -91,10 +97,8 @@ export interface DelegationSlotDeps {
   readonly causePrefix: string;
   /** The task's completion return, when the node keeps them. */
   readonly getCompletionReturn?: (typeof CompletionReturnRepository.Service)["get"];
-  /** `cancelledByDelegatingChat`. */
-  readonly cancelledByDelegatingChat: (
-    record: Pick<CompletionReturnRecord, "status" | "detail">,
-  ) => boolean;
+  /** `noLongerAwaited`. */
+  readonly noLongerAwaited: (record: Pick<CompletionReturnRecord, "status">) => boolean;
   /** `delegationSlotCancelCommandId`. */
   readonly cancelCommandId: (proposalId: string, threadId: string) => CommandId;
   /** `noUserMessageSent`. */
@@ -109,8 +113,8 @@ export interface DelegationSlotDeps {
 }
 
 /**
- * What one task of a capped request is doing. `cancelled`: the delegating chat cancelled it
- * before it was sent; it never starts and takes no slot.
+ * What one task of a capped request is doing. `cancelled`: the delegating chat stopped waiting for
+ * it before it was sent; it never starts and takes no slot.
  */
 export type DelegationSlotTaskState = "waiting" | "working" | "idle" | "gone" | "cancelled";
 
@@ -182,7 +186,9 @@ export function isDelegationSlotWakeEvent(event: OrchestrationEvent): boolean {
 }
 
 export const makeDelegationSlots = (deps: DelegationSlotDeps) =>
-  Effect.sync(() => {
+  Effect.gen(function* () {
+    /** A goal continues only turns that ended while this process ran (`goalContinuationSourceTurn`). */
+    const observedSinceMs = yield* Clock.currentTimeMillis;
     /**
      * Each request's cap (a plan never changes, so one read per request and process); null for a
      * request that releases nothing: not capped, or its operation failed or was cancelled.
@@ -220,7 +226,7 @@ export const makeDelegationSlots = (deps: DelegationSlotDeps) =>
         // Released and not sent yet: the drain sends it (the shell may not show it yet).
         const unsent =
           queue !== undefined && queue.hold === null && queue.entries[0]?.status === "queued";
-        // Cancelled before its first message was sent: whatever else waits in its queue, it never
+        // Given up before its first message was sent: whatever else waits in its queue, it never
         // starts, and what the cancel had to take out of the queue is taken out now.
         if (
           queue !== undefined &&
@@ -229,7 +235,7 @@ export const makeDelegationSlots = (deps: DelegationSlotDeps) =>
           deps.noUserMessageSent(thread)
         ) {
           const record = yield* deps.getCompletionReturn(threadId);
-          if (record !== undefined && deps.cancelledByDelegatingChat(record)) {
+          if (record !== undefined && deps.noLongerAwaited(record)) {
             return {
               state: "cancelled" as const,
               removals: deps.cancelledTaskEntryIds(queue.entries, record.initialMessageId),
@@ -240,10 +246,12 @@ export const makeDelegationSlots = (deps: DelegationSlotDeps) =>
         if (unsent) return { state: "working" as const };
         const shell = yield* deps.getThreadShellById(threadId);
         if (Option.isNone(shell)) return { state: "gone" as const };
-        // Running, starting, a start not bound yet, a question or approval, background work.
+        // Running, starting, a start not bound yet, a question or approval, background work, or
+        // the goal's grace before its next turn.
         return {
           state:
-            (yield* deps.holdReason(shell.value, nowMs)) === "busy"
+            (yield* deps.holdReason(shell.value, nowMs)) === "busy" ||
+            goalContinuationPending(shell.value, observedSinceMs, nowMs)
               ? ("working" as const)
               : ("idle" as const),
         };

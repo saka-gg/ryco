@@ -17,6 +17,7 @@ import {
   type QueuedFollowUp,
 } from "@ryco/contracts";
 import { Effect, Fiber, Option, PubSub, Queue, Stream } from "effect";
+import { TestClock } from "effect/testing";
 
 import {
   DELEGATION_SLOT_CAUSE_PREFIX,
@@ -27,7 +28,7 @@ import {
   noUserMessageSent,
 } from "../orchestration/delegationSlotHold.ts";
 import type { CompletionReturnRecord } from "../persistence/Layers/AgentControlCompletionReturns.ts";
-import { cancelledByDelegatingChat, DELEGATED_TASK_CANCEL_DETAIL } from "./delegatedTaskControl.ts";
+import { DELEGATED_TASK_CANCEL_DETAIL, noLongerAwaited } from "./delegatedTaskControl.ts";
 import { threadsQueuedAtBoot } from "../orchestration/Layers/ServerQueueDrain.ts";
 import { anyLiveTaskWaitsForSlot } from "./Layers/AgentControlDelegationSlots.ts";
 import {
@@ -71,6 +72,10 @@ interface Task {
   busy: boolean;
   /** The delegating chat cancelled its return with `ryco_task_cancel`. */
   cancelled: boolean;
+  /** Its return's status otherwise (the chat's Stop, archive or delete; its time limit). */
+  returnStatus?: CompletionReturnRecord["status"];
+  /** What its shell shows besides its id (a goal, its latest turn). */
+  shell?: Partial<OrchestrationThreadShell>;
   /** Its first message was sent (it has a user message). */
   sent: boolean;
   queue: { entries: QueuedFollowUp[]; hold: FollowUpQueueHold | null } | undefined;
@@ -128,7 +133,10 @@ const world = (input: { readonly cap: number | undefined; readonly count: number
     getThreadShellById: (id) =>
       Effect.sync(() =>
         tasks.some((entry) => entry.id === id)
-          ? Option.some({ id } as unknown as OrchestrationThreadShell)
+          ? Option.some({
+              id,
+              ...tasks.find((entry) => entry.id === id)!.shell,
+            } as unknown as OrchestrationThreadShell)
           : Option.none(),
       ),
     // The fence: busy while the session works, or while an unheld queue waits to send.
@@ -206,12 +214,12 @@ const world = (input: { readonly cap: number | undefined; readonly count: number
       Effect.sync(() => {
         const index = tasks.findIndex((entry) => entry.id === id);
         return {
-          status: task(index).cancelled ? "cancelled" : "waiting",
+          status: task(index).returnStatus ?? (task(index).cancelled ? "cancelled" : "waiting"),
           detail: task(index).cancelled ? DELEGATED_TASK_CANCEL_DETAIL : "Waiting.",
           initialMessageId: firstMessage(index).messageId,
         } as CompletionReturnRecord;
       }),
-    cancelledByDelegatingChat,
+    noLongerAwaited,
     cancelCommandId: delegationSlotCancelCommandId,
     noUserMessageSent,
     cancelledTaskEntryIds,
@@ -433,6 +441,63 @@ describe("delegation slots", () => {
       yield* (yield* makeDelegationSlots(w.deps)).pass;
       assert.deepEqual(w.released(), [taskId(2)]);
       assert.isUndefined(w.task(1).queue);
+    }),
+  );
+
+  it.effect(
+    "a waiting task its chat stopped, archived or deleted, or that ran out of time, never starts",
+    () =>
+      Effect.gen(function* () {
+        const w = world({ cap: 1, count: 4 });
+        const slots = yield* makeDelegationSlots(w.deps);
+        // The person stopped the delegating chat (or archived or deleted it): its return was
+        // cancelled. Task 2's return expired after 7 days of waiting.
+        w.task(1).returnStatus = "cancelled";
+        w.task(2).returnStatus = "ready";
+        w.task(0).busy = false;
+        yield* slots.pass;
+        // Both leave their queues; the slot goes to task 3.
+        assert.deepEqual(w.released(), [taskId(3)]);
+        assert.deepEqual(
+          w.removals.map((command) => command.threadId),
+          [taskId(1), taskId(2)],
+        );
+        assert.isUndefined(w.task(1).queue);
+        assert.isUndefined(w.task(2).queue);
+      }),
+  );
+
+  it.effect("a task whose goal continues keeps its slot through the goal's grace", () =>
+    Effect.gen(function* () {
+      const w = world({ cap: 1, count: 2 });
+      // A person's goal on a task an integration created (not a delegated child), whose provider
+      // does not pursue goals: its turn just ended cleanly, and the goal starts the next one
+      // after its grace.
+      w.task(0).busy = false;
+      w.task(0).shell = {
+        goal: {
+          status: "active",
+          synchronization: { state: "unsupported" },
+          updatedAt: "1970-01-01T00:00:00.000Z",
+        },
+        archivedAt: null,
+        lineage: null,
+        interactionMode: "default",
+        hasActionableProposedPlan: false,
+        latestTurn: {
+          turnId: "turn-1",
+          state: "completed",
+          completedAt: "1970-01-01T00:00:01.000Z",
+        },
+      } as unknown as Partial<OrchestrationThreadShell>;
+      const slots = yield* makeDelegationSlots(w.deps);
+      yield* TestClock.adjust("10 seconds");
+      yield* slots.pass;
+      assert.deepEqual(w.released(), []);
+      // No next turn came (its provider has no Agent Control tools, say): the slot frees.
+      yield* TestClock.adjust("1 minute");
+      yield* slots.pass;
+      assert.deepEqual(w.released(), [taskId(1)]);
     }),
   );
 

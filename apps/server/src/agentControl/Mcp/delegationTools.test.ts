@@ -735,6 +735,26 @@ it.effect("reports a task waiting for a free slot as waiting, with why", () =>
   }).pipe(Effect.provide(layer)),
 );
 
+it.effect("reports a waiting task whose chat stopped waiting for it as never started", () =>
+  Effect.gen(function* () {
+    const h = yield* setup;
+    yield* h.sql`DELETE FROM projection_turns WHERE thread_id = 'child'`;
+    h.setChild(waitingChild());
+    // The person stopped the delegating chat while the task waited for its slot.
+    const record = (yield* h.repo.get(ThreadId.make("child")))!;
+    yield* h.repo.save(record, {
+      ...record,
+      status: "cancelled",
+      detail: "You stopped the delegating chat before this task's turn came, so it never starts.",
+    });
+    const [task] = structured(
+      yield* h.call(AGENT_CONTROL_DELEGATION_MCP_TOOLS.taskStatus, { taskId: "child" }),
+    ).tasks as unknown as ReadonlyArray<RunEntry>;
+    assert.equal(task?.run.state, "interrupted");
+    assert.notProperty(task?.run, "detail");
+  }).pipe(Effect.provide(layer)),
+);
+
 /** The engine's model of a waiting task: first message, an agent follow-up and a person's entry. */
 const waitingInEngine = (h: { readonly engineChild: { entries: unknown; sent: boolean } }) => {
   h.engineChild.sent = false;

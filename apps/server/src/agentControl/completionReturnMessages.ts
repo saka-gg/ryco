@@ -24,8 +24,30 @@ import { serverWakeGuard } from "../orchestration/serverWake.ts";
 
 export const MAX_WAKE_SECTIONS = 10;
 export const MAX_WAKE_TEXT_CHARS = 100_000;
-/** A child that never reaches a terminal state within this window yields an `expired` notice. */
+/**
+ * A child that never reaches a terminal state within this window of its first message's send
+ * yields an `expired` notice. A capped request's task sends it when its slot frees, so the window
+ * runs from then, within `WAITING_EXPIRY_MS` of the task's creation.
+ */
 export const CAPTURE_EXPIRY_MS = 24 * 60 * 60 * 1000;
+/** No task's return is waited for longer than this after the task was created, started or not. */
+export const WAITING_EXPIRY_MS = 7 * 24 * 60 * 60 * 1000;
+
+/**
+ * Whether a waiting return expired: `CAPTURE_EXPIRY_MS` after the task's first message was sent
+ * (`startedAt`), or `WAITING_EXPIRY_MS` after the task was created, whichever comes first.
+ */
+export function waitingReturnExpired(input: {
+  readonly createdAt: string;
+  readonly startedAt: string | null | undefined;
+  readonly nowMs: number;
+}): boolean {
+  const startedMs = input.startedAt ? Date.parse(input.startedAt) : Number.NaN;
+  return (
+    input.nowMs - Date.parse(input.createdAt) > WAITING_EXPIRY_MS ||
+    (Number.isFinite(startedMs) && input.nowMs - startedMs > CAPTURE_EXPIRY_MS)
+  );
+}
 /** A captured return held this long (busy chat, scope change, policy off) fails without a wake. */
 export const DELIVERY_EXPIRY_MS = 24 * 60 * 60 * 1000;
 
@@ -112,7 +134,8 @@ const NOTICE_SENTENCES: Record<CompletionReturnNoticeOutcome, string> = {
     "The task received a follow-up before its result was captured. Open the task to read it.",
   archived: "The task was archived or deleted before it finished.",
   "request-failed": "The request that created this task failed, was rejected or was cancelled.",
-  expired: "The task did not finish within 24 hours. Ryco stopped waiting for it.",
+  expired:
+    "The task did not finish within 24 hours of starting, or within 7 days of being created. Ryco stopped waiting for it.",
 };
 
 /** Server-authored notice section. Never contains child-authored text. */

@@ -119,6 +119,11 @@ export const CompletionReturnRecord = Schema.Struct({
    * clears, because the delivery window opens no earlier than the reset (usage-limits §5.2).
    */
   limitResetAt: Schema.optional(IsoDateTime),
+  /**
+   * When the task's first message was sent: at once, or when a capped request's slot freed. The
+   * return's time limit runs from it (`waitingReturnExpired`). Remembered once known.
+   */
+  startedAt: Schema.optional(IsoDateTime),
 });
 export type CompletionReturnRecord = typeof CompletionReturnRecord.Type;
 const decode = Schema.decodeUnknownSync(Schema.fromJsonString(CompletionReturnRecord));
@@ -304,6 +309,15 @@ export const makeCompletionReturnRepository = Effect.gen(function* () {
     WHERE thread_id = ${record.childThreadId} AND pending_message_id = ${record.initialMessageId}
       AND turn_id IS NOT NULL LIMIT 1
   `.pipe(Effect.map((rows) => (rows[0] ? TurnId.make(rows[0].turnId) : null))),
+    );
+  /** When the task's first message was sent, or null while it waits in the task's queue. */
+  const initialMessageSentAt = (record: CompletionReturnRecord) =>
+    safe(
+      sql<{ createdAt: string }>`
+    SELECT created_at AS "createdAt" FROM projection_thread_messages
+    WHERE message_id = ${record.initialMessageId} AND thread_id = ${record.childThreadId}
+    LIMIT 1
+  `.pipe(Effect.map((rows) => rows[0]?.createdAt ?? null)),
     );
   const turnMessageId = (threadId: ThreadId, turnId: TurnId) =>
     safe(
@@ -661,6 +675,7 @@ export const makeCompletionReturnRepository = Effect.gen(function* () {
     get,
     save,
     initialTurnId,
+    initialMessageSentAt,
     observe,
     output,
     latestUserMessageId,

@@ -45,7 +45,7 @@ import { ProviderService } from "../../provider/Services/ProviderService.ts";
 import { AgentControlPolicy } from "../Services/AgentControlPolicy.ts";
 import { AgentControlProposalEvents } from "../Services/AgentControlProposalEvents.ts";
 import {
-  CAPTURE_EXPIRY_MS,
+  WAITING_EXPIRY_MS,
   MAX_DELIVERY_ATTEMPTS,
   MAX_REPLAYS,
   buildDelegationReturnCommand,
@@ -58,6 +58,7 @@ import {
   renderCompletionNotice,
   renderCompletionReturn,
   selectWakeBatch,
+  waitingReturnExpired,
   type CompletionReturnNoticeOutcome,
 } from "../completionReturnMessages.ts";
 import { publishCompletionReturns } from "../completionReturnPublish.ts";
@@ -94,6 +95,8 @@ const DETAIL = {
     "The originating chat was reverted to before this task was delegated; this result was not returned automatically. Open the child and send its result manually.",
   userStopped:
     "You stopped the delegating chat; this result was not returned automatically. Open the child.",
+  userStoppedBeforeStart:
+    "You stopped the delegating chat before this task's turn came, so it never starts.",
   cold: "Waiting for another chat's session to start.",
   deliveryExpired:
     "Not delivered within 24 hours of its capture or of the originating chat's usage-limit reset (the chat stayed busy, usage-limited or out of scope, or Agent Control was disabled). Open the child.",
@@ -186,7 +189,7 @@ export const makeCompletionReturnDelivery = Effect.gen(function* () {
   /**
    * Wake message ids this process applied → scan time of the apply. The reactor only acts on
    * live events, so this process's reactor owns those starts; a wake an earlier process
-   * applied and never started died with it. Pruned after CAPTURE_EXPIRY_MS: no waiting row
+   * applied and never started died with it. Pruned after WAITING_EXPIRY_MS: no waiting row
    * is older than that, and a row only looks at wakes delivered after it was created.
    */
   const wakesAppliedHere = new Map<MessageId, number>();
@@ -890,20 +893,35 @@ export const makeCompletionReturnDelivery = Effect.gen(function* () {
       );
     });
 
-  const advanceWaiting = (record: CompletionReturnRecord, ctx: ScanContext) =>
+  const advanceWaiting = (waiting: CompletionReturnRecord, ctx: ScanContext) =>
     Effect.gen(function* () {
       const now = ctx.now;
-      const cancel = yield* parentCancelDetail(yield* readShell(record.parentThreadId));
-      if (cancel) return yield* finish(record, "cancelled", cancel, now);
-      const proposal = yield* proposals.getById({ proposalId: record.proposalId });
+      const cancel = yield* parentCancelDetail(yield* readShell(waiting.parentThreadId));
+      if (cancel) return yield* finish(waiting, "cancelled", cancel, now);
+      const proposal = yield* proposals.getById({ proposalId: waiting.proposalId });
       // Integrity first: never wake a chat a mismatched row merely claims to belong to.
-      if (Option.isSome(proposal) && !integrityMatches(proposal.value, record))
-        return yield* finish(record, "blocked", DETAIL.integrity, now);
-      if (ctx.nowMs - Date.parse(record.createdAt) > CAPTURE_EXPIRY_MS)
+      if (Option.isSome(proposal) && !integrityMatches(proposal.value, waiting))
+        return yield* finish(waiting, "blocked", DETAIL.integrity, now);
+      // The time limit runs from the task's first message, sent at once or when a capped
+      // request's slot freed; remembered with the row's next save.
+      const startedAt = waiting.startedAt ?? (yield* repository.initialMessageSentAt(waiting));
+      let record =
+        startedAt !== null && waiting.startedAt === undefined ? { ...waiting, startedAt } : waiting;
+      if (waitingReturnExpired({ createdAt: record.createdAt, startedAt, nowMs: ctx.nowMs }))
         return yield* notice(record, "expired", ctx);
       if (Option.isNone(proposal) || FAILED_PROPOSAL_STATUSES.has(proposal.value.status))
         return yield* notice(record, "request-failed", ctx);
       if (proposal.value.status !== "completed") return yield* hold(record, now);
+      // A task still waiting for its slot never starts once the person stopped the delegating
+      // chat (the delegation slots then take its first message out of its queue).
+      if (startedAt === null) {
+        const cache = new Map<TurnId, MessageId | null>();
+        record = yield* withStopBound(record, cache);
+        if (
+          (yield* userStoppedRows(record.parentThreadId, [record], cache)).has(record.childThreadId)
+        )
+          return yield* finish(record, "cancelled", DETAIL.userStoppedBeforeStart, now);
+      }
       const child = yield* readShell(record.childThreadId);
       if (Option.isNone(child) || child.value.archivedAt !== null)
         return yield* notice(record, "archived", ctx);
@@ -1083,7 +1101,7 @@ export const makeCompletionReturnDelivery = Effect.gen(function* () {
         };
         yield* fence.releaseColdSlots(ctx.nowMs);
         for (const [messageId, appliedMs] of wakesAppliedHere)
-          if (ctx.nowMs - appliedMs > CAPTURE_EXPIRY_MS) wakesAppliedHere.delete(messageId);
+          if (ctx.nowMs - appliedMs > WAITING_EXPIRY_MS) wakesAppliedHere.delete(messageId);
         for (const record of yield* repository.listDue(now)) {
           yield* processDue(record, ctx).pipe(
             Effect.catch(() =>

@@ -199,6 +199,9 @@ const setup = (
       VALUES ('parent', 'parent-turn', 'parent-initial', 'completed', ${now}, '[]')`;
     yield* sql`INSERT INTO projection_thread_messages (message_id, thread_id, turn_id, role, text, is_streaming, created_at, updated_at)
       VALUES ('parent-initial', 'parent', NULL, 'user', 'Fixture parent', 0, ${now}, ${now})`;
+    // The task's first message, sent when it was created (a capped request's task sends it later).
+    yield* sql`INSERT INTO projection_thread_messages (message_id, thread_id, turn_id, role, text, is_streaming, created_at, updated_at)
+      VALUES (${row.initialMessageId}, ${row.childThreadId}, NULL, 'user', 'Fixture task', 0, ${row.createdAt}, ${row.createdAt})`;
 
     const shells = new Map<string, OrchestrationThreadShell | null>();
     // Live provider sessions (ProviderService.getSession); absent = none.
@@ -875,6 +878,71 @@ for (const outcome of [
     }).pipe(Effect.provide(layer)),
   );
 }
+
+it.effect("counts a capped task's 24 hours from its first send, within 7 days of creation", () =>
+  Effect.gen(function* () {
+    const h = yield* setup();
+    // Its first message still waits in its queue for a slot.
+    yield* h.sql`DELETE FROM projection_thread_messages WHERE message_id = 'child-initial'`;
+    h.setChild({ ...shell("child", "child-turn", "child-runtime"), latestUserMessageAt: null });
+    yield* h.tick(DAY + 1);
+    assert.equal((yield* h.read()).status, "waiting");
+    // Its slot frees on day three, and it runs from then.
+    yield* h.sql`INSERT INTO projection_thread_messages (message_id, thread_id, turn_id, role, text, is_streaming, created_at, updated_at)
+      VALUES ('child-initial', 'child', NULL, 'user', 'Fixture task', 0, ${at(2 * DAY)}, ${at(2 * DAY)})`;
+    yield* h.tick(3 * DAY - 10);
+    const started = yield* h.read();
+    assert.equal(started.status, "waiting");
+    assert.equal(started.startedAt, at(2 * DAY));
+    yield* h.tick(3 * DAY + 10);
+    assert.equal((yield* h.read()).status, "delivered");
+    assert.include(h.sent[0]!.message.text, "Delegated task notice (expired).");
+  }).pipe(Effect.provide(layer)),
+);
+
+it.effect("stops waiting for a task that never started 7 days after its creation", () =>
+  Effect.gen(function* () {
+    const h = yield* setup();
+    yield* h.sql`DELETE FROM projection_thread_messages WHERE message_id = 'child-initial'`;
+    h.setChild({ ...shell("child", "child-turn", "child-runtime"), latestUserMessageAt: null });
+    yield* h.tick(7 * DAY - 10);
+    assert.equal((yield* h.read()).status, "waiting");
+    yield* h.tick(7 * DAY + 10);
+    assert.equal((yield* h.read()).status, "delivered");
+    assert.include(h.sent[0]!.message.text, "within 7 days of being created");
+  }).pipe(Effect.provide(layer)),
+);
+
+it.effect("never starts a task still waiting for its slot once the person stopped the chat", () =>
+  Effect.gen(function* () {
+    const h = yield* setup();
+    yield* h.sql`DELETE FROM projection_thread_messages WHERE message_id = 'child-initial'`;
+    h.setChild({ ...shell("child", "child-turn", "child-runtime"), latestUserMessageAt: null });
+    yield* h.tick(3);
+    assert.equal((yield* h.read()).status, "waiting");
+    // The person stops the delegating turn while the task waits for a slot.
+    yield* h.appendEvent({
+      stream: "parent",
+      type: "thread.turn-start-requested",
+      commandId: "web:send",
+      payload: { messageId: "parent-initial" },
+    });
+    yield* h.appendEvent({
+      stream: "parent",
+      type: "thread.turn-interrupt-requested",
+      commandId: "web:stop",
+      payload: { turnId: "parent-turn" },
+    });
+    yield* h.tick(6);
+    const record = yield* h.read();
+    assert.equal(record.status, "cancelled");
+    assert.equal(
+      record.detail,
+      "You stopped the delegating chat before this task's turn came, so it never starts.",
+    );
+    assert.equal(h.sent.length, 0);
+  }).pipe(Effect.provide(layer)),
+);
 
 it.effect("keeps a failed initial run a result with the error flag", () =>
   Effect.gen(function* () {
