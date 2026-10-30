@@ -5,7 +5,7 @@
  */
 import {
   activeScheduleCount,
-  envWords,
+  runsInWords,
   isSchedulePaused,
   scheduleModelLabel,
   type ScheduleRow,
@@ -51,8 +51,8 @@ export function ScheduleSentence(props: {
   return (
     <p className="ad-sentence-ro">
       {props.verb} <b>{phrase(props.definition.schedule, props.nowMs)}</b> in{" "}
-      <b>{envWords(ex.envMode)}</b>
-      {ex.envMode === "worktree" && ex.baseRef ? (
+      <b>{runsInWords(ex)}</b>
+      {ex.target === undefined && ex.envMode === "worktree" && ex.baseRef ? (
         <>
           {" "}
           off <b className="ad-ref">{ex.baseRef}</b>

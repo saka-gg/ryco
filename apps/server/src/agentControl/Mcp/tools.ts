@@ -125,6 +125,10 @@ import type {
   AgentControlTurnAuthority,
 } from "../Services/AgentControlSessionRegistry.ts";
 import { agentControlSupportForDriver } from "../ProviderInjection.ts";
+import {
+  automationDefinitionAfterUpdateInput,
+  automationDefinitionFromCreateInput,
+} from "../automationToolInput.ts";
 import { agentControlSettingsPlan, agentControlSettingsSummary } from "../settingsControl.ts";
 import {
   assertSafeAgentControlDeviceUrl,
@@ -896,7 +900,7 @@ export const AGENT_CONTROL_MCP_TOOL_DESCRIPTORS: ReadonlyArray<AgentControlMcpTo
   {
     name: AGENT_CONTROL_MCP_TOOLS.proposeAutomationCreate,
     description:
-      "Request approval for a bounded schedule definition. Approval creates no thread or provider turn; every due run gets a new approval request. A calendar schedule runs at localTime (HH:MM) on weekdays (0 = Sunday) in an IANA timeZone.",
+      "Request approval for a bounded schedule definition. Approval creates no thread or provider turn; every due run gets a new approval request. A calendar schedule runs at localTime (HH:MM) on weekdays (0 = Sunday) in an IANA timeZone. Each run starts a new thread, or with targetThreadId queues its prompt in that existing thread of the same project (a heartbeat; sent like the thread's other follow-ups, with its current model and modes).",
     inputSchema: {
       type: "object",
       properties: {
@@ -911,6 +915,7 @@ export const AGENT_CONTROL_MCP_TOOL_DESCRIPTORS: ReadonlyArray<AgentControlMcpTo
         tokenMode: { type: "string", enum: ["off", "balanced", "aggressive"] },
         envMode: { type: "string", enum: ["local", "worktree"] },
         baseRef: { type: "string", maxLength: 256 },
+        targetThreadId: { type: "string", maxLength: 256 },
         schedule: automationScheduleSchema,
         enabled: { type: "boolean" },
       },
@@ -931,7 +936,8 @@ export const AGENT_CONTROL_MCP_TOOL_DESCRIPTORS: ReadonlyArray<AgentControlMcpTo
   },
   {
     name: AGENT_CONTROL_MCP_TOOLS.proposeAutomationUpdate,
-    description: "Request approval for an exact revision-guarded schedule replacement.",
+    description:
+      "Request approval for an exact revision-guarded schedule replacement. targetThreadId null makes runs start new threads again.",
     inputSchema: {
       type: "object",
       properties: {
@@ -947,6 +953,7 @@ export const AGENT_CONTROL_MCP_TOOL_DESCRIPTORS: ReadonlyArray<AgentControlMcpTo
         tokenMode: { type: "string", enum: ["off", "balanced", "aggressive"] },
         envMode: { type: "string", enum: ["local", "worktree"] },
         baseRef: { anyOf: [{ type: "string", maxLength: 256 }, { type: "null" }] },
+        targetThreadId: { anyOf: [{ type: "string", maxLength: 256 }, { type: "null" }] },
         schedule: automationScheduleSchema,
         enabled: { type: "boolean" },
       },
@@ -2126,24 +2133,7 @@ export const makeAgentControlMcpTools = (deps: AgentControlMcpToolDeps): AgentCo
         plan: {
           kind: "createAutomation",
           automationId,
-          definition: {
-            execution: {
-              projectId: input.projectId,
-              title: input.title,
-              prompt: input.prompt,
-              modelSelection: {
-                instanceId: input.providerInstanceId,
-                model: input.model,
-                options: input.options,
-              },
-              runtimeMode: input.runtimeMode,
-              ...(input.tokenMode === undefined ? {} : { tokenMode: input.tokenMode }),
-              envMode: input.envMode,
-              ...(input.baseRef === undefined ? {} : { baseRef: input.baseRef }),
-            },
-            schedule: input.schedule,
-            enabled: input.enabled ?? true,
-          },
+          definition: automationDefinitionFromCreateInput(input),
         },
       });
     });
@@ -2165,10 +2155,6 @@ export const makeAgentControlMcpTools = (deps: AgentControlMcpToolDeps): AgentCo
       if (current.revision !== input.expectedRevision) {
         return yield* failTool("Automation revision changed.");
       }
-      const currentExecution = current.definition.execution;
-      const nextBaseRef =
-        input.baseRef === null ? undefined : (input.baseRef ?? currentExecution.baseRef);
-      const nextOptions = input.options ?? currentExecution.modelSelection.options;
       return yield* submitMutation({
         session,
         authority,
@@ -2182,28 +2168,7 @@ export const makeAgentControlMcpTools = (deps: AgentControlMcpToolDeps): AgentCo
             cancelled: current.cancelled,
             updatedAt: current.updatedAt,
           },
-          after: {
-            execution: {
-              projectId: currentExecution.projectId,
-              title: input.title ?? currentExecution.title,
-              prompt: input.prompt ?? currentExecution.prompt,
-              modelSelection: {
-                instanceId: input.providerInstanceId ?? currentExecution.modelSelection.instanceId,
-                model: input.model ?? currentExecution.modelSelection.model,
-                ...(nextOptions === undefined ? {} : { options: nextOptions }),
-              },
-              runtimeMode: input.runtimeMode ?? currentExecution.runtimeMode,
-              ...(input.tokenMode !== undefined
-                ? { tokenMode: input.tokenMode }
-                : currentExecution.tokenMode !== undefined
-                  ? { tokenMode: currentExecution.tokenMode }
-                  : {}),
-              envMode: input.envMode ?? currentExecution.envMode,
-              ...(nextBaseRef === undefined ? {} : { baseRef: nextBaseRef }),
-            },
-            schedule: input.schedule ?? current.definition.schedule,
-            enabled: input.enabled ?? current.definition.enabled,
-          },
+          after: automationDefinitionAfterUpdateInput(current, input),
         },
       });
     });

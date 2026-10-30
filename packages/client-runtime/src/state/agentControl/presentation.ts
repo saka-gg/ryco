@@ -166,6 +166,9 @@ function planPresentation(proposal: AgentControlProposal): {
     `Project: ${execution.projectId}`,
     `Provider: ${execution.modelSelection.instanceId} · ${execution.modelSelection.model}`,
     `Runtime: ${execution.runtimeMode} · ${execution.envMode}`,
+    ...(execution.target === undefined
+      ? []
+      : [`Runs in: the follow-up queue of thread ${execution.target.threadId}`]),
     ...(execution.tokenMode === undefined ? [] : [`Token mode: ${execution.tokenMode}`]),
     ...(execution.baseRef === undefined ? [] : [`Base ref: ${execution.baseRef}`]),
     `Intended work: ${execution.title}`,

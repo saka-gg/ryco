@@ -3,6 +3,7 @@ import type { AgentControlWorkspaces } from "../workspaceLifecycle.ts";
 import {
   AGENT_CONTROL_CAPABILITIES,
   AgentControlAutomationId,
+  AgentControlAutomationRunId,
   AgentControlIntegrationId,
   AgentControlProposalId,
   AgentControlRequestId,
@@ -1003,6 +1004,196 @@ it.effect("never lets an external integration hand over artifacts", () =>
   }),
 );
 
+it.effect("gives an agent's heartbeat the send rules of its own chat", () =>
+  Effect.gen(function* () {
+    const snapshot = yield* Ref.make(
+      makeSnapshot(
+        undefined,
+        thread({ id: targetThreadId, runtimeMode: "approval-required", envMode: "local" }),
+      ),
+    );
+    const providers = yield* Ref.make<ReadonlyArray<typeof provider>>([provider]);
+    const automations = {
+      validateLifecyclePlan: () => Effect.void,
+      // Updates read the schedule; its own record is all the checks below need.
+      get: () => Effect.succeed({}),
+    } as unknown as AgentControlAutomationShape;
+    const validator = makeValidator(snapshot, providers, [], undefined, undefined, automations);
+    const plan = (target: ThreadId) => ({
+      kind: "createAutomation" as const,
+      automationId: AgentControlAutomationId.make("automation-agent-heartbeat"),
+      definition: {
+        execution: {
+          projectId,
+          title: "Check CI",
+          prompt: "Check CI and continue.",
+          modelSelection: { instanceId: providerInstanceId, model: "gpt-5.6", options: [] },
+          runtimeMode: "approval-required" as const,
+          envMode: "worktree" as const,
+          target: { kind: "thread" as const, threadId: target },
+        },
+        schedule: { kind: "once" as const, runAt: "2099-01-01T00:00:00.000Z" },
+        enabled: true,
+      },
+    });
+    // The caller works in a worktree: it may not queue into a shared local checkout, as it may
+    // not message one.
+    const shared = yield* Effect.flip(
+      validator.validateSubmission({ session, authority, plan: plan(targetThreadId) }),
+    );
+    assert.strictEqual(shared.reason, "worktree-escalation");
+    // Its own chat is fine.
+    yield* validator.validateSubmission({ session, authority, plan: plan(callerThreadId) });
+    const created = plan(callerThreadId).definition;
+    const update = (after: typeof created, beforeTarget = callerThreadId) => ({
+      kind: "updateAutomation" as const,
+      automationId: plan(callerThreadId).automationId,
+      before: {
+        revision: 1,
+        definition: {
+          ...created,
+          execution: {
+            ...created.execution,
+            target: { kind: "thread" as const, threadId: beforeTarget },
+          },
+        },
+        cancelled: false,
+        updatedAt: now,
+      },
+      after,
+    });
+    // A disabled update that moves the heartbeat to another chat is checked all the same: the
+    // owner enabling it later must not let the new chat skip the agent's send rules.
+    const movedWhileDisabled = yield* Effect.flip(
+      validator.validateSubmission({
+        session,
+        authority,
+        plan: update({ ...plan(targetThreadId).definition, enabled: false }),
+      }),
+    );
+    assert.strictEqual(movedWhileDisabled.reason, "worktree-escalation");
+    // A heartbeat whose chat was deleted can still be disabled (it keeps the chat).
+    const deleted = ThreadId.make("thread-deleted");
+    const keepsDeleted = {
+      ...created,
+      execution: { ...created.execution, target: { kind: "thread" as const, threadId: deleted } },
+      enabled: false,
+    };
+    yield* validator.validateSubmission({
+      session,
+      authority,
+      plan: update(keepsDeleted, deleted),
+    });
+  }),
+);
+
+it.effect(
+  "keeps an integration's heartbeat within its grants at every run, not its own modes",
+  () =>
+    Effect.gen(function* () {
+      const snapshot = yield* Ref.make(
+        makeSnapshot(
+          undefined,
+          thread({ id: targetThreadId, runtimeMode: "approval-required", envMode: "worktree" }),
+        ),
+      );
+      const providers = yield* Ref.make<ReadonlyArray<typeof provider>>([provider]);
+      const integration: AgentControlExternalIntegration = {
+        integrationId: AgentControlIntegrationId.make("integration-heartbeat-ceiling"),
+        displayName: "External scheduler",
+        clientKind: "generic-mcp",
+        projectScope: { kind: "selected", projectIds: [projectId] },
+        // No full access and no shared checkout: its ceiling is approval-required in a worktree.
+        capabilities: [
+          AGENT_CONTROL_CAPABILITIES.externalCreateTask,
+          AGENT_CONTROL_CAPABILITIES.externalManageAutomations,
+          AGENT_CONTROL_CAPABILITIES.externalControlThreads,
+        ],
+        rateLimitPerMinute: 60,
+        activeTaskLimit: 1,
+        activeTaskCount: 0,
+        expiresAt: null,
+        revokedAt: null,
+        pairingState: "paired",
+        pairingCodeExpiresAt: null,
+        pairedAt: now,
+        createdAt: now,
+        updatedAt: now,
+        lastUsedAt: null,
+      };
+      const automations = {
+        validateLifecyclePlan: () => Effect.void,
+        validateRun: () => Effect.void,
+      } as unknown as AgentControlAutomationShape;
+      const validator = makeValidator(
+        snapshot,
+        providers,
+        [],
+        () => Effect.succeed(integration),
+        undefined,
+        automations,
+      );
+      const execution = {
+        projectId,
+        title: "Check CI",
+        prompt: "Check CI and continue.",
+        modelSelection: { instanceId: providerInstanceId, model: "gpt-5.6", options: [] },
+        // Above the integration's ceiling: only full access is gated by a grant of its own.
+        runtimeMode: "auto" as const,
+        envMode: "worktree" as const,
+        target: { kind: "thread" as const, threadId: targetThreadId },
+      };
+      const principal = yield* validator.validateExternalSubmission({
+        integration,
+        plan: {
+          kind: "createAutomation",
+          automationId: AgentControlAutomationId.make("automation-external-heartbeat"),
+          definition: {
+            execution,
+            schedule: { kind: "once", runAt: "2099-01-01T00:00:00.000Z" },
+            enabled: true,
+          },
+        },
+      });
+      const run: AgentControlProposal = {
+        proposalId: AgentControlProposalId.make("proposal-external-heartbeat-run"),
+        requestId: AgentControlRequestId.make("request-external-heartbeat-run"),
+        principal,
+        planVersion: 1,
+        plan: {
+          kind: "automationRun",
+          automationId: AgentControlAutomationId.make("automation-external-heartbeat"),
+          runId: AgentControlAutomationRunId.make("run-external-heartbeat"),
+          automationRevision: 1,
+          scheduledFor: now,
+          coalescedOccurrences: 0,
+          execution,
+        },
+        planDigest: "e".repeat(64),
+        riskTags: [],
+        promptSummary: "Run the heartbeat",
+        status: "approved",
+        createdAt: now,
+        updatedAt: now,
+        expiresAt: "2099-01-01T00:00:00.000Z",
+        decidedAt: now,
+        result: null,
+      };
+      yield* validator.revalidateExecution(run);
+      // The person raises the chat to auto: a message from the integration could no longer go
+      // there, so neither does its heartbeat's run.
+      yield* Ref.set(
+        snapshot,
+        makeSnapshot(
+          undefined,
+          thread({ id: targetThreadId, runtimeMode: "auto", envMode: "worktree" }),
+        ),
+      );
+      const raised = yield* Effect.flip(validator.revalidateExecution(run));
+      assert.strictEqual(raised.reason, "privilege-escalation");
+    }),
+);
+
 it.effect("binds external automation proposals to project, provider, and current grants", () =>
   Effect.gen(function* () {
     const snapshot = yield* Ref.make(makeSnapshot());
@@ -1087,6 +1278,83 @@ it.effect("binds external automation proposals to project, provider, and current
       }),
     );
     assert.strictEqual(unattended.reason, "privilege-escalation");
+
+    // A heartbeat runs into an open chat of its own project, and nowhere else.
+    const heartbeat = (threadId: ThreadId) => ({
+      ...plan,
+      definition: {
+        ...plan.definition,
+        execution: { ...plan.definition.execution, target: { kind: "thread" as const, threadId } },
+      },
+    });
+    // Queueing into an existing chat is thread control: without that grant, refused.
+    const noThreadControl = yield* Effect.flip(
+      validator.validateExternalSubmission({
+        integration: yield* Ref.get(integrationRef),
+        plan: heartbeat(targetThreadId),
+      }),
+    );
+    assert.strictEqual(noThreadControl.reason, "privilege-escalation");
+    yield* Ref.update(integrationRef, (integration) => ({
+      ...integration,
+      capabilities: [
+        ...integration.capabilities,
+        AGENT_CONTROL_CAPABILITIES.externalControlThreads,
+      ],
+    }));
+    yield* validator.validateExternalSubmission({
+      integration: yield* Ref.get(integrationRef),
+      plan: heartbeat(targetThreadId),
+    });
+    // Within the integration's ceiling: no shared checkout without that grant, whatever the
+    // definition's own envMode says.
+    yield* Ref.set(
+      snapshot,
+      makeSnapshot(
+        undefined,
+        thread({ id: targetThreadId, runtimeMode: "approval-required", envMode: "local" }),
+      ),
+    );
+    const sharedCheckout = yield* Effect.flip(
+      validator.validateExternalSubmission({
+        integration: yield* Ref.get(integrationRef),
+        plan: heartbeat(targetThreadId),
+      }),
+    );
+    assert.strictEqual(sharedCheckout.reason, "worktree-escalation");
+    yield* Ref.set(snapshot, makeSnapshot());
+    const unknownChat = yield* Effect.flip(
+      validator.validateExternalSubmission({
+        integration: yield* Ref.get(integrationRef),
+        plan: heartbeat(ThreadId.make("thread-unknown")),
+      }),
+    );
+    assert.strictEqual(unknownChat.reason, "thread-unavailable");
+    yield* Ref.set(snapshot, {
+      ...makeSnapshot(),
+      threads: makeSnapshot().threads.map((thread) =>
+        thread.id === targetThreadId ? { ...thread, archivedAt: now } : thread,
+      ),
+    });
+    const archivedChat = yield* Effect.flip(
+      validator.validateExternalSubmission({
+        integration: yield* Ref.get(integrationRef),
+        plan: heartbeat(targetThreadId),
+      }),
+    );
+    assert.strictEqual(archivedChat.reason, "thread-unavailable");
+    // Disabling a heartbeat whose chat was archived still goes through.
+    const created = heartbeat(targetThreadId).definition;
+    yield* validator.validateExternalSubmission({
+      integration: yield* Ref.get(integrationRef),
+      plan: {
+        kind: "updateAutomation",
+        automationId: plan.automationId,
+        before: { revision: 1, definition: created, cancelled: false, updatedAt: now },
+        after: { ...created, enabled: false },
+      },
+    });
+    yield* Ref.set(snapshot, makeSnapshot());
 
     const deniedScope = yield* Effect.flip(
       validator.validateExternalSubmission({

@@ -9,6 +9,7 @@ import {
   draftFromDefinition,
   draftOfLatest,
   envWords,
+  runsInWords,
   scheduleDraftKey,
   type ScheduleDraft,
 } from "@ryco/client-runtime/state/agentControl";
@@ -232,7 +233,11 @@ export function sentenceWords(draft: ScheduleDraft, nowMs: number): SentenceWord
   // Relative words ("tomorrow 09:00") also say the day for a screen reader.
   const absolute = start === formatDateTime(draft.start) ? "" : `, ${formatDay(draft.start)}`;
   const ends = endWords(draft.start, draft.endsAt, nowMs);
-  const env = envWords(draft.envMode);
+  // A heartbeat runs in its chat: the checkout of a new chat does not apply.
+  const env =
+    draft.target === null
+      ? envWords(draft.envMode)
+      : runsInWords({ envMode: draft.envMode, target: draft.target });
   return {
     interval,
     intervalLabel:

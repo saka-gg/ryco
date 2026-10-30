@@ -29,6 +29,7 @@ import {
   type AgentControlAutomationId,
   type AgentControlAutomationRunStatus,
   type AgentControlAutomationSchedule,
+  type AgentControlAutomationTarget,
   type AgentControlProposal,
   type AgentControlProposalId,
   type AgentControlProposalStatus,
@@ -235,6 +236,7 @@ const sameExecution = (
   a.runtimeMode === b.runtimeMode &&
   a.envMode === b.envMode &&
   (a.baseRef ?? null) === (b.baseRef ?? null) &&
+  (a.target?.threadId ?? null) === (b.target?.threadId ?? null) &&
   (a.tokenMode ?? null) === (b.tokenMode ?? null) &&
   sameModelSelection(a.modelSelection, b.modelSelection);
 
@@ -794,6 +796,13 @@ export function envWords(mode: ThreadEnvMode): string {
   return mode === "local" ? "the main checkout" : "a new worktree";
 }
 
+/** Where each run goes: "an existing chat" (a heartbeat), else its new chat's checkout. */
+export function runsInWords(
+  execution: Pick<AgentControlAutomationExecutionTemplate, "envMode" | "target">,
+): string {
+  return execution.target === undefined ? envWords(execution.envMode) : "an existing chat";
+}
+
 const EFFORT_OPTION_IDS = ["effort", "reasoningEffort"] as const;
 
 /** "Sonnet 5.5", or with `{ effort: true }` "Sonnet 5.5 · High". */
@@ -908,9 +917,15 @@ export function diffScheduleDefinitions(
       options.runtimeModeLabel(be.runtimeMode),
       options.runtimeModeLabel(ae.runtimeMode),
     );
-  if (be.envMode !== ae.envMode)
-    push("runsIn", "Runs in", envWords(be.envMode), envWords(ae.envMode));
-  else if (ae.envMode === "worktree" && (be.baseRef ?? "") !== (ae.baseRef ?? ""))
+  if (runsInWords(be) !== runsInWords(ae))
+    push("runsIn", "Runs in", runsInWords(be), runsInWords(ae));
+  else if (be.target?.threadId !== ae.target?.threadId)
+    push("runsIn", "Runs in", "an existing chat", "another existing chat");
+  else if (
+    ae.target === undefined &&
+    ae.envMode === "worktree" &&
+    (be.baseRef ?? "") !== (ae.baseRef ?? "")
+  )
     push("branch", "Branch", be.baseRef ?? "—", ae.baseRef ?? "—");
   return out;
 }
@@ -935,6 +950,8 @@ export interface ScheduleDraft {
   readonly baseRef: string;
   /** Carried through unchanged; the editor does not offer it. */
   readonly tokenMode: AgentTokenMode | null;
+  /** The chat each run queues in (a heartbeat); carried through unchanged, like `tokenMode`. */
+  readonly target: AgentControlAutomationTarget | null;
   readonly kind: "once" | "fixed-interval" | "calendar";
   /** The run (once) or the first run (repeats). A calendar schedule runs at its time of day. */
   readonly start: number;
@@ -974,6 +991,7 @@ export function draftFromDefinition(
     envMode: ex.envMode,
     baseRef: ex.envMode === "worktree" ? (ex.baseRef ?? "") : (options.defaultBaseRef ?? "main"),
     tokenMode: ex.tokenMode ?? null,
+    target: ex.target ?? null,
     kind: s.kind,
     start,
     intervalMs: s.kind === "fixed-interval" ? s.intervalMs : DAY_MS,
@@ -1020,6 +1038,7 @@ export function definitionFromDraft(draft: ScheduleDraft): AgentControlAutomatio
     ...(draft.tokenMode ? { tokenMode: draft.tokenMode } : {}),
     envMode: draft.envMode,
     ...(draft.envMode === "worktree" && baseRef ? { baseRef } : {}),
+    ...(draft.target === null ? {} : { target: draft.target }),
   };
   return {
     execution,
@@ -1059,6 +1078,7 @@ export function blankScheduleDraft(input: {
     envMode: "worktree",
     baseRef: input.baseRef ?? "main",
     tokenMode: null,
+    target: null,
     kind: "fixed-interval",
     start,
     intervalMs: DAY_MS,

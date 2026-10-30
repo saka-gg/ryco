@@ -20,6 +20,16 @@ The schedule language is deliberately finite:
 - missed intervals coalesce into one occurrence, never a catch-up batch;
 - each run proposal expires after 15 minutes.
 
+A **heartbeat** runs into one existing chat instead of a new one each time: a definition whose
+execution names a `target` thread (`targetThreadId` on `ryco_propose_automation_create` and
+`ryco_propose_automation_update`; `null` on an update clears it). An approved run adds its prompt
+to that chat's follow-up queue as an `automation` entry, which the node sends like the chat's other
+queued follow-ups: behind the shared wake fence, after the person's own, held with the queue, with
+the chat's current model and modes and never above the run's runtime mode. The chat must be an
+open chat of the automation's project, checked when the definition is proposed, approved and run;
+a run whose chat was archived, deleted or moved fails (and counts toward the unattended pause).
+The run creates no thread, so nothing undoes or archives the chat.
+
 SQLite uniqueness constraints make occurrence claims and active-run creation idempotent across
 concurrent ticks and restart recovery. A revision change or cancellation before proposal
 materialization invalidates the claimed occurrence. Cancellation prevents future proposals and

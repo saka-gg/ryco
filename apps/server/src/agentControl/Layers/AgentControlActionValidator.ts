@@ -1,6 +1,7 @@
 import { AgentControlWorkspaces } from "../workspaceLifecycle.ts";
 import type {
   AgentControlActionPlan,
+  AgentControlAutomationExecutionTemplate,
   AgentControlDeviceActionPlan,
   AgentControlDeviceControlConsentPlan,
   AgentControlProviderSessionPrincipal,
@@ -118,10 +119,86 @@ const targetThreadIds = (plan: AgentControlActionPlan): ReadonlyArray<string> =>
     case "deviceControlConsent":
     case "pullRequestWatch":
       return [plan.threadId];
+    case "createAutomation":
+    case "updateAutomation":
+      // Only a chat the plan checks now (a deleted chat's heartbeat can still be disabled).
+      return lifecycleTargetChecked(plan, false)
+        ? automationTargetThreadIds(automationDefinitionForPlan(plan).execution)
+        : [];
+    case "automationRun":
+      return automationTargetThreadIds(automationDefinitionForPlan(plan).execution);
     default:
       return isAgentControlDevicePlan(plan) ? [plan.threadId] : [];
   }
 };
+
+/** The existing chat an automation's runs go to (a heartbeat), if any. */
+const automationTargetThreadIds = (
+  execution: AgentControlAutomationExecutionTemplate,
+): ReadonlyArray<string> => (execution.target === undefined ? [] : [execution.target.threadId]);
+
+/**
+ * Whether a lifecycle plan's heartbeat chat is checked now: on a create, on any update that
+ * changes the chat (also a disabled one), and on a proposer's update that leaves it enabled.
+ * Every run checks it again.
+ */
+function lifecycleTargetChecked(
+  plan: Extract<AgentControlActionPlan, { kind: "createAutomation" | "updateAutomation" }>,
+  owner: boolean,
+): boolean {
+  if (plan.kind === "createAutomation") return true;
+  const chatChanged =
+    plan.before.definition.execution.target?.threadId !== plan.after.execution.target?.threadId;
+  return chatChanged || (plan.after.enabled && !owner);
+}
+
+/** The stricter of two send ceilings: the lower runtime mode, a worktree over a shared checkout. */
+const lowerSendCeiling = (
+  a: { readonly runtimeMode: RuntimeMode; readonly envMode: "local" | "worktree" },
+  b: { readonly runtimeMode: RuntimeMode; readonly envMode: "local" | "worktree" },
+): { readonly runtimeMode: RuntimeMode; readonly envMode: "local" | "worktree" } => ({
+  runtimeMode:
+    runtimeModePrivilegeRank[a.runtimeMode] <= runtimeModePrivilegeRank[b.runtimeMode]
+      ? a.runtimeMode
+      : b.runtimeMode,
+  envMode: a.envMode === "worktree" || b.envMode === "worktree" ? "worktree" : "local",
+});
+
+/**
+ * A heartbeat's chat: an open chat of the automation's project, which a proposer's heartbeat
+ * (`asSender`) must also be allowed to message. The owner's own schedules need only the first.
+ */
+const validateAutomationTarget = (
+  execution: AgentControlAutomationExecutionTemplate,
+  snapshot: OrchestrationShellSnapshot,
+  asSender?: Omit<Parameters<typeof validatePlanAgainstSnapshot>[0], "plan" | "snapshot">,
+) =>
+  Effect.gen(function* () {
+    const target = execution.target;
+    if (target === undefined) return;
+    const thread = snapshot.threads.find((candidate) => candidate.id === target.threadId);
+    if (
+      thread === undefined ||
+      thread.archivedAt !== null ||
+      thread.projectId !== execution.projectId
+    ) {
+      return yield* fail(
+        "thread-unavailable",
+        "The automation's chat is archived, deleted or outside the automation's project.",
+      );
+    }
+    if (asSender === undefined) return;
+    yield* validatePlanAgainstSnapshot({
+      ...asSender,
+      plan: {
+        kind: "sendMessage",
+        threadId: target.threadId,
+        text: execution.prompt,
+        delivery: "queue",
+      },
+      snapshot,
+    });
+  });
 
 const validateDevicePlanScope = (
   plan: AgentControlDeviceActionPlan | AgentControlDeviceControlConsentPlan,
@@ -743,6 +820,16 @@ export const makeAgentControlActionValidatorFromDeps = (deps: {
           providers,
           requireBaseRef,
         });
+        if (input.plan.kind !== "cancelAutomation" && lifecycleTargetChecked(input.plan, false)) {
+          yield* validateAutomationTarget(definition.execution, snapshot, {
+            originThreadId: caller.id,
+            originProjectId: caller.projectId,
+            originRuntimeMode: caller.runtimeMode,
+            originEnvMode,
+            providers,
+            requireBaseRef,
+          });
+        }
       } else if (input.plan.kind === "changeSettings") {
         // Closed schema: only non-secret boolean preferences are supported.
       } else if (input.plan.kind === "deleteLocalTask") {
@@ -872,7 +959,9 @@ export const makeAgentControlActionValidatorFromDeps = (deps: {
           ) {
             return yield* fail("privilege-escalation", "Automation execution scope is denied.");
           }
-          const { snapshot, providers } = yield* loadState([]);
+          const { snapshot, providers } = yield* loadState(
+            automationTargetThreadIds(definition.execution),
+          );
           yield* validatePlanAgainstSnapshot({
             plan: { kind: "createThreads", entries: [definition.execution] },
             originProjectId: definition.execution.projectId,
@@ -882,6 +971,34 @@ export const makeAgentControlActionValidatorFromDeps = (deps: {
             providers,
             requireBaseRef,
           });
+          if (
+            input.plan.kind !== "cancelAutomation" &&
+            definition.execution.target !== undefined &&
+            lifecycleTargetChecked(input.plan, false)
+          ) {
+            // Thread control, within the integration's ceiling and the definition's own modes.
+            if (
+              !input.integration.capabilities.includes(
+                AGENT_CONTROL_CAPABILITIES.externalControlThreads,
+              )
+            ) {
+              return yield* fail(
+                "privilege-escalation",
+                "External thread control authority is absent.",
+              );
+            }
+            const ceiling = lowerSendCeiling(
+              agentControlExternalCeiling(input.integration),
+              definition.execution,
+            );
+            yield* validateAutomationTarget(definition.execution, snapshot, {
+              originProjectId: definition.execution.projectId,
+              originRuntimeMode: ceiling.runtimeMode,
+              originEnvMode: ceiling.envMode,
+              providers,
+              requireBaseRef,
+            });
+          }
           return {
             kind: "external-integration",
             integrationId: input.integration.integrationId,
@@ -990,7 +1107,9 @@ export const makeAgentControlActionValidatorFromDeps = (deps: {
       yield* validateAutomation(deps.automations.validateLifecyclePlan(plan));
       if (plan.kind === "cancelAutomation") return;
       const definition = plan.kind === "createAutomation" ? plan.definition : plan.after;
-      const { snapshot, providers } = yield* loadState([]);
+      const { snapshot, providers } = yield* loadState(
+        automationTargetThreadIds(definition.execution),
+      );
       yield* validatePlanAgainstSnapshot({
         plan: { kind: "createThreads", entries: [definition.execution] },
         originProjectId: definition.execution.projectId,
@@ -1000,6 +1119,9 @@ export const makeAgentControlActionValidatorFromDeps = (deps: {
         providers,
         requireBaseRef,
       });
+      if (lifecycleTargetChecked(plan, true)) {
+        yield* validateAutomationTarget(definition.execution, snapshot);
+      }
     });
 
   const revalidateExecution: AgentControlActionValidatorShape["revalidateExecution"] = (
@@ -1044,6 +1166,7 @@ export const makeAgentControlActionValidatorFromDeps = (deps: {
         ...targetThreadIds(proposal.plan),
         ...agentControlTargetSnapshots(principal).map((target) => target.threadId),
       ]);
+      let externalCeiling: ReturnType<typeof agentControlExternalCeiling> | undefined;
       if (principal.kind === "provider-session") {
         const origin = snapshot.threads.find((thread) => thread.id === principal.threadId);
         if (!origin || origin.projectId !== originProjectId) {
@@ -1078,6 +1201,7 @@ export const makeAgentControlActionValidatorFromDeps = (deps: {
           return yield* fail("caller-stale", "The external integration is unavailable.");
         }
         const integration = checked.value;
+        externalCeiling = agentControlExternalCeiling(integration);
         const scopeAllowed =
           integration.projectScope.kind === "all" ||
           integration.projectScope.projectIds.includes(originProjectId);
@@ -1091,11 +1215,21 @@ export const makeAgentControlActionValidatorFromDeps = (deps: {
                 : AGENT_CONTROL_CAPABILITIES.externalCreateTask;
         const requiresTaskCapability =
           proposal.plan.kind === "automationRun" || isAutomationLifecyclePlan(proposal.plan);
+        // A heartbeat queues into an existing chat: thread control.
+        const requiresThreadControl =
+          (proposal.plan.kind === "automationRun" ||
+            proposal.plan.kind === "createAutomation" ||
+            proposal.plan.kind === "updateAutomation") &&
+          automationDefinitionForPlan(proposal.plan).execution.target !== undefined;
         if (
           !scopeAllowed ||
           !integration.capabilities.includes(externalCapability) ||
           (requiresTaskCapability &&
             !integration.capabilities.includes(AGENT_CONTROL_CAPABILITIES.externalCreateTask)) ||
+          (requiresThreadControl &&
+            !integration.capabilities.includes(
+              AGENT_CONTROL_CAPABILITIES.externalControlThreads,
+            )) ||
           (originEnvMode === "local" &&
             !integration.capabilities.includes(
               AGENT_CONTROL_CAPABILITIES.externalSharedCheckout,
@@ -1192,6 +1326,27 @@ export const makeAgentControlActionValidatorFromDeps = (deps: {
         });
         return;
       }
+      // A heartbeat's chat passes its proposer's send rules (an integration's within its grants).
+      const senderCeiling =
+        externalCeiling === undefined
+          ? { runtimeMode: originRuntimeMode, envMode: originEnvMode }
+          : lowerSendCeiling(externalCeiling, {
+              runtimeMode: originRuntimeMode,
+              envMode: originEnvMode,
+            });
+      const targetSender =
+        principal.kind === "automation-owner"
+          ? undefined
+          : {
+              ...(principal.kind === "provider-session"
+                ? { originThreadId: principal.threadId }
+                : {}),
+              originProjectId,
+              originRuntimeMode: senderCeiling.runtimeMode,
+              originEnvMode: senderCeiling.envMode,
+              providers,
+              requireBaseRef,
+            };
       if (isAutomationLifecyclePlan(proposal.plan)) {
         if (deps.automations === undefined) {
           return yield* fail("automation-unavailable", "Automation control is unavailable.");
@@ -1213,6 +1368,9 @@ export const makeAgentControlActionValidatorFromDeps = (deps: {
           providers,
           requireBaseRef,
         });
+        if (lifecycleTargetChecked(proposal.plan, principal.kind === "automation-owner")) {
+          yield* validateAutomationTarget(definition.execution, snapshot, targetSender);
+        }
         return;
       }
       if (proposal.plan.kind === "automationRun") {
@@ -1229,6 +1387,7 @@ export const makeAgentControlActionValidatorFromDeps = (deps: {
           providers,
           requireBaseRef,
         });
+        yield* validateAutomationTarget(proposal.plan.execution, snapshot, targetSender);
         return;
       }
       if (proposal.plan.kind === "workspaceLifecycle") {

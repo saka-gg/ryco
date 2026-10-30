@@ -78,7 +78,10 @@ export interface FollowUpQueueHost {
    * request update.
    */
   readonly serverMintedMessageIdPrefixes: ReadonlyArray<string>;
-  /** The one of them an Agent Control message takes; only the node's own agent adds may use it. */
+  /**
+   * The one of them an Agent Control message takes; only the node's own agent and automation
+   * adds may use it.
+   */
   readonly agentControlMessageIdPrefix: string;
 }
 type PlannedEvent = Omit<OrchestrationEvent, "sequence">;
@@ -233,10 +236,11 @@ function reservedMessageIdBlocker(
   messageId: MessageId,
   author: QueuedFollowUp["author"],
 ): string | null {
-  // An Agent Control message queued by the node keeps its own id, so its turn reads as one.
+  // An Agent Control message or a scheduled run queued by the node keeps its own id, so its
+  // turn reads as one.
   const reserved = (prefix: string) =>
     messageId.startsWith(prefix) &&
-    !(author === "agent" && prefix === host.agentControlMessageIdPrefix);
+    !(author !== "user" && prefix === host.agentControlMessageIdPrefix);
   if (host.serverMintedMessageIdPrefixes.some(reserved)) {
     return `Message id '${messageId}' is reserved for messages the node sends.`;
   }

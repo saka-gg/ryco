@@ -1,7 +1,9 @@
 import {
+  AGENT_CONTROL_CAPABILITIES,
   AGENT_CONTROL_ERROR_CODES,
   AGENT_CONTROL_RISK_TAGS,
   AgentControlAutomationId,
+  AgentControlIntegrationId,
   AgentControlProposalId,
   AgentControlRequestId,
   ProjectId,
@@ -23,6 +25,10 @@ import { AgentControlAutomationRepository } from "../../persistence/Services/Age
 import { AgentControlAuditRepository } from "../../persistence/Services/AgentControlAudit.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { AgentControlAutomationService } from "../Services/AgentControlAutomation.ts";
+import {
+  AgentControlExternalIntegrationService,
+  type AgentControlExternalIntegrationServiceShape,
+} from "../Services/AgentControlExternalIntegration.ts";
 import {
   AgentControlProposalStore,
   agentControlFailureResult,
@@ -594,6 +600,60 @@ layer("AgentControlAutomationService", (it) => {
     }),
   );
 });
+
+it.effect("cancels an integration's heartbeat run once it lost thread control", () =>
+  Effect.gen(function* () {
+    const repository = yield* AgentControlAutomationRepository;
+    const automations = yield* AgentControlAutomationService;
+    const base = makeAutomation(
+      "automation-external-heartbeat",
+      new Date(Date.now() - 60_000).toISOString(),
+    );
+    const automation: AgentControlAutomation = {
+      ...base,
+      principal: {
+        kind: "external-integration",
+        integrationId: AgentControlIntegrationId.make("integration-heartbeat"),
+        label: "External scheduler",
+        projectId,
+        runtimeMode: "approval-required",
+        envMode: "worktree",
+      },
+      definition: {
+        ...base.definition,
+        execution: {
+          ...base.definition.execution,
+          target: { kind: "thread", threadId: ThreadId.make("thread-heartbeat") },
+        },
+      },
+    };
+    assert.isTrue(yield* repository.insertAutomation(automation));
+    yield* automations.materializeDue;
+    const [run] = yield* repository.listRuns({ automationId: automation.automationId, limit: 5 });
+    // No run card that could only fail at approval.
+    assert.strictEqual(run?.status, "cancelled");
+    assert.strictEqual(run?.proposalId, null);
+  }).pipe(
+    Effect.provide(
+      makeAutomationLayer(true, { disableBackground: true }).pipe(
+        Layer.provideMerge(
+          Layer.succeed(AgentControlExternalIntegrationService, {
+            // Every grant a scheduled task needs, but no longer thread control.
+            revalidate: (integrationId: AgentControlIntegrationId) =>
+              Effect.succeed({
+                integrationId,
+                projectScope: { kind: "all" },
+                capabilities: [
+                  AGENT_CONTROL_CAPABILITIES.externalCreateTask,
+                  AGENT_CONTROL_CAPABILITIES.externalManageAutomations,
+                ],
+              }),
+          } as unknown as AgentControlExternalIntegrationServiceShape),
+        ),
+      ),
+    ),
+  ),
+);
 
 it.effect("keeps the background scheduler idle while Agent Control is disabled", () => {
   const messages: string[] = [];

@@ -53,6 +53,7 @@ import {
   scheduleProposalOf,
   scheduleRetryState,
   scheduleRowPresentation,
+  runsInWords,
   startFix,
   validateScheduleDraft,
   type ScheduleRow,
@@ -1053,6 +1054,33 @@ describe("drafts", () => {
     });
     expect(local.execution).not.toHaveProperty("baseRef");
     expect(local.execution).toMatchObject({ title: "Spaced", tokenMode: "balanced" });
+  });
+
+  it("carries a heartbeat's chat through an edit, and names where runs go", () => {
+    const heartbeat = {
+      ...twoHourly,
+      execution: {
+        ...twoHourly.execution,
+        target: { kind: "thread" as const, threadId: ThreadId.make("thread-ci") },
+      },
+    };
+    const draft = draftFromDefinition(heartbeat);
+    expect(draft.target).toEqual({ kind: "thread", threadId: "thread-ci" });
+    expect(definitionFromDraft({ ...draft, title: "Check CI" }).execution.target).toEqual({
+      kind: "thread",
+      threadId: "thread-ci",
+    });
+    expect(definitionFromDraft(draftFromDefinition(twoHourly)).execution).not.toHaveProperty(
+      "target",
+    );
+    expect(runsInWords(heartbeat.execution)).toBe("an existing chat");
+    expect(runsInWords(twoHourly.execution)).toBe("a new worktree");
+    expect(
+      diffScheduleDefinitions(twoHourly, heartbeat, {
+        nowMs: T(2026, 10, 7, 12, 0),
+        runtimeModeLabel: (mode) => mode,
+      }).map((row) => [row.key, row.before, row.after]),
+    ).toEqual([["runsIn", "a new worktree", "an existing chat"]]);
   });
 
   it("carries run without asking, and writes the policy only when it is on", () => {
