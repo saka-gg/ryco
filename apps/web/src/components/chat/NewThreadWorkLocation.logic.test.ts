@@ -2,7 +2,6 @@ import { describe, expect, it } from "vitest";
 
 import {
   branchSlotPreposition,
-  newWorktreeBaseBranch,
   resolveWorkLocation,
   showsBranchSlot,
   workLocationDraftPatch,
@@ -150,17 +149,5 @@ describe("branch slot", () => {
   it('reads "from" when forking and "on" when working in place', () => {
     expect(branchSlotPreposition({ kind: "newWorktree", worktree: null })).toBe("from");
     expect(branchSlotPreposition({ kind: "projectRoot", worktree: null })).toBe("on");
-  });
-});
-
-describe("newWorktreeBaseBranch", () => {
-  it("defaults to origin HEAD and qualifies local defaults when fetching", () => {
-    expect(newWorktreeBaseBranch(null, true)).toBe("origin/HEAD");
-    expect(newWorktreeBaseBranch("main", true)).toBe("origin/main");
-    expect(newWorktreeBaseBranch("origin/feature", true)).toBe("origin/feature");
-  });
-  it("uses the local checkout or selected ref when fetching is disabled", () => {
-    expect(newWorktreeBaseBranch(null, false)).toBe("HEAD");
-    expect(newWorktreeBaseBranch("main", false)).toBe("main");
   });
 });

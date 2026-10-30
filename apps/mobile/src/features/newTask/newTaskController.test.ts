@@ -7,7 +7,6 @@ import {
   ProjectId,
   ProviderInstanceId,
   ThreadId,
-  WorktreeId,
   type ClientOrchestrationCommand,
 } from "@ryco/contracts";
 
@@ -40,12 +39,7 @@ function deps(
     dispatch: async (command) => {
       commands.push(command);
     },
-    createWorktree: async () => ({
-      worktreeId: WorktreeId.make("worktree-created"),
-      threadId: ThreadId.make("thread-from-worktree"),
-    }),
     waitForProject: async () => undefined,
-    waitForWorktree: async () => undefined,
     waitForThread: async () => undefined,
     ...overrides,
   };
@@ -165,40 +159,126 @@ describe("New Task controller", () => {
     ]);
   });
 
-  it.each([undefined, " release/v2 "])(
-    "uses the server-managed worktree with source %s and does not create a second thread",
-    async (baseBranch) => {
-      const createWorktree = vi.fn(async () => ({
-        worktreeId: WorktreeId.make("worktree-created"),
-        threadId: ThreadId.make("thread-from-worktree"),
-      }));
-      const runtime = deps({ createWorktree });
-      const result = await runNewTaskAttempt(
-        createNewTaskAttempt({
-          environmentId,
-          prompt: "Isolate this change",
-          project: {
-            kind: "existing",
-            projectId: existingProjectId,
-            workspaceRoot: "/code/ryco",
-          },
-          worktree: { kind: "new", branch: "feat/mobile", ...(baseBranch ? { baseBranch } : {}) },
-          createdAt,
-          ids,
-        }),
-        runtime,
-      );
+  it("prepares a new worktree inside the turn start, under this attempt's own thread id", async () => {
+    const waitForThread = vi.fn(async () => undefined);
+    const runtime = deps({ waitForThread });
+    const result = await runNewTaskAttempt(
+      createNewTaskAttempt({
+        environmentId,
+        prompt: "Isolate this change",
+        project: {
+          kind: "existing",
+          projectId: existingProjectId,
+          workspaceRoot: "/code/ryco",
+        },
+        worktree: {
+          kind: "new",
+          branch: " feat/mobile ",
+          baseBranch: "origin/release/v2",
+          fetchOrigin: true,
+        },
+        tokenMode: "balanced",
+        createdAt,
+        ids,
+      }),
+      runtime,
+    );
 
-      expect(result.ok).toBe(true);
-      expect(createWorktree).toHaveBeenCalledWith({
-        projectId: existingProjectId,
+    expect(result.ok).toBe(true);
+    // One command: no separate worktree RPC, no thread.create, no wait for a thread
+    // the node only creates once the checkout exists.
+    expect(runtime.commands.map((command) => command.type)).toEqual(["thread.turn.start"]);
+    expect(waitForThread).not.toHaveBeenCalled();
+    expect(runtime.commands[0]).toMatchObject({
+      commandId: ids.turnCommandId,
+      threadId: ids.threadId,
+      message: { messageId: ids.messageId, text: "Isolate this change" },
+      tokenMode: "balanced",
+      bootstrap: {
+        createThread: {
+          projectId: existingProjectId,
+          title: "Isolate this change",
+          branch: null,
+          worktreePath: null,
+          tokenMode: "balanced",
+          createdAt,
+        },
+        prepareWorktree: {
+          projectCwd: "/code/ryco",
+          baseBranch: "origin/release/v2",
+          branch: "feat/mobile",
+          fetchOrigin: true,
+        },
+      },
+    });
+    expect(result.attempt.threadId).toBe(ids.threadId);
+    expect(result.attempt.turnStarted).toBe(true);
+  });
+
+  it("shows the node's refusal of a new worktree and sends the same command on retry", async () => {
+    let refuse = true;
+    const runtime = deps({
+      dispatch: async (command) => {
+        runtime.commands.push(command);
+        if (refuse) {
+          refuse = false;
+          throw new Error("A branch named 'feat/mobile' already exists.");
+        }
+      },
+    });
+    const attempt = createNewTaskAttempt({
+      environmentId,
+      prompt: "Isolate this change",
+      project: { kind: "existing", projectId: existingProjectId, workspaceRoot: "/code/ryco" },
+      worktree: {
+        kind: "new",
         branch: "feat/mobile",
-        ...(baseBranch ? { baseBranch: "release/v2" } : {}),
-      });
-      expect(runtime.commands.map((command) => command.type)).toEqual(["thread.turn.start"]);
-      expect(result.attempt.threadId).toBe("thread-from-worktree");
-    },
-  );
+        baseBranch: "origin/HEAD",
+        fetchOrigin: true,
+      },
+      createdAt,
+      ids,
+    });
+    const first = await runNewTaskAttempt(attempt, runtime);
+    if (first.ok) throw new Error("expected failure");
+    expect(first.step).toBe("worktree");
+    expect(first.message).toBe("A branch named 'feat/mobile' already exists.");
+    expect(first.deliveryUncertain).toBe(false);
+
+    const second = await runNewTaskAttempt(first.attempt, runtime);
+    expect(second.ok).toBe(true);
+    expect(runtime.commands.map((command) => command.commandId)).toEqual([
+      ids.turnCommandId,
+      ids.turnCommandId,
+    ]);
+  });
+
+  it("calls a lost new-worktree turn start uncertain, with the step's own text", async () => {
+    const runtime = deps({
+      dispatch: async () => {
+        throw new Error("SocketCloseError: the connection closed");
+      },
+    });
+    const result = await runNewTaskAttempt(
+      createNewTaskAttempt({
+        environmentId,
+        prompt: "Isolate this change",
+        project: { kind: "existing", projectId: existingProjectId, workspaceRoot: "/code/ryco" },
+        worktree: {
+          kind: "new",
+          branch: "feat/mobile",
+          baseBranch: "origin/HEAD",
+          fetchOrigin: true,
+        },
+        createdAt,
+        ids,
+      }),
+      runtime,
+    );
+    if (result.ok) throw new Error("expected failure");
+    expect(result.deliveryUncertain).toBe(true);
+    expect(result.message).not.toContain("SocketCloseError");
+  });
 
   it("retains successful hierarchy steps and retries only the failed thread step", async () => {
     let failThread = true;
@@ -233,6 +313,45 @@ describe("New Task controller", () => {
     expect(second.ok).toBe(true);
     expect(commands.filter((command) => command.type === "project.create")).toHaveLength(1);
     expect(commands.filter((command) => command.type === "thread.create")).toHaveLength(2);
+  });
+
+  it("shows the node's refusal of a step as certain, and a lost connection as uncertain", async () => {
+    const refusing = deps({
+      dispatch: async (command) => {
+        if (command.type === "thread.create") throw new Error("This project is archived.");
+      },
+    });
+    const refusal = await runNewTaskAttempt(
+      createNewTaskAttempt({
+        environmentId,
+        prompt: "Start here",
+        project: { kind: "existing", projectId: existingProjectId, workspaceRoot: "/code/ryco" },
+        worktree: { kind: "local" },
+        createdAt,
+        ids,
+      }),
+      refusing,
+    );
+    if (refusal.ok) throw new Error("expected failure");
+    expect(refusal).toMatchObject({
+      step: "thread",
+      message: "This project is archived.",
+      deliveryUncertain: false,
+    });
+
+    const lost = await runNewTaskAttempt(
+      refusal.attempt,
+      deps({
+        dispatch: async () => {
+          throw new Error("SocketReadError: heartbeat missed");
+        },
+      }),
+    );
+    if (lost.ok) throw new Error("expected failure");
+    expect(lost.deliveryUncertain).toBe(true);
+    expect(lost.message).toBe(
+      "The task could not be confirmed. The project and worktree remain available.",
+    );
   });
 
   it("reports uncertain turn delivery without dropping the authoritative thread", async () => {

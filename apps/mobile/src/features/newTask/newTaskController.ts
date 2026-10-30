@@ -4,7 +4,12 @@ import {
   type WorkspaceExecutionTargetResolution,
   type WorkspacePhysicalProjectVariant,
 } from "@ryco/client-runtime/state/workspace";
-import { composeOutgoingPrompt } from "@ryco/client-runtime/state/composer";
+import {
+  buildTurnStartCommand,
+  composeOutgoingPrompt,
+  type SendTurnBootstrap,
+} from "@ryco/client-runtime/state/composer";
+import { isTransportConnectionErrorMessage } from "@ryco/client-runtime/errors";
 import type { Project, SidebarThreadOrStub } from "@ryco/client-runtime/state/threads";
 import type {
   CommandId,
@@ -22,6 +27,7 @@ import {
   type ModelSelection,
   type ProviderInteractionMode,
   type RuntimeMode,
+  type UploadChatImageAttachment,
 } from "@ryco/contracts/orchestration";
 import { ProviderInstanceId } from "@ryco/contracts/provider-instance";
 
@@ -162,7 +168,13 @@ export type NewTaskWorktreeContext =
       readonly branch: string;
       readonly worktreePath: string | null;
     }
-  | { readonly kind: "new"; readonly branch: string; readonly baseBranch?: string };
+  | {
+      readonly kind: "new";
+      readonly branch: string;
+      /** The ref the worktree branches from, as sent (`newWorktreeBaseBranch`). */
+      readonly baseBranch: string;
+      readonly fetchOrigin: boolean;
+    };
 
 export interface NewTaskStableIds {
   readonly projectId: ProjectId;
@@ -177,7 +189,7 @@ export interface NewTaskStableIds {
 export interface NewTaskAttempt {
   readonly environmentId: EnvironmentId;
   readonly prompt: string;
-  readonly attachments: TurnStartCommand["message"]["attachments"];
+  readonly attachments: ReadonlyArray<UploadChatImageAttachment>;
   readonly project: NewTaskProjectContext;
   readonly worktree: NewTaskWorktreeContext;
   readonly modelSelection: ModelSelection;
@@ -212,16 +224,7 @@ export type NewTaskRunResult =
 
 export interface NewTaskControllerDeps {
   readonly dispatch: (command: ClientOrchestrationCommand) => Promise<unknown>;
-  readonly createWorktree: (input: {
-    readonly projectId: ProjectId;
-    readonly branch: string;
-    readonly baseBranch?: string;
-  }) => Promise<{
-    readonly worktreeId: WorktreeId;
-    readonly threadId: ThreadId;
-  }>;
   readonly waitForProject: (projectId: ProjectId) => Promise<void>;
-  readonly waitForWorktree: (worktreeId: WorktreeId) => Promise<void>;
   readonly waitForThread: (input: {
     readonly threadId: ThreadId;
     readonly worktreeId?: WorktreeId | null;
@@ -231,7 +234,7 @@ export interface NewTaskControllerDeps {
 export function createNewTaskAttempt(input: {
   readonly environmentId: EnvironmentId;
   readonly prompt: string;
-  readonly attachments?: TurnStartCommand["message"]["attachments"];
+  readonly attachments?: ReadonlyArray<UploadChatImageAttachment>;
   readonly project: NewTaskProjectContext;
   readonly worktree: NewTaskWorktreeContext;
   readonly modelSelection?: ModelSelection;
@@ -288,14 +291,58 @@ function failed(
   attempt: NewTaskAttempt,
   step: NewTaskFailureStep,
   deliveryUncertain: boolean,
+  /** The node's own refusal, shown instead of the step's generic text. */
+  detail?: string | null,
 ): NewTaskRunResult {
   return {
     ok: false,
     attempt,
     step,
-    message: failureMessage(step),
+    message: detail ? detail : failureMessage(step),
     deliveryUncertain,
   };
+}
+
+function errorMessage(error: unknown): string | null {
+  return error instanceof Error && error.message.trim().length > 0 ? error.message.trim() : null;
+}
+
+/**
+ * A step whose command threw. A lost connection may still have delivered it,
+ * so that failure is uncertain and keeps the step's own text; a refusal the
+ * node answered created nothing, and its reason is shown as it came.
+ */
+function refused(
+  attempt: NewTaskAttempt,
+  step: NewTaskFailureStep,
+  error: unknown,
+): NewTaskRunResult {
+  const message = errorMessage(error);
+  const uncertain = message === null || isTransportConnectionErrorMessage(message);
+  return failed(attempt, step, uncertain, uncertain ? null : message);
+}
+
+/** The turn start every New Task sends, through the shared command builder. */
+function turnStartCommand(
+  attempt: NewTaskAttempt,
+  bootstrap?: NonNullable<SendTurnBootstrap>,
+): TurnStartCommand {
+  const command = buildTurnStartCommand({
+    commandId: attempt.ids.turnCommandId,
+    threadId: attempt.threadId,
+    messageId: attempt.ids.messageId,
+    // The shared composition: a pasted quote token goes out expanded.
+    text: composeOutgoingPrompt({ prompt: attempt.prompt }),
+    attachments: attempt.attachments,
+    modelSelection: attempt.modelSelection,
+    titleSeed: inferTaskTitle(attempt.prompt),
+    runtimeMode: attempt.runtimeMode,
+    interactionMode: attempt.interactionMode,
+    tokenMode: attempt.tokenMode,
+    ...(bootstrap ? { bootstrap } : {}),
+    createdAt: attempt.createdAt,
+  });
+  return command as TurnStartCommand;
 }
 
 export async function runNewTaskAttempt(
@@ -325,41 +372,55 @@ export async function runNewTaskAttempt(
       }
       await deps.waitForProject(next.projectId);
       next = { ...next, projectReady: true };
-    } catch {
-      return failed(next, "project", !next.projectCommandAccepted);
+    } catch (error) {
+      // Once the command was accepted only the confirmation is missing.
+      if (next.projectCommandAccepted) return failed(next, "project", false);
+      return refused(next, "project", error);
     }
   }
 
-  if (next.worktree.kind === "new" && !next.worktreeReady) {
-    try {
-      let worktreeId = next.worktreeId;
-      let threadId = next.threadId;
-      if (!worktreeId) {
-        const branch = next.worktree.branch.trim();
-        if (!branch) throw new Error("branch-required");
-        const created = await deps.createWorktree({
-          projectId: next.projectId,
-          branch,
-          ...(next.worktree.baseBranch?.trim()
-            ? { baseBranch: next.worktree.baseBranch.trim() }
-            : {}),
-        });
-        worktreeId = created.worktreeId;
-        threadId = created.threadId;
-        next = { ...next, worktreeId, threadId };
+  // A new worktree is prepared by the node inside the turn start, like web's
+  // first send: the thread id is this attempt's own, so the thread screen can
+  // open at once and follow the node's setup feed for it.
+  if (next.worktree.kind === "new") {
+    if (!next.turnStarted) {
+      const branch = next.worktree.branch.trim();
+      if (!branch) return failed(next, "worktree", false);
+      try {
+        await deps.dispatch(
+          turnStartCommand(next, {
+            createThread: {
+              projectId: next.projectId,
+              title: inferTaskTitle(next.prompt),
+              modelSelection: next.modelSelection,
+              runtimeMode: next.runtimeMode,
+              interactionMode: next.interactionMode,
+              tokenMode: next.tokenMode,
+              branch: null,
+              worktreePath: null,
+              createdAt: next.createdAt,
+            },
+            prepareWorktree: {
+              projectCwd: validateNodeWorkspacePath(next.project.workspaceRoot),
+              baseBranch: next.worktree.baseBranch,
+              branch,
+              fetchOrigin: next.worktree.fetchOrigin,
+            },
+          }),
+        );
+      } catch (error) {
+        return refused(next, "worktree", error);
       }
-      await deps.waitForWorktree(worktreeId);
-      await deps.waitForThread({ threadId, worktreeId });
       next = {
         ...next,
-        worktreeReady: true,
-        threadReady: true,
         threadCommandAccepted: true,
+        threadReady: true,
+        worktreeReady: true,
         worktreeAttached: true,
+        turnStarted: true,
       };
-    } catch {
-      return failed(next, "worktree", next.worktreeId === null);
     }
+    return { ok: true, attempt: next };
   }
 
   if (!next.threadReady) {
@@ -385,8 +446,9 @@ export async function runNewTaskAttempt(
       }
       await deps.waitForThread({ threadId: next.threadId, worktreeId: null });
       next = { ...next, threadReady: true };
-    } catch {
-      return failed(next, "thread", !next.threadCommandAccepted);
+    } catch (error) {
+      if (next.threadCommandAccepted) return failed(next, "thread", false);
+      return refused(next, "thread", error);
     }
   }
 
@@ -411,25 +473,7 @@ export async function runNewTaskAttempt(
 
   if (!next.turnStarted) {
     try {
-      await deps.dispatch({
-        type: "thread.turn.start",
-        commandId: next.ids.turnCommandId,
-        threadId: next.threadId,
-        message: {
-          messageId: next.ids.messageId,
-          role: "user",
-          // The shared composition: a pasted quote token goes out expanded.
-          text: composeOutgoingPrompt({ prompt: next.prompt }),
-          attachments: next.attachments,
-        },
-        modelSelection: next.modelSelection,
-        titleSeed: inferTaskTitle(next.prompt),
-        runtimeMode: next.runtimeMode,
-        interactionMode: next.interactionMode,
-        tokenMode: next.tokenMode,
-        sourceControlContexts: [],
-        createdAt: next.createdAt,
-      });
+      await deps.dispatch(turnStartCommand(next));
       next = { ...next, turnStarted: true };
     } catch {
       return failed(next, "turn", true);

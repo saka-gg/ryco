@@ -15,6 +15,7 @@ import { RollingText, useTravelDirection, type RollDirection } from "./RollingTe
 import { useFlipLayout } from "./useFlipLayout";
 import { NewThreadSourcePicker, type NewThreadSource } from "./NewThreadSourcePicker";
 import type { DraftWorktreeSource } from "@ryco/client-runtime/state/composer";
+import { newWorktreeBaseBranch } from "@ryco/client-runtime/state/worktree-setup";
 import {
   Combobox,
   ComboboxEmpty,
@@ -25,7 +26,6 @@ import {
 } from "../ui/combobox";
 import {
   branchSlotPreposition,
-  newWorktreeBaseBranch,
   resolveWorkLocation,
   showsBranchSlot,
   workLocationDraftPatch,

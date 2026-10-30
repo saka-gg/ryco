@@ -57,7 +57,6 @@ import { readEnvironmentConnection } from "../environments/runtime";
 import { useSideChatStore } from "../sideChatStore";
 import { parseSideQuestionCommand } from "@ryco/client-runtime/state/side-chat";
 import { useDeviceName } from "../deviceName";
-import { newWorktreeBaseBranch } from "./chat/NewThreadWorkLocation.logic";
 import {
   type CommandId,
   DEFAULT_MODEL,
@@ -518,6 +517,7 @@ import {
 } from "../versionSkew";
 import {
   isWorktreeLaunchSettingUp,
+  newWorktreeBaseBranch,
   readWorktreeLaunch,
   resolveWorktreeLaunchWorkStartedAt,
   stopWorktreeLaunchFeed,
