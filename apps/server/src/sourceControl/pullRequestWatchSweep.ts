@@ -167,6 +167,7 @@ export interface PullRequestWatchRuntimeDeps {
       readonly dispatch: (
         update: PullRequestLinkUpdate,
       ) => Effect.Effect<void, PullRequestLinkError>;
+      readonly restore?: boolean;
     }) => Effect.Effect<WorktreePullRequestLink, PullRequestLinkError>;
     /** `linkPullRequest` refused another repository's pull request (or could not tell). */
     readonly isWrongRepositoryLinkFailure: (error: PullRequestLinkError) => boolean;
@@ -1480,6 +1481,8 @@ export const makePullRequestWatchRuntime = (
               reference: request.url ?? String(number),
               operation: "watchPullRequest",
               dispatch: (update) => Effect.sync(() => void pending.push(update)),
+              // The user's removal wins over an agent, also one that lands during the reads.
+              restore: request.origin !== "agent",
             })
             .pipe(
               Effect.mapError((error) =>
@@ -1877,8 +1880,20 @@ export const makePullRequestWatchRuntime = (
               "Only an active chat links pull requests.",
             );
           }
+          const own = yield* threadWorkspace(shell).pipe(
+            Effect.mapError(() =>
+              watchError("thread-unavailable", "Could not read the chat's workspace."),
+            ),
+          );
+          // A chat on the main checkout is never shown with the main workspace's pull requests.
+          if (own?.origin === "main" && shell.worktreeId == null) {
+            return yield* watchError(
+              "unsupported",
+              "This chat works in the project's main checkout, where linked pull requests are not shown with the chat. Watch it with ryco_watch_pull_request, or work in a worktree.",
+            );
+          }
           const named = yield* requestedPullRequest(request);
-          const { link, pendingLink } = yield* resolveTarget(
+          const { link, pendingLink, foreign } = yield* resolveTarget(
             shell,
             { origin: "agent", url: request.url },
             named,
@@ -1894,6 +1909,7 @@ export const makePullRequestWatchRuntime = (
             title: link.title ?? null,
             state: link.state ?? null,
             alreadyLinked: pendingLink === null,
+            linkedTo: foreign ? "another-workspace" : "this-chat",
           } satisfies PullRequestLinkResult;
         }),
       );

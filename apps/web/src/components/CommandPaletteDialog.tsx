@@ -104,6 +104,7 @@ import {
 import { CHAT_PROJECT_LABEL, projectPlaceLabel } from "../composerDraftStore";
 import { excludeChatProjects, isChatProject } from "@ryco/shared/projectKind";
 import { pullRequestLinkSearchTerms } from "@ryco/shared/worktreePullRequests";
+import { createThreadWorktreeResolver } from "@ryco/client-runtime/state/threads";
 import {
   appendBrowsePathSegment,
   canNavigateUp,
@@ -560,21 +561,16 @@ function OpenCommandPaletteDialog() {
   const threads = useStore(useShallow(selectSidebarThreadsAcrossEnvironments));
   const unarchivedThreads = useMemo(() => threads.filter(isUnarchivedThreadEntry), [threads]);
   const worktrees = useStore(useShallow(selectSidebarWorktreesAcrossEnvironments));
-  // A thread is found by its workspace's pull requests too (`#123`, `owner/repo#123`, the URL).
+  // A thread is found by its workspace's pull requests too (`#123`, `owner/repo#123`, the URL),
+  // as one search field so a workspace with many pull requests does not sink their rank.
   const threadPullRequestSearchTerms = useMemo(() => {
-    const termsByWorktree = new Map<string, ReadonlyArray<string>>();
-    for (const worktree of worktrees) {
-      if (worktree.pullRequests && worktree.pullRequests.length > 0) {
-        termsByWorktree.set(
-          `${worktree.environmentId}:${worktree.id}`,
-          pullRequestLinkSearchTerms(worktree.pullRequests),
-        );
-      }
-    }
-    return (thread: SidebarThreadSummary): ReadonlyArray<string> =>
-      thread.worktreeId
-        ? (termsByWorktree.get(`${thread.environmentId}:${thread.worktreeId}`) ?? [])
+    const worktreeOf = createThreadWorktreeResolver(worktrees);
+    return (thread: SidebarThreadSummary): ReadonlyArray<string> => {
+      const pullRequests = worktreeOf(thread)?.pullRequests;
+      return pullRequests && pullRequests.length > 0
+        ? [pullRequestLinkSearchTerms(pullRequests).join(" ")]
         : [];
+    };
   }, [worktrees]);
   const keybindings = useAppKeybindings();
   const [viewStack, setViewStack] = useState<CommandPaletteView[]>([]);

@@ -85,6 +85,7 @@ const harness = (input: { readonly authority?: boolean; readonly refuse?: string
             title: "Ship it",
             state: "open",
             alreadyLinked: false,
+            linkedTo: "this-chat",
           } satisfies PullRequestLinkResult);
         }),
     },

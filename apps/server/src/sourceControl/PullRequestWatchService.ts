@@ -96,6 +96,11 @@ export interface PullRequestLinkResult {
   readonly state: string | null;
   /** It was linked before the call (to this chat's workspace or another of the project's). */
   readonly alreadyLinked: boolean;
+  /**
+   * Which workspace has it: this chat's, or another workspace of the project already linking it
+   * (then this chat does not show it).
+   */
+  readonly linkedTo: "this-chat" | "another-workspace";
 }
 
 export interface PullRequestWatchServiceShape {

@@ -12,6 +12,7 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   buildThreadInbox,
+  createThreadWorktreeResolver,
   deriveThreadSnoozeEligibility,
   resolveThreadLifecycleAvailability,
   resolveThreadReferenceCopyTarget,
@@ -884,6 +885,12 @@ describe("inbox search by pull request", () => {
     expect(search("https://github.com/acme/app/pull/675")).toEqual([linked.id]);
     expect(search("ship the inbox")).toEqual([linked.id]);
     expect(search("#676")).toEqual([]);
+
+    // Other lists find the same workspace by id or, without one, by checkout path.
+    const worktreeOf = createThreadWorktreeResolver([worktree]);
+    expect(worktreeOf(linked)?.id).toBe(worktree.id);
+    expect(worktreeOf({ ...linked, worktreeId: null })?.id).toBe(worktree.id);
+    expect(worktreeOf(other)).toBeNull();
   });
 });
 
