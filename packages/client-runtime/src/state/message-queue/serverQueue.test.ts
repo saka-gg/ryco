@@ -72,6 +72,7 @@ import {
   toFollowUpQueueHoldInput,
   type FollowUpQueueAddCommand,
   type FollowUpQueueEntryContent,
+  followUpQueueBadgeOf,
   followUpQueueEditAttachments,
   followUpQueueEditOf,
   withoutFollowUpQueueEditAttachment,
@@ -364,6 +365,32 @@ describe("editing the node's queued entry", () => {
     ]);
     // The entry left the queue meanwhile: nothing to show.
     expect(followUpQueueEditAttachments(dropped, undefined)).toEqual([]);
+  });
+});
+
+describe("follow-up queue badge", () => {
+  const hold = {
+    reason: "interrupted" as const,
+    detail: null,
+    causeKeys: ["interrupt:turn-1"],
+    heldAt: "2026-10-24T10:00:00.000Z",
+  };
+
+  it("counts queued follow-ups, and says why nothing goes out", () => {
+    expect(followUpQueueBadgeOf(undefined)).toBeNull();
+    expect(followUpQueueBadgeOf({ count: 1, hold: null, headStatus: "queued" })).toEqual({
+      label: "1 queued",
+      title: "1 queued follow-up",
+      held: false,
+    });
+    expect(followUpQueueBadgeOf({ count: 3, hold, headStatus: "queued" })).toEqual({
+      label: "3 queued",
+      title: "3 queued follow-ups: Paused after Stop",
+      held: true,
+    });
+    expect(followUpQueueBadgeOf({ count: 2, hold: null, headStatus: "failed" })?.title).toBe(
+      "2 queued follow-ups: The next one waits for Retry",
+    );
   });
 });
 

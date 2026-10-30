@@ -328,3 +328,63 @@ describe("SidebarThreadRow navigation intent", () => {
     }
   });
 });
+
+describe("SidebarThreadRow follow-up queue badge", () => {
+  afterEach(() => {
+    document.body.innerHTML = "";
+  });
+
+  it("marks a thread with queued follow-ups, and says why a held queue waits", async () => {
+    const queued = rowProps("queued");
+    const held = rowProps("held");
+    const mounted = await render(
+      <AppAtomRegistryProvider>
+        <ul>
+          <SidebarThreadRow {...rowProps("empty")} gitStatusTarget={null} />
+          <SidebarThreadRow
+            {...queued}
+            thread={{
+              ...queued.thread,
+              followUpQueueSummary: {
+                count: 2,
+                hold: null,
+                headStatus: "queued",
+                headPreview: "Next",
+              },
+            }}
+            gitStatusTarget={null}
+          />
+          <SidebarThreadRow
+            {...held}
+            thread={{
+              ...held.thread,
+              followUpQueueSummary: {
+                count: 1,
+                hold: {
+                  reason: "error",
+                  detail: "Provider died.",
+                  causeKeys: ["error:turn-1:Provider died."],
+                  heldAt: "2026-05-01T00:00:00.000Z",
+                },
+                headStatus: "queued",
+                headPreview: "Next",
+              },
+            }}
+            gitStatusTarget={null}
+          />
+        </ul>
+      </AppAtomRegistryProvider>,
+    );
+    try {
+      const badges = [...document.querySelectorAll("[data-follow-up-queue-badge]")];
+      expect(badges.map((badge) => badge.textContent)).toEqual(["2 queued", "1 queued"]);
+      expect(badges.map((badge) => badge.getAttribute("data-follow-up-queue-badge"))).toEqual([
+        "queued",
+        "held",
+      ]);
+      expect(badges[1]?.getAttribute("title")).toBe("1 queued follow-up: Paused after an error");
+    } finally {
+      await mounted.unmount();
+    }
+  });
+});

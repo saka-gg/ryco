@@ -14,6 +14,7 @@ import type {
   RuntimeMode,
   ServerConfig,
   ThreadFollowUpQueue,
+  ThreadFollowUpQueueShell,
   ThreadId,
   TurnId,
   UploadChatAttachment,
@@ -28,7 +29,7 @@ import {
   type AppState,
 } from "../threads/store.ts";
 import { selectThreadLiveDetailLoaded } from "../threads/storeSelectors.ts";
-import { queueHoldInputOf, type QueueHold } from "./hold.ts";
+import { describeQueueHold, queueHoldInputOf, type QueueHold } from "./hold.ts";
 import { summarizeQueuedMessage } from "./logic.ts";
 
 // ---------------------------------------------------------------------------
@@ -97,6 +98,35 @@ export function followUpSendWaitsForServerQueue(input: {
   readonly pendingAdds: number;
 }): boolean {
   return input.serverQueueSupported && (input.queueWaiting || input.pendingAdds > 0);
+}
+
+/** How a thread list marks a thread with queued follow-ups (the node's shell summary). */
+export interface FollowUpQueueBadge {
+  /** "2 queued" */
+  readonly label: string;
+  /** "2 queued follow-ups: Paused after an error" */
+  readonly title: string;
+  /** Held, or the next one waits for Retry: nothing goes out without the person. */
+  readonly held: boolean;
+}
+
+/** The mark for a thread whose queue holds follow-ups, or null while it holds none. */
+export function followUpQueueBadgeOf(
+  summary: Pick<ThreadFollowUpQueueShell, "count" | "hold" | "headStatus"> | null | undefined,
+): FollowUpQueueBadge | null {
+  if (!summary || summary.count <= 0) return null;
+  const queued = `${summary.count} queued follow-up${summary.count === 1 ? "" : "s"}`;
+  const why =
+    summary.hold !== null
+      ? describeQueueHold(summary.hold).title
+      : summary.headStatus === "failed"
+        ? "The next one waits for Retry"
+        : null;
+  return {
+    label: `${summary.count} queued`,
+    title: why === null ? queued : `${queued}: ${why}`,
+    held: why !== null,
+  };
 }
 
 /** Whether the node keeps follow-up queues itself (`thread.queue.*`). */
