@@ -1334,6 +1334,10 @@ describe("ChatView Workspace (full app)", () => {
           runOnWorktreeCreate: true,
         },
       ]),
+      // A node without the setup feed: the send shows its wait, but no stages.
+      configureFixture: (nextFixture) => {
+        nextFixture.unservedStreams = new Set([WS_METHODS.subscribeWorktreeSetup]);
+      },
       resolveRpc: (body) => {
         if (body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand) {
           return dispatchPromise;

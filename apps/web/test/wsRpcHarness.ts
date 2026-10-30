@@ -1,11 +1,6 @@
 import { Effect, Exit, Queue, Scope } from "effect";
-import {
-  AGENT_CONTROL_WS_METHODS,
-  ORCHESTRATION_WS_METHODS,
-  WS_METHODS,
-  WsRpcGroup,
-} from "@ryco/contracts";
-import { RpcMessage, RpcSerialization, RpcServer } from "effect/rpc";
+import { WsRpcGroup } from "@ryco/contracts";
+import { RpcMessage, RpcSchema, RpcSerialization, RpcServer } from "effect/rpc";
 
 type BrowserWsClient = {
   send: (data: string) => void;
@@ -30,23 +25,19 @@ interface BrowserWsRpcHarnessOptions {
   readonly resolveUnary?: (request: NormalizedWsRpcRequestBody) => UnaryResolverResult;
   readonly getInitialStreamValues?: (
     request: NormalizedWsRpcRequestBody,
-  ) => ReadonlyArray<unknown> | undefined;
+  ) => ReadonlyArray<unknown> | WsRpcUnservedStream | undefined;
 }
 
-// RpcGroup does not expose stream metadata through its request keys. Every
-// streaming method must be listed here or the harness will return a unary
-// response into the stream and trigger the client's reconnect path.
-const STREAM_METHODS = new Set<string>([
-  ORCHESTRATION_WS_METHODS.subscribeShell,
-  ORCHESTRATION_WS_METHODS.subscribeThread,
-  ORCHESTRATION_WS_METHODS.subscribeThreadWindow,
-  AGENT_CONTROL_WS_METHODS.subscribeProposals,
-  WS_METHODS.gitRunStackedAction,
-  WS_METHODS.subscribeVcsStatus,
-  WS_METHODS.subscribeTerminalEvents,
-  WS_METHODS.subscribeServerConfig,
-  WS_METHODS.subscribeServerLifecycle,
-]);
+// Every streaming method of the group, read from its success schema. A stream
+// the harness answered as unary makes the RpcServer fail the whole connection
+// with a defect, which fails every request then in flight on it: a stream left
+// off a hand-kept list once failed a first send's settings read whenever that
+// read was still out when the worktree setup feed subscribed.
+const STREAM_METHODS = new Set<string>(
+  Array.from(WsRpcGroup.requests.values(), (rpc) =>
+    RpcSchema.isStreamSchema(rpc.successSchema) ? rpc._tag : null,
+  ).filter((tag) => tag !== null),
+);
 
 const ALL_RPC_METHODS = Array.from(WsRpcGroup.requests.keys());
 
@@ -67,6 +58,14 @@ function normalizeRequest(tag: string, payload: unknown): NormalizedWsRpcRequest
 export class WsRpcFailure {
   constructor(readonly error: WsRpcTaggedError) {}
 }
+
+/**
+ * An initial stream result for a method this node does not serve. It is
+ * answered as a node from before the method answers it: that request alone
+ * fails ("Unknown request tag"), and the connection and its other requests
+ * carry on.
+ */
+export class WsRpcUnservedStream {}
 
 /** A schema-declared RPC error: a tagged error from `@ryco/contracts`. */
 type WsRpcTaggedError = { readonly _tag: string };
@@ -249,7 +248,11 @@ export class BrowserWsRpcHarness {
     if (!queues) {
       throw new Error(`No stream registered for ${method}`);
     }
-    const initialValues = this.getInitialStreamValues(request) ?? [];
+    const initial = this.getInitialStreamValues(request);
+    if (initial instanceof WsRpcUnservedStream) {
+      return Effect.die(`Unknown request tag: ${method}`);
+    }
+    const initialValues = initial ?? [];
     return Effect.acquireRelease(
       Queue.unbounded<unknown>().pipe(
         Effect.tap((queue) => Queue.offerAll(queue, initialValues)),

@@ -54,12 +54,49 @@ function isAlive(pid: number): boolean {
   }
 }
 
-async function waitFor<A>(read: () => A | null, what: string): Promise<A> {
+/** Linux's state letter for `pid` (`/proc/<pid>/stat`), or null without procfs. */
+function procState(pid: number): string | null {
+  try {
+    const stat = NodeFS.readFileSync(`/proc/${pid}/stat`, "utf8");
+    // The command name in parentheses can hold spaces; the state follows the last ")".
+    return stat.slice(stat.lastIndexOf(")") + 2).split(" ")[0] ?? null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Whether `pid` still runs. A backend whose app was killed is reparented, and once it exits it
+ * stays a zombie, which `kill(pid, 0)` still finds, until its new parent reaps it. That parent is
+ * the runner's (init or a subreaper above the test), so how soon it reaps is not the backend's.
+ */
+function isRunning(pid: number): boolean {
+  if (!isAlive(pid)) return false;
+  const state = procState(pid);
+  return state !== "Z" && state !== "X";
+}
+
+/** `State` and `PPid` of `pid`, for a failure message. */
+function describeProcess(pid: number): string {
+  try {
+    const status = NodeFS.readFileSync(`/proc/${pid}/status`, "utf8");
+    return status
+      .split("\n")
+      .filter((line) => line.startsWith("State:") || line.startsWith("PPid:"))
+      .join(", ");
+  } catch {
+    return isAlive(pid) ? "alive" : "gone";
+  }
+}
+
+async function waitFor<A>(read: () => A | null, what: string | (() => string)): Promise<A> {
   const deadline = Date.now() + 15_000;
   for (;;) {
     const value = read();
     if (value !== null) return value;
-    if (Date.now() > deadline) throw new Error(`timed out waiting for ${what}`);
+    if (Date.now() > deadline) {
+      throw new Error(`timed out waiting for ${typeof what === "string" ? what : what()}`);
+    }
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
 }
@@ -133,7 +170,10 @@ describe.skipIf(process.platform === "win32")("desktop backend parent lifetime",
     await exited(app);
 
     expect(await waitFor(() => readState(stateDir, "exit-code"), "backend exit")).toBe("130");
-    await waitFor(() => (isAlive(pid) ? null : true), "backend process to end");
+    await waitFor(
+      () => (isRunning(pid) ? null : true),
+      () => `backend process to end (${describeProcess(pid)})`,
+    );
     expect(readState(stateDir, "finalized")).not.toBeNull();
     expect(readState(stateDir, "log")).toContain(PARENT_LOSS_WARNING);
   });

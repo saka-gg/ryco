@@ -136,8 +136,14 @@ interface Mounted {
   readonly listRef: RefObject<LegendListRef | null>;
   readonly rerender: (props: Omit<HarnessProps, "listRef">) => Promise<void>;
   readonly unmount: () => Promise<void>;
-  /** Frames stepped until the item container became visible, or -1. */
+  /** Frames from the mount until the item container became visible (0: already at mount), or -1. */
   readonly revealFrame: number;
+  /**
+   * The scroller's `scrollTop` when `readyToRender` flipped to true: where the list stood when it
+   * decided to reveal. Measured rows can move `scrollTop` a frame later while keeping the same rows
+   * in view, so a later read depends on how long the test took to look.
+   */
+  readonly readyScrollTop: () => number;
   /** Whether LegendList's `readyToRender` signal was seen flipping to true. */
   readonly sawReadyToRender: () => boolean;
 }
@@ -149,21 +155,44 @@ async function mountList(
   const listRef = createRef<LegendListRef>();
   let ready = false;
   let unlisten: (() => void) | undefined;
+  // Frames are counted from the commit that mounted the list, not from when `render()`
+  // returns: React's `act` can let a frame, and with it the reveal, pass before it does.
+  let watching = false;
+  let revealFrame = -1;
+  let readyScrollTop = Number.NaN;
+  let settle!: () => void;
+  const settled = new Promise<void>((resolve) => {
+    settle = resolve;
+  });
   const onMounted = () => {
+    if (watching) return;
+    watching = true;
+    const node = scrollNodeOf(listRef);
     unlisten = listRef.current?.getState?.()?.listen?.("readyToRender", (value: boolean) => {
-      if (value) ready = true;
+      if (!value || ready) return;
+      ready = true;
+      readyScrollTop = node.scrollTop;
     });
+    if (isRevealed(node)) {
+      revealFrame = 0;
+      settle();
+      return;
+    }
+    let frame = 0;
+    const step = () => {
+      frame += 1;
+      if (isRevealed(node)) revealFrame = frame;
+      if (revealFrame >= 0 || frame >= maxFrames) settle();
+      else requestAnimationFrame(step);
+    };
+    requestAnimationFrame(step);
   };
   const screen = await render(<Harness {...props} listRef={listRef} onMounted={onMounted} />);
-  const node = scrollNodeOf(listRef);
-  let revealFrame = isRevealed(node) ? 0 : -1;
-  for (let frame = 1; revealFrame < 0 && frame <= maxFrames; frame += 1) {
-    await nextFrame();
-    if (isRevealed(node)) revealFrame = frame;
-  }
+  await settled;
   return {
     listRef,
     revealFrame,
+    readyScrollTop: () => readyScrollTop,
     sawReadyToRender: () => ready,
     rerender: async (next) => {
       await screen.rerender(<Harness {...next} listRef={listRef} />);
@@ -297,9 +326,9 @@ describe("LegendList web entry patch: initial end scroll arrival", () => {
       10,
     );
     try {
-      const node = scrollNodeOf(mounted.listRef);
       expect(mounted.revealFrame).toBeGreaterThan(0);
-      expect(Math.abs(node.scrollTop - 2_000)).toBeLessThanOrEqual(1);
+      expect(mounted.sawReadyToRender()).toBe(true);
+      expect(Math.abs(mounted.readyScrollTop() - 2_000)).toBeLessThanOrEqual(1);
     } finally {
       await mounted.unmount();
     }

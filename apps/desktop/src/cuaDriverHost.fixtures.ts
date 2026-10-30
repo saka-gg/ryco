@@ -2,7 +2,7 @@
 // The fake driver harness shared by the cuaDriverHost.*.test.ts suites. They are
 // separate files so their mostly sleeping tests can run in parallel workers.
 import { expect } from "vitest";
-import { mkdtemp, writeFile, chmod, rm, readFile } from "node:fs/promises";
+import { appendFile, mkdtemp, writeFile, chmod, rm, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import { CuaDriverHost } from "./cuaDriverHost.ts";
@@ -66,6 +66,14 @@ export async function fixture(
     inputDelayMs?: number;
     delayBrowserObservation?: boolean;
     delayObservation?: boolean;
+    /**
+     * Holds each `get_window_state` reply until the test calls
+     * `releaseObservation()`, so a step that must land while a read is in
+     * flight does not race a fixed delay.
+     */
+    holdObservation?: boolean;
+    /** The host's clock (see `CuaDriverHost`'s `now`). */
+    now?: () => number;
     delayListWindowsMs?: number;
     hangSession?: boolean;
     dropCancel?: boolean;
@@ -107,13 +115,16 @@ export async function fixture(
   const directory = await mkdtemp(join(tmpdir(), "synara-cua-host-test-"));
   cleanups.push(() => rm(directory, { recursive: true, force: true }));
   const log = join(directory, "events.jsonl");
+  // One character per `releaseObservation()`; the driver answers its n-th held read at n.
+  const observationGate = join(directory, "observation-releases");
   const binary = join(directory, "driver");
   options = { ...options, deathFlag: join(directory, "session-died") };
+  const driverOptions = { ...options, observationGate };
   await writeFile(
     binary,
     `#!${process.execPath}
 const net=require('node:net'),fs=require('node:fs');
-const log=${JSON.stringify(log)}, options=${JSON.stringify(options)};
+const log=${JSON.stringify(log)}, options=${JSON.stringify(driverOptions)};
 const write=event=>fs.appendFileSync(log,JSON.stringify({event,pid:process.pid,time:Date.now()})+'\\n');
 write('start');
 if(!options.unpatched){
@@ -122,7 +133,9 @@ if(!options.unpatched){
 }
 if(options.unpatched&&(process.argv.includes('--compact-cursor')||process.argv.includes('--idle-hide-ms'))) throw new Error('Upstream driver cannot parse Synara cursor flags');
 const socket=process.argv[process.argv.indexOf('--socket')+1];
-let action, timer, inputEpoch=0, interruptions=0, browserCleanupPending=false, cursorEnables=0, cursorHides=0, clipboardRestores=0;
+let action, timer, inputEpoch=0, interruptions=0, browserCleanupPending=false, cursorEnables=0, cursorHides=0, clipboardRestores=0, heldObservations=0;
+const releasedObservations=()=>{try{return fs.readFileSync(options.observationGate,'utf8').length}catch{return 0}};
+const afterObservationRelease=(send)=>{const turn=++heldObservations;const poll=()=>releasedObservations()>=turn?send():setTimeout(poll,5);poll();};
 net.createServer(s=>{
   const reply=result=>s.end(JSON.stringify({ok:true,result})+'\\n');
   s.once('data',b=>{
@@ -188,7 +201,7 @@ net.createServer(s=>{
       else if(options.clipboardReplyLost&&r.args.preserve) s.destroy();
       else reply({structuredContent:{restore_token:r.args.preserve_token,clipboard_restored:restoring&&(options.clipboardRestored??true)}});
     }
-    else if(r.name==='get_window_state' && !r.args?.empty) { write('observe'); setTimeout(()=>reply({structuredContent:{elements:r.args?.fixture_usable?[{role:"AXWindow"}]:[],window_is_on_screen:r.args?.fixture_usable===true,window_on_current_space:r.args?.fixture_usable===true,degraded:r.args?.fixture_degraded,screenshot_frame_valid:r.args?.fixture_stale!==true,pid:r.args?.pid,window_id:r.args?.fixture_wrong_window?99999:r.args?.window_id}}),options.delayObservation?60:0); }
+    else if(r.name==='get_window_state' && !r.args?.empty) { write('observe'); const send=()=>reply({structuredContent:{elements:r.args?.fixture_usable?[{role:"AXWindow"}]:[],window_is_on_screen:r.args?.fixture_usable===true,window_on_current_space:r.args?.fixture_usable===true,degraded:r.args?.fixture_degraded,screenshot_frame_valid:r.args?.fixture_stale!==true,pid:r.args?.pid,window_id:r.args?.fixture_wrong_window?99999:r.args?.window_id}}); if(options.holdObservation) afterObservationRelease(send); else setTimeout(send,options.delayObservation?60:0); }
     else if(r.name==='get_desktop_state') reply({content:[{type:'image',data:'fixture-image'}]});
     else if(r.name==='list_windows') { write('list-windows'); setTimeout(()=>{reply({structuredContent:{windows:options.listWindows||[]}});if(options.delayListWindowsMs) write('list-windows-replied');},options.delayListWindowsMs??0); }
     // Browser family observability: the persistent control connection opens
@@ -247,6 +260,7 @@ process.stdin.resume(); process.stdin.on('end',retire);
     ...(options.nativeRevision !== undefined ? { nativeRevision: options.nativeRevision } : {}),
     ...(options.ownPids ? { ownPids: options.ownPids } : {}),
     ...(options.cursorStyle ? { cursorStyle: options.cursorStyle } : {}),
+    ...(options.now ? { now: options.now } : {}),
   });
   const events = async () =>
     (await readFile(log, "utf8"))
@@ -272,7 +286,9 @@ process.stdin.resume(); process.stdin.on('end',retire);
     }
   });
   const endpoint = await host.listen();
-  return { host, endpoint, events };
+  /** Lets the driver answer the next `get_window_state` it holds (`holdObservation`). */
+  const releaseObservation = () => appendFile(observationGate, "1");
+  return { host, endpoint, events, releaseObservation };
 }
 /**
  * Physical input while the agent drives the real cursor and keyboard: the one
@@ -306,16 +322,17 @@ export async function foregroundCollision(
   await waitForEvent(f, "interrupt-ack");
 }
 
-/** Wait for a real driver event; a missed barrier must fail the test. */
+/** Wait for a real driver event (its `count`-th); a missed barrier must fail the test. */
 export async function waitForEvent(
   f: Awaited<ReturnType<typeof fixture>>,
   event: string,
+  count = 1,
 ): Promise<Array<{ event: string; pid: number; time: number }>> {
   for (let attempt = 0; attempt < 300; attempt += 1) {
     const events = await f
       .events()
       .catch(() => [] as Array<{ event: string; pid: number; time: number }>);
-    if (events.some((row) => row.event === event)) return events;
+    if (events.filter((row) => row.event === event).length >= count) return events;
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
   const events = await f.events().catch(() => []);
