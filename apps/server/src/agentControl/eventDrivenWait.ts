@@ -113,6 +113,21 @@ export const threadWakeSource = (
   );
 };
 
+/**
+ * Sleeps until the clock reads `target`. A live timer is measured on Node's
+ * monotonic clock while `Clock.currentTimeMillis` reads `Date.now()`, so a
+ * timer can end a millisecond before the clock gets there; it sleeps the rest
+ * instead of handing a check to a deadline that has not passed yet.
+ */
+const sleepUntil = (target: number) =>
+  Effect.gen(function* () {
+    let now = yield* Clock.currentTimeMillis;
+    while (now < target) {
+      yield* Effect.sleep(Duration.millis(target - now));
+      now = yield* Clock.currentTimeMillis;
+    }
+  });
+
 export interface WaitCheck<A> {
   readonly done: boolean;
   readonly value: A;
@@ -158,15 +173,12 @@ export const waitUntil = <A, E, R>(input: {
         if (current.done) return { value: current.value, timedOut: false };
         const checkedAt = yield* Clock.currentTimeMillis;
         if (checkedAt >= deadline) return { value: current.value, timedOut: true };
-        yield* Effect.race(
-          Effect.sleep(Duration.millis(Math.min(recheckMs, deadline - checkedAt))),
-          woken.await,
-        );
+        yield* Effect.race(sleepUntil(Math.min(checkedAt + recheckMs, deadline)), woken.await);
         if (!woken.isOpen()) continue;
         // Woken: coalesce a burst into one trailing check per spacing interval.
         const wokenAt = yield* Clock.currentTimeMillis;
         const earliest = Math.min(lastWokenCheckAt + spacingMs, deadline);
-        if (wokenAt < earliest) yield* Effect.sleep(Duration.millis(earliest - wokenAt));
+        if (wokenAt < earliest) yield* sleepUntil(earliest);
         lastWokenCheckAt = Math.max(wokenAt, earliest);
       }
     }),

@@ -1,5 +1,5 @@
 import { assert, it } from "@effect/vitest";
-import { Effect, Exit, Fiber, PubSub, Stream } from "effect";
+import { Clock, Duration, Effect, Exit, Fiber, PubSub, Stream } from "effect";
 import { TestClock } from "effect/testing";
 
 import {
@@ -138,6 +138,44 @@ it.effect("checks last at the deadline and reports the timeout", () =>
     assert.isTrue(yield* awaitDone(fiber));
     // Checks at 0, 5, 10 and 12 s.
     assert.deepStrictEqual(yield* Fiber.join(fiber), { value: 4, timedOut: true });
+  }),
+);
+
+it.effect("waits out a timer that fires before the clock reaches the deadline", () =>
+  Effect.gen(function* () {
+    // Node measures timers on its monotonic clock, Effect's live clock reads
+    // `Date.now()`: now and then a timer fires while `Date.now()` is still one
+    // millisecond short of where the timer was meant to end.
+    const clock = yield* Clock.Clock;
+    const earlyTimers: Clock.Clock = {
+      currentTimeMillisUnsafe: () => clock.currentTimeMillisUnsafe(),
+      currentTimeMillis: clock.currentTimeMillis,
+      currentTimeNanosUnsafe: () => clock.currentTimeNanosUnsafe(),
+      currentTimeNanos: clock.currentTimeNanos,
+      monotonicTimeNanosUnsafe: () => clock.monotonicTimeNanosUnsafe(),
+      monotonicTimeNanos: clock.monotonicTimeNanos,
+      // A timer still waits at least a millisecond.
+      sleep: (duration) => {
+        const millis = Duration.toMillis(duration);
+        return clock.sleep(Duration.millis(millis > 1 ? millis - 1 : millis));
+      },
+    };
+    const feed = yield* makeFeed;
+    const check = makeCheck();
+    const fiber = yield* Effect.forkChild(
+      waitUntil({ sources: [feed.source], check: check.check, timeoutMs: 1_200 }).pipe(
+        Effect.provideService(Clock.Clock, earlyTimers),
+      ),
+    );
+    yield* settle;
+    yield* feed.publish("relevant");
+    yield* settle;
+    assert.strictEqual(check.runs(), 2);
+    yield* TestClock.adjust(1_200);
+    assert.isTrue(yield* awaitDone(fiber));
+    // The first check, the woken check and one at the deadline: no extra check
+    // a millisecond before it.
+    assert.deepStrictEqual(yield* Fiber.join(fiber), { value: 3, timedOut: true });
   }),
 );
 
