@@ -19,6 +19,7 @@ import {
   pullRequestDiffQuery,
   pullRequestListQuery,
   PullRequestNodeOfflineError,
+  refreshPullRequestReads,
   resetPullRequestAtomsForTests,
 } from "./pullRequestAtoms";
 
@@ -147,6 +148,59 @@ describe("pull request reads", () => {
   it("has no key until the checkout and number are known", () => {
     expect(pullRequestDetailQuery.keyOf({ environmentId: ENV, cwd: null, number: 7 })).toBeNull();
     expect(pullRequestDetailQuery.keyOf({ environmentId: ENV, cwd: CWD, number: null })).toBeNull();
+  });
+});
+
+describe("refresh after a change", () => {
+  it("reads again only what the change made stale", async () => {
+    const getChangeRequestDetail = vi.fn(async (input: { reference: string }) => ({
+      ...row(Number(input.reference)),
+      body: "",
+    }));
+    const listChangeRequests = vi.fn(async () => [row(7), row(8)]);
+    const getChangeRequestDiff = vi.fn(async () => PATCH);
+    setSourceControl(ENV, { getChangeRequestDetail, listChangeRequests, getChangeRequestDiff });
+    const releases = [
+      pullRequestDetailQuery.watch({ environmentId: ENV, cwd: CWD, number: 7 }),
+      pullRequestDetailQuery.watch({ environmentId: ENV, cwd: CWD, number: 8 }),
+      pullRequestListQuery.watch({ environmentId: ENV, cwd: CWD, state: "open", limit: 100 }),
+      pullRequestDiffQuery.watch({ environmentId: ENV, cwd: CWD, number: 7, headSha: "abc1234" }),
+    ];
+    await flush();
+    expect([
+      getChangeRequestDetail.mock.calls.length,
+      listChangeRequests.mock.calls.length,
+      getChangeRequestDiff.mock.calls.length,
+    ]).toEqual([2, 1, 1]);
+
+    // A review moves #7's detail and the list rows, never a diff or another pull request.
+    refreshPullRequestReads({
+      environmentId: ENV,
+      cwd: CWD,
+      number: 7,
+      scope: { checkout: false, detail: true, activity: true, lists: true },
+    });
+    await flush();
+    expect(getChangeRequestDetail.mock.calls.map(([input]) => input.reference)).toEqual([
+      "7",
+      "8",
+      "7",
+    ]);
+    expect(listChangeRequests).toHaveBeenCalledTimes(2);
+    expect(getChangeRequestDiff).toHaveBeenCalledTimes(1);
+
+    // A merge moves the whole checkout.
+    refreshPullRequestReads({
+      environmentId: ENV,
+      cwd: CWD,
+      number: 7,
+      scope: { checkout: true, detail: false, activity: false, lists: false },
+    });
+    await flush();
+    expect(getChangeRequestDetail).toHaveBeenCalledTimes(5);
+    expect(listChangeRequests).toHaveBeenCalledTimes(3);
+    expect(getChangeRequestDiff).toHaveBeenCalledTimes(2);
+    for (const release of releases) release();
   });
 });
 

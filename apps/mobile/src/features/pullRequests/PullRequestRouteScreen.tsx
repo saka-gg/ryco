@@ -26,6 +26,8 @@ import {
   type PullRequestNextStep,
   type PullRequestThreadModel,
 } from "./pullRequestDetailModel";
+import { useHomeEnvironments } from "../home/useHomeEnvironments";
+import { PullRequestActionsPanel } from "./PullRequestActionsPanel";
 import {
   ActorLine,
   CheckDot,
@@ -35,6 +37,7 @@ import {
   PullRequestStatePill,
   SectionTitle,
 } from "./PullRequestParts";
+import { usePullRequestActions } from "./usePullRequestActions";
 import {
   usePullRequest,
   usePullRequestCheckout,
@@ -280,7 +283,10 @@ function FileRow(props: {
   );
 }
 
-/** One pull request: header, conversation, checks and files, read-only. */
+/**
+ * One pull request: header, conversation, checks and files, plus review,
+ * merge and branch update where the host, the viewer and the node allow them.
+ */
 export function PullRequestRouteScreen(props: PullRequestRouteProps) {
   const navigation = useNavigation();
   const environmentIdRaw = firstParam(props.route.params.environmentId);
@@ -298,6 +304,27 @@ export function PullRequestRouteScreen(props: PullRequestRouteProps) {
     number,
     detail: pullRequest.detail.data,
     enabled: tab === "files" && pullRequest.capabilities.diff,
+  });
+
+  // The same readiness the thread screen sends with: connected, allowed to
+  // change things, and not a cached view.
+  const environments = useHomeEnvironments();
+  const mutationReady =
+    environments.find((environment) => environment.environmentId === environmentId)
+      ?.mutationReady === true;
+  const actions = usePullRequestActions({
+    environmentId,
+    cwd: checkout.cwd,
+    number,
+    detail: pullRequest.detail.data,
+    viewer: pullRequest.activity.data?.viewer ?? null,
+    nextAction: pullRequest.nextAction,
+    capabilities: pullRequest.capabilities,
+    mutationReady,
+    // A review the viewer started on the host only counts where the host reports it.
+    hostPendingComments: pullRequest.capabilities.submitReview.pendingReview
+      ? (pullRequest.activity.data?.pendingReview?.commentsCount ?? 0)
+      : 0,
   });
 
   useEffect(() => {
@@ -356,6 +383,7 @@ export function PullRequestRouteScreen(props: PullRequestRouteProps) {
           hostName={hostName}
         />
       ) : null}
+      <PullRequestActionsPanel control={actions} />
       {loadError && detail === null ? (
         <View className="px-4 pt-3">
           <ErrorBanner message={loadError} />

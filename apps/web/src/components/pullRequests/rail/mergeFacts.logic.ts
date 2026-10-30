@@ -7,7 +7,11 @@ import type {
 import {
   changeRequestHostAllowsMerge,
   deriveChangeRequestMergeAction,
+  MERGE_METHOD_ACTION,
+  mergeDeleteBranchDefault,
+  mergeMethodOptions,
   workflowJobIdFromUrl,
+  type MergeMethodOption,
   type ChangeRequestCheck,
   type ChangeRequestChecksSummary,
   type ChangeRequestNextAction,
@@ -456,78 +460,6 @@ export function deriveMergeStatusLines(
     .map(({ line }) => line);
 }
 
-// ── Merge methods ────────────────────────────────────────────────────
-
-export const MERGE_METHODS: ReadonlyArray<SourceControlChangeRequestMergeMethod> = [
-  "squash",
-  "merge",
-  "rebase",
-];
-
-export const MERGE_METHOD_LABEL: Record<SourceControlChangeRequestMergeMethod, string> = {
-  squash: "Squash and merge",
-  merge: "Create a merge commit",
-  rebase: "Rebase and merge",
-};
-
-/** Button wording: GitHub's own ("Merge pull request" for a merge commit). */
-export const MERGE_METHOD_ACTION: Record<SourceControlChangeRequestMergeMethod, string> = {
-  squash: "Squash and merge",
-  merge: "Merge pull request",
-  rebase: "Rebase and merge",
-};
-
-export const MERGE_METHOD_CONFIRM: Record<SourceControlChangeRequestMergeMethod, string> = {
-  squash: "Confirm squash and merge",
-  merge: "Confirm merge",
-  rebase: "Confirm rebase and merge",
-};
-
-export const MERGE_METHOD_HINT: Record<SourceControlChangeRequestMergeMethod, string> = {
-  squash: "One commit on the base branch",
-  merge: "Keeps every commit plus a merge commit",
-  rebase: "Replays every commit onto the base",
-};
-
-export interface MergeMethodOption {
-  readonly method: SourceControlChangeRequestMergeMethod;
-  readonly label: string;
-  /** Why this method cannot be picked, or null when it can. */
-  readonly disabledReason: string | null;
-}
-
-/**
- * The merge methods to offer: the ones the host's provider can merge with
- * (`hostMethods`; others are not shown at all), each disabled with a reason
- * when this repository turns it off.
- */
-export function mergeMethodOptions(
-  detail: Pick<MergeFactsDetail, "mergeCapabilities">,
-  hostMethods?: ReadonlySet<SourceControlChangeRequestMergeMethod>,
-): ReadonlyArray<MergeMethodOption> {
-  return MERGE_METHODS.filter((method) => hostMethods?.has(method) ?? true).map((method) => ({
-    method,
-    label: MERGE_METHOD_LABEL[method],
-    disabledReason:
-      detail.mergeCapabilities && !detail.mergeCapabilities[method]
-        ? "Not allowed in this repository"
-        : null,
-  }));
-}
-
-/** The preferred method when the host and repository allow it, else the first they allow. */
-export function resolveMergeMethod(
-  detail: Pick<MergeFactsDetail, "mergeCapabilities">,
-  preferred: SourceControlChangeRequestMergeMethod | null,
-  hostMethods?: ReadonlySet<SourceControlChangeRequestMergeMethod>,
-): SourceControlChangeRequestMergeMethod {
-  const allowed = mergeMethodOptions(detail, hostMethods).filter(
-    (option) => option.disabledReason === null,
-  );
-  if (preferred && allowed.some((option) => option.method === preferred)) return preferred;
-  return allowed[0]?.method ?? preferred ?? "squash";
-}
-
 // ── Next action button ───────────────────────────────────────────────
 
 export type NextActionCommand =
@@ -892,19 +824,7 @@ export function deriveNextActionMenu(
       mergeRelevant && detail.mergeCapabilities
         ? mergeMethodOptions(detail, capabilities.merge.methods)
         : null,
-    deleteBranchDefault:
-      mergeRelevant && capabilities.merge.deleteBranch && detail.isCrossRepository !== true
-        ? (detail.deleteBranchOnMerge ?? false)
-        : null,
+    deleteBranchDefault: mergeRelevant ? mergeDeleteBranchDefault(detail, capabilities) : null,
     items,
   };
-}
-
-/** True when the error is the host refusing a merge because the head moved. */
-export function isHeadMovedError(error: unknown): boolean {
-  const message =
-    error instanceof Error ? error.message : typeof error === "string" ? error : String(error);
-  return /head (?:changed|moved)|changed since it was loaded|head branch was modified/iu.test(
-    message,
-  );
 }

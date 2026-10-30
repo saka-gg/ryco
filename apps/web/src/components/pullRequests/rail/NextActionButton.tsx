@@ -1,5 +1,9 @@
 import { ChevronDownIcon } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
+import {
+  MERGE_METHOD_CONFIRM,
+  MERGE_METHOD_HINT,
+} from "@ryco/client-runtime/state/pull-request-review";
 
 import { cn } from "../../../lib/utils";
 import { RollingText } from "../../chat/RollingText";
@@ -31,12 +35,7 @@ import { usePullRequestSelection } from "../PullRequestsPageContext";
 import type { PullRequestsTab } from "../pullRequestsSearch";
 import { usePullRequestsShortcut } from "../pullRequestsShortcuts";
 import { MergeThroughPopover } from "./MergeThroughPopover";
-import {
-  MERGE_METHOD_CONFIRM,
-  MERGE_METHOD_HINT,
-  type NextActionCommand,
-  type NextActionMenuItem,
-} from "./mergeFacts.logic";
+import { type NextActionCommand, type NextActionMenuItem } from "./mergeFacts.logic";
 import { PENDING_LABEL, useMergeCommands, type MergeCommands } from "./useMergeCommands";
 import { useMergeModel, type MergeModel } from "./useMergeModel";
 

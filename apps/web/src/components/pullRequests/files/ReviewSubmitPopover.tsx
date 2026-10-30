@@ -2,10 +2,10 @@ import type { ChangeRequestReviewEvent } from "@ryco/contracts";
 import {
   buildSubmitReviewInput,
   isReviewDraftCommentOutdated,
+  resolveReviewEvents,
   type ReviewDraft,
   type ReviewDraftComment,
 } from "@ryco/client-runtime/state/pull-request-review";
-import { supportsChangeRequestReviewEvent } from "@ryco/shared/changeRequestHostCapabilities";
 import { ArrowUpRightIcon, XIcon } from "lucide-react";
 import { useEffect, useRef, useState, type KeyboardEvent } from "react";
 
@@ -25,12 +25,6 @@ import {
 import { SUBMIT_SHORTCUT_LABEL } from "../threads/ReplyComposer";
 import { commentSnippet } from "../threads/reviewThread.logic";
 import { lineCommentTargetLabel } from "./pullRequestFiles.logic";
-
-const EVENTS: ReadonlyArray<{ readonly id: ChangeRequestReviewEvent; readonly label: string }> = [
-  { id: "comment", label: "Comment" },
-  { id: "approve", label: "Approve" },
-  { id: "request_changes", label: "Request changes" },
-];
 
 const CONFIRM_WINDOW_MS = 4000;
 
@@ -74,17 +68,12 @@ export function ReviewSubmitPopover(props: {
     : null;
   const headSha = selection.headSha;
   const isAuthor = viewer?.isAuthor ?? false;
-  // Verdicts the host does not take are not offered at all.
-  const events = EVENTS.filter((option) =>
-    supportsChangeRequestReviewEvent(model.capabilities, option.id),
-  );
-  const fallbackEvent = events[0]?.id ?? "comment";
-  const chosen = draft.event ?? fallbackEvent;
-  const event: ChangeRequestReviewEvent = !events.some((option) => option.id === chosen)
-    ? fallbackEvent
-    : isAuthor && chosen !== "comment"
-      ? "comment"
-      : chosen;
+  // Verdicts the host does not take are not offered at all; the author can only comment.
+  const { options: events, event } = resolveReviewEvents({
+    capabilities: model.capabilities,
+    isAuthor,
+    chosen: draft.event,
+  });
 
   const setSummary = usePullRequestReviewDraftStore((state) => state.setSummary);
   const setEvent = usePullRequestReviewDraftStore((state) => state.setEvent);
@@ -161,8 +150,8 @@ export function ReviewSubmitPopover(props: {
   // The author can only comment on their own pull request.
   const verdictGroup = rovingRadioGroup<ChangeRequestReviewEvent>({
     options: events.map((option) => ({
-      value: option.id,
-      disabled: (isAuthor && option.id !== "comment") || submit.isPending,
+      value: option.event,
+      disabled: option.disabled || submit.isPending,
     })),
     value: event,
     onChange: (next) => setEvent(draftKey, next),
@@ -199,11 +188,11 @@ export function ReviewSubmitPopover(props: {
             onKeyDown={verdictGroup.onKeyDown}
           >
             {events.map((option) => {
-              const checked = event === option.id;
+              const checked = event === option.event;
               return (
                 <button
-                  key={option.id}
-                  {...verdictGroup.radio(option.id)}
+                  key={option.event}
+                  {...verdictGroup.radio(option.event)}
                   className={cn(
                     "h-7 flex-auto rounded-md px-2.5 text-xs whitespace-nowrap outline-hidden transition-colors duration-(--app-motion-duration-chip) focus-visible:ring-2 focus-visible:ring-ring disabled:pointer-events-none disabled:opacity-45",
                     checked

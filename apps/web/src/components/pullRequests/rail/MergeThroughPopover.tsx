@@ -3,6 +3,11 @@ import type {
   SourceControlChangeRequestStack,
 } from "@ryco/contracts";
 import { useMemo, useState, type RefObject } from "react";
+import {
+  isHeadMovedError,
+  MERGE_METHOD_LABEL,
+  mergeMethodOptions,
+} from "@ryco/client-runtime/state/pull-request-review";
 
 import { cn } from "../../../lib/utils";
 import { useMergeChangeRequestMutation } from "../../../rpc/useSourceControl";
@@ -15,7 +20,6 @@ import { Spinner } from "../../ui/spinner";
 import { stackedThreadToast, toastManager } from "../../ui/toast";
 import { usePullRequestSelection, usePullRequestsPage } from "../PullRequestsPageContext";
 import { FACT_TONE_TEXT } from "./FactGlyph";
-import { isHeadMovedError, MERGE_METHOD_LABEL, mergeMethodOptions } from "./mergeFacts.logic";
 import { StackBaseFoot, SpineCell, StackMark, useStackSpine } from "./StackLayerList";
 import {
   defaultMergeThroughLayer,

@@ -15,3 +15,4 @@ export * from "./listStacks.ts";
 export * from "./listModel.ts";
 export * from "./conversationTimeline.ts";
 export * from "./files.ts";
+export * from "./merge.ts";

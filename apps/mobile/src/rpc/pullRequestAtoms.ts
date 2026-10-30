@@ -7,7 +7,8 @@
 // Environment teardown imports this module, so it stays light on the launch
 // graph: no pull request rules or patch parsing here (the screens own those).
 //
-// Read-only by construction: nothing here merges, reviews or edits. Node-owned
+// Reads only: the changes a reader makes (reviews, merges, branch updates) are
+// sent by the pull request screen and refresh these reads afterwards. Node-owned
 // pull request content lives only in the atom state — never persisted, never
 // logged — and is dropped when the environment is torn down or the
 // retained-key budget is exceeded.
@@ -19,7 +20,10 @@ import type {
   SourceControlChangeRequestDetail,
 } from "@ryco/contracts";
 import { KEY_SEP } from "@ryco/client-runtime/rpc";
-import type { PullRequestsStateFilter } from "@ryco/client-runtime/state/pull-request-review";
+import type {
+  ChangeRequestRefreshScope,
+  PullRequestsStateFilter,
+} from "@ryco/client-runtime/state/pull-request-review";
 
 import { readRpcClient } from "../connection/environmentApi";
 import { cachedPayloadBytes } from "../persistence/cacheSize";
@@ -177,6 +181,40 @@ export const pullRequestDiffQuery = pullRequestCache.defineQuery<PullRequestDiff
       ...(input.headSha ? { expectedHeadSha: input.headSha } : {}),
     }),
 });
+
+// ---------------------------------------------------------------------------
+// Refresh after a change
+// ---------------------------------------------------------------------------
+
+/**
+ * Reads again what a change to one pull request made stale, by the shared
+ * `resolveChangeRequestRefreshScope`: `checkout` is every pull request read of
+ * the checkout (lists, details, activity, diffs); otherwise this pull request's
+ * detail and activity and the checkout's lists, as the scope says.
+ */
+export function refreshPullRequestReads(input: {
+  readonly environmentId: EnvironmentId;
+  readonly cwd: string;
+  readonly number: number;
+  readonly scope: ChangeRequestRefreshScope;
+}): void {
+  const { environmentId, cwd, scope } = input;
+  const number = String(input.number);
+  pullRequestCache.refreshMatching(([label, environment, checkout, reference]) => {
+    if (environment !== environmentId || checkout !== cwd) return false;
+    if (scope.checkout) return true;
+    switch (label) {
+      case "list":
+        return scope.lists;
+      case "detail":
+        return scope.detail && reference === number;
+      case "activity":
+        return scope.activity && reference === number;
+      default:
+        return false;
+    }
+  });
+}
 
 // ---------------------------------------------------------------------------
 // Teardown

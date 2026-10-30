@@ -1,6 +1,7 @@
 import type { ChangeRequestUpdateAction } from "@ryco/contracts";
 import { preferredUpdateBranchMethod } from "@ryco/shared/changeRequestHostCapabilities";
 import { useCallback, useLayoutEffect, useRef, useState } from "react";
+import { isHeadMovedError } from "@ryco/client-runtime/state/pull-request-review";
 
 import {
   invalidateSourceControl,
@@ -10,7 +11,7 @@ import {
 import { stackedThreadToast, toastManager } from "../../ui/toast";
 import { usePullRequestAgentHandoff } from "../agentHandoff";
 import { usePullRequestSelection, usePullRequestsPage } from "../PullRequestsPageContext";
-import { isHeadMovedError, type MergeStatusLine, type NextActionCommand } from "./mergeFacts.logic";
+import { type MergeStatusLine, type NextActionCommand } from "./mergeFacts.logic";
 import { usePullRequestRailStore } from "./railStore";
 import type { MergeModel } from "./useMergeModel";
 
