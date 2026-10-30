@@ -341,6 +341,10 @@ function addedEntry(command: ThreadQueueAddCommand): QueuedFollowUp {
     status: entry.failure === undefined ? "queued" : "failed",
     ...(entry.failure === undefined ? {} : { failure: entry.failure }),
     author: command.author ?? "user",
+    // Only an agent's entry names the chat that queued it.
+    ...(command.author === "agent" && command.queuedBy !== undefined
+      ? { queuedBy: command.queuedBy }
+      : {}),
   };
 }
 
@@ -518,6 +522,7 @@ function decideQueueCommand(
             status: entry.status,
             ...(entry.failure === undefined ? {} : { failure: entry.failure }),
             author: entry.author,
+            ...(entry.queuedBy === undefined ? {} : { queuedBy: entry.queuedBy }),
           },
         },
       });

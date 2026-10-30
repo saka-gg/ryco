@@ -1196,6 +1196,11 @@ export const QueuedFollowUp = Schema.Struct({
   status: FollowUpQueueEntryStatus,
   failure: Schema.optional(FollowUpQueueEntryFailure),
   author: FollowUpQueueEntryAuthor,
+  /**
+   * The chat whose agent queued it (`author: "agent"`): only that agent edits or removes it with
+   * the `ryco_queue_*` tools. Absent on entries queued before it was recorded.
+   */
+  queuedBy: Schema.optional(ThreadId),
 });
 export type QueuedFollowUp = typeof QueuedFollowUp.Type;
 
@@ -2418,6 +2423,8 @@ export const ThreadQueueAddCommand = Schema.Struct({
   entry: Schema.Struct({ ...FollowUpQueueEntryInputFields, attachments: ChatAttachments }),
   /** Server-only: who queued it (a client always queues as the user). */
   author: Schema.optional(FollowUpQueueEntryAuthor),
+  /** Server-only: the chat whose agent queued it (`QueuedFollowUp.queuedBy`). */
+  queuedBy: Schema.optional(ThreadId),
   /** Server-only: normalization found `entry.messageId` already a message of the thread. */
   alreadySent: Schema.optional(Schema.Literal(true)),
 });

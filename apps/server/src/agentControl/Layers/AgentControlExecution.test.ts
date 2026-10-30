@@ -1317,6 +1317,8 @@ it.effect("queues a message to a busy thread's follow-up queue at once, as the a
     assert.ok(queued?.type === "thread.queue.add");
     const add = queued as unknown as ThreadQueueAddCommand;
     assert.strictEqual(add.author, "agent");
+    // The chat whose agent queued it may change it later (`ryco_queue_*`).
+    assert.strictEqual(add.queuedBy, "thread-origin");
     assert.strictEqual(add.threadId, threadId);
     assert.match(add.entry.messageId, /^message-agent-control-/);
     assert.strictEqual(add.entry.text, plan.text);

@@ -221,11 +221,35 @@ describe("follow-up queue decider: add", () => {
   it("lets only the node's own agent add keep an Agent Control message id", async () => {
     const agentAdd = addCommand("message-agent-control-op-2-send-message", {
       author: "agent",
+      queuedBy: ThreadId.make("thread-agent"),
     } as Partial<Extract<OrchestrationCommand, { type: "thread.queue.add" }>>);
     const { model } = await apply(modelWith(), agentAdd);
     const entry = model.threads[0]?.followUpQueue?.entries[0];
     expect(entry?.messageId).toBe("message-agent-control-op-2-send-message");
     expect(entry?.author).toBe("agent");
+    expect(entry?.queuedBy).toBe("thread-agent");
+    // An edit keeps who queued it; a person's add never records one.
+    const edited = await apply(model, {
+      type: "thread.queue.edit",
+      commandId: nextCommandId("edit"),
+      threadId,
+      messageId: entry!.messageId,
+      expectedRevision: entry!.revision,
+      text: "Edited",
+      attachments: [],
+      modelSelection: entry!.modelSelection,
+      runtimeMode: entry!.runtimeMode,
+      interactionMode: entry!.interactionMode,
+      createdAt: at(2),
+    } as OrchestrationCommand);
+    expect(queueOf(edited.model)?.entries[0]?.queuedBy).toBe("thread-agent");
+    const personAdd = await apply(
+      modelWith(),
+      addCommand("person-1", {
+        queuedBy: ThreadId.make("thread-agent"),
+      } as Partial<Extract<OrchestrationCommand, { type: "thread.queue.add" }>>),
+    );
+    expect(queueOf(personAdd.model)?.entries[0]).not.toHaveProperty("queuedBy");
     // Other reserved prefixes stay refused, also for the agent.
     const delegated = await refusal(
       modelWith(),

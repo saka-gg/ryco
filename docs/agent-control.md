@@ -78,6 +78,14 @@ called. This matters for clients such as Codex that cache the initial MCP catalo
   Control lease covers Computer Use only.
 - `ryco_task_status`, `ryco_task_cancel`: status, results and cancel for tasks this chat delegated
   with `returnToOrigin` (see [Delegated tasks](#delegated-tasks)).
+- `ryco_queue_list`, `ryco_queue_edit`, `ryco_queue_remove`: a thread's follow-up queue on the
+  node. The list (the `read` grant) shows every entry, next first, with its revision and `mine`:
+  whether this chat's agent queued it with `ryco_send_message` (`delivery: "queue"`). Edit and
+  remove (the `threads.send-message` grant and exact active-turn authority, run at once) change
+  only those entries, before the node sends them: an edit replaces the text at the revision the
+  list showed and keeps the entry's place, attachments, model and modes; a removal of several is
+  all or nothing. A person's entries, another chat's agent's and a schedule's stay out of reach.
+  Private sessions only.
 - `ryco_list_local_tasks`, `ryco_read_local_task`, `ryco_create_local_task`,
   `ryco_update_local_task`, `ryco_add_local_task_file`, `ryco_remove_local_task_file`,
   `ryco_start_local_task_chat`, `ryco_propose_local_task_delete`: the user's Tasks page (see

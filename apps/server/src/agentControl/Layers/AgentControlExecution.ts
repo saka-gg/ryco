@@ -1512,6 +1512,10 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
                 commandId: commandIdFor(operation.operationId, "follow-up-queue"),
                 threadId: plan.threadId,
                 author: "agent",
+                // Its chat's agent may edit or remove it later (`ryco_queue_*`).
+                ...(proposal.principal.kind === "provider-session"
+                  ? { queuedBy: proposal.principal.threadId }
+                  : {}),
                 entry: {
                   messageId,
                   text: plan.text,
