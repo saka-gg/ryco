@@ -3,7 +3,8 @@ import type {
   ChangeRequestState,
   SourceControlChangeRequestStack,
 } from "@ryco/contracts";
-import type { ChangeRequestListGroup } from "@ryco/client-runtime/state/pull-request-review";
+
+import type { ChangeRequestListGroup } from "./readiness.ts";
 
 /**
  * Stacks in the pull request list. A GitHub-native stack renders as one unit:

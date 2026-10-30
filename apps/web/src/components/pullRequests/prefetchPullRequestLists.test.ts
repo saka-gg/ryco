@@ -1,5 +1,6 @@
 import type { EnvironmentId } from "@ryco/contracts";
 import { describe, expect, it } from "vitest";
+import { PULL_REQUESTS_LIST_LIMIT } from "@ryco/client-runtime/state/pull-request-review";
 
 import { changeRequestListBinding } from "../../rpc/sourceControlAtoms";
 import { projectCheckoutKey } from "../../projectCheckouts.logic";
@@ -7,7 +8,6 @@ import {
   pullRequestListPrefetchInputs,
   resolvePullRequestListPrefetchTarget,
 } from "./prefetchPullRequestLists";
-import { PULL_REQUESTS_LIST_LIMIT } from "./pullRequestsModel.logic";
 
 const local = "local" as EnvironmentId;
 const remote = "remote" as EnvironmentId;

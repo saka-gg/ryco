@@ -4,15 +4,13 @@ import type {
   SourceControlCommentReaction,
   SourceControlCommentReactionContent,
 } from "@ryco/contracts";
-import type {
-  ChangeRequestChecksOverall,
-  ChangeRequestTimelineDisplay,
-  ChangeRequestTimelineGroup,
-} from "@ryco/client-runtime/state/pull-request-review";
-import { DateTime } from "effect";
+import * as DateTime from "effect/DateTime";
+
+import type { ChangeRequestChecksOverall } from "./checks.ts";
+import type { ChangeRequestTimelineDisplay, ChangeRequestTimelineGroup } from "./timeline.ts";
 
 /**
- * Pure helpers behind the Conversation timeline: how grouped activity and
+ * Pure helpers behind every client's Conversation timeline: how grouped activity and
  * stray review threads interleave, how commit check states map onto the
  * page's glyphs, and how a cross-reference resolves to a pull request here.
  */

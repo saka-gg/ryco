@@ -2,7 +2,7 @@ import type { ChangeRequest, SourceControlCheckRollupItem } from "@ryco/contract
 import { Option } from "effect";
 import { describe, expect, it } from "vitest";
 
-import { describePullRequestReadiness } from "./pullRequestListRows.logic";
+import { describePullRequestReadiness } from "./listReadiness.ts";
 
 function check(name: string, conclusion: string | null): SourceControlCheckRollupItem {
   return {

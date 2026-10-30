@@ -3,7 +3,6 @@ import type {
   ChangeRequestState,
   SourceControlChangeRequestStack,
 } from "@ryco/contracts";
-import type { ChangeRequestListGroup } from "@ryco/client-runtime/state/pull-request-review";
 import { describe, expect, it } from "vitest";
 
 import {
@@ -15,7 +14,8 @@ import {
   stackFootParts,
   type PullRequestListItem,
   type PullRequestStackLayer,
-} from "./pullRequestListStacks.logic";
+} from "./listStacks.ts";
+import type { ChangeRequestListGroup } from "./readiness.ts";
 
 type Row = Pick<ChangeRequest, "number" | "state" | "stackSummary">;
 

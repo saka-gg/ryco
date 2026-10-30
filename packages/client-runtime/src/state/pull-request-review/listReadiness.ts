@@ -1,9 +1,8 @@
 import type { ChangeRequest } from "@ryco/contracts";
-import {
-  deriveChangeRequestNextAction,
-  summarizeChangeRequestChecks,
-} from "@ryco/client-runtime/state/pull-request-review";
 import type { ChangeRequestListReadiness } from "@ryco/shared/changeRequestHostCapabilities";
+
+import { summarizeChangeRequestChecks } from "./checks.ts";
+import { deriveChangeRequestNextAction } from "./nextAction.ts";
 
 /**
  * What a list row says on its second line: the pull request's readiness as a

@@ -1,9 +1,11 @@
 import type { ChangeRequestReviewThread, SourceControlLabel } from "@ryco/contracts";
-import type {
-  ChangeRequestTimelineCommitItem,
-  ChangeRequestTimelineEventSummary,
-  ChangeRequestTimelineGroup,
-  ChangeRequestTimelineOtherItem,
+import {
+  commitChecksOverall,
+  sameRepositoryPullNumber,
+  type ChangeRequestTimelineCommitItem,
+  type ChangeRequestTimelineEventSummary,
+  type ChangeRequestTimelineGroup,
+  type ChangeRequestTimelineOtherItem,
 } from "@ryco/client-runtime/state/pull-request-review";
 import {
   ArrowUpRightIcon,
@@ -30,7 +32,6 @@ import { Fragment, memo, useId, useState, type MouseEvent, type ReactNode } from
 import { cn } from "../../../lib/utils";
 import { CheckStateGlyph, CHECKS_OVERALL_LABEL, RelativeTime } from "../primitives";
 import { usePullRequestSelection, usePullRequestsPage } from "../PullRequestsPageContext";
-import { commitChecksOverall, sameRepositoryPullNumber } from "./conversationTimeline.logic";
 import { ThreadSlot } from "./TimelinePost";
 import { Actor, EventLine, IconNode, TimelineItem, type TimelineNodeTone } from "./TimelineRail";
 

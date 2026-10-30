@@ -4,6 +4,7 @@ import {
   crossRepositoryHostAliases,
   mergeCrossRepositoryChangeRequests,
   planCrossRepositoryReads,
+  resolvePullRequestsStateFilter,
   type CrossRepositoryAnswer,
   type CrossRepositoryCheckout,
   type CrossRepositoryRowBase,
@@ -29,7 +30,7 @@ import { isSourceControlReadAdmitted } from "../../../rpc/sourceControlAtoms";
 import { subscribeSourceControlReadAdmission } from "../../../rpc/sourceControlReadAdmission";
 import { selectBootstrapCompleteForEnvironment, useStore } from "../../../store";
 import { usePullRequestsLayoutStore } from "../pullRequestsLayoutStore";
-import { resolvePullRequestsStateFilter, type PullRequestsSearch } from "../pullRequestsSearch";
+import type { PullRequestsSearch } from "../pullRequestsSearch";
 import {
   applyCrossRepositoryOverlays,
   attachCrossRepositoryCheckouts,

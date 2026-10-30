@@ -9,8 +9,11 @@ import {
   CROSS_REPOSITORY_ROW_LIMIT,
   crossRepositoryKeyHost,
   crossRepositoryRowKey,
+  pullRequestListFilter,
   rankChangeRequests,
   resolveCrossRepositoryCheckoutKey,
+  resolvePullRequestsStateFilter,
+  sortPullRequestGroups,
   type ChangeRequestListGroup,
   type CrossRepositoryHostAliases,
   type CrossRepositoryReadTarget,
@@ -29,8 +32,7 @@ import type {
   ProjectCheckoutOption,
 } from "../../../projectCheckouts.logic";
 import type { SourceControlQueryState } from "../../../rpc/sourceControlAtoms";
-import { pullRequestListFilter, sortPullRequestGroups } from "../pullRequestsModel.logic";
-import { resolvePullRequestsStateFilter, type PullRequestsSearch } from "../pullRequestsSearch";
+import type { PullRequestsSearch } from "../pullRequestsSearch";
 
 /**
  * The pull requests page's All repositories list: the rows every node reported

@@ -4,8 +4,10 @@ import { DateTime, Option } from "effect";
 import { describe, expect, it } from "vitest";
 
 import {
+  checkStateOverall,
   classifyCheckState,
   checkStateGroup,
+  formatWorkflowDuration,
   pullRequestCheckJobParam,
   summarizeChangeRequestChecks,
   workflowJobIdFromUrl,
@@ -105,5 +107,26 @@ describe("moved check classification", () => {
     expect(checkStateGroup).toBe(SharedChecks.checkStateGroup);
     expect(epochMillis).toBe(SharedChecks.epochMillis);
     expect(optionalValue).toBe(SharedChecks.optionalValue);
+  });
+});
+
+describe("checkStateOverall", () => {
+  it("maps job states onto the four-way glyph", () => {
+    expect(checkStateOverall("failure")).toBe("failing");
+    expect(checkStateOverall("cancelled")).toBe("failing");
+    expect(checkStateOverall("running")).toBe("pending");
+    expect(checkStateOverall("pending")).toBe("none");
+    expect(checkStateOverall("neutral")).toBe("passing");
+    expect(checkStateOverall("skipped")).toBe("none");
+  });
+});
+
+describe("formatWorkflowDuration", () => {
+  it("formats seconds, minutes and hours", () => {
+    expect(formatWorkflowDuration(null)).toBeNull();
+    expect(formatWorkflowDuration(48_000)).toBe("48s");
+    expect(formatWorkflowDuration(131_000)).toBe("2m 11s");
+    expect(formatWorkflowDuration(120_000)).toBe("2m");
+    expect(formatWorkflowDuration(3_840_000)).toBe("1h 4m");
   });
 });

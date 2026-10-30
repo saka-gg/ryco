@@ -4,7 +4,7 @@ import {
   availablePullRequestOnlyOptions,
   pullRequestFilterChips,
   togglePullRequestLabelFilter,
-} from "./pullRequestListFilters.logic";
+} from "./listFilters.ts";
 
 describe("availablePullRequestOnlyOptions", () => {
   const values = (input: Parameters<typeof availablePullRequestOnlyOptions>[0]) =>
