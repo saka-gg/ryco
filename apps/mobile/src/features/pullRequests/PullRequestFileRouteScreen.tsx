@@ -16,6 +16,7 @@ import { EmptyState } from "../../components/EmptyState";
 import { LoadingStrip } from "../../components/LoadingStrip";
 import { resolveMobileCodeSurface } from "../../lib/appearancePreferences";
 import { cn } from "../../lib/cn";
+import { openWebLink } from "../../lib/openWebLink";
 import { useThemeColor } from "../../lib/useThemeColor";
 import {
   highlightSourceFile,
@@ -32,11 +33,10 @@ import {
   pullRequestTokenSpans,
   type PullRequestDiffRow,
 } from "./pullRequestDiffModel";
-import { openPullRequestLink } from "./PullRequestParts";
 import {
-  usePullRequest,
   usePullRequestCheckout,
   usePullRequestDiff,
+  usePullRequestDetail,
   useSourceControlProvider,
 } from "./usePullRequestData";
 
@@ -107,7 +107,8 @@ export function PullRequestFileRouteScreen(props: PullRequestFileRouteProps) {
   const path = routeFilePathParam(props.route.params.path);
   const checkout = usePullRequestCheckout(environmentId, projectId);
   const provider = useSourceControlProvider(environmentId, checkout.cwd);
-  const pullRequest = usePullRequest({ environmentId, cwd: checkout.cwd, number, provider });
+  // The detail only (head, host, link): this screen shows none of the activity.
+  const pullRequest = usePullRequestDetail({ environmentId, cwd: checkout.cwd, number, provider });
   const detail = pullRequest.detail.data;
   const diff = usePullRequestDiff({
     environmentId,
@@ -270,7 +271,7 @@ export function PullRequestFileRouteScreen(props: PullRequestFileRouteProps) {
           <Pressable
             accessibilityRole="link"
             disabled={filesUrl === null}
-            onPress={() => openPullRequestLink(filesUrl)}
+            onPress={() => openWebLink(filesUrl)}
           >
             <Text className="text-2xs text-foreground-muted">
               A very large change: showing the first {parsed.rows.length} of {parsed.totalRows}{" "}
@@ -289,7 +290,7 @@ export function PullRequestFileRouteScreen(props: PullRequestFileRouteProps) {
           title="Too large to show"
           detail={`${hostName} refused to send this pull request's diff.`}
           {...(filesUrl
-            ? { actionLabel: `Open on ${hostName}`, onAction: () => openPullRequestLink(filesUrl) }
+            ? { actionLabel: `Open on ${hostName}`, onAction: () => openWebLink(filesUrl) }
             : {})}
         />
       ) : diff.status === "error" ? (

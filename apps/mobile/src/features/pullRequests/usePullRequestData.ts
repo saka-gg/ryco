@@ -29,7 +29,7 @@ import {
 import { useMobileQuery, type MobileQueryResult } from "../../rpc/useMobileQuery";
 import { selectProjectByRef, useStore } from "../../state/threadsRuntime";
 import type { PullRequestDiffReadStatus } from "./pullRequestDetailModel";
-import { readPullRequestPatchFiles, type PullRequestPatchFile } from "./pullRequestDiffModel";
+import { splitPullRequestPatch, type PullRequestPatchFile } from "./pullRequestDiffModel";
 import {
   derivePullRequestListScreen,
   pullRequestListReadInputs,
@@ -148,22 +148,20 @@ export function usePullRequestList(input: {
   };
 }
 
-export interface PullRequestData {
-  readonly capabilities: ChangeRequestHostCapabilities;
-  readonly detail: MobileQueryResult<SourceControlChangeRequestDetail>;
-  readonly activity: MobileQueryResult<ChangeRequestActivity>;
-  readonly checks: ChangeRequestChecksSummary;
-  /** Null until the detail loads. */
-  readonly nextAction: ChangeRequestNextAction | null;
-  readonly refresh: () => void;
-}
-
-export function usePullRequest(input: {
+export interface PullRequestReadInput {
   readonly environmentId: EnvironmentId | null;
   readonly cwd: string | null;
   readonly number: number | null;
   readonly provider: SourceControlProviderInfo | null;
-}): PullRequestData {
+}
+
+export interface PullRequestDetailData {
+  readonly capabilities: ChangeRequestHostCapabilities;
+  readonly detail: MobileQueryResult<SourceControlChangeRequestDetail>;
+}
+
+/** The pull request's detail alone, for a screen that shows none of its activity. */
+export function usePullRequestDetail(input: PullRequestReadInput): PullRequestDetailData {
   const { environmentId, cwd, number, provider } = input;
   const capabilities = derivePullRequestsCapabilities(provider);
   const detail = useMobileQuery(
@@ -171,6 +169,20 @@ export function usePullRequest(input: {
     { environmentId, cwd, number },
     environmentId,
   );
+  return { capabilities, detail };
+}
+
+export interface PullRequestData extends PullRequestDetailData {
+  readonly activity: MobileQueryResult<ChangeRequestActivity>;
+  readonly checks: ChangeRequestChecksSummary;
+  /** Null until the detail loads. */
+  readonly nextAction: ChangeRequestNextAction | null;
+  readonly refresh: () => void;
+}
+
+export function usePullRequest(input: PullRequestReadInput): PullRequestData {
+  const { environmentId, cwd, number } = input;
+  const { capabilities, detail } = usePullRequestDetail(input);
   // A host without activity reads (or one not known yet) is not asked.
   const activity = useMobileQuery(
     pullRequestActivityQuery,
@@ -218,8 +230,11 @@ export function usePullRequestDiff(input: {
     { environmentId, cwd, number, headSha: detail?.headSha ?? null, enabled },
     environmentId,
   );
+  // Split once per screen and patch. Nothing outside the bounded cache keeps
+  // the patch: a module-level copy would outlive the node's teardown, a Storage
+  // clear and the cache's own eviction, and Storage would not count it.
   const files = useMemo(
-    () => (query.data === null ? null : readPullRequestPatchFiles(query.data)),
+    () => (query.data === null ? null : splitPullRequestPatch(query.data)),
     [query.data],
   );
   const error = query.error?.message ?? null;

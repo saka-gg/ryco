@@ -132,22 +132,6 @@ export function splitPullRequestPatch(patch: string): ReadonlyArray<PullRequestP
   return reviewFileTreePaths(tree).flatMap((path) => byPath.get(path) ?? []);
 }
 
-let lastPatch: string | null = null;
-let lastFiles: ReadonlyArray<PullRequestPatchFile> = [];
-
-/**
- * `splitPullRequestPatch`, remembered for the last patch: the pull request
- * screen and the file screen it opens read the same cached patch, so it is
- * split once.
- */
-export function readPullRequestPatchFiles(patch: string): ReadonlyArray<PullRequestPatchFile> {
-  if (patch !== lastPatch) {
-    lastFiles = splitPullRequestPatch(patch);
-    lastPatch = patch;
-  }
-  return lastFiles;
-}
-
 export function describePullRequestDiffPresentation(
   file: Pick<PullRequestPatchFile, "binary" | "additions" | "deletions">,
 ): PullRequestDiffPresentation {

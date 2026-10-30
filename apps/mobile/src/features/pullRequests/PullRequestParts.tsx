@@ -2,11 +2,11 @@ import type {
   ChangeRequestChecksOverall,
   PullRequestReadinessTone,
 } from "@ryco/client-runtime/state/pull-request-review";
-import * as Linking from "expo-linking";
 import { Pressable, ScrollView, View } from "react-native";
 
 import { AppText as Text } from "../../components/AppText";
 import { cn } from "../../lib/cn";
+import { openWebLink } from "../../lib/openWebLink";
 import { relativeTime } from "../../lib/time";
 import {
   hasNativeSelectableMarkdownText,
@@ -153,16 +153,10 @@ export function PullRequestMarkdown(props: { readonly markdown: string }) {
       preserveSoftBreaks
       marginTop={0}
       marginBottom={0}
-      onLinkPress={(href) => {
-        void Linking.openURL(href).catch(() => undefined);
-      }}
+      // The text is the host's (anyone who can comment wrote it): only web links open.
+      onLinkPress={openWebLink}
     />
   );
-}
-
-export function openPullRequestLink(url: string | null): void {
-  if (url === null) return;
-  void Linking.openURL(url).catch(() => undefined);
 }
 
 export function SectionTitle(props: { readonly title: string; readonly detail?: string | null }) {

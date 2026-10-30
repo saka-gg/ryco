@@ -5,7 +5,6 @@ import {
   type LegendListRenderItemProps,
 } from "@legendapp/list/react-native";
 import { Image } from "expo-image";
-import * as Linking from "expo-linking";
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import {
   ActivityIndicator,
@@ -34,6 +33,7 @@ import { NavigationHeaderButton } from "../../components/NavigationHeaderButton"
 import { CopyTextButton } from "../../components/CopyTextButton";
 import { EmptyState } from "../../components/EmptyState";
 import { cn } from "../../lib/cn";
+import { openWebLink } from "../../lib/openWebLink";
 import { resolveMobileCodeSurface } from "../../lib/appearancePreferences";
 import { useThemeColor } from "../../lib/useThemeColor";
 import { useProjectReadFile, useProjectReadFileBinary } from "../../rpc/useProjectFiles";
@@ -391,13 +391,10 @@ function MarkdownFileView(props: {
         preserveSoftBreaks
         marginTop={0}
         marginBottom={0}
-        onLinkPress={(href) => {
-          // Only absolute web links leave the app. A relative link points into
-          // the workspace, and resolving one would be a navigation this
-          // read-only preview has deliberately not built.
-          if (!/^https?:\/\//iu.test(href)) return;
-          void Linking.openURL(href).catch(() => undefined);
-        }}
+        // Only absolute web links leave the app. A relative link points into
+        // the workspace, and resolving one would be a navigation this
+        // read-only preview has deliberately not built.
+        onLinkPress={openWebLink}
       />
     </ScrollView>
   );

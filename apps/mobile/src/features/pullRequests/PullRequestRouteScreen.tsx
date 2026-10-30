@@ -10,6 +10,7 @@ import { EmptyState } from "../../components/EmptyState";
 import { ErrorBanner } from "../../components/ErrorBanner";
 import { LoadingStrip } from "../../components/LoadingStrip";
 import { cn } from "../../lib/cn";
+import { openWebLink } from "../../lib/openWebLink";
 import {
   derivePullRequestDetailItems,
   derivePullRequestHeader,
@@ -30,7 +31,6 @@ import {
   CheckDot,
   ChipRow,
   FilterChip,
-  openPullRequestLink,
   PullRequestMarkdown,
   PullRequestStatePill,
   SectionTitle,
@@ -105,7 +105,7 @@ function Header(props: {
         {header.url ? (
           <Pressable
             accessibilityRole="link"
-            onPress={() => openPullRequestLink(header.url)}
+            onPress={() => openWebLink(header.url)}
             className="self-start active:opacity-70"
           >
             <Text className="text-sm font-ryco-bold text-primary">Open on {props.hostName}</Text>
@@ -230,7 +230,7 @@ function CheckRow(props: { readonly row: PullRequestCheckRow }) {
     <Pressable
       accessibilityRole={row.url ? "link" : undefined}
       disabled={row.url === null}
-      onPress={() => openPullRequestLink(row.url)}
+      onPress={() => openWebLink(row.url)}
       className="mx-4 mb-1.5 flex-row items-center gap-3 rounded-xl border border-border bg-card px-3.5 py-2.5 active:bg-card-alt"
     >
       <CheckDot overall={row.overall} showNone />

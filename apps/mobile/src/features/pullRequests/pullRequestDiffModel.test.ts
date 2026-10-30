@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+
 import { describe, expect, it } from "vitest";
 
 import {
@@ -10,7 +12,6 @@ import {
   PULL_REQUEST_DIFF_EXCERPT_ROWS,
   pullRequestDiffRowMarker,
   pullRequestTokenSpans,
-  readPullRequestPatchFiles,
   splitPullRequestPatch,
 } from "./pullRequestDiffModel";
 
@@ -97,10 +98,12 @@ describe("splitPullRequestPatch", () => {
     expect(file?.path).toBe("x y");
   });
 
-  it("splits the same patch once for the screens that share it", () => {
-    const first = readPullRequestPatchFiles(MODIFIED);
-    expect(readPullRequestPatchFiles(MODIFIED)).toBe(first);
-    expect(readPullRequestPatchFiles(ADDED_TEST)).not.toBe(first);
+  it("keeps no patch of its own: the bounded cache is the only place a diff lives", () => {
+    // A module-level copy of the last patch (megabytes of the node's source)
+    // would outlive the node's teardown, a Storage clear and the cache's
+    // eviction, and Storage would not count it.
+    const source = readFileSync(new URL("./pullRequestDiffModel.ts", import.meta.url), "utf8");
+    expect(source).not.toMatch(/^(?:let|var) /mu);
   });
 
   it("accepts CRLF patches", () => {

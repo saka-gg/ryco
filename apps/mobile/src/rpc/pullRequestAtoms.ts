@@ -161,7 +161,7 @@ export interface PullRequestDiffInput extends PullRequestInput {
   readonly headSha: string | null;
 }
 
-/** The raw patch; the screens split it (`readPullRequestPatchFiles`, memoized per patch). */
+/** The raw patch; each screen that reads it splits it (`splitPullRequestPatch`). */
 export const pullRequestDiffQuery = pullRequestCache.defineQuery<PullRequestDiffInput, string>({
   label: "diff",
   staleTime: DIFF_STALE_TIME_MS,
