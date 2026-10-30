@@ -775,10 +775,12 @@ describe("finalizing backups", () => {
     return Effect.gen(function* () {
       NodeFS.mkdirSync(home.backupsDir, { recursive: true });
       const name = formatBackupName({ stem: "state", from: 92, to: 93, at: Date.UTC(2026, 0, 1) });
+      // This process's pid, pinned: the real one could be any of the others below.
+      const ownPid = 7373;
       const files = {
         dead: `.${name}.4242.partial`,
         deadWal: `.${name}.4242.partial-wal`,
-        own: `.${name}.${process.pid}.partial`,
+        own: `.${name}.${ownPid}.partial`,
         live: `.${name}.5151.partial`,
         cloned: `.${name}.6161.partial`,
         foreignPartial: ".notes.txt.4242.partial",
@@ -792,7 +794,7 @@ describe("finalizing backups", () => {
       const daysAgo = new Date(Date.now() - 3 * 24 * 60 * 60_000);
       NodeFS.utimesSync(NodePath.join(home.backupsDir, files.cloned), daysAgo, daysAgo);
       const clean = cleanStaleBackupPartials(home.dbPath).pipe(
-        withEnvironment({ processAlive: (pid) => pid !== 4242 }),
+        withEnvironment({ pid: ownPid, processAlive: (pid) => pid !== 4242 }),
         Effect.provide(quiet),
       );
 
