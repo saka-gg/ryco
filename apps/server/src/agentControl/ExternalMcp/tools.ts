@@ -117,6 +117,10 @@ import type { AgentControlAutomationShape } from "../Services/AgentControlAutoma
 import type { AgentControlDiagnosticsShape } from "../Services/AgentControlDiagnostics.ts";
 import type { AgentControlProposalServiceShape } from "../Services/AgentControlProposalService.ts";
 import { toAgentControlProposalReceipt } from "../Services/AgentControlProposalService.ts";
+import {
+  automationDefinitionAfterUpdateInput,
+  automationDefinitionFromCreateInput,
+} from "../automationToolInput.ts";
 
 export interface ExternalMcpToolDescriptor {
   readonly name: string;
@@ -267,7 +271,7 @@ const descriptors: ReadonlyArray<ExternalMcpToolDescriptor> = [
     [
       [
         AGENT_CONTROL_EXTERNAL_MCP_TOOLS.proposeAutomationCreate,
-        "Request approval for a bounded schedule definition; every due run needs fresh approval.",
+        "Request approval for a bounded schedule definition; every due run needs fresh approval. Each run starts a new thread, or with targetThreadId queues its prompt in that existing thread of the same project.",
         [
           "requestId",
           "projectId",
@@ -311,6 +315,7 @@ const descriptors: ReadonlyArray<ExternalMcpToolDescriptor> = [
         tokenMode: { type: "string", enum: ["off", "balanced", "aggressive"] },
         envMode: { type: "string", enum: ["local", "worktree"] },
         baseRef: { anyOf: [{ type: "string", maxLength: 256 }, { type: "null" }] },
+        targetThreadId: { anyOf: [{ type: "string", maxLength: 256 }, { type: "null" }] },
         schedule: { type: "object" },
         enabled: { type: "boolean" },
       },
@@ -1036,24 +1041,7 @@ export const makeExternalMcpTools = (deps: {
           return yield* submitExternal(integration, input.requestId, {
             kind: "createAutomation",
             automationId,
-            definition: {
-              execution: {
-                projectId: input.projectId,
-                title: input.title,
-                prompt: input.prompt,
-                modelSelection: {
-                  instanceId: input.providerInstanceId,
-                  model: input.model,
-                  options: input.options,
-                },
-                runtimeMode: input.runtimeMode,
-                ...(input.tokenMode === undefined ? {} : { tokenMode: input.tokenMode }),
-                envMode: input.envMode,
-                ...(input.baseRef === undefined ? {} : { baseRef: input.baseRef }),
-              },
-              schedule: input.schedule,
-              enabled: input.enabled ?? true,
-            },
+            definition: automationDefinitionFromCreateInput(input),
           });
         }
         case AGENT_CONTROL_EXTERNAL_MCP_TOOLS.proposeAutomationUpdate: {
@@ -1070,10 +1058,6 @@ export const makeExternalMcpTools = (deps: {
           if (current.revision !== input.expectedRevision) {
             return yield* Effect.fail(new Error("Revision changed"));
           }
-          const execution = current.definition.execution;
-          const nextOptions = input.options ?? execution.modelSelection.options;
-          const nextBaseRef =
-            input.baseRef === null ? undefined : (input.baseRef ?? execution.baseRef);
           return yield* submitExternal(integration, input.requestId, {
             kind: "updateAutomation",
             automationId: current.automationId,
@@ -1083,28 +1067,7 @@ export const makeExternalMcpTools = (deps: {
               cancelled: current.cancelled,
               updatedAt: current.updatedAt,
             },
-            after: {
-              execution: {
-                projectId: execution.projectId,
-                title: input.title ?? execution.title,
-                prompt: input.prompt ?? execution.prompt,
-                modelSelection: {
-                  instanceId: input.providerInstanceId ?? execution.modelSelection.instanceId,
-                  model: input.model ?? execution.modelSelection.model,
-                  ...(nextOptions === undefined ? {} : { options: nextOptions }),
-                },
-                runtimeMode: input.runtimeMode ?? execution.runtimeMode,
-                ...(input.tokenMode !== undefined
-                  ? { tokenMode: input.tokenMode }
-                  : execution.tokenMode !== undefined
-                    ? { tokenMode: execution.tokenMode }
-                    : {}),
-                envMode: input.envMode ?? execution.envMode,
-                ...(nextBaseRef === undefined ? {} : { baseRef: nextBaseRef }),
-              },
-              schedule: input.schedule ?? current.definition.schedule,
-              enabled: input.enabled ?? current.definition.enabled,
-            },
+            after: automationDefinitionAfterUpdateInput(current, input),
           });
         }
         case AGENT_CONTROL_EXTERNAL_MCP_TOOLS.proposeAutomationCancel: {

@@ -388,6 +388,18 @@ describe("follow-up queue decider: add", () => {
     expect(await decide(released.model, release)).toEqual([]);
   });
 
+  it("lets a scheduled run queued into its chat (a heartbeat) keep its Agent Control id", async () => {
+    const automationAdd = addCommand("message-agent-control-op-3-automation-run", {
+      author: "automation",
+    } as Partial<Extract<OrchestrationCommand, { type: "thread.queue.add" }>>);
+    const heartbeat = await apply(modelWith(), automationAdd);
+    expect(heartbeat.model.threads[0]?.followUpQueue?.entries[0]?.author).toBe("automation");
+    // A person's own add may not.
+    expect(
+      (await refusal(modelWith(), addCommand("message-agent-control-op-4-automation-run"))).detail,
+    ).toContain("reserved");
+  });
+
   it("keeps a device queue's failed entry failed and its hold, and a server author", async () => {
     const { events, model } = await apply(
       modelWith(),

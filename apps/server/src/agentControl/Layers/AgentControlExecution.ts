@@ -38,6 +38,7 @@ import { GitWorkflowService, type GitWorkflowServiceShape } from "../../git/GitW
 import { OrchestrationCommandApplication } from "../../orchestration/Services/OrchestrationCommandApplication.ts";
 import { DeviceService } from "../../device/Services/DeviceService.ts";
 import { OrchestrationEngineService } from "../../orchestration/Services/OrchestrationEngine.ts";
+import { findThreadInArray } from "../../orchestration/threadIndex.ts";
 import { delegationSlotHold } from "../../orchestration/delegationSlotHold.ts";
 import { isThreadSessionWakeEvent } from "../../orchestration/threadWaitWakeEvents.ts";
 import {
@@ -325,6 +326,16 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
           Effect.mapError((error) => new Error(error.detail)),
         );
     const startup = yield* ServerRuntimeStartup;
+
+    /** A heartbeat's run logic, loaded on its first run or recovery (`heartbeatRuns.ts`). */
+    const heartbeatRuns = Effect.promise(() => import("../heartbeatRuns.ts"));
+    const queuedIn = (threadId: ThreadId) =>
+      engine.getReadModel === undefined
+        ? Effect.succeed([])
+        : Effect.map(
+            engine.getReadModel(),
+            (model) => findThreadInArray(model.threads, threadId)?.followUpQueue?.entries ?? [],
+          );
 
     const loadThread = (threadId: ThreadId) =>
       projections.getThreadShellById(threadId).pipe(
@@ -1001,6 +1012,40 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
               ]),
             },
           });
+          return operation;
+        }
+
+        // A heartbeat's run queues its prompt in its chat instead of creating one.
+        if (
+          proposal.plan.kind === "automationRun" &&
+          proposal.plan.execution.target !== undefined
+        ) {
+          const plan = proposal.plan;
+          yield* checkpoint({
+            ...operation.state,
+            resources: {
+              ...operation.state.resources,
+              automationIds: unique([
+                ...(operation.state.resources.automationIds ?? []),
+                plan.automationId,
+              ]),
+              automationRunId: plan.runId,
+            },
+          });
+          const { runHeartbeat } = yield* heartbeatRuns;
+          yield* runHeartbeat(
+            {
+              messageId: (step) => messageIdFor(operation.operationId, step),
+              commandId: (step) => commandIdFor(operation.operationId, step),
+              loadThread,
+              queuedIn,
+              coalesced: Effect.asVoid(
+                checkpoint(appendStep(operation.state, "automation-coalesced")),
+              ),
+              queue: (queued) => Effect.asVoid(dispatch("automation-queued", { queued })),
+            },
+            plan,
+          );
           return operation;
         }
 
@@ -1894,6 +1939,45 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
               });
             }
             continue;
+          }
+          // A heartbeat run whose prompt was queued (or coalesced) before a restart has done its
+          // work: the entry is in the chat's queue and the drain sends it. Counting it failed
+          // would pause an unattended schedule for nothing. So has one whose queue add committed
+          // although the restart lost its checkpoint: its message is queued, or already sent.
+          if (
+            operation.status === "running" &&
+            proposal.plan.kind === "automationRun" &&
+            proposal.plan.execution.target !== undefined
+          ) {
+            if (
+              operation.state.completedSteps.includes("automation-queued") ||
+              operation.state.completedSteps.includes("automation-coalesced")
+            ) {
+              yield* completeRecovered(proposal, operation, operation.state);
+              continue;
+            }
+            const { heartbeatRunReachedChat } = yield* heartbeatRuns;
+            const reached = yield* heartbeatRunReachedChat(
+              {
+                messageId: (step) => messageIdFor(operation.operationId, step),
+                queuedIn,
+                sentMessage: (threadId, messageId) =>
+                  projections.getThreadMessageById === undefined
+                    ? Effect.succeed(Option.none())
+                    : projections
+                        .getThreadMessageById({ threadId, messageId })
+                        .pipe(Effect.orElseSucceed(() => Option.none())),
+              },
+              proposal.plan,
+            );
+            if (reached) {
+              yield* completeRecovered(
+                proposal,
+                operation,
+                appendStep(operation.state, "automation-queued"),
+              );
+              continue;
+            }
           }
           if (proposal.plan.kind === "workspaceLifecycle") {
             yield* settleProposalFailure(proposal, operation, {

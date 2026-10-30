@@ -6,7 +6,6 @@ import {
   AGENT_CONTROL_AUTOMATION_MIN_INTERVAL_MS,
   AGENT_CONTROL_AUTOMATION_PROPOSAL_TTL_MS,
   AGENT_CONTROL_AUTOMATION_RUN_HISTORY_MAX,
-  AGENT_CONTROL_RISK_TAGS,
   AgentControlRequestId,
   type AgentControlAutomation,
   type AgentControlAutomationDefinition,
@@ -28,6 +27,7 @@ import { AgentControlPolicy } from "../Services/AgentControlPolicy.ts";
 import { AgentControlProposalEvents } from "../Services/AgentControlProposalEvents.ts";
 import { AgentControlProposalStore } from "../Services/AgentControlProposalStore.ts";
 import { AgentControlExternalIntegrationService } from "../Services/AgentControlExternalIntegration.ts";
+import { agentControlRiskTagsForPlan } from "../proposalPresentation.ts";
 
 const SCHEDULER_INTERVAL_MS = 30_000;
 const SCHEDULER_BATCH_LIMIT = 25;
@@ -530,7 +530,10 @@ export const makeAgentControlAutomationLive = (options?: AgentControlAutomationL
                   AGENT_CONTROL_CAPABILITIES.externalSharedCheckout,
                 )) &&
               (definition.execution.runtimeMode !== "full-access" ||
-                current?.capabilities.includes(AGENT_CONTROL_CAPABILITIES.externalFullAccess));
+                current?.capabilities.includes(AGENT_CONTROL_CAPABILITIES.externalFullAccess)) &&
+              // A heartbeat queues into an existing chat: thread control.
+              (definition.execution.target === undefined ||
+                current?.capabilities.includes(AGENT_CONTROL_CAPABILITIES.externalControlThreads));
             if (
               current === undefined ||
               !projectAllowed ||
@@ -554,24 +557,26 @@ export const makeAgentControlAutomationLive = (options?: AgentControlAutomationL
             }
           }
           const now = new Date();
+          const execution = automation.value.definition.execution;
+          const plan = {
+            kind: "automationRun" as const,
+            automationId: run.automationId,
+            runId: run.runId,
+            automationRevision: run.automationRevision,
+            scheduledFor: run.scheduledFor,
+            coalescedOccurrences: run.coalescedOccurrences,
+            execution,
+          };
           const submitted = yield* proposals.submit({
             principal: automation.value.principal,
             requestId: AgentControlRequestId.make(`automation-run:${run.runId}`),
-            plan: {
-              kind: "automationRun",
-              automationId: run.automationId,
-              runId: run.runId,
-              automationRevision: run.automationRevision,
-              scheduledFor: run.scheduledFor,
-              coalescedOccurrences: run.coalescedOccurrences,
-              execution: automation.value.definition.execution,
-            },
-            riskTags: [
-              AGENT_CONTROL_RISK_TAGS.scheduledRun,
-              AGENT_CONTROL_RISK_TAGS.createsThreads,
-              AGENT_CONTROL_RISK_TAGS.startsProviderTurn,
-            ],
-            promptSummary: `Scheduled run for ${automation.value.definition.execution.title}`,
+            plan,
+            // A heartbeat's run queues into its chat and creates none.
+            riskTags: agentControlRiskTagsForPlan(plan),
+            promptSummary:
+              execution.target === undefined
+                ? `Scheduled run for ${execution.title}`
+                : `Scheduled run for ${execution.title}, queued in thread ${execution.target.threadId}`,
             now: now.toISOString(),
             expiresAt: new Date(
               now.getTime() + AGENT_CONTROL_AUTOMATION_PROPOSAL_TTL_MS,

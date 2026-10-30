@@ -640,6 +640,17 @@ export type AgentControlChangeSettingsPlan = typeof AgentControlChangeSettingsPl
  * exists in this schema. Each due occurrence copies this exact template into
  * a fresh `automationRun` proposal that still requires user approval.
  */
+/**
+ * Where a scheduled run goes: absent, a new chat each time; `thread`, the follow-up queue of one
+ * existing chat of the same project (a heartbeat), as an `automation` entry the chat's queue
+ * holds and sends like its other follow-ups, with the chat's current model and modes.
+ */
+export const AgentControlAutomationTarget = Schema.Struct({
+  kind: Schema.Literal("thread"),
+  threadId: ThreadId,
+}).pipe(rejectExcessProperties);
+export type AgentControlAutomationTarget = typeof AgentControlAutomationTarget.Type;
+
 export const AgentControlAutomationExecutionTemplate = Schema.Struct({
   projectId: ProjectId,
   title: AgentControlTitle,
@@ -651,6 +662,7 @@ export const AgentControlAutomationExecutionTemplate = Schema.Struct({
   tokenMode: Schema.optional(AgentTokenMode),
   envMode: ThreadEnvMode,
   baseRef: Schema.optional(TrimmedNonEmptyString.check(Schema.isMaxLength(256))),
+  target: Schema.optional(AgentControlAutomationTarget),
 }).pipe(rejectExcessProperties);
 export type AgentControlAutomationExecutionTemplate =
   typeof AgentControlAutomationExecutionTemplate.Type;

@@ -1975,6 +1975,183 @@ it.effect("keeps automation runs as plain thread creates even for provider-sessi
   }),
 );
 
+const heartbeatProposal = (): AgentControlProposal => {
+  const heartbeatPlan = {
+    kind: "automationRun" as const,
+    automationId: AgentControlAutomationId.make("automation-heartbeat"),
+    runId: AgentControlAutomationRunId.make("automation-heartbeat-run"),
+    automationRevision: 1,
+    scheduledFor: now,
+    coalescedOccurrences: 0,
+    execution: {
+      projectId,
+      title: "Check CI",
+      prompt: "Check CI and continue.",
+      modelSelection: { instanceId: ProviderInstanceId.make("claude"), model: "sonnet" },
+      runtimeMode: "approval-required" as const,
+      envMode: "local" as const,
+      target: { kind: "thread" as const, threadId },
+    },
+  };
+  return {
+    ...approvedProposal,
+    plan: heartbeatPlan,
+    planDigest: computeAgentControlPlanDigest(heartbeatPlan),
+  };
+};
+
+const runHeartbeat = (
+  shell: OrchestrationThreadShell,
+  queued: ReadonlyArray<{ readonly messageId: string; readonly author: string }> = [],
+) =>
+  Effect.gen(function* () {
+    const proposal = heartbeatProposal();
+    const stores = yield* makeExecutionStores(proposal);
+    const commands: DispatchedCommand[] = [];
+    const executor = yield* makeTestExecution({
+      ...stores,
+      engine: {
+        getReadModel: () =>
+          Effect.succeed({
+            threads: [{ id: threadId, followUpQueue: { entries: queued, hold: null } }],
+          }),
+      },
+      projections: {
+        getShellSnapshot: () =>
+          Effect.succeed({ projects: [{ id: projectId, workspaceRoot: "/workspace/project" }] }),
+        getThreadShellById: (id: ThreadId) =>
+          Effect.succeed(id === threadId ? Option.some(shell) : Option.none()),
+      },
+      commandApplication: {
+        apply: (command: DispatchedCommand) =>
+          Effect.sync(() => {
+            commands.push(command);
+            return { sequence: commands.length };
+          }),
+        applyInternal: (command: DispatchedCommand) =>
+          Effect.sync(() => {
+            commands.push(command);
+            return { sequence: commands.length };
+          }),
+      },
+    });
+    yield* executor.executeApproved(proposal.proposalId);
+    return { commands, proposal: yield* Ref.get(stores.proposalRef), stores };
+  });
+
+it.effect("queues a heartbeat run's prompt in its chat as the automation's, creating nothing", () =>
+  Effect.gen(function* () {
+    const { commands, proposal, stores } = yield* runHeartbeat(target);
+    assert.strictEqual(proposal.status, "completed");
+    assert.deepStrictEqual(
+      commands.map((command) => command.type),
+      ["thread.queue.add"],
+    );
+    const add = commands[0] as unknown as ThreadQueueAddCommand;
+    assert.strictEqual(add.author, "automation");
+    assert.strictEqual(add.threadId, threadId);
+    assert.match(
+      add.entry.messageId,
+      /^message-agent-control-.*-automation-run-of-automation-heartbeat$/,
+    );
+    assert.strictEqual(add.entry.text, "Check CI and continue.");
+    // The chat's model and modes; the run's runtime mode caps what the drain sends it with.
+    assert.deepStrictEqual(add.entry.modelSelection, target.modelSelection);
+    assert.strictEqual(add.entry.interactionMode, target.interactionMode);
+    assert.strictEqual(add.entry.runtimeMode, "approval-required");
+    // The chat is not the run's: nothing would undo or archive it.
+    const operation = Option.getOrThrow(yield* Ref.get(stores.operationRef));
+    assert.deepStrictEqual(operation.state.resources.threadIds, []);
+    assert.strictEqual(operation.state.resources.automationRunId, "automation-heartbeat-run");
+  }),
+);
+
+it.effect("adds no second entry while the schedule's last one still waits in the chat", () =>
+  Effect.gen(function* () {
+    const first = yield* runHeartbeat(target);
+    const add = first.commands[0] as unknown as ThreadQueueAddCommand;
+    assert.match(add.entry.messageId, /-of-automation-heartbeat$/);
+    // That entry is still queued (held, say) when the next run comes: it coalesces.
+    const second = yield* runHeartbeat(target, [
+      { messageId: add.entry.messageId, author: "automation" },
+    ]);
+    assert.strictEqual(second.proposal.status, "completed");
+    assert.deepStrictEqual(second.commands, []);
+    // Another schedule's entry or a person's does not count.
+    const third = yield* runHeartbeat(target, [
+      {
+        messageId: "message-agent-control-op-automation-run-of-automation-other",
+        author: "automation",
+      },
+      { messageId: "person-1", author: "user" },
+    ]);
+    assert.lengthOf(third.commands, 1);
+  }),
+);
+
+it.effect("completes a heartbeat run after a restart when its message reached the chat", () =>
+  Effect.gen(function* () {
+    // The queue add committed, then the restart lost the run's checkpoint.
+    const recover = (sent: boolean) =>
+      Effect.gen(function* () {
+        const proposal = { ...heartbeatProposal(), status: "executing" as const };
+        const stores = yield* makeExecutionStores(proposal);
+        const inserted = yield* stores.operationStore.createForProposal();
+        yield* stores.operationStore.transition({
+          expectedStatus: "pending",
+          nextStatus: "running",
+          attempt: 1,
+          state: inserted.operation.state,
+          result: null,
+        });
+        const asked: string[] = [];
+        const execution = yield* makeTestExecution({
+          proposalStore: stores.proposalStore,
+          operationStore: {
+            ...stores.operationStore,
+            listRecoverable: () =>
+              Ref.get(stores.operationRef).pipe(
+                Effect.map((o) =>
+                  Option.isSome(o) && o.value.status === "running" ? [o.value] : [],
+                ),
+              ),
+          },
+          engine: {
+            getReadModel: () =>
+              Effect.succeed({
+                threads: [{ id: threadId, followUpQueue: { entries: [], hold: null } }],
+              }),
+          },
+          projections: {
+            // The drain already sent it: it is a message of the chat now.
+            getThreadMessageById: (input: { threadId: ThreadId; messageId: MessageId }) =>
+              Effect.sync(() => {
+                asked.push(input.messageId);
+                return sent ? Option.some({ id: input.messageId }) : Option.none();
+              }),
+          },
+          commandApplication: { apply: () => Effect.die("must not queue again") },
+        });
+        yield* execution.recoverIncomplete;
+        return { settled: yield* Ref.get(stores.proposalRef), asked };
+      });
+    const sent = yield* recover(true);
+    assert.strictEqual(sent.settled.status, "completed");
+    assert.match(sent.asked[0] ?? "", /-automation-run-of-automation-heartbeat$/);
+    // Nothing reached the chat: the run failed, as any run a restart cut off.
+    const lost = yield* recover(false);
+    assert.strictEqual(lost.settled.status, "failed");
+  }),
+);
+
+it.effect("fails a heartbeat run whose chat was archived, queueing nothing", () =>
+  Effect.gen(function* () {
+    const { commands, proposal } = yield* runHeartbeat({ ...target, archivedAt: now });
+    assert.strictEqual(proposal.status, "failed");
+    assert.deepStrictEqual(commands, []);
+  }),
+);
+
 it.effect("keeps external-integration createThreads children as plain thread creates", () =>
   Effect.gen(function* () {
     const proposal: AgentControlProposal = {

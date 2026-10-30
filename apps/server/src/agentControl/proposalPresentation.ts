@@ -59,11 +59,14 @@ export const agentControlRiskTagsForPlan = (
     case "cancelAutomation":
       return [AGENT_CONTROL_RISK_TAGS.cancelsAutomation];
     case "automationRun":
-      return [
-        AGENT_CONTROL_RISK_TAGS.scheduledRun,
-        AGENT_CONTROL_RISK_TAGS.createsThreads,
-        AGENT_CONTROL_RISK_TAGS.startsProviderTurn,
-      ];
+      // A heartbeat queues into an existing chat; any other run creates one.
+      return plan.execution.target === undefined
+        ? [
+            AGENT_CONTROL_RISK_TAGS.scheduledRun,
+            AGENT_CONTROL_RISK_TAGS.createsThreads,
+            AGENT_CONTROL_RISK_TAGS.startsProviderTurn,
+          ]
+        : [AGENT_CONTROL_RISK_TAGS.scheduledRun, AGENT_CONTROL_RISK_TAGS.startsProviderTurn];
     case "deviceOpenUrl":
       return [AGENT_CONTROL_RISK_TAGS.deviceMutation, AGENT_CONTROL_RISK_TAGS.deviceOpenWorld];
     case "deviceBoot":
@@ -82,6 +85,11 @@ export const agentControlRiskTagsForPlan = (
       return [AGENT_CONTROL_RISK_TAGS.deviceMutation];
   }
 };
+
+/** Where a heartbeat's runs go: the queue of an existing thread. */
+const automationTargetSummary = (execution: {
+  readonly target?: { readonly threadId: string } | undefined;
+}) => (execution.target === undefined ? "" : `, queued in thread ${execution.target.threadId}`);
 
 export const agentControlPromptSummaryForPlan = (plan: AgentControlActionPlan): string => {
   switch (plan.kind) {
@@ -123,13 +131,13 @@ export const agentControlPromptSummaryForPlan = (plan: AgentControlActionPlan): 
     case "changeSettings":
       return `Change ${plan.change.kind}`;
     case "createAutomation":
-      return `Create automation ${plan.automationId}; each run requires separate approval`;
+      return `Create automation ${plan.automationId}${automationTargetSummary(plan.definition.execution)}; each run requires separate approval`;
     case "updateAutomation":
-      return `Update automation ${plan.automationId} from revision ${plan.before.revision}`;
+      return `Update automation ${plan.automationId} from revision ${plan.before.revision}${automationTargetSummary(plan.after.execution)}`;
     case "cancelAutomation":
       return `Cancel future runs for automation ${plan.automationId}`;
     case "automationRun":
-      return `Approve scheduled run ${plan.runId}`;
+      return `Approve scheduled run ${plan.runId}${automationTargetSummary(plan.execution)}`;
     case "deviceBoot":
     case "deviceAttach":
     case "deviceDetach":
