@@ -1,89 +1,94 @@
-# Ryco — Marketing Site
+# Ryco marketing site
 
-A standalone marketing site for **Ryco** (a fast local workspace for coding agents),
-shipping **six distinct, premium art directions** of the same landing page so the
-team can pick a direction. Every version is **led by real product screenshots**
-(captured from the running app) and uses the **authentic provider marks** the app
-itself ships.
-
-| Route | Direction         | Vibe                                   | Animation          |
-| ----- | ----------------- | -------------------------------------- | ------------------ |
-| `/`   | Overview          | Neutral gallery / picker               | —                  |
-| `/1`  | **Precision**     | Linear/Vercel-grade dark product       | GSAP ScrollTrigger |
-| `/2`  | **Datasheet**     | Technical monospace spec-sheet (light) | GSAP, mechanical   |
-| `/3`  | **Editorial**     | Swiss serif magazine (light)           | anime.js v4        |
-| `/4`  | **Kinetic**       | Motion-led scroll storytelling (dark)  | GSAP pin + scrub   |
-| `/5`  | **Brutalist**     | High-contrast typographic (B/W + blue) | anime.js v4        |
-| `/6`  | **Control Plane** | t3.codes-style, screenshot-led (light) | GSAP ScrollTrigger |
+The landing page (`/`) and changelog (`/changelog`) for Ryco. It is a motion-led
+product site: the centrepiece is a coded, faithful replica of the Ryco desktop
+window that plays a complete agent run as you scroll, next to real product
+captures and a section for Ryco Cloud (the hosted Hub at app.ryco.space).
 
 ## Stack
 
-- **React 19** + **react-router-dom** (routes `/1`…`/5`, lazy-loaded & code-split)
-- **Tailwind v4** (`@tailwindcss/vite`)
-- **GSAP** (+ ScrollTrigger) and **anime.js v4** for motion
-- **Vite 6**, TypeScript strict
-- Inline SVG brand/OS icons (`src/assets/brands.tsx`) — no icon CDN
-- `lucide-react` for UI glyphs
+- React 19, react-router-dom, Tailwind v4 (`@tailwindcss/vite`), Vite, TypeScript strict
+- GSAP 3.15 with ScrollTrigger, SplitText, DrawSVG, ScrambleText and CustomEase
+  (all plugins ship in the public `gsap` package)
+- Lenis smooth scroll, driven from the GSAP ticker so ScrollTrigger never lags it
+- Fonts: Archivo (variable width + weight, animated), DM Sans (the app's own UI
+  face), Geist Mono
 
 It lives outside the monorepo workspace globs on purpose, so its dependency tree
 never disturbs the pinned Effect/Bun catalog used by `apps/web`.
 
-## Develop
+## Art direction
 
-```bash
-cd marketing
-bun install      # or npm install
-bun run dev      # http://localhost:5174  (try /1 … /5)
-```
-
-## Build
-
-```bash
-bun run build    # → marketing/dist
-bun run preview  # serve the production build on :4173
-```
+- One dark canvas (`--color-canvas`), one accent: "ignition" orange `#ff5c28`
+  (`--color-accent`, `ACCENT` in `src/site/theme.ts`). Dark text on accent fills.
+- Headlines end in an accent period; that is the only decorative device.
+- Motion uses the app's own house curve (`cubic-bezier(0.16, 1, 0.3, 1)`,
+  registered as the GSAP ease `"ryco"`), so the site and product move alike.
 
 ## Structure
 
 ```
 src/
-  data/content.ts            # single source of truth (features, providers, platforms, copy)
-  assets/brands.tsx          # authentic provider + OS icons (the app's own marks, themeable)
-  assets/RycoLogo.tsx        # vector wordmark + raster app mark
-  components/shared/         # ScreenshotFrame (window chrome for real captures), VersionSwitcher
-  lib/                       # cn(), GSAP motion helpers
-  versions/Index.tsx         # the "/" gallery
-  versions/v1..v6/           # the six self-contained landing pages
+  data/content.ts        copy and product facts (providers, platforms, shots, Cloud, FAQ)
+  lib/motion.ts          GSAP registration, eases, useGsap(), Lenis, reduced-motion hook
+  lib/useMediaQuery.ts   shared narrow-screen query
+  site/HomePage.tsx      composes the sections below
+  site/ProductFilm.tsx   kinetic hero + pinned product film with chapter rail
+  site/stage/            the coded app replica
+    Stage.tsx            1280x800 design canvas, scaled (and cropped on phones)
+    film.ts              the scroll-scrubbed timeline: Ask, Work, Parallel, Review, Run
+    script.ts            the screenplay (prompt, tool rows, diff, terminal, six panes)
+  site/Agents.tsx        provider roster with width-axis hover + trailing preview
+  site/Gallery.tsx       real captures, pinned horizontal pan
+  site/Toolkit.tsx       five live micro-demos (worktrees, ⌘K, # issues, themes, traces)
+  site/Cloud.tsx         Ryco Cloud relay diagram
+  site/Download.tsx      OS-detected platforms + typing terminal
+  site/Faq.tsx, Finale.tsx, Nav.tsx, ui/
+  pages/ChangelogPage.tsx
 ```
 
-All five versions share `data/content.ts` so the copy stays factually consistent
-with the real product while the layouts diverge hard.
+### The Stage and the film
+
+`Stage.tsx` renders the _settled_ composition (finished conversation, review
+panel open). That is exactly what shows under `prefers-reduced-motion`. With
+motion on, `film.ts` rewinds it to an empty thread with explicit `gsap.set`s and
+builds the run from `.to()` tweens only, so scrubbing backwards is exact. Text is
+typed by writing slices into React's existing text nodes. Animation targets are
+tagged `data-s="…"`. Because the canvas has fixed coordinates, the camera
+(`data-s="cam"`) and the scripted cursor can be choreographed precisely; phones
+use `NARROW_CROP` to frame the chat column and the camera pans to panels.
+
+## Develop
+
+```bash
+cd marketing
+bun install
+bun run dev        # http://localhost:5174
+```
+
+## Build and checks
+
+```bash
+bunx tsc --noEmit && bunx vite build
+node scripts/errcheck.mjs   # loads / and /changelog with motion on, reports console errors
+MOTION=off node scripts/shoot.mjs   # settled (reduced-motion) captures into screenshots/
+```
 
 ## Real product screenshots
 
-The screenshots in `public/shots/` are **real captures of the running Ryco app**
-(not mockups). To regenerate them:
+`public/shots/` holds real captures of the running app (dark mode, account
+identities blurred). The `.png` files are the sources; `bun run assets:optimize`
+regenerates the responsive lossless WebP variants and `src/lib/screenshotAssets.json`,
+and pages render them through `screenshotImageProps()`. To recapture, boot the server
+with this repo as a project and drive it with `scripts/app-shots.mjs`:
 
 ```bash
-# from the repo root — build + boot the server with this repo as a project
+# from the repo root
 bunx turbo run build --filter=ryco-cli
 RYCO_HOME=/tmp/ryco-shots RYCO_PORT=13773 RYCO_HOST=127.0.0.1 RYCO_MODE=web \
   RYCO_NO_BROWSER=1 RYCO_AUTO_BOOTSTRAP_PROJECT_FROM_CWD=1 \
   node apps/server/dist/bin.mjs            # prints a one-time /pair#token=… URL
 
-# then, with that token:
 cd marketing
 RYCO_TOKEN=<token> node scripts/app-shots.mjs   # → marketing/app-screenshots/
 ```
-
-`app-shots.mjs` pairs once, drives the live app (composer, model picker, command
-palette, terminal, providers, appearance) and blurs account identities (PII).
-Copy the chosen frames into `public/shots/`.
-
-## Page screenshots
-
-`node scripts/shoot.mjs` boots a preview server and captures `/` and `/1`…`/6`
-to `screenshots/`. `MOTION=off` captures the fully-settled (reduced-motion) state;
-`ROUTES=/4 node scripts/shoot.mjs` limits to specific routes. Requires Playwright
-(`bunx playwright install chromium`). `scripts/errcheck.mjs` loads every route with
-motion on and reports console errors.

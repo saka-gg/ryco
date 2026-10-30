@@ -4,7 +4,7 @@ import { spawn } from "node:child_process";
 import { setTimeout as sleep } from "node:timers/promises";
 
 const BASE = "http://localhost:4173";
-const ROUTES = process.env.ROUTES ? process.env.ROUTES.split(",") : ["/", "/4"];
+const ROUTES = process.env.ROUTES ? process.env.ROUTES.split(",") : ["/", "/changelog"];
 const server = spawn("npx", ["vite", "preview", "--port", "4173"], {
   cwd: new URL("..", import.meta.url).pathname,
   stdio: "ignore",

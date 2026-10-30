@@ -1,6 +1,6 @@
 /**
  * Capture showcase screenshots of every version.
- * Boots `vite preview` on :4173, then shoots `/` and `/1`…`/5` at desktop +
+ * Boots `vite preview` on :4173, then shoots `/` and `/changelog` at desktop +
  * mobile widths into ./screenshots. Requires Playwright chromium.
  *
  *   bunx playwright install chromium
@@ -12,9 +12,7 @@ import { mkdir } from "node:fs/promises";
 import { setTimeout as sleep } from "node:timers/promises";
 
 const BASE = "http://localhost:4173";
-const ROUTES = process.env.ROUTES
-  ? process.env.ROUTES.split(",")
-  : ["/", "/1", "/2", "/3", "/4", "/5", "/6"];
+const ROUTES = process.env.ROUTES ? process.env.ROUTES.split(",") : ["/", "/changelog"];
 const OUT = new URL("../screenshots/", import.meta.url).pathname;
 
 async function waitForServer(url, tries = 60) {
