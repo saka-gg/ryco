@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
 import {
   isWorktreeSetupFeedSettled,
+  newWorktreeBaseBranch,
   resolveWorktreeLaunchWorkStartedAt,
   resolveWorktreeSetupScriptChip,
   resolveWorktreeSetupStages,
@@ -190,5 +191,17 @@ describe("worktree launch feed", () => {
       threadId,
     });
     expect(readWorktreeLaunch(key)?.feedUnavailable).toBe(true);
+  });
+});
+
+describe("newWorktreeBaseBranch", () => {
+  it("defaults to origin HEAD and qualifies local defaults when fetching", () => {
+    expect(newWorktreeBaseBranch(null, true)).toBe("origin/HEAD");
+    expect(newWorktreeBaseBranch("main", true)).toBe("origin/main");
+    expect(newWorktreeBaseBranch("origin/feature", true)).toBe("origin/feature");
+  });
+  it("uses the local checkout or selected ref when fetching is disabled", () => {
+    expect(newWorktreeBaseBranch(null, false)).toBe("HEAD");
+    expect(newWorktreeBaseBranch("main", false)).toBe("main");
   });
 });

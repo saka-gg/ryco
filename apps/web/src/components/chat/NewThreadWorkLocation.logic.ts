@@ -137,17 +137,3 @@ export function showsBranchSlot(location: WorkLocation): boolean {
 export function branchSlotPreposition(location: WorkLocation): "from" | "on" {
   return location.kind === "newWorktree" ? "from" : "on";
 }
-
-/** Resolve new-worktree bases without silently falling back to a local branch. */
-export function newWorktreeBaseBranch(
-  branch: string | null | undefined,
-  fetchOrigin: boolean,
-): string {
-  const selected = branch?.trim();
-  if (!fetchOrigin) return selected || "HEAD";
-  return selected
-    ? selected.startsWith("origin/")
-      ? selected
-      : `origin/${selected}`
-    : "origin/HEAD";
-}

@@ -210,6 +210,15 @@ import {
 import { useHomeEnvironments } from "../home/useHomeEnvironments";
 import { TerminalHeaderButton } from "../terminal/TerminalHeaderButton";
 import { useRepositoryStatus } from "../newTask/useNewTaskRepository";
+import { NewTaskLaunchCard } from "../newTask/NewTaskLaunchCard";
+import { useWorktreeLaunchStore } from "@ryco/client-runtime/state/worktree-setup";
+import {
+  deriveNewTaskLaunchView,
+  newTaskLaunchKey,
+  retryNewTaskLaunch,
+  useNewTaskLaunchStore,
+} from "../newTask/newTaskLaunch";
+import { createNewTaskLaunchDeps } from "../newTask/newTaskLaunchRuntime";
 import { AgentControlProposalCard } from "./AgentControlProposalCard";
 import {
   runEditFromHere,
@@ -587,6 +596,17 @@ export function ThreadDetailScreen(props: {
   );
 
   const built = useThreadTimeline(environmentId, threadId);
+  // A task sent from New Task opens here before the node shows it: the launch
+  // carries it (setup stages, failure, Retry, Edit task) until the thread has
+  // messages of its own.
+  const launchKey = newTaskLaunchKey(environmentId, threadId);
+  const newTaskLaunch = useNewTaskLaunchStore((state) => state.launchesByKey[launchKey]);
+  const worktreeLaunch = useWorktreeLaunchStore((state) => state.launchesByKey[launchKey]);
+  const threadHasMessages = (built?.timeline.length ?? 0) > 0;
+  const launchView = useMemo(
+    () => deriveNewTaskLaunchView({ launch: newTaskLaunch, worktreeLaunch, threadHasMessages }),
+    [newTaskLaunch, threadHasMessages, worktreeLaunch],
+  );
   // Capability-routed file attachments: capability + direct HTTP base enable the
   // streaming upload path; without either, only the legacy image dataUrl flow.
   const fileUploadMaxBytes = useComposerFileUploadMaxBytes(environmentId);
@@ -2539,18 +2559,30 @@ export function ThreadDetailScreen(props: {
             ) : null
           }
           ListEmptyComponent={
-            <View className="px-4 py-16">
-              <EmptyState
-                variant="plain"
-                title={built ? (thread?.title ?? "Task") : "Loading task"}
-                detail={
-                  cachedView.emptyStateDetail ??
-                  (built
-                    ? "No messages yet. Send one to get started."
-                    : "Syncing the conversation from the node.")
+            launchView ? (
+              <NewTaskLaunchCard
+                view={launchView}
+                onRetry={() =>
+                  retryNewTaskLaunch(launchKey, createNewTaskLaunchDeps(environmentId))
+                }
+                onEdit={() =>
+                  navigation.dispatch(StackActions.replace("NewTask", { editLaunchKey: launchKey }))
                 }
               />
-            </View>
+            ) : (
+              <View className="px-4 py-16">
+                <EmptyState
+                  variant="plain"
+                  title={built ? (thread?.title ?? "Task") : "Loading task"}
+                  detail={
+                    cachedView.emptyStateDetail ??
+                    (built
+                      ? "No messages yet. Send one to get started."
+                      : "Syncing the conversation from the node.")
+                  }
+                />
+              </View>
+            )
           }
         />
       </HtmlRenderFullScreenProvider>
@@ -2693,7 +2725,8 @@ export function ThreadDetailScreen(props: {
         attachmentError={attachmentError}
         sendBlock={sendBlock}
         fileUploadRecords={fileUploadRecords}
-        disabled={cachedView.composerDisabled}
+        // Nothing to send into until the node has created the launched task.
+        disabled={cachedView.composerDisabled || (launchView !== null && !thread)}
         {...(sendRedirectsApprovals ? { placeholder: APPROVAL_REDIRECT_PLACEHOLDER } : {})}
         policyModel={policyModel}
         policyDisabled={policyBusy || cachedView.actionsDisabled}

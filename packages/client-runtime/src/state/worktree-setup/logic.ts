@@ -153,3 +153,21 @@ export function resolveWorktreeLaunchWorkStartedAt(
   }
   return launch.startedAt;
 }
+
+/**
+ * The ref a new worktree branches from: the chosen branch, or the repository's
+ * default, from origin when the setup fetches it. Never a silent fall back to
+ * a local branch while fetching. Web and mobile send the same base.
+ */
+export function newWorktreeBaseBranch(
+  branch: string | null | undefined,
+  fetchOrigin: boolean,
+): string {
+  const selected = branch?.trim();
+  if (!fetchOrigin) return selected || "HEAD";
+  return selected
+    ? selected.startsWith("origin/")
+      ? selected
+      : `origin/${selected}`
+    : "origin/HEAD";
+}

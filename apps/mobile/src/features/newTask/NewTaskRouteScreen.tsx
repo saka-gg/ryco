@@ -13,7 +13,7 @@ import {
   getAutoRuntimeModeUnavailableReason,
   normalizeInteractionModeForProviderTarget,
 } from "@ryco/client-runtime/state/composer";
-import { scopeProjectRef, scopeThreadRef } from "@ryco/client-runtime/scoped";
+import { newWorktreeBaseBranch } from "@ryco/client-runtime/state/worktree-setup";
 import { EnvironmentId, ProjectId } from "@ryco/contracts/base-schemas";
 import {
   DEFAULT_AGENT_TOKEN_MODE,
@@ -37,24 +37,24 @@ import { buildModelOptions } from "../../lib/modelOptions";
 import { useThemeColor } from "../../lib/useThemeColor";
 import { useEnvironmentServerConfigs } from "../../state/environmentServerConfigs";
 import { useHomeWorkspaceData } from "../../state/homeData";
-import {
-  selectProjectByRef,
-  selectSidebarThreadSummaryByRef,
-  selectSidebarWorktreesForProjectRef,
-  selectThreadExistsByRef,
-  useStore,
-} from "../../state/threadsRuntime";
+import { useStore } from "../../state/threadsRuntime";
 import { ensureEnvironmentApi } from "../../connection/environmentApi";
 import { useHomeEnvironments } from "../home/useHomeEnvironments";
 import { inferNodeProjectTitle, validateNodeWorkspacePath } from "../projects/projectActions";
 import {
   createNewTaskAttempt,
   resolveMobileNewTaskTarget,
-  runNewTaskAttempt,
   type NewTaskAttempt,
   type NewTaskProjectContext,
   type NewTaskWorktreeContext,
 } from "./newTaskController";
+import {
+  discardNewTaskLaunch,
+  readNewTaskLaunchDraftForEdit,
+  startNewTaskLaunch,
+  type NewTaskLaunchDraft,
+} from "./newTaskLaunch";
+import { createNewTaskLaunchDeps } from "./newTaskLaunchRuntime";
 import { NewTaskComposer } from "./NewTaskComposer";
 import { NewTaskContextSheet, type NewTaskWorktreeSelection } from "./NewTaskContextSheet";
 import { deriveNewTaskDefaults, resolveNewTaskProjectChoice } from "./newTaskModel";
@@ -64,20 +64,13 @@ type NewTaskRouteScreenProps = StaticScreenProps<{
   readonly environmentId?: string;
   readonly projectId?: string;
   readonly worktreeId?: string;
+  /** A launch whose thread screen chose Edit task: its draft comes back here. */
+  readonly editLaunchKey?: string;
 }>;
 
 function firstParam(value: string | string[] | undefined): string | null {
   if (Array.isArray(value)) return value[0] ?? null;
   return value ?? null;
-}
-
-async function waitForAuthoritative(read: () => boolean, label: string): Promise<void> {
-  const deadline = Date.now() + 12_000;
-  while (Date.now() < deadline) {
-    if (read()) return;
-    await new Promise((resolve) => setTimeout(resolve, 75));
-  }
-  throw new Error(`${label} was not confirmed`);
 }
 
 export function NewTaskRouteScreen(props: NewTaskRouteScreenProps) {
@@ -133,35 +126,44 @@ function NewTaskContent(props: NewTaskRouteScreenProps) {
     projects,
     threads,
   ]);
-  const initialized = useRef(false);
-  const modelEdited = useRef(false);
-  const locationEdited = useRef(false);
+  const editLaunchKey = firstParam(props.route.params?.editLaunchKey);
+  // Read once: the draft a failed launch hands back. The launch itself stays
+  // until the edited task is sent, so backing out of the sheet loses nothing.
+  const [restored] = useState<NewTaskLaunchDraft | null>(() =>
+    editLaunchKey ? readNewTaskLaunchDraftForEdit(editLaunchKey) : null,
+  );
+  const initialized = useRef(restored !== null);
+  const modelEdited = useRef(restored !== null);
+  const locationEdited = useRef(restored !== null);
   const [preferencesRevision, setPreferencesRevision] = useState(0);
   const [preferencesReady, setPreferencesReady] = useState(false);
   const [preferencesError, setPreferencesError] = useState<string | null>(null);
-  const [environmentId, setEnvironmentId] = useState<EnvironmentId | null>(null);
-  const [projectId, setProjectId] = useState<ProjectId | null>(null);
-  const [worktreeSelection, setWorktreeSelection] = useState<NewTaskWorktreeSelection>({
-    kind: "local",
-  });
-  const [newProjectPath, setNewProjectPath] = useState("");
-  const [newProjectTitle, setNewProjectTitle] = useState("");
-  const [newBranch, setNewBranch] = useState("");
-  const [baseBranch, setBaseBranch] = useState("");
-  const [prompt, setPrompt] = useState("");
-  const [attachments, setAttachments] = useState<ReadonlyArray<DraftComposerImageAttachment>>([]);
-  const [modelSelection, setModelSelection] = useState<ModelSelection>(defaults.modelSelection);
-  const [selectedInteractionMode, setInteractionMode] =
-    useState<ProviderInteractionMode>("default");
-  const [runtimeMode, setRuntimeMode] = useState<RuntimeMode>(defaults.runtimeMode);
+  const [environmentId, setEnvironmentId] = useState<EnvironmentId | null>(
+    restored?.environmentId ?? null,
+  );
+  const [projectId, setProjectId] = useState<ProjectId | null>(restored?.projectId ?? null);
+  const [worktreeSelection, setWorktreeSelection] = useState<NewTaskWorktreeSelection>(
+    restored?.worktree ?? { kind: "local" },
+  );
+  const [newProjectPath, setNewProjectPath] = useState(restored?.newProjectPath ?? "");
+  const [newProjectTitle, setNewProjectTitle] = useState(restored?.newProjectTitle ?? "");
+  const [newBranch, setNewBranch] = useState(restored?.newBranch ?? "");
+  const [baseBranch, setBaseBranch] = useState(restored?.baseBranch ?? "");
+  const [prompt, setPrompt] = useState(restored?.prompt ?? "");
+  const [attachments, setAttachments] = useState<ReadonlyArray<DraftComposerImageAttachment>>(
+    restored?.attachments ?? [],
+  );
+  const [modelSelection, setModelSelection] = useState<ModelSelection>(
+    restored?.modelSelection ?? defaults.modelSelection,
+  );
+  const [selectedInteractionMode, setInteractionMode] = useState<ProviderInteractionMode>(
+    restored?.interactionMode ?? "default",
+  );
+  const [runtimeMode, setRuntimeMode] = useState<RuntimeMode>(
+    restored?.runtimeMode ?? defaults.runtimeMode,
+  );
   const [workspacePickerVisible, setWorkspacePickerVisible] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [attempt, setAttempt] = useState<NewTaskAttempt | null>(null);
-  const [failure, setFailure] = useState<{
-    readonly message: string;
-    readonly step: string;
-    readonly deliveryUncertain: boolean;
-  } | null>(null);
+  const [failure, setFailure] = useState<{ readonly message: string } | null>(null);
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
   const placeholderColor = useThemeColor("--color-placeholder");
   const textColor = useThemeColor("--color-foreground");
@@ -307,7 +309,6 @@ function NewTaskContent(props: NewTaskRouteScreenProps) {
         : (repository?.refName ?? null);
 
   const resetAttempt = () => {
-    setAttempt(null);
     setFailure(null);
   };
 
@@ -411,7 +412,10 @@ function NewTaskContent(props: NewTaskRouteScreenProps) {
           ? {
               kind: "new",
               branch: newBranch,
-              ...(baseBranch.trim() ? { baseBranch: baseBranch.trim() } : {}),
+              // The phone branches from the node's checkout as it always has: the
+              // typed base, else the project's current HEAD, without fetching.
+              baseBranch: newWorktreeBaseBranch(baseBranch, false),
+              fetchOrigin: false,
             }
           : { kind: "local" };
     return createNewTaskAttempt({
@@ -437,86 +441,53 @@ function NewTaskContent(props: NewTaskRouteScreenProps) {
     });
   };
 
-  const run = async (currentAttempt: NewTaskAttempt | null) => {
-    if (!canSend && !currentAttempt) return;
-    setBusy(true);
-    setFailure(null);
+  /**
+   * Send the task and open its thread at once. The thread screen follows the
+   * launch: the node's setup stages while it prepares a worktree, then the
+   * agent's turn, or the failure with Retry and Edit task.
+   */
+  const send = () => {
+    if (!canSend) return;
+    let attempt: NewTaskAttempt;
     try {
-      const nextAttempt = currentAttempt ?? createAttempt();
-      setAttempt(nextAttempt);
-      const api = ensureEnvironmentApi(nextAttempt.environmentId);
-      const result = await runNewTaskAttempt(nextAttempt, {
-        dispatch: (command) => api.orchestration.dispatchCommand(command),
-        createWorktree: async ({
-          projectId: selectedProjectId,
-          branch,
-          baseBranch: sourceBranch,
-        }) => {
-          const createWorktree = api.git.createWorktreeForProject;
-          if (!createWorktree) throw new Error("Worktree creation unavailable");
-          const created = await createWorktree({
-            projectId: selectedProjectId,
-            intent: {
-              kind: "newBranch",
-              branchName: branch,
-              ...(sourceBranch ? { baseBranch: sourceBranch } : {}),
-            },
-          });
-          return { worktreeId: created.worktreeId, threadId: created.sessionId };
-        },
-        waitForProject: (selectedProjectId) =>
-          waitForAuthoritative(
-            () =>
-              selectProjectByRef(
-                useStore.getState(),
-                scopeProjectRef(nextAttempt.environmentId, selectedProjectId),
-              ) !== undefined,
-            "Project",
-          ),
-        waitForWorktree: (selectedWorktreeId) =>
-          waitForAuthoritative(
-            () =>
-              selectSidebarWorktreesForProjectRef(
-                useStore.getState(),
-                scopeProjectRef(nextAttempt.environmentId, nextAttempt.projectId),
-              ).some((candidate) => candidate.id === selectedWorktreeId),
-            "Worktree",
-          ),
-        waitForThread: ({ threadId: selectedThreadId, worktreeId: expectedWorktreeId }) =>
-          waitForAuthoritative(() => {
-            const state = useStore.getState();
-            const ref = scopeThreadRef(nextAttempt.environmentId, selectedThreadId);
-            if (!selectThreadExistsByRef(state, ref)) return false;
-            if (expectedWorktreeId === undefined) return true;
-            const summary = selectSidebarThreadSummaryByRef(state, ref);
-            return (summary?.worktreeId ?? null) === expectedWorktreeId;
-          }, "Task"),
-      });
-      setAttempt(result.attempt);
-      if (!result.ok) {
-        setFailure({
-          message: result.message,
-          step: result.step,
-          deliveryUncertain: result.deliveryUncertain,
-        });
-        return;
-      }
-      useStore.getState().setActiveEnvironmentId(result.attempt.environmentId);
-      navigation.dispatch(
-        StackActions.replace("Thread", {
-          environmentId: result.attempt.environmentId,
-          threadId: result.attempt.threadId,
-        }),
-      );
-    } catch {
+      if (!project) validateNodeWorkspacePath(newProjectPath);
+      attempt = createAttempt();
+    } catch (error) {
       setFailure({
-        message: "The task could not be started. Your draft is still here.",
-        step: "context",
-        deliveryUncertain: false,
+        message:
+          error instanceof Error && error.message.trim().length > 0
+            ? error.message
+            : "The task could not be started. Your draft is still here.",
       });
-    } finally {
-      setBusy(false);
+      return;
     }
+    startNewTaskLaunch({
+      attempt,
+      draft: {
+        environmentId: attempt.environmentId,
+        projectId,
+        newProjectPath,
+        newProjectTitle,
+        worktree: worktreeSelection,
+        newBranch,
+        baseBranch,
+        prompt,
+        attachments,
+        modelSelection,
+        runtimeMode,
+        interactionMode: selectedInteractionMode,
+      },
+      deps: createNewTaskLaunchDeps(attempt.environmentId),
+    });
+    // The edited task replaces the one it came from, now that it is on its way.
+    if (restored && editLaunchKey) discardNewTaskLaunch(editLaunchKey);
+    useStore.getState().setActiveEnvironmentId(attempt.environmentId);
+    navigation.dispatch(
+      StackActions.replace("Thread", {
+        environmentId: attempt.environmentId,
+        threadId: attempt.threadId,
+      }),
+    );
   };
 
   const pickAttachments = async () => {
@@ -575,36 +546,8 @@ function NewTaskContent(props: NewTaskRouteScreenProps) {
             </View>
           )}
           {failure ? (
-            <View className="mb-4 gap-2">
+            <View className="mb-4">
               <ErrorBanner message={failure.message} />
-              <View className="flex-row gap-2">
-                <Pressable
-                  accessibilityRole="button"
-                  disabled={busy}
-                  onPress={() => void run(attempt)}
-                  className="h-11 items-center justify-center rounded-full bg-primary px-5 disabled:opacity-40"
-                >
-                  <Text className="text-sm font-ryco-bold text-primary-foreground">
-                    Retry {failure.step}
-                  </Text>
-                </Pressable>
-                {attempt?.threadReady ? (
-                  <Pressable
-                    accessibilityRole="button"
-                    onPress={() =>
-                      navigation.dispatch(
-                        StackActions.replace("Thread", {
-                          environmentId: attempt.environmentId,
-                          threadId: attempt.threadId,
-                        }),
-                      )
-                    }
-                    className="h-11 items-center justify-center rounded-full bg-subtle px-5"
-                  >
-                    <Text className="text-sm font-ryco-bold text-foreground">Open task</Text>
-                  </Pressable>
-                ) : null}
-              </View>
             </View>
           ) : null}
           {attachmentError ? (
@@ -675,7 +618,7 @@ function NewTaskContent(props: NewTaskRouteScreenProps) {
               setInteractionMode(mode);
               resetAttempt();
             }}
-            busy={busy}
+            busy={false}
             canSend={canSend}
             sendDisabledReason={sendDisabledReason}
             onChangePrompt={(value) => {
@@ -701,7 +644,7 @@ function NewTaskContent(props: NewTaskRouteScreenProps) {
               setRuntimeMode(mode);
               resetAttempt();
             }}
-            onSend={() => void run(null)}
+            onSend={send}
           />
         </ScrollView>
       </KeyboardAvoidingView>
