@@ -50,10 +50,13 @@ const SUPERSEDED_SESSION_GRACE = Duration.minutes(1);
 /**
  * The longest a Hub-linked session lives, and the cap on its rotation chain.
  * It is renewed by asking the node again over the relay, so a device whose Hub
- * enrollment was revoked while this node was off the Hub loses direct access
- * within this bound.
+ * enrollment was revoked, or whose member lost or changed their role on this
+ * machine, while the node was not told keeps direct access at most this long.
+ * Clients renew a link after three days (`HUB_LINKED_DIRECT_ACCESS_RENEW_AFTER_MS`).
+ * Every check applies it, so a link issued under the earlier seven days ends
+ * at this bound too.
  */
-export const LINKED_SESSION_MAX_AGE = Duration.days(7);
+export const LINKED_SESSION_MAX_AGE = Duration.days(4);
 /** The least time between two rotations of one pairing. */
 const BEARER_ROTATION_MIN_INTERVAL = Duration.hours(1);
 const DEFAULT_WEBSOCKET_TOKEN_TTL = Duration.minutes(5);
@@ -115,6 +118,39 @@ type DisconnectOutcome = {
   readonly becameFullyDisconnected: boolean;
   readonly chainId: AuthSessionId;
 };
+
+/**
+ * When a session stops authenticating: its own expiry, and for a Hub-linked one
+ * never later than `LINKED_SESSION_MAX_AGE` after its pairing.
+ */
+export function sessionExpiresAtMs(
+  record: Pick<AuthSessionRecord, "expiresAt" | "chainIssuedAt" | "link">,
+): number {
+  return record.link === null
+    ? record.expiresAt.epochMilliseconds
+    : Math.min(
+        record.expiresAt.epochMilliseconds,
+        record.chainIssuedAt.epochMilliseconds + Duration.toMillis(LINKED_SESSION_MAX_AGE),
+      );
+}
+
+/** The longest single wait of `sleepUntil`. */
+const WALL_CLOCK_CHECK_INTERVAL = Duration.hours(1);
+
+/**
+ * Waits until the wall clock reaches `deadlineMs`. It re-reads the clock at
+ * least hourly: a timer does not count the time a machine slept.
+ */
+const sleepUntil = (deadlineMs: number): Effect.Effect<void> =>
+  Effect.gen(function* () {
+    while (true) {
+      const remainingMs = deadlineMs - (yield* Clock.currentTimeMillis);
+      if (remainingMs <= 0) return;
+      yield* Effect.sleep(
+        Duration.millis(Math.min(remainingMs, Duration.toMillis(WALL_CLOCK_CHECK_INTERVAL))),
+      );
+    }
+  });
 
 function createDefaultClientMetadata(): AuthClientMetadata {
   return {
@@ -209,7 +245,7 @@ export const makeSessionCredentialService = Effect.gen(function* () {
       method: record.method,
       client: toClientMetadata(record.client),
       issuedAt: record.issuedAt,
-      expiresAt: record.expiresAt,
+      expiresAt: DateTime.makeUnsafe(sessionExpiresAtMs(record)),
       lastConnectedAt: record.lastConnectedAt,
       connected: isChainConnected(connectedSessions, record.chainId),
     });
@@ -454,6 +490,12 @@ export const makeSessionCredentialService = Effect.gen(function* () {
         });
       }
       const record = row.value;
+      const expiresAtMs = Math.min(claims.exp, sessionExpiresAtMs(record));
+      if (expiresAtMs <= now) {
+        return yield* new SessionCredentialError({
+          message: "Session token expired.",
+        });
+      }
       if (record.supersededAt !== null) {
         if (
           now - record.supersededAt.epochMilliseconds >
@@ -476,7 +518,7 @@ export const makeSessionCredentialService = Effect.gen(function* () {
         token,
         method: claims.method,
         client: toClientMetadata(row.value.client),
-        expiresAt: DateTime.makeUnsafe(claims.exp),
+        expiresAt: DateTime.makeUnsafe(expiresAtMs),
         subject: claims.sub,
         role: claims.role,
         link: record.link,
@@ -546,7 +588,8 @@ export const makeSessionCredentialService = Effect.gen(function* () {
           message: "Unknown websocket session.",
         });
       }
-      if (row.value.expiresAt.epochMilliseconds <= now) {
+      const sessionExpiresAt = sessionExpiresAtMs(row.value);
+      if (sessionExpiresAt <= now) {
         return yield* new SessionCredentialError({
           message: "Websocket session expired.",
         });
@@ -563,7 +606,7 @@ export const makeSessionCredentialService = Effect.gen(function* () {
         token,
         method: row.value.method,
         client: toClientMetadata(row.value.client),
-        expiresAt: row.value.expiresAt,
+        expiresAt: DateTime.makeUnsafe(sessionExpiresAt),
         subject: row.value.subject,
         role: row.value.role,
         link: row.value.link,
@@ -576,7 +619,9 @@ export const makeSessionCredentialService = Effect.gen(function* () {
       const connectedSessions = yield* Ref.get(connectedSessionsRef);
       const rows = yield* authSessions.listActive({ now });
 
-      return rows.map((row) => toClientSession(row, connectedSessions));
+      return rows
+        .filter((row) => sessionExpiresAtMs(row) > now.epochMilliseconds)
+        .map((row) => toClientSession(row, connectedSessions));
     }).pipe(Effect.mapError(toSessionCredentialError("Failed to list active sessions.")));
 
   const revoke: SessionCredentialServiceShape["revoke"] = (sessionId) =>
@@ -595,7 +640,7 @@ export const makeSessionCredentialService = Effect.gen(function* () {
             return yield* new SessionCredentialError({ message: "Unknown session." });
           }
           const current = row.value;
-          if (current.expiresAt.epochMilliseconds <= now.epochMilliseconds) {
+          if (sessionExpiresAtMs(current) <= now.epochMilliseconds) {
             return yield* new SessionCredentialError({ message: "Session token expired." });
           }
           if (current.method !== "bearer-session-token") {
@@ -728,6 +773,33 @@ export const makeSessionCredentialService = Effect.gen(function* () {
       return new Set(revoked.map((session) => session.chainId)).size;
     }).pipe(Effect.mapError(toSessionCredentialError("Failed to revoke linked sessions.")));
 
+  const awaitEnd: SessionCredentialServiceShape["awaitEnd"] = (session) =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const changes = yield* PubSub.subscribe(changesPubSub);
+        // Revoked between the socket's check and this subscription.
+        const row = yield* authSessions
+          .getById({ sessionId: session.sessionId })
+          .pipe(Effect.orElseSucceed(() => Option.none()));
+        if (Option.isSome(row) && row.value.revokedAt !== null) return;
+        const revoked = Effect.gen(function* () {
+          while (true) {
+            const change = yield* PubSub.take(changes);
+            if (
+              change.type === "clientRemoved" &&
+              change.reason === "revoked" &&
+              change.chainId === session.chainId
+            ) {
+              return;
+            }
+          }
+        });
+        yield* session.linkedExpiresAt === undefined
+          ? revoked
+          : Effect.raceFirst(revoked, sleepUntil(session.linkedExpiresAt.epochMilliseconds));
+      }),
+    );
+
   const revokeAllExcept: SessionCredentialServiceShape["revokeAllExcept"] = (sessionId) =>
     Effect.gen(function* () {
       const revokedAt = yield* DateTime.now;
@@ -756,6 +828,7 @@ export const makeSessionCredentialService = Effect.gen(function* () {
     revoke,
     revokeLinked,
     revokeAllExcept,
+    awaitEnd,
     markConnected,
     markDisconnected,
   } satisfies SessionCredentialServiceShape;

@@ -242,7 +242,7 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 /**
  * A linked route is used for this long after it was linked, then the relay
  * carries the connection so the link can be renewed there, well within the
- * node's seven days (`HUB_LINKED_DIRECT_ACCESS_RENEW_AFTER_MS`).
+ * node's four days (`HUB_LINKED_DIRECT_ACCESS_RENEW_AFTER_MS`).
  */
 export const LINKED_ROUTE_USABLE_FOR_MS = 3 * DAY_MS;
 

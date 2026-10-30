@@ -60,7 +60,7 @@ Running the relay's E2EE over the direct socket would let them in; it is not bui
 
 | Kind   | Reach                                       | Credential                                     |
 | ------ | ------------------------------------------- | ---------------------------------------------- |
-| direct | `tailnet-https`, `tailnet`, `lan`, `public` | the linked bearer (7 days, renewed over relay) |
+| direct | `tailnet-https`, `tailnet`, `lan`, `public` | the linked bearer (4 days, renewed over relay) |
 | relay  | —                                           | the relay's own E2EE session and tickets       |
 
 - Order: tailnet HTTPS, tailnet, LAN, public, then the relay. Routes of one reach keep their order.

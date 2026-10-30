@@ -197,7 +197,7 @@ export const authWebSocketTokenRouteLayer = HttpRouter.add(
  * node's own HTTP listener, which no relay path reaches: a relay or hosted
  * client can never extend a direct credential through it. The one relay path
  * that mints one, `auth.issueLinkedDirectAccess`, issues a Hub-linked session
- * this route will not carry past its seven days.
+ * this route will not carry past its four days.
  */
 export const authBearerRotateRouteLayer = HttpRouter.add(
   "POST",
