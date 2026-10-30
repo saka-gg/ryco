@@ -121,13 +121,14 @@ export const make = Effect.fn("makeVcsProcess")(function* () {
 
   const spawn = Effect.fn("VcsProcess.spawn")(function* (input: VcsProcessInput) {
     const label = commandLabel(input.command, input.args);
-    const env = { ...process.env, ...input.env };
-    const command =
-      input.command === "git"
-        ? yield* Effect.promise(() => resolveGitExecutable(env))
-        : input.command;
+    const baseEnv = { ...process.env, ...input.env };
+    const git =
+      input.command === "git" ? yield* Effect.promise(() => resolveGitExecutable(baseEnv)) : null;
+    const env = git === null ? baseEnv : { ...baseEnv, ...git.env };
     const child = yield* spawner
-      .spawn(ChildProcess.make(command, [...input.args], { cwd: input.cwd, env }))
+      .spawn(
+        ChildProcess.make(git?.command ?? input.command, [...input.args], { cwd: input.cwd, env }),
+      )
       .pipe(
         Effect.mapError(
           (cause) =>

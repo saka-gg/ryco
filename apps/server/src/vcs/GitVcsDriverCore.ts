@@ -1060,9 +1060,14 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
           ...input.env,
           ...trace2Monitor.env,
         };
-        const gitCommand = yield* Effect.promise(() => resolveGitExecutable(env));
+        const git = yield* Effect.promise(() => resolveGitExecutable(env));
         const child = yield* commandSpawner
-          .spawn(ChildProcess.make(gitCommand, commandInput.args, { cwd: commandInput.cwd, env }))
+          .spawn(
+            ChildProcess.make(git.command, commandInput.args, {
+              cwd: commandInput.cwd,
+              env: { ...env, ...git.env },
+            }),
+          )
           .pipe(Effect.mapError(toGitCommandError(commandInput, "failed to spawn.")));
 
         const [stdout, stderr, exitCode] = yield* Effect.all(
