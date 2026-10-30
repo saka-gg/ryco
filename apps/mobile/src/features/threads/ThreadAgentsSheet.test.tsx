@@ -3,8 +3,26 @@ import { describe, expect, it, vi } from "vite-plus/test";
 
 // The sheet's stateless pieces invoked as plain functions with react-native mocked (no React
 // renderer exists in this suite): the control under the context bar, and an agent row with its
-// status, time, unfolded details and Stop.
+// status, time, unfolded details and Stop. React's external-store hook is reduced to "read the
+// snapshot per render", recording what each row listens to; the shared clock is a stand-in.
 
+const hoisted = vi.hoisted(() => {
+  const state = {
+    nowMs: Date.parse("2026-08-10T10:01:05.000Z"),
+    subscribed: [] as unknown[],
+    clock: { subscribe: () => () => undefined, read: () => state.nowMs },
+  };
+  return state;
+});
+
+vi.mock("react", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("react")>()),
+  useSyncExternalStore: <T,>(subscribe: unknown, read: () => T) => {
+    hoisted.subscribed.push(subscribe);
+    return read();
+  },
+}));
+vi.mock("../../lib/secondClock", () => ({ secondClock: hoisted.clock }));
 vi.mock("react-native", () => ({
   Alert: { alert: () => undefined },
   Modal: "Modal",
@@ -51,7 +69,7 @@ const row: ThreadAgentRow = {
   tone: "working",
   activity: "Reading ws.ts",
   activityFailed: false,
-  elapsed: "1m 05s",
+  elapsed: { kind: "live", since: "2026-08-10T10:00:00.000Z" },
   childThreadId: null,
   details: {
     title: "Map how the relay client reconnects after a drop",
@@ -144,5 +162,37 @@ describe("thread agent row", () => {
     expect(button.props.accessibilityHint).toBe("Opens the task");
     expect(button.props.accessibilityState).toBeUndefined();
     expect(nodes.find((node) => node.type === "SymbolView")?.props.name).toBe("chevron.right");
+  });
+});
+
+describe("thread agent row time", () => {
+  it("ticks a working row's time with the shared clock, the spoken label too", () => {
+    hoisted.subscribed.length = 0;
+    expect(texts(renderRow())).toContain("Running · 1m 05s");
+    expect(hoisted.subscribed).toEqual([hoisted.clock.subscribe]);
+
+    hoisted.nowMs += 1000;
+    const nodes = renderRow();
+    expect(texts(nodes)).toContain("Running · 1m 06s");
+    expect(nodes[1]?.props.accessibilityLabel).toBe(
+      "Map the relay client. Running · 1m 06s. Reading ws.ts.",
+    );
+    hoisted.nowMs -= 1000;
+  });
+
+  it("leaves the clock alone for a settled row, whose time is a fact", () => {
+    hoisted.subscribed.length = 0;
+    const nodes = renderRow({
+      row: {
+        ...row,
+        statusLabel: "Completed",
+        tone: "done",
+        elapsed: { kind: "frozen", text: "40s" },
+        stop: null,
+      },
+    });
+    expect(texts(nodes)).toContain("Completed · 40s");
+    expect(hoisted.subscribed).toHaveLength(1);
+    expect(hoisted.subscribed[0]).not.toBe(hoisted.clock.subscribe);
   });
 });

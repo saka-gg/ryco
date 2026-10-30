@@ -1,5 +1,6 @@
 import type { ThreadCapabilitySupport } from "@ryco/client-runtime/rpc";
 import {
+  applicableUsageLimit,
   deriveThreadActivityStatus,
   deriveUsageLimitStatus,
   isThreadFailed,
@@ -142,7 +143,6 @@ function threadState(
   thread: SidebarThreadSummary,
   environment: InboxEnvironment | undefined,
   deliveryUnknownThreadIds: ReadonlySet<string>,
-  nowMs: number,
 ): InboxThreadState {
   // A stale environment's rows are last-known state: nothing on them may
   // present as live activity (or as actionable), whatever the cached fields
@@ -160,8 +160,9 @@ function threadState(
   if (environment?.connectionState === "offline") return "offline";
   if (activity === "working") return "working";
   if (activity === "connecting") return "connecting";
-  // Same predicate as web: a usage limit outranks the generic error it ended in.
-  if (deriveUsageLimitStatus(thread, nowMs) !== null) return "limited";
+  // Same predicate as web: a usage limit outranks the generic error it ended in, before and
+  // after its reset (the row's words tell the two apart), so the state never reads the clock.
+  if (applicableUsageLimit(thread) !== null) return "limited";
   // Same rule as web: a restart release is an interruption, not a failure.
   if (isThreadFailed(thread)) return "error";
   if (environment?.connectionState === "reconnecting") return "reconnecting";
@@ -200,9 +201,8 @@ function statusLabel(state: InboxThreadState): string {
 export function inboxThreadStatus(
   thread: SidebarThreadSummary,
   environment: InboxEnvironment | undefined,
-  nowMs: number,
 ): { readonly state: InboxThreadState; readonly label: string } {
-  const state = threadState(thread, environment, new Set(), nowMs);
+  const state = threadState(thread, environment, new Set());
   return { state, label: statusLabel(state) };
 }
 
@@ -262,7 +262,7 @@ export function buildInboxSections(input: BuildInboxInput): ReadonlyArray<InboxS
         ? "offline"
         : entry.lifecycle.classification === "settled"
           ? "settled"
-          : threadState(thread, environment, deliveryUnknown, nowMs);
+          : threadState(thread, environment, deliveryUnknown);
     const providerDriver =
       thread.session?.provider ??
       thread.providerDriver ??

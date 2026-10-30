@@ -21,6 +21,7 @@ import { AppText as Text } from "../../components/AppText";
 import { SymbolView } from "../../components/AppSymbol";
 import { ensureEnvironmentApi } from "../../connection/environmentApi";
 import { cn } from "../../lib/cn";
+import { secondClock } from "../../lib/secondClock";
 import { useThemeColor } from "../../lib/useThemeColor";
 import {
   isArchivedThreadStub,
@@ -35,7 +36,9 @@ import { startSubagentStop, subagentStopRequests } from "./subagentStopRequests"
 import {
   buildThreadAgentsEntry,
   buildThreadAgentsSheetModel,
+  threadAgentElapsedText,
   threadAgentsSheetSummary,
+  type ThreadAgentElapsed,
   type ThreadAgentRow,
   type ThreadAgentsEntry,
   type ThreadAgentSection,
@@ -68,6 +71,22 @@ const STATUS_TEXT_CLASS: Readonly<Record<ThreadAgentTone, string>> = {
 };
 
 const NO_CHILDREN: ReadonlyArray<SidebarThreadSummary> = [];
+
+const subscribeToNothing = () => () => undefined;
+const readNoClock = () => 0;
+
+/**
+ * A row's time as text, current to the shared second clock while it works. Only a working
+ * row listens, so the clock runs only while the sheet shows one (offline, none does).
+ */
+function useThreadAgentElapsedText(elapsed: ThreadAgentElapsed | null): string | null {
+  const live = elapsed?.kind === "live";
+  const nowMs = useSyncExternalStore(
+    live ? secondClock.subscribe : subscribeToNothing,
+    live ? secondClock.read : readNoClock,
+  );
+  return threadAgentElapsedText(elapsed, nowMs);
+}
 
 /** Everything the sheet lists that does not tick: the chat's agents and its delegated tasks. */
 function useThreadAgentsSource(input: {
@@ -166,7 +185,9 @@ export function ThreadAgentRowView(props: {
   const { row } = props;
   const opensThread = row.childThreadId !== null;
   const details = props.expanded ? row.details : null;
-  const meta = [row.statusLabel, row.elapsed].filter(Boolean).join(" · ");
+  // The row, not the sheet, re-renders as its time ticks: its spoken label carries the time too.
+  const elapsed = useThreadAgentElapsedText(row.elapsed);
+  const meta = [row.statusLabel, elapsed].filter(Boolean).join(" · ");
   return (
     <View className={cn(props.divided && "border-t border-border")}>
       <Pressable
@@ -331,7 +352,6 @@ export function ThreadAgents(props: {
 }) {
   const source = useThreadAgentsSource(props);
   const [sheet, setSheet] = useState(THREAD_AGENTS_SHEET_CLOSED);
-  const [nowMs, setNowMs] = useState(() => Date.now());
   const [expandedKeys, setExpandedKeys] = useState<ReadonlySet<string>>(() => new Set());
   const runtimeSessionId = props.thread?.session?.runtimeSessionId ?? null;
   const model = useMemo(
@@ -342,9 +362,8 @@ export function ThreadAgents(props: {
         runtimeSessionId,
         stopReady: props.stopReady,
         offline: props.offline,
-        nowMs,
       }),
-    [nowMs, props.environment, props.offline, props.stopReady, runtimeSessionId, source],
+    [props.environment, props.offline, props.stopReady, runtimeSessionId, source],
   );
   const entry = buildThreadAgentsEntry(model);
   const hasAgents = entry !== null;
@@ -352,14 +371,6 @@ export function ThreadAgents(props: {
   useEffect(() => {
     if (!hasAgents) setSheet(closeThreadAgentsSheet);
   }, [hasAgents]);
-  // The clock ticks only while the sheet shows it; offline, nothing is live, so it stays put.
-  const ticking = sheet.open && model.live > 0;
-  useEffect(() => {
-    if (!ticking) return undefined;
-    const timer = setInterval(() => setNowMs(Date.now()), 1000);
-    return () => clearInterval(timer);
-  }, [ticking]);
-
   // A stop stays pending, across sheets and reopenings, until its agent settles or it times out.
   const threadRef = useMemo(
     () => scopeThreadRef(props.environmentId, props.threadId),
@@ -418,13 +429,7 @@ export function ThreadAgents(props: {
   return (
     <>
       {entry ? (
-        <ThreadAgentsButton
-          entry={entry}
-          onPress={() => {
-            setNowMs(Date.now());
-            setSheet(openThreadAgentsSheet());
-          }}
-        />
+        <ThreadAgentsButton entry={entry} onPress={() => setSheet(openThreadAgentsSheet())} />
       ) : null}
       <Modal
         visible={sheet.open}

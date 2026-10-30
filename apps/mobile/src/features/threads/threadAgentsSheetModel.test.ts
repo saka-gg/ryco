@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vite-plus/test";
+import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
 import {
   deriveAgentPanelModel,
@@ -12,6 +12,7 @@ import type { AgentControlCompletionReturn } from "@ryco/contracts/agent-control
 import {
   buildThreadAgentsEntry,
   buildThreadAgentsSheetModel,
+  threadAgentElapsedText,
   threadAgentsSheetSummary,
   type ThreadAgentsSheetInput,
   type ThreadAgentsSheetModel,
@@ -100,10 +101,30 @@ function build(overrides: Partial<ThreadAgentsSheetInput> = {}): ThreadAgentsShe
     stopReady: true,
     offline: false,
     completionReturns: new Map(),
-    nowMs: NOW,
     ...overrides,
   });
 }
+
+function limitedChild(id: string): SidebarThreadSummary {
+  return child(id, {
+    modelSelection: { instanceId: "codex", model: "gpt-5" } as never,
+    usageLimit: {
+      limitId: `usage-limit:${id}:turn-1`,
+      provider: "codex",
+      providerInstanceId: "codex",
+      turnId: "turn-1",
+      message: "Usage limit reached",
+      limitedAt: T0,
+      resetAt: "2026-08-10T10:05:00.000Z",
+      autoResume: null,
+      updatedAt: T0,
+    } as never,
+  });
+}
+
+afterEach(() => {
+  vi.useRealTimers();
+});
 
 describe("thread agents sheet", () => {
   it("lists nothing, and offers no way in, while the chat set no agents working", () => {
@@ -143,15 +164,16 @@ describe("thread agents sheet", () => {
       statusLabel: "Running",
       tone: "working",
       activity: "Reading ws.ts",
-      // Measured to the sheet's clock, so it ticks as the clock does.
-      elapsed: "1m 05s",
+      // Its start, which the row's label measures to the clock as it ticks.
+      elapsed: { kind: "live", since: T0 },
       childThreadId: null,
     });
+    expect(threadAgentElapsedText(running!.elapsed, NOW)).toBe("1m 05s");
     expect(done).toMatchObject({
       statusLabel: "Completed",
       tone: "done",
       activity: "All 12 tests pass.",
-      elapsed: "40s",
+      elapsed: { kind: "frozen", text: "40s" },
     });
     expect(done?.details?.outcome).toEqual({ text: "All 12 tests pass.", failed: false });
     expect(failed).toMatchObject({
@@ -250,12 +272,17 @@ describe("thread agents sheet", () => {
       label: "Child working",
       statusLabel: "Working",
       tone: "working",
-      elapsed: "35s",
+      elapsed: { kind: "live", since: "2026-08-10T10:00:30.000Z" },
       childThreadId: "working",
       details: null,
       stop: null,
     });
-    expect(done).toMatchObject({ statusLabel: "Done", tone: "done", elapsed: "2m 05s" });
+    expect(threadAgentElapsedText(working!.elapsed, NOW)).toBe("35s");
+    expect(done).toMatchObject({
+      statusLabel: "Done",
+      tone: "done",
+      elapsed: { kind: "frozen", text: "2m 05s" },
+    });
     expect(asking).toMatchObject({ statusLabel: "Needs input", tone: "attention", elapsed: null });
     expect(model).toMatchObject({ total: 3, live: 2 });
   });
@@ -371,7 +398,11 @@ describe("thread agents sheet", () => {
       activity: "Reading ws.ts",
     });
     // What settled stays a fact.
-    expect(settled).toMatchObject({ statusLabel: "Completed", tone: "done", elapsed: "40s" });
+    expect(settled).toMatchObject({
+      statusLabel: "Completed",
+      tone: "done",
+      elapsed: { kind: "frozen", text: "40s" },
+    });
     const [working, done] = model.sections[1]!.rows;
     expect(working).toMatchObject({ statusLabel: "Offline", tone: "muted", elapsed: null });
     expect(done).toMatchObject({ statusLabel: "Done", tone: "done" });
@@ -386,26 +417,38 @@ describe("thread agents sheet", () => {
   });
 
   it("counts a delegated task held by a usage limit, as the dock does, as not active", () => {
-    const model = build({
-      delegatedChildren: [
-        child("limited", {
-          modelSelection: { instanceId: "codex", model: "gpt-5" } as never,
-          usageLimit: {
-            limitId: "usage-limit:limited:turn-1",
-            provider: "codex",
-            providerInstanceId: "codex",
-            turnId: "turn-1",
-            message: "Usage limit reached",
-            limitedAt: T0,
-            resetAt: "2026-08-10T10:05:00.000Z",
-            autoResume: null,
-            updatedAt: T0,
-          } as never,
-        }),
-      ],
-    });
+    const model = build({ delegatedChildren: [limitedChild("limited")] });
     expect(model.sections[0]!.rows[0]).toMatchObject({ statusLabel: "Limited", tone: "attention" });
     expect(model.live).toBe(0);
     expect(buildThreadAgentsEntry(model)).toMatchObject({ label: "1 agent", live: false });
+  });
+
+  it("never reads the time: only a working row's label measures its start to the clock", () => {
+    const input = {
+      panel: deriveAgentPanelModel({
+        agents: [
+          agent("a"),
+          agent("b", { status: "completed", completedAt: "2026-08-10T10:00:40.000Z" }),
+        ],
+      }),
+      delegatedChildren: [
+        child("working", { latestTurn: turn("running", "2026-08-10T10:00:30.000Z", null) }),
+        limitedChild("limited"),
+      ],
+    };
+    vi.useFakeTimers({ now: NOW });
+    const opened = build(input);
+    // Ten minutes on, past the limit's reset too: a clock tick has nothing to rebuild.
+    vi.setSystemTime(NOW + 10 * 60_000);
+    expect(build(input)).toEqual(opened);
+
+    const [running, settled] = opened.sections[0]!.rows;
+    const [working, limited] = opened.sections[1]!.rows;
+    expect(threadAgentElapsedText(running!.elapsed, NOW)).toBe("1m 05s");
+    expect(threadAgentElapsedText(running!.elapsed, NOW + 1000)).toBe("1m 06s");
+    expect(threadAgentElapsedText(working!.elapsed, NOW + 1000)).toBe("36s");
+    // Settled time is a fact, whatever the clock says; a held task shows none.
+    expect(threadAgentElapsedText(settled!.elapsed, NOW + 60_000)).toBe("40s");
+    expect(limited).toMatchObject({ statusLabel: "Limited", elapsed: null });
   });
 });
