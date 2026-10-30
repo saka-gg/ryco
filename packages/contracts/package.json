@@ -36,6 +36,11 @@
       "import": "./src/windowMaterial.ts",
       "require": "./src/windowMaterial.ts"
     },
+    "./relay-constants": {
+      "types": "./src/relayConstants.ts",
+      "import": "./src/relayConstants.ts",
+      "require": "./src/relayConstants.ts"
+    },
     "./relay": {
       "types": "./src/relay.ts",
       "import": "./src/relay.ts",

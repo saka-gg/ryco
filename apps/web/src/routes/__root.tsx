@@ -175,6 +175,9 @@ function resolveRootBeforeLoadContext(
   } else if (isHostedHubMode() && isNativeAuthorizationPath(pathname)) {
     // The hosted consent page downloads while the access check is on the wire.
     void preloadMatchedRouteChunks(pathname);
+  } else if (pathname === "/pair" && !isHostedHubMode()) {
+    // A pairing link's page downloads while the session check is on the wire.
+    void preloadMatchedRouteChunks(pathname);
   }
 
   const pendingContext: Promise<RootBeforeLoadContext> = resolveRootBeforeLoadContextAsync(
@@ -280,6 +283,9 @@ async function resolveRootBeforeLoadContextAsync(pathname: string): Promise<Root
   } else {
     discardPrefetchedPrimaryWebSocketToken();
     if (authGateState.status !== "authenticated") {
+      // Every route sends this browser to pairing: its page downloads now,
+      // alongside the redirect, rather than after it.
+      void preloadRouteChunk("/pair");
       // The server no longer accepts this browser's session: what it cached goes.
       void primaryShellCache?.then((loaded) => loaded?.cache.clearPrimaryShellCache());
       void providerCatalogs?.then((clear) => clear?.());

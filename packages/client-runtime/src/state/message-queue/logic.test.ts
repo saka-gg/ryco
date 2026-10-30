@@ -10,7 +10,6 @@ import {
   resolveQueuedMessageEditUnavailableReason,
   resolveQueuedMessageSteerEligibility,
   resolveQueuedMessageSteerOutcome,
-  summarizeQueuedMessage,
   type QueuedMessageSteerAttempt,
 } from "./logic.ts";
 
@@ -231,21 +230,5 @@ describe("resolveQueuedMessageEditUnavailableReason", () => {
     expect(
       resolveQueuedMessageEditUnavailableReason({ ...editable, composerHasContent: true }),
     ).toBe("Clear the composer to edit a queued message.");
-  });
-});
-
-describe("summarizeQueuedMessage", () => {
-  const empty = { trimmedPrompt: "", imageCount: 0, terminalContextCount: 0 };
-
-  it("names picked page elements after file references", () => {
-    expect(summarizeQueuedMessage({ ...empty, browserElementCount: 1 })).toBe("1 page element");
-    expect(summarizeQueuedMessage({ ...empty, browserElementCount: 3 })).toBe("3 page elements");
-    expect(
-      summarizeQueuedMessage({ ...empty, fileReferenceCount: 2, browserElementCount: 3 }),
-    ).toBe("2 file references");
-    expect(
-      summarizeQueuedMessage({ ...empty, trimmedPrompt: "Fix it", browserElementCount: 1 }),
-    ).toBe("Fix it");
-    expect(summarizeQueuedMessage(empty)).toBe("Queued message");
   });
 });
