@@ -3,7 +3,6 @@ import { networkInterfaces } from "node:os";
 import type { AdvertisedEndpoint } from "@ryco/contracts";
 import { DEFAULT_HOSTED_APP_ORIGIN } from "@ryco/shared/hostedApp";
 import { buildDirectPairingUrl, buildHostedPairingUrl } from "@ryco/shared/pairingUrl";
-import { QrCode } from "@ryco/shared/qrCode";
 import { isTailscaleIpv4Address } from "@ryco/tailscale";
 import { DateTime, Effect } from "effect";
 import { HttpServer } from "effect/http";
@@ -140,29 +139,18 @@ export const buildPairingUrl = (connectionString: string, token: string): string
   return url.toString();
 };
 
-export const renderTerminalQrCode = (value: string, margin = 2): string => {
-  const qrCode = QrCode.encodeText(value, QrCode.Ecc.MEDIUM);
-  const rows: Array<string> = [];
-  const isDark = (x: number, y: number): boolean =>
-    x >= 0 && x < qrCode.size && y >= 0 && y < qrCode.size && qrCode.getModule(x, y);
+/**
+ * `renderTerminalQrCode` of `terminalQrCode.ts`: the QR encoder loads when a command prints a
+ * code, never with the server's boot.
+ */
+export const loadTerminalQrCode = Effect.promise(() => import("./terminalQrCode.ts")).pipe(
+  Effect.map((module) => module.renderTerminalQrCode),
+);
 
-  for (let y = -margin; y < qrCode.size + margin; y += 2) {
-    let row = "";
-
-    for (let x = -margin; x < qrCode.size + margin; x += 1) {
-      const topDark = isDark(x, y);
-      const bottomDark = isDark(x, y + 1);
-
-      row += topDark ? (bottomDark ? "█" : "▀") : bottomDark ? "▄" : " ";
-    }
-
-    rows.push(row);
-  }
-
-  return rows.join("\n");
-};
-
-export const formatHeadlessServeOutput = (accessInfo: HeadlessServeAccessInfo): string => {
+export const formatHeadlessServeOutput = (
+  accessInfo: HeadlessServeAccessInfo,
+  renderQrCode: (value: string) => string,
+): string => {
   if (accessInfo.token === undefined || accessInfo.pairingUrl === undefined) {
     return [
       "Ryco server is ready.",
@@ -199,7 +187,7 @@ export const formatHeadlessServeOutput = (accessInfo: HeadlessServeAccessInfo): 
           `Hub relay: enabled via ${accessInfo.hubOrigin}. Link this node to your account with \`ryco hub login\` (or \`ryco hub enroll\`); check it with \`ryco hub status\`.`,
         ]),
     "",
-    renderTerminalQrCode(accessInfo.pairingUrl),
+    renderQrCode(accessInfo.pairingUrl),
     "",
   ].join("\n");
 };

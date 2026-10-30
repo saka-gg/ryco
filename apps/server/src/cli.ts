@@ -78,7 +78,7 @@ import {
 } from "./hubConnector/e2eeOperatorContract.ts";
 import { expandHomePath, resolveBaseDir } from "./os-jank.ts";
 import { runServer } from "./server.ts";
-import { renderTerminalQrCode } from "./startupAccess.ts";
+import { loadTerminalQrCode } from "./startupAccess.ts";
 import {
   EMPTY_NODE_CONFIG,
   nodeConfigAsServeArgs,
@@ -2693,15 +2693,17 @@ const e2eeClientApprovalQrCommand = Command.make("approval-qr", {
       { quietLogs: flags.json },
     ).pipe(
       Effect.flatMap((approval) =>
-        Console.log(
-          flags.json
-            ? emitJson(approval)
-            : [
-                "Scan this code in Ryco on the approved phone. It expires after five minutes.",
-                renderTerminalQrCode(approval.payload),
-                "The code grants no access by itself; the phone still reconnects with a fresh ticket, channel, and IK handshake.",
-              ].join("\n"),
-        ),
+        flags.json
+          ? Console.log(emitJson(approval))
+          : Effect.flatMap(loadTerminalQrCode, (renderQrCode) =>
+              Console.log(
+                [
+                  "Scan this code in Ryco on the approved phone. It expires after five minutes.",
+                  renderQrCode(approval.payload),
+                  "The code grants no access by itself; the phone still reconnects with a fresh ticket, channel, and IK handshake.",
+                ].join("\n"),
+              ),
+            ),
       ),
     ),
   ),

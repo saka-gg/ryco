@@ -105,6 +105,7 @@ import {
   formatHostForUrl,
   isWildcardHost,
   issueHeadlessServeAccessInfo,
+  loadTerminalQrCode,
 } from "./startupAccess.ts";
 
 export const DEFAULT_STARTUP_COMMAND_GATE_MAX_PENDING = 2_048;
@@ -1224,7 +1225,9 @@ export const makeServerRuntimeStartup = Effect.gen(function* () {
         });
         yield* runStartupPhase(
           "headless.output",
-          Console.log(formatHeadlessServeOutput(accessInfo)),
+          Effect.flatMap(loadTerminalQrCode, (renderQrCode) =>
+            Console.log(formatHeadlessServeOutput(accessInfo, renderQrCode)),
+          ),
         );
       } else {
         yield* Effect.logDebug("startup phase: browser open check");

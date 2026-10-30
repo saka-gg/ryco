@@ -3,12 +3,12 @@ import { assert, expect, it } from "@effect/vitest";
 import {
   buildPairingUrl,
   formatHeadlessServeOutput,
-  renderTerminalQrCode,
   resolveHeadlessConnectionHost,
   resolveHeadlessConnectionString,
   resolveHeadlessServeLinks,
   resolveListeningPort,
 } from "./startupAccess.ts";
+import { renderTerminalQrCode } from "./terminalQrCode.ts";
 import { resolveServerAdvertisedEndpointsWithTailscale } from "./remote/AdvertisedEndpointRegistry.ts";
 
 const lanAndTailnetInterfaces = {
@@ -91,11 +91,14 @@ it("renders terminal QR codes as a multi-line unicode block grid", () => {
 });
 
 it("formats headless serve output with the connection string, token, pairing url, and qr code", () => {
-  const output = formatHeadlessServeOutput({
-    connectionString: "http://192.168.1.42:3773",
-    token: "PAIRCODE",
-    pairingUrl: "http://192.168.1.42:3773/pair#token=PAIRCODE",
-  });
+  const output = formatHeadlessServeOutput(
+    {
+      connectionString: "http://192.168.1.42:3773",
+      token: "PAIRCODE",
+      pairingUrl: "http://192.168.1.42:3773/pair#token=PAIRCODE",
+    },
+    renderTerminalQrCode,
+  );
 
   expect(output).toContain("Connection string: http://192.168.1.42:3773");
   expect(output).toContain("Token: PAIRCODE");
@@ -157,16 +160,19 @@ it("leads with the Tailnet HTTPS URL for a loopback server behind Tailscale Serv
 });
 
 it("prints alternatives, the token lifetime, and the Hub hint", () => {
-  const output = formatHeadlessServeOutput({
-    connectionString: "http://192.168.1.42:3773",
-    token: "PAIRCODE",
-    pairingUrl: "http://192.168.1.42:3773/pair#token=PAIRCODE",
-    tokenExpiresInMinutes: 5,
-    alternativeLinks: [
-      { label: "Tailscale IP", url: "http://100.100.100.100:3773/pair#token=PAIRCODE" },
-    ],
-    hubOrigin: "https://app.example",
-  });
+  const output = formatHeadlessServeOutput(
+    {
+      connectionString: "http://192.168.1.42:3773",
+      token: "PAIRCODE",
+      pairingUrl: "http://192.168.1.42:3773/pair#token=PAIRCODE",
+      tokenExpiresInMinutes: 5,
+      alternativeLinks: [
+        { label: "Tailscale IP", url: "http://100.100.100.100:3773/pair#token=PAIRCODE" },
+      ],
+      hubOrigin: "https://app.example",
+    },
+    renderTerminalQrCode,
+  );
 
   expect(output).toContain("Token: PAIRCODE (one-time, expires in 5 min");
   expect(output).toContain("Also reachable at:");

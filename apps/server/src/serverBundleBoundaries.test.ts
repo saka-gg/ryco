@@ -491,6 +491,8 @@ describe.skipIf(!hasCurrentBuild)("built server bundle", () => {
       const source = readFileSync(chunk, "utf8");
       // Region markers rolldown leaves in the output name the modules each chunk holds.
       expect(source).not.toMatch(/^\/\/#region src\/computer\/CuaComputerBackend\.ts$/mu);
+      // The terminal QR encoder loads when a command prints a pairing code.
+      expect(source).not.toMatch(/^\/\/#region \.\.\/\.\.\/packages\/shared\/src\/qrCode\.ts$/mu);
       expect(source).not.toMatch(/^\/\/#region src\/hubConnector\/HubIdentityRuntime\.ts$/mu);
       expect(source).not.toMatch(/^\/\/#region src\/sourceControl\/GitHubCli\.ts$/mu);
       // Loaded when the external Agent Control integration first starts.
