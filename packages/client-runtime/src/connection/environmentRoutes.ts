@@ -17,6 +17,8 @@
  */
 import type { AdvertisedEndpoint, EnvironmentId } from "@ryco/contracts";
 
+import type { SavedEnvironmentRecord } from "./catalog.ts";
+
 export type EnvironmentRouteReach = "tailnet-https" | "tailnet" | "lan" | "public";
 
 /** Where a direct route came from; only learned routes are replaced automatically. */
@@ -229,4 +231,118 @@ export function recordCheckWithoutUpgrade(
   nowMs: number,
 ): BetterRouteState {
   return { ...state, lastCheckAt: nowMs, checking: false };
+}
+
+const DAY_MS = 24 * 60 * 60 * 1000;
+/**
+ * A linked route is used for this long after it was linked, then the relay
+ * carries the connection so the link can be renewed there, well within the
+ * node's seven days (`HUB_LINKED_DIRECT_ACCESS_RENEW_AFTER_MS`).
+ */
+export const LINKED_ROUTE_USABLE_FOR_MS = 3 * DAY_MS;
+
+function isPrivateIpv4(host: string): "tailnet" | "lan" | null {
+  const parts = host.split(".");
+  if (parts.length !== 4 || parts.some((part) => !/^\d{1,3}$/u.test(part))) return null;
+  const [a, b] = parts.map(Number) as [number, number, number, number];
+  if (a === 100 && b >= 64 && b <= 127) return "tailnet";
+  if (a === 10 || (a === 172 && b >= 16 && b <= 31) || (a === 192 && b === 168)) return "lan";
+  if (a === 169 && b === 254) return "lan";
+  return null;
+}
+
+/**
+ * The reach of a saved direct address, read from its URL: a MagicDNS name over
+ * HTTPS, a tailnet address, a private or `.local` address, else public. Null
+ * for loopback, which no other device can use. Only orders routes; whether a
+ * route is the machine is the descriptor check's job.
+ */
+export function routeReachForBaseUrl(httpBaseUrl: string): EnvironmentRouteReach | null {
+  let url: URL;
+  try {
+    url = new URL(httpBaseUrl);
+  } catch {
+    return null;
+  }
+  const host = url.hostname.toLowerCase().replace(/^\[|\]$/gu, "");
+  if (host === "localhost" || host === "::1" || host.startsWith("127.")) return null;
+  if (host.endsWith(".ts.net")) return url.protocol === "https:" ? "tailnet-https" : "tailnet";
+  const ipv4 = isPrivateIpv4(host);
+  if (ipv4 !== null) return ipv4;
+  if (host.startsWith("fd") && host.includes(":")) return "tailnet";
+  if (host.endsWith(".local") || host.startsWith("fe80:")) return "lan";
+  return "public";
+}
+
+/**
+ * The direct routes a Hub machine's linked direct access gives it: one per
+ * linked record that names this Hub environment and is still within its
+ * usable age (an older one waits for its renewal over the relay).
+ */
+export function linkedDirectRoutes(input: {
+  readonly records: ReadonlyArray<SavedEnvironmentRecord>;
+  readonly hubEnvironmentId: EnvironmentId;
+  readonly nowMs: number;
+}): ReadonlyArray<EnvironmentRoute> {
+  const routes: EnvironmentRoute[] = [];
+  for (const record of input.records) {
+    if (record.hubLink?.hubEnvironmentId !== input.hubEnvironmentId) continue;
+    const linkedAtMs = Date.parse(record.hubLink.linkedAt);
+    if (!Number.isFinite(linkedAtMs) || input.nowMs - linkedAtMs >= LINKED_ROUTE_USABLE_FOR_MS) {
+      continue;
+    }
+    const reach = routeReachForBaseUrl(record.httpBaseUrl);
+    if (reach === null) continue;
+    routes.push({
+      kind: "direct",
+      httpBaseUrl: record.httpBaseUrl,
+      wsBaseUrl: record.wsBaseUrl,
+      reach,
+      expectedDescriptorId: record.environmentId,
+      source: "linked",
+    });
+  }
+  return orderEnvironmentRoutes(routes);
+}
+
+/**
+ * Check every direct route at once: each answers with its public descriptor's
+ * id within the timeout or counts as unreachable. No credential is sent; the
+ * relay is not checked.
+ */
+export async function checkEnvironmentRoutes(input: {
+  readonly routes: ReadonlyArray<EnvironmentRoute>;
+  readonly fetchDescriptorId: (httpBaseUrl: string, signal: AbortSignal) => Promise<EnvironmentId>;
+  readonly timeoutMs?: number;
+  readonly signal?: AbortSignal;
+}): Promise<ReadonlyMap<string, RouteCheckResult>> {
+  const timeoutMs = input.timeoutMs ?? ROUTE_CHECK_TIMEOUT_MS;
+  const direct = input.routes.filter(
+    (route): route is Extract<EnvironmentRoute, { kind: "direct" }> => route.kind === "direct",
+  );
+  const entries = await Promise.all(
+    direct.map(async (route): Promise<readonly [string, RouteCheckResult]> => {
+      const controller = new AbortController();
+      const abort = () => controller.abort();
+      input.signal?.addEventListener("abort", abort, { once: true });
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const timedOut = new Promise<RouteCheckResult>((resolve) => {
+        timer = setTimeout(() => {
+          controller.abort();
+          resolve({ kind: "timeout" });
+        }, timeoutMs);
+      });
+      try {
+        const answered = input.fetchDescriptorId(route.httpBaseUrl, controller.signal).then(
+          (descriptorId): RouteCheckResult => ({ kind: "answered", descriptorId }),
+          (): RouteCheckResult => ({ kind: "unreachable" }),
+        );
+        return [environmentRouteKey(route), await Promise.race([answered, timedOut])] as const;
+      } finally {
+        if (timer !== undefined) clearTimeout(timer);
+        input.signal?.removeEventListener("abort", abort);
+      }
+    }),
+  );
+  return new Map(entries);
 }

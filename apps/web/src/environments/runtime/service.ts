@@ -65,8 +65,10 @@ import {
 } from "../remote/api";
 import { resolveRemotePairingTarget } from "../remote/target";
 import {
+  getLinkedDirectRecord,
   getSavedEnvironmentRecord,
   hasSavedEnvironmentRegistryHydrated,
+  listLinkedDirectRecords,
   listSavedEnvironmentRecords,
   persistSavedEnvironmentRecord,
   readSavedEnvironmentBearerToken,
@@ -124,6 +126,8 @@ import {
 } from "./hostedEnvironmentConnection";
 import { webFrameScheduler, webSocket } from "../../platform";
 import { DesktopWorkspaceIpcSocketFactory } from "../../platform/desktopWorkspaceSocket";
+/** Desktop-only, and off the boot path: loaded by the first Hub machine connection. */
+const loadDesktopHubLinkedRoutes = () => import("../../platform/desktopHubLinkedRoutes");
 
 function isSavedEnvironmentConnectionCancelledError(
   error: unknown,
@@ -1316,17 +1320,35 @@ export async function connectDesktopWorkspaceEnvironment(input: {
   if (!bridge?.prepareDesktopWorkspaceTransport) {
     throw new Error("Desktop workspace transport is unavailable.");
   }
+  // Hub-linked direct access is a route of its Hub machine now, not a second
+  // environment: drop what an earlier run kept under the direct id.
+  void forgetFoldedEnvironmentsOnce().catch(() => undefined);
   const existing = getEnvironmentSupervisor().read(input.environmentId);
   if (existing) {
     await existing.ensureBootstrapped();
     return existing;
   }
-  const socketFactory = new DesktopWorkspaceIpcSocketFactory(input.environmentId, bridge);
+  // Each attempt walks the machine's routes: a linked direct address that
+  // answers as the machine, else the relay Desktop main owns
+  // (`docs/environment-routes.md`). The machine keeps its Hub id either way.
+  const socketFactory = new DesktopWorkspaceIpcSocketFactory(input.environmentId, bridge, {
+    resolve: async (signal) =>
+      (await loadDesktopHubLinkedRoutes())
+        .createDesktopHubLinkedRoutes(input.environmentId)
+        .resolve(signal),
+  });
+  let stopRouteUpgrades: () => void = NOOP;
+  let transportDisposed = false;
   const transport = new HostedWsTransport(() => socketFactory.nextUrl(), {
     preserveSocketPath: true,
     webSocketConstructor: (url) => socketFactory.createSocket(url) as unknown as WebSocket,
     retryTransientErrors: false,
     ...socketFactory.lifecycleHandlers,
+    onDispose: () => {
+      transportDisposed = true;
+      stopRouteUpgrades();
+      socketFactory.lifecycleHandlers.onDispose?.();
+    },
     getConnectionLabel: () => input.label,
     getEnvironmentId: () => input.environmentId,
   });
@@ -1362,6 +1384,19 @@ export async function connectDesktopWorkspaceEnvironment(input: {
       ...createEnvironmentConnectionHandlers(),
     }),
   );
+  void loadDesktopHubLinkedRoutes()
+    .then(({ keepDesktopHubRouteUpgraded }) => {
+      if (transportDisposed) return;
+      stopRouteUpgrades = keepDesktopHubRouteUpgraded({
+        hubEnvironmentId: input.environmentId,
+        readActiveRouteKey: () => socketFactory.activeRoute,
+        reconnect: () => {
+          if (getEnvironmentSupervisor().read(input.environmentId) !== connection) return;
+          void connection.reconnect().catch(() => undefined);
+        },
+      });
+    })
+    .catch(() => undefined);
   try {
     await connection.ensureBootstrapped();
     return connection;
@@ -1839,6 +1874,39 @@ export async function reconnectSavedEnvironment(environmentId: EnvironmentId): P
   }
 }
 
+/**
+ * Forget what this client held under a direct id that is now a route of a Hub
+ * machine: its connection, thread state, config and project artwork. The same
+ * machine's threads live under its Hub id; keeping the direct copies showed
+ * every thread twice. The record and its bearer stay: they are the route.
+ */
+async function forgetFoldedEnvironment(environmentId: EnvironmentId): Promise<void> {
+  getEnvironmentSupervisor().cancelPendingSavedEnvironmentConnection(environmentId);
+  if (getEnvironmentSupervisor().read(environmentId)) {
+    await removeConnection(environmentId).catch(() => false);
+  }
+  disposeThreadDetailSubscriptionsForEnvironment(environmentId);
+  useSavedEnvironmentRuntimeStore.getState().clear(environmentId);
+  forgetEnvironmentServerConfig(environmentId);
+  useStore.getState().removeEnvironmentState(environmentId);
+  clearProjectIconCache(environmentId);
+}
+
+let foldedEnvironmentsForgotten = false;
+/**
+ * Once per run, after the saved registry loaded: a Desktop that linked a
+ * machine before routes existed kept it as a second environment. Its data
+ * under the direct id goes; the link itself is now that machine's route.
+ */
+async function forgetFoldedEnvironmentsOnce(): Promise<void> {
+  if (foldedEnvironmentsForgotten) return;
+  foldedEnvironmentsForgotten = true;
+  await waitForSavedEnvironmentRegistryHydration();
+  for (const record of listLinkedDirectRecords()) {
+    await forgetFoldedEnvironment(record.environmentId);
+  }
+}
+
 export async function removeSavedEnvironment(environmentId: EnvironmentId): Promise<void> {
   await disconnectSavedEnvironment(environmentId);
   disposeThreadDetailSubscriptionsForEnvironment(environmentId);
@@ -1877,6 +1945,7 @@ export async function addSavedEnvironment(input: {
   const registrySnapshot = snapshotSavedEnvironmentRegistry([environmentId]);
   const existingRecord =
     getSavedEnvironmentRecord(environmentId) ??
+    getLinkedDirectRecord(environmentId) ??
     findSavedEnvironmentRecordByDesktopSshTarget(input.desktopSsh);
   const staleDesktopSshRecord =
     existingRecord && existingRecord.environmentId !== environmentId ? existingRecord : null;
@@ -1913,6 +1982,16 @@ export async function addSavedEnvironment(input: {
   useSavedEnvironmentRegistryStore.getState().upsert(record);
   if (staleDesktopSshRecord) {
     await removeSavedEnvironment(staleDesktopSshRecord.environmentId);
+  }
+  if (record.hubLink) {
+    // A route of the Hub machine, renewed in place: never connected as an
+    // environment of its own. The machine's connection checks it now.
+    await forgetFoldedEnvironment(environmentId);
+    const hubEnvironmentId = record.hubLink.hubEnvironmentId;
+    void loadDesktopHubLinkedRoutes()
+      .then(({ requestDesktopHubRouteCheck }) => requestDesktopHubRouteCheck(hubEnvironmentId))
+      .catch(() => undefined);
+    return record;
   }
   // A connect still running started on the credential this pairing replaced;
   // joining it would answer for the old one.

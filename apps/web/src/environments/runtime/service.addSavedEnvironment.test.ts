@@ -89,6 +89,8 @@ vi.mock("~/localApi", () => ({
 
 vi.mock("./catalog", () => ({
   getSavedEnvironmentRecord: mockGetSavedEnvironmentRecord,
+  getLinkedDirectRecord: vi.fn(() => null),
+  listLinkedDirectRecords: vi.fn(() => []),
   hasSavedEnvironmentRegistryHydrated: vi.fn(),
   listSavedEnvironmentRecords: mockListSavedEnvironmentRecords,
   persistSavedEnvironmentRecord: mockPersistSavedEnvironmentRecord,
@@ -278,6 +280,37 @@ describe("addSavedEnvironment", () => {
     );
     expect(mockSetSavedEnvironmentRegistry).toHaveBeenCalledWith([]);
     expect(mockUpsert).not.toHaveBeenCalled();
+
+    await resetEnvironmentServiceForTests();
+  }, 15_000);
+
+  it("keeps a Hub-linked pairing as a route of its Hub machine, never a second environment", async () => {
+    mockWriteSavedEnvironmentBearerToken.mockResolvedValue(true);
+    const { addSavedEnvironment, resetEnvironmentServiceForTests } = await import("./service");
+
+    const record = await addSavedEnvironment({
+      label: "Studio Mac",
+      host: "http://192.168.1.20:3773",
+      pairingCode: "linked-code",
+      hubLink: { hubEnvironmentId: "env_hub", linkedAt: "2026-10-30T08:00:00.000Z" },
+    });
+
+    expect(record).toMatchObject({
+      environmentId: "environment-1",
+      hubLink: { hubEnvironmentId: "env_hub" },
+    });
+    expect(mockWriteSavedEnvironmentBearerToken).toHaveBeenCalledWith(
+      EnvironmentId.make("environment-1"),
+      "bearer-token",
+    );
+    expect(mockUpsert).toHaveBeenCalledWith(
+      expect.objectContaining({ hubLink: expect.anything() }),
+    );
+    // No connection, no socket: the machine's own connection takes the route.
+    expect(mockCreateEnvironmentConnection).not.toHaveBeenCalled();
+    expect(mockWsTransport).not.toHaveBeenCalled();
+    // What a direct copy of the machine held under this id is forgotten.
+    expect(mockClearRuntime).toHaveBeenCalledWith(EnvironmentId.make("environment-1"));
 
     await resetEnvironmentServiceForTests();
   }, 15_000);

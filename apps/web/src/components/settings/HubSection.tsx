@@ -122,7 +122,7 @@ export function HubSection({
   const [linkingEnvironmentId, setLinkingEnvironmentId] = useState<string | null>(null);
   // Hub machine ids that already have a direct connection linked through the Hub.
   const directlyLinkedHubIds = useSavedEnvironmentRegistryStore((state) =>
-    Object.values(state.byId)
+    Object.values(state.linkedById ?? {})
       .flatMap((record) => (record.hubLink ? [record.hubLink.hubEnvironmentId] : []))
       .toSorted()
       .join("\n"),

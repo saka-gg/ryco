@@ -11,6 +11,7 @@ import {
   connectDesktopWorkspaceEnvironment,
   listSavedEnvironmentRecords,
 } from "../environments/runtime";
+import { listLinkedDirectRecords } from "../environments/runtime/catalog";
 
 /**
  * Hub-linked direct access on Desktop
@@ -23,9 +24,10 @@ import {
  * connection is renewed through the relay whenever Desktop reconnects to the
  * machine and the link has aged.
  *
- * Linking is explicit rather than automatic because the direct connection is a
- * separate environment with its own id: until one machine can be routed over
- * either path, adding it shows the machine a second time.
+ * The link is a route of the Hub machine, not a second environment: the
+ * machine keeps its Hub id, and each connection attempt takes the linked
+ * address when it answers as the machine (`desktopHubLinkedRoutes.ts`).
+ * Renewing it rewrites the stored address and bearer in place.
  */
 
 export type DesktopHubLinkOutcome =
@@ -53,6 +55,7 @@ async function link(machine: {
     deviceLabel: DEVICE_LABEL,
   });
   if (access.kind === "unavailable") return "no-direct-endpoint";
+  // A machine the user paired by hand stays theirs: an environment of its own.
   if (isManuallyPairedEnvironment(listSavedEnvironmentRecords(), access.environmentId)) {
     return "already-paired";
   }
@@ -95,7 +98,7 @@ export function linkDesktopMachineDirectAccess(machine: {
 /** The direct environment linked to a Hub machine, if any. */
 export function readDesktopMachineDirectLink(hubEnvironmentId: EnvironmentId) {
   return (
-    listSavedEnvironmentRecords().find(
+    listLinkedDirectRecords().find(
       (record) => record.hubLink?.hubEnvironmentId === hubEnvironmentId,
     ) ?? null
   );
@@ -115,7 +118,7 @@ export function renewDesktopMachineDirectAccess(machine: {
   if (
     !hubLinkedDirectAccessDue({
       hubEnvironmentId: machine.environmentId,
-      records: listSavedEnvironmentRecords(),
+      records: listLinkedDirectRecords(),
       nowMs,
     })
   ) {

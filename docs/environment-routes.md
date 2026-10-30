@@ -6,7 +6,8 @@ a faster route when it becomes reachable again. Today a linked direct grant crea
 environment with its own id, so the machine and its threads show twice, and nothing switches routes.
 
 This page is the design. Phase 1, the route model and its policy, is in
-`packages/client-runtime/src/connection/environmentRoutes.ts`. Nothing uses it yet.
+`packages/client-runtime/src/connection/environmentRoutes.ts`; the upgrade loop is
+`environmentRouteUpgrader.ts`. Phase 2 (Desktop) uses them.
 
 ## Identity
 
@@ -57,11 +58,20 @@ relay lifecycle owner and never sees a route. `canAdoptHostedEnvironmentSession`
 
 1. The route model and policy in client-runtime, pure and tested (this change), plus the mobile
    `network-changed` signal (#924).
-2. Desktop:
-   - fold saved `hubLink` records into the Hub environment's routes, and drop the duplicate
-     environment and its cached data;
-   - renew the linked bearer in place;
-   - walk routes inside the connection's attempt factory.
+2. Desktop (done):
+   - the saved catalog keeps `hubLink` records apart (`linkedById`): they are routes of the Hub
+     environment, never environments, so nothing lists or connects them, and what an earlier run
+     kept under the direct id is dropped once;
+   - linking again rewrites the stored address and bearer in place and asks the machine's
+     connection to check its routes;
+   - the Hub connection's socket factory walks the routes on every attempt
+     (`apps/web/src/platform/desktopHubLinkedRoutes.ts`): linked addresses are checked in
+     parallel, the best one that answers as the machine's direct id gets a one-time socket token
+     from the linked bearer, else the relay Desktop main owns; a refused bearer holds its address
+     back until the link changes;
+   - while on the relay, better routes are checked every minute, when the network comes back and
+     when the window is shown, and a new attempt is made when one answers;
+   - a link older than three days is not used, so the relay carries the machine and renews it.
 3. Mobile: ask for linked direct access over the relay through the shared helpers. Its adapter
    only supplies network changes.
 4. Optionally, the node pushes its direct endpoints in its config, and Desktop mode includes

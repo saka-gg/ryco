@@ -37,6 +37,8 @@ vi.mock("../remote/api", () => ({
 
 vi.mock("./catalog", () => ({
   getSavedEnvironmentRecord: mockGetSavedEnvironmentRecord,
+  getLinkedDirectRecord: vi.fn(() => null),
+  listLinkedDirectRecords: vi.fn(() => []),
   hasSavedEnvironmentRegistryHydrated: vi.fn(() => true),
   listSavedEnvironmentRecords: mockListSavedEnvironmentRecords,
   persistSavedEnvironmentRecord: vi.fn(),

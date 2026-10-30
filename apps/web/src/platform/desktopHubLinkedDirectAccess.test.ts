@@ -16,7 +16,11 @@ vi.mock("../environments/runtime", () => ({
   connectDesktopWorkspaceEnvironment: async () => ({
     client: { server: { issueLinkedDirectAccess } },
   }),
-  listSavedEnvironmentRecords: () => records,
+  // The catalog keeps linked records apart from the environments.
+  listSavedEnvironmentRecords: () => records.filter((record) => record.hubLink === undefined),
+}));
+vi.mock("../environments/runtime/catalog", () => ({
+  listLinkedDirectRecords: () => records.filter((record) => record.hubLink !== undefined),
 }));
 vi.mock("../environments/remote/api", () => ({
   fetchRemoteEnvironmentDescriptor: (input: unknown) => fetchRemoteEnvironmentDescriptor(input),

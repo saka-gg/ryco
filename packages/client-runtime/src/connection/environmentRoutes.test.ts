@@ -1,18 +1,23 @@
 import { EnvironmentId, type AdvertisedEndpoint } from "@ryco/contracts";
-import { describe, expect, it } from "vite-plus/test";
+import { describe, expect, it, vi } from "vite-plus/test";
+
+import type { SavedEnvironmentRecord } from "./catalog.ts";
 
 import {
   BETTER_ROUTE_CHECK_INTERVAL_MS,
   BETTER_ROUTE_HOLDBACK_MS,
   INITIAL_BETTER_ROUTE_STATE,
   RELAY_ROUTE,
+  checkEnvironmentRoutes,
   directRoutesFromEndpoints,
   environmentRouteKey,
+  linkedDirectRoutes,
   mergeLearnedRoutes,
   orderEnvironmentRoutes,
   planBetterRouteCheck,
   recordCheckWithoutUpgrade,
   recordUpgradeOutcome,
+  routeReachForBaseUrl,
   selectEnvironmentRoute,
   type EnvironmentRoute,
   type RouteCheckResult,
@@ -170,5 +175,86 @@ describe("environment routes", () => {
       nowMs: 6_000,
     });
     expect(landed.heldBackUntil.size).toBe(0);
+  });
+});
+
+describe("linked direct routes", () => {
+  const NOW = Date.parse("2026-10-30T12:00:00.000Z");
+  const record = (overrides: Partial<SavedEnvironmentRecord>): SavedEnvironmentRecord => ({
+    environmentId: "env-direct" as EnvironmentId,
+    label: "Studio",
+    wsBaseUrl: "wss://studio.tail1234.ts.net",
+    httpBaseUrl: "https://studio.tail1234.ts.net",
+    createdAt: "2026-10-20T00:00:00.000Z",
+    lastConnectedAt: null,
+    hubLink: { hubEnvironmentId: "env_hub", linkedAt: "2026-10-29T12:00:00.000Z" },
+    ...overrides,
+  });
+
+  it("reads a route's reach from its address", () => {
+    expect(routeReachForBaseUrl("https://studio.tail1234.ts.net")).toBe("tailnet-https");
+    expect(routeReachForBaseUrl("http://100.101.102.103:3773")).toBe("tailnet");
+    expect(routeReachForBaseUrl("http://192.168.1.20:3773")).toBe("lan");
+    expect(routeReachForBaseUrl("http://studio.local:3773")).toBe("lan");
+    expect(routeReachForBaseUrl("https://ryco.example.com")).toBe("public");
+    expect(routeReachForBaseUrl("http://127.0.0.1:3773")).toBeNull();
+    expect(routeReachForBaseUrl("not a url")).toBeNull();
+  });
+
+  it("gives a Hub machine only its own links that are young enough to use", () => {
+    const routes = linkedDirectRoutes({
+      hubEnvironmentId: "env_hub" as EnvironmentId,
+      nowMs: NOW,
+      records: [
+        record({ httpBaseUrl: "http://192.168.1.20:3773", wsBaseUrl: "ws://192.168.1.20:3773" }),
+        record({}),
+        record({
+          environmentId: "env-other" as EnvironmentId,
+          hubLink: { hubEnvironmentId: "env_other_hub", linkedAt: "2026-10-29T12:00:00.000Z" },
+        }),
+        // Due for renewal: the relay carries the machine until it is renewed.
+        record({
+          httpBaseUrl: "http://100.64.0.9:3773",
+          hubLink: { hubEnvironmentId: "env_hub", linkedAt: "2026-10-27T11:59:00.000Z" },
+        }),
+        record({ hubLink: undefined, httpBaseUrl: "http://10.0.0.2:3773" }),
+      ],
+    });
+    expect(routes.map((route) => (route.kind === "direct" ? route.httpBaseUrl : "relay"))).toEqual([
+      "https://studio.tail1234.ts.net",
+      "http://192.168.1.20:3773",
+    ]);
+    expect(routes[0]).toMatchObject({ expectedDescriptorId: "env-direct", source: "linked" });
+  });
+
+  it("checks routes at once, sends no credential, and times out a silent one", async () => {
+    vi.useFakeTimers();
+    try {
+      const routes = [
+        direct("https://a.ts.net", "tailnet-https"),
+        direct("http://192.168.1.20:3773", "lan"),
+        direct("http://192.168.1.30:3773", "lan"),
+      ];
+      const fetchDescriptorId = vi.fn((httpBaseUrl: string) =>
+        httpBaseUrl === "https://a.ts.net"
+          ? new Promise<EnvironmentId>(() => undefined)
+          : httpBaseUrl === "http://192.168.1.20:3773"
+            ? Promise.resolve(directId)
+            : Promise.reject(new Error("refused")),
+      );
+      const pending = checkEnvironmentRoutes({ routes, fetchDescriptorId, timeoutMs: 2_500 });
+      expect(fetchDescriptorId).toHaveBeenCalledTimes(3);
+      await vi.advanceTimersByTimeAsync(2_500);
+      const results = await pending;
+      expect(results.get("https://a.ts.net")).toEqual({ kind: "timeout" });
+      expect(results.get("http://192.168.1.20:3773")).toEqual({
+        kind: "answered",
+        descriptorId: directId,
+      });
+      expect(results.get("http://192.168.1.30:3773")).toEqual({ kind: "unreachable" });
+      expect(selectEnvironmentRoute([...routes, RELAY_ROUTE], results)).toBe(routes[1]);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
