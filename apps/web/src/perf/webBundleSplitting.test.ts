@@ -250,8 +250,35 @@ describe("web bundle splitting boundaries", () => {
     expect(worktreeList).toContain("onLoadError:");
     expect(worktreeList).not.toMatch(REACT_LAZY_IMPORT);
     expect(worktreeList).not.toContain("<Suspense");
-    // Pointing at what opens it starts the chunk load.
-    expect(worktreeList).toContain("onOpenLinkedItemIntent={preloadLinkedWorktreeItemDialog}");
+    // Pointing at what opens them starts the chunk load: a badge opens the linked-item
+    // dialog, or with several pull requests the pull requests popover.
+    expect(worktreeList).toContain("onOpenLinkedItemIntent={preloadWorktreeBadgeSurfaces}");
+    expect(sharedDialogs).toMatch(
+      /export function preloadWorktreeBadgeSurfaces\(\): void \{\n  void LazyLinkedWorktreeItemDialog\.preload\(\);\n  void LazyWorkspacePullRequestsPopover\.preload\(\);/u,
+    );
+  });
+
+  it("mounts the workspace pull requests popover on its first open, wherever it opens", async () => {
+    const sharedDialogs = await readSource("../components/worktrees/lazyWorktreeDialogs.ts");
+    const onDemand = await readSource(
+      "../components/worktrees/WorkspacePullRequestsPopoverOnDemand.tsx",
+    );
+    expect(sharedDialogs).toContain('import("./WorkspacePullRequestsPopover")');
+    expect(onDemand).toContain("useLazyComponentReady(");
+    expect(onDemand).toContain("onLoadError:");
+    for (const path of [
+      "../components/sidebar/SidebarWorktreeList.tsx",
+      "../components/ChatView.tsx",
+      "../components/ThreadWorkspacePanel.tsx",
+      "../components/overview/crown/details/PullRequestDetail.tsx",
+    ]) {
+      const source = await readSource(path);
+      expect(source).toContain("<WorkspacePullRequestsPopoverOnDemand");
+      // Only types from the popover module itself, so its code stays in its own chunk.
+      expect(source).not.toMatch(
+        /^import \{[^}]*\} from "[./]+(?:worktrees\/)?WorkspacePullRequestsPopover";$/mu,
+      );
+    }
   });
 
   it("preloads the shell's on-demand dialogs from their entry points", async () => {

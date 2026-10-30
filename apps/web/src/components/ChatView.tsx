@@ -127,10 +127,8 @@ import {
   workspaceDiscoversPullRequests,
 } from "@ryco/shared/worktreePullRequests";
 import { resolveThreadPullRequests } from "./chat/ChatOverviewPanel.logic";
-import {
-  WorkspacePullRequestsPopover,
-  type WorkspacePullRequestsView,
-} from "./worktrees/WorkspacePullRequestsPopover";
+import type { WorkspacePullRequestsView } from "./worktrees/WorkspacePullRequestsPopover";
+import { WorkspacePullRequestsPopoverOnDemand } from "./worktrees/WorkspacePullRequestsPopoverOnDemand";
 import { useWorkspacePullRequestEditing } from "./worktrees/useWorkspacePullRequestEditing";
 import { hasSeveralPullRequests } from "./worktrees/workspacePullRequests.logic";
 import { truncate } from "@ryco/shared/String";
@@ -3228,7 +3226,8 @@ export default function ChatView(props: ChatViewProps) {
   );
   const headerPullRequestsPopover =
     openPullRequestInApp && headerPullRequestNumber !== null ? (
-      <WorkspacePullRequestsPopover
+      <WorkspacePullRequestsPopoverOnDemand
+        threadRef={routeThreadRef}
         environmentId={environmentId}
         worktreeId={
           headerPullRequestsEditing.supported ? (activeWorktreeSummary?.id ?? null) : null

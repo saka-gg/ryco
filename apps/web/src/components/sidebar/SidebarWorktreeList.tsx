@@ -58,13 +58,11 @@ import type { LinkedWorktreeItem } from "../worktrees/LinkedWorktreeItemDialog";
  */
 import {
   LazyLinkedWorktreeItemDialog,
-  preloadLinkedWorktreeItemDialog,
+  preloadWorktreeBadgeSurfaces,
 } from "../worktrees/lazyWorktreeDialogs";
+import { WorkspacePullRequestsPopoverOnDemand } from "../worktrees/WorkspacePullRequestsPopoverOnDemand";
 import { WorktreeSourceControlBadges } from "../worktrees/WorktreeSourceControlBadges";
-import {
-  WorkspacePullRequestsPopover,
-  type WorkspacePullRequestsView,
-} from "../worktrees/WorkspacePullRequestsPopover";
+import type { WorkspacePullRequestsView } from "../worktrees/WorkspacePullRequestsPopover";
 import { useWorkspacePullRequestEditing } from "../worktrees/useWorkspacePullRequestEditing";
 import { hasSeveralPullRequests } from "../worktrees/workspacePullRequests.logic";
 import {
@@ -341,7 +339,7 @@ function ArchivedWorktreeRow(props: {
           workItemStateName={props.worktree.worktree.workItemStateName}
           displayMode="prefer-pr"
           onOpenLinkedItem={props.onOpenLinkedItem}
-          onOpenLinkedItemIntent={preloadLinkedWorktreeItemDialog}
+          onOpenLinkedItemIntent={preloadWorktreeBadgeSurfaces}
           pullRequests={pullRequests.links}
           pullRequestsToggle={
             pullRequests.enabled
@@ -618,7 +616,7 @@ const SidebarWorktreeSection = memo(function SidebarWorktreeSection(props: {
                   workItemStateName={props.worktree.worktree.workItemStateName}
                   displayMode="prefer-pr"
                   onOpenLinkedItem={props.onOpenLinkedItem}
-                  onOpenLinkedItemIntent={preloadLinkedWorktreeItemDialog}
+                  onOpenLinkedItemIntent={preloadWorktreeBadgeSurfaces}
                   prUrl={
                     pullRequests.links.find(
                       (link) => link.number === props.worktree.worktree.prNumber,
@@ -858,11 +856,12 @@ function WorktreeMenu(props: {
 
 /**
  * A workspace row's pull requests: its links, and the one popover that shows
- * them, mounted for the row's lifetime (going from one pull request to two
- * never remounts it). With several, the badge toggles it; "Link pull
- * request…" in the row's menu opens it on the link view. It hangs from the
- * badge, or the row while there is none. The frozen phone tier keeps the
- * badge's dialog and gets no picker.
+ * them, mounted from the row's first open on (going from one pull request to
+ * two never remounts it). Its chunk loads on that open, or on pointer or focus
+ * intent toward the badge, so nothing of it loads while the sidebar boots.
+ * With several, the badge toggles it; "Link pull request…" in the row's menu
+ * opens it on the link view. It hangs from the badge, or the row while there
+ * is none. The frozen phone tier keeps the badge's dialog and gets no picker.
  */
 function useWorktreePullRequestsControl(input: {
   readonly rowElement: HTMLDivElement | null;
@@ -902,6 +901,7 @@ function useWorktreePullRequestsControl(input: {
     worktree,
   });
   const enabled = presentationTier !== "phone" && !isSyntheticWorktreeId(worktree.worktreeId);
+
   const badgeToggles = worktree.prNumber != null && hasSeveralPullRequests(links);
   // Wait a frame so the closing menu returns focus first, then the picker takes it.
   const openLinkPicker = () =>
@@ -921,7 +921,7 @@ function useWorktreePullRequestsControl(input: {
     onLinkPullRequest:
       enabled && editing.supported ? (editing.ready ? openLinkPicker : null) : undefined,
     popover: enabled ? (
-      <WorkspacePullRequestsPopover
+      <WorkspacePullRequestsPopoverOnDemand
         environmentId={input.environmentId}
         worktreeId={editing.supported ? WorktreeId.make(worktree.worktreeId) : null}
         cwd={worktree.worktreePath ?? input.projectCwd}
