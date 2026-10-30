@@ -29,13 +29,13 @@ import type { EnvironmentId, ThreadId } from "@ryco/contracts";
 import { quoteCitationsToPlainText } from "@ryco/shared/quoteCitations";
 import { useVideoPlayer, VideoView } from "expo-video";
 import { useEvent } from "expo";
-import * as Linking from "expo-linking";
 import { useMemo, useState } from "react";
 import { Image, Pressable, ScrollView, Share, View } from "react-native";
 
 import { SymbolView } from "../../components/AppSymbol";
 import { AppText as Text } from "../../components/AppText";
 import { CopyTextButton } from "../../components/CopyTextButton";
+import { openWebLink } from "../../lib/openWebLink";
 import { useThemeColor } from "../../lib/useThemeColor";
 import {
   hasNativeSelectableMarkdownText,
@@ -415,9 +415,9 @@ export function ThreadMessage(props: {
             preserveSoftBreaks
             marginTop={0}
             marginBottom={0}
-            onLinkPress={(href) => {
-              void Linking.openURL(href).catch(() => undefined);
-            }}
+            // An agent's message can link to anything; only web links leave the app,
+            // as on the pull request screens (`isWebLink`).
+            onLinkPress={openWebLink}
           />
         )}
         {sentContexts && sentContextCount > 0 ? (
