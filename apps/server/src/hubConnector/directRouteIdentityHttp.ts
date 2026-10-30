@@ -5,15 +5,15 @@ import {
 import { Effect } from "effect";
 import { HttpRouter, HttpServerRequest, HttpServerResponse } from "effect/http";
 
+import { deriveAuthClientMetadata } from "../auth/utils.ts";
 import { ServerEnvironment } from "../environment/Services/ServerEnvironment.ts";
+import { AdvertisedEndpointRegistry } from "../remote/Services/AdvertisedEndpointRegistry.ts";
 import { awaitHubConnector } from "./HubConnectorService.ts";
 import {
   DESKTOP_LOCAL_NO_STORE_HEADERS,
   DesktopLocalControlRefused,
   requireBoundedDesktopJsonBody,
 } from "./localIntroductionHttp.ts";
-
-const PROOF_RETRY_AFTER_SECONDS = "3";
 
 /**
  * `POST /.well-known/ryco/environment/identity`: a Hub machine's direct address
@@ -23,24 +23,35 @@ const PROOF_RETRY_AFTER_SECONDS = "3";
  * (`directRouteIdentityProof.ts`, loaded on the first request). It answers
  * nothing about a node without an enrolled identity.
  */
-export const makeDirectRouteIdentityRouteLayer = (pace?: () => boolean) =>
+export const makeDirectRouteIdentityRouteLayer = (pace?: (remoteAddress: string) => boolean) =>
   HttpRouter.add(
     "POST",
     DIRECT_ROUTE_IDENTITY_PATH,
     Effect.gen(function* () {
       yield* requireBoundedDesktopJsonBody(DIRECT_ROUTE_IDENTITY_MAX_BODY_BYTES);
-      const body = yield* (yield* HttpServerRequest.HttpServerRequest).json.pipe(
+      const request = yield* HttpServerRequest.HttpServerRequest;
+      const body = yield* request.json.pipe(
         Effect.mapError(() => new DesktopLocalControlRefused({ reason: "body" })),
       );
       const environment = yield* (yield* ServerEnvironment).getDescriptor;
-      const connector = yield* awaitHubConnector;
-      const { answerDirectRouteIdentityProof } = yield* Effect.promise(
-        () => import("./directRouteIdentityProof.ts"),
+      // The node signs only for an origin it advertises right now.
+      const advertisedOrigins = (yield* (yield* AdvertisedEndpointRegistry).list).flatMap(
+        (endpoint) => {
+          try {
+            return [new URL(endpoint.httpBaseUrl).origin];
+          } catch {
+            return [];
+          }
+        },
       );
+      const connector = yield* awaitHubConnector;
+      const proof = yield* Effect.promise(() => import("./directRouteIdentityProof.ts"));
       const answer = yield* Effect.promise(() =>
-        answerDirectRouteIdentityProof({
+        proof.answerDirectRouteIdentityProof({
           body,
           environmentId: environment.environmentId,
+          advertisedOrigins,
+          remoteAddress: deriveAuthClientMetadata({ request }).ipAddress ?? "unknown",
           prove: connector.proveDirectRouteIdentity,
           ...(pace === undefined ? {} : { pace }),
         }),
@@ -49,7 +60,10 @@ export const makeDirectRouteIdentityRouteLayer = (pace?: () => boolean) =>
         status: answer.status,
         headers:
           answer.status === 429
-            ? { ...DESKTOP_LOCAL_NO_STORE_HEADERS, "Retry-After": PROOF_RETRY_AFTER_SECONDS }
+            ? {
+                ...DESKTOP_LOCAL_NO_STORE_HEADERS,
+                "Retry-After": String(proof.PROOF_RETRY_AFTER_SECONDS),
+              }
             : DESKTOP_LOCAL_NO_STORE_HEADERS,
       });
     }).pipe(

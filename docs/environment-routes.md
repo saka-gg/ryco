@@ -22,25 +22,35 @@ This page is the design. Phase 1, the route model and its policy, is in
   learned from one.
 - The grant names the node identity key that relay channel's handshake verified. Before a client
   redeems the grant's code or presents its bearer at a direct address, it posts a fresh random
-  challenge to `/.well-known/ryco/environment/identity`; the node signs
-  `["ryco.direct-route-identity.proof.v1", directEnvironmentId, challenge]` with that key
-  (`@ryco/shared/directRouteIdentity`). An address that cannot sign gets nothing and is held until
-  the link is renewed over the relay (a rotated key arrives that way). A link from a node older
-  than the proof names no key, so it is never used and is renewed instead.
+  challenge and the origin it contacted to `/.well-known/ryco/environment/identity`; the node
+  signs `["ryco.direct-route-identity.proof.v1", directEnvironmentId, origin, challenge]` with that
+  key (`@ryco/shared/directRouteIdentity`), and only for an origin it advertises right now. An
+  address that cannot answer gets nothing and is held until the link is renewed over the relay (a
+  rotated key, or the machine's new addresses, arrive that way). A link from a node older than the
+  proof names no key, so it is never used and is renewed instead.
+- The origin is what keeps a reused address from borrowing the machine's answer: a device that now
+  holds an address the machine had (a Tailscale or DHCP address given to another device, a host or
+  tunnel name handed on) can pass the challenge through, or redirect it, to the machine, but the
+  machine no longer advertises that origin and signs nothing; rewriting the origin gets a
+  signature for another origin, which the client's own check refuses.
+- The proof endpoint needs no credential, so it never takes the identity lock or starts identity
+  repairs (only the process that already owns the identity answers), and it is paced per remote
+  address under one ceiling for all.
 
 ### Why direct routes still need HTTPS or Tailscale
 
-The proof shows that the far end of the request holds the machine's key, now. It cannot show that
-nobody sits in between: the socket that follows is not bound to the key, so on plain HTTP someone on
-the network can pass the challenge through to the real machine, then read and change everything
-after it, bearer included. Only an encrypted channel tied to the key (the relay's E2EE, or the same
+The proof shows that the machine holding the key answers for the origin the client contacted, now.
+It cannot show that nobody sits between the client and that origin: the socket that follows is not
+bound to the key, so on plain HTTP someone on the network can sit in front of the machine's own
+address, pass the challenge through, then read and change everything after it, bearer included. Only an encrypted channel tied to the key (the relay's E2EE, or the same
 E2EE over the direct socket) would close that. HTTPS and Tailscale close it at the transport: the
 certificate names the host, WireGuard the peer. So the two checks are complementary:
 
 - the transport rules out someone in between;
-- the proof rules out the wrong machine at the end: an address that now belongs to another device
-  (a reused Tailscale or DHCP address, a renamed host with a valid certificate, a tunnel name
-  handed to someone else), or another node serving a copy of the public descriptor.
+- the proof, bound to the origin, rules out the wrong machine at the end: an address that now
+  belongs to another device (a reused Tailscale or DHCP address, a renamed host with a valid
+  certificate, a tunnel name handed to someone else), or another node serving a copy of the public
+  descriptor.
 
 Plain LAN and public addresses therefore stay out, and linking no longer redeems a code at one.
 Running the relay's E2EE over the direct socket would let them in; it is not built.

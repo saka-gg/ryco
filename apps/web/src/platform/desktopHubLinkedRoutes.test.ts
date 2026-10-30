@@ -30,9 +30,11 @@ vi.mock("./directRouteIdentityRequest", () => ({
   requestWebDirectRouteIdentityProof: async ({
     httpBaseUrl,
     challenge,
+    origin,
   }: {
     httpBaseUrl: string;
     challenge: string;
+    origin: string;
   }) => {
     remote.proofs.push(httpBaseUrl);
     if (remote.proofAnswers.shift() === "unreachable") return { kind: "unreachable" };
@@ -41,6 +43,7 @@ vi.mock("./directRouteIdentityRequest", () => ({
     const environmentId = remote.descriptors.get(httpBaseUrl) ?? "";
     const transcript = encodeDirectRouteIdentityTranscript({
       environmentId,
+      origin,
       challenge: Uint8Array.from(Buffer.from(challenge, "base64url")),
     });
     const signature = await crypto.subtle.sign("Ed25519", signer, Uint8Array.from(transcript));

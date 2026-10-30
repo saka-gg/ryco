@@ -246,6 +246,7 @@ export interface HubIdentityRuntimeShape {
    */
   readonly proveDirectRouteIdentity: (input: {
     readonly environmentId: string;
+    readonly origin: string;
     readonly challenge: Uint8Array;
   }) => Promise<Uint8Array | undefined>;
   readonly createRelayAuthenticationFrame: (
@@ -1548,9 +1549,9 @@ export async function makeHubIdentityRuntime(options: {
         return active;
       },
     },
-    proveDirectRouteIdentity: async ({ environmentId, challenge }) => {
-      // Encoded first: a challenge of the wrong size never reaches key custody.
-      const transcript = encodeDirectRouteIdentityTranscript({ environmentId, challenge });
+    proveDirectRouteIdentity: async ({ environmentId, origin, challenge }) => {
+      // Encoded first: a malformed challenge or origin never reaches key custody.
+      const transcript = encodeDirectRouteIdentityTranscript({ environmentId, origin, challenge });
       const active = (await stateStore.readOrCreate()).activeNode;
       if (active === null) return undefined;
       // The selector the relay proof and the capability statement use, so the

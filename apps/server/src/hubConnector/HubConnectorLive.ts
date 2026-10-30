@@ -880,11 +880,12 @@ const makeHubConnectorService = (dependencies: HubConnectorLiveDependencies) =>
         sign: (input) => asIdentityOwner(() => identity.nativeNodeClaim.sign(input)),
         commit: (input) => asIdentityOwner(() => identity.nativeNodeClaim.commit(input)),
       },
-      // Only the process that owns the identity speaks for it; a standby
-      // backend answers as a node without one.
+      // Only the process that already owns the identity speaks for it, and an
+      // unauthenticated proof never claims the identity lock or starts its
+      // repairs; a standby backend answers as a node without one.
       proveDirectRouteIdentity: (input) =>
         connectorConfig.enabled
-          ? asIdentityOwner(() => identity.proveDirectRouteIdentity(input))
+          ? connector.ifIdentityOwner(() => identity.proveDirectRouteIdentity(input))
           : Promise.resolve(undefined),
       e2ee: makeNodeE2eeOperator({
         identity,

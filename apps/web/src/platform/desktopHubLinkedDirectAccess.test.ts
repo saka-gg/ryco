@@ -14,10 +14,18 @@ const fetchRemoteEnvironmentDescriptor = vi.fn(async (_input: unknown) => ({
 /** The key the machine's direct address signs challenges with. */
 let addressSigner: CryptoKey | null = null;
 const requestDirectRouteIdentityProof = vi.fn(
-  async ({ challenge }: { readonly httpBaseUrl: string; readonly challenge: string }) => {
+  async ({
+    challenge,
+    origin,
+  }: {
+    readonly httpBaseUrl: string;
+    readonly challenge: string;
+    readonly origin: string;
+  }) => {
     if (addressSigner === null) return { kind: "refused" as const };
     const transcript = encodeDirectRouteIdentityTranscript({
       environmentId: DIRECT,
+      origin,
       challenge: Uint8Array.from(Buffer.from(challenge, "base64url")),
     });
     const signature = await crypto.subtle.sign(
@@ -44,8 +52,11 @@ vi.mock("../environments/remote/api", () => ({
   fetchRemoteEnvironmentDescriptor: (input: unknown) => fetchRemoteEnvironmentDescriptor(input),
 }));
 vi.mock("./directRouteIdentityRequest", () => ({
-  requestWebDirectRouteIdentityProof: (input: { httpBaseUrl: string; challenge: string }) =>
-    requestDirectRouteIdentityProof(input),
+  requestWebDirectRouteIdentityProof: (input: {
+    httpBaseUrl: string;
+    challenge: string;
+    origin: string;
+  }) => requestDirectRouteIdentityProof(input),
 }));
 
 const { linkDesktopMachineDirectAccess, renewDesktopMachineDirectAccess } =

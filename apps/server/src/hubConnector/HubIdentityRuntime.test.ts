@@ -671,14 +671,17 @@ describe("HubIdentityRuntime", () => {
       now: () => 1_700_000_000_000,
     });
     const challenge = Uint8Array.from({ length: 32 }, (_, index) => index);
+    const origin = "https://studio.tail1.ts.net";
     const signature = await runtime.proveDirectRouteIdentity({
       environmentId: "env-direct",
+      origin,
       challenge,
     });
     expect(
       verifyDirectRouteIdentityProof({
         nodeIdentityPublicKey: active.publicKey,
         environmentId: "env-direct",
+        origin,
         challenge,
         signature: signature!,
       }),
@@ -687,13 +690,22 @@ describe("HubIdentityRuntime", () => {
     await expect(
       runtime.proveDirectRouteIdentity({
         environmentId: "env-direct",
+        origin,
         challenge: new Uint8Array(8),
+      }),
+    ).rejects.toThrow();
+    // Nor does an origin that is not one.
+    await expect(
+      runtime.proveDirectRouteIdentity({
+        environmentId: "env-direct",
+        origin: `${origin}/path`,
+        challenge,
       }),
     ).rejects.toThrow();
 
     await runtime.leave();
     await expect(
-      runtime.proveDirectRouteIdentity({ environmentId: "env-direct", challenge }),
+      runtime.proveDirectRouteIdentity({ environmentId: "env-direct", origin, challenge }),
     ).resolves.toBeUndefined();
   });
 

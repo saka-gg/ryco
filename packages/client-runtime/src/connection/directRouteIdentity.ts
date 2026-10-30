@@ -12,6 +12,7 @@ import { DIRECT_ROUTE_IDENTITY_PATH } from "@ryco/contracts/direct-route-identit
 import { randomBytes } from "@noble/hashes/utils.js";
 import {
   DIRECT_ROUTE_IDENTITY_CHALLENGE_BYTES,
+  directRouteOrigin,
   verifyDirectRouteIdentityProof,
 } from "@ryco/shared/directRouteIdentity";
 
@@ -47,6 +48,8 @@ export async function requestDirectRouteIdentityProof(
   input: {
     readonly httpBaseUrl: string;
     readonly challenge: string;
+    /** The origin the client contacted, which the node's signature names. */
+    readonly origin: string;
     readonly signal?: AbortSignal;
   },
 ): Promise<DirectRouteIdentityProofAnswer> {
@@ -59,7 +62,7 @@ export async function requestDirectRouteIdentityProof(
       {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ challenge: input.challenge }),
+        body: JSON.stringify({ challenge: input.challenge, origin: input.origin }),
         ...(input.signal === undefined ? {} : { signal: input.signal }),
       },
       REMOTE_CONTROL_PLANE_REQUEST_TIMEOUT_MS,
@@ -91,6 +94,7 @@ export async function proveDirectRouteIdentity(input: {
   readonly requestProof: (request: {
     readonly httpBaseUrl: string;
     readonly challenge: string;
+    readonly origin: string;
     readonly signal?: AbortSignal;
   }) => Promise<DirectRouteIdentityProofAnswer>;
   readonly signal?: AbortSignal;
@@ -103,10 +107,15 @@ export async function proveDirectRouteIdentity(input: {
   } catch {
     return "refused";
   }
+  // The signature names the origin this client contacted: an address that now
+  // belongs to another device cannot borrow the machine's answer for it.
+  const origin = directRouteOrigin(input.httpBaseUrl);
+  if (origin === null) return "refused";
   const challenge = (input.randomBytes ?? randomBytes)(DIRECT_ROUTE_IDENTITY_CHALLENGE_BYTES);
   const answer = await input.requestProof({
     httpBaseUrl: input.httpBaseUrl,
     challenge: encodeBase64Url(challenge),
+    origin,
     ...(input.signal === undefined ? {} : { signal: input.signal }),
   });
   if (answer.kind !== "signed") return answer.kind;
@@ -119,6 +128,7 @@ export async function proveDirectRouteIdentity(input: {
   return verifyDirectRouteIdentityProof({
     nodeIdentityPublicKey,
     environmentId: input.environmentId,
+    origin,
     challenge,
     signature,
   })

@@ -13,19 +13,22 @@ const nodeKey = encodeBase64Url(ed25519.getPublicKey(nodeSecret));
 const DIRECT_ID = "env-direct";
 const BASE = "https://studio.tail1234.ts.net";
 
-/** A node at the address: signs whatever challenge arrives, for `environmentId`, with `secret`. */
+/** A node at the address: signs whatever challenge and origin arrive, for `environmentId`, with `secret`. */
 const node =
   (secret = nodeSecret, environmentId = DIRECT_ID) =>
   async ({
     challenge,
+    origin,
   }: {
     readonly challenge: string;
+    readonly origin: string;
   }): Promise<DirectRouteIdentityProofAnswer> => ({
     kind: "signed",
     signature: encodeBase64Url(
       ed25519.sign(
         encodeDirectRouteIdentityTranscript({
           environmentId,
+          origin,
           challenge: decodeBase64Url(challenge),
         }),
         secret,
@@ -43,6 +46,7 @@ describe("proveDirectRouteIdentity", () => {
       nodeIdentityPublicKey: nodeKey,
       requestProof: (request) => {
         expect(request.httpBaseUrl).toBe(BASE);
+        expect(request.origin).toBe(BASE);
         challenges.push(request.challenge);
         return answer(request);
       },
@@ -56,7 +60,7 @@ describe("proveDirectRouteIdentity", () => {
     let recorded: DirectRouteIdentityProofAnswer | undefined;
     const record = node();
     // An impostor that saw one real proof and replays it.
-    const replaying = async (request: { readonly challenge: string }) => {
+    const replaying = async (request: { readonly challenge: string; readonly origin: string }) => {
       challenges.push(request.challenge);
       recorded ??= await record(request);
       return recorded;
@@ -101,6 +105,19 @@ describe("proveDirectRouteIdentity", () => {
         environmentId: DIRECT_ID,
         nodeIdentityPublicKey: "not base64url!",
         requestProof: node(),
+      }),
+    ).toBe("refused");
+  });
+
+  it("refuses an address whose answer names another origin, as a passed-on challenge would", async () => {
+    const real = node();
+    expect(
+      await proveDirectRouteIdentity({
+        httpBaseUrl: BASE,
+        environmentId: DIRECT_ID,
+        nodeIdentityPublicKey: nodeKey,
+        // Whoever holds BASE now rewrote the origin to one the machine still advertises.
+        requestProof: (request) => real({ ...request, origin: "http://100.64.0.2:3773" }),
       }),
     ).toBe("refused");
   });

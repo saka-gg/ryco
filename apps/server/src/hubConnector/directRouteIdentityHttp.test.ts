@@ -14,6 +14,7 @@ import * as HttpRouter from "effect/http/HttpRouter";
 import * as HttpServer from "effect/http/HttpServer";
 
 import { ServerEnvironment } from "../environment/Services/ServerEnvironment.ts";
+import { AdvertisedEndpointRegistry } from "../remote/Services/AdvertisedEndpointRegistry.ts";
 import { makeDirectRouteIdentityRouteLayer } from "./directRouteIdentityHttp.ts";
 import { makeProofPacer } from "./directRouteIdentityProof.ts";
 import { hubConnectorReadyLayer, type HubConnectorServiceShape } from "./HubConnectorService.ts";
@@ -24,9 +25,11 @@ const nodeIdentityPublicKey = Uint8Array.from(
 );
 const DIRECT_ID = "env-direct";
 const challenge = Uint8Array.from({ length: 32 }, (_, index) => index);
+const ORIGIN = "https://studio.tail1.ts.net";
 
 interface ProofCall {
   readonly environmentId: string;
+  readonly origin: string;
   readonly challenge: Uint8Array;
 }
 
@@ -46,7 +49,7 @@ function connector(
 const withRoute = <A, E, R>(
   service: HubConnectorServiceShape,
   run: (origin: string) => Effect.Effect<A, E, R>,
-  pace: () => boolean = () => true,
+  pace: (remoteAddress: string) => boolean = () => true,
 ) =>
   Effect.gen(function* () {
     const appLayer = HttpRouter.serve(makeDirectRouteIdentityRouteLayer(pace), {
@@ -58,6 +61,14 @@ const withRoute = <A, E, R>(
         Layer.succeed(ServerEnvironment, {
           getDescriptor: Effect.succeed({ environmentId: DIRECT_ID }),
         } as never),
+      ),
+      Layer.provide(
+        Layer.succeed(AdvertisedEndpointRegistry, {
+          list: Effect.succeed([
+            { httpBaseUrl: `${ORIGIN}/` },
+            { httpBaseUrl: "http://100.64.0.2:3773" },
+          ] as never),
+        }),
       ),
       Layer.provideMerge(
         NodeHttpServer.layer(NodeHttp.createServer, { host: "127.0.0.1", port: 0 }),
@@ -91,6 +102,7 @@ it.layer(NodeServices.layer)("direct route identity proof", (it) => {
       Effect.gen(function* () {
         const answer = yield* post(origin, {
           challenge: Buffer.from(challenge).toString("base64url"),
+          origin: ORIGIN,
         });
         assert.strictEqual(answer.status, 200);
         assert.deepStrictEqual(Object.keys(answer.body), ["signature"]);
@@ -98,12 +110,30 @@ it.layer(NodeServices.layer)("direct route identity proof", (it) => {
           verifyDirectRouteIdentityProof({
             nodeIdentityPublicKey,
             environmentId: DIRECT_ID,
+            origin: ORIGIN,
             challenge,
             signature: Uint8Array.from(Buffer.from(String(answer.body.signature), "base64url")),
           }),
         );
         assert.strictEqual(calls[0]?.environmentId, DIRECT_ID);
+        assert.strictEqual(calls[0]?.origin, ORIGIN);
         assert.deepStrictEqual([...(calls[0]?.challenge ?? [])], [...challenge]);
+      }),
+    );
+  });
+
+  it.effect("signs for no origin it does not advertise: a passed-on challenge gets nothing", () => {
+    const calls: ProofCall[] = [];
+    return withRoute(connector(calls), (origin) =>
+      Effect.gen(function* () {
+        // A device that now holds an address the machine used to have.
+        const answer = yield* post(origin, {
+          challenge: Buffer.from(challenge).toString("base64url"),
+          origin: "https://old-name.example.com",
+        });
+        assert.strictEqual(answer.status, 404);
+        assert.deepStrictEqual(answer.body, {});
+        assert.strictEqual(calls.length, 0);
       }),
     );
   });
@@ -115,6 +145,7 @@ it.layer(NodeServices.layer)("direct route identity proof", (it) => {
         Effect.gen(function* () {
           const answer = yield* post(origin, {
             challenge: Buffer.from(challenge).toString("base64url"),
+            origin: ORIGIN,
           });
           assert.strictEqual(answer.status, 404);
           assert.deepStrictEqual(answer.body, {});
@@ -127,7 +158,7 @@ it.layer(NodeServices.layer)("direct route identity proof", (it) => {
           }),
           (origin) =>
             Effect.gen(function* () {
-              const answer = yield* post(origin, { challenge: "AAAA" });
+              const answer = yield* post(origin, { challenge: "AAAA", origin: ORIGIN });
               assert.strictEqual(answer.status, 404);
               assert.deepStrictEqual(answer.body, {});
             }),
@@ -142,7 +173,8 @@ it.layer(NodeServices.layer)("direct route identity proof", (it) => {
       Effect.gen(function* () {
         assert.strictEqual((yield* post(origin, { challenge: "not base64url!" })).status, 400);
         assert.strictEqual((yield* post(origin, { nonce: "AAAA" })).status, 400);
-        assert.strictEqual((yield* post(origin, { challenge: "A".repeat(300) })).status, 400);
+        assert.strictEqual((yield* post(origin, { challenge: "A".repeat(1_100) })).status, 400);
+        assert.strictEqual((yield* post(origin, { challenge: "AAAA" })).status, 400);
         assert.strictEqual(
           (yield* post(origin, JSON.stringify({ challenge: "AAAA" }), "text/plain")).status,
           400,
@@ -159,7 +191,7 @@ it.layer(NodeServices.layer)("direct route identity proof", (it) => {
       connector(calls),
       (origin) =>
         Effect.gen(function* () {
-          const body = { challenge: Buffer.from(challenge).toString("base64url") };
+          const body = { challenge: Buffer.from(challenge).toString("base64url"), origin: ORIGIN };
           assert.strictEqual((yield* post(origin, body)).status, 200);
           assert.strictEqual((yield* post(origin, body)).status, 200);
           assert.strictEqual((yield* post(origin, body)).status, 429);
@@ -170,19 +202,23 @@ it.layer(NodeServices.layer)("direct route identity proof", (it) => {
   });
 });
 
-it("refills the proof bucket one token per interval, up to its burst", () => {
+it("paces each remote address apart, under one ceiling for all", () => {
   let now = 0;
-  const pace = makeProofPacer({ burst: 2, refillMs: 1_000, now: () => now });
-  assert.isTrue(pace());
-  assert.isTrue(pace());
-  assert.isFalse(pace());
-  now = 999;
-  assert.isFalse(pace());
-  now = 1_000;
-  assert.isTrue(pace());
-  assert.isFalse(pace());
-  now = 60_000;
-  assert.isTrue(pace());
-  assert.isTrue(pace());
-  assert.isFalse(pace());
+  const pace = makeProofPacer({
+    perAddressBurst: 2,
+    perAddressRefillMs: 1_000,
+    globalBurst: 3,
+    globalRefillMs: 10_000,
+    maxAddresses: 2,
+    now: () => now,
+  });
+  assert.isTrue(pace("10.0.0.1"));
+  assert.isTrue(pace("10.0.0.1"));
+  // One peer exhausts only its own bucket.
+  assert.isFalse(pace("10.0.0.1"));
+  assert.isTrue(pace("10.0.0.2"));
+  // The ceiling holds for every address together.
+  assert.isFalse(pace("10.0.0.3"));
+  now = 10_000;
+  assert.isTrue(pace("10.0.0.1"));
 });
