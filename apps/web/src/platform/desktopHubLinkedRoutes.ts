@@ -9,12 +9,14 @@ import {
   routeCheckAccepted,
   type EnvironmentRoute,
 } from "@ryco/client-runtime/connection";
+import { proveDirectRouteIdentity } from "@ryco/client-runtime/connection/directRouteIdentity";
 
 import {
   fetchRemoteEnvironmentDescriptor,
   isRemoteEnvironmentAuthHttpError,
   resolveRemoteWebSocketConnectionUrl,
 } from "../environments/remote/api";
+import { requestWebDirectRouteIdentityProof } from "./directRouteIdentityRequest";
 import {
   listLinkedDirectRecords,
   readSavedEnvironmentBearerToken,
@@ -32,16 +34,18 @@ import type { DesktopWorkspaceDirectRoutes } from "./desktopWorkspaceSocket";
  * (a saved record carrying `hubLink`) is a route of that environment, never an
  * environment of its own: each connection attempt to the machine checks those
  * addresses first and takes the best one that answers as the machine's own
- * direct id, with the linked bearer; otherwise the relay, which the Electron
- * workspace transport owns as before. The relay's credentials never reach a
- * direct address and the linked bearer never reaches the relay.
+ * direct id and then proves, with a fresh challenge, that it holds the node
+ * identity key the link names; only then does the linked bearer go there.
+ * Otherwise the relay, which the Electron workspace transport owns as before.
+ * The relay's credentials never reach a direct address and the linked bearer
+ * never reaches the relay.
  */
 
 /**
- * Addresses whose bearer the node refused. Each stays out until its link
- * changes (renewed or removed: `requestDesktopHubRouteCheck`), never on a
- * timer: trying it again would only drop a healthy relay connection for the
- * same refusal.
+ * Addresses that refused the linked bearer or failed the identity proof. Each
+ * stays out until its link changes (renewed or removed:
+ * `requestDesktopHubRouteCheck`), never on a timer: trying it again would only
+ * drop a healthy relay connection for the same refusal.
  */
 const refusedRoutes = new Set<string>();
 
@@ -56,11 +60,26 @@ function readLinkedRoutes(hubEnvironmentId: EnvironmentId, nowMs: number) {
 const fetchDescriptorId = async (httpBaseUrl: string, signal: AbortSignal) =>
   (await fetchRemoteEnvironmentDescriptor({ httpBaseUrl, signal })).environmentId;
 
-/** The socket URL of a direct route, with a one-time token from the linked bearer. */
+class DirectRouteIdentityRefused extends Error {}
+
+/**
+ * The socket URL of a direct route, with a one-time token from the linked
+ * bearer, once the address proved it holds the machine's identity key.
+ */
 async function directSocketUrl(
   route: Extract<EnvironmentRoute, { kind: "direct" }>,
   signal: AbortSignal,
 ): Promise<string | null> {
+  if (route.nodeIdentityPublicKey === undefined) return null;
+  const proof = await proveDirectRouteIdentity({
+    httpBaseUrl: route.httpBaseUrl,
+    environmentId: route.expectedDescriptorId,
+    nodeIdentityPublicKey: route.nodeIdentityPublicKey,
+    requestProof: requestWebDirectRouteIdentityProof,
+    signal,
+  });
+  if (proof === "refused") throw new DirectRouteIdentityRefused();
+  if (proof !== "proven" || signal.aborted) return null;
   const bearerToken = await readSavedEnvironmentBearerToken(route.expectedDescriptorId);
   if (!bearerToken) return null;
   const raw = await resolveRemoteWebSocketConnectionUrl({
@@ -95,9 +114,12 @@ export function createDesktopHubLinkedRoutes(
           const url = await directSocketUrl(route, signal);
           if (url !== null) return { routeKey: environmentRouteKey(route), url };
         } catch (error) {
-          // A refused bearer waits for the link to change; an unreachable
-          // address is simply skipped this time.
-          if (isRemoteEnvironmentAuthHttpError(error)) {
+          // A refused bearer or identity waits for the link to change; an
+          // unreachable address is simply skipped this time.
+          if (
+            error instanceof DirectRouteIdentityRefused ||
+            isRemoteEnvironmentAuthHttpError(error)
+          ) {
             refusedRoutes.add(environmentRouteKey(route));
             options?.onRefused?.();
           }

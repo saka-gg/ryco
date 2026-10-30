@@ -2,6 +2,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 
+import { verifyDirectRouteIdentityProof } from "@ryco/shared/directRouteIdentity";
 import { E2EE_PREKEY_ROTATION_OVERLAP } from "@ryco/shared/relayE2eeConstants";
 import { deriveE2eeAgreementPublicKey } from "@ryco/shared/relayE2eeKeys";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vite-plus/test";
@@ -651,6 +652,61 @@ describe("HubIdentityRuntime", () => {
     await expect(
       makeHubIdentityRuntime({ ...options, allowFileFallback: false }),
     ).rejects.toMatchObject({ code: "identity_store_unavailable" });
+  });
+
+  it("proves a direct address with the active identity key, and nothing without one", async () => {
+    const root = await makeTempRoot("ryco-hub-identity-direct-proof-");
+    const statePath = join(root, "hub-identity.json");
+    const store = makeMemoryStore();
+    const active = await makeNodeSigningIdentity(store).generate("node-key.active");
+    await writeLegacyActiveState(statePath);
+    const runtime = await makeHubIdentityRuntime({
+      statePath,
+      prekeyStatePath: join(root, "hub-e2ee-prekey.json"),
+      continuityStatePath: join(root, "hub-continuity.json"),
+      continuityAnchorPath: join(root, "anchor", "hub-continuity.json"),
+      fileSecretRoot: join(root, "secrets"),
+      allowFileFallback: false,
+      secretStore: store,
+      now: () => 1_700_000_000_000,
+    });
+    const challenge = Uint8Array.from({ length: 32 }, (_, index) => index);
+    const origin = "https://studio.tail1.ts.net";
+    const signature = await runtime.proveDirectRouteIdentity({
+      environmentId: "env-direct",
+      origin,
+      challenge,
+    });
+    expect(
+      verifyDirectRouteIdentityProof({
+        nodeIdentityPublicKey: active.publicKey,
+        environmentId: "env-direct",
+        origin,
+        challenge,
+        signature: signature!,
+      }),
+    ).toBe(true);
+    // A challenge of another size never reaches key custody.
+    await expect(
+      runtime.proveDirectRouteIdentity({
+        environmentId: "env-direct",
+        origin,
+        challenge: new Uint8Array(8),
+      }),
+    ).rejects.toThrow();
+    // Nor does an origin that is not one.
+    await expect(
+      runtime.proveDirectRouteIdentity({
+        environmentId: "env-direct",
+        origin: `${origin}/path`,
+        challenge,
+      }),
+    ).rejects.toThrow();
+
+    await runtime.leave();
+    await expect(
+      runtime.proveDirectRouteIdentity({ environmentId: "env-direct", origin, challenge }),
+    ).resolves.toBeUndefined();
   });
 
   it("issues, re-signs, and erases the E2EE agreement prekey alongside the identity", async () => {

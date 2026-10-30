@@ -1,5 +1,6 @@
 export * from "./baseSchemas.ts";
 export * from "./auth.ts";
+export * from "./directRouteIdentity.ts";
 export * from "./environment.ts";
 export * from "./remoteAccess.ts";
 export * from "./relay.ts";

@@ -72,6 +72,7 @@ import { HubConnectorReady } from "./hubConnector/HubConnectorService.ts";
 import { hubConnectorRoutesLayer } from "./hubConnector/http.ts";
 import { desktopLocalIntroductionRoutesLayer } from "./hubConnector/localIntroductionHttp.ts";
 import { desktopHubReachabilityRouteLayer } from "./hubConnector/desktopHubReachabilityHttp.ts";
+import { directRouteIdentityRouteLayer } from "./hubConnector/directRouteIdentityHttp.ts";
 import { desktopNativeNodeClaimRoutesLayer } from "./hubConnector/desktopNativeNodeClaimHttp.ts";
 import { OpenLive } from "./open.ts";
 import { layerConfig as SqlitePersistenceLayerLive } from "./persistence/Layers/Sqlite.ts";
@@ -788,6 +789,7 @@ export const makeRoutesLayer = Layer.mergeAll(
   desktopLocalIntroductionRoutesLayer,
   desktopNativeNodeClaimRoutesLayer,
   desktopHubReachabilityRouteLayer,
+  directRouteIdentityRouteLayer,
 ).pipe(Layer.provide(browserApiCorsLayer));
 
 export const makeServerLayer = Layer.unwrap(

@@ -710,6 +710,17 @@ export class HubConnector {
    * at once rather than reporting a copy that is gone — and handed back
    * afterwards when it does not.
    */
+  /**
+   * Run a read that speaks for the identity only when this process already owns it: it never
+   * claims the lock and never runs the identity's deferred startup work, so a request no one
+   * authenticated (the direct-route identity proof) can neither take the identity from another
+   * local process nor start a repair. `undefined` when this process does not own it.
+   */
+  async ifIdentityOwner<A>(operation: () => Promise<A>): Promise<A | undefined> {
+    if (this.#stopping || !this.#ownsIdentity) return undefined;
+    return operation();
+  }
+
   async asIdentityOwner<A>(operation: () => Promise<A>): Promise<A> {
     if (this.#stopping) throw new Error("Hub identity is unavailable while stopping.");
     const claim = await this.#takeIdentity();

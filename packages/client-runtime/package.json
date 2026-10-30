@@ -46,6 +46,10 @@
       "types": "./src/connection/index.ts",
       "import": "./src/connection/index.ts"
     },
+    "./connection/directRouteIdentity": {
+      "types": "./src/connection/directRouteIdentity.ts",
+      "import": "./src/connection/directRouteIdentity.ts"
+    },
     "./authorization": {
       "types": "./src/authorization/index.ts",
       "import": "./src/authorization/index.ts"

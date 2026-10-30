@@ -450,7 +450,13 @@ export function desktopWorkspaceMachineTrustPresentation(input: {
  */
 export function desktopDirectAccessOutcomeMessage(
   label: string,
-  outcome: "linked" | "already-paired" | "no-direct-endpoint" | "unreachable" | "failed",
+  outcome:
+    | "linked"
+    | "already-paired"
+    | "no-direct-endpoint"
+    | "node-update-required"
+    | "unreachable"
+    | "failed",
 ): string | null {
   switch (outcome) {
     case "linked":
@@ -459,8 +465,10 @@ export function desktopDirectAccessOutcomeMessage(
       return `${label} is already paired directly on this device.`;
     case "no-direct-endpoint":
       return `${label} only listens on its own loopback address, so no other device can reach it directly.`;
+    case "node-update-required":
+      return `Update Ryco on ${label} first: this version can't prove which machine answers at its direct address.`;
     case "unreachable":
-      return `None of ${label}'s direct addresses answered from this network.`;
+      return `None of ${label}'s Tailscale or HTTPS addresses answered as ${label} from this network.`;
     case "failed":
       return `Direct access to ${label} could not be set up. Try again in a moment.`;
   }

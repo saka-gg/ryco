@@ -6,6 +6,7 @@ export * from "./environmentRoutes.ts";
 export * from "./environmentRouteUpgrader.ts";
 export * from "./hostFreeze.ts";
 export * from "./hubLinkedDirectAccess.ts";
+export * from "./hubLinkedDirectTarget.ts";
 export * from "./environmentStateSink.ts";
 export * from "./evictionPolicy.ts";
 export * from "./environmentApi.ts";

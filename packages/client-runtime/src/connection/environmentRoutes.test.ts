@@ -188,7 +188,11 @@ describe("linked direct routes", () => {
     httpBaseUrl: "https://studio.tail1234.ts.net",
     createdAt: "2026-10-20T00:00:00.000Z",
     lastConnectedAt: null,
-    hubLink: { hubEnvironmentId: "env_hub", linkedAt: "2026-10-29T12:00:00.000Z" },
+    hubLink: {
+      hubEnvironmentId: "env_hub",
+      linkedAt: "2026-10-29T12:00:00.000Z",
+      nodeIdentityPublicKey: "bm9kZQ",
+    },
     ...overrides,
   });
 
@@ -219,16 +223,29 @@ describe("linked direct routes", () => {
         // Due for renewal: the relay carries the machine until it is renewed.
         record({
           httpBaseUrl: "http://100.64.0.9:3773",
-          hubLink: { hubEnvironmentId: "env_hub", linkedAt: "2026-10-27T11:59:00.000Z" },
+          hubLink: {
+            hubEnvironmentId: "env_hub",
+            linkedAt: "2026-10-27T11:59:00.000Z",
+            nodeIdentityPublicKey: "bm9kZQ",
+          },
         }),
         record({ hubLink: undefined, httpBaseUrl: "http://100.64.0.10:3773" }),
+        // Linked before the identity proof: no key to prove, so never a route.
+        record({
+          httpBaseUrl: "http://100.64.0.11:3773",
+          hubLink: { hubEnvironmentId: "env_hub", linkedAt: "2026-10-29T12:00:00.000Z" },
+        }),
       ],
     });
     expect(routes.map((route) => (route.kind === "direct" ? route.httpBaseUrl : "relay"))).toEqual([
       "https://studio.tail1234.ts.net",
       "http://100.101.102.103:3773",
     ]);
-    expect(routes[0]).toMatchObject({ expectedDescriptorId: "env-direct", source: "linked" });
+    expect(routes[0]).toMatchObject({
+      expectedDescriptorId: "env-direct",
+      source: "linked",
+      nodeIdentityPublicKey: "bm9kZQ",
+    });
   });
 
   // The relay is end-to-end encrypted with a pinned identity; a direct address

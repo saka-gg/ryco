@@ -101,6 +101,7 @@ function identity(overrides: Partial<HubIdentityRuntimeShape> = {}): HubIdentity
       },
     },
     nativeNodeClaim: stubNativeNodeClaimService(),
+    proveDirectRouteIdentity: async () => undefined,
     crossDeviceApproval: stubCrossDeviceApprovalService(),
     readPendingEnrollment: async () => null,
     leave: async () => undefined,
@@ -2302,6 +2303,11 @@ describe("HubConnector", () => {
     const connector = makeConnector(enabledConfig);
     await connector.start();
     expect(connector.status()).toMatchObject({ failure: "connection_replaced" });
+    // A read no one authenticated (the direct-route proof) neither claims the
+    // identity nor runs its startup work: it answers as if there were none.
+    calls.length = 0;
+    await expect(connector.ifIdentityOwner(ownerOperation)).resolves.toBeUndefined();
+    expect(calls).toEqual([]);
     await expect(connector.asIdentityOwner(ownerOperation)).rejects.toThrow(
       "in use by another Ryco process",
     );
@@ -2314,6 +2320,9 @@ describe("HubConnector", () => {
     // startup work deferred for it runs before anything uses it.
     otherCopyRunning = false;
     calls.length = 0;
+    // Free now, but still not this process's: the read does not take it.
+    await expect(connector.ifIdentityOwner(ownerOperation)).resolves.toBeUndefined();
+    expect(calls).toEqual([]);
     await expect(connector.asIdentityOwner(ownerOperation)).resolves.toBe("done");
     expect(calls.slice(0, 3)).toEqual(["acquire", "startup", "operation"]);
     // A running connector keeps the claim, and stops waiting out a copy that is
@@ -2321,6 +2330,10 @@ describe("HubConnector", () => {
     await settle();
     expect(calls).toEqual(["acquire", "startup", "operation", "startup", "read"]);
     expect(connector.status().failure).not.toBe("connection_replaced");
+    // Once this process owns it, the read runs, with no lock or startup work of its own.
+    calls.length = 0;
+    await expect(connector.ifIdentityOwner(ownerOperation)).resolves.toBe("done");
+    expect(calls).toEqual(["operation"]);
     await connector.stop();
 
     // A connector that is switched off hands an operation's claim straight back.

@@ -292,6 +292,11 @@ export interface NodeE2eeChannelSessionSources {
         /** §8.6 step 6's approved local record; IK suite `0x01` only. */
         readonly admittedAuthority: E2eeAdmittedAuthoritySnapshot | undefined;
         readonly accountGrantAuthority: E2eeAccountGrantAuthoritySnapshot | undefined;
+        /**
+         * The node identity key the advertised statement carried, which this
+         * client verified. A linked direct grant issued on the channel names it.
+         */
+        readonly nodeIdentityPublicKey: Uint8Array;
       }) => () => void)
     | undefined;
   readonly onDiagnostic?: (diagnostic: NodeE2eeChannelDiagnostic) => void;
@@ -1057,6 +1062,7 @@ export function makeNodeE2eeChannelSession(
               trustSource: accept.trustSource,
               admittedAuthority: accept.admittedAuthority,
               accountGrantAuthority: accept.accountGrantAuthority,
+              nodeIdentityPublicKey: Uint8Array.from(advertised.nodeIdentityPublicKey),
             });
           }
           return { kind: "entered" };

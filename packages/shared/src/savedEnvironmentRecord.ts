@@ -10,7 +10,9 @@ export function isSavedEnvironmentHubLink(value: unknown): value is SavedEnviron
     typeof value.hubEnvironmentId === "string" &&
     value.hubEnvironmentId.length > 0 &&
     typeof value.linkedAt === "string" &&
-    Number.isFinite(Date.parse(value.linkedAt))
+    Number.isFinite(Date.parse(value.linkedAt)) &&
+    (value.nodeIdentityPublicKey === undefined ||
+      (typeof value.nodeIdentityPublicKey === "string" && value.nodeIdentityPublicKey.length > 0))
   );
 }
 

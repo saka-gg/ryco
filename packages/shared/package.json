@@ -380,6 +380,10 @@
       "types": "./src/nodeIdentity.ts",
       "import": "./src/nodeIdentity.ts"
     },
+    "./directRouteIdentity": {
+      "types": "./src/directRouteIdentity.ts",
+      "import": "./src/directRouteIdentity.ts"
+    },
     "./rpcAccessPolicy": {
       "types": "./src/rpcAccessPolicy.ts",
       "import": "./src/rpcAccessPolicy.ts"

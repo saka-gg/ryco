@@ -6,6 +6,7 @@ import { relayChannelAuthority } from "./relayChannelAuthority.ts";
 import { Effect, Exit } from "effect";
 
 const FINGERPRINT = Uint8Array.from([7, 7, 7]);
+const NODE_KEY = Uint8Array.from([5, 5, 5]);
 
 const grant = (maximumRole: string) => ({
   trustSource: "account-enrolled" as const,
@@ -36,12 +37,14 @@ describe("relayChannelAuthority", () => {
         trustSource: "account-enrolled",
         admittedAuthority: undefined,
         accountGrantAuthority: grant("operator"),
+        nodeIdentityPublicKey: NODE_KEY,
       }),
     ).toEqual({
       trustSource: "account-enrolled",
       enrollmentId: "enr_1",
       clientIdentityFingerprint: FINGERPRINT,
       role: "operator",
+      nodeIdentityPublicKey: NODE_KEY,
     });
   });
 
@@ -51,17 +54,20 @@ describe("relayChannelAuthority", () => {
         trustSource: "locally-verified",
         admittedAuthority: local("owner"),
         accountGrantAuthority: undefined,
+        nodeIdentityPublicKey: NODE_KEY,
       }),
     ).toEqual({
       trustSource: "locally-verified",
       clientIdentityFingerprint: FINGERPRINT,
       role: "operator",
+      nodeIdentityPublicKey: NODE_KEY,
     });
     expect(
       relayChannelAuthority("owner", {
         trustSource: "locally-verified",
         admittedAuthority: local("owner", "pending"),
         accountGrantAuthority: undefined,
+        nodeIdentityPublicKey: NODE_KEY,
       }),
     ).toEqual({ trustSource: "none" });
   });
@@ -72,6 +78,7 @@ describe("relayChannelAuthority", () => {
         trustSource: "web-unsigned",
         admittedAuthority: undefined,
         accountGrantAuthority: undefined,
+        nodeIdentityPublicKey: NODE_KEY,
       }),
     ).toEqual({ trustSource: "none" });
     expect(
@@ -79,6 +86,7 @@ describe("relayChannelAuthority", () => {
         trustSource: "account-enrolled",
         admittedAuthority: undefined,
         accountGrantAuthority: grant("superuser"),
+        nodeIdentityPublicKey: NODE_KEY,
       }),
     ).toEqual({ trustSource: "none" });
   });
