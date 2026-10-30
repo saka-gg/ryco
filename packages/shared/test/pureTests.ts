@@ -46,6 +46,7 @@ export const SHARED_PURE_TEST_FILES = [
   "src/environmentIcon.test.ts",
   "src/frameTransport.test.ts",
   "src/git.test.ts",
+  "src/gitDiffPaths.test.ts",
   "src/htmlRenderToolPresentation.test.ts",
   "src/hubSessionCodec.test.ts",
   "src/localTasks.test.ts",
