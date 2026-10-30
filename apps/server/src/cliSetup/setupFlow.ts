@@ -40,7 +40,7 @@ import {
   stopNodeService,
   uninstallNodeService,
 } from "../service/nodeService.ts";
-import { renderTerminalQrCode, resolveHeadlessServeLinks } from "../startupAccess.ts";
+import { loadTerminalQrCode, resolveHeadlessServeLinks } from "../startupAccess.ts";
 import {
   detectMachineName,
   detectMissingOsKeyStore,
@@ -650,12 +650,13 @@ const showPairing = (
       credential,
       fallbackConnectionString: origin.replace(/\/$/u, ""),
     });
+    const renderQrCode = yield* loadTerminalQrCode;
     yield* Console.log(
       [
         "",
         "  Scan with the Ryco app or a phone camera, or open a link on the device:",
         "",
-        renderTerminalQrCode(links.pairingUrl),
+        renderQrCode(links.pairingUrl),
         "",
         `  ${links.pairingUrl}`,
         ...links.alternativeLinks.map((link) => `  ${dim(`${link.label}:`)} ${link.url}`),
