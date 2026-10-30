@@ -240,7 +240,8 @@ export type HostedAccountIntent =
   | "add-passkey"
   | "regenerate-recovery-codes"
   | "connect-external-identity"
-  | "disconnect-external-identity";
+  | "disconnect-external-identity"
+  | "delete-account";
 
 /**
  * The operations where a `403` is *most likely* the fallback-session step-up
@@ -263,6 +264,7 @@ const STEP_UP_INTENTS: ReadonlySet<HostedAccountIntent> = new Set([
   "regenerate-recovery-codes",
   "connect-external-identity",
   "disconnect-external-identity",
+  "delete-account",
 ]);
 
 /** The operations where a `403` is most likely "this needs a passkey session". */
@@ -2439,6 +2441,30 @@ export class HostedHubApi {
     this.#finishRotatedSession(value);
     const passkey = passkeyValue(value.passkey);
     return { passkey, confirmed: passkey !== null };
+  }
+
+  /**
+   * Delete the signed-in account ({@link HostedIdentity.ACCOUNT_DELETION_PATH}).
+   * `identifier` is what the user typed to confirm: the account's email, or its
+   * username. On success this device's session material is gone too; the Hub
+   * has already ended every session.
+   */
+  async deleteAccount(
+    input: { readonly identifier: string } & HostedAccountStepUp,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    const identifier = input.identifier.trim();
+    if (identifier.length === 0 || identifier.length > 320) {
+      throw new HostedHubApiError("invalid_request", 400, undefined, "delete-account");
+    }
+    await this.#request(HostedIdentity.ACCOUNT_DELETION_PATH, {
+      method: "POST",
+      body: { confirmation: "delete", identifier, ...stepUpBody(input) },
+      csrf: true,
+      intent: "delete-account",
+      ...(signal ? { signal } : {}),
+    });
+    this.clearSessionMaterial();
   }
 
   async signOut(signal?: AbortSignal): Promise<void> {

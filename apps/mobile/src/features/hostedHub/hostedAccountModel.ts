@@ -77,6 +77,7 @@ const ACCOUNT_INTENTS = {
   "regenerate-recovery-codes": true,
   "connect-external-identity": true,
   "disconnect-external-identity": true,
+  "delete-account": true,
 } satisfies Record<HostedAccountIntent, true>;
 
 export const HOSTED_ACCOUNT_INTENTS = Object.keys(

@@ -134,7 +134,8 @@ export type HostedAccountActionStatus =
   | "revoking-totp"
   | "requesting-email-verification"
   | "connecting-external-identity"
-  | "disconnecting-external-identity";
+  | "disconnecting-external-identity"
+  | "deleting-account";
 
 /**
  * Account-management surface state. Kept in its own store rather than widened
@@ -578,6 +579,8 @@ export const HOSTED_ACCESS_CHECK_DEADLINE_MS = 8_000;
 export const HOSTED_SESSION_REVALIDATION_INTERVAL_MS = 30_000;
 export const HOSTED_SESSION_SYNC_FAILURE_MESSAGE = "Ryco state could not be synchronized.";
 export const HOSTED_ACCOUNT_BUSY_MESSAGE = "Another account change is still in progress.";
+export const HOSTED_ACCOUNT_DELETION_UNSUPPORTED_MESSAGE =
+  "This Hub can't delete accounts yet. Ask whoever runs it to update it.";
 export const HOSTED_ACCOUNT_SIGNED_OUT_MESSAGE = "Sign in to change your account settings.";
 export const HOSTED_PASSKEY_UNCONFIRMED_MESSAGE =
   "The passkey could not be confirmed. Check your passkeys before relying on it.";
@@ -1842,6 +1845,35 @@ class HostedHubController {
   }
 
   /** Remove the account's fallback password. */
+  /**
+   * Delete the signed-in account. `identifier` is the account's email (or its
+   * username) as the user typed it to confirm. Once the Hub has recorded the
+   * deletion this device signs out; nodes and their chats are untouched. A Hub
+   * that cannot delete accounts says so instead of failing vaguely.
+   */
+  async deleteAccount(
+    input: { readonly identifier: string } & HostedAccountStepUp,
+  ): Promise<HostedAccountOutcome> {
+    let unsupported = false;
+    const outcome = await this.#accountAction(
+      "deleting-account",
+      async (signal) => {
+        try {
+          await getHostedHubApi().deleteAccount(input, signal);
+        } catch (error) {
+          unsupported = error instanceof HostedHubApiError && error.status === 404;
+          throw error;
+        }
+        return () => undefined;
+      },
+      "account",
+    );
+    if (unsupported)
+      patchAccountState(localErrorPatch(HOSTED_ACCOUNT_DELETION_UNSUPPORTED_MESSAGE));
+    if (outcome.status === "committed") await this.clearAccount("signed-out");
+    return outcome;
+  }
+
   async removePassword(input?: HostedAccountStepUp): Promise<HostedAccountOutcome> {
     const outcome = await this.#accountAction("removing-password", async (signal) => {
       await getHostedHubApi().removePassword(input, signal);
