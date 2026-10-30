@@ -73,7 +73,8 @@ export interface FollowUpQueueHost {
   readonly defaultTokenMode: AgentTokenMode;
   /**
    * Message ids the node mints for its own turns. A queued follow-up never takes one: its turn
-   * would read as a delegated result, an Agent Control message or a pull request update.
+   * would read as a delegated result, an Agent Control message, a goal's next turn or a pull
+   * request update.
    */
   readonly serverMintedMessageIdPrefixes: ReadonlyArray<string>;
   /** The one of them an Agent Control message takes; only the node's own agent adds may use it. */
