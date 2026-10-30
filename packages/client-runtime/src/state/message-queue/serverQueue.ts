@@ -136,6 +136,8 @@ export interface FollowUpQueueEntryContent {
   readonly runtimeMode: RuntimeMode;
   readonly interactionMode: ProviderInteractionMode;
   readonly tokenMode?: AgentTokenMode | undefined;
+  /** This device turned the Claude resume review off: the node sends it without asking. */
+  readonly skipClaudeResumeReview?: boolean | undefined;
 }
 
 interface CommandBase {
@@ -153,6 +155,7 @@ function contentFields(threadId: ThreadId, content: FollowUpQueueEntryContent) {
     interactionMode: content.interactionMode,
     ...(content.tokenMode === undefined ? {} : { tokenMode: content.tokenMode }),
     ...(threadReferences.length > 0 ? { threadReferences } : {}),
+    ...(content.skipClaudeResumeReview === true ? { claudeResumeReview: "skip" as const } : {}),
   };
 }
 

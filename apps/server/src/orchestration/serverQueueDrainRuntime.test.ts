@@ -27,6 +27,8 @@ import { PersistenceSqlError } from "../persistence/Errors.ts";
 import type { WakeStartState } from "../persistence/serverWakeQueries.ts";
 import { runtimeModePrivilegeRank, serverWakeGuard } from "./serverWake.ts";
 import {
+  CLAUDE_REVIEW_UNREADABLE_DETAIL,
+  MAX_CLAUDE_REVIEW_READ_FAILURES,
   makeServerQueueDrain,
   MAX_QUEUE_DISPATCH_ATTEMPTS,
   QUEUE_DISPATCH_STALL_MS,
@@ -196,7 +198,11 @@ const harness = (
   });
 
 describe("ServerQueueDrain: Claude resume review", () => {
-  const review = { reason: "This large conversation has been idle.", promptTokens: 120_400 };
+  const review = {
+    reason: "This large conversation has been idle.",
+    promptTokens: 120_400,
+    observationKey: "2026-10-24T09:00:00.000Z:runtime-1",
+  };
 
   it.effect(
     "holds a head that would resume a cold Claude conversation until the person resumes",
@@ -223,11 +229,11 @@ describe("ServerQueueDrain: Claude resume review", () => {
         // Held: nothing more is asked or sent.
         yield* h.drain.drainThread(threadId);
         assert.deepEqual(asked, [CLAUDE]);
-        // The person's Resume answers the review: the head goes without another one.
+        // The person's Resume answers for that cold cache: the head goes, held no more.
         h.state.hold = null;
         yield* h.drain.drainThread(threadId);
         assert.deepEqual(h.sent(), ["a"]);
-        assert.deepEqual(asked, [CLAUDE]);
+        assert.deepEqual(h.state.hold, null);
         // Once the queue is gone, nothing about it is remembered.
         h.state.entries = [];
         yield* h.drain.drainThread(threadId);
@@ -263,6 +269,74 @@ describe("ServerQueueDrain: Claude resume review", () => {
       warm.state.session = { providerName: "claudeAgent", providerInstanceId: CLAUDE };
       yield* warm.drain.drainThread(threadId);
       assert.deepEqual(warm.sent(), ["a"]);
+    }),
+  );
+
+  it.effect("one Resume answers for that cold cache, whichever follow-up is at the head", () =>
+    Effect.gen(function* () {
+      const h = yield* harness([entry("a"), entry("b")], [], {
+        claudeResumeReview: () => Effect.succeed(review),
+      });
+      h.state.session = { providerName: "claudeAgent", providerInstanceId: CLAUDE };
+      yield* h.drain.drainThread(threadId);
+      assert.deepEqual(h.state.hold?.causeKeys, ["review:a"]);
+      // The person takes "a" out and resumes: "b" goes, not asked about the same cache again.
+      h.state.entries = [entry("b")];
+      h.state.hold = null;
+      yield* h.drain.drainThread(threadId);
+      assert.deepEqual(h.sent(), ["b"]);
+    }),
+  );
+
+  it.effect("never asks about a slash command, or a message queued with the review off", () =>
+    Effect.gen(function* () {
+      const asked: string[] = [];
+      const h = yield* harness(
+        [
+          entry("compact", { text: "  /compact" }),
+          entry("no-review", { claudeResumeReview: "skip" }),
+        ],
+        [],
+        {
+          claudeResumeReview: () =>
+            Effect.sync(() => {
+              asked.push("asked");
+              return review;
+            }),
+        },
+      );
+      h.state.session = { providerName: "claudeAgent", providerInstanceId: CLAUDE };
+      yield* h.drain.drainThread(threadId);
+      h.state.startStates.set("compact", "bound");
+      yield* h.drain.drainThread(threadId);
+      assert.deepEqual(h.sent(), ["compact", "no-review"]);
+      assert.deepEqual(asked, []);
+    }),
+  );
+
+  it.effect("holds the queue after the review could not be read a few times in a row", () =>
+    Effect.gen(function* () {
+      const h = yield* harness([entry("a")], [], {
+        claudeResumeReview: () =>
+          Effect.fail(new PersistenceSqlError({ operation: "window", detail: "corrupt" })),
+      });
+      h.state.session = { providerName: "claudeAgent", providerInstanceId: CLAUDE };
+      for (let pass = 1; pass < MAX_CLAUDE_REVIEW_READ_FAILURES; pass += 1) {
+        yield* h.drain.drainThread(threadId);
+      }
+      assert.deepEqual(h.dispatched, []);
+      yield* h.drain.drainThread(threadId);
+      assert.deepEqual(h.state.hold, {
+        reason: "review",
+        detail: CLAUDE_REVIEW_UNREADABLE_DETAIL,
+        causeKeys: ["review:a"],
+        heldAt: h.state.hold!.heldAt,
+      });
+      // A deleted thread forgets it all.
+      h.state.entries = [];
+      h.state.hold = null;
+      yield* h.drain.drainThread(threadId);
+      assert.equal(h.drain.reviewCount(), 0);
     }),
   );
 

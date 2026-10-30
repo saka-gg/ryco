@@ -141,6 +141,18 @@ describe("server follow-up queue commands", () => {
     expect(selectServerFollowUpQueueSupported(null)).toBe(false);
   });
 
+  it("carries this device's choice to skip the Claude resume review, and only that", () => {
+    const add = (skipClaudeResumeReview: boolean | undefined) =>
+      buildFollowUpQueueAddCommand({
+        ...base,
+        messageId: MessageId.make("m-1"),
+        content: { ...CONTENT, skipClaudeResumeReview },
+      }).entry;
+    expect(add(true).claudeResumeReview).toBe("skip");
+    expect(add(false)).not.toHaveProperty("claudeResumeReview");
+    expect(add(undefined)).not.toHaveProperty("claudeResumeReview");
+  });
+
   it("queues under the entry's own message id with its modes and mentions", () => {
     const otherThread = ThreadId.make("other-thread");
     const command = buildFollowUpQueueAddCommand({

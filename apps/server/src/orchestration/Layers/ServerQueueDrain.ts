@@ -93,12 +93,19 @@ export const ServerQueueDrainLive = Layer.effect(
                       threadId,
                       limits: CLAUDE_CACHE_REVIEW_WINDOW_LIMITS,
                     }).pipe(
-                      Effect.map(
-                        (window) =>
-                          assessClaudeCacheResume(window.thread, target, nowMs, {
-                            workspaceCwd: window.workspaceCwd,
-                          }) ?? null,
-                      ),
+                      Effect.map((window) => {
+                        const review = assessClaudeCacheResume(window.thread, target, nowMs, {
+                          workspaceCwd: window.workspaceCwd,
+                        });
+                        // One Resume answers for this observation of this runtime's cache.
+                        return review === undefined
+                          ? null
+                          : {
+                              reason: review.reason,
+                              promptTokens: review.promptTokens,
+                              observationKey: `${review.observation.observedAt}:${window.thread.session?.runtimeSessionId ?? ""}`,
+                            };
+                      }),
                     ),
                 }),
           }),

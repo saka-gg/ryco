@@ -332,6 +332,9 @@ function addedEntry(command: ThreadQueueAddCommand): QueuedFollowUp {
     interactionMode: entry.interactionMode,
     ...(entry.tokenMode === undefined ? {} : { tokenMode: entry.tokenMode }),
     ...(entry.threadReferences === undefined ? {} : { threadReferences: entry.threadReferences }),
+    ...(entry.claudeResumeReview === undefined
+      ? {}
+      : { claudeResumeReview: entry.claudeResumeReview }),
     createdAt: command.createdAt,
     updatedAt: command.createdAt,
     revision: 1,
@@ -506,6 +509,9 @@ function decideQueueCommand(
             ...(command.threadReferences === undefined
               ? {}
               : { threadReferences: command.threadReferences }),
+            ...(command.claudeResumeReview === undefined
+              ? {}
+              : { claudeResumeReview: command.claudeResumeReview }),
             createdAt: entry.createdAt,
             updatedAt: command.createdAt,
             revision: entry.revision + 1,
