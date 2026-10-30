@@ -10,6 +10,7 @@ import {
 } from "@ryco/contracts";
 import { timeoutWhileResponsiveOption } from "@ryco/shared/responsiveDeadline";
 import { governChildProcess } from "../processGovernor.ts";
+import { resolveGitExecutable } from "./gitExecutable.ts";
 import { collectUint8StreamText } from "../stream/collectUint8StreamText.ts";
 
 export interface VcsProcessInput {
@@ -120,16 +121,13 @@ export const make = Effect.fn("makeVcsProcess")(function* () {
 
   const spawn = Effect.fn("VcsProcess.spawn")(function* (input: VcsProcessInput) {
     const label = commandLabel(input.command, input.args);
+    const env = { ...process.env, ...input.env };
+    const command =
+      input.command === "git"
+        ? yield* Effect.promise(() => resolveGitExecutable(env))
+        : input.command;
     const child = yield* spawner
-      .spawn(
-        ChildProcess.make(input.command, [...input.args], {
-          cwd: input.cwd,
-          env: {
-            ...process.env,
-            ...input.env,
-          },
-        }),
-      )
+      .spawn(ChildProcess.make(command, [...input.args], { cwd: input.cwd, env }))
       .pipe(
         Effect.mapError(
           (cause) =>
