@@ -22,6 +22,7 @@ import type { EnvironmentId, ThreadId } from "@ryco/contracts";
 import type { SidebarAutoSettleAfterDays } from "@ryco/contracts/settings";
 import { isChatProject } from "@ryco/shared/projectKind";
 import type { ThreadSettlementBlocker } from "@ryco/shared/threadSettlement";
+import { isThreadWokeUnseen, threadSnoozeWokeAt } from "@ryco/shared/threadSnooze";
 
 import { buildChangeRequestBadge, type ChangeRequestBadge } from "../../lib/changeRequestBadge";
 import {
@@ -115,6 +116,10 @@ export interface InboxThreadRow {
   readonly providerLabel: string | null;
   readonly attentionState: "active" | "settled" | "snoozed";
   readonly snoozedUntil?: string | null;
+  /** When an awake, unsettled thread woke from its snooze by the timer. */
+  readonly wokeAt?: string | null;
+  /** It woke from its snooze and this device has not opened it since: the row says "Woke". */
+  readonly woke?: boolean;
   readonly canSnooze?: boolean;
   readonly canUnsnooze?: boolean;
   readonly canSettle: boolean;
@@ -142,6 +147,8 @@ export interface BuildInboxInput {
   readonly pinnedThreadKeys?: ReadonlySet<string> | ReadonlyArray<string>;
   readonly autoSettleAfterDays?: SidebarAutoSettleAfterDays;
   readonly nowMs?: number;
+  /** When this device last saw each thread after it woke from snooze, by scoped key. */
+  readonly wokeSeenAtByThreadKey?: Readonly<Record<string, string>>;
 }
 
 function scopedKey(environmentId: EnvironmentId, id: string): string {
@@ -272,6 +279,8 @@ export function buildInboxSections(input: BuildInboxInput): ReadonlyArray<InboxS
         : entry.lifecycle.classification === "settled"
           ? "settled"
           : threadState(thread, environment, deliveryUnknown);
+    const wokeAt =
+      entry.lifecycle.classification === "active" ? threadSnoozeWokeAt(thread, nowMs) : null;
     const providerDriver =
       thread.session?.provider ??
       thread.providerDriver ??
@@ -304,6 +313,14 @@ export function buildInboxSections(input: BuildInboxInput): ReadonlyArray<InboxS
       attentionState: entry.lifecycle.classification,
       snoozedUntil:
         entry.lifecycle.classification === "snoozed" ? (thread.snoozedUntil ?? null) : null,
+      wokeAt,
+      // Only an idle row: a request, a failure or running work says more.
+      woke:
+        state === "idle" &&
+        isThreadWokeUnseen({
+          wokeAt,
+          lastVisitedAt: input.wokeSeenAtByThreadKey?.[entry.key],
+        }),
       canSnooze: entry.canSnooze,
       canUnsnooze:
         environment?.threadSnoozeSupported === true &&

@@ -31,6 +31,7 @@ vi.mock("../../threadLifecycleCommands", () => ({
   presentSkippedThreads: lifecycle.skipped,
   attemptThreadArchive: vi.fn(async () => undefined),
   requestThreadArchive: vi.fn(async () => undefined),
+  requestCustomSnooze: vi.fn(async () => null),
 }));
 
 const READY = EnvironmentId.make("selection-ready");

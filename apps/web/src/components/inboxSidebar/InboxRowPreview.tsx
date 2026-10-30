@@ -16,6 +16,7 @@ import { InboxPullRequestBadges } from "./InboxPullRequestBadges";
 import { InboxChangeStatsLine } from "./InboxChangeStats";
 import type { InboxChangeStats, resolveInboxPullRequests } from "./inboxPullRequests";
 import {
+  formatInboxDayTime,
   inboxAttentionDetail,
   inboxGlyphLabel,
   resolveInboxGlyph,
@@ -29,6 +30,8 @@ import { useInboxClock } from "./useInboxListMotion";
 export interface InboxRowPreviewPayload {
   readonly row: InboxSidebarRow;
   readonly unseen: boolean;
+  /** Woke from its snooze and not opened since; wins over `unseen`. */
+  readonly woke: boolean;
   readonly timestamp: string;
   readonly pullRequests: ReturnType<typeof resolveInboxPullRequests>;
   readonly changeRequestShortName: string;
@@ -39,6 +42,7 @@ export interface InboxRowPreviewPayload {
 const STATUS_TONE = {
   "needs-input": "text-warning-foreground",
   completed: "text-success-foreground",
+  woke: "text-warning-foreground",
   limited: "text-warning-foreground",
   error: "text-destructive-foreground",
   working: "text-foreground",
@@ -87,9 +91,9 @@ function RunningClock(props: { readonly since: string }) {
  * lives. No tool calls, no reasoning; the transcript owns those.
  */
 export function InboxRowPreview({ payload }: { readonly payload: InboxRowPreviewPayload }) {
-  const { row, unseen } = payload;
-  const glyph = resolveInboxGlyph(row, unseen);
-  const line = resolveInboxStateLine(row);
+  const { row, unseen, woke } = payload;
+  const glyph = resolveInboxGlyph(row, unseen, woke);
+  const line = resolveInboxStateLine(row, woke);
   const ProviderIcon = row.providerDriver
     ? (PROVIDER_ICON_BY_PROVIDER[row.providerDriver] ?? null)
     : null;
@@ -109,7 +113,7 @@ export function InboxRowPreview({ payload }: { readonly payload: InboxRowPreview
           data-testid="inbox-preview-status"
         >
           <InboxStatusGlyph key={glyph} kind={glyph} />
-          <span className="truncate">{inboxGlyphLabel(row, unseen)}</span>
+          <span className="truncate">{inboxGlyphLabel(row, unseen, woke)}</span>
         </span>
         <span className="ml-auto shrink-0 tabular-nums text-muted-foreground/75">
           {row.runningSince ? (
@@ -132,6 +136,10 @@ export function InboxRowPreview({ payload }: { readonly payload: InboxRowPreview
       ) : line.kind === "attention" ? (
         <p className="text-[11.5px] leading-4 text-warning-foreground">
           {inboxAttentionDetail(row)}
+        </p>
+      ) : line.kind === "woke" && row.wokeAt ? (
+        <p className="text-[11.5px] leading-4 text-warning-foreground">
+          {`Woke from snooze ${formatInboxDayTime(row.wokeAt)}.`}
         </p>
       ) : line.kind === "status" ? (
         <p className="text-[11.5px] leading-4 text-muted-foreground">{line.text}</p>

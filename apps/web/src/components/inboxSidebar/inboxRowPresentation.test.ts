@@ -216,6 +216,10 @@ describe("row hints", () => {
       inboxGlyphHint({ ...hintRow, latestTurnCompletedAt: "2026-10-02T14:26:00.000Z" }, true),
     ).toBe("Completed 6m ago · not opened yet");
     expect(inboxGlyphHint(hintRow, false)).toBe("Idle · nothing running");
+    const wokeAt = "2026-10-02T14:00:00.000Z";
+    expect(inboxGlyphHint({ ...hintRow, wokeAt }, true, true)).toBe(
+      `Woke from snooze ${formatInboxDayTime(wokeAt)} · not opened yet`,
+    );
     const started = "2026-10-02T14:28:00.000Z";
     expect(
       inboxGlyphHint(
@@ -304,5 +308,23 @@ describe("usage-limited rows", () => {
       latestTurnCompletedAt: null,
     };
     expect(inboxGlyphHint(hintRow, false)).toBe(`Limited · Resets ${resetLabel}`);
+  });
+});
+
+describe("a row that woke from its snooze", () => {
+  it("says Woke instead of Completed or the workspace while idle", () => {
+    expect(resolveInboxGlyph(row({ state: "idle" }), true, true)).toBe("woke");
+    expect(inboxGlyphLabel(row({ state: "idle" }), true, true)).toBe("Woke");
+    expect(resolveInboxStateLine(row({ state: "idle" }), true)).toEqual({
+      kind: "woke",
+      text: "Woke",
+    });
+  });
+
+  it("leaves a request, a failure or running work as they are", () => {
+    for (const state of ["needs-input", "error", "working"] as const) {
+      expect(resolveInboxGlyph(row({ state }), false, true)).not.toBe("woke");
+      expect(resolveInboxStateLine(row({ state }), true).kind).not.toBe("woke");
+    }
   });
 });

@@ -40,18 +40,31 @@ export function snoozeMenuPresetsFromKey(key: string): ReadonlyArray<InboxSnooze
   });
 }
 
-/** The long-press menu of one inbox row: settle/unsettle, then snooze or unsnooze. */
+/** The menu action that asks for a date and time or a duration (`CustomSnoozeSheet`). */
+export const CUSTOM_SNOOZE_ACTION_ID = "snooze-custom";
+
+/**
+ * The long-press menu of one inbox row: settle/unsettle, then snooze (the
+ * presets and "Custom…") or unsnooze.
+ */
 export function buildInboxRowMenuActions(
   row: InboxThreadRow,
   presets: ReadonlyArray<InboxSnoozeMenuPreset>,
 ): InboxRowMenuAction[] {
   const actions: InboxRowMenuAction[] = row.snoozedUntil
     ? [{ id: "unsnooze", title: "Unsnooze", attributes: { disabled: !row.canUnsnooze } }]
-    : presets.map((preset) => ({
-        id: preset.id,
-        title: preset.label,
-        attributes: { disabled: !row.canSnooze },
-      }));
+    : [
+        ...presets.map((preset) => ({
+          id: preset.id,
+          title: preset.label,
+          attributes: { disabled: !row.canSnooze },
+        })),
+        {
+          id: CUSTOM_SNOOZE_ACTION_ID,
+          title: "Custom…",
+          attributes: { disabled: !row.canSnooze },
+        },
+      ];
   actions.unshift({
     id: row.attentionState === "settled" ? "unsettle" : "settle",
     title: row.attentionState === "settled" ? "Move to Active" : "Settle task",

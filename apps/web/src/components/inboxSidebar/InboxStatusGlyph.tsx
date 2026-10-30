@@ -1,3 +1,5 @@
+import { AlarmClockIcon } from "lucide-react";
+
 import { cn } from "../../lib/utils";
 
 import type { InboxGlyphKind } from "./inboxRowPresentation";
@@ -83,6 +85,9 @@ function GlyphMark({ kind }: { readonly kind: InboxGlyphKind }) {
       );
     case "completed":
       return <CompletedMark />;
+    case "woke":
+      // On you like a request, without one waiting: the snooze ran out.
+      return <AlarmClockIcon aria-hidden className="size-[13px] text-warning-foreground" />;
     case "limited":
       // A static gauge at its limit: on you, but nothing failed and nothing runs.
       return (

@@ -243,6 +243,7 @@ import { cn, randomUUID } from "~/lib/utils";
 import { stackedThreadToast, toastManager } from "./ui/toast";
 import { newCommandId, newDraftId, newMessageId, newProjectId, newThreadId } from "~/lib/utils";
 import { isChatProject } from "@ryco/shared/projectKind";
+import { threadSnoozeWokeAt } from "@ryco/shared/threadSnooze";
 import { getProviderSupportsAskMode, resolveSelectableProvider } from "../providerModels";
 import { useProjectGroupingSettings } from "../hooks/useProjectGroupingSettings";
 import { useSettings } from "../hooks/useSettings";
@@ -336,6 +337,7 @@ import {
   useRestartInterruptionBannerItem,
 } from "./chat/restartInterruptionBanner";
 import { ComposerBannerStack, type ComposerBannerStackItem } from "./chat/ComposerBannerStack";
+import { useSnoozeBannerItem } from "./chat/snoozeBanner";
 import { useUsageLimitBannerItem } from "./chat/usageLimitBanner";
 import {
   CONTINUE_AFTER_FAILURE_PROMPT,
@@ -546,6 +548,8 @@ const EMPTY_STEER_ATTEMPTS: QueuedMessageSteerAttempts = Object.freeze({});
 
 /** A launch handed off this recently is still being carried over by a new view. */
 const CONTINUED_LAUNCH_WINDOW_MS = 5_000;
+/** setTimeout's largest delay: an open thread's snooze ending later is not waited for. */
+const MAX_SNOOZE_WAKE_DELAY_MS = 2 ** 31 - 1;
 
 /**
  * Whether a thread opens with the overview rail docked: only where the rail
@@ -2082,6 +2086,38 @@ export default function ChatView(props: ChatViewProps) {
     serverThread?.id,
   ]);
 
+  // Seeing a thread whose snooze ran out, or that runs out while it is on
+  // screen, clears its "Woke" mark: the visit is recorded at the wake.
+  const activeSnoozedUntil = serverThread?.snoozedUntil ?? null;
+  const activeSnoozedAt = serverThread?.snoozedAt ?? null;
+  useEffect(() => {
+    const threadKey =
+      paneFocused && serverThread?.id
+        ? scopedThreadKey(scopeThreadRef(serverThread.environmentId, serverThread.id))
+        : null;
+    if (threadKey === null || activeSnoozedUntil === null) return;
+    const snooze = { snoozedUntil: activeSnoozedUntil, snoozedAt: activeSnoozedAt };
+    const markWoke = () => {
+      const wokeAt = threadSnoozeWokeAt(snooze, Date.now());
+      if (wokeAt !== null) markThreadVisited(threadKey, wokeAt);
+    };
+    const delayMs = Date.parse(activeSnoozedUntil) - Date.now();
+    if (!(delayMs > 0)) {
+      markWoke();
+      return;
+    }
+    if (delayMs > MAX_SNOOZE_WAKE_DELAY_MS) return;
+    const timer = setTimeout(markWoke, delayMs);
+    return () => clearTimeout(timer);
+  }, [
+    activeSnoozedAt,
+    activeSnoozedUntil,
+    markThreadVisited,
+    paneFocused,
+    serverThread?.environmentId,
+    serverThread?.id,
+  ]);
+
   const selectedProviderByThreadId = composerActiveProvider ?? null;
   const threadProvider = activeThread?.modelSelection.instanceId ?? null;
   const primaryServerConfig = useServerConfig();
@@ -3036,10 +3072,18 @@ export default function ChatView(props: ChatViewProps) {
     dispatchAllowed: dispatchCapability.allowed,
     snoozeEligibility: usageLimitSnoozeEligibility,
   });
+  const snoozeBannerItem = useSnoozeBannerItem({
+    // The web phone tier is frozen: no new banners there.
+    thread: isServerThread && presentationTier !== "phone" ? (activeThreadSummary ?? null) : null,
+    dispatchAllowed: dispatchCapability.allowed,
+    canSnooze: usageLimitSnoozeEligibility.canSnooze,
+  });
   const composerBannerStackItems = useMemo<ComposerBannerStackItem[]>(() => {
-    const baseItems = usageLimitBannerItem
-      ? [usageLimitBannerItem, ...composerBannerItems]
-      : composerBannerItems;
+    const baseItems = [
+      ...(usageLimitBannerItem ? [usageLimitBannerItem] : []),
+      ...composerBannerItems,
+      ...(snoozeBannerItem ? [snoozeBannerItem] : []),
+    ];
     if (!visibleProviderStatusNotice) {
       return baseItems;
     }
@@ -3063,7 +3107,7 @@ export default function ChatView(props: ChatViewProps) {
         },
       },
     ];
-  }, [composerBannerItems, usageLimitBannerItem, visibleProviderStatusNotice]);
+  }, [composerBannerItems, snoozeBannerItem, usageLimitBannerItem, visibleProviderStatusNotice]);
 
   useEffect(() => {
     if (routeKind !== "server" || !sourceControlCwd) return;

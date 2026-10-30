@@ -30,6 +30,7 @@ import {
   resetSourceControlPausesForTests,
 } from "../../sourceControlPause";
 import { useTerminalStateStore } from "../../terminalStateStore";
+import { useUiStateStore } from "../../uiStateStore";
 import { useInboxFilterStore } from "./inboxFilterStore";
 import { InboxSidebar, type InboxSidebarProps } from "./InboxSidebar";
 
@@ -468,6 +469,61 @@ describe("Inbox sidebar rendering and settlement", () => {
       expect(glyph().getAnimations().length).toBeGreaterThan(0);
       expect(busyShell().getAnimations().length).toBeGreaterThan(0);
     } finally {
+      await mounted.unmount();
+    }
+  });
+
+  it("says Woke on a thread whose snooze ran out until it is visited", async () => {
+    const snoozedUntil = new Date(Date.now() - 60_000).toISOString();
+    const thread = {
+      environmentId: ENVIRONMENT_ID,
+      projectId: PROJECT_ID,
+      id: ThreadId.make("woke"),
+      title: "Nap task",
+      interactionMode: "default" as const,
+      session: null,
+      createdAt: "2026-09-01T00:00:00.000Z",
+      archivedAt: null,
+      latestTurn: null,
+      branch: "main",
+      worktreePath: null,
+      latestUserMessageAt: null,
+      hasPendingApprovals: false,
+      hasPendingUserInput: false,
+      hasActionableProposedPlan: false,
+      snoozedAt: new Date(Date.now() - 3_600_000).toISOString(),
+      snoozedUntil,
+    };
+    const props: InboxSidebarProps = {
+      projects: [],
+      worktrees: [],
+      environments: [],
+      threads: [thread],
+      deliveryUnknownThreadKeys: new Set(),
+      localQueuedThreadKeys: new Set(),
+      activeThreadKey: null,
+      autoSettleAfterDays: null,
+      pinnedThreadKeys: new Set(),
+      onOpenThread: vi.fn(),
+    };
+    const key = `${ENVIRONMENT_ID}:woke`;
+    const mounted = await render(<InboxSidebar {...props} />);
+    try {
+      const row = () =>
+        document.querySelector<HTMLElement>(
+          `[data-inbox-row-key="${key}"] [data-testid="inbox-thread-row"]`,
+        )!;
+      expect(row().closest("section")?.querySelector("h2")?.textContent).toBe("Recent");
+      expect(row().querySelector("[data-inbox-glyph]")?.getAttribute("aria-label")).toBe("Woke");
+      expect(row().textContent).toContain("Woke");
+
+      useUiStateStore.getState().markThreadVisited(key, snoozedUntil);
+      await vi.waitFor(() =>
+        expect(row().querySelector("[data-inbox-glyph]")?.getAttribute("aria-label")).toBe("Idle"),
+      );
+      expect(row().textContent).not.toContain("Woke");
+    } finally {
+      useUiStateStore.getState().clearThreadUi(key);
       await mounted.unmount();
     }
   });

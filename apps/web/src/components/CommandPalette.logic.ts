@@ -310,27 +310,51 @@ export function buildSettingsSearchItems(input: {
   }));
 }
 
-/** The open thread's "Snooze until" view: each time, with when it wakes the thread. */
+/**
+ * The open thread's "Snooze until" view: each time, with when it wakes the
+ * thread, then "Custom…" when `pickCustom` asks the user for a time.
+ */
 export function buildSnoozeUntilGroups(input: {
   options: ReadonlyArray<ThreadSnoozeOption>;
   icon: ReactNode;
   snooze: (snoozedUntil: string) => void;
+  /** Resolves the time the user picked, or null when they dismissed it. */
+  pickCustom?: (() => Promise<string | null>) | undefined;
 }): CommandPaletteGroup[] {
+  const { pickCustom } = input;
   return [
     {
       value: "snooze-until",
       label: "Snooze until",
-      items: input.options.map((option) => ({
-        kind: "action" as const,
-        value: `snooze-until:${option.id}`,
-        searchTerms: [option.label, option.timeLabel],
-        title: option.label,
-        description: option.timeLabel,
-        icon: input.icon,
-        run: async () => {
-          input.snooze(option.snoozedUntil);
-        },
-      })),
+      items: [
+        ...input.options.map((option) => ({
+          kind: "action" as const,
+          value: `snooze-until:${option.id}`,
+          searchTerms: [option.label, option.timeLabel],
+          title: option.label,
+          description: option.timeLabel,
+          icon: input.icon,
+          run: async () => {
+            input.snooze(option.snoozedUntil);
+          },
+        })),
+        ...(pickCustom
+          ? [
+              {
+                kind: "action" as const,
+                value: "snooze-until:custom",
+                searchTerms: ["custom", "date", "time", "duration"],
+                title: "Custom…",
+                description: "A date and time, or a duration",
+                icon: input.icon,
+                run: async () => {
+                  const snoozedUntil = await pickCustom();
+                  if (snoozedUntil) input.snooze(snoozedUntil);
+                },
+              },
+            ]
+          : []),
+      ],
     },
   ];
 }
@@ -353,6 +377,8 @@ export interface CurrentThreadLifecycleIcons {
 export function buildCurrentThreadLifecycleActions(input: {
   lifecycle: CurrentThreadLifecycle;
   icons: CurrentThreadLifecycleIcons;
+  /** Asks for a custom snooze time; omitted, the snooze view lists only the presets. */
+  pickCustomSnooze?: (() => Promise<string | null>) | undefined;
 }): {
   items: Array<CommandPaletteActionItem | CommandPaletteSubmenuItem>;
   snoozeUntil: CommandPaletteView | null;
@@ -371,6 +397,7 @@ export function buildCurrentThreadLifecycleActions(input: {
           options: lifecycle.snoozeOptions(),
           icon: icons.snooze,
           snooze: lifecycle.snooze,
+          pickCustom: input.pickCustomSnooze,
         }),
       };
   const snoozeSearchTerms = ["snooze", "unsnooze", "later", "remind", "wake", "current thread"];

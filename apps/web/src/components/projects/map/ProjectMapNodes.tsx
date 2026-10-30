@@ -51,6 +51,8 @@ const TALLY_ORDER: Record<InboxGlyphKind, number> = {
   connecting: 3,
   limited: 4,
   completed: 5,
+  // The map never shows a wake; ranked with a completion if it did.
+  woke: 5,
   offline: 6,
   idle: 7,
 };

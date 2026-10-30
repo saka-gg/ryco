@@ -32,6 +32,7 @@ import type { ReactNode } from "react";
 
 import { useProjectGroupingSettings } from "../../hooks/useProjectGroupingSettings";
 import { deriveLogicalProjectKeyFromSettings } from "../../logicalProject";
+import { requestCustomSnooze } from "../../threadLifecycleCommands";
 import { DeviceIcon } from "../DeviceIcon";
 import type {
   ThreadMenuActionId,
@@ -126,18 +127,32 @@ export interface InboxSnoozePreset {
   readonly snoozedUntil: string;
 }
 
+/** The presets, then "Custom…" for a date and time or a duration the user picks. */
 function snoozePresetItems(
   presets: ReadonlyArray<InboxSnoozePreset>,
   onSnooze: (snoozedUntil: string) => void,
 ): ReactNode[] {
-  return presets.map((preset) => (
-    <MenuItem key={preset.id} onClick={() => onSnooze(preset.snoozedUntil)}>
-      {preset.label}
-      <MenuShortcut className="tracking-normal">
-        {formatInboxDayTime(preset.snoozedUntil)}
-      </MenuShortcut>
-    </MenuItem>
-  ));
+  return [
+    ...presets.map((preset) => (
+      <MenuItem key={preset.id} onClick={() => onSnooze(preset.snoozedUntil)}>
+        {preset.label}
+        <MenuShortcut className="tracking-normal">
+          {formatInboxDayTime(preset.snoozedUntil)}
+        </MenuShortcut>
+      </MenuItem>
+    )),
+    <MenuSeparator key="separator-custom" />,
+    <MenuItem
+      key="custom"
+      onClick={() =>
+        void requestCustomSnooze().then((snoozedUntil) => {
+          if (snoozedUntil) onSnooze(snoozedUntil);
+        })
+      }
+    >
+      Custom…
+    </MenuItem>,
+  ];
 }
 
 /**

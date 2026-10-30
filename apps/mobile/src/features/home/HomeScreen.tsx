@@ -26,6 +26,7 @@ import { useHomeWorkspaceData } from "../../state/homeData";
 import { useMessageQueueStore } from "../../state/messageQueueStore";
 import { resolveHomeGroupingMode } from "../../state/homeGrouping";
 import { usePreferences } from "../../state/preferencesStore";
+import { markSnoozeWokeSeen, useSnoozeWokeSeen } from "../../state/snoozeWokeSeen";
 import { useStore } from "../../state/threadsRuntime";
 import {
   buildInboxSections,
@@ -35,6 +36,7 @@ import {
   type InboxSection,
   type InboxThreadRow,
 } from "../inbox/inboxModel";
+import { CustomSnoozeSheetHost } from "../inbox/CustomSnoozeSheet";
 import { InboxScreen } from "../inbox/InboxScreen";
 import { buildProjectRows, type ProjectListRow } from "../projects/projectsModel";
 import { ProjectsScreen } from "../projects/ProjectsScreen";
@@ -101,6 +103,7 @@ export function HomeScreen() {
     [queuesByThreadKey],
   );
   const preferences = usePreferences();
+  const wokeSeen = useSnoozeWokeSeen();
   useAutoSettleRuleHandOver(environments, preferences.sidebarAutoSettleAfterDays);
   const groupingMode = resolveHomeGroupingMode(preferences.projectGroupingEnabled);
 
@@ -126,10 +129,12 @@ export function HomeScreen() {
               localQueuedThreadIds,
               autoSettleAfterDays: preferences.sidebarAutoSettleAfterDays,
               nowMs,
+              wokeSeenAtByThreadKey: wokeSeen,
             }),
           )
         : NO_INBOX_SECTIONS,
     [
+      wokeSeen,
       environments,
       home.mode,
       home.nodeScopeByMode.inbox,
@@ -235,7 +240,14 @@ export function HomeScreen() {
     },
     [navigation],
   );
-  const openInboxThread = useCallback((row: InboxThreadRow) => openThread(row), [openThread]);
+  const openInboxThread = useCallback(
+    (row: InboxThreadRow) => {
+      // Opening a woken thread clears its "Woke" mark.
+      if (row.wokeAt) markSnoozeWokeSeen(row.key, row.wokeAt);
+      openThread(row);
+    },
+    [openThread],
+  );
 
   const handleInboxEmptyAction = useCallback(
     (state: Exclude<InboxEmptyState, null>) => {
@@ -280,6 +292,7 @@ export function HomeScreen() {
         <View className="min-h-0 flex-1">
           <NeedsVerificationSection />
           <QueuedTasksSection machines={environments} />
+          <CustomSnoozeSheetHost />
           {home.mode === "inbox" ? (
             <InboxScreen
               filterKey={inboxFilterKey}

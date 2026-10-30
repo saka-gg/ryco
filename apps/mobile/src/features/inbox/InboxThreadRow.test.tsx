@@ -102,3 +102,17 @@ describe("inbox thread row follow-up queue mark", () => {
     expect(nodes[0]?.props.accessibilityLabel).toContain("1 queued follow-up: Paused after Stop");
   });
 });
+
+describe("inbox thread row Woke mark", () => {
+  it("says Woke in words and to a screen reader on an idle row that woke", () => {
+    const nodes = renderRow({ woke: true, wokeAt: "2026-10-30T09:00:00.000Z" });
+    const mark = nodes.find((node) => node.type === "Text" && node.props.children === "Woke");
+    expect(mark?.props.className).toContain("text-warning");
+    expect(nodes[0]?.props.accessibilityLabel).toContain("Woke from snooze");
+  });
+
+  it("says nothing once the thread was seen", () => {
+    const nodes = renderRow({ woke: false, wokeAt: "2026-10-30T09:00:00.000Z" });
+    expect(texts(nodes)).not.toContain("Woke");
+  });
+});

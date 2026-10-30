@@ -318,6 +318,23 @@ describe("buildMessageSearchItems", () => {
 });
 
 describe("buildSnoozeUntilGroups", () => {
+  it("ends with Custom…, which snoozes until the time picked and not when dismissed", async () => {
+    const snooze = vi.fn();
+    const pickCustom = vi
+      .fn<() => Promise<string | null>>()
+      .mockResolvedValueOnce("2026-03-06T08:00:00.000Z")
+      .mockResolvedValueOnce(null);
+    const groups = buildSnoozeUntilGroups({ options: [], icon: null, snooze, pickCustom });
+    const custom = groups[0]?.items.at(-1);
+    if (custom?.kind !== "action") throw new Error("expected action item");
+    expect(custom.title).toBe("Custom…");
+    await custom.run();
+    expect(snooze).toHaveBeenCalledWith("2026-03-06T08:00:00.000Z");
+    await custom.run();
+    expect(snooze).toHaveBeenCalledTimes(1);
+    expect(buildSnoozeUntilGroups({ options: [], icon: null, snooze })[0]?.items).toEqual([]);
+  });
+
   it("lists each snooze time with when it wakes the thread, and snoozes until it", async () => {
     const snooze = vi.fn();
     const groups = buildSnoozeUntilGroups({
