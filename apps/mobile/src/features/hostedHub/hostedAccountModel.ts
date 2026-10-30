@@ -178,6 +178,10 @@ export interface HostedAccountActions {
     input?: { readonly totpCode?: string },
   ) => unknown;
   readonly cancelExternalIdentityConnection: (provider: "github") => void;
+  readonly deleteAccount: (input: {
+    readonly identifier: string;
+    readonly totpCode?: string;
+  }) => unknown;
   readonly dismissTotpEnrollment: () => void;
   readonly cancelAccountAction: () => void;
 }
@@ -359,7 +363,8 @@ export type HostedAccountPromptId =
   | "revoke-totp"
   | "verify-email"
   | "connect-github"
-  | "disconnect-github";
+  | "disconnect-github"
+  | "delete-account";
 
 /**
  * Everything the surface holds for an open prompt. Deliberately flat so a test
@@ -386,7 +391,10 @@ export interface HostedAccountPromptDraft {
   /** `revoke-passkey` only: which credential, and what to call it in the copy. */
   readonly credentialId: string | null;
   readonly passkeyLabel: string | null;
-  /** The prompt's primary text field (device name, password, email, or code). */
+  /**
+   * The prompt's primary text field (device name, password, email, code, or the
+   * email or username typed to confirm deleting the account).
+   */
   readonly text: string;
   /** The confirmation field, used by `set-password` only. */
   readonly secondary: string;
@@ -485,7 +493,8 @@ export type HostedAccountSectionId =
   | "password"
   | "two-factor"
   | "email"
-  | "external-identities";
+  | "external-identities"
+  | "delete-account";
 
 export interface HostedAccountActionRow {
   readonly id: HostedAccountPromptId;
@@ -509,6 +518,11 @@ export interface HostedAccountManagementView {
   readonly passkeyRows: ReadonlyArray<HostedPasskeyRow>;
   readonly passkeysEmptyDetail: string | null;
   readonly sections: ReadonlyArray<HostedAccountSection>;
+  /**
+   * Deleting the account, kept apart from {@link sections} so the screen can
+   * put it last, below this device's own rows. Null when signed out.
+   */
+  readonly deleteAccount: HostedAccountSection | null;
   readonly securityMessage: string | null;
   readonly securityRetry: HostedAccountButton | null;
   readonly externalIdentityMessage: string | null;
@@ -571,10 +585,14 @@ const EMAIL_DISABLED_FOOTNOTE =
   "This Hub has no mail transport configured, so no message will arrive. The request is accepted and recorded either way.";
 const EMAIL_CONFIGURED_FOOTNOTE =
   "Used for account recovery after verification. The Hub accepts the request without confirming whether an address is already known.";
+const DELETE_ACCOUNT_FOOTNOTE =
+  "Ends every session, removes your devices and your access to nodes, and erases the account. Chats and projects on your nodes stay there.";
 
 const MAX_LABEL_LENGTH = 64;
 const MAX_PASSWORD_LENGTH = 256;
 const MAX_EMAIL_LENGTH = 254;
+/** The runtime refuses a longer confirmation before sending it. */
+const MAX_DELETE_IDENTIFIER_LENGTH = 320;
 const MAX_CODE_LENGTH = 16;
 const MIN_CODE_LENGTH = 6;
 /** The app's own floor. The Hub owns the real policy and may demand more. */
@@ -615,6 +633,7 @@ export function deriveHostedAccountManagementView(
       passkeyRows: [],
       passkeysEmptyDetail: null,
       sections: [],
+      deleteAccount: null,
       securityMessage: null,
       securityRetry: null,
       externalIdentityMessage: null,
@@ -816,6 +835,13 @@ export function deriveHostedAccountManagementView(
             ? "The passkey list could not be loaded."
             : "Loading your passkeys.",
     sections,
+    deleteAccount: {
+      id: "delete-account",
+      title: "Delete account",
+      status: null,
+      footnote: DELETE_ACCOUNT_FOOTNOTE,
+      rows: [row("delete-account", "Delete account…", { destructive: true })],
+    },
     securityMessage,
     securityRetry,
     externalIdentityMessage,
@@ -1273,6 +1299,32 @@ function promptSpec(
         enrollment: null,
         perform: async () => {
           await actions.disconnectExternalIdentity("github", stepUp);
+        },
+      };
+
+    // The Hub, not this prompt, checks that the typed text is the account's:
+    // the same rule as web. A Hub without account deletion answers 404, and the
+    // runtime publishes "This Hub can't delete accounts yet" as this prompt's
+    // error. A committed deletion signs this device out, which ends the surface.
+    case "delete-account":
+      return {
+        title: "Delete your Hub account?",
+        message:
+          "This can't be undone. Type your account's email, or its username if it has no email, to confirm.",
+        notice: "Chats and projects on your nodes stay there.",
+        destructive: true,
+        submitLabel: "Delete account",
+        completionMessage: null,
+        fields: withStepUp([
+          field("text", "Email or username", "you@example.com", draft.text, {
+            keyboardType: "email-address",
+            maxLength: MAX_DELETE_IDENTIFIER_LENGTH,
+          }),
+        ]),
+        incomplete: draft.text.trim().length === 0,
+        enrollment: null,
+        perform: async () => {
+          await actions.deleteAccount({ identifier: draft.text, ...stepUp });
         },
       };
   }

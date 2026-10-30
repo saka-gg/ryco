@@ -1,6 +1,6 @@
 import { readMobileDeviceLabel } from "../../platform/config";
 import { useIsFocused, useNavigation } from "@react-navigation/native";
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { ScrollView, View } from "react-native";
 
 import { AppText as Text } from "../../components/AppText";
@@ -22,6 +22,7 @@ import {
   deriveHostedAccountManagementView,
   leaseHostedRecoveryCodeDisplay,
   type HostedAccountPromptDraft,
+  type HostedAccountSection,
 } from "./hostedAccountModel";
 import { HostedAccountPrompt } from "./HostedAccountPrompt";
 import { deriveHostedAccountView, type HostedAccountRow } from "./hostedAuthModel";
@@ -221,36 +222,18 @@ export function HostedAccountRouteScreen() {
 
             {management.available
               ? management.sections.map((section) => (
-                  <View key={section.id}>
-                    <SettingsSection title={section.title}>
-                      {section.status !== null ? (
-                        <SettingsRow first label="Status" value={section.status} />
-                      ) : null}
-                      {section.id === "passkeys" ? (
+                  <HostedAccountSectionCard
+                    key={section.id}
+                    section={section}
+                    passkeys={
+                      section.id === "passkeys" ? (
                         <HostedPasskeyList
                           rows={management.passkeyRows}
                           emptyDetail={management.passkeysEmptyDetail}
                         />
-                      ) : null}
-                      {section.rows.map((row, index) => (
-                        <SettingsRow
-                          key={row.id}
-                          // The passkey list occupies the top of its own card,
-                          // so the action beneath it always keeps a separator.
-                          first={
-                            section.status === null && section.id !== "passkeys" && index === 0
-                          }
-                          label={row.label}
-                          destructive={row.destructive}
-                          disabled={row.disabled}
-                          onPress={row.run}
-                        />
-                      ))}
-                    </SettingsSection>
-                    <Text className="mt-2 px-5 font-sans text-xs leading-relaxed text-foreground-muted">
-                      {section.footnote}
-                    </Text>
-                  </View>
+                      ) : null
+                    }
+                  />
                 ))
               : null}
 
@@ -268,11 +251,50 @@ export function HostedAccountRouteScreen() {
                 ))}
               </SettingsSection>
             ) : null}
+
+            {management.deleteAccount ? (
+              <HostedAccountSectionCard section={management.deleteAccount} passkeys={null} />
+            ) : null}
           </>
         )}
       </ScrollView>
 
       <HostedAccountPrompt view={management.prompt} />
     </>
+  );
+}
+
+/** One account section: its status, the passkey list when it has one, its rows. */
+function HostedAccountSectionCard({
+  section,
+  passkeys,
+}: {
+  readonly section: HostedAccountSection;
+  readonly passkeys: ReactNode;
+}) {
+  return (
+    <View>
+      <SettingsSection title={section.title}>
+        {section.status !== null ? (
+          <SettingsRow first label="Status" value={section.status} />
+        ) : null}
+        {passkeys}
+        {section.rows.map((row, index) => (
+          <SettingsRow
+            key={row.id}
+            // The passkey list occupies the top of its own card, so the action
+            // beneath it always keeps a separator.
+            first={section.status === null && passkeys === null && index === 0}
+            label={row.label}
+            destructive={row.destructive}
+            disabled={row.disabled}
+            onPress={row.run}
+          />
+        ))}
+      </SettingsSection>
+      <Text className="mt-2 px-5 font-sans text-xs leading-relaxed text-foreground-muted">
+        {section.footnote}
+      </Text>
+    </View>
   );
 }

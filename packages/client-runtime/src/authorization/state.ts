@@ -1844,7 +1844,6 @@ class HostedHubController {
     return outcome;
   }
 
-  /** Remove the account's fallback password. */
   /**
    * Delete the signed-in account. `identifier` is the account's email (or its
    * username) as the user typed it to confirm. Once the Hub has recorded the
@@ -1874,6 +1873,7 @@ class HostedHubController {
     return outcome;
   }
 
+  /** Remove the account's fallback password. */
   async removePassword(input?: HostedAccountStepUp): Promise<HostedAccountOutcome> {
     const outcome = await this.#accountAction("removing-password", async (signal) => {
       await getHostedHubApi().removePassword(input, signal);
