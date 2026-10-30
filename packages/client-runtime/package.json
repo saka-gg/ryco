@@ -182,6 +182,10 @@
       "types": "./src/state/threads/index.ts",
       "import": "./src/state/threads/index.ts"
     },
+    "./state/threads/interThreadMessage": {
+      "types": "./src/state/threads/interThreadMessage.ts",
+      "import": "./src/state/threads/interThreadMessage.ts"
+    },
     "./state/threads/runningThreads": {
       "types": "./src/state/threads/runningThreads.ts",
       "import": "./src/state/threads/runningThreads.ts"

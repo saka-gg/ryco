@@ -39,6 +39,22 @@ vi.mock("@legendapp/list/react", async () => {
   return { LegendList };
 });
 
+// The row reads thread titles from the store (see below); its browser test renders it. Here it
+// only shows which messages the timeline hands it.
+vi.mock("./InterThreadMessageRow", () => ({
+  InterThreadMessageRow: (props: {
+    message: { text: string };
+    inter: { kind: string; senderThreadId?: string | null };
+  }) => (
+    <div
+      data-inter-thread-message={props.inter.kind}
+      data-sender={props.inter.senderThreadId ?? "none"}
+    >
+      {props.message.text}
+    </div>
+  ),
+}));
+
 // Node resolves client-runtime's zustand to a second React copy (the browser
 // build dedupes it), so the thread store's `useStore` cannot render under
 // `renderToStaticMarkup` here. The leaf only swaps in the store's live text for
@@ -239,7 +255,7 @@ describe("MessagesTimeline", () => {
     expect(markup).toContain("yoo what&#x27;s ");
   }, 20_000);
 
-  it("folds another agent's message into one line and keeps a typed message open", async () => {
+  it("sets another chat's message apart and keeps a typed message open", async () => {
     const { MessagesTimeline } = await import("./MessagesTimeline");
     const message = (id: string, text: string) => ({
       id,
@@ -258,16 +274,23 @@ describe("MessagesTimeline", () => {
         {...buildProps()}
         timelineEntries={[
           message("message-agent-control-op-1-send-message", "Rebase onto main.\nThen test."),
+          message("message-agent-control-op-2-from:child-9b-send-message", "PR #1004 is green."),
+          message("delegation-result:child-9b", "Ryco delegation update."),
+          message("goal-continuation:1", "Keep going."),
           message("message-typed", "Hello from a person"),
         ]}
       />,
     );
 
-    expect(markup).toContain('data-agent-message-fold="agent-message"');
-    expect(markup).toContain("Message from another agent");
-    expect(markup).toContain("Rebase onto main.");
-    expect(markup).not.toContain("Then test.");
+    expect(markup).toContain('data-inter-thread-message="agent-message" data-sender="none"');
+    expect(markup).toContain('data-sender="child-9b"');
+    expect(markup).toContain('data-inter-thread-message="delegation-result"');
+    expect(markup).toContain("Rebase onto main.\nThen test.");
+    expect(markup).not.toContain('data-agent-message-fold="agent-message"');
+    expect(markup).not.toContain('data-agent-message-fold="delegation-result"');
     expect(markup).toContain("Hello from a person");
+    // Ryco's own wakes keep their one-line fold.
+    expect(markup).toContain('data-agent-message-fold="goal-continuation"');
   }, 20_000);
 
   it("renders context compaction entries as timeline markers", async () => {

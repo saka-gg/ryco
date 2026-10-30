@@ -2246,7 +2246,8 @@ export type TurnOrigin = typeof TurnOrigin.Type;
  * Message ids the server mints for user-role messages no person typed: a delegated task's
  * result waking its parent (`delegation-result:`), Agent Control sends
  * (`message-agent-control-<operation>-<step>`; `-send-message` is an agent's message to an
- * existing thread), the next turn toward a thread's goal (`goal-continuation:`) and a pull
+ * existing thread, naming its sender as `-from:<thread>` before the suffix, see
+ * `@ryco/shared/interThreadMessage`), the next turn toward a thread's goal (`goal-continuation:`) and a pull
  * request watch's update (`pull-request-watch:<thread>:<uuid>`). Clients render them by origin
  * and may never send or queue them.
  */

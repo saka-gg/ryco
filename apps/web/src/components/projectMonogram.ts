@@ -47,9 +47,10 @@ export function deriveProjectMonogram(name: string): ProjectMonogram {
           .map((word) => Array.from(word)[0]!)
           .join("")
           .toLocaleUpperCase();
-  const color =
-    PROJECT_MONOGRAM_PALETTE[
-      fnv1a32(name.trim().toLocaleLowerCase()) % PROJECT_MONOGRAM_PALETTE.length
-    ]!;
-  return { initials, color };
+  return { initials, color: monogramColorFor(name.trim().toLocaleLowerCase()) };
+}
+
+/** A palette color keyed on any stable string, such as a thread id that outlives renames. */
+export function monogramColorFor(key: string): string {
+  return PROJECT_MONOGRAM_PALETTE[fnv1a32(key) % PROJECT_MONOGRAM_PALETTE.length]!;
 }

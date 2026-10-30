@@ -35,6 +35,7 @@ import {
   type OrchestrationEventType,
   type ThreadDelegatedCreateCommand,
 } from "@ryco/contracts";
+import { agentSentMessageSenderThreadId } from "@ryco/shared/interThreadMessage";
 import { assert, it, vi } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
@@ -1321,6 +1322,8 @@ it.effect("queues a message to a busy thread's follow-up queue at once, as the a
     assert.strictEqual(add.queuedBy, "thread-origin");
     assert.strictEqual(add.threadId, threadId);
     assert.match(add.entry.messageId, /^message-agent-control-/);
+    // The message names its sender, so the target shows which chat wrote it.
+    assert.strictEqual(agentSentMessageSenderThreadId(add.entry.messageId), "thread-origin");
     assert.strictEqual(add.entry.text, plan.text);
     assert.deepStrictEqual(add.entry.modelSelection, harness.running().modelSelection);
     assert.strictEqual(add.entry.runtimeMode, harness.running().runtimeMode);

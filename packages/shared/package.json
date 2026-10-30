@@ -432,6 +432,10 @@
       "types": "./src/delegationSlot.ts",
       "import": "./src/delegationSlot.ts"
     },
+    "./interThreadMessage": {
+      "types": "./src/interThreadMessage.ts",
+      "import": "./src/interThreadMessage.ts"
+    },
     "./threadSettlement": {
       "types": "./src/threadSettlement.ts",
       "import": "./src/threadSettlement.ts"

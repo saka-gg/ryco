@@ -293,10 +293,16 @@ describe("DelegationDock", () => {
     ]);
     seedQueue([
       proposal("create", { completionReturns: [completionReturn("child", "waiting")] }),
-      proposal("steer", {
+      proposal("interrupt", {
         principal: { kind: "provider-session", threadId: REVIEWER, providerInstanceId: "codex" },
-        plan: { kind: "sendMessage", threadId: "child", text: "Hidden", delivery: "steer" },
+        plan: { kind: "interruptThread", threadId: "child" },
         decidedAt: "2026-10-01T00:00:09.000Z",
+      }),
+      // A message directs nothing: a newer one from another chat names no manager.
+      proposal("steer", {
+        principal: { kind: "provider-session", threadId: "sibling", providerInstanceId: "codex" },
+        plan: { kind: "sendMessage", threadId: "child", text: "Hidden", delivery: "steer" },
+        decidedAt: "2026-10-01T00:00:10.000Z",
       }),
     ]);
     const mounted = await render(<DelegationDock environmentId={ENV} threadId={child} />);
@@ -312,6 +318,34 @@ describe("DelegationDock", () => {
         .element(page.getByRole("link", { name: "Open Coordinator ↗" }))
         .toHaveAttribute("href", "/delegation-dock-env/coordinator");
       await expect.element(page.getByText(/1 sibling thread/)).toBeVisible();
+    } finally {
+      await mounted.unmount();
+    }
+  });
+
+  it("never shows a delegated task that reported back as its parent's manager", async () => {
+    seed(workers);
+    seedQueue([
+      proposal("create", { completionReturns: [completionReturn("first-worker", "waiting")] }),
+      proposal("report-back", {
+        principal: {
+          kind: "provider-session",
+          threadId: "first-worker",
+          providerInstanceId: "codex",
+        },
+        plan: {
+          kind: "sendMessage",
+          threadId: "coordinator",
+          text: "PR is green",
+          delivery: "queue",
+        },
+        decidedAt: "2026-10-01T00:00:09.000Z",
+      }),
+    ]);
+    const mounted = await render(<DelegationDock environmentId={ENV} threadId={COORDINATOR} />);
+    try {
+      await expect.element(page.getByRole("button", { name: /2 delegated/ })).toBeVisible();
+      expect(document.body.textContent).not.toMatch(/Managed by|Delegated from/);
     } finally {
       await mounted.unmount();
     }

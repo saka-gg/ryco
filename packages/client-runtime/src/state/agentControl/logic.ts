@@ -306,7 +306,9 @@ export function selectAgentControlThreadActivity(
       proposal.principal.kind === "provider-session" && proposal.principal.threadId === threadId,
   );
   // Infer the last known manager only from accepted thread-management work.
-  // Device/project operations and unaccepted requests do not establish a manager.
+  // Device/project operations and unaccepted requests do not establish a manager,
+  // and neither does a message: a delegated task reporting back to its parent, or
+  // any chat writing to another, directs nothing (the target shows the sender).
   // Child-return progress updates updatedAt long after the management action.
   // Order accepted work by its stable decision time, not that independent lifecycle.
   const managers = proposals
@@ -325,7 +327,6 @@ export function selectAgentControlThreadActivity(
               proposal.result.createdThreadIds?.includes(threadId)) ||
             proposal.result?.execution?.affectedThreadIds.includes(threadId)
           );
-        case "sendMessage":
         case "interruptThread":
         case "updateThread":
         case "pullRequestWatch":
