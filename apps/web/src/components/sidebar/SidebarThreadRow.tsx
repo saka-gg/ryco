@@ -30,6 +30,7 @@ import {
 } from "../Sidebar.logic";
 import { SidebarMenuSubButton, SidebarMenuSubItem } from "../ui/sidebar";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
+import { FollowUpQueueMark } from "./FollowUpQueueMark";
 import {
   resolveSidebarStatusTextStyle,
   resolveThreadStatusTextClassName,
@@ -667,21 +668,7 @@ export const SidebarThreadRowContent = memo(function SidebarThreadRowContent(
                     <TooltipPopup side="top">{threadEnvironmentLabel}</TooltipPopup>
                   </Tooltip>
                 )}
-                {queueBadge && !isMobile ? (
-                  <span
-                    data-follow-up-queue-badge={queueBadge.held ? "held" : "queued"}
-                    title={queueBadge.title}
-                    className={cn(
-                      "inline-flex h-4 items-center rounded-full border px-1.5 text-[10px] font-medium",
-                      queueBadge.held
-                        ? "border-warning/40 text-warning"
-                        : "border-border/80 text-muted-foreground",
-                    )}
-                  >
-                    <span aria-hidden="true">{queueBadge.label}</span>
-                    <span className="sr-only">{queueBadge.title}</span>
-                  </span>
-                ) : null}
+                {queueBadge && !isMobile ? <FollowUpQueueMark badge={queueBadge} /> : null}
                 {jumpLabel ? (
                   <span
                     className="inline-flex h-5 items-center rounded-full border border-border/80 bg-background/90 px-1.5 font-mono text-[10px] font-medium tracking-tight text-foreground shadow-sm"

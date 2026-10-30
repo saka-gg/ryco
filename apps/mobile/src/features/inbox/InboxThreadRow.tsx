@@ -68,6 +68,8 @@ export const InboxThreadRow = memo(function InboxThreadRow(props: {
     row.isChat ? null : row.isWorktree ? "Worktree" : "Original directory",
     row.statusLabel,
     row.roleLabel,
+    // The queue's sentence, not its short mark: "2 queued follow-ups: Paused after an error".
+    row.followUpQueue?.title,
     row.changeRequest?.accessibilityLabel,
     row.providerLabel ? `Provider: ${row.providerLabel}` : null,
   ]
@@ -138,7 +140,7 @@ export const InboxThreadRow = memo(function InboxThreadRow(props: {
           </Text>
         </View>
       </View>
-      {showStatus || row.roleLabel || row.snoozedUntil ? (
+      {showStatus || row.roleLabel || row.followUpQueue || row.snoozedUntil ? (
         <View className="flex-row flex-wrap items-center gap-2">
           {showStatus ? (
             <Text className={`text-xs font-ryco-medium ${statusTextClassName(row.state)}`}>
@@ -147,6 +149,21 @@ export const InboxThreadRow = memo(function InboxThreadRow(props: {
           ) : null}
           {row.roleLabel ? (
             <Text className="text-xs text-foreground-tertiary">{row.roleLabel}</Text>
+          ) : null}
+          {row.followUpQueue ? (
+            <View
+              className={`rounded-full border px-1.5 ${
+                row.followUpQueue.held ? "border-warning" : "border-border"
+              }`}
+            >
+              <Text
+                className={`text-2xs font-ryco-medium ${
+                  row.followUpQueue.held ? "text-warning" : "text-foreground-tertiary"
+                }`}
+              >
+                {row.followUpQueue.label}
+              </Text>
+            </View>
           ) : null}
           {row.snoozedUntil ? (
             <Text className="text-xs text-foreground-tertiary">

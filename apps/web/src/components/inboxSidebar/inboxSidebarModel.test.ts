@@ -472,6 +472,48 @@ describe("buildInboxSidebarSections", () => {
     });
   });
 
+  it("marks queued and held follow-ups in the project sidebar's words", () => {
+    const stopped = {
+      reason: "interrupted" as const,
+      detail: null,
+      causeKeys: ["interrupt:turn-1"],
+      heldAt: "2026-08-23T10:00:00.000Z",
+    };
+    const rows = build({
+      threads: [
+        thread("queued", {
+          followUpQueueSummary: { count: 2, hold: null, headStatus: "queued", headPreview: "a" },
+        }),
+        thread("held", {
+          followUpQueueSummary: { count: 1, hold: stopped, headStatus: "queued", headPreview: "b" },
+        }),
+        thread("retry", {
+          followUpQueueSummary: { count: 3, hold: null, headStatus: "failed", headPreview: "c" },
+        }),
+        thread("plain"),
+      ],
+    }).flatMap((section) => section.rows);
+    const queueOf = (id: string) => rows.find((row) => row.threadId === id)?.followUpQueue;
+
+    expect(queueOf("plain")).toBeNull();
+    expect(queueOf("queued")).toEqual({
+      label: "2 queued",
+      title: "2 queued follow-ups",
+      held: false,
+    });
+    // Held reads as words, not only as a color; the title says why.
+    expect(queueOf("held")).toEqual({
+      label: "1 held",
+      title: "1 queued follow-up: Paused after Stop",
+      held: true,
+    });
+    expect(queueOf("retry")).toEqual({
+      label: "3 held",
+      title: "3 queued follow-ups: The next one waits for Retry",
+      held: true,
+    });
+  });
+
   it("applies search, machine, and status filters deterministically", () => {
     const rows = [
       thread("older match", { updatedAt: "2026-08-23T10:00:00.000Z" }),

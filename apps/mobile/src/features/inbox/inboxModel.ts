@@ -13,6 +13,10 @@ import type {
   ThreadInboxMutationBlocker,
 } from "@ryco/client-runtime/state/threads";
 import { buildThreadInbox } from "@ryco/client-runtime/state/threads";
+import {
+  followUpQueueBadgeOf,
+  type FollowUpQueueBadge,
+} from "@ryco/client-runtime/state/message-queue/queueBadge";
 import { CHAT_WORKSPACE_LABEL, projectDisplayLabel } from "@ryco/client-runtime/state/composer";
 import type { EnvironmentId, ThreadId } from "@ryco/contracts";
 import type { SidebarAutoSettleAfterDays } from "@ryco/contracts/settings";
@@ -101,6 +105,11 @@ export interface InboxThreadRow {
    * matches HubNodeSection's `ROLE_LABELS`.
    */
   readonly roleLabel: "Viewer" | null;
+  /**
+   * The node's follow-up queue for the thread, as web's sidebar marks it: "2 queued", or
+   * "2 held" when nothing goes out without the person. Null while it holds none.
+   */
+  readonly followUpQueue: FollowUpQueueBadge | null;
   /** Current provider brand for the task; null renders the neutral mark. */
   readonly providerDriver: string | null;
   readonly providerLabel: string | null;
@@ -289,6 +298,7 @@ export function buildInboxSections(input: BuildInboxInput): ReadonlyArray<InboxS
       updatedAt: entry.lifecycle.effectiveSettlementTimestamp ?? timestamp(thread),
       changeRequest: buildChangeRequestBadge(entry.worktree),
       roleLabel: environment?.role === "viewer" ? "Viewer" : null,
+      followUpQueue: followUpQueueBadgeOf(thread.followUpQueueSummary),
       providerDriver,
       providerLabel: providerDisplayLabel(providerDriver),
       attentionState: entry.lifecycle.classification,
