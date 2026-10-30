@@ -156,6 +156,34 @@ describe("computer-use helper build", () => {
     ).toThrow("expected arm64 or x64");
   });
 
+  it("runs rustup and cargo from PATH when CARGO_HOME has no rustup proxies", () => {
+    const cargoHome = mkdtempSync(join(tmpdir(), "ryco-helper-cargo-home-"));
+    roots.push(cargoHome);
+    const f = fixture("darwin", { CARGO_HOME: cargoHome });
+    buildComputerUseHelper(f.desktop);
+    expect(spawnSync).toHaveBeenCalledWith(
+      "rustup",
+      ["target", "add", "--toolchain", "1.98.1", "aarch64-apple-darwin"],
+      expect.anything(),
+    );
+    expect(cargoCalls().map(([command]) => command)).toEqual(["cargo"]);
+  });
+
+  it("runs the rustup proxies in CARGO_HOME/bin when they are installed there", () => {
+    const cargoHome = mkdtempSync(join(tmpdir(), "ryco-helper-cargo-home-"));
+    roots.push(cargoHome);
+    mkdirSync(join(cargoHome, "bin"));
+    for (const tool of ["cargo", "rustup"]) writeFileSync(join(cargoHome, "bin", tool), "");
+    const f = fixture("darwin", { CARGO_HOME: cargoHome });
+    buildComputerUseHelper(f.desktop);
+    expect(spawnSync).toHaveBeenCalledWith(
+      join(cargoHome, "bin", "rustup"),
+      ["target", "add", "--toolchain", "1.98.1", "aarch64-apple-darwin"],
+      expect.anything(),
+    );
+    expect(cargoCalls().map(([command]) => command)).toEqual([join(cargoHome, "bin", "cargo")]);
+  });
+
   it("reports a failed Cargo command without diagnosing a missing toolchain", () => {
     const f = fixture("darwin");
     spawnSync.mockImplementation((command, args) => ({
