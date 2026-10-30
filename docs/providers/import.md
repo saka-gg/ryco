@@ -1,7 +1,42 @@
 # Import local Codex and Claude conversations
 
+## Import whole projects
+
+Open the command palette and choose **Import from Codex or Claude Code…**. The same dialog opens
+from **Import projects…** on the banner an empty sidebar shows (its **×** hides it for good on that
+device), from **Import from Codex or Claude Code** in the welcome tour's project step, and from
+**Import projects…** in Settings above the conversation import described below.
+
+1. The dialog lists each source store on the node, Codex and Claude Code, including stores that
+   provider instances declare, with the instance and model that continue its conversations. Uncheck
+   stores to skip, include archived conversations if you want them, and choose **Find projects**.
+   Every page of each store is read with the same bounded discovery as below.
+2. Conversations are grouped by the folder they ran in as the node resolves it today (its real
+   path), never by name or Git remote. A linked spelling and the real folder are one group, and
+   Codex and Claude Code conversations from one folder share it. Each group proposes a destination:
+   the Ryco project whose folder holds it (the closest one when projects nest), else a new project
+   in that folder. A folder that no longer exists, or a conversation without a recorded folder,
+   needs a project picked by hand; Ryco never proposes a project for a folder that is gone. Any
+   group's destination can be changed before importing.
+3. Select whole groups, or expand one and pick single conversations. Already imported and paused
+   (quarantined) conversations cannot be selected. **Import selected** creates each new project with
+   the same `project.create` command the project picker sends, right before its first conversation,
+   then imports one conversation at a time with the conversation import below. **Stop** ends after
+   the conversation in progress, so no empty project is left for groups it did not reach.
+   **Retry failed** retries only the failures and reuses the projects created before.
+
+The node checks every new project's folder against its workspace access policy, like any added
+folder, and only links folders that exist; it never creates one. Discovery stays owner-only and
+unavailable on workspace-restricted nodes. Imports still need canonical target folders: a project
+added under a linked path does not match the real folder, so its group proposes a new project at
+the real path instead. Nodes older than this dialog do not resolve folders; their conversations
+are grouped by the recorded folder. Grouping, destinations and the run live in
+`@ryco/client-runtime/state/sessionImport`; the native app has no import screen yet.
+
+## Import single conversations
+
 In **Settings → this node → General → Import local conversations**, choose a source and find
-conversations. The welcome tour's project step links to this screen. Select individual conversations,
+conversations. Select individual conversations,
 choose an existing Ryco target project, and select an available provider/model for future turns.
 A replacement project can be used when the original folder moved or no longer exists. Add a folder
 through the normal project picker first if it is not already a Ryco project. Targets must be existing

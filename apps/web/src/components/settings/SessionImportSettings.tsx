@@ -1,33 +1,19 @@
-import { useRef, useLayoutEffect } from "react";
 import { useShallow } from "zustand/react/shallow";
-import { WS_METHODS } from "@ryco/contracts";
-import { useHostedRpcCapability } from "../../hostedHub/capabilities";
 import { useSettingsTarget, useSettingsEditingScope } from "../../settingsTarget";
 import { usePresentationTier } from "../../hooks/usePresentationTier";
-import { readEnvironmentConnection } from "../../environments/runtime";
 import { selectProjectsAcrossEnvironments, useStore } from "../../store";
-import { SettingsSection } from "./settingsLayout";
+import { openProjectImportDialog } from "../projectImport/projectImportDialogStore";
+import { Button } from "../ui/button";
+import { SettingsRow, SettingsSection } from "./settingsLayout";
 import { SessionImportPanel } from "./SessionImportPanel";
+import { useSessionImportAccess } from "./sessionImportAccess";
 import { excludeChatProjects } from "@ryco/shared/projectKind";
 export function SessionImportSettings() {
   const target = useSettingsTarget();
   const scope = useSettingsEditingScope();
   const tier = usePresentationTier();
-  const capability = useHostedRpcCapability(
-    WS_METHODS.sessionImportRun,
-    target?.environmentId ?? null,
-  );
   const projects = useStore(useShallow(selectProjectsAcrossEnvironments));
-  const current = useRef({ allowed: false, environmentId: target?.environmentId });
-  const allowed =
-    !!target?.connected &&
-    target.canManage === true &&
-    target.canMutate !== false &&
-    capability.allowed;
-  const environmentId = target?.environmentId;
-  useLayoutEffect(() => {
-    current.current = { allowed, environmentId };
-  }, [allowed, environmentId]);
+  const { allowed, client } = useSessionImportAccess(target);
   if (tier === "phone" || scope === "client" || !target) return null;
   return (
     <SettingsSection
@@ -35,6 +21,20 @@ export function SessionImportSettings() {
       description={`Bring Codex or Claude Code history from ${target.nodeLabel} into Ryco. New turns continue in separate native session copies.`}
       owner="node"
     >
+      <SettingsRow
+        title="Whole projects"
+        description="Find every Codex and Claude Code project on this node, grouped by folder, and create the Ryco projects they need."
+        control={
+          <Button
+            size="sm"
+            variant="outline"
+            disabled={!allowed}
+            onClick={() => openProjectImportDialog({ environmentId: target.environmentId })}
+          >
+            Import projects…
+          </Button>
+        }
+      />
       <SessionImportPanel
         key={target.environmentId}
         nodeLabel={target.nodeLabel}
@@ -44,16 +44,7 @@ export function SessionImportSettings() {
           (project) => project.environmentId === target.environmentId,
         )}
         providerOptions={target.serverConfig?.providers ?? []}
-        client={() => {
-          const connection = readEnvironmentConnection(target.environmentId);
-          if (
-            !connection ||
-            !current.current.allowed ||
-            current.current.environmentId !== target.environmentId
-          )
-            throw new Error("Reconnect with owner access before importing.");
-          return connection.client.sessionImport;
-        }}
+        client={client}
       />
     </SettingsSection>
   );

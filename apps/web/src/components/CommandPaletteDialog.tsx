@@ -53,6 +53,7 @@ import {
   FolderIcon,
   FolderTreeIcon,
   FoldersIcon,
+  FolderInputIcon,
   FolderPlusIcon,
   FolderSymlinkIcon,
   LinkIcon,
@@ -114,7 +115,6 @@ import {
   getBrowseLeafPathSegment,
   getBrowseParentPath,
   hasTrailingPathSeparator,
-  inferProjectTitleFromPath,
   isExplicitRelativeProjectPath,
   isFilesystemBrowseQuery,
   isSameFilesystemPath,
@@ -125,7 +125,8 @@ import {
 import { notifySurfaceLoadFailure } from "./ui/surfaceLoadFailure";
 import { useLazyComponentReady } from "../lib/preloadableLazy";
 import { getLatestThreadForProject } from "../lib/threadSort";
-import { cn, isMacPlatform, isWindowsPlatform, newCommandId, newProjectId } from "../lib/utils";
+import { cn, isMacPlatform, isWindowsPlatform, newProjectId } from "../lib/utils";
+import { buildProjectCreateCommand } from "../lib/projectCreateCommand";
 import { deriveLogicalProjectKeyFromSettings } from "../logicalProject";
 import {
   selectProjectsAcrossEnvironments,
@@ -200,6 +201,7 @@ import { useComposerHandleContext } from "../composerHandleContext";
 import { useHostedRpcCapability, type HostedRpcCapability } from "../hostedHub/capabilities";
 import { hostedCapabilityCopy, hostedSwitchTargetLabel } from "../hostedHub/switchTarget";
 import { openAutomationsDialog } from "./automations/automationsDialogStore";
+import { openProjectImportDialog } from "./projectImport/projectImportDialogStore";
 import { openPromoteChatDialog, useCanPromoteChat } from "./chat/promoteChatDialogStore";
 import { getPresentationTier } from "../lib/presentationTier";
 import { buildProjectsPageLocation } from "../projectsRoute";
@@ -505,6 +507,8 @@ function OpenCommandPaletteDialog() {
   const addProjectCapability = useHostedRpcCapability(WS_METHODS.projectsAdd, null);
   // hosted-capability: routed node
   const statisticsCapability = useHostedRpcCapability(WS_METHODS.serverGetStatistics, null);
+  // hosted-capability: routed node
+  const sessionImportCapability = useHostedRpcCapability(WS_METHODS.sessionImportRun, null);
   // hosted-capability: routed node
   const pullRequestsCapability = useHostedRpcCapability(
     WS_METHODS.sourceControlListChangeRequests,
@@ -1766,6 +1770,29 @@ function OpenCommandPaletteDialog() {
   if (getPresentationTier() !== "phone") {
     actionItems.push({
       kind: "action",
+      value: "action:import-projects",
+      searchTerms: [
+        "import",
+        "codex",
+        "claude",
+        "claude code",
+        "conversations",
+        "history",
+        "sessions",
+        "projects",
+        "migrate",
+      ],
+      title: "Import from Codex or Claude Code…",
+      ...unavailableDescription(sessionImportCapability, routedNodeLabel),
+      disabled: !sessionImportCapability.allowed,
+      icon: <FolderInputIcon className={ITEM_ICON_CLASS} />,
+      run: async () => {
+        setOpen(false);
+        openProjectImportDialog({ environmentId: settingsPageTarget.environmentId });
+      },
+    });
+    actionItems.push({
+      kind: "action",
       value: "action:statistics",
       searchTerms: ["statistics", "usage", "activity", "tokens", "cost", "history"],
       title: "Open statistics",
@@ -2098,16 +2125,13 @@ function OpenCommandPaletteDialog() {
 
       try {
         const projectId = newProjectId();
-        await api.orchestration.dispatchCommand({
-          type: "project.create",
-          commandId: newCommandId(),
-          projectId,
-          title: inferProjectTitleFromPath(cwd),
-          workspaceRoot: cwd,
-          projectMetadataDir: ".ryco",
-          createWorkspaceRootIfMissing: true,
-          createdAt: new Date().toISOString(),
-        });
+        await api.orchestration.dispatchCommand(
+          buildProjectCreateCommand({
+            projectId,
+            workspaceRoot: cwd,
+            createWorkspaceRootIfMissing: true,
+          }),
+        );
         await handleNewThread(scopeProjectRef(environmentId, projectId), {
           envMode: settings.defaultThreadEnvMode,
         }).catch(() => undefined);

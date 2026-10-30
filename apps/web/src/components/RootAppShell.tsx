@@ -17,6 +17,7 @@ import { ContextMenuActionSheetHost } from "./shell/phone/ContextMenuActionSheet
 import { SshPasswordPromptDialog } from "./desktop/SshPasswordPromptDialog";
 import { WorkspaceReviewDialog } from "./worktrees/WorkspaceReviewDialog";
 import { useAutomationsDialogStore } from "./automations/automationsDialogStore";
+import { useProjectImportDialogStore } from "./projectImport/projectImportDialogStore";
 import { usePromoteChatDialogStore } from "./chat/promoteChatDialogStore";
 import { useForkThreadDialogStore } from "./chat/forkThreadDialogStore";
 import { ProviderUpdateLaunchNotification } from "./ProviderUpdateLaunchNotification";
@@ -154,6 +155,7 @@ export function RootAppShell({ authGateState }: RootAppShellProps) {
         {chatAvailable ? <AutomationsDialogMount /> : null}
         {chatAvailable ? <PromoteChatDialogMount /> : null}
         {chatAvailable ? <ForkThreadDialogMount /> : null}
+        {chatAvailable ? <ProjectImportDialogMount /> : null}
         {chatAvailable ? <MissedAutomationRunsNotice /> : null}
         {ownsThreadAlerts ? <ThreadAlertsBootstrap /> : null}
         {authGateState.status === "hosted-static" ? <HostedStaticEnvironmentBootstrap /> : null}
@@ -227,6 +229,20 @@ function ForkThreadDialogMount() {
   const ready = useLazyComponentReady(ForkThreadDialog, hasOpened);
   if (!hasOpened || !ready) return null;
   return <ForkThreadDialog />;
+}
+
+const ProjectImportDialog = preloadableLazy(() =>
+  import("./projectImport/ProjectImportDialog").then((module) => module.ProjectImportDialog),
+);
+
+/** "Import from Codex or Claude Code" loads the first time something opens it, then stays mounted. */
+function ProjectImportDialogMount() {
+  const open = useProjectImportDialogStore((state) => state.open);
+  const [hasOpened, setHasOpened] = useState(open);
+  if (open && !hasOpened) setHasOpened(true);
+  const ready = useLazyComponentReady(ProjectImportDialog, hasOpened);
+  if (!hasOpened || !ready) return null;
+  return <ProjectImportDialog />;
 }
 
 const THREAD_ROUTE_ID = "/_chat/$environmentId/$threadId";

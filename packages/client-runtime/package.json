@@ -182,6 +182,10 @@
       "types": "./src/state/providerSignIn/index.ts",
       "import": "./src/state/providerSignIn/index.ts"
     },
+    "./state/sessionImport": {
+      "types": "./src/state/sessionImport/index.ts",
+      "import": "./src/state/sessionImport/index.ts"
+    },
     "./updates": {
       "types": "./src/updates/index.ts",
       "import": "./src/updates/index.ts"

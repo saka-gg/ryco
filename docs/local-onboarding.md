@@ -18,8 +18,9 @@ closing setup does not stop it, and Provider settings keeps showing it. Setup do
 CLI, change accounts, or enable or disable providers. **Refresh discovery** explicitly rechecks
 status; unverified authentication remains labeled as such.
 
-**Add project** opens the normal project picker. Closing the picker or Provider settings returns
-to the same setup step. Setup writes no project commands of its own. Connection loss disables
+**Add project** opens the normal project picker. **Import from Codex or Claude Code** opens the
+project import dialog ([import](providers/import.md)). Closing the picker, the import or Provider
+settings returns to the same setup step. Setup writes no project commands of its own. Connection loss disables
 setup actions until the current workspace is ready again; it does not change connection recovery.
 
 On Desktop, a folder dropped anywhere on the window during the project step is handed to the same
