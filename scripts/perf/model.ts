@@ -390,7 +390,10 @@ const TRACING_EXPORTER_SOURCES: readonly ForbiddenBundleSource[] = [
  * paint path. 527 KiB with the push alert device RPCs, whose schemas the
  * boot RPC client carries. 528 KiB with the follow-up queue's commands and
  * events in the orchestration contracts that boot decodes. 529 KiB with the
- * threads store applying the queue's events.
+ * threads store applying the queue's events. 530 KiB with port batch 8a's
+ * contract fields that boot decodes too: a heartbeat automation's target chat,
+ * who queued a follow-up, and a node hold that replaces another's causes
+ * (main was within 0.05 KiB of 529 KiB before them).
  */
 export const DEFAULT_BUNDLE_BUDGET_POLICY: BundleBudgetPolicy = {
   bootChunk: "main",
@@ -399,7 +402,7 @@ export const DEFAULT_BUNDLE_BUDGET_POLICY: BundleBudgetPolicy = {
       name: "boot",
       chunk: "main",
       beyondBoot: false,
-      maxGzipBytes: 529 * KIB,
+      maxGzipBytes: 530 * KIB,
       forbiddenSources: [
         ...HOSTED_RUNTIME_SOURCES,
         ...MARKDOWN_SOURCES,
