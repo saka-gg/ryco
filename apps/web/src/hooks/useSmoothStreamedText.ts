@@ -2,13 +2,18 @@
 // Purpose: Reveal streamed assistant text at a steady, adaptive cadence so tokens appear
 //          fluidly instead of in the network clumps that land in the store.
 // Layer: Web UI streaming primitive
-// Exports: useSmoothStreamedText, revealBoundary, stepSmoothReveal, createSmoothRevealState
+// Exports: useSmoothStreamedText, revealBoundary, stepSmoothReveal, claimRevealEmit,
+//          createSmoothRevealState, MIN_EMIT_INTERVAL_MS
 // Why: Provider deltas reach the store in bursts, so rendering each clump verbatim reads
 //      as choppy. This hook drains the already-delivered buffer on requestAnimationFrame
 //      at a velocity that adapts to the backlog, low-pass-smooths that velocity so there
 //      are no jarring speed jumps, and sleeps between bursts once it catches up. It feeds
 //      the text ChatMarkdown already throttles, so markdown re-parse stays coalesced:
 //      this hook governs *cadence*, not parse cost.
+//      The reveal position advances every frame, but React commits are quantized to
+//      MIN_EMIT_INTERVAL_MS: a commit per frame (up to 120 a second on a 120 Hz display,
+//      each re-rendering the growing message) is the main CPU cost of a streaming message,
+//      while ~25 multi-character steps a second read the same.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
@@ -34,6 +39,9 @@ const MAX_FRAME_SECONDS = 0.05;
 // A remainder below this many characters snaps onto the target. Far below one visible
 // character, so the reveal cadence is unchanged, but it lets the loop settle and sleep.
 const SETTLE_REMAINDER_CHARS = 0.001;
+// Minimum spacing between React commits (25 a second). The reveal float still advances every
+// frame at the smoothed velocity; this only batches how often the grown prefix is committed.
+export const MIN_EMIT_INTERVAL_MS = 40;
 
 /**
  * Mutable reveal state, owned by the hook through a ref. The stepper mutates it in place
@@ -46,10 +54,12 @@ export interface SmoothRevealState {
   velocity: number;
   /** Timestamp (ms) of the previous frame; 0 marks the start of a fresh burst. */
   lastFrameAt: number;
+  /** Timestamp (ms) of the last commit; 0 lets the next one through at once. */
+  lastEmitAt: number;
 }
 
 export function createSmoothRevealState(shown: number): SmoothRevealState {
-  return { shown, velocity: 0, lastFrameAt: 0 };
+  return { shown, velocity: 0, lastFrameAt: 0, lastEmitAt: 0 };
 }
 
 /**
@@ -95,6 +105,34 @@ export function stepSmoothReveal(
 }
 
 /**
+ * Whether this frame commits `nextCount` revealed characters, recording the commit in `state`.
+ *
+ * A commit is due only when the count advanced past `emittedCount` and either
+ * {@link MIN_EMIT_INTERVAL_MS} passed since the last one, the reveal caught up with
+ * `targetLength` (the last characters of a burst are never held back), or nothing has been
+ * committed yet.
+ */
+export function claimRevealEmit(
+  state: SmoothRevealState,
+  nowMs: number,
+  nextCount: number,
+  emittedCount: number,
+  targetLength: number,
+): boolean {
+  if (nextCount === emittedCount) {
+    return false;
+  }
+  const due =
+    nextCount >= targetLength ||
+    state.lastEmitAt === 0 ||
+    nowMs - state.lastEmitAt >= MIN_EMIT_INTERVAL_MS;
+  if (due) {
+    state.lastEmitAt = nowMs;
+  }
+  return due;
+}
+
+/**
  * Pulls a reveal position back off the seam of a surrogate pair.
  *
  * Astral characters (emoji, many CJK extensions) occupy two UTF-16 units, and
@@ -134,8 +172,8 @@ export function useSmoothStreamedText(text: string, isStreaming: boolean): strin
   // without re-subscribing the animation effect on every delta.
   const targetRef = useRef(text);
   const revealRef = useRef(createSmoothRevealState(text.length));
-  // Character count last pushed to React state — guards against redundant setState when the
-  // floored count has not advanced.
+  // Character count last pushed to React state: guards against redundant setState when the
+  // floored count has not advanced, and is what the commit gate compares against.
   const emittedRef = useRef(text.length);
   const rafRef = useRef<number | null>(null);
   const tickRef = useRef<(now: number) => void>(() => undefined);
@@ -165,7 +203,7 @@ export function useSmoothStreamedText(text: string, isStreaming: boolean): strin
       const pending = stepSmoothReveal(revealRef.current, now, target.length);
 
       const nextCount = revealBoundary(target, Math.floor(revealRef.current.shown));
-      if (nextCount !== emittedRef.current) {
+      if (claimRevealEmit(revealRef.current, now, nextCount, emittedRef.current, target.length)) {
         emittedRef.current = nextCount;
         setRevealed(nextCount >= target.length ? target : target.slice(0, nextCount));
       }
