@@ -340,6 +340,41 @@ const PULL_REQUESTS_POPOVER_SOURCES: readonly ForbiddenBundleSource[] = [
   },
 ];
 
+/**
+ * The relay's wire schemas. The standard build never decodes a relay frame: a reconnect's
+ * retry ceiling and an upload's message cap are plain numbers
+ * (`@ryco/contracts/relay-constants`) and node proofs name a node with `RelayNodeId`
+ * from its own module. Importing one of them from `@ryco/contracts/relay` put every relay schema
+ * on the first paint (about 2 KiB gzip; schema constructors are not tree-shaken).
+ */
+const RELAY_WIRE_SCHEMA_SOURCES: readonly ForbiddenBundleSource[] = [
+  {
+    pattern: /^packages\/contracts\/src\/relay\.ts$/u,
+    reason: "relay wire schemas (import numbers from @ryco/contracts/relay-constants)",
+  },
+];
+
+/** The pairing form: `/pair` loads it as its route body, so a paired launch never does. */
+const PAIRING_SOURCES: readonly ForbiddenBundleSource[] = [
+  {
+    pattern:
+      /^apps\/web\/src\/components\/(?:auth\/PairingRouteSurface|routeViews\/PairRouteView)\.tsx$/u,
+    reason: "pairing form (the /pair route body)",
+  },
+];
+
+/**
+ * The quote citation parser. The follow-up queue's ordering logic runs at boot; its chip
+ * summary, which reads quote chips as their passage, loads with the shell
+ * (`@ryco/client-runtime/state/message-queue` `summary.ts`).
+ */
+const QUOTE_CITATION_SOURCES: readonly ForbiddenBundleSource[] = [
+  {
+    pattern: /^packages\/shared\/src\/quoteCitations\.ts$/u,
+    reason: "quote citation parser (the queued message summary loads with the shell)",
+  },
+];
+
 /** The thread routes (server thread and draft) share their chat graph. */
 const CHAT_ROUTE_FORBIDDEN_SOURCES: readonly ForbiddenBundleSource[] = [
   ...HOSTED_RUNTIME_SOURCES,
@@ -347,6 +382,8 @@ const CHAT_ROUTE_FORBIDDEN_SOURCES: readonly ForbiddenBundleSource[] = [
   ...CHAT_DEFERRED_SOURCES,
   ...PULL_REQUESTS_POPOVER_SOURCES,
   ...SERVER_ONLY_SOURCES,
+  ...RELAY_WIRE_SCHEMA_SOURCES,
+  ...PAIRING_SOURCES,
 ];
 /**
  * 709 KiB gzip and 142 files beyond boot on 2026-10-15 (813 KiB on 2026-10-12,
@@ -362,7 +399,9 @@ const CHAT_ROUTE_FORBIDDEN_SOURCES: readonly ForbiddenBundleSource[] = [
  * lucide chunks, and one now carries 26 icons the route does not use
  * (+2.7 KiB; the grouping is entries-aware, see `CHAT_ROUTE_MAX_FILES`).
  * 2026-10-30 later: 749 KiB and 150 files once the pull requests popover mounted
- * on its first open.
+ * on its first open; 753 KiB and 151 files once the quote citation parser
+ * left boot (the route shares it with the shell, so a thread open loads it as
+ * before).
  */
 const CHAT_ROUTE_GZIP_BUDGET = 765 * KIB;
 /**
@@ -393,6 +432,12 @@ const TRACING_EXPORTER_SOURCES: readonly ForbiddenBundleSource[] = [
  * threads store applying the queue's events. 530 KiB with the push alert
  * device methods on the boot RPC client, which the phone's background alerts
  * call (about 0.1 KiB), after Desktop's linked direct routes took the rest.
+ * 522 KiB later on 2026-10-30 (529 before): the pairing form became the
+ * `/pair` route's body, boot stopped carrying the relay's wire schemas for two
+ * of its numbers, and the queued message summary with its quote citation
+ * parser moved to the shell. A paired launch's first load (boot, shell and a
+ * thread) shrank by about 3 KiB; the cap stays so the rest is room for the
+ * contract fields boot decodes.
  */
 export const DEFAULT_BUNDLE_BUDGET_POLICY: BundleBudgetPolicy = {
   bootChunk: "main",
@@ -408,6 +453,9 @@ export const DEFAULT_BUNDLE_BUDGET_POLICY: BundleBudgetPolicy = {
         ...DIFF_RENDERER_SOURCES,
         ...TRACING_EXPORTER_SOURCES,
         ...SERVER_ONLY_SOURCES,
+        ...RELAY_WIRE_SCHEMA_SOURCES,
+        ...PAIRING_SOURCES,
+        ...QUOTE_CITATION_SOURCES,
       ],
     },
     {
@@ -417,7 +465,9 @@ export const DEFAULT_BUNDLE_BUDGET_POLICY: BundleBudgetPolicy = {
       // The boot code-splitting group keeps shell-only @base-ui and lucide
       // modules out of boot, so ~20 KiB gzip sits here instead (405 KiB).
       // 103 files on 2026-10-15. 419 KiB on 2026-10-29; 400 KiB and 106 files
-      // on 2026-10-30 once the pull requests popover mounted on its first open.
+      // on 2026-10-30 once the pull requests popover mounted on its first open,
+      // 403 KiB and 107 with the queued message summary's quote citation
+      // parser, which boot no longer carries.
       maxGzipBytes: 420 * KIB,
       maxFiles: 115,
       forbiddenSources: [
@@ -427,6 +477,8 @@ export const DEFAULT_BUNDLE_BUDGET_POLICY: BundleBudgetPolicy = {
         ...SERVER_ONLY_SOURCES,
         ...AUTOMATION_SCHEDULE_SOURCES,
         ...PULL_REQUESTS_POPOVER_SOURCES,
+        ...RELAY_WIRE_SCHEMA_SOURCES,
+        ...PAIRING_SOURCES,
       ],
     },
     {

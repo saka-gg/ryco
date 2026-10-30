@@ -200,10 +200,10 @@ describe("on-demand lazy surfaces", () => {
 describe("app route tree", () => {
   it("splits every page body at the route level, so the reveal guarantees above apply to it", () => {
     // Route shells that render without a code-split body: the root (which
-    // loads its shell in `beforeLoad`) and the pairing surface, which must
-    // render on the first navigation. The chat layout and index bodies are
-    // split too; the root `beforeLoad` starts their chunks with the auth check.
-    const EAGER_ROUTE_IDS = ["/pair", "__root__"];
+    // loads its shell in `beforeLoad`). The chat layout and index bodies and
+    // the pairing form are split too; the root `beforeLoad` starts their
+    // chunks with the auth check.
+    const EAGER_ROUTE_IDS = ["__root__"];
     // Building the router only initialises the route objects; nothing loads.
     const router = createRouter({ routeTree, history: createMemoryHistory() });
     const eager: string[] = [];
@@ -225,6 +225,7 @@ describe("app route tree", () => {
         "/projects",
         "/pull-requests",
         "/settings",
+        "/pair",
       ]),
     );
   });

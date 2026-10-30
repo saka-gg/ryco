@@ -29,7 +29,7 @@ import {
 } from "../threads/store.ts";
 import { selectThreadLiveDetailLoaded } from "../threads/storeSelectors.ts";
 import { queueHoldInputOf, type QueueHold } from "./hold.ts";
-import { summarizeQueuedMessage } from "./logic.ts";
+import { summarizeQueuedMessage } from "./summary.ts";
 
 // ---------------------------------------------------------------------------
 // The server-owned follow-up queue (design §3.6): a node that advertises

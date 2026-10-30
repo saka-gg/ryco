@@ -34,6 +34,7 @@ describe("web bundle splitting boundaries", () => {
       "../routes/tasks.tsx",
       "../routes/_settings.diagnostics.tsx",
       "../routes/native.authorize.$handoffId.tsx",
+      "../routes/pair.tsx",
     ];
     for (const file of routeFiles) {
       const source = await readSource(file);
@@ -194,11 +195,23 @@ describe("web bundle splitting boundaries", () => {
     );
   });
 
-  it("keeps the first-navigation pairing surface eager", async () => {
+  it("loads the pairing form as the pairing route's body, alongside the session check", async () => {
     const pairRoute = await readSource("../routes/pair.tsx");
+    const rootRoute = await readSource("../routes/__root.tsx");
 
-    expect(pairRoute).toContain('from "../components/auth/PairingRouteSurface"');
-    expect(pairRoute).not.toContain('import("../components/auth/PairingRouteSurface")');
+    // A paired launch never renders the form, so it stays out of boot; the
+    // pending surface the route shows meanwhile is the light shell.
+    expect(pairRoute).toContain('import("../components/routeViews/PairRouteView")');
+    expect(pairRoute).not.toContain("components/auth/PairingRouteSurface");
+    expect(pairRoute).toContain('from "../components/auth/PairingSurface"');
+    // The root starts the chunk with the session check on a pairing link, and
+    // as soon as the check sends any other route to pairing.
+    expect(rootRoute).toMatch(
+      /pathname === "\/pair" && !isHostedHubMode\(\)\) \{[^}]*preloadMatchedRouteChunks\(pathname\)/u,
+    );
+    expect(rootRoute).toMatch(
+      /authGateState\.status !== "authenticated"\) \{[^}]*preloadRouteChunk\("\/pair"\)/u,
+    );
   });
 
   it("loads a sign-in's terminal, with xterm, only once a terminal sign-in shows", async () => {

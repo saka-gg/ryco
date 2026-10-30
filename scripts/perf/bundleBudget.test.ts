@@ -375,6 +375,40 @@ describe("bundle budgets", () => {
     }
   });
 
+  it("keeps the pairing form, the relay's wire schemas and the quote citation parser out of boot", () => {
+    const forbiddenIn = (name: string) => {
+      const closure = DEFAULT_BUNDLE_BUDGET_POLICY.closures.find((entry) => entry.name === name)!;
+      return (source: string) => closure.forbiddenSources.some((rule) => rule.pattern.test(source));
+    };
+    const boot = forbiddenIn("boot");
+    for (const source of [
+      "apps/web/src/components/auth/PairingRouteSurface.tsx",
+      "apps/web/src/components/routeViews/PairRouteView.tsx",
+      "packages/contracts/src/relay.ts",
+      "packages/shared/src/quoteCitations.ts",
+    ]) {
+      assert.isTrue(boot(source), source);
+    }
+    for (const source of [
+      // What boot keeps: the pairing pending surface, the relay's numbers, the
+      // node identity schema and the queue's ordering logic.
+      "apps/web/src/components/auth/PairingSurface.tsx",
+      "packages/contracts/src/relayConstants.ts",
+      "packages/contracts/src/relayNodeId.ts",
+      "packages/client-runtime/src/state/message-queue/logic.ts",
+    ]) {
+      assert.isFalse(boot(source), source);
+    }
+    // A paired launch's shell and thread routes never load the pairing form or
+    // decode relay frames; the queued message summary's parser is theirs.
+    for (const name of ["RootAppShell", "ChatThreadRouteView", "DraftChatThreadRouteView"]) {
+      const forbidden = forbiddenIn(name);
+      assert.isTrue(forbidden("apps/web/src/components/auth/PairingRouteSurface.tsx"), name);
+      assert.isTrue(forbidden("packages/contracts/src/relay.ts"), name);
+      assert.isFalse(forbidden("packages/shared/src/quoteCitations.ts"), name);
+    }
+  });
+
   it("forbids the hosted runtime in every default standard closure", () => {
     for (const closure of DEFAULT_BUNDLE_BUDGET_POLICY.closures) {
       const forbidden = (source: string) =>

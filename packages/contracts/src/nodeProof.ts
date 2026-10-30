@@ -1,6 +1,6 @@
 import * as Schema from "effect/Schema";
 
-import { RelayNodeId } from "./relay.ts";
+import { RelayNodeId } from "./relayNodeId.ts";
 
 const SafeCounter = Schema.Number.check(
   Schema.makeFilter((value) => Number.isSafeInteger(value) && value >= 0),
