@@ -7,10 +7,8 @@ import { changeRequestStateKind, StateBadge } from "../../../projectExplorer/Sta
 import { Button } from "../../../ui/button";
 import { OtherPullRequestRows, reviewsLabel } from "../../overviewSections";
 import type { OverviewPullRequestLinking, OverviewPullRequestState } from "../../overviewTypes";
-import {
-  WorkspacePullRequestsPopover,
-  type WorkspacePullRequestsView,
-} from "../../../worktrees/WorkspacePullRequestsPopover";
+import type { WorkspacePullRequestsView } from "../../../worktrees/WorkspacePullRequestsPopover";
+import { WorkspacePullRequestsPopoverOnDemand } from "../../../worktrees/WorkspacePullRequestsPopoverOnDemand";
 import {
   CROWN_PILL_BUTTON_CLASS,
   CrownDetailActions,
@@ -121,7 +119,7 @@ function LinkPullRequestAction({
         <LinkIcon aria-hidden="true" className="size-3.5" />
         {hasPullRequest ? "Link another…" : "Link pull request…"}
       </Button>
-      <WorkspacePullRequestsPopover
+      <WorkspacePullRequestsPopoverOnDemand
         {...linking}
         showStack={false}
         open={open}

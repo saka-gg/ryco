@@ -12,7 +12,24 @@ export const LazyLinkedWorktreeItemDialog = preloadableLazy(() =>
   import("./LinkedWorktreeItemDialog").then((module) => module.LinkedWorktreeItemDialog),
 );
 
+/**
+ * A workspace's pull requests popover (its list, the stack, the link picker): the sidebar mounts
+ * it on a row's first open instead of with every row.
+ */
+export const LazyWorkspacePullRequestsPopover = preloadableLazy(() =>
+  import("./WorkspacePullRequestsPopover").then((module) => module.WorkspacePullRequestsPopover),
+);
+
 /** Pointer or focus intent toward a badge that opens the linked-item dialog. */
 export function preloadLinkedWorktreeItemDialog(): void {
   void LazyLinkedWorktreeItemDialog.preload();
+}
+
+/**
+ * Pointer or focus intent toward a sidebar badge: it opens the linked-item dialog, or with
+ * several pull requests the pull requests popover.
+ */
+export function preloadWorktreeBadgeSurfaces(): void {
+  void LazyLinkedWorktreeItemDialog.preload();
+  void LazyWorkspacePullRequestsPopover.preload();
 }

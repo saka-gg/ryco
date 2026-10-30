@@ -86,10 +86,8 @@ import { useWorkspaceHtmlRender } from "./chat/useWorkspaceHtmlRender";
 import { useThreadChangeRequest } from "./chat/useThreadChangeRequest";
 import { KeyHint } from "./pullRequests/primitives";
 import { useWorkspacePullRequestEditing } from "./worktrees/useWorkspacePullRequestEditing";
-import {
-  WorkspacePullRequestsPopover,
-  type WorkspacePullRequestsView,
-} from "./worktrees/WorkspacePullRequestsPopover";
+import type { WorkspacePullRequestsView } from "./worktrees/WorkspacePullRequestsPopover";
+import { WorkspacePullRequestsPopoverOnDemand } from "./worktrees/WorkspacePullRequestsPopoverOnDemand";
 import { formatLiveAgentCount, LiveAgentCountBadge } from "./LiveAgentCountBadge";
 import { buildTabs, type WorkspaceTab } from "../threadWorkspaceTabs";
 import { readEnvironmentApi } from "../environmentApi";
@@ -1483,7 +1481,7 @@ export default function ThreadWorkspacePanel(props: {
           })}
           {/* Portaled: renders nothing in the tab list itself. */}
           {!isPhoneSurface && threadChangeRequest.worktree !== null ? (
-            <WorkspacePullRequestsPopover
+            <WorkspacePullRequestsPopoverOnDemand
               environmentId={threadChangeRequest.environmentId}
               worktreeId={pullRequestEditing.supported ? threadChangeRequest.worktree.id : null}
               cwd={threadChangeRequest.cwd}

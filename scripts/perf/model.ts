@@ -329,10 +329,23 @@ const SERVER_ONLY_SOURCES: readonly ForbiddenBundleSource[] = [
 ];
 
 /** The thread routes (server thread and draft) share their chat graph. */
+/**
+ * A workspace's pull requests popover (its list, the stack, the link picker) mounts on its first
+ * open (`WorkspacePullRequestsPopoverOnDemand`) in the sidebar, the chat header, the workspace
+ * panel and the crown: about 20 KiB gzip that the shell and the chat route no longer load.
+ */
+const PULL_REQUESTS_POPOVER_SOURCES: readonly ForbiddenBundleSource[] = [
+  {
+    pattern: /^apps\/web\/src\/components\/worktrees\/WorkspacePullRequestsPopover\.tsx$/u,
+    reason: "workspace pull requests popover (mounts on its first open)",
+  },
+];
+
 const CHAT_ROUTE_FORBIDDEN_SOURCES: readonly ForbiddenBundleSource[] = [
   ...HOSTED_RUNTIME_SOURCES,
   ...DIFF_RENDERER_SOURCES,
   ...CHAT_DEFERRED_SOURCES,
+  ...PULL_REQUESTS_POPOVER_SOURCES,
   ...SERVER_ONLY_SOURCES,
 ];
 /**
@@ -348,6 +361,8 @@ const CHAT_ROUTE_FORBIDDEN_SOURCES: readonly ForbiddenBundleSource[] = [
  * shrank, but losing the dialog as an icon importer regrouped the shared
  * lucide chunks, and one now carries 26 icons the route does not use
  * (+2.7 KiB; the grouping is entries-aware, see `CHAT_ROUTE_MAX_FILES`).
+ * 2026-10-30 later: the pull requests popover mounts on its first open (measured
+ * below in the PR that made it so).
  */
 const CHAT_ROUTE_GZIP_BUDGET = 765 * KIB;
 /**
@@ -399,7 +414,8 @@ export const DEFAULT_BUNDLE_BUDGET_POLICY: BundleBudgetPolicy = {
       beyondBoot: true,
       // The boot code-splitting group keeps shell-only @base-ui and lucide
       // modules out of boot, so ~20 KiB gzip sits here instead (405 KiB).
-      // 103 files on 2026-10-15.
+      // 103 files on 2026-10-15. 419 KiB on 2026-10-29; 400 KiB and 106 files
+      // on 2026-10-30 once the pull requests popover mounted on its first open.
       maxGzipBytes: 420 * KIB,
       maxFiles: 115,
       forbiddenSources: [
@@ -408,6 +424,7 @@ export const DEFAULT_BUNDLE_BUDGET_POLICY: BundleBudgetPolicy = {
         ...DIFF_RENDERER_SOURCES,
         ...SERVER_ONLY_SOURCES,
         ...AUTOMATION_SCHEDULE_SOURCES,
+        ...PULL_REQUESTS_POPOVER_SOURCES,
       ],
     },
     {
