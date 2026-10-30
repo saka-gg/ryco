@@ -295,6 +295,8 @@ describe("surface morph", () => {
       // The dialog mounts when React gets to it, and its ghost lives only for the grow.
       // (StrictMode attaches twice, so the live grow is the last one.)
       await vi.waitFor(() => expect(grows.travels.length).toBeGreaterThan(0), { timeout: 2_000 });
+      // One ghost grows the dialog (it may already be gone): never one per attach.
+      expect(ghosts().length).toBeLessThanOrEqual(1);
       const start = grows.travels.at(-1)!.from;
       const rowRect = row.getBoundingClientRect();
       expect(Math.abs(start.left - rowRect.left)).toBeLessThan(40);

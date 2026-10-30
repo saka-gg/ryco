@@ -179,6 +179,38 @@ it.effect("waits out a timer that fires before the clock reaches the deadline", 
   }),
 );
 
+it.effect("keeps its recheck interval when the wall clock steps backward", () =>
+  Effect.gen(function* () {
+    // A manual time change or a VM resyncing its clock: `Date.now()` jumps back ten minutes
+    // while a sleep runs. The sleep still ends after its own duration (it tops up only a
+    // timer's millisecond-sized shortfall), so the next check is not ten minutes late.
+    const clock = yield* Clock.Clock;
+    let stepBackMs = 0;
+    const steppedClock: Clock.Clock = {
+      currentTimeMillisUnsafe: () => clock.currentTimeMillisUnsafe() - stepBackMs,
+      currentTimeMillis: Effect.map(clock.currentTimeMillis, (now) => now - stepBackMs),
+      currentTimeNanosUnsafe: () => clock.currentTimeNanosUnsafe(),
+      currentTimeNanos: clock.currentTimeNanos,
+      monotonicTimeNanosUnsafe: () => clock.monotonicTimeNanosUnsafe(),
+      monotonicTimeNanos: clock.monotonicTimeNanos,
+      sleep: (duration) => clock.sleep(duration),
+    };
+    const check = makeCheck();
+    const fiber = yield* Effect.forkChild(
+      waitUntil({ sources: [], check: check.check, timeoutMs: 3_600_000 }).pipe(
+        Effect.provideService(Clock.Clock, steppedClock),
+      ),
+    );
+    yield* settle;
+    assert.strictEqual(check.runs(), 1);
+    stepBackMs = 10 * 60_000;
+    yield* TestClock.adjust(AGENT_CONTROL_WAIT_RECHECK_MS);
+    yield* settle;
+    assert.strictEqual(check.runs(), 2);
+    yield* Fiber.interrupt(fiber);
+  }),
+);
+
 it.effect("performs exactly one check with a zero timeout and subscribes to nothing", () =>
   Effect.gen(function* () {
     const feed = yield* makeFeed;
