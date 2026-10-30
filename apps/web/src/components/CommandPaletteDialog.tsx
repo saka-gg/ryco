@@ -77,6 +77,7 @@ import {
   type KeyboardEvent,
   type ReactNode,
 } from "react";
+import type { LegendListRef } from "@legendapp/list/react";
 import { useShallow } from "zustand/react/shallow";
 import { availablePaneSplit, useChatPanesStore } from "../chatPanesStore";
 import { useCommandPaletteStore } from "../commandPaletteStore";
@@ -135,12 +136,15 @@ import { useUiStateStore } from "../uiStateStore";
 import {
   ADDON_ICON_CLASS,
   buildBrowseGroups,
+  buildCommandPaletteRows,
   buildCurrentThreadLifecycleActions,
   buildMessageSearchItems,
   buildProjectActionItems,
   buildRootGroups,
   buildSettingsSearchItems,
   buildThreadActionItems,
+  COMMAND_PALETTE_VIRTUALIZE_AFTER_ITEMS,
+  findHighlightedCommandPaletteItem,
   type CommandPaletteMessageSearchResult,
   type CommandPaletteActionItem,
   type CommandPaletteSubmenuItem,
@@ -154,7 +158,11 @@ import {
 } from "./CommandPalette.logic";
 import { resolveEnvironmentOptionLabel } from "./BranchToolbar.logic";
 import { useAppearancePaletteItems } from "./CommandPaletteAppearance";
-import { CommandPaletteResults } from "./CommandPaletteResults";
+import {
+  CommandPaletteResults,
+  CommandPaletteVirtualizedResults,
+  scrollCommandPaletteRowIntoView,
+} from "./CommandPaletteResults";
 import { WorkspaceSearchDialog } from "./workspaceSearch/WorkspaceSearchDialog";
 import { AzureDevOpsIcon, BitbucketIcon, ForgejoIcon, GitHubIcon, GitLabIcon } from "./Icons";
 import { ProjectFavicon } from "./ProjectFavicon";
@@ -528,6 +536,7 @@ function OpenCommandPaletteDialog() {
   const deferredQuery = useDeferredValue(query);
   const isActionsOnly = deferredQuery.startsWith(">");
   const [highlightedItemValue, setHighlightedItemValue] = useState<string | null>(null);
+  const resultListRef = useRef<LegendListRef | null>(null);
   const settings = useSettings();
   const pinnedThreadKeys = useUiStateStore((state) => state.pinnedThreadKeys);
   const primaryServerConfig = useServerConfig();
@@ -2496,6 +2505,8 @@ function OpenCommandPaletteDialog() {
   } else if (isBrowsing) {
     displayedGroups = relativePathNeedsActiveProject ? [] : browseGroups;
   }
+  const resultRows = buildCommandPaletteRows(displayedGroups);
+  const virtualizeResults = resultRows.itemValues.length > COMMAND_PALETTE_VIRTUALIZE_AFTER_ITEMS;
 
   const inputPlaceholder =
     remoteProjectInputPlaceholder(addProjectCloneFlow) ??
@@ -2607,6 +2618,27 @@ function OpenCommandPaletteDialog() {
     if (event.key === "Backspace" && query === "" && isSubmenu) {
       event.preventDefault();
       popView();
+      return;
+    }
+
+    // Base UI clicks the highlighted row on Enter, which does nothing once the
+    // virtualized list has unmounted it, so run the tracked highlight directly.
+    if (
+      virtualizeResults &&
+      event.key === "Enter" &&
+      !event.nativeEvent.isComposing &&
+      event.keyCode !== 229
+    ) {
+      const highlightedItem = findHighlightedCommandPaletteItem(
+        displayedGroups,
+        highlightedItemValue,
+      );
+      if (highlightedItem) {
+        (event as typeof event & { preventBaseUIHandler?: () => void }).preventBaseUIHandler?.();
+        event.preventDefault();
+        event.stopPropagation();
+        executeItem(highlightedItem);
+      }
     }
   }
 
@@ -2686,8 +2718,14 @@ function OpenCommandPaletteDialog() {
         aria-label="Command palette"
         autoHighlight={isBrowsing || isRemoteProjectCloneFlow ? false : "always"}
         mode="none"
-        onItemHighlighted={(value) => {
+        items={resultRows.itemValues}
+        virtualized={virtualizeResults}
+        onItemHighlighted={(value, eventDetails) => {
           setHighlightedItemValue(typeof value === "string" ? value : null);
+          const rowIndex = resultRows.rowIndexByItemIndex[eventDetails.index];
+          if (virtualizeResults && eventDetails.reason === "keyboard" && rowIndex !== undefined) {
+            scrollCommandPaletteRowIntoView(resultListRef.current, rowIndex);
+          }
         }}
         onValueChange={handleQueryChange}
         value={query}
@@ -2804,31 +2842,42 @@ function OpenCommandPaletteDialog() {
               </div>
             </div>
           ) : null}
-          <CommandPaletteResults
-            groups={displayedGroups}
-            highlightedItemValue={highlightedItemValue}
-            isActionsOnly={isActionsOnly}
-            keybindings={keybindings}
-            onExecuteItem={executeItem}
-            {...(addProjectCloneFlow?.step === "repository"
-              ? {
-                  emptyStateMessage:
-                    addProjectCloneFlow.source === "url"
-                      ? "Enter a Git clone URL and press Enter to continue."
-                      : (remoteRepositoryEmptyStateMessage ??
-                        "Enter a repository path and press Enter to look it up."),
-                }
-              : addProjectCloneFlow?.step === "confirm"
-                ? { emptyStateMessage: "Choose a destination path and press Enter to clone." }
-                : relativePathNeedsActiveProject
-                  ? { emptyStateMessage: "Relative paths require an active project." }
-                  : willCreateProjectPath
-                    ? {
-                        emptyStateMessage:
-                          "Press Enter to create this folder and add it as a project.",
-                      }
-                    : {})}
-          />
+          {virtualizeResults ? (
+            <CommandPaletteVirtualizedResults
+              rows={resultRows.rows}
+              listRef={resultListRef}
+              scrollResetKey={deferredQuery}
+              highlightedItemValue={highlightedItemValue}
+              keybindings={keybindings}
+              onExecuteItem={executeItem}
+            />
+          ) : (
+            <CommandPaletteResults
+              groups={displayedGroups}
+              highlightedItemValue={highlightedItemValue}
+              isActionsOnly={isActionsOnly}
+              keybindings={keybindings}
+              onExecuteItem={executeItem}
+              {...(addProjectCloneFlow?.step === "repository"
+                ? {
+                    emptyStateMessage:
+                      addProjectCloneFlow.source === "url"
+                        ? "Enter a Git clone URL and press Enter to continue."
+                        : (remoteRepositoryEmptyStateMessage ??
+                          "Enter a repository path and press Enter to look it up."),
+                  }
+                : addProjectCloneFlow?.step === "confirm"
+                  ? { emptyStateMessage: "Choose a destination path and press Enter to clone." }
+                  : relativePathNeedsActiveProject
+                    ? { emptyStateMessage: "Relative paths require an active project." }
+                    : willCreateProjectPath
+                      ? {
+                          emptyStateMessage:
+                            "Press Enter to create this folder and add it as a project.",
+                        }
+                      : {})}
+            />
+          )}
         </CommandPanel>
         <CommandFooter className="gap-3 max-sm:flex-col max-sm:items-start">
           {/* Keyboard-navigation hints; hidden on coarse pointers where every

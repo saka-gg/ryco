@@ -19,6 +19,17 @@ export const RECENT_THREAD_LIMIT = 12;
 export const SETTINGS_SEARCH_RESULT_LIMIT = 8;
 export const ITEM_ICON_CLASS = "size-4 text-muted-foreground/80";
 export const ADDON_ICON_CLASS = "size-4";
+/**
+ * Above this many selectable results the list renders only the rows in view (a
+ * one-letter query can match every thread). Shorter lists keep the plain grouped list.
+ */
+export const COMMAND_PALETTE_VIRTUALIZE_AFTER_ITEMS = 60;
+
+/**
+ * Content shown beside an item's title, or a function that builds it when the row
+ * mounts, so a list with an item per thread builds no elements for rows it never shows.
+ */
+export type CommandPaletteItemContent = ReactNode | (() => ReactNode);
 
 export interface CommandPaletteItem {
   readonly kind: "action" | "submenu";
@@ -32,9 +43,9 @@ export interface CommandPaletteItem {
   readonly icon: ReactNode;
   readonly disabled?: boolean;
   /** Optional content rendered inline before the title text. */
-  readonly titleLeadingContent?: ReactNode;
+  readonly titleLeadingContent?: CommandPaletteItemContent;
   /** Optional content rendered inline after the title text (before the timestamp). */
-  readonly titleTrailingContent?: ReactNode;
+  readonly titleTrailingContent?: CommandPaletteItemContent;
   readonly shortcutCommand?: KeybindingCommand;
 }
 
@@ -151,9 +162,9 @@ export function buildThreadActionItems<TThread extends BuildThreadActionItemsThr
   projectTitleById: ReadonlyMap<Project["id"], string>;
   sortOrder: SidebarThreadSortOrder;
   icon: ReactNode;
-  /** Optional content rendered inline before the title text per-thread. */
+  /** Optional content rendered inline before the title text per-thread, once its row mounts. */
   renderLeadingContent?: (thread: TThread) => ReactNode;
-  /** Optional content rendered inline after the title text per-thread. */
+  /** Optional content rendered inline after the title text per-thread, once its row mounts. */
   renderTrailingContent?: (thread: TThread) => ReactNode;
   runThread: (thread: Pick<SidebarThreadSummary, "environmentId" | "id">) => Promise<void>;
   limit?: number;
@@ -164,6 +175,7 @@ export function buildThreadActionItems<TThread extends BuildThreadActionItemsThr
   );
   const visibleThreads =
     input.limit === undefined ? sortedThreads : sortedThreads.slice(0, input.limit);
+  const { renderLeadingContent, renderTrailingContent } = input;
 
   return visibleThreads.map((thread) => {
     const projectTitle = input.projectTitleById.get(thread.projectId);
@@ -179,9 +191,6 @@ export function buildThreadActionItems<TThread extends BuildThreadActionItemsThr
       descriptionParts.push("Current thread");
     }
 
-    const leadingContent = input.renderLeadingContent?.(thread);
-    const trailingContent = input.renderTrailingContent?.(thread);
-
     return Object.assign(
       {
         kind: "action" as const,
@@ -195,8 +204,8 @@ export function buildThreadActionItems<TThread extends BuildThreadActionItemsThr
         ),
         icon: input.icon,
       },
-      leadingContent ? { titleLeadingContent: leadingContent } : {},
-      trailingContent ? { titleTrailingContent: trailingContent } : {},
+      renderLeadingContent ? { titleLeadingContent: () => renderLeadingContent(thread) } : {},
+      renderTrailingContent ? { titleTrailingContent: () => renderTrailingContent(thread) } : {},
       {
         run: async () => {
           await input.runThread(thread);
@@ -555,6 +564,75 @@ export function filterCommandPaletteGroups(input: {
 
     return [{ value: group.value, label: group.label, items }];
   });
+}
+
+export type CommandPaletteRow =
+  | {
+      readonly kind: "label";
+      readonly key: string;
+      readonly label: string;
+      readonly first: boolean;
+    }
+  | {
+      readonly kind: "item";
+      readonly key: string;
+      readonly item: CommandPaletteActionItem | CommandPaletteSubmenuItem;
+      /** Position among enabled items, or null for disabled rows the keyboard skips. */
+      readonly itemIndex: number | null;
+    };
+
+export interface CommandPaletteRows {
+  readonly rows: ReadonlyArray<CommandPaletteRow>;
+  /** The highlightable item order the Command root navigates (its `items`). */
+  readonly itemValues: ReadonlyArray<string>;
+  /** Maps a highlighted item's index back to its row, for scrolling it into view. */
+  readonly rowIndexByItemIndex: ReadonlyArray<number>;
+}
+
+/**
+ * Flattens groups into the rows a virtualized list renders: each group's label,
+ * then its items. Disabled items get a row but no item index, as they are not
+ * options the keyboard can reach.
+ */
+export function buildCommandPaletteRows(
+  groups: ReadonlyArray<CommandPaletteGroup>,
+): CommandPaletteRows {
+  const rows: CommandPaletteRow[] = [];
+  const itemValues: string[] = [];
+  const rowIndexByItemIndex: number[] = [];
+  for (const group of groups) {
+    if (group.label) {
+      rows.push({
+        kind: "label",
+        key: `group:${group.value}`,
+        label: group.label,
+        first: rows.length === 0,
+      });
+    }
+    for (const item of group.items) {
+      const itemIndex = item.disabled ? null : itemValues.length;
+      if (itemIndex !== null) {
+        itemValues.push(item.value);
+        rowIndexByItemIndex.push(rows.length);
+      }
+      rows.push({ kind: "item", key: `${group.value}:${item.value}`, item, itemIndex });
+    }
+  }
+  return { rows, itemValues, rowIndexByItemIndex };
+}
+
+/** The enabled item Enter should run for a highlight, whether or not its row is mounted. */
+export function findHighlightedCommandPaletteItem(
+  groups: ReadonlyArray<CommandPaletteGroup>,
+  highlightedItemValue: string | null,
+): CommandPaletteActionItem | CommandPaletteSubmenuItem | null {
+  if (highlightedItemValue === null) return null;
+  for (const group of groups) {
+    for (const item of group.items) {
+      if (item.value === highlightedItemValue && !item.disabled) return item;
+    }
+  }
+  return null;
 }
 
 export function buildBrowseGroups(input: {
