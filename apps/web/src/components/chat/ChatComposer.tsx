@@ -83,6 +83,7 @@ import {
   releaseUnusedComposerFileUploads,
   useComposerFileUploadRecords,
 } from "../../composerFileUpload";
+import { useComposerImagePreparationSendBlock } from "../../composerImagePreparation";
 import {
   deriveComposerFooterActionLayoutKey,
   deriveComposerSendState,
@@ -1179,9 +1180,14 @@ export const ChatComposer = memo(
       nowMs: Date.now(),
       records: fileUploadRecords,
     });
-    const composerSendBlockedReason = composerFileUploadSendBlock;
+    // An oversized image being shrunk is not in the draft yet: sent now, the message would go
+    // without it and the image would land in the next draft.
+    const composerImagePreparationSendBlock =
+      useComposerImagePreparationSendBlock(composerDraftTarget);
+    const composerSendBlockedReason =
+      composerFileUploadSendBlock ?? composerImagePreparationSendBlock;
     const composerHasSendableContent =
-      composerSendState.hasSendableContent && composerFileUploadSendBlock === null;
+      composerSendState.hasSendableContent && composerSendBlockedReason === null;
 
     // Upload completion flows back into the draft entry so dispatch, draft
     // persistence, and stash snapshots all read the token from the attachment.

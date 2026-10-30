@@ -32,13 +32,13 @@ import { ChildProcessSpawner } from "effect/process";
 import * as EffectAcpErrors from "effect-acp/errors";
 import type * as EffectAcpSchema from "effect-acp/schema";
 
-import {
-  appendAttachmentPathLines,
-  formatAttachmentPathLines,
-  type AttachmentPathLineEntry,
-} from "@ryco/shared/attachmentPrompt";
+import { appendAttachmentPathLines } from "@ryco/shared/attachmentPrompt";
 
-import { isPersistableChatAttachment, resolveAttachmentPath } from "../../attachmentStore.ts";
+import {
+  attachmentPathLines,
+  isPersistableChatAttachment,
+  resolveAttachmentPath,
+} from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
 import { createProcessDeviceToolBinding } from "../../providerTools/deviceToolGateway.ts";
 import {
@@ -857,7 +857,6 @@ export function makeAcpAdapter(options: AcpAdapterLiveOptions) {
                 mapAcpToAdapterError(PROVIDER, input.threadId, "session/set_model", cause),
             });
 
-            const pathLineEntries: AttachmentPathLineEntry[] = [];
             const imagePromptParts = yield* Effect.forEach(input.attachments ?? [], (attachment) =>
               Effect.gen(function* () {
                 if (
@@ -865,18 +864,6 @@ export function makeAcpAdapter(options: AcpAdapterLiveOptions) {
                   attachment.type !== "image" ||
                   (options.respectPromptCapabilities && !ctx.promptImages)
                 ) {
-                  pathLineEntries.push({
-                    attachment,
-                    ...(attachment.id === undefined
-                      ? {}
-                      : {
-                          resolvedPath:
-                            resolveAttachmentPath({
-                              attachmentsDir: serverConfig.attachmentsDir,
-                              attachment,
-                            }) ?? undefined,
-                        }),
-                  });
                   return null;
                 }
                 const attachmentPath = resolveAttachmentPath({
@@ -910,7 +897,10 @@ export function makeAcpAdapter(options: AcpAdapterLiveOptions) {
             );
             const promptText = appendAttachmentPathLines(
               input.input?.trim(),
-              formatAttachmentPathLines(pathLineEntries),
+              attachmentPathLines({
+                attachmentsDir: serverConfig.attachmentsDir,
+                attachments: input.attachments,
+              }),
             );
             const promptParts: Array<EffectAcpSchema.ContentBlock> = [
               ...(promptText && promptText.trim().length > 0

@@ -1556,7 +1556,7 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
         parts: [
           {
             type: "text",
-            text: `<ryco_host_context>${agentControlHostContext(false)}</ryco_host_context>\n\nReview this`,
+            text: `<ryco_host_context>${agentControlHostContext(false)}</ryco_host_context>\n\nReview this\n\n[Attached file] notes.txt (text/plain, 3 bytes) saved at: ${attachmentPath}`,
           },
           {
             type: "file",
@@ -1566,6 +1566,61 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
           },
         ],
       });
+    }),
+  );
+
+  it.effect("sends a pasted image natively and tells the agent where it is saved", () =>
+    Effect.gen(function* () {
+      const adapter = yield* OpenCodeAdapter;
+      const fileSystem = yield* FileSystem.FileSystem;
+      const config = yield* ServerConfig;
+      const threadId = asThreadId("thread-native-image");
+      const attachment = {
+        type: "image" as const,
+        id: "thread-native-image-attachment",
+        name: "screenshot.png",
+        mimeType: "image/png",
+        sizeBytes: 4,
+      };
+      yield* fileSystem.makeDirectory(config.attachmentsDir, { recursive: true });
+      const attachmentPath = `${config.attachmentsDir}/${attachmentRelativePath(attachment)}`;
+      yield* fileSystem.writeFile(attachmentPath, Uint8Array.from([1, 2, 3, 4]));
+      yield* adapter.startSession({
+        runtimeSessionId: RuntimeSessionId.make("test-opencodeadapter-native-image"),
+        provider: ProviderDriverKind.make("opencode"),
+        threadId,
+        runtimeMode: "full-access",
+      });
+
+      yield* adapter
+        .sendTurn({
+          threadId,
+          input: "Put this screenshot in the PR",
+          attachments: [attachment],
+          modelSelection: createModelSelection(ProviderInstanceId.make("opencode"), "openai/gpt-5"),
+        })
+        .pipe(Effect.ensuring(fileSystem.remove(attachmentPath).pipe(Effect.ignore)));
+
+      const lastPrompt = runtimeMock.state.promptCalls.at(-1) as {
+        parts: Array<Record<string, unknown>>;
+      };
+      assert.deepEqual(
+        lastPrompt.parts.filter((part) => part.type === "file"),
+        [
+          {
+            type: "file",
+            mime: "image/png",
+            filename: "screenshot.png",
+            url: "data:image/png;base64,AQIDBA==",
+          },
+        ],
+      );
+      const text = lastPrompt.parts.find((part) => part.type === "text")?.text as string;
+      assert.ok(
+        text.endsWith(
+          `Put this screenshot in the PR\n\n[Attached image "screenshot.png" is saved at: ${attachmentPath}]`,
+        ),
+      );
     }),
   );
 
@@ -1659,6 +1714,12 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
       const text = textPart?.text as string;
       assert.equal(typeof text, "string");
       assert.ok(text.includes("Review everything"));
+      // Files sent natively are named with their saved path too.
+      assert.ok(
+        text.includes(
+          `[Attached file] report.pdf (application/pdf, 4 bytes) saved at: ${config.attachmentsDir}/${attachmentRelativePath(smallPdf)}`,
+        ),
+      );
       assert.ok(
         text.includes(
           `[Attached file] huge.pdf (application/pdf, ${OPENCODE_NATIVE_ATTACHMENT_MAX_BYTES + 1} bytes) saved at: ${config.attachmentsDir}/${attachmentRelativePath(oversizedPdf)}`,
@@ -1671,7 +1732,7 @@ it.layer(OpenCodeAdapterTestLayer)("OpenCodeAdapterLive", (it) => {
       );
       assert.ok(
         text.includes(
-          `[Attached file] diagram.bmp (image/bmp, 2 bytes) saved at: ${config.attachmentsDir}/${attachmentRelativePath(bitmap)}`,
+          `[Attached image "diagram.bmp" is saved at: ${config.attachmentsDir}/${attachmentRelativePath(bitmap)}]`,
         ),
       );
     }),

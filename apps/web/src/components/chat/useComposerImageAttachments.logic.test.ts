@@ -1,6 +1,7 @@
 import {
   PROVIDER_SEND_TURN_MAX_ATTACHMENT_TOTAL_BYTES,
   PROVIDER_SEND_TURN_MAX_ATTACHMENTS,
+  PROVIDER_SEND_TURN_MAX_IMAGE_BYTES,
   type ProviderDriverKind,
 } from "@ryco/contracts";
 import { describe, expect, it, vi } from "vite-plus/test";
@@ -134,5 +135,50 @@ describe("planDirectComposerAttachments", () => {
     });
     expect(overTotal.accepted).toEqual([]);
     expect(overTotal.error).toContain("Attachments can total at most");
+  });
+});
+
+describe("planDirectComposerAttachments with oversized images", () => {
+  const MB = 1024 * 1024;
+  const image = (name: string, sizeBytes: number) => {
+    const file = new File(["x"], name, { type: "image/png" });
+    Object.defineProperty(file, "size", { value: sizeBytes });
+    return file;
+  };
+  const plan = (files: File[], existing: ReadonlyArray<{ sizeBytes: number }> = []) =>
+    planDirectComposerAttachments({ files, existing, fileUploadMaxBytes: null, streamFiles: true });
+
+  it("accepts an image over the image limit to shrink it, instead of refusing it", () => {
+    const result = plan([image("small.png", MB), image("huge.png", 30 * MB)]);
+    expect(result.error).toBeNull();
+    expect(result.accepted.map(({ name, shrinks }) => ({ name, shrinks }))).toEqual([
+      { name: "small.png", shrinks: false },
+      { name: "huge.png", shrinks: true },
+    ]);
+  });
+
+  it("still refuses an image too large to decode safely", () => {
+    const result = plan([image("panorama.png", 50 * MB + 1)]);
+    expect(result.accepted).toEqual([]);
+    expect(result.error).toBe(
+      "'panorama.png' must be non-empty and no larger than the 50MB attachment limit.",
+    );
+  });
+
+  it("counts a shrinking image at the image limit against the message total", () => {
+    // With 40 MB attached, a 30 MB image that will weigh at most 10 MB just fits.
+    const fits = plan([image("huge.png", 30 * MB)], [{ sizeBytes: 40 * MB }]);
+    expect(fits.accepted).toHaveLength(1);
+    const overflows = plan(
+      [image("huge.png", 30 * MB)],
+      [
+        {
+          sizeBytes:
+            PROVIDER_SEND_TURN_MAX_ATTACHMENT_TOTAL_BYTES - PROVIDER_SEND_TURN_MAX_IMAGE_BYTES + 1,
+        },
+      ],
+    );
+    expect(overflows.accepted).toEqual([]);
+    expect(overflows.error).toContain("Attachments can total at most");
   });
 });

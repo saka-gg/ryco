@@ -364,6 +364,59 @@ it.layer(grokAdapterTestLayer)("GrokAdapterLive", (it) => {
     }),
   );
 
+  it.effect("sends a pasted image natively and tells the agent where it is saved", () =>
+    Effect.gen(function* () {
+      const threadId = ThreadId.make("grok-image-attachment");
+      const tempDir = yield* Effect.promise(() => mkdtemp(path.join(os.tmpdir(), "grok-acp-")));
+      const requestLogPath = path.join(tempDir, "requests.ndjson");
+      const wrapperPath = yield* Effect.promise(() =>
+        makeMockGrokWrapper({ RYCO_ACP_REQUEST_LOG_PATH: requestLogPath }),
+      );
+      const { attachmentsDir } = yield* ServerConfig;
+      const adapter = yield* makeTestAdapter(wrapperPath);
+
+      yield* adapter.startSession({
+        runtimeSessionId: RuntimeSessionId.make("test-grokadapter-image-attachment"),
+        threadId,
+        provider: ProviderDriverKind.make("grok"),
+        cwd: process.cwd(),
+        runtimeMode: "full-access",
+      });
+
+      const imageAttachment = {
+        type: "image" as const,
+        id: "grok-image-attachment-12345678-1234-1234-1234-123456789abc",
+        name: "screenshot.png",
+        mimeType: "image/png",
+        sizeBytes: 4,
+      };
+      const imagePath = path.join(attachmentsDir, attachmentRelativePath(imageAttachment)!);
+      yield* Effect.promise(async () => {
+        await mkdir(path.dirname(imagePath), { recursive: true });
+        await writeFile(imagePath, Uint8Array.from([1, 2, 3, 4]));
+      });
+      yield* adapter.sendTurn({
+        threadId,
+        input: "put this screenshot in the PR",
+        attachments: [imageAttachment],
+      });
+      yield* adapter.stopSession(threadId);
+
+      const requests = yield* Effect.promise(() => readJsonLines(requestLogPath));
+      const promptRequest = requests.find((entry) => entry.method === "session/prompt");
+      const prompt =
+        (promptRequest?.params as { prompt: Array<Record<string, unknown>> } | undefined)?.prompt ??
+        [];
+      assert.deepInclude(prompt, { type: "image", data: "AQIDBA==", mimeType: "image/png" });
+      const textBlock = prompt.find((block) => block.type === "text") as { text: string };
+      assert.ok(
+        textBlock.text.endsWith(
+          `put this screenshot in the PR\n\n[Attached image "screenshot.png" is saved at: ${imagePath}]`,
+        ),
+      );
+    }),
+  );
+
   it.effect("applies a model change to the live session without restarting", () =>
     Effect.gen(function* () {
       const threadId = ThreadId.make("grok-in-session-model-switch");

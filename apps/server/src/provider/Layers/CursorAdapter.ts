@@ -42,13 +42,13 @@ import {
 import { ChildProcessSpawner } from "effect/process";
 import type * as EffectAcpSchema from "effect-acp/schema";
 
-import {
-  appendAttachmentPathLines,
-  formatAttachmentPathLines,
-  type AttachmentPathLineEntry,
-} from "@ryco/shared/attachmentPrompt";
+import { appendAttachmentPathLines } from "@ryco/shared/attachmentPrompt";
 
-import { isPersistableChatAttachment, resolveAttachmentPath } from "../../attachmentStore.ts";
+import {
+  attachmentPathLines,
+  isPersistableChatAttachment,
+  resolveAttachmentPath,
+} from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
 import { createProcessDeviceToolBinding } from "../../providerTools/deviceToolGateway.ts";
 import {
@@ -1101,22 +1101,9 @@ export function makeCursorAdapter(
             });
             ctx.agentControlHostContextDelivered = true;
           }
-          const pathLineEntries: AttachmentPathLineEntry[] = [];
           const imageParts: Array<EffectAcpSchema.ContentBlock> = [];
           for (const attachment of input.attachments ?? []) {
             if (!isPersistableChatAttachment(attachment) || attachment.type !== "image") {
-              pathLineEntries.push({
-                attachment,
-                ...(attachment.id === undefined
-                  ? {}
-                  : {
-                      resolvedPath:
-                        resolveAttachmentPath({
-                          attachmentsDir: serverConfig.attachmentsDir,
-                          attachment,
-                        }) ?? undefined,
-                    }),
-              });
               continue;
             }
             const attachmentPath = resolveAttachmentPath({
@@ -1149,7 +1136,10 @@ export function makeCursorAdapter(
           }
           const promptText = appendAttachmentPathLines(
             input.input?.trim(),
-            formatAttachmentPathLines(pathLineEntries),
+            attachmentPathLines({
+              attachmentsDir: serverConfig.attachmentsDir,
+              attachments: input.attachments,
+            }),
           );
           if (promptText?.trim()) {
             promptParts.push({ type: "text", text: promptText });

@@ -59,6 +59,19 @@ has no room for another attachment (at most eight, 50 MB in total) but the promp
 the text. A paste that fits neither is refused with a message saying why. Remove the card to
 discard the pasted text; preview it from the card like any other attachment.
 
+## Large images
+
+On web and desktop, an image over the 10 MB image limit is shrunk instead of refused: its long
+edge drops to 2048 pixels and it is saved as WebP (JPEG where the browser cannot write WebP), at
+the highest quality that fits. A large screenshot keeps its text readable. Images up to 50 MB can
+be shrunk; larger ones are refused. While an image is being shrunk, the send button waits and
+says so, and the image appears in the composer once it is ready.
+
+Every attachment, images included, also reaches the agent as a line that says where the file is
+saved, such as `[Attached image "screenshot.png" is saved at: …]`. The agent sees the image
+itself, and with the path it can open or copy the file too, for example to add a pasted
+screenshot to a pull request.
+
 ## Recall a sent prompt
 
 Press `ArrowUp` in an empty composer to bring back the last prompt you sent in this thread. Press

@@ -14,11 +14,16 @@ import {
 } from "@ryco/contracts";
 import {
   PASTED_TEXT_MIME_TYPE,
+  composerTargetKey,
   nextPastedTextFileName,
   resolvePastedTextDisposition,
   sentPromptTextLength,
   wouldTextPasteExceedInputLimit,
 } from "@ryco/client-runtime/state/composer";
+import {
+  IMAGE_COMPRESSION_MAX_SOURCE_BYTES,
+  imageAttachmentSizeAction,
+} from "@ryco/client-runtime/state/composer/imageCompression";
 import { providerSupportsGeneralFileAttachments } from "@ryco/shared/providerCapabilities";
 import { quoteCitationsToPlainText } from "@ryco/shared/quoteCitations";
 import { useCallback, useEffect, useRef, useState } from "react";
@@ -36,6 +41,7 @@ import {
   enqueueComposerFileUpload,
   useEnvironmentFileUploadCapability,
 } from "../../composerFileUpload";
+import { composerImagePreparations, shrinkComposerImage } from "../../composerImagePreparation";
 import { readEnvironmentApi } from "~/environmentApi";
 import { getPrimaryKnownEnvironment } from "~/environments/primary";
 import { getEnvironmentHttpBaseUrl } from "~/environments/runtime/catalog";
@@ -50,6 +56,7 @@ import type {
 } from "../ComposerPromptEditor";
 
 const IMAGE_SIZE_LIMIT_LABEL = `${Math.round(PROVIDER_SEND_TURN_MAX_IMAGE_BYTES / (1024 * 1024))}MB`;
+const SHRINKABLE_IMAGE_SIZE_LIMIT_LABEL = `${Math.round(IMAGE_COMPRESSION_MAX_SOURCE_BYTES / (1024 * 1024))}MB`;
 const FILE_SIZE_LIMIT_LABEL = `${Math.round(PROVIDER_SEND_TURN_MAX_FILE_BYTES / (1024 * 1024))}MB`;
 const STAGED_FILE_SIZE_LIMIT_LABEL = `${Math.round(PROJECT_STAGE_FILE_MAX_BYTES / (1024 * 1024))}MB`;
 const COMPOSER_FILE_REFERENCE_SEPARATOR = " ";
@@ -148,6 +155,8 @@ export interface PlannedComposerAttachment {
   readonly isImage: boolean;
   /** Non-image bytes stream to the environment under an upload token. */
   readonly streamsUpload: boolean;
+  /** An image over the image limit, shrunk before it joins the draft. */
+  readonly shrinks: boolean;
 }
 
 /**
@@ -181,13 +190,15 @@ export function planDirectComposerAttachments(input: {
       continue;
     }
     const streamsUpload = !isImage && input.streamFiles && fileUploadMaxBytes !== null;
+    // An image over the image limit is shrunk to fit it instead of being refused, up to the
+    // size that is still safe to decode.
     const fileLimit = isImage
-      ? PROVIDER_SEND_TURN_MAX_IMAGE_BYTES
+      ? IMAGE_COMPRESSION_MAX_SOURCE_BYTES
       : streamsUpload
         ? Math.min(fileUploadMaxBytes, PROVIDER_SEND_TURN_MAX_FILE_BYTES)
         : PROVIDER_SEND_TURN_MAX_FILE_BYTES;
     const limitLabel = isImage
-      ? IMAGE_SIZE_LIMIT_LABEL
+      ? SHRINKABLE_IMAGE_SIZE_LIMIT_LABEL
       : streamsUpload
         ? formatUploadSizeLimitLabel(fileUploadMaxBytes)
         : FILE_SIZE_LIMIT_LABEL;
@@ -195,19 +206,70 @@ export function planDirectComposerAttachments(input: {
       error = `'${attachmentName}' must be non-empty and no larger than the ${limitLabel} attachment limit.`;
       continue;
     }
+    const shrinks =
+      isImage &&
+      imageAttachmentSizeAction(file.size, PROVIDER_SEND_TURN_MAX_IMAGE_BYTES) === "compress";
+    // A shrinking image counts at the image limit, the most it can weigh once it arrives.
+    const countedBytes = shrinks ? PROVIDER_SEND_TURN_MAX_IMAGE_BYTES : file.size;
     if (nextAttachmentCount >= PROVIDER_SEND_TURN_MAX_ATTACHMENTS) {
       error = `You can attach up to ${PROVIDER_SEND_TURN_MAX_ATTACHMENTS} files per message.`;
       break;
     }
-    if (nextTotalBytes + file.size > PROVIDER_SEND_TURN_MAX_ATTACHMENT_TOTAL_BYTES) {
+    if (nextTotalBytes + countedBytes > PROVIDER_SEND_TURN_MAX_ATTACHMENT_TOTAL_BYTES) {
       error = `Attachments can total at most ${FILE_SIZE_LIMIT_LABEL} per message.`;
       continue;
     }
-    accepted.push({ file, name: attachmentName, isImage, streamsUpload });
+    accepted.push({ file, name: attachmentName, isImage, streamsUpload, shrinks });
     nextAttachmentCount += 1;
-    nextTotalBytes += file.size;
+    nextTotalBytes += countedBytes;
   }
   return { accepted, error };
+}
+
+/**
+ * Shrinks images over the image limit, one at a time since each decode can take hundreds of
+ * megabytes, and hands each to `add` as soon as it fits. Until then each holds its place in the
+ * message and holds back the composer's send. Resolves with the ids `add` returned and the
+ * message for the last image that could not be shrunk.
+ */
+async function shrinkPlannedComposerImages(input: {
+  readonly planned: ReadonlyArray<PlannedComposerAttachment>;
+  /** `composerTargetKey` of the draft the images go to. */
+  readonly targetKey: string;
+  readonly add: (shrunk: PlannedComposerAttachment, original: File) => readonly string[];
+}): Promise<{ readonly attached: string[]; readonly error: string | null }> {
+  const finishes = input.planned.map((entry) =>
+    composerImagePreparations.begin({
+      targetKey: input.targetKey,
+      name: entry.name,
+      reservedBytes: PROVIDER_SEND_TURN_MAX_IMAGE_BYTES,
+    }),
+  );
+  const attached: string[] = [];
+  let error: string | null = null;
+  try {
+    for (const [index, entry] of input.planned.entries()) {
+      const result = await shrinkComposerImage(
+        entry.file,
+        PROVIDER_SEND_TURN_MAX_IMAGE_BYTES,
+      ).catch(() => null);
+      if (result?.ok) {
+        const { file } = result;
+        attached.push(
+          ...input.add({ ...entry, file, name: file.name, shrinks: false }, entry.file),
+        );
+      } else {
+        error =
+          result?.reason === "unreadable"
+            ? `'${entry.name}' could not be read as an image.`
+            : `'${entry.name}' could not be shrunk to the ${IMAGE_SIZE_LIMIT_LABEL} image limit.`;
+      }
+      finishes[index]?.();
+    }
+  } finally {
+    for (const finish of finishes) finish();
+  }
+  return { attached, error };
 }
 
 export interface UseComposerImageAttachmentsParams {
@@ -374,8 +436,39 @@ export function useComposerImageAttachments(
     [addComposerImage, addComposerImagesToDraft, enqueueFileUpload],
   );
 
+  /** The draft's attachments, and the images still being shrunk for it, which hold their place. */
+  const readPlannedAttachments = useCallback(
+    (): ReadonlyArray<{ readonly sizeBytes: number }> => [
+      ...composerImagesRef.current,
+      ...composerImagePreparations
+        .pendingFor(composerTargetKey(composerDraftTarget))
+        .map((pending) => ({ sizeBytes: pending.reservedBytes })),
+    ],
+    [composerDraftTarget, composerImagesRef],
+  );
+
+  const shrinkAndAddComposerImages = useCallback(
+    async (
+      planned: ReadonlyArray<PlannedComposerAttachment>,
+      threadId: ThreadId,
+      attachmentIdFor: ((file: File) => string | undefined) | undefined,
+    ): Promise<string[]> => {
+      const { attached, error } = await shrinkPlannedComposerImages({
+        planned,
+        targetKey: composerTargetKey(composerDraftTarget),
+        add: (shrunk, original) =>
+          addPlannedComposerAttachments([shrunk], () => attachmentIdFor?.(original)),
+      });
+      // Only a failure is reported: by now another add or a send may have set an error that
+      // clearing would hide.
+      if (error !== null) setThreadError(threadId, error);
+      return attached;
+    },
+    [addPlannedComposerAttachments, composerDraftTarget, setThreadError],
+  );
+
   const addDirectComposerAttachments = useCallback(
-    (files: File[], attachmentIds?: ReadonlyArray<string | undefined>): string[] => {
+    async (files: File[], attachmentIds?: ReadonlyArray<string | undefined>): Promise<string[]> => {
       if (!activeThreadId || files.length === 0) return [];
       if (pendingUserInputCount > 0) {
         toastManager.add({
@@ -386,24 +479,31 @@ export function useComposerImageAttachments(
       }
       const plan = planDirectComposerAttachments({
         files,
-        existing: composerImagesRef.current,
+        existing: readPlannedAttachments(),
         fileUploadMaxBytes,
         streamFiles: true,
       });
+      const attachmentIdFor = attachmentIds && ((file: File) => attachmentIds[files.indexOf(file)]);
       const attached = addPlannedComposerAttachments(
-        plan.accepted,
-        attachmentIds && ((file) => attachmentIds[files.indexOf(file)]),
+        plan.accepted.filter((entry) => !entry.shrinks),
+        attachmentIdFor,
       );
       setThreadError(activeThreadId, plan.error);
-      return attached;
+      const shrinking = plan.accepted.filter((entry) => entry.shrinks);
+      if (shrinking.length === 0) return attached;
+      return [
+        ...attached,
+        ...(await shrinkAndAddComposerImages(shrinking, activeThreadId, attachmentIdFor)),
+      ];
     },
     [
       activeThreadId,
       addPlannedComposerAttachments,
-      composerImagesRef,
       fileUploadMaxBytes,
       pendingUserInputCount,
+      readPlannedAttachments,
       setThreadError,
+      shrinkAndAddComposerImages,
     ],
   );
 
@@ -519,6 +619,7 @@ export function useComposerImageAttachments(
         files,
       });
 
+      // Not awaited before the references: an image being shrunk must not hold them up.
       const attached =
         direct.length > 0
           ? addDirectComposerAttachments(
@@ -526,7 +627,7 @@ export function useComposerImageAttachments(
               options?.attachmentIds &&
                 direct.map((file) => options.attachmentIds?.[files.indexOf(file)]),
             )
-          : [];
+          : Promise.resolve([]);
 
       if (references.length === 0) {
         return attached;
@@ -603,7 +704,7 @@ export function useComposerImageAttachments(
       }
       const plan = planDirectComposerAttachments({
         files: [file],
-        existing: attachments,
+        existing: readPlannedAttachments(),
         fileUploadMaxBytes,
         // Pasted text has no file to pick again, so it never streams under an upload token
         // that expires: its bytes stay with the draft, survive a reload and go with the message.
@@ -631,6 +732,7 @@ export function useComposerImageAttachments(
       composerImagesRef,
       fileUploadMaxBytes,
       pendingUserInputCount,
+      readPlannedAttachments,
       selectedProvider,
       setThreadError,
     ],

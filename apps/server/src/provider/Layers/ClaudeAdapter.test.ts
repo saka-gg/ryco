@@ -1482,7 +1482,8 @@ describe("ClaudeAdapterLive", () => {
       assert.deepEqual(promptMessage?.message.content, [
         {
           type: "text",
-          text: "What's in this image?",
+          // The model sees the image; the path lets its tools open or copy the file.
+          text: `What's in this image?\n\n[Attached image "diagram.png" is saved at: ${attachmentPath}]`,
         },
         {
           type: "image",
@@ -1548,7 +1549,7 @@ describe("ClaudeAdapterLive", () => {
       assert.deepEqual(promptMessage?.message.content, [
         {
           type: "text",
-          text: "Summarize the report",
+          text: `Summarize the report\n\n[Attached file] report.pdf (application/pdf, 4 bytes) saved at: ${attachmentPath}`,
         },
         {
           type: "document",
@@ -1628,7 +1629,10 @@ describe("ClaudeAdapterLive", () => {
         textBlock.text,
         `[Attached file] notes.txt (text/plain, 3 bytes) saved at: ${textPath}`,
       );
-      assert.include(textBlock.text, "[Attached file] diagram.bmp (image/bmp, 2 bytes) saved at:");
+      assert.include(
+        textBlock.text,
+        `[Attached image "diagram.bmp" is saved at: ${path.join(attachmentsDir, attachmentRelativePath(bitmap)!)}]`,
+      );
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
       Effect.provide(harness.layer),
