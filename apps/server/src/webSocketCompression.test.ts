@@ -46,6 +46,72 @@ async function negotiatedExtensions(
   }
 }
 
+/**
+ * Sends `messages` from the server over a connection that negotiated permessage-deflate and
+ * returns how many bytes each one took on the wire (frame headers included).
+ */
+async function wireBytesPerMessage(messages: ReadonlyArray<string>): Promise<number[]> {
+  const server = Http.createServer();
+  const wss = new NodeSocket.NodeWS.WebSocketServer({
+    noServer: true,
+    perMessageDeflate: WEBSOCKET_PER_MESSAGE_DEFLATE,
+  });
+  server.on("upgrade", (request, socket, head) => {
+    wss.handleUpgrade(request, socket, head, async (ws) => {
+      for (const message of messages) {
+        await new Promise<void>((resolve, reject) =>
+          ws.send(message, (error) => (error ? reject(error) : resolve())),
+        );
+        // One message per read on the client side.
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+    });
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const { port } = server.address() as AddressInfo;
+  try {
+    return await new Promise<number[]>((resolve, reject) => {
+      const client = new NodeSocket.NodeWS.WebSocket(`ws://127.0.0.1:${port}/ws`, {
+        perMessageDeflate: true,
+      });
+      const sizes: number[] = [];
+      let pending = 0;
+      client.once("open", () => {
+        const socket = (client as unknown as { readonly _socket: import("node:net").Socket })
+          ._socket;
+        socket.prependListener("data", (chunk: Buffer) => {
+          pending += chunk.length;
+        });
+      });
+      client.on("message", () => {
+        sizes.push(pending);
+        pending = 0;
+        if (sizes.length === messages.length) {
+          client.close();
+          resolve(sizes);
+        }
+      });
+      client.once("error", reject);
+    });
+  } finally {
+    wss.close();
+    server.closeAllConnections();
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+  }
+}
+
+/** A streamed-delta frame of about `bytes` bytes, like the ones a turn sends every 32 ms. */
+function liveFrame(bytes: number, seed: number): string {
+  const text = "the agent explains what it changed and why the tests pass ".repeat(
+    Math.ceil(bytes / 58),
+  );
+  return JSON.stringify({
+    _tag: "Chunk",
+    requestId: "17",
+    values: [{ type: "thread.message-sent", sequence: seed, payload: { text } }],
+  }).slice(0, bytes);
+}
+
 describe("WebSocket compression policy", () => {
   it("recognizes loopback peers in every address form", () => {
     expect(isLoopbackRangeAddress("127.0.0.1")).toBe(true);
@@ -82,6 +148,20 @@ describe("WebSocket compression policy", () => {
     expect(await negotiatedExtensions(true, { "x-forwarded-for": "100.101.102.103" })).toContain(
       "permessage-deflate",
     );
+  });
+
+  it("compresses live frames from 512 bytes, each message on its own", async () => {
+    const frame = liveFrame(1_200, 1);
+    const tiny = liveFrame(300, 2);
+    const [first, second, small] = await wireBytesPerMessage([frame, frame, tiny]);
+    // A 1.2 KB streamed delta goes out compressed (it went out as is under the old 16 KiB
+    // threshold).
+    expect(first).toBeLessThan(frame.length * 0.6);
+    // No context is shared between messages: the same frame again costs the same, so no
+    // message's compressed length depends on what earlier messages held.
+    expect(second).toBe(first);
+    // Below the threshold a frame goes out as is (plus its 4-byte header).
+    expect(small).toBe(tiny.length + 4);
   });
 
   it("never negotiates permessage-deflate for device frames, in any mode", async () => {

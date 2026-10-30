@@ -4,8 +4,18 @@
  *
  * Shell snapshots, thread windows and the provider-heavy server config
  * compress about 8x, which matters on LAN, Tailscale, SSH and cellular links.
- * Level 1 with no context takeover keeps the CPU and per-connection memory
- * small, and messages under the threshold are sent as is. The desktop's own
+ * Live frames (streamed deltas, activity and shell events, mostly 0.3-2 KiB)
+ * compress about 2x on their own, so everything from 512 B is compressed;
+ * below that the saving is a few bytes. Level 1 keeps the CPU small.
+ *
+ * Every message is compressed with a fresh context on both sides (no context
+ * takeover). A context shared across messages would shrink live frames about
+ * twice as much again, but compressed lengths would then show whether a
+ * message repeats content of earlier ones, so content an attacker can steer
+ * (a fetched page, a file) could probe a secret printed in another message to
+ * anyone who sees the encrypted lengths. Per-message contexts confine that to
+ * one message, as for the relay (docs/relay-e2ee-protocol.md §4.6.6). The
+ * threshold is not a defense either way. The desktop's own
  * renderer talks over loopback, where compression is pure CPU, so desktop
  * backends drop the extension offer from direct loopback peers (a local proxy
  * relaying a remote client keeps it). Other servers keep it for loopback too:
@@ -20,7 +30,7 @@ import { isIP } from "node:net";
 import { DEVICE_FRAME_WS_PATH } from "@ryco/shared/deviceFrame";
 
 export const WEBSOCKET_PER_MESSAGE_DEFLATE = {
-  threshold: 16 * 1024,
+  threshold: 512,
   zlibDeflateOptions: { level: 1 },
   serverNoContextTakeover: true,
   clientNoContextTakeover: true,
