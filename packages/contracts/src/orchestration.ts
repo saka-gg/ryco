@@ -1173,6 +1173,11 @@ const FollowUpQueueEntryContentFields = {
   interactionMode: ProviderInteractionMode,
   tokenMode: Schema.optionalKey(AgentTokenMode),
   threadReferences: Schema.optional(ThreadReferences),
+  /**
+   * `skip`: the person turned the Claude resume review off on the device that queued it ("Don't
+   * ask again"), so the node sends it without asking, as that device would have.
+   */
+  claudeResumeReview: Schema.optional(Schema.Literal("skip")),
 };
 
 /**

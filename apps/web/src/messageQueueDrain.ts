@@ -34,6 +34,7 @@ import {
   type SendTurnSettings,
 } from "./hooks/executeChatSendTurn";
 import { formatOutgoingPrompt } from "./hooks/chatSendShared";
+import { isClaudeResumeReviewSkipped } from "./hooks/useSettings";
 import { sendQueuedMessageInBackground } from "./hooks/sendQueuedMessageInBackground";
 import { useComposerDraftStore } from "./composerDraftStore";
 import { stackedThreadToast, toastManager } from "./components/ui/toast";
@@ -155,6 +156,8 @@ export async function buildWebFollowUpContent(
     runtimeMode: settings.runtimeMode,
     interactionMode: settings.interactionMode,
     tokenMode: settings.tokenMode,
+    // The node's drain asks this device's question for it: carry the answer.
+    skipClaudeResumeReview: isClaudeResumeReviewSkipped(),
   };
 }
 

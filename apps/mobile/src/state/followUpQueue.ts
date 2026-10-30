@@ -22,6 +22,7 @@ import { ensureEnvironmentApi } from "../connection/environmentApi";
 import { newCommandId } from "../lib/ids";
 import { mobileKV } from "../platform/kv";
 import { readEnvironmentServerConfig } from "./environmentServerConfigs";
+import { isClaudeResumeReviewEnabled } from "./preferencesStore";
 import { buildQueuedThreadMessageAttachments } from "./queuedThreadMessageAttachments";
 import { enqueueThreadOutboxMessage } from "./threadOutbox";
 import {
@@ -75,6 +76,8 @@ export async function buildQueuedThreadMessageFollowUpContent(
     runtimeMode: message.runtimeMode,
     interactionMode: message.interactionMode,
     tokenMode: message.tokenMode ?? DEFAULT_AGENT_TOKEN_MODE,
+    // The node's drain asks this device's question for it: carry the answer.
+    skipClaudeResumeReview: !isClaudeResumeReviewEnabled(),
   };
 }
 
