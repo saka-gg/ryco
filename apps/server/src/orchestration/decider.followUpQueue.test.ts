@@ -218,6 +218,65 @@ describe("follow-up queue decider: add", () => {
     );
   });
 
+  it("removes an agent's entries for that agent only all together, never a steering one", async () => {
+    const agent = ThreadId.make("thread-agent");
+    const agentAdd = (id: string) =>
+      addCommand(id, { author: "agent", queuedBy: agent } as Partial<
+        Extract<OrchestrationCommand, { type: "thread.queue.add" }>
+      >);
+    let model = (await apply(modelWith(), agentAdd("agent-1"))).model;
+    model = (await apply(model, agentAdd("agent-2"))).model;
+    model = (await apply(model, addCommand("person-1"))).model;
+    const removeOf = (messageIds: ReadonlyArray<string>, queuedBy?: ThreadId) =>
+      ({
+        type: "thread.queue.remove",
+        commandId: nextCommandId("remove"),
+        threadId,
+        messageIds,
+        createdAt: at(3),
+        ...(queuedBy === undefined ? {} : { queuedBy }),
+      }) as OrchestrationCommand;
+    // One entry that is not the agent's (or not queued) refuses the whole removal.
+    for (const ids of [
+      ["agent-1", "person-1"],
+      ["agent-1", "gone"],
+    ]) {
+      expect((await refusal(model, removeOf(ids, agent))).detail).toContain(
+        "this chat's agent queued",
+      );
+    }
+    expect(
+      (await refusal(model, removeOf(["agent-1"], ThreadId.make("thread-other")))).detail,
+    ).toContain("this chat's agent queued");
+    // An entry being steered into the running turn is out of reach too.
+    const thread = model.threads[0]!;
+    const steering = {
+      ...model,
+      threads: [
+        {
+          ...thread,
+          followUpQueue: {
+            ...thread.followUpQueue!,
+            entries: thread.followUpQueue!.entries.map((entry) =>
+              entry.messageId === "agent-2" ? { ...entry, status: "steering" as const } : entry,
+            ),
+          },
+        },
+      ],
+    };
+    expect((await refusal(steering, removeOf(["agent-2"], agent))).detail).toContain(
+      "not being sent",
+    );
+    const removed = await apply(model, removeOf(["agent-1", "agent-2"], agent));
+    expect(queueOf(removed.model)?.entries.map((entry) => entry.messageId)).toEqual(["person-1"]);
+    // A person's removal is not limited to their own entries.
+    const byPerson = await apply(model, removeOf(["agent-1", "gone"]));
+    expect(queueOf(byPerson.model)?.entries.map((entry) => entry.messageId)).toEqual([
+      "agent-2",
+      "person-1",
+    ]);
+  });
+
   it("lets only the node's own agent add keep an Agent Control message id", async () => {
     const agentAdd = addCommand("message-agent-control-op-2-send-message", {
       author: "agent",
@@ -228,21 +287,48 @@ describe("follow-up queue decider: add", () => {
     expect(entry?.messageId).toBe("message-agent-control-op-2-send-message");
     expect(entry?.author).toBe("agent");
     expect(entry?.queuedBy).toBe("thread-agent");
-    // An edit keeps who queued it; a person's add never records one.
-    const edited = await apply(model, {
-      type: "thread.queue.edit",
-      commandId: nextCommandId("edit"),
-      threadId,
-      messageId: entry!.messageId,
-      expectedRevision: entry!.revision,
-      text: "Edited",
-      attachments: [],
-      modelSelection: entry!.modelSelection,
-      runtimeMode: entry!.runtimeMode,
-      interactionMode: entry!.interactionMode,
-      createdAt: at(2),
-    } as OrchestrationCommand);
+    // The agent's own edit keeps who queued it; a person's add never records one.
+    const editOf = (
+      on: typeof entry,
+      revision: number,
+      extra: { readonly queuedBy?: ThreadId } = {},
+    ): OrchestrationCommand =>
+      ({
+        type: "thread.queue.edit",
+        commandId: nextCommandId("edit"),
+        threadId,
+        messageId: on!.messageId,
+        expectedRevision: revision,
+        text: "Edited",
+        attachments: [],
+        modelSelection: on!.modelSelection,
+        runtimeMode: on!.runtimeMode,
+        interactionMode: on!.interactionMode,
+        createdAt: at(2),
+        ...extra,
+      }) as OrchestrationCommand;
+    const edited = await apply(
+      model,
+      editOf(entry, 1, { queuedBy: ThreadId.make("thread-agent") }),
+    );
     expect(queueOf(edited.model)?.entries[0]?.queuedBy).toBe("thread-agent");
+    // Another chat's agent cannot edit it.
+    expect(
+      (await refusal(edited.model, editOf(entry, 2, { queuedBy: ThreadId.make("thread-other") })))
+        .detail,
+    ).toContain("this chat's agent queued");
+    // A person's edit makes the text theirs: the agent no longer reaches the entry.
+    const personEdited = await apply(edited.model, editOf(entry, 2));
+    expect(queueOf(personEdited.model)?.entries[0]?.author).toBe("agent");
+    expect(queueOf(personEdited.model)?.entries[0]).not.toHaveProperty("queuedBy");
+    expect(
+      (
+        await refusal(
+          personEdited.model,
+          editOf(entry, 3, { queuedBy: ThreadId.make("thread-agent") }),
+        )
+      ).detail,
+    ).toContain("this chat's agent queued");
     const personAdd = await apply(
       modelWith(),
       addCommand("person-1", {

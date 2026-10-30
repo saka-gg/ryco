@@ -65,6 +65,7 @@ const harness = (input: { readonly authority?: boolean } = {}) => {
     entry("other-agent", { queuedBy: ThreadId.make("thread-other") }),
     entry("person", { author: "user", queuedBy: undefined }),
     entry("old-agent", { queuedBy: undefined }),
+    entry("steering-mine", { status: "steering" }),
   ];
   const dispatched: OrchestrationCommand[] = [];
   const base: AgentControlMcpTools = {
@@ -124,7 +125,7 @@ const harness = (input: { readonly authority?: boolean } = {}) => {
   });
   const call = (name: string, args: unknown, caller = session()) =>
     tools.callTool(caller, name, args);
-  return { tools, call, dispatched };
+  return { tools, call, dispatched, entries };
 };
 
 describe("ryco_queue_* tools", () => {
@@ -147,6 +148,8 @@ describe("ryco_queue_* tools", () => {
           ["other-agent", false, 2],
           ["person", false, 2],
           ["old-agent", false, 2],
+          // Its own, though out of reach while it is being steered.
+          ["steering-mine", true, 2],
         ],
       );
       const missing = yield* h.call(AGENT_CONTROL_QUEUE_MCP_TOOLS.queueList, {
@@ -176,8 +179,12 @@ describe("ryco_queue_* tools", () => {
         attachments: [],
         keptAttachmentIds: ["mine-image"],
         runtimeMode: "approval-required",
+        // The node checks again that it is still the caller's agent's.
+        queuedBy: "thread-caller",
       });
-      for (const messageId of ["other-agent", "person", "old-agent"]) {
+      // A fresh command id per call: a refusal the node remembers never blocks a later edit.
+      assert.notInclude(String(command.commandId), ":2");
+      for (const messageId of ["other-agent", "person", "old-agent", "steering-mine"]) {
         const refused = yield* h.call(AGENT_CONTROL_QUEUE_MCP_TOOLS.queueEdit, {
           threadId,
           messageId,
@@ -197,6 +204,31 @@ describe("ryco_queue_* tools", () => {
     }),
   );
 
+  it.effect("answers a retry after a lost reply with the edit it already made", () =>
+    Effect.gen(function* () {
+      const h = harness();
+      const text = "Rebase first, then run the tests.";
+      // The node applied the first call; its reply was lost.
+      h.entries[0] = { ...h.entries[0]!, text, revision: 3 };
+      const retried = yield* h.call(AGENT_CONTROL_QUEUE_MCP_TOOLS.queueEdit, {
+        threadId,
+        messageId: "mine",
+        expectedRevision: 2,
+        text,
+      });
+      assert.deepEqual(retried.structuredContent, { messageId: "mine", revision: 3 });
+      assert.lengthOf(h.dispatched, 0);
+      // Another text at the old revision is a stale edit.
+      const other = yield* h.call(AGENT_CONTROL_QUEUE_MCP_TOOLS.queueEdit, {
+        threadId,
+        messageId: "mine",
+        expectedRevision: 2,
+        text: "Something else",
+      });
+      assert.include(other.content[0]?.text ?? "", "changed since you read it");
+    }),
+  );
+
   it.effect("removes the caller's own entries, all or nothing", () =>
     Effect.gen(function* () {
       const h = harness();
@@ -205,6 +237,18 @@ describe("ryco_queue_* tools", () => {
         messageIds: ["mine", "person"],
       });
       assert.isTrue(mixed.isError);
+      const steering = yield* h.call(AGENT_CONTROL_QUEUE_MCP_TOOLS.queueRemove, {
+        threadId,
+        messageIds: ["mine", "steering-mine"],
+      });
+      assert.isTrue(steering.isError);
+      // An id that is no longer queued says so, and nothing is removed.
+      const gone = yield* h.call(AGENT_CONTROL_QUEUE_MCP_TOOLS.queueRemove, {
+        threadId,
+        messageIds: ["mine", "sent-already"],
+      });
+      assert.include(gone.content[0]?.text ?? "", "No longer queued");
+      assert.include(gone.content[0]?.text ?? "", "sent-already");
       assert.lengthOf(h.dispatched, 0);
       const removed = yield* h.call(AGENT_CONTROL_QUEUE_MCP_TOOLS.queueRemove, {
         threadId,
@@ -214,6 +258,7 @@ describe("ryco_queue_* tools", () => {
       assert.deepInclude(h.dispatched[0] as unknown as Record<string, unknown>, {
         type: "thread.queue.remove",
         messageIds: ["mine"],
+        queuedBy: "thread-caller",
       });
     }),
   );
@@ -232,7 +277,11 @@ describe("ryco_queue_* tools", () => {
         { threadId, messageIds: ["mine"] },
         session("thread-caller", [AGENT_CONTROL_CAPABILITIES.read]),
       );
-      assert.isTrue(noGrant.isError);
+      assert.strictEqual(noGrant.content[0]?.text, "Capability denied.");
+      const invalid = yield* readOnly.call(AGENT_CONTROL_QUEUE_MCP_TOOLS.queueList, {
+        threadId: 7,
+      });
+      assert.strictEqual(invalid.content[0]?.text, "Invalid tool arguments.");
       assert.lengthOf(noTurn.dispatched, 0);
       assert.lengthOf(readOnly.dispatched, 0);
       // A read-only session sees the list but not the changes.

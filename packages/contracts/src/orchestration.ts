@@ -2455,6 +2455,11 @@ const FollowUpQueueEditFields = {
 export const ThreadQueueEditCommand = Schema.Struct({
   ...FollowUpQueueEditFields,
   attachments: ChatAttachments,
+  /**
+   * Server-only: an agent's edit (Agent Control), refused unless the entry is still the one that
+   * chat's agent queued. An edit without it is a person's, and the entry stops being the agent's.
+   */
+  queuedBy: Schema.optional(ThreadId),
 });
 export type ThreadQueueEditCommand = typeof ThreadQueueEditCommand.Type;
 const ClientThreadQueueEditCommand = Schema.Struct({
@@ -2472,8 +2477,7 @@ const ThreadQueueMoveCommand = Schema.Struct({
   createdAt: IsoDateTime,
 });
 
-/** Removes entries; ids no longer queued are skipped. */
-const ThreadQueueRemoveCommand = Schema.Struct({
+const FollowUpQueueRemoveFields = {
   type: Schema.Literal("thread.queue.remove"),
   commandId: CommandId,
   threadId: ThreadId,
@@ -2482,7 +2486,17 @@ const ThreadQueueRemoveCommand = Schema.Struct({
     Schema.isMaxLength(MAX_FOLLOW_UP_QUEUE_ENTRIES),
   ),
   createdAt: IsoDateTime,
+};
+/** Removes entries; ids no longer queued are skipped. */
+const ThreadQueueRemoveCommand = Schema.Struct({
+  ...FollowUpQueueRemoveFields,
+  /**
+   * Server-only: an agent's removal (Agent Control): all of that chat's agent's own entries,
+   * still queued and not being steered, or nothing.
+   */
+  queuedBy: Schema.optional(ThreadId),
 });
+const ClientThreadQueueRemoveCommand = Schema.Struct(FollowUpQueueRemoveFields);
 
 /**
  * Sends a queued entry into the running turn `expectedTurnId` as a steer. When that turn is no
@@ -2853,7 +2867,7 @@ export const ClientOrchestrationCommand = Schema.Union([
   ClientThreadQueueAddCommand,
   ClientThreadQueueEditCommand,
   ThreadQueueMoveCommand,
-  ThreadQueueRemoveCommand,
+  ClientThreadQueueRemoveCommand,
   ThreadQueueSteerCommand,
   ThreadQueueHoldCommand,
   ThreadQueueResumeCommand,

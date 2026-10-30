@@ -44,7 +44,7 @@ import type {
 const listDescriptor: AgentControlMcpToolDescriptor = {
   name: AGENT_CONTROL_QUEUE_MCP_TOOLS.queueList,
   description:
-    "List a thread's follow-up queue on the node, next first, and why it waits when held. Each entry has its revision and `mine`: whether this chat's agent queued it with ryco_send_message (delivery queue), the only ones ryco_queue_edit and ryco_queue_remove change.",
+    "List a thread's follow-up queue on the node, next first, and why it waits when held. Each entry has its revision and `mine`: whether this chat's agent queued it with ryco_send_message (delivery queue) and no person has edited it since. ryco_queue_edit and ryco_queue_remove change only those, and not while one is being steered into the running turn.",
   inputSchema: {
     type: "object",
     properties: { threadId: { type: "string", maxLength: 256 } },
@@ -63,7 +63,7 @@ const editDescriptor: AgentControlMcpToolDescriptor = {
       threadId: { type: "string", maxLength: 256 },
       messageId: { type: "string", maxLength: 256 },
       expectedRevision: { type: "integer", minimum: 1 },
-      text: { type: "string", maxLength: 120_000 },
+      text: { type: "string", minLength: 1, maxLength: 120_000 },
     },
     required: ["threadId", "messageId", "expectedRevision", "text"],
     additionalProperties: false,
@@ -73,7 +73,7 @@ const editDescriptor: AgentControlMcpToolDescriptor = {
 const removeDescriptor: AgentControlMcpToolDescriptor = {
   name: AGENT_CONTROL_QUEUE_MCP_TOOLS.queueRemove,
   description:
-    "Take follow-ups this chat's agent queued out of a thread's queue before the node sends them.",
+    "Take follow-ups this chat's agent queued out of a thread's queue before the node sends them: all of them, or none when one is not yours or no longer queued.",
   inputSchema: {
     type: "object",
     properties: {
@@ -95,6 +95,7 @@ const NOT_FOUND = "Thread not found.";
 const NOT_YOURS =
   "Only follow-ups this chat's agent queued, and the node has not sent yet, can be changed.";
 const CHANGED = "That follow-up changed since you read it: list the queue again.";
+const GONE = "No longer queued (the node sent it, or it was removed); nothing was removed: ";
 
 const textResult = (value: unknown): AgentControlMcpToolResult => ({
   content: [{ type: "text", text: JSON.stringify(value) }],
@@ -145,18 +146,30 @@ export function withQueueTools(
       ? AGENT_CONTROL_CAPABILITIES.read
       : AGENT_CONTROL_CAPABILITIES.sendMessage;
   const authorize = (session: AgentControlSessionRecord, name: string, turnId?: TurnId) =>
-    deps.policy.authorize({
-      principal: {
-        kind: "provider-session",
-        threadId: session.threadId,
-        providerInstanceId: session.providerInstanceId,
-        runtimeSessionId: session.runtimeSessionId,
-        ...(turnId === undefined ? {} : { turnId }),
-      },
-      grantedCapabilities: session.grantedCapabilities,
-      requiredCapability: capabilityFor(name),
-      operation: `mcp:${name}`,
-    });
+    deps.policy
+      .authorize({
+        principal: {
+          kind: "provider-session",
+          threadId: session.threadId,
+          providerInstanceId: session.providerInstanceId,
+          runtimeSessionId: session.runtimeSessionId,
+          ...(turnId === undefined ? {} : { turnId }),
+        },
+        grantedCapabilities: session.grantedCapabilities,
+        requiredCapability: capabilityFor(name),
+        operation: `mcp:${name}`,
+      })
+      .pipe(
+        Effect.mapError((error) =>
+          error._tag === "AgentControlDisabledError"
+            ? new ToolFailure("Agent Control is disabled.")
+            : new ToolFailure("Capability denied."),
+        ),
+      );
+  const decode = <S extends Schema.Top>(schema: S, args: unknown) =>
+    Schema.decodeUnknownEffect(schema)(args ?? {}).pipe(
+      Effect.mapError(() => new ToolFailure("Invalid tool arguments.")),
+    ) as Effect.Effect<S["Type"], ToolFailure>;
   const exactAuthority = (session: AgentControlSessionRecord) =>
     deps.registry
       .getTurnAuthority(session.sessionId)
@@ -207,7 +220,7 @@ export function withQueueTools(
   const list = (session: AgentControlSessionRecord, args: unknown) =>
     Effect.gen(function* () {
       yield* authorize(session, listDescriptor.name);
-      const input = yield* Schema.decodeUnknownEffect(AgentControlQueueListInput)(args);
+      const input = yield* decode(AgentControlQueueListInput, args);
       const queue = yield* queueOf(input.threadId);
       return textResult({
         threadId: input.threadId,
@@ -218,11 +231,15 @@ export function withQueueTools(
   const edit = (session: AgentControlSessionRecord, args: unknown) =>
     Effect.gen(function* () {
       yield* writeAuthority(session, editDescriptor.name);
-      const input = yield* Schema.decodeUnknownEffect(AgentControlQueueEditInput)(args);
+      const input = yield* decode(AgentControlQueueEditInput, args);
       const queue = yield* queueOf(input.threadId);
       const entry = queue.entries.find((candidate) => candidate.messageId === input.messageId);
       if (entry === undefined || !ownEntry(entry, session)) {
         return yield* Effect.fail(new ToolFailure(NOT_YOURS));
+      }
+      // A retry after a lost reply finds its own edit applied: the next revision, this text.
+      if (entry.revision === input.expectedRevision + 1 && entry.text === input.text) {
+        return textResult({ messageId: entry.messageId, revision: entry.revision });
       }
       if (entry.revision !== input.expectedRevision) {
         return yield* Effect.fail(new ToolFailure(CHANGED));
@@ -230,10 +247,12 @@ export function withQueueTools(
       const threadReferences = deps.helpers.extractThreadReferences(input.text, input.threadId);
       yield* dispatch({
         type: "thread.queue.edit",
-        // One id per edit of one revision: a retry after a lost reply replays its receipt.
+        // A fresh id per call: the node remembers a refusal under its command id.
         commandId: CommandId.make(
-          `agent-control:queue-edit:${session.threadId}:${entry.messageId}:${entry.revision}`,
+          `agent-control:queue-edit:${session.threadId}:${crypto.randomUUID()}`,
         ),
+        // The node checks again that the entry is still this agent's.
+        queuedBy: session.threadId,
         threadId: input.threadId,
         messageId: entry.messageId,
         expectedRevision: entry.revision,
@@ -255,12 +274,14 @@ export function withQueueTools(
   const remove = (session: AgentControlSessionRecord, args: unknown) =>
     Effect.gen(function* () {
       yield* writeAuthority(session, removeDescriptor.name);
-      const input = yield* Schema.decodeUnknownEffect(AgentControlQueueRemoveInput)(args);
+      const input = yield* decode(AgentControlQueueRemoveInput, args);
       const queue = yield* queueOf(input.threadId);
-      const wanted = new Set<string>(input.messageIds);
-      const entries = queue.entries.filter((entry) => wanted.has(entry.messageId));
-      // All or nothing: one entry that is not this agent's refuses the whole call.
-      if (entries.length !== wanted.size || entries.some((entry) => !ownEntry(entry, session))) {
+      const wanted = [...new Set<string>(input.messageIds)];
+      const entries = queue.entries.filter((entry) => wanted.includes(entry.messageId));
+      // All or nothing: one entry that is gone or not this agent's refuses the whole call.
+      const gone = wanted.filter((id) => !entries.some((entry) => entry.messageId === id));
+      if (gone.length > 0) return yield* Effect.fail(new ToolFailure(GONE + gone.join(", ")));
+      if (entries.some((entry) => !ownEntry(entry, session))) {
         return yield* Effect.fail(new ToolFailure(NOT_YOURS));
       }
       yield* dispatch({
@@ -268,6 +289,8 @@ export function withQueueTools(
         commandId: CommandId.make(
           `agent-control:queue-remove:${session.threadId}:${crypto.randomUUID()}`,
         ),
+        // The node removes them only if all are still this agent's, unsent and not steered.
+        queuedBy: session.threadId,
         threadId: input.threadId,
         messageIds: entries.map((entry) => entry.messageId),
         createdAt: new Date().toISOString(),
