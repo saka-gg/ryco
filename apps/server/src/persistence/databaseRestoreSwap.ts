@@ -38,11 +38,23 @@
  * are checked against the database only; the result says to revoke those again.
  *
  * A journal is read back only if every path in it is one this module would have written for the
- * database it sits next to; anything else is refused, never acted on.
+ * database it sits next to; anything else is refused, never acted on. A run that stopped while it
+ * staged (before it wrote its journal) leaves only its staging directory; the next `--replace`
+ * removes such leftovers once no journal names them.
  *
  * @module databaseRestoreSwap
  */
-import { lstat, mkdir, open, readFile, rename, rm, rmdir, writeFile } from "node:fs/promises";
+import {
+  lstat,
+  mkdir,
+  open,
+  readdir,
+  readFile,
+  rename,
+  rm,
+  rmdir,
+  writeFile,
+} from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 
 import { Data, Effect, Layer, Option, Schema } from "effect";
@@ -338,6 +350,14 @@ export const replaceDatabaseWithBackup = Effect.fn("replaceDatabaseWithBackup")(
   const dbPath = input.live.dbPath;
   const journalPath = databaseRestoreJournalPath(dbPath);
   yield* finishInterruptedDatabaseRestore(dbPath, { owned: true });
+  // No journal is left now, so no staging directory is in use (this process owns the database).
+  yield* Effect.promise(async () => {
+    const stateDir = dirname(dbPath);
+    for (const name of await readdir(stateDir).catch(() => [] as string[])) {
+      if (!name.startsWith(STAGING_PREFIX)) continue;
+      await rm(join(stateDir, name), { recursive: true, force: true }).catch(() => undefined);
+    }
+  });
 
   const warnings: string[] = [];
   if (yield* Effect.promise(() => pathExists(dbPath).catch(() => true))) {

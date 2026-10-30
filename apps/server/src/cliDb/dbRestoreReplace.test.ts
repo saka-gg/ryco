@@ -246,6 +246,19 @@ describe("ryco db restore --replace", () => {
     }).pipe(Effect.ensuring(home.cleanup));
   });
 
+  it.effect("removes what a run that stopped while staging left behind", () => {
+    const home = makeHome();
+    return Effect.gen(function* () {
+      const backup = yield* buildHome(home);
+      const leftover = NodePath.join(home.stateDir, ".restore-staging-20261030T000000000Z");
+      NodeFS.mkdirSync(leftover);
+      NodeFS.writeFileSync(NodePath.join(leftover, ".state.sqlite.4242.partial"), "half a copy");
+      yield* capture(runCli(["db", "restore", backup, "--replace", ...home.here, "--json"]));
+      assert.isFalse(NodeFS.existsSync(leftover));
+      assert.deepEqual(notes(home.dbPath), ["kept"]);
+    }).pipe(Effect.ensuring(home.cleanup));
+  });
+
   it.effect("moves back what it moved when the swap fails part-way", () => {
     const home = makeHome();
     return Effect.gen(function* () {
