@@ -56,7 +56,7 @@ export const THREAD_WORKING_SESSION_STATUSES: ReadonlySet<OrchestrationSessionSt
   "running",
 ]);
 
-function isWorkingSessionStatus(status: OrchestrationSessionStatus | undefined): boolean {
+export function isWorkingSessionStatus(status: OrchestrationSessionStatus | undefined): boolean {
   return status !== undefined && THREAD_WORKING_SESSION_STATUSES.has(status);
 }
 

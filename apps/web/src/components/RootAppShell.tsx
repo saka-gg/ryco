@@ -161,6 +161,7 @@ export function RootAppShell({ authGateState }: RootAppShellProps) {
         ) : null}
         {primaryEnvironmentAuthenticated ? <RoleAwareProviderUpdateLaunchNotification /> : null}
         {isElectron ? <DeferredRemoteInstallCountdown /> : null}
+        {isElectron && primaryEnvironmentAuthenticated ? <DeferredRunningThreadKeepAlive /> : null}
         {recoveryOwner ? <WebSocketConnectionCoordinator recoveryOwner={recoveryOwner} /> : null}
         <ShellIdlePreloads authGateStatus={authGateState.status} />
         {appShell}
@@ -336,6 +337,18 @@ function AuthenticatedTracingBootstrap() {
 const LazyRemoteInstallCountdown = preloadableLazy(() =>
   import("../updates/RemoteInstallCountdown").then((module) => module.RemoteInstallCountdown),
 );
+
+const LazyRunningThreadKeepAlive = preloadableLazy(() =>
+  import("./desktop/RunningThreadKeepAlive").then((module) => module.RunningThreadKeepAlive),
+);
+
+/** Desktop: running threads' detail streams stay subscribed; loaded off the first paint. */
+function DeferredRunningThreadKeepAlive() {
+  const ready = useLazyComponentReady(LazyRunningThreadKeepAlive, true, {
+    onLoadError: (error) => console.warn("Running thread keep-alive failed to load.", error),
+  });
+  return ready ? <LazyRunningThreadKeepAlive /> : null;
+}
 
 function DeferredRemoteInstallCountdown() {
   const ready = useLazyComponentReady(LazyRemoteInstallCountdown, true, {
