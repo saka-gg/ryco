@@ -302,6 +302,7 @@ describe("thread header change-request badge", () => {
     expect(model.changeRequest?.label).toBe("#42");
     expect(model.changeRequest?.tone).toBe("merged");
     expect(model.changeRequest?.accessibilityLabel).toContain("Last known state.");
+    expect(model.pullRequestNumber).toBe(42);
   });
 
   it("leaves the badge null when there is no worktree at all", () => {
@@ -314,6 +315,7 @@ describe("thread header change-request badge", () => {
       hasPendingUserInput: false,
     });
     expect(model.changeRequest).toBeNull();
+    expect(model.pullRequestNumber).toBeNull();
   });
 });
 

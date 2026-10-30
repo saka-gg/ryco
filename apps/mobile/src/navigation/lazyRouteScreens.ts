@@ -108,6 +108,27 @@ export const SourceControlRouteScreen = lazyScreen(
       require("../features/sourceControl/SourceControlRouteScreen") as typeof import("../features/sourceControl/SourceControlRouteScreen")
     ).SourceControlRouteScreen,
 );
+export const PullRequestsRouteScreen = lazyScreen(
+  "PullRequestsRouteScreen",
+  () =>
+    (
+      require("../features/pullRequests/PullRequestsRouteScreen") as typeof import("../features/pullRequests/PullRequestsRouteScreen")
+    ).PullRequestsRouteScreen,
+);
+export const PullRequestRouteScreen = lazyScreen(
+  "PullRequestRouteScreen",
+  () =>
+    (
+      require("../features/pullRequests/PullRequestRouteScreen") as typeof import("../features/pullRequests/PullRequestRouteScreen")
+    ).PullRequestRouteScreen,
+);
+export const PullRequestFileRouteScreen = lazyScreen(
+  "PullRequestFileRouteScreen",
+  () =>
+    (
+      require("../features/pullRequests/PullRequestFileRouteScreen") as typeof import("../features/pullRequests/PullRequestFileRouteScreen")
+    ).PullRequestFileRouteScreen,
+);
 export const SettingsAppearanceRouteScreen = lazyScreen(
   "SettingsAppearanceRouteScreen",
   () =>

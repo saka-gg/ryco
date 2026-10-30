@@ -6,6 +6,7 @@ import {
 
 import { useStore } from "../state/threadsRuntime";
 import { clearProjectFilesStateForEnvironment } from "../rpc/projectFilesAtoms";
+import { clearPullRequestStateForEnvironment } from "../rpc/pullRequestAtoms";
 import { purgeEnvironmentSnapshot } from "../persistence/environmentSnapshotPersistence";
 import type { MobileE2eeTrustStore } from "../platform/e2eeTrustStore";
 import type { MobileConnectionRegistry } from "../runtime/bootstrap";
@@ -152,10 +153,11 @@ export function createEnvironmentActions(deps: EnvironmentActionsDeps) {
     // must not outlive the environment it belongs to (wave 2, plan step 5).
     purgeEnvironmentSnapshot(environmentId);
     // Keyed-query caches are not part of the threads store: the workspace
-    // listings and file contents this node handed us are memory-only and scoped
-    // to its environment id, so forgetting the node drops them here or not at
-    // all.
+    // listings, file contents and pull requests this node handed us are
+    // memory-only and scoped to its environment id, so forgetting the node drops
+    // them here or not at all.
     clearProjectFilesStateForEnvironment(environmentId);
+    clearPullRequestStateForEnvironment(environmentId);
     clearProjectIconCache(environmentId);
     await registry.catalog.removeBearerToken(environmentId);
     // The owner forgetting a node also forgets its §13 trust state — the pin, the

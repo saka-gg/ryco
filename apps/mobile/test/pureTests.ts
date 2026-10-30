@@ -95,6 +95,7 @@ export const MOBILE_PURE_TEST_FILES = [
   "src/lib/native-glass-capability.test.ts",
   "src/lib/runWhileBusy.test.ts",
   "src/lib/typography.test.ts",
+  "src/lib/webLink.test.ts",
   "src/native/composerEditorRevision.test.ts",
   "src/native/scrollEdgeEffects.test.ts",
   "src/navigation/lazyScreen.test.ts",

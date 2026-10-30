@@ -370,3 +370,41 @@ describe("thread actions sheet pull request watch", () => {
     expect(render(headerModel({ available: false }))).toBeNull();
   });
 });
+
+describe("task sheet pull request row", () => {
+  function sheetRows(onOpenPullRequest?: () => void) {
+    const sheet = ThreadActionsSheet({
+      visible: true,
+      model: headerModel({}),
+      environmentId,
+      threadId,
+      mutationReady: true,
+      busy: false,
+      error: null,
+      onClose: () => undefined,
+      onRename: () => undefined,
+      onStop: () => undefined,
+      onToggleSettlement: () => undefined,
+      onToggleArchive: () => undefined,
+      onReview: () => undefined,
+      onCompact: () => undefined,
+      onOpenPullRequest,
+    });
+    return elements(sheet).filter((element) => typeof element.props.label === "string");
+  }
+
+  it("opens the worktree's pull request on the phone", () => {
+    const opened: string[] = [];
+    const row = sheetRows(() => opened.push("open")).find(
+      (element) => element.props.label === "Open pull request #42",
+    );
+    press(row);
+    expect(opened).toEqual(["open"]);
+  });
+
+  it("is absent without a project to read it through", () => {
+    expect(sheetRows().some((element) => element.props.label === "Open pull request #42")).toBe(
+      false,
+    );
+  });
+});

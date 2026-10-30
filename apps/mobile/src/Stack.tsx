@@ -28,6 +28,9 @@ import {
   NativeIdentityScreen,
   NewTaskRouteScreen,
   ProjectRouteScreen,
+  PullRequestFileRouteScreen,
+  PullRequestRouteScreen,
+  PullRequestsRouteScreen,
   ReviewCommentComposerSheet,
   ReviewSheet,
   SettingsAboutRouteScreen,
@@ -381,6 +384,23 @@ export const ROOT_STACK_SCREENS = {
     screen: SourceControlRouteScreen,
     linking: MVP_ROOT_ROUTES.ProjectSourceControl.linking,
     options: routeOptions("ProjectSourceControl", { title: "Source Control" }),
+  }),
+  ProjectPullRequests: createNativeStackScreen({
+    screen: PullRequestsRouteScreen,
+    linking: MVP_ROOT_ROUTES.ProjectPullRequests.linking,
+    options: routeOptions("ProjectPullRequests", { title: "Pull requests" }),
+  }),
+  ProjectPullRequest: createNativeStackScreen({
+    screen: PullRequestRouteScreen,
+    linking: MVP_ROOT_ROUTES.ProjectPullRequest.linking,
+    // The title is `#number`, which the screen sets once the param is parsed.
+    options: routeOptions("ProjectPullRequest"),
+  }),
+  ProjectPullRequestFile: createNativeStackScreen({
+    screen: PullRequestFileRouteScreen,
+    linking: MVP_ROOT_ROUTES.ProjectPullRequestFile.linking,
+    // The title is the file's basename, which only the screen knows.
+    options: routeOptions("ProjectPullRequestFile"),
   }),
   NewTask: createNativeStackScreen({
     screen: NewTaskRouteScreen,

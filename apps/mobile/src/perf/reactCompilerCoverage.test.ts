@@ -93,7 +93,7 @@ const KNOWN_BAILOUTS: Readonly<Record<string, Readonly<Record<string, string>>>>
   "src/native/ComposerEditor.ios.tsx": { ComposerEditor: "reads refs during render" },
   "src/native/ComposerEditor.native.tsx": { ComposerEditor: "reads refs during render" },
   "src/native/StackHeader.tsx": { NativeStackScreenOptions: "reads refs during render" },
-  "src/rpc/useProjectFiles.ts": { useProjectFilesQuery: "reads a ref during render" },
+  "src/rpc/useMobileQuery.ts": { useMobileQuery: "reads a ref during render" },
 };
 
 interface Location {

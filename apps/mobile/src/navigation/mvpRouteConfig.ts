@@ -79,6 +79,36 @@ export const MVP_ROOT_ROUTES = {
     ios: { presentation: "card" },
     android: { presentation: "card" },
   },
+  /** One repository's pull requests: the list a project's checkout reads through. */
+  ProjectPullRequests: {
+    linking: `${PROJECT}/pull-requests`,
+    overlay: false,
+    headerPreset: "glass",
+    headerAction: "back",
+    ios: { presentation: "card" },
+    android: { presentation: "card" },
+  },
+  /** One pull request: summary, conversation, checks and files. */
+  ProjectPullRequest: {
+    linking: `${PROJECT}/pull-requests/:number`,
+    overlay: false,
+    headerPreset: "glass",
+    headerAction: "back",
+    ios: { presentation: "card" },
+    android: { presentation: "card" },
+  },
+  /**
+   * One file's diff in a pull request. `:path*` is a segment wildcard like
+   * ThreadFile's; a solid header, because the diff scrolls horizontally too.
+   */
+  ProjectPullRequestFile: {
+    linking: `${PROJECT}/pull-requests/:number/files/:path*`,
+    overlay: false,
+    headerPreset: "solid",
+    headerAction: "back",
+    ios: { presentation: "card" },
+    android: { presentation: "card" },
+  },
   NewTask: {
     linking: "tasks/new",
     overlay: true,
