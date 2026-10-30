@@ -163,6 +163,21 @@ describe("thread queue sheet over the node's queue", () => {
     expect(input.onCancelEdit).toHaveBeenCalledOnce();
   });
 
+  it("lists the stored attachments the edited entry keeps, each one droppable", () => {
+    const onDropEditingAttachment = vi.fn();
+    const editingAttachments = [{ id: "img-1", name: "a.png", kind: "image" as const }];
+    const input = props(VIEW, { editingId: "n-1", editingAttachments, onDropEditingAttachment });
+    const tree = ThreadQueuedMessages(input) as Element;
+    expect(texts(tree)).toContain("a.png");
+    (controls(tree, "Drop a.png from the queued message")[0]!.onPress as () => void)();
+    expect(onDropEditingAttachment).toHaveBeenCalledWith("img-1");
+    // While the edit saves, nothing can be dropped.
+    const saving = ThreadQueuedMessages(
+      props(VIEW, { editingId: "n-1", editingAttachments }),
+    ) as Element;
+    expect(controls(saving, "Drop a.png from the queued message")[0]!.disabled).toBe(true);
+  });
+
   it("shows the node's hold with Resume instead of Pause", () => {
     const hold: QueueHold = {
       reason: "interrupted",

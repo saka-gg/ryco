@@ -1,5 +1,6 @@
 import {
   describeQueueHold,
+  type FollowUpQueueEditAttachment,
   type FollowUpQueueRow,
   type QueueHold,
 } from "@ryco/client-runtime/state/message-queue";
@@ -48,6 +49,10 @@ export function ThreadQueuedMessages(props: {
   readonly onMove?: (row: FollowUpQueueRow, direction: "up" | "down") => void;
   /** The node's entry the composer is editing; the next send saves it. */
   readonly editingId?: string | null;
+  /** The edited entry's stored attachments that stay with it. */
+  readonly editingAttachments?: ReadonlyArray<FollowUpQueueEditAttachment>;
+  /** Drops a stored attachment from the edit (absent while saving). */
+  readonly onDropEditingAttachment?: (attachmentId: string) => void;
   readonly onCancelEdit?: () => void;
 }) {
   const iconColor = String(useThemeColor("--color-icon"));
@@ -107,7 +112,7 @@ export function ThreadQueuedMessages(props: {
         const range = movableRange(rows, index);
         const movable = props.onMove !== undefined && row.source === "server";
         return (
-          <View key={row.id} className="flex-row items-center gap-2 py-1">
+          <View key={row.id} className="flex-row flex-wrap items-center gap-2 py-1">
             <Text className="flex-1 text-sm text-foreground">{row.summary}</Text>
             {local?.resumeReviewError && (
               <View className="flex-1 gap-1">
@@ -239,6 +244,30 @@ export function ThreadQueuedMessages(props: {
                 <SymbolView name="xmark" size={15} tintColor={mutedColor} type="monochrome" />
               </Pressable>
             )}
+            {editing && props.editingAttachments && props.editingAttachments.length > 0 ? (
+              <View className="w-full flex-row flex-wrap gap-1.5">
+                {props.editingAttachments.map((attachment) => (
+                  <View
+                    key={attachment.id}
+                    className="max-w-[60%] flex-row items-center gap-1 rounded-full border border-border py-0.5 pl-2.5 pr-1"
+                  >
+                    <Text className="shrink text-xs text-foreground-muted" numberOfLines={1}>
+                      {attachment.name}
+                    </Text>
+                    <Pressable
+                      accessibilityRole="button"
+                      accessibilityLabel={`Drop ${attachment.name} from the queued message`}
+                      disabled={props.onDropEditingAttachment === undefined}
+                      onPress={() => props.onDropEditingAttachment?.(attachment.id)}
+                      hitSlop={6}
+                      className="h-7 w-7 items-center justify-center rounded-full active:bg-subtle-strong disabled:opacity-40"
+                    >
+                      <SymbolView name="xmark" size={11} tintColor={mutedColor} type="monochrome" />
+                    </Pressable>
+                  </View>
+                ))}
+              </View>
+            ) : null}
           </View>
         );
       })}

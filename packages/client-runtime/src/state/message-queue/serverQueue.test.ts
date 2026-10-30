@@ -72,6 +72,9 @@ import {
   toFollowUpQueueHoldInput,
   type FollowUpQueueAddCommand,
   type FollowUpQueueEntryContent,
+  followUpQueueEditAttachments,
+  followUpQueueEditOf,
+  withoutFollowUpQueueEditAttachment,
 } from "./serverQueue.ts";
 import { createMessageQueueStore } from "./store.ts";
 
@@ -325,6 +328,42 @@ describe("server follow-up queue commands", () => {
       type: "thread.queue.retry",
       messageId: "m-1",
     });
+  });
+});
+
+describe("editing the node's queued entry", () => {
+  const entry = {
+    messageId: "m-1" as MessageId,
+    revision: 3,
+    attachments: [
+      { type: "image", id: "img-1", name: "a.png", mimeType: "image/png", sizeBytes: 1 },
+      { type: "file", id: "file-1", name: "notes.md", mimeType: "text/markdown", sizeBytes: 2 },
+      { type: "image", name: "unstored.png" },
+    ] as unknown as QueuedFollowUp["attachments"],
+  };
+
+  it("edits at the revision shown, keeping the entry's stored attachments by id", () => {
+    expect(followUpQueueEditOf("env:t", entry)).toEqual({
+      threadKey: "env:t",
+      messageId: "m-1",
+      revision: 3,
+      keptAttachmentIds: ["img-1", "file-1"],
+    });
+  });
+
+  it("shows the stored attachments it keeps, and drops one the person removes", () => {
+    const edit = followUpQueueEditOf("env:t", entry);
+    expect(followUpQueueEditAttachments(edit, entry)).toEqual([
+      { id: "img-1", name: "a.png", kind: "image" },
+      { id: "file-1", name: "notes.md", kind: "file" },
+    ]);
+    const dropped = withoutFollowUpQueueEditAttachment(edit, "img-1");
+    expect(dropped.keptAttachmentIds).toEqual(["file-1"]);
+    expect(followUpQueueEditAttachments(dropped, entry)).toEqual([
+      { id: "file-1", name: "notes.md", kind: "file" },
+    ]);
+    // The entry left the queue meanwhile: nothing to show.
+    expect(followUpQueueEditAttachments(dropped, undefined)).toEqual([]);
   });
 });
 

@@ -10,6 +10,7 @@ import {
 
 import {
   describeQueueHold,
+  type FollowUpQueueEditAttachment,
   type FollowUpQueueRow,
   type QueueHold,
 } from "@ryco/client-runtime/state/message-queue";
@@ -86,6 +87,10 @@ interface ComposerQueuedMessagesProps {
   onSteer: (row: FollowUpQueueRow) => void;
   /** The node's entry the composer is editing; saving the composer saves it. */
   editingId?: string | null | undefined;
+  /** The edited entry's stored attachments that stay with it. */
+  editingAttachments?: ReadonlyArray<FollowUpQueueEditAttachment> | undefined;
+  /** Drops a stored attachment from the edit (absent while saving). */
+  onDropEditingAttachment?: ((attachmentId: string) => void) | undefined;
   onCancelEdit?: (() => void) | undefined;
 }
 
@@ -125,6 +130,8 @@ export const ComposerQueuedMessages = memo(function ComposerQueuedMessages({
   getSteerUnavailableReason,
   onSteer,
   editingId = null,
+  editingAttachments,
+  onDropEditingAttachment,
   onCancelEdit,
 }: ComposerQueuedMessagesProps) {
   if (rows.length === 0) {
@@ -200,7 +207,7 @@ export const ComposerQueuedMessages = memo(function ComposerQueuedMessages({
             <li
               key={row.id}
               data-queued-message-source={row.source}
-              className="flex items-center gap-1 rounded-md px-1.5 py-1 hover:bg-muted/50"
+              className="flex flex-wrap items-center gap-1 rounded-md px-1.5 py-1 hover:bg-muted/50"
             >
               <span className="min-w-0 flex-1 truncate text-xs text-foreground" title={summary}>
                 {summary}
@@ -219,6 +226,7 @@ export const ComposerQueuedMessages = memo(function ComposerQueuedMessages({
                       type="button"
                       className={textButtonClass}
                       onClick={onCancelEdit}
+                      data-cancel-edit=""
                       aria-label={`Cancel editing ${rowLabel}`}
                     >
                       Cancel
@@ -294,6 +302,47 @@ export const ComposerQueuedMessages = memo(function ComposerQueuedMessages({
               >
                 <XIcon className="size-3.5" />
               </button>
+              {editing && editingAttachments && editingAttachments.length > 0 ? (
+                <ul
+                  className="flex basis-full flex-wrap items-center gap-1 pt-0.5"
+                  aria-label={`Attachments kept with ${rowLabel}`}
+                >
+                  {editingAttachments.map((attachment, attachmentIndex) => (
+                    <li
+                      key={attachment.id}
+                      className="inline-flex max-w-48 items-center gap-0.5 rounded border border-border/70 py-px pl-1.5 text-[11px] text-muted-foreground"
+                    >
+                      <span className="truncate" title={attachment.name}>
+                        {attachment.name}
+                      </span>
+                      <button
+                        type="button"
+                        className={iconButtonClass}
+                        disabled={!onDropEditingAttachment}
+                        onClick={(event) => {
+                          // Keyboard focus moves to the next attachment's button, else to the
+                          // row's Cancel, instead of falling to the page.
+                          const list = event.currentTarget.closest("ul");
+                          const row = list?.closest("li");
+                          onDropEditingAttachment?.(attachment.id);
+                          requestAnimationFrame(() => {
+                            const remaining = list?.isConnected
+                              ? [...list.querySelectorAll<HTMLButtonElement>("button")]
+                              : [];
+                            const next =
+                              remaining[Math.min(attachmentIndex, remaining.length - 1)] ??
+                              row?.querySelector<HTMLButtonElement>("[data-cancel-edit]");
+                            next?.focus();
+                          });
+                        }}
+                        aria-label={`Drop ${attachment.name} from ${rowLabel}`}
+                      >
+                        <XIcon className="size-3" />
+                      </button>
+                    </li>
+                  ))}
+                </ul>
+              ) : null}
             </li>
           );
         })}
