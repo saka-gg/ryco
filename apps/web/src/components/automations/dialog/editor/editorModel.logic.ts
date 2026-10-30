@@ -9,7 +9,7 @@ import {
   draftFromDefinition,
   draftOfLatest,
   envWords,
-  runsInWords,
+  EXISTING_CHAT_WORDS,
   scheduleDraftKey,
   type ScheduleDraft,
 } from "@ryco/client-runtime/state/agentControl";
@@ -41,6 +41,7 @@ export type EditorTokenKind =
   | "device"
   | "env"
   | "ref"
+  | "chat"
   | "model"
   | "mode";
 
@@ -184,9 +185,12 @@ export interface SentenceWords {
   /** "1 week" · "Oct 20" */
   readonly end: string;
   readonly endLabel: string;
-  /** "a new worktree" · "the main checkout" */
+  /** "a new worktree" · "the main checkout" · "an existing chat" (a heartbeat) */
   readonly env: string;
   readonly envLabel: string;
+  /** The heartbeat's chat: its title, else "pick a chat" while one is being picked. */
+  readonly chat: string;
+  readonly chatLabel: string;
   /** The branch a worktree run starts from; the server's own default is HEAD. */
   readonly ref: string;
   readonly refLabel: string;
@@ -225,8 +229,20 @@ function calendarIntervalWords(draft: ScheduleDraft): string {
   return `${days} at ${formatLocalTime(minutes)}`;
 }
 
-/** The sentence's words: "Every [day] from [tomorrow 09:00] for [30 days] on … in … off …". */
-export function sentenceWords(draft: ScheduleDraft, nowMs: number): SentenceWords {
+/**
+ * The sentence's words: "Every [day] from [tomorrow 09:00] for [30 days] on … in … off …",
+ * or for a heartbeat "… in [an existing chat] called [Fix CI flakes]". `chat.words` is what
+ * the draft's chat reads as (`heartbeatChatWords`); `chat.choosingChat` says a chat is being
+ * picked for a draft that has none yet.
+ */
+export function sentenceWords(
+  draft: ScheduleDraft,
+  nowMs: number,
+  chat: { readonly words: string | null; readonly choosingChat: boolean } = {
+    words: null,
+    choosingChat: false,
+  },
+): SentenceWords {
   const interval =
     draft.kind === "calendar" ? calendarIntervalWords(draft) : everyWords(draft.intervalMs);
   const start = when(draft.start, nowMs);
@@ -235,9 +251,8 @@ export function sentenceWords(draft: ScheduleDraft, nowMs: number): SentenceWord
   const ends = endWords(draft.start, draft.endsAt, nowMs);
   // A heartbeat runs in its chat: the checkout of a new chat does not apply.
   const env =
-    draft.target === null
-      ? envWords(draft.envMode)
-      : runsInWords({ envMode: draft.envMode, target: draft.target });
+    draft.target === null && !chat.choosingChat ? envWords(draft.envMode) : EXISTING_CHAT_WORDS;
+  const chatWords = draft.target === null ? null : chat.words;
   return {
     interval,
     intervalLabel:
@@ -252,6 +267,8 @@ export function sentenceWords(draft: ScheduleDraft, nowMs: number): SentenceWord
     endLabel: `Ends: ${ends.conn} ${ends.text}`,
     env,
     envLabel: `Runs in: ${env}`,
+    chat: chatWords ?? "pick a chat",
+    chatLabel: chatWords === null ? "Chat: none picked yet" : `Chat: ${chatWords}`,
     ref: draft.baseRef.trim() || "HEAD",
     refLabel: `Branch: ${draft.baseRef.trim() || "HEAD"}`,
   };

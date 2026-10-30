@@ -559,6 +559,132 @@ describe("ScheduleEditor", () => {
     });
   });
 
+  it("runs a new schedule into a chat of the project, found by its title, where the device takes one", async () => {
+    const base = dialogCentreFixture.snapshots.get(projectCheckoutKey(LOCAL_ENV, RYCO_LOCAL))!;
+    const screen = await renderDialog();
+    openRyco();
+    const dialog = screen.getByRole("dialog");
+    await expect.poll(detailTitle).toBe("Triage new issues");
+    await userEvent.keyboard("n");
+    const editor = dialog.getByRole("region", { name: "New schedule" });
+    await expect.element(editor).toBeVisible();
+    await userEvent.fill(editor.getByRole("textbox", { name: "Title" }), "Check CI");
+    await userEvent.fill(editor.getByRole("textbox", { name: "Prompt" }), "Check CI, keep going.");
+    // An older device does not offer it.
+    await userEvent.click(token("env")!);
+    await expect.element(page.getByRole("menuitemradio", { name: "a new worktree" })).toBeVisible();
+    expect(document.querySelectorAll('[role="menuitemradio"]')).toHaveLength(2);
+    await userEvent.keyboard("{Escape}");
+    await expect.poll(() => document.querySelector('[data-ae-pop$=":env"]')).toBeNull();
+
+    dialogCentreFixture.set(LOCAL_ENV, RYCO_LOCAL, {
+      ...base,
+      heartbeats: true,
+    } as AutomationCentreSnapshot);
+    hooks.bump();
+    await userEvent.click(token("env")!);
+    await page.getByRole("menuitemradio", { name: "an existing chat" }).click();
+    // The chat list opens once the menu has closed, the newest chat first.
+    const find = page.getByRole("combobox", { name: "Find a chat" });
+    await expect.element(find).toHaveFocus();
+    await expect
+      .poll(() =>
+        Array.from(document.querySelectorAll('[data-ae-pop$=":chat"] [role="option"]')).map(
+          (option) => option.textContent,
+        ),
+      )
+      .toEqual(["Fix the relay reconnect", "Add a projects page"]);
+    expect(token("env")?.textContent).toBe("an existing chat");
+    await userEvent.keyboard("relay");
+    await page.getByRole("option", { name: "Fix the relay reconnect" }).click();
+    await expect.poll(() => token("chat")?.textContent).toBe("Fix the relay reconnect");
+    expect(token("chat")?.getAttribute("aria-label")).toBe("Chat: Fix the relay reconnect");
+    // A heartbeat has no branch: it runs in its chat.
+    expect(document.querySelector<HTMLElement>('[data-m="worktree"]')?.hidden).toBe(true);
+
+    await userEvent.keyboard("{Control>}{Enter}{/Control}");
+    await expect.poll(() => dialogCentreFixture.commands.length).toBe(1);
+    expect(lastCommand()).toMatchObject({
+      kind: "save",
+      projectId: RYCO_LOCAL,
+      definition: {
+        execution: {
+          title: "Check CI",
+          target: { kind: "thread", threadId: "thread-relay" },
+        },
+      },
+    });
+  });
+
+  it("goes back to where it ran when the chat list closes without a pick", async () => {
+    const base = dialogCentreFixture.snapshots.get(projectCheckoutKey(LOCAL_ENV, RYCO_LOCAL))!;
+    dialogCentreFixture.set(LOCAL_ENV, RYCO_LOCAL, {
+      ...base,
+      heartbeats: true,
+    } as AutomationCentreSnapshot);
+    const screen = await renderDialog();
+    openRyco();
+    const dialog = screen.getByRole("dialog");
+    await expect.poll(detailTitle).toBe("Triage new issues");
+    await userEvent.keyboard("n");
+    await expect.element(dialog.getByRole("region", { name: "New schedule" })).toBeVisible();
+    (token("env") as HTMLElement).focus();
+    await userEvent.keyboard("{ArrowDown}");
+    await page.getByRole("menuitemradio", { name: "an existing chat" }).click();
+    await expect.element(page.getByRole("combobox", { name: "Find a chat" })).toHaveFocus();
+    expect(token("chat")?.textContent).toBe("pick a chat");
+    await userEvent.keyboard("{Escape}");
+    await expect.poll(() => token("env")?.textContent).toBe("a new worktree");
+    expect(document.querySelector<HTMLElement>('[data-m="chat"]')?.hidden).toBe(true);
+    expect(document.querySelector<HTMLElement>('[data-m="worktree"]')?.hidden).toBe(false);
+    await expect.poll(() => document.activeElement).toBe(token("env"));
+  });
+
+  it("names a heartbeat's chat, and clears it back to a new chat each run", async () => {
+    const base = dialogCentreFixture.snapshots.get(projectCheckoutKey(LOCAL_ENV, RYCO_LOCAL))!;
+    // "Watch main CI for flakes" runs into a chat; this older device has no heartbeats flag.
+    dialogCentreFixture.set(LOCAL_ENV, RYCO_LOCAL, {
+      ...base,
+      automations: base.automations.map((automation) =>
+        automation.automationId === "auto-ci"
+          ? {
+              ...automation,
+              definition: {
+                ...automation.definition,
+                execution: {
+                  ...automation.definition.execution,
+                  target: { kind: "thread", threadId: "thread-relay" },
+                },
+              },
+            }
+          : automation,
+      ),
+    } as AutomationCentreSnapshot);
+    const screen = await renderDialog();
+    openRyco();
+    const dialog = screen.getByRole("dialog");
+    await dialog.getByRole("option", { name: /Watch main CI for flakes/ }).click();
+    await expect.poll(detailTitle).toBe("Watch main CI for flakes");
+    await expect
+      .poll(() => document.querySelector(".ad-pane:not(.is-leaving) .ad-sentence-ro")?.textContent)
+      .toMatch(/in an existing chat called Fix the relay reconnect on /);
+    await userEvent.keyboard("e");
+    const editor = dialog.getByRole("region", { name: "Edit Watch main CI for flakes" });
+    await expect.element(editor).toBeVisible();
+    expect(token("env")?.textContent).toBe("an existing chat");
+    expect(token("chat")?.textContent).toBe("Fix the relay reconnect");
+    await userEvent.click(token("env")!);
+    await page.getByRole("menuitemradio", { name: "the main checkout" }).click();
+    await expect.poll(() => token("env")?.textContent).toBe("the main checkout");
+    expect(token("chat")?.checkVisibility() ?? false).toBe(false);
+    await editor.getByRole("button", { name: /Save for approval/ }).click();
+    await expect.poll(() => dialogCentreFixture.commands.length).toBe(1);
+    const saved = lastCommand() as { definition: AgentControlAutomationDefinition };
+    expect(saved).toMatchObject({ kind: "save", automationId: "auto-ci" });
+    expect(saved.definition.execution.envMode).toBe("local");
+    expect(saved.definition.execution).not.toHaveProperty("target");
+  });
+
   it("closes without proposing when nothing changed, and says so", async () => {
     const toast = vi.spyOn(toastManager, "add");
     const screen = await renderDialog();

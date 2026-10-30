@@ -111,6 +111,8 @@ layer("Automation centre", (it) => {
         const first = yield* centre.command(input);
         const second = yield* centre.command(input);
         assert.strictEqual(first.proposals.at(-1)?.principal.kind, "automation-owner");
+        // The owner's editor offers a heartbeat's chat only where the node says it takes one.
+        assert.strictEqual(first.heartbeats, true);
         assert.strictEqual(first.proposals.at(-1)?.status, "pending-user-approval");
         assert.deepStrictEqual(
           first.proposals.map((p) => p.proposalId),

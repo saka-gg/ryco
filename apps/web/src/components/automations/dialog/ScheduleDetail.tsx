@@ -27,11 +27,13 @@ import { ProviderInstanceIcon } from "../../chat/ProviderInstanceIcon";
 import { runtimeModeConfig } from "../../chat/sessionPolicyPresentation";
 import { Menu, MenuItem, MenuPopup, MenuTrigger } from "../../ui/menu";
 import type { ProjectAutomationsCheckout } from "../data/useProjectAutomations";
+import { useProjectChats } from "../data/useProjectChats";
 import { ActiveRunBlock, DueRunBlock, LapsedBlock, ProposalBlock, hasBlocks } from "./DetailBlocks";
 import { RunHistory } from "./RunHistory";
 import { RelativeTime } from "./Ticking";
 import { DialogButton, Tip, type ScheduleDialogActions } from "./dialogControls";
 import type { DialogRow } from "./dialogModel.logic";
+import { heartbeatChatWords } from "./heartbeatChats.logic";
 import { detailVerb, scheduleWhenLine } from "./dialogWords";
 
 /** The prompt clamps to three lines past this many characters. */
@@ -39,19 +41,28 @@ const PROMPT_CLAMP_CHARS = 220;
 
 /**
  * "Runs **every 2 hours until Oct 20** in **the main checkout** on **This
- * device**." — the read-only sentence the editor turns into tokens.
+ * device**." — the read-only sentence the editor turns into tokens. A
+ * heartbeat names its chat: "in **an existing chat** called **Fix CI**".
  */
 export function ScheduleSentence(props: {
   readonly verb: string;
   readonly definition: AgentControlAutomationDefinition;
   readonly deviceLabel: string;
   readonly nowMs: number;
+  /** What a heartbeat's chat reads as (`heartbeatChatWords`). */
+  readonly chat: string | null;
 }) {
   const ex = props.definition.execution;
   return (
     <p className="ad-sentence-ro">
       {props.verb} <b>{phrase(props.definition.schedule, props.nowMs)}</b> in{" "}
       <b>{runsInWords(ex)}</b>
+      {ex.target !== undefined && props.chat ? (
+        <>
+          {" "}
+          called <b>{props.chat}</b>
+        </>
+      ) : null}
       {ex.target === undefined && ex.envMode === "worktree" && ex.baseRef ? (
         <>
           {" "}
@@ -118,6 +129,7 @@ export function ScheduleDetail(props: ScheduleDetailProps) {
   const automation = row.automation;
   const def = row.def;
   const ex = def.execution;
+  const chats = useProjectChats(checkout.environmentId, checkout.projectId);
   const resumeWhyId = useId();
   const providers = checkout.providers.length ? checkout.providers : undefined;
   const lockedReason = checkout.disabledReason;
@@ -215,6 +227,7 @@ export function ScheduleDetail(props: ScheduleDetailProps) {
         definition={def}
         deviceLabel={checkout.deviceLabel}
         nowMs={nowMs}
+        chat={ex.target ? heartbeatChatWords(chats, ex.target.threadId) : null}
       />
       <ScheduleModelLine definition={def} providers={checkout.providers} />
       {validation.errors.model ? (
