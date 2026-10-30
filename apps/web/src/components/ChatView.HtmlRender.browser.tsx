@@ -40,6 +40,8 @@ vi.mock("../lib/gitStatusState", () => import("../../test/gitStatusStateMock"));
 const TURN_ID = "turn-html-render" as TurnId;
 const RENDER_MESSAGE_ID = "msg-html-render" as MessageId;
 const ATTACHMENT_ID = "thread-browser-test-chart-html";
+/** The timeline row of the thread's own page. */
+const RENDER_ROW_ID = `html-render:${RENDER_MESSAGE_ID}:${ATTACHMENT_ID}`;
 const OTHER_THREAD_ID = "thread-html-render-other" as ThreadId;
 const TITLE = "Quarterly chart";
 const PAGE = injectHtmlRenderBootstrap(
@@ -411,6 +413,16 @@ describe("ChatView HTML renders (full app)", () => {
       // The thread's window is untouched: no older message, no re-snapshot.
       expect(storedMessageIds()).not.toContain(OLDER_MESSAGE_ID);
       expect(storedMessageIds()).toContain(RENDER_MESSAGE_ID);
+      // The timeline mounts in a deferred render after the chrome, so it can
+      // still be on its way when the panel already shows the page. Its own
+      // page row first, then the check that it is the only page in it.
+      await vi.waitFor(
+        () =>
+          expect(
+            document.querySelector(`[data-timeline-row-id="${RENDER_ROW_ID}"]`),
+          ).not.toBeNull(),
+        { timeout: 10_000 },
+      );
       expect(document.querySelectorAll('[data-timeline-row-kind="html-render"]')).toHaveLength(1);
       expect(requestsOf(ORCHESTRATION_WS_METHODS.getThreadWindow)).toEqual([]);
 

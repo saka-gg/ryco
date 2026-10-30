@@ -3,7 +3,7 @@ import {
   type ExecutionEnvironmentDescriptor,
   type OrchestrationShellSnapshot,
 } from "@ryco/contracts";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 import type { HostedHubNode } from "@ryco/client-runtime/authorization";
 
@@ -73,6 +73,19 @@ function makeClient(): Record<string, unknown> {
     terminal: { onEvent: vi.fn(() => () => undefined) },
   };
 }
+
+// Every case imports the runtime graph afresh (`vi.resetModules`), but only the first import
+// transforms it, which takes seconds on a cold cache or a loaded machine. That one-time cost is
+// paid here, under a setup budget, instead of inside whichever case happens to run first.
+beforeAll(async () => {
+  await Promise.all([
+    import("./service"),
+    import("../primary"),
+    import("../../hostedHub/api"),
+    import("../../hostedHub/runtime"),
+    import("../../hostedHub/state"),
+  ]);
+}, 60_000);
 
 beforeEach(() => {
   vi.resetModules();

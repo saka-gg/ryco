@@ -126,6 +126,30 @@ const makeHarness = Effect.fn("test.makePreviewBrowser")(function* (
   return { browser, fs, path, baseDir, installRoot, partial, requests, ranges };
 });
 
+/**
+ * Waits until the download in progress under `installRoot` holds `bytes` on disk. The stream
+ * pulls its next chunk while the file is still writing the last one, so a chunk it sent can
+ * still be on its way to disk.
+ */
+const waitForDownloadedBytes = Effect.fn("test.waitForDownloadedBytes")(function* (
+  fs: FileSystem.FileSystem,
+  path: Path.Path,
+  installRoot: string,
+  bytes: number,
+) {
+  const onDisk = Effect.gen(function* () {
+    const [staging] = yield* fs.readDirectory(installRoot);
+    if (staging === undefined) return 0;
+    return Number((yield* fs.stat(path.join(installRoot, staging, "download.zip"))).size);
+  }).pipe(Effect.orElseSucceed(() => 0));
+  const deadline = Date.now() + 10_000;
+  while ((yield* onDisk) < bytes) {
+    if (Date.now() > deadline) return yield* Effect.die(`The download never held ${bytes} bytes.`);
+    // Real time: the test clock does not move the file system along.
+    yield* Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 5)));
+  }
+});
+
 /** A download that delivers `bytes` and then loses its connection. */
 const brokenAfter = (bytes: number): Stream.Stream<Uint8Array, unknown> =>
   Stream.concat(
@@ -260,7 +284,7 @@ it.layer(NodeServices.layer)("PreviewBrowser", (it) => {
       const firstChunkSent = yield* Deferred.make<void>();
       // The first server stops mid-download, as when Ryco quits.
       const stopped = yield* Effect.gen(function* () {
-        const { browser, partial } = yield* makeHarness({
+        const { browser, fs, path, installRoot, partial } = yield* makeHarness({
           baseDir,
           wait: "2 hours",
           body: Stream.concat(
@@ -275,6 +299,8 @@ it.layer(NodeServices.layer)("PreviewBrowser", (it) => {
         });
         yield* Effect.forkScoped(browser.executable);
         yield* Deferred.await(firstChunkSent);
+        // Stopped once the first chunk is saved, so there is a download to keep.
+        yield* waitForDownloadedBytes(fs, path, installRoot, 64);
         return partial;
       }).pipe(Effect.scoped);
 

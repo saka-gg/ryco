@@ -1039,6 +1039,8 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
             models: [],
           } satisfies ServerProvider;
           const changes = yield* PubSub.unbounded<ServerProvider>();
+          // The registry subscribes to an instance's changes in a forked fiber.
+          const changesSubscribed = yield* Deferred.make<void>();
           const instance = {
             instanceId: cursorInstanceId,
             driverKind: cursorDriver,
@@ -1058,7 +1060,12 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
               getSnapshot: Effect.succeed(initialProvider),
               revalidate: Effect.succeed(initialProvider),
               refresh: Effect.succeed(refreshedProvider),
-              streamChanges: Stream.fromPubSub(changes),
+              streamChanges: Stream.unwrap(
+                PubSub.subscribe(changes).pipe(
+                  Effect.tap(() => Deferred.succeed(changesSubscribed, undefined)),
+                  Effect.map(Stream.fromSubscription),
+                ),
+              ),
             },
             adapter: {} as ProviderInstance["adapter"],
             textGeneration: {} as ProviderInstance["textGeneration"],
@@ -1098,17 +1105,17 @@ it.layer(Layer.mergeAll(NodeServices.layer, ServerSettingsService.layerTest(), T
             assert.deepStrictEqual((yield* registry.getProviders)[0]?.models, [
               ...initialProvider.models,
             ]);
-            // The per-instance change subscription starts in a forked fiber.
-            for (let attempt = 0; attempt < 5; attempt += 1) yield* Effect.yieldNow;
+            yield* Deferred.await(changesSubscribed);
             yield* PubSub.publish(changes, refreshedProvider);
 
+            // The write is real disk work: wait for it by time, not by scheduler turns.
+            const deadline = Date.now() + 10_000;
             let cachedProvider = yield* readProviderStatusCache(filePath);
-            for (
-              let attempt = 0;
-              attempt < 50 && cachedProvider?.checkedAt !== refreshedProvider.checkedAt;
-              attempt += 1
+            while (
+              cachedProvider?.checkedAt !== refreshedProvider.checkedAt &&
+              Date.now() < deadline
             ) {
-              yield* Effect.yieldNow;
+              yield* Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 5)));
               cachedProvider = yield* readProviderStatusCache(filePath);
             }
 

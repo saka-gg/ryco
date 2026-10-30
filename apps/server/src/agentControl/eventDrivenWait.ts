@@ -113,6 +113,30 @@ export const threadWakeSource = (
   );
 };
 
+/**
+ * The most a sleep tops up after its timer: a live timer is measured on Node's monotonic clock
+ * while `Clock.currentTimeMillis` reads `Date.now()`, so it can end a millisecond or two before
+ * the clock gets there. A larger shortfall is the wall clock stepping backward, which must not
+ * stretch the sleep by the step.
+ */
+const SLEEP_TOP_UP_MAX_MS = 5;
+
+/**
+ * Sleeps until the clock reads `target`: the whole distance once, then only a small shortfall
+ * ({@link SLEEP_TOP_UP_MAX_MS}), instead of handing a check to a deadline that has not passed yet.
+ */
+const sleepUntil = (target: number) =>
+  Effect.gen(function* () {
+    let now = yield* Clock.currentTimeMillis;
+    if (now >= target) return;
+    yield* Effect.sleep(Duration.millis(target - now));
+    now = yield* Clock.currentTimeMillis;
+    while (now < target && target - now <= SLEEP_TOP_UP_MAX_MS) {
+      yield* Effect.sleep(Duration.millis(target - now));
+      now = yield* Clock.currentTimeMillis;
+    }
+  });
+
 export interface WaitCheck<A> {
   readonly done: boolean;
   readonly value: A;
@@ -158,15 +182,12 @@ export const waitUntil = <A, E, R>(input: {
         if (current.done) return { value: current.value, timedOut: false };
         const checkedAt = yield* Clock.currentTimeMillis;
         if (checkedAt >= deadline) return { value: current.value, timedOut: true };
-        yield* Effect.race(
-          Effect.sleep(Duration.millis(Math.min(recheckMs, deadline - checkedAt))),
-          woken.await,
-        );
+        yield* Effect.race(sleepUntil(Math.min(checkedAt + recheckMs, deadline)), woken.await);
         if (!woken.isOpen()) continue;
         // Woken: coalesce a burst into one trailing check per spacing interval.
         const wokenAt = yield* Clock.currentTimeMillis;
         const earliest = Math.min(lastWokenCheckAt + spacingMs, deadline);
-        if (wokenAt < earliest) yield* Effect.sleep(Duration.millis(earliest - wokenAt));
+        if (wokenAt < earliest) yield* sleepUntil(earliest);
         lastWokenCheckAt = Math.max(wokenAt, earliest);
       }
     }),
