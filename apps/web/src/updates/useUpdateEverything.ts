@@ -10,6 +10,7 @@ import {
   type UpdateEverythingPlan,
   type UpdateEverythingResult,
   type UpdateEverythingRunState,
+  type UpdateEverythingStartOptions,
 } from "@ryco/client-runtime/updates";
 import { getWsConnectionStatusForEnvironment } from "@ryco/client-runtime/rpc";
 import { WS_METHODS, type EnvironmentId, type NodeUpdateState } from "@ryco/contracts";
@@ -38,10 +39,10 @@ export interface UpdateEverythingController {
   readonly result: UpdateEverythingResult | null;
   readonly running: boolean;
   /**
-   * Run the current plan; with `environmentIds`, only those devices. No-op while a run
-   * is active.
+   * Run the current plan; with `environmentIds`, only those devices, and without the
+   * updates in `exclude`. No-op while a run is active.
    */
-  readonly start: (options?: { readonly environmentIds?: ReadonlyArray<EnvironmentId> }) => void;
+  readonly start: (options?: UpdateEverythingStartOptions) => void;
   /** Ask every node and this app's updater to check for updates now. */
   readonly checkAll: () => Promise<void>;
   readonly checking: boolean;

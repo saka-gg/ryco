@@ -1,4 +1,10 @@
-import type { UpdateEverythingResult } from "@ryco/client-runtime/updates";
+import {
+  excludeFromUpdateEverythingPlan,
+  updateEverythingNodeItem,
+  updateEverythingProviderItem,
+  type UpdateEverythingResult,
+} from "@ryco/client-runtime/updates";
+import { ProviderInstanceId } from "@ryco/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
@@ -12,6 +18,7 @@ import {
   updateEverythingDeviceEntries,
   updateEverythingPlanKey,
   updateEverythingPlanSummary,
+  updateEverythingSelectionSummary,
   updateEverythingSubtitle,
   type UpdatePillInput,
 } from "./updateEverything.logic";
@@ -27,6 +34,7 @@ import {
   runDevice,
   runState,
   THIS_MAC_DEVICE,
+  THIS_MAC_ID,
   updatePlan,
 } from "./updateEverythingTestFixtures";
 
@@ -85,6 +93,19 @@ describe("plan wording", () => {
     expect(updateEverythingPlanSummary(manualOnly)).toBe("1 update needs a manual step.");
   });
 
+  it("counts the selected updates once some are left out", () => {
+    expect(updateEverythingSelectionSummary(FULL_PLAN, FULL_PLAN)).toBeNull();
+    const selected = excludeFromUpdateEverythingPlan(
+      FULL_PLAN,
+      new Set([updateEverythingNodeItem(THIS_MAC_ID)]),
+    );
+    expect(updateEverythingSelectionSummary(FULL_PLAN, selected)).toBe("4 of 5 updates selected");
+    // This app no longer restarts.
+    expect(updateEverythingSubtitle(selected)).toBe(
+      "Providers update first, then each node restarts on the new Ryco.",
+    );
+  });
+
   it("words the chat warning for the restart", () => {
     expect(chatRestartWarning(0, true)).toBeNull();
     expect(chatRestartWarning(1, true)).toBe("1 chat running. It continues after the restart.");
@@ -123,14 +144,42 @@ describe("device cards", () => {
       dot: "muted",
       pulse: false,
       version: { kind: "change", from: "0.1.33", to: "0.1.35", emphasize: true },
+      nodeItem: { selected: true, label: "Update Ryco on MacBook Pro M4" },
       providers: [
-        { name: "Claude Code", from: "2.1.40", to: "2.1.44" },
-        { name: "Codex", from: "0.130", to: "0.132" },
+        { name: "Claude Code", from: "2.1.40", to: "2.1.44", item: { selected: true } },
+        { name: "Codex", from: "0.130", to: "0.132", item: { selected: true } },
       ],
       chatWarning: "1 chat running. It continues after the restart.",
       notes: [],
       manual: [{ text: "Copilot needs a manual update.", command: "npm i -g @github/copilot" }],
       status: null,
+      canUpdate: true,
+    });
+  });
+
+  it("marks the updates left out, and warns no one about chats a left-out node keeps", () => {
+    const card = describeDeviceCard(
+      { environmentId: M4_ID, device: M4_DEVICE, run: null },
+      new Set([
+        updateEverythingNodeItem(M4_ID),
+        updateEverythingProviderItem(M4_ID, ProviderInstanceId.make("codex")),
+      ]),
+    );
+    expect(card).toMatchObject({
+      version: { kind: "change", emphasize: false },
+      nodeItem: { key: updateEverythingNodeItem(M4_ID), selected: false },
+      providers: [
+        { name: "Claude Code", item: { selected: true } },
+        {
+          name: "Codex",
+          item: {
+            key: updateEverythingProviderItem(M4_ID, ProviderInstanceId.make("codex")),
+            selected: false,
+            label: "Update Codex on MacBook Pro M4",
+          },
+        },
+      ],
+      chatWarning: null,
       canUpdate: true,
     });
   });
@@ -158,6 +207,7 @@ describe("device cards", () => {
     });
     expect(card.notes).toEqual(["Not connected right now."]);
     expect(card.version).toEqual({ kind: "current", version: "0.1.30" });
+    expect(card.nodeItem).toBeNull();
     expect(card.canUpdate).toBe(false);
   });
 

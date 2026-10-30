@@ -1,5 +1,10 @@
 import "../../index.css";
 
+import {
+  updateEverythingNodeItem,
+  updateEverythingProviderItem,
+} from "@ryco/client-runtime/updates";
+import { ProviderInstanceId } from "@ryco/contracts";
 import { page } from "vite-plus/test/browser";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import { render } from "vitest-browser-react";
@@ -16,6 +21,7 @@ import {
   runDevice,
   runState,
   THIS_MAC_DEVICE,
+  THIS_MAC_ID,
   updatePlan,
 } from "./updateEverythingTestFixtures";
 
@@ -36,6 +42,7 @@ function controller(
 }
 
 const card = (name: string) => page.getByRole("group", { name, exact: true });
+const checkbox = (name: string) => page.getByRole("checkbox", { name, exact: true });
 
 describe("the Update everything dialog", () => {
   let mounted: Awaited<ReturnType<typeof render>> | null = null;
@@ -86,6 +93,73 @@ describe("the Update everything dialog", () => {
 
     await page.getByRole("button", { name: "Cancel" }).click();
     expect(onOpenChange).toHaveBeenCalledWith(false);
+  });
+
+  it("checks every one-click update and leaves the unchecked ones out of the run", async () => {
+    const control = controller();
+    mounted = await render(
+      <UpdateEverythingDialog open onOpenChange={() => undefined} controller={control} />,
+    );
+    const dialog = page.getByRole("dialog", { name: "Update everything" });
+    await expect.element(dialog).toBeVisible();
+    expect(page.getByRole("checkbox").elements()).toHaveLength(5);
+    for (const name of [
+      "Update Ryco on This Mac",
+      "Update OpenCode on This Mac",
+      "Update Ryco on MacBook Pro M4",
+      "Update Claude Code on MacBook Pro M4",
+      "Update Codex on MacBook Pro M4",
+    ]) {
+      await expect.element(checkbox(name)).toBeChecked();
+    }
+
+    await checkbox("Update Ryco on This Mac").click();
+    await expect.element(checkbox("Update Ryco on This Mac")).not.toBeChecked();
+    await expect.element(dialog).not.toMatchTextContent("This app restarts last.");
+    await checkbox("Update Ryco on MacBook Pro M4").click();
+    // No restart there, so its chat keeps running.
+    await expect.element(card("MacBook Pro M4")).not.toMatchTextContent("1 chat running.");
+    // The provider's name toggles it too.
+    await card("MacBook Pro M4").getByText("Codex", { exact: true }).click();
+    await expect.element(checkbox("Update Codex on MacBook Pro M4")).not.toBeChecked();
+    await expect.element(page.getByText("2 of 5 updates selected")).toBeVisible();
+    expect(page.getByRole("button", { name: "Update all" }).elements()).toHaveLength(0);
+
+    await page.getByRole("button", { name: "Update selected" }).click();
+    expect(control.start).toHaveBeenCalledExactlyOnceWith({
+      exclude: [
+        updateEverythingNodeItem(THIS_MAC_ID),
+        updateEverythingNodeItem(M4_ID),
+        updateEverythingProviderItem(M4_ID, ProviderInstanceId.make("codex")),
+      ],
+    });
+  });
+
+  it("runs nothing with every update unchecked, and checks them all again when reopened", async () => {
+    const control = controller({ plan: updatePlan([M4_DEVICE]) });
+    mounted = await render(
+      <UpdateEverythingDialog open onOpenChange={() => undefined} controller={control} />,
+    );
+    for (const name of [
+      "Update Ryco on MacBook Pro M4",
+      "Update Claude Code on MacBook Pro M4",
+      "Update Codex on MacBook Pro M4",
+    ]) {
+      await checkbox(name).click();
+    }
+    await expect.element(page.getByText("0 of 3 updates selected")).toBeVisible();
+    await expect.element(page.getByRole("button", { name: "Update selected" })).toBeDisabled();
+
+    await mounted.rerender(
+      <UpdateEverythingDialog open={false} onOpenChange={() => undefined} controller={control} />,
+    );
+    await expect.element(page.getByRole("dialog")).not.toBeInTheDocument();
+    await mounted.rerender(
+      <UpdateEverythingDialog open onOpenChange={() => undefined} controller={control} />,
+    );
+    await expect.element(checkbox("Update Codex on MacBook Pro M4")).toBeChecked();
+    await expect.element(page.getByRole("button", { name: "Update all" })).toBeEnabled();
+    expect(page.getByText(/updates selected/).elements()).toHaveLength(0);
   });
 
   it("copies a manual command", async () => {
@@ -144,6 +218,7 @@ describe("the Update everything dialog", () => {
     await expect.element(card("Linux box")).toMatchTextContent("Skipped");
     await expect.element(page.getByText("0 of 2 done")).toBeVisible();
     expect(page.getByRole("button", { name: "Update all" }).elements()).toHaveLength(0);
+    expect(page.getByRole("checkbox").elements()).toHaveLength(0);
 
     const footer = page.elementLocator(document.querySelector('[data-slot="dialog-footer"]')!);
     await footer.getByRole("button", { name: "Close", exact: true }).click();

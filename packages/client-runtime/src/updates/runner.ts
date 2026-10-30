@@ -7,7 +7,9 @@ import {
 import { selectUpdateEverythingEnvironments } from "./inputs.ts";
 import {
   buildUpdateEverythingPlan,
+  excludeFromUpdateEverythingPlan,
   type UpdateEverythingEnvironmentInput,
+  type UpdateEverythingItemKey,
   type UpdateEverythingLocalApp,
   type UpdateEverythingPlan,
 } from "./plan.ts";
@@ -42,12 +44,17 @@ export interface UpdateEverythingRunnerDeps {
 
 export interface UpdateEverythingStartOptions {
   readonly environmentIds?: ReadonlyArray<EnvironmentId>;
+  /** One-click updates left out of the run (see `excludeFromUpdateEverythingPlan`). */
+  readonly exclude?: ReadonlyArray<UpdateEverythingItemKey>;
 }
 
 export interface UpdateEverythingRunner {
   readonly getSnapshot: () => UpdateEverythingRunSnapshot;
   readonly subscribe: (listener: () => void) => () => void;
-  /** Runs the current plan (only `environmentIds` when given); a no-op while a run is active or nothing would run. */
+  /**
+   * Runs the current plan (only `environmentIds` when given, without `exclude`); a no-op
+   * while a run is active or nothing would run.
+   */
   readonly start: (options?: UpdateEverythingStartOptions) => void;
   /** Single-flight: a call while a check runs joins it. */
   readonly checkAll: () => Promise<void>;
@@ -99,13 +106,14 @@ export function createUpdateEverythingRunner(
   const planFor = (options?: UpdateEverythingStartOptions): UpdateEverythingPlan | null => {
     try {
       const inputs = deps.readInputs();
-      return buildUpdateEverythingPlan({
+      const plan = buildUpdateEverythingPlan({
         environments: selectUpdateEverythingEnvironments(
           inputs.environments,
           options?.environmentIds,
         ),
         localApp: inputs.localApp,
       });
+      return excludeFromUpdateEverythingPlan(plan, new Set(options?.exclude));
     } catch (error) {
       show({
         type: "error",

@@ -6,12 +6,14 @@ import type {
 } from "./index.ts";
 import {
   EnvironmentId,
+  ProviderInstanceId,
   type NodeUpdateInput,
   type ServerProviderUpdatedPayload,
 } from "@ryco/contracts";
 import { describe, expect, it, vi } from "vite-plus/test";
 
 import { nodeUpdateState, updatableProvider } from "../../test/nodeUpdateFixtures.ts";
+import { updateEverythingNodeItem, updateEverythingProviderItem } from "./plan.ts";
 import { createUpdateEverythingRunner, type UpdateEverythingRunnerDeps } from "./runner.ts";
 
 const LOCAL = EnvironmentId.make("env-local");
@@ -174,6 +176,41 @@ describe("createUpdateEverythingRunner", () => {
       LAPTOP,
     ]);
     expect(h.shown).toEqual([{ type: "success", title: "Updated 1 provider" }]);
+  });
+
+  it("leaves the excluded updates out of the run", async () => {
+    const h = harness({
+      environments: [
+        environment(SERVER, "Server", {
+          nodeUpdate: nodeUpdateState(),
+          providers: [updatableProvider("codex"), updatableProvider("claudeAgent")],
+        }),
+        environment(LAPTOP, "Laptop"),
+      ],
+    });
+    h.runner.start({
+      exclude: [
+        updateEverythingNodeItem(SERVER),
+        updateEverythingProviderItem(SERVER, ProviderInstanceId.make("codex")),
+        updateEverythingProviderItem(LAPTOP, ProviderInstanceId.make("codex")),
+      ],
+    });
+    await flush();
+    expect(h.calls).toEqual(["provider env-server claudeAgent"]);
+    expect(h.runner.getSnapshot().run?.devices).toMatchObject([
+      { environmentId: LAPTOP, status: "skipped", message: "Not selected." },
+      { environmentId: SERVER, status: "done", message: "Updated Claude." },
+    ]);
+
+    // Excluding everything leaves nothing to run.
+    h.runner.dismissRun();
+    h.runner.start({
+      environmentIds: [LAPTOP],
+      exclude: [updateEverythingProviderItem(LAPTOP, ProviderInstanceId.make("codex"))],
+    });
+    await flush();
+    expect(h.runner.getSnapshot().run).toBeNull();
+    expect(h.calls).toHaveLength(1);
   });
 
   it("does nothing when the plan (or the listed part of it) has no one-click work", async () => {
