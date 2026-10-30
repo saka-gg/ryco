@@ -118,6 +118,7 @@ describe("recallablePrompt", () => {
     const imported = appendAttachmentPathLines("Look at the report", [
       "[Attached file] report (final).pdf (application/pdf, 123456 bytes) saved at: /tmp/a/report.pdf",
       "[Attached file] diagram.png (image/png, size unknown bytes)",
+      '[Attached image "screenshot.png" is saved at: /tmp/a/thread-1.png]',
     ]);
     expect(recallablePrompt(imported ?? "")).toBe("Look at the report");
   });

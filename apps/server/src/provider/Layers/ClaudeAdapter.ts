@@ -68,11 +68,7 @@ import {
   parseClaudeAutoCompactWindow,
   resolveClaudeAutoCompactMode,
 } from "@ryco/shared/claudeAutoCompact";
-import {
-  appendAttachmentPathLines,
-  formatAttachmentPathLines,
-  type AttachmentPathLineEntry,
-} from "@ryco/shared/attachmentPrompt";
+import { appendAttachmentPathLines } from "@ryco/shared/attachmentPrompt";
 import {
   ApprovalRequestId,
   type AgentTokenMode,
@@ -149,7 +145,11 @@ import {
   Stream,
 } from "effect";
 
-import { isPersistableChatAttachment, resolveAttachmentPath } from "../../attachmentStore.ts";
+import {
+  attachmentPathLines,
+  isPersistableChatAttachment,
+  resolveAttachmentPath,
+} from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
 import { logOnceEvery } from "../../logOnceEvery.ts";
 import { makeServerQueueMetrics } from "../../observability/QueueMetrics.ts";
@@ -1619,22 +1619,9 @@ const buildUserMessageEffect = Effect.fn("buildUserMessageEffect")(function* (
 ) {
   const promptText = buildPromptText(input, dependencies.boundInstanceId);
   const nativeBlocks: Array<Record<string, unknown>> = [];
-  const pathLineEntries: AttachmentPathLineEntry[] = [];
 
   for (const attachment of input.attachments ?? []) {
     if (!isPersistableChatAttachment(attachment) || !isClaudeNativeAttachment(attachment)) {
-      pathLineEntries.push({
-        attachment,
-        ...(attachment.id === undefined
-          ? {}
-          : {
-              resolvedPath:
-                resolveAttachmentPath({
-                  attachmentsDir: dependencies.attachmentsDir,
-                  attachment,
-                }) ?? undefined,
-            }),
-      });
       continue;
     }
 
@@ -1675,7 +1662,13 @@ const buildUserMessageEffect = Effect.fn("buildUserMessageEffect")(function* (
     );
   }
 
-  const text = appendAttachmentPathLines(promptText, formatAttachmentPathLines(pathLineEntries));
+  const text = appendAttachmentPathLines(
+    promptText,
+    attachmentPathLines({
+      attachmentsDir: dependencies.attachmentsDir,
+      attachments: input.attachments,
+    }),
+  );
   const sdkContent: Array<Record<string, unknown>> = [];
   if (text !== undefined && text.length > 0) {
     sdkContent.push({ type: "text", text });

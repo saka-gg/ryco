@@ -62,11 +62,7 @@ import * as CodexErrors from "effect-codex-app-server/errors";
 import * as EffectCodexSchema from "effect-codex-app-server/schema";
 
 import { getModelSelectionStringOptionValue } from "@ryco/shared/model";
-import {
-  appendAttachmentPathLines,
-  formatAttachmentPathLines,
-  type AttachmentPathLineEntry,
-} from "@ryco/shared/attachmentPrompt";
+import { appendAttachmentPathLines } from "@ryco/shared/attachmentPrompt";
 import { formatSourceControlContextsForAgent } from "@ryco/shared/sourceControlContextFormatter";
 import { isNativeCompactionCommand, NATIVE_COMPACTION_COMMAND } from "@ryco/shared/threadActivity";
 import {
@@ -87,7 +83,7 @@ import { type CodexAdapterShape } from "../Services/CodexAdapter.ts";
 import type { AgentProcessPriorityShape } from "../agentProcessPriority.ts";
 import { codexServiceTierForSelection } from "../CodexServiceTier.ts";
 import { isFatalCodexStderrMessage } from "../codexStderr.ts";
-import { resolveAttachmentPath } from "../../attachmentStore.ts";
+import { attachmentPathLines, resolveAttachmentPath } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
 import { makeServerQueueMetrics } from "../../observability/QueueMetrics.ts";
 import { buildTokenReductionInstructions, checkRtkAvailability } from "../../tokenReduction.ts";
@@ -2318,21 +2314,6 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
       });
     }
 
-    const pathLineEntries: AttachmentPathLineEntry[] = attachments
-      .filter((attachment) => attachment.type !== "image")
-      .map((attachment) => ({
-        attachment,
-        ...(attachment.id === undefined
-          ? {}
-          : {
-              resolvedPath:
-                resolveAttachmentPath({
-                  attachmentsDir: serverConfig.attachmentsDir,
-                  attachment,
-                }) ?? undefined,
-            }),
-      }));
-
     if (resolved.length > 0) {
       yield* Effect.annotateCurrentSpan({
         "provider.attachment_count": resolved.length,
@@ -2352,7 +2333,7 @@ export const makeCodexAdapter = Effect.fn("makeCodexAdapter")(function* (
 
     return {
       native: resolved,
-      pathLines: formatAttachmentPathLines(pathLineEntries),
+      pathLines: attachmentPathLines({ attachmentsDir: serverConfig.attachmentsDir, attachments }),
     };
   });
 

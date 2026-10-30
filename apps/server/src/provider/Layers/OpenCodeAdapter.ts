@@ -44,15 +44,11 @@ import type {
   QuestionRequest,
   Session,
 } from "@opencode-ai/sdk/v2";
-import {
-  appendAttachmentPathLines,
-  formatAttachmentPathLines,
-  type AttachmentPathLineEntry,
-} from "@ryco/shared/attachmentPrompt";
+import { appendAttachmentPathLines } from "@ryco/shared/attachmentPrompt";
 import { getModelSelectionStringOptionValue } from "@ryco/shared/model";
 import { formatSourceControlContextsForAgent } from "@ryco/shared/sourceControlContextFormatter";
 
-import { readPersistedAttachment, resolveAttachmentPath } from "../../attachmentStore.ts";
+import { attachmentPathLines, readPersistedAttachment } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
 import { makeServerQueueMetrics } from "../../observability/QueueMetrics.ts";
 import { createProcessDeviceToolBinding } from "../../providerTools/deviceToolGateway.ts";
@@ -2715,21 +2711,8 @@ export function makeOpenCodeAdapter(
             });
           }
           let attachmentTotalBytes = 0;
-          const pathLineEntries: AttachmentPathLineEntry[] = [];
           for (const attachment of input.attachments ?? []) {
             if (!isOpenCodeNativeAttachment(attachment)) {
-              pathLineEntries.push({
-                attachment,
-                ...(attachment.id === undefined
-                  ? {}
-                  : {
-                      resolvedPath:
-                        resolveAttachmentPath({
-                          attachmentsDir: serverConfig.attachmentsDir,
-                          attachment,
-                        }) ?? undefined,
-                    }),
-              });
               continue;
             }
             const persisted = yield* Effect.promise(() =>
@@ -2758,7 +2741,13 @@ export function makeOpenCodeAdapter(
               });
             }
           }
-          text = appendAttachmentPathLines(text, formatAttachmentPathLines(pathLineEntries));
+          text = appendAttachmentPathLines(
+            text,
+            attachmentPathLines({
+              attachmentsDir: serverConfig.attachmentsDir,
+              attachments: input.attachments,
+            }),
+          );
           const fileParts = toOpenCodeFileParts({
             attachments: input.attachments,
             resolveAttachmentUrl: (attachment) =>

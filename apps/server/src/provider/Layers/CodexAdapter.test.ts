@@ -864,7 +864,8 @@ sessionErrorLayer("CodexAdapterLive session errors", (it) => {
       });
 
       assert.deepStrictEqual(runtime.sendTurnImpl.mock.calls[0]?.[0], {
-        input: "What's in this image?",
+        // The model sees the image; the path lets its tools open or copy the file.
+        input: `What's in this image?\n\n[Attached image "diagram.png" is saved at: ${attachmentPath}]`,
         attachments: [
           {
             type: "image",

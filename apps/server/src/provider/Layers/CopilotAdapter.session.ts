@@ -20,14 +20,14 @@ import {
   type SessionEvent,
 } from "@github/copilot-sdk";
 import { Effect, Option } from "effect";
-import {
-  appendAttachmentPathLines,
-  formatAttachmentPathLines,
-  type AttachmentPathLineEntry,
-} from "@ryco/shared/attachmentPrompt";
+import { appendAttachmentPathLines } from "@ryco/shared/attachmentPrompt";
 import { getModelSelectionStringOptionValue } from "@ryco/shared/model";
 
-import { isPersistableChatAttachment, readPersistedAttachment } from "../../attachmentStore.ts";
+import {
+  attachmentPathLines,
+  isPersistableChatAttachment,
+  readPersistedAttachment,
+} from "../../attachmentStore.ts";
 import { createProcessDeviceToolBinding } from "../../providerTools/deviceToolGateway.ts";
 import {
   ProviderAdapterProcessError,
@@ -429,13 +429,11 @@ export const makeSendTurn =
         });
       }
       let attachmentTotalBytes = 0;
-      const pathLineEntries: AttachmentPathLineEntry[] = [];
       const attachments: MessageOptions["attachments"] = (yield* Effect.forEach(
         input.attachments ?? [],
         (attachment) =>
           Effect.gen(function* () {
             if (!isPersistableChatAttachment(attachment)) {
-              pathLineEntries.push({ attachment });
               return null;
             }
             const persisted = yield* Effect.promise(() =>
@@ -511,7 +509,10 @@ export const makeSendTurn =
         prompt:
           appendAttachmentPathLines(
             input.input ?? "",
-            formatAttachmentPathLines(pathLineEntries),
+            attachmentPathLines({
+              attachmentsDir: deps.serverConfig.attachmentsDir,
+              attachments: input.attachments,
+            }),
           ) ?? "",
         ...(attachments.length > 0 ? { attachments } : {}),
         mode: "immediate",
