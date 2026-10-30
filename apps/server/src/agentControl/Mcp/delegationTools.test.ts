@@ -745,7 +745,8 @@ it.effect("reports a waiting task whose chat stopped waiting for it as never sta
     yield* h.repo.save(record, {
       ...record,
       status: "cancelled",
-      detail: "You stopped the delegating chat before this task's turn came, so it never starts.",
+      detail:
+        "You stopped the delegating chat before this task's turn came: it stays paused and starts only if you resume it, and its result does not return automatically.",
     });
     const [task] = structured(
       yield* h.call(AGENT_CONTROL_DELEGATION_MCP_TOOLS.taskStatus, { taskId: "child" }),

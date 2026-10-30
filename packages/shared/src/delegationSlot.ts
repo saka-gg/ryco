@@ -22,3 +22,20 @@ export const heldOnlyForDelegationSlot = (
   hold != null &&
   hold.causeKeys.length > 0 &&
   hold.causeKeys.every((key) => key.startsWith(DELEGATION_SLOT_CAUSE_PREFIX));
+
+/**
+ * Cause keys of the hold that replaces a task's slot hold once its delegating chat gave it up
+ * before it started: `delegation-given-up:<proposalId>`. A pause only a person's Resume ends.
+ */
+export const DELEGATION_GIVEN_UP_CAUSE_PREFIX = "delegation-given-up:";
+
+/**
+ * Whether only a given-up task's own pause keeps the queue. It already waits for the person's
+ * Resume, so a restart adds no hold of its own: its banner keeps saying why it waits.
+ */
+export const heldOnlyAsGivenUpDelegation = (
+  hold: { readonly causeKeys: ReadonlyArray<string> } | null | undefined,
+): boolean =>
+  hold != null &&
+  hold.causeKeys.length > 0 &&
+  hold.causeKeys.every((key) => key.startsWith(DELEGATION_GIVEN_UP_CAUSE_PREFIX));

@@ -95,7 +95,11 @@ type HoldRecordCommand = Extract<
   { type: "thread.queue.hold.record" }
 >;
 
-/** Cause keys of a given-up task's hold: `delegation-given-up:<proposalId>`. */
+/**
+ * Cause keys of a given-up task's hold: `delegation-given-up:<proposalId>`. The same value as
+ * `@ryco/shared/delegationSlot`'s, which boot reads; this lazily loaded module keeps its own
+ * copy so it imports no boot value (the test keeps them equal).
+ */
 export const DELEGATION_GIVEN_UP_CAUSE_PREFIX = "delegation-given-up:";
 
 /**

@@ -21,7 +21,7 @@ import { Cause, Context, Effect, Layer } from "effect";
 
 import { ServerRuntimeStartup } from "../../serverRuntimeStartup.ts";
 import { currentCommandReadModel } from "../currentCommandReadModel.ts";
-import { heldOnlyForDelegationSlot } from "../delegationSlotHold.ts";
+import { heldOnlyAsGivenUpDelegation, heldOnlyForDelegationSlot } from "../delegationSlotHold.ts";
 import { runtimeModePrivilegeRank, serverWakeGuard } from "../serverWake.ts";
 import { findThreadInArray } from "../threadIndex.ts";
 import { OrchestrationCommandApplication } from "../Services/OrchestrationCommandApplication.ts";
@@ -49,7 +49,8 @@ export const threadsQueuedAtBoot = (threads: OrchestrationReadModel["threads"]) 
     .filter(
       (thread) =>
         (thread.followUpQueue?.entries.length ?? 0) > 0 &&
-        !heldOnlyForDelegationSlot(thread.followUpQueue?.hold),
+        !heldOnlyForDelegationSlot(thread.followUpQueue?.hold) &&
+        !heldOnlyAsGivenUpDelegation(thread.followUpQueue?.hold),
     )
     .map((thread) => thread.id);
 

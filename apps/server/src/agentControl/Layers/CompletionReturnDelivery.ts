@@ -97,7 +97,7 @@ const DETAIL = {
   userStopped:
     "You stopped the delegating chat; this result was not returned automatically. Open the child.",
   userStoppedBeforeStart:
-    "You stopped the delegating chat before this task's turn came, so it never starts.",
+    "You stopped the delegating chat before this task's turn came: it stays paused and starts only if you resume it, and its result does not return automatically.",
   cold: "Waiting for another chat's session to start.",
   deliveryExpired:
     "Not delivered within 24 hours of its capture or of the originating chat's usage-limit reset (the chat stayed busy, usage-limited or out of scope, or Agent Control was disabled). Open the child.",

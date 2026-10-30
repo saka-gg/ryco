@@ -23,6 +23,7 @@ import { DELEGATION_SLOT_CAUSE_PREFIX } from "@ryco/shared/delegationSlot";
 
 export {
   DELEGATION_SLOT_CAUSE_PREFIX,
+  heldOnlyAsGivenUpDelegation,
   heldOnlyForDelegationSlot,
 } from "@ryco/shared/delegationSlot";
 
