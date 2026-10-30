@@ -18,11 +18,18 @@ import { acquireDatabaseMaintenance } from "../persistence/databaseOwnerLock.ts"
 import { databaseRestoreJournalPath } from "../persistence/databaseRestoreJournal.ts";
 import {
   DatabaseRestoreSwapError,
+  planDatabaseRestoreSwap,
   replaceDatabaseWithBackup,
+  restoreSwapPaths,
   SESSION_SIGNING_KEY_FILE,
+  undoDatabaseRestoreSwap,
 } from "../persistence/databaseRestoreSwap.ts";
 import { makeRuntimeSqliteLayer } from "../persistence/Layers/Sqlite.ts";
-import { runMigrations } from "../persistence/Migrations.ts";
+import {
+  migrationEntries,
+  repairedMigrationIds,
+  runMigrations,
+} from "../persistence/Migrations.ts";
 import * as NodeSqliteClient from "../persistence/NodeSqliteClient.ts";
 
 const CliRuntimeLayer = Layer.mergeAll(NodeServices.layer, NetService.layer);
@@ -62,6 +69,20 @@ const buildHome = (home: ReturnType<typeof makeHome>) =>
       yield* runMigrations();
       yield* sql`CREATE TABLE cli_marker (note TEXT)`;
       yield* sql`INSERT INTO cli_marker (note) VALUES ('kept')`;
+      // A pairing link nobody used yet and a paired integration: both valid in the backup.
+      yield* sql`
+        INSERT INTO auth_pairing_links (id, credential, method, role, subject, created_at, expires_at)
+        VALUES ('link-1', 'credential-1', 'one-time-token', 'client', 'phone', '2026-10-30T00:00:00.000Z', '2099-01-01T00:00:00.000Z')
+      `;
+      yield* sql`
+        INSERT INTO agent_control_external_integrations (
+          integration_id, display_name, client_kind, project_scope_json, capabilities_json,
+          rate_limit_per_minute, active_task_limit, pairing_state, created_at, updated_at
+        ) VALUES (
+          'integration-1', 'Claude Desktop', 'claude-desktop', '[]', '[]', 60, 1, 'paired',
+          '2026-10-30T00:00:00.000Z', '2026-10-30T00:00:00.000Z'
+        )
+      `;
     }).pipe(
       Effect.provide(
         Layer.provideMerge(NodeSqliteClient.layer({ filename: home.dbPath }), Logger.layer([])),
@@ -115,9 +136,21 @@ describe("ryco db restore --replace", () => {
           readonly path: string;
           readonly replacedDir: string;
           readonly signedOut: boolean;
+          readonly revoked: { readonly pairingLinks: number; readonly integrations: number };
         };
         assert.equal(document.path, home.dbPath);
         assert.isTrue(document.signedOut);
+        // What was used or revoked after the backup must not work again: nothing from then does.
+        assert.deepEqual(document.revoked, { pairingLinks: 1, integrations: 1 });
+        const restoredDatabase = new DatabaseSync(home.dbPath, { readOnly: true });
+        const unrevoked = restoredDatabase
+          .prepare(
+            `SELECT (SELECT count(*) FROM auth_pairing_links WHERE revoked_at IS NULL)
+               + (SELECT count(*) FROM agent_control_external_integrations WHERE revoked_at IS NULL) AS n`,
+          )
+          .get() as { n: number };
+        restoredDatabase.close();
+        assert.equal(unrevoked.n, 0);
         assert.equal(NodePath.dirname(document.replacedDir), home.stateDir);
 
         // The database in use is the backup now; the replaced one keeps the later row.
@@ -257,6 +290,110 @@ describe("ryco db restore --replace", () => {
       assert.isFalse(NodeFS.existsSync(leftover));
       assert.deepEqual(notes(home.dbPath), ["kept"]);
     }).pipe(Effect.ensuring(home.cleanup));
+  });
+
+  it.effect("checks for other processes right before the swap, after staging", () => {
+    const home = makeHome();
+    return Effect.gen(function* () {
+      const backup = yield* buildHome(home);
+      const stagedWhenAsked: boolean[] = [];
+      const refused = yield* replaceDatabaseWithBackup({
+        file: backup,
+        live: { baseDir: home.root, stateDir: home.stateDir, dbPath: home.dbPath },
+        openSqlite: makeRuntimeSqliteLayer,
+        nowMs: Date.now(),
+        // A process opened the database while the backup was being staged.
+        fileHolders: async () => {
+          stagedWhenAsked.push(
+            NodeFS.readdirSync(home.stateDir).some((name) => name.startsWith(".restore-staging-")),
+          );
+          return { kind: "checked", others: [{ pid: 4242, command: "sqlite3" }] };
+        },
+      }).pipe(Effect.provide(NodeServices.layer), Effect.flip);
+      assert.deepEqual(stagedWhenAsked, [true]);
+      assert.include(refused.message, "pid 4242 (sqlite3)");
+      // The staged copy is gone again, and nothing else changed.
+      assert.deepEqual(
+        NodeFS.readdirSync(home.stateDir).filter((name) => name.startsWith(".restore-staging-")),
+        [],
+      );
+      assert.deepEqual(notes(home.dbPath), ["kept"]);
+    }).pipe(Effect.ensuring(home.cleanup));
+  });
+
+  it.effect("refuses a backup whose ledger would make this build skip its own migrations", () => {
+    const home = makeHome();
+    return Effect.gen(function* () {
+      yield* buildHome(home);
+      // A plain copy that another branch wrote: one of this build's migrations has another name.
+      const foreignId = migrationEntries
+        .map(([id]) => id)
+        .find((id) => !repairedMigrationIds.has(id))!;
+      const foreign = NodePath.join(home.root, "foreign.sqlite");
+      const source = new DatabaseSync(home.dbPath);
+      source.exec(`VACUUM INTO '${foreign}'`);
+      source.close();
+      const copy = new DatabaseSync(foreign);
+      copy
+        .prepare("UPDATE effect_sql_migrations SET name = 'SomethingElse' WHERE migration_id = ?")
+        .run(foreignId);
+      copy.close();
+
+      const refused = yield* runCli(["db", "restore", foreign, "--replace", ...home.here]).pipe(
+        Effect.provide(CliRuntimeLayer),
+        Effect.flip,
+      );
+      assert.instanceOf(refused, DatabaseBackupCommandError);
+      assert.include(refused.message, `skip its own migration ${foreignId}`);
+      assert.deepEqual(notes(home.dbPath), ["kept"]);
+      assert.isTrue(NodeFS.existsSync(home.keyPath));
+    }).pipe(Effect.ensuring(home.cleanup));
+  });
+
+  it.effect("refuses to replace a database that is a symbolic link", () => {
+    const home = makeHome();
+    return Effect.gen(function* () {
+      const backup = yield* buildHome(home);
+      const real = NodePath.join(home.root, "elsewhere.sqlite");
+      NodeFS.renameSync(home.dbPath, real);
+      for (const suffix of ["-wal", "-shm"])
+        NodeFS.rmSync(`${home.dbPath}${suffix}`, { force: true });
+      NodeFS.symlinkSync(real, home.dbPath);
+      const refused = yield* runCli(["db", "restore", backup, "--replace", ...home.here]).pipe(
+        Effect.provide(CliRuntimeLayer),
+        Effect.flip,
+      );
+      assert.instanceOf(refused, DatabaseBackupCommandError);
+      assert.include(refused.message, "symbolic link");
+      assert.isTrue(NodeFS.lstatSync(home.dbPath).isSymbolicLink());
+    }).pipe(Effect.ensuring(home.cleanup));
+  });
+
+  it("reports a swap whose staged file already has its name as done when undoing", async () => {
+    const home = makeHome();
+    try {
+      NodeFS.mkdirSync(home.stateDir, { recursive: true });
+      const journal = planDatabaseRestoreSwap(Date.UTC(2026, 9, 31));
+      const paths = restoreSwapPaths(home.dbPath, journal);
+      // The rename went through; only the clean-up after it failed.
+      NodeFS.mkdirSync(paths.aside);
+      NodeFS.writeFileSync(home.dbPath, "restored");
+      NodeFS.writeFileSync(paths.asideDatabase, "replaced");
+      NodeFS.writeFileSync(databaseRestoreJournalPath(home.dbPath), JSON.stringify(journal));
+      assert.equal(
+        await undoDatabaseRestoreSwap(
+          databaseRestoreJournalPath(home.dbPath),
+          home.dbPath,
+          journal,
+        ),
+        "completed",
+      );
+      assert.equal(NodeFS.readFileSync(home.dbPath, "utf8"), "restored");
+      assert.equal(NodeFS.readFileSync(paths.asideDatabase, "utf8"), "replaced");
+      assert.isFalse(NodeFS.existsSync(databaseRestoreJournalPath(home.dbPath)));
+    } finally {
+      NodeFS.rmSync(home.root, { recursive: true, force: true });
+    }
   });
 
   it.effect("moves back what it moved when the swap fails part-way", () => {

@@ -1984,6 +1984,8 @@ export interface RestoreResult {
   readonly schema: number;
   readonly supportedSchema: number;
   readonly opensWithThisBuild: boolean;
+  /** This build's own migrations it would skip there (another branch wrote it under these ids). */
+  readonly skippedMigrations: ReadonlyArray<number>;
   readonly check: "quick_check" | "integrity_check";
   readonly bytes: number;
   /** Not errors: what the person restoring should know (another branch, a newer schema, a failed flush). */
@@ -2295,6 +2297,7 @@ export const restoreDatabaseBackup = Effect.fn("restoreDatabaseBackup")(function
       schema,
       supportedSchema: SUPPORTED_MIGRATION_ID,
       opensWithThisBuild: schema <= SUPPORTED_MIGRATION_ID,
+      skippedMigrations: skipped,
       check: pragma,
       bytes,
       warnings,

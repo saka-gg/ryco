@@ -224,14 +224,15 @@ export const makeSqlitePersistenceLive = Effect.fn("makeSqlitePersistenceLive")(
   const path = yield* Path.Path;
   yield* fs.makeDirectory(path.dirname(dbPath), { recursive: true });
   // An in-place restore (`ryco db restore --replace`) that was interrupted is finished before
-  // anything opens the database; it fails startup with its journal's path when it cannot be.
+  // anything opens the database; startup fails with its journal's path when it cannot be
+  // (`database-restore-interrupted`, startupFailure.ts).
   if (
     yield* fs.exists(databaseRestoreJournalPath(dbPath)).pipe(Effect.orElseSucceed(() => false))
   ) {
     const { finishInterruptedDatabaseRestore } = yield* Effect.promise(
       () => import("../databaseRestoreSwap.ts"),
     );
-    yield* finishInterruptedDatabaseRestore(dbPath).pipe(Effect.orDie);
+    yield* finishInterruptedDatabaseRestore(dbPath);
   }
   // Only a database without content needs `setup` to choose auto_vacuum before WAL. Every other
   // file keeps the Bun client's own WAL switch, which retries SQLITE_BUSY (setup's does not).

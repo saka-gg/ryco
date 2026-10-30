@@ -160,8 +160,8 @@ const formatReplace = (result: ReplaceResult) =>
     ...(result.signedOut
       ? ["  Every device was signed out: pair your phones and other browsers again."]
       : []),
-    "  The restored database accepts again what was revoked after the backup was taken: revoke",
-    "  again any pairing link or integration you revoked since then.",
+    `  So that nothing revoked since the backup works again, its ${result.revoked.pairingLinks} unused pairing link(s)`,
+    `  and ${result.revoked.integrations} integration(s) were revoked: create new links, and pair integrations again.`,
   ].join("\n");
 
 /** `ryco db backup`. */

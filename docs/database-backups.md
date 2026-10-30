@@ -206,32 +206,37 @@ replaces in `<stateDir>/replaced-<time>/`. Quit Ryco first (the desktop app, `ry
 or any `ryco serve`): the command takes the database's owner lock
 ([database-ownership.md](database-ownership.md)) and refuses while a server holds it.
 
-1. It folds the write-ahead log into the database (`wal_checkpoint(TRUNCATE)`) and asks the
-   operating system whether any other process still has the database or its log open (`lsof` on
-   macOS, `/proc` on Linux, as `ryco doctor` does before its swap). SQLite opens `-wal` and `-shm`
-   by name, so a process that kept the old file open would share the restored file's log and
-   corrupt it. It refuses when another process has them open, or when that cannot be known
-   (Windows, no `lsof`); restore with `--into` there.
-2. It restores and checks the backup into a staging directory next to the database
+1. It restores and checks the backup into a staging directory next to the database
    (`<stateDir>/.restore-staging-<time>/`), on the same volume, so publishing it is a rename. A
-   backup with a newer schema than this build supports is refused.
-3. It writes a journal, `<stateDir>/state.sqlite.restore.json`, then moves the session signing key
-   (`secrets/server-signing-key.bin`) and `state.sqlite` with its `-wal`, `-shm` and `-journal`
-   files into `<stateDir>/replaced-<time>/`, renames the restored file to `state.sqlite`, and
-   removes the journal and the staging directory, flushing every directory on the way. Nothing is
-   deleted.
+   backup with a newer schema than this build supports is refused, and so is one another branch
+   wrote whose ledger would make this build skip its own migrations. A `state.sqlite` that is a
+   symbolic link is refused too.
+2. It secures the restored copy. Revocations live in the database, so the restored one would
+   accept again whatever was revoked or used after the backup was taken. Every pairing link not
+   used yet and every integration credential is revoked in it, and the session signing key
+   (`secrets/server-signing-key.bin`) moves aside below, so every session token is invalid: every
+   device and integration pairs again. The copy gets the database's owner and permissions.
+3. Right before the swap, it folds the write-ahead log into the database
+   (`wal_checkpoint(TRUNCATE)`) and asks the operating system whether any other process still has
+   the database or its log open (`lsof` on macOS, `/proc` on Linux, as `ryco doctor` does before
+   its swap). SQLite opens `-wal` and `-shm` by name, so a process that kept the old file open
+   would share the restored file's log and corrupt it. It refuses when another process has them
+   open, or when that cannot be known (Windows, no `lsof`); restore with `--into` there.
+4. It writes a journal, `<stateDir>/state.sqlite.restore.json`, then moves the signing key and the
+   database's `-wal`, `-shm` and `-journal` files into `<stateDir>/replaced-<time>/`, hard-links
+   `state.sqlite` there, and renames the restored file over `state.sqlite`, so the name never goes
+   missing. It then removes the journal and the staging directory, flushing every directory on the
+   way. This step cannot be interrupted. Nothing is deleted.
 
-If the command stops part-way (a crash, a power loss), the journal finishes the swap: the next
-start of Ryco, or the next `ryco db restore --replace`, completes it before anything opens the
-database. A swap that fails while it runs moves back what it moved, and the database stays as it
-was. A journal is only acted on when every path in it is one the command would have written for
-that database.
+If the command stops part-way anyway (a crash, a power loss), the journal finishes the swap: the
+next start of Ryco, or the next `ryco db restore --replace`, completes it before anything opens
+the database (a start that cannot finish it stops with `database-restore-interrupted` and names
+the journal). A swap that fails while it runs moves back what it moved, and the database stays as
+it was. A run that stopped while staging leaves only its staging directory, which the next
+`--replace` removes. The journal holds only the names of the two directories it uses.
 
-Revocations live in the database, so the restored one accepts again every device session,
-pairing link and integration revoked after the backup was taken. That is why the signing key
-moves aside: every session token was signed with it, so every device is signed out and pairs
-again. Pairing links and integration credentials are checked against the database only, so revoke
-again any you revoked since the backup.
+The `replaced-<time>` directories hold full copies of the database; Ryco never removes them.
+Delete one once you no longer need what it holds.
 
 ### What `ryco db backup` costs
 
