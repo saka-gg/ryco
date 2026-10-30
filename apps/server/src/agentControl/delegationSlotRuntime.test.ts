@@ -37,6 +37,7 @@ import { threadsQueuedAtBoot } from "../orchestration/Layers/ServerQueueDrain.ts
 import { anyLiveTaskWaitsForSlot } from "./Layers/AgentControlDelegationSlots.ts";
 import {
   delegationGivenUpCommandId,
+  DELEGATION_GIVEN_UP_CAUSE_PREFIX,
   delegationGivenUpHold,
   delegationSlotReleaseCommandId,
   freeSlots,
@@ -46,6 +47,7 @@ import {
   waitingRequestIds,
   type DelegationSlotDeps,
 } from "./delegationSlotRuntime.ts";
+import { DELEGATION_GIVEN_UP_CAUSE_PREFIX as SHARED_GIVEN_UP_CAUSE_PREFIX } from "@ryco/shared/delegationSlot";
 
 const proposalId = AgentControlProposalId.make("proposal-capped");
 const slotKey = `delegation-slot:${proposalId}`;
@@ -539,7 +541,8 @@ describe("delegation slots", () => {
       w.task(1).returnStatus = "cancelled";
       yield* slots.pass;
       // Its slot's cause became a hold of its own, in one command: nothing waits for a slot any
-      // more, so a restart neither loads the runtime nor treats the queue as the node's own.
+      // more, so a restart does not load the runtime. Nor does it add its own hold: the queue
+      // already waits for the person, and its banner keeps saying why.
       assert.deepEqual(
         w.holdRecords.map((command) => [command.commandId, command.replacesCauseKeys]),
         [[delegationGivenUpCommandId(proposalId, taskId(1)), [slotKey]]],
@@ -549,7 +552,7 @@ describe("delegation slots", () => {
       assert.deepEqual(waitingRequestIds(threads, DELEGATION_SLOT_CAUSE_PREFIX), []);
       assert.isFalse(anyLiveTaskWaitsForSlot(threads));
       assert.isFalse(heldOnlyForDelegationSlot(w.task(1).queue?.hold));
-      assert.deepEqual(threadsQueuedAtBoot(threads), [taskId(1)]);
+      assert.deepEqual(threadsQueuedAtBoot(threads), []);
       assert.include(
         delegationGivenUpHold(proposalId).detail ?? "",
         "Its chat stopped waiting for it",
@@ -601,6 +604,23 @@ describe("delegation slots", () => {
       yield* slots.pass;
       assert.deepEqual(w.task(1).queue?.hold?.causeKeys, [givenUpKey]);
       assert.deepEqual(w.task(2).queue?.hold?.causeKeys, [givenUpKey]);
+      assert.deepEqual(w.released(), [taskId(1)]);
+    }),
+  );
+
+  it.effect("holds the last released task too, when no other task of the request waits", () =>
+    Effect.gen(function* () {
+      const w = world({ cap: 1, count: 2 });
+      const slots = yield* makeDelegationSlots(w.deps);
+      w.task(0).busy = false;
+      yield* slots.pass;
+      assert.deepEqual(w.released(), [taskId(1)]);
+      // Nothing of the request waits for a slot any more, but task 1 is not sent yet when the
+      // person stops the chat: its return says it stays paused, so it must not start on its own.
+      assert.isNull(w.task(1).queue?.hold);
+      w.parent.stopped = true;
+      yield* slots.pass;
+      assert.deepEqual(w.task(1).queue?.hold?.causeKeys, [givenUpKey]);
       assert.deepEqual(w.released(), [taskId(1)]);
     }),
   );
@@ -894,7 +914,7 @@ describe("delegation slot rules", () => {
     assert.isFalse(isDelegationSlotWakeEvent(event("thread.message-sent")));
   });
 
-  it("a restart holds every left queue but one that only waits for a slot", () => {
+  it("a restart holds every left queue but one that waits for a slot or was given up", () => {
     const thread = (id: string, causeKeys: ReadonlyArray<string> | null) => ({
       id: ThreadId.make(id),
       followUpQueue: {
@@ -907,14 +927,19 @@ describe("delegation slot rules", () => {
       thread("slot", [slotKey]),
       thread("slot-and-paused", [slotKey, "paused:x"]),
       thread("paused", ["paused:x"]),
+      // Already paused until the person resumes it: a restart hold would only relabel its
+      // banner "Paused after Ryco restarted".
       thread("given-up", [givenUpKey]),
+      thread("given-up-and-paused", [givenUpKey, "paused:x"]),
     ] as unknown as OrchestrationReadModel["threads"];
     assert.deepEqual(threadsQueuedAtBoot(threads), [
       "unheld",
       "slot-and-paused",
       "paused",
-      "given-up",
+      "given-up-and-paused",
     ]);
+    // The lazily loaded runtime keeps its own copy of the shared prefix.
+    assert.strictEqual(DELEGATION_GIVEN_UP_CAUSE_PREFIX, SHARED_GIVEN_UP_CAUSE_PREFIX);
     assert.isTrue(heldOnlyForDelegationSlot({ causeKeys: [slotKey] }));
     assert.isFalse(heldOnlyForDelegationSlot({ causeKeys: [] }));
     assert.isFalse(heldOnlyForDelegationSlot(null));

@@ -959,7 +959,7 @@ it.effect("never starts a task still waiting for its slot once the person stoppe
     assert.equal(record.status, "cancelled");
     assert.equal(
       record.detail,
-      "You stopped the delegating chat before this task's turn came, so it never starts.",
+      "You stopped the delegating chat before this task's turn came: it stays paused and starts only if you resume it, and its result does not return automatically.",
     );
     assert.equal(h.sent.length, 0);
   }).pipe(Effect.provide(layer)),
