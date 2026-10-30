@@ -12,6 +12,7 @@ import type {
   ProjectId,
   ProviderInstanceId,
   ServerProvider,
+  ThreadId,
 } from "@ryco/contracts";
 import { DAY_MS, HOUR_MS, MINUTE_MS, WEEK_MS } from "@ryco/shared/automationSchedule";
 import { describe, expect, it } from "vite-plus/test";
@@ -197,6 +198,24 @@ describe("the sentence", () => {
     expect(words.start).toBe("Sat, Oct 10 · 10:40");
     expect(words.startLabel).toBe("Runs at: Sat, Oct 10 · 10:40");
     expect(words.endWord).toBe("until");
+  });
+
+  it("says a heartbeat runs in an existing chat called its title, or asks for one", () => {
+    const heartbeat = blank({ target: { kind: "thread", threadId: "thread-ci" as ThreadId } });
+    const words = sentenceWords(heartbeat, NOW, { words: "Fix CI flakes", choosingChat: false });
+    expect([words.env, words.envLabel]).toEqual(["an existing chat", "Runs in: an existing chat"]);
+    expect([words.chat, words.chatLabel]).toEqual(["Fix CI flakes", "Chat: Fix CI flakes"]);
+    // Picking a chat for a draft that has none yet.
+    const choosing = sentenceWords(blank(), NOW, { words: null, choosingChat: true });
+    expect([choosing.env, choosing.chat, choosing.chatLabel]).toEqual([
+      "an existing chat",
+      "pick a chat",
+      "Chat: none picked yet",
+    ]);
+    // A draft without a chat reads its checkout, whatever chat words come along.
+    expect(sentenceWords(blank(), NOW, { words: "Fix CI flakes", choosingChat: false }).env).toBe(
+      "a new worktree",
+    );
   });
 });
 

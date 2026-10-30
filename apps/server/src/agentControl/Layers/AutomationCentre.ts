@@ -144,6 +144,7 @@ export const AutomationCentreLive = Layer.effect(
           unavailableRecords: metadata.unavailableRecords,
           historyLimit: 50,
           runWithoutAsking: true as const,
+          heartbeats: true as const,
           proposals: active.filter((proposal) => {
             const plan = proposal.plan;
             return plan.kind === "createAutomation"

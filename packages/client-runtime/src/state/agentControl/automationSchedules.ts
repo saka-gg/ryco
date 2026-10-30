@@ -796,11 +796,14 @@ export function envWords(mode: ThreadEnvMode): string {
   return mode === "local" ? "the main checkout" : "a new worktree";
 }
 
+/** Where a heartbeat's runs go (`execution.target`): one chat, not a new one each time. */
+export const EXISTING_CHAT_WORDS = "an existing chat";
+
 /** Where each run goes: "an existing chat" (a heartbeat), else its new chat's checkout. */
 export function runsInWords(
   execution: Pick<AgentControlAutomationExecutionTemplate, "envMode" | "target">,
 ): string {
-  return execution.target === undefined ? envWords(execution.envMode) : "an existing chat";
+  return execution.target === undefined ? envWords(execution.envMode) : EXISTING_CHAT_WORDS;
 }
 
 const EFFORT_OPTION_IDS = ["effort", "reasoningEffort"] as const;
@@ -1037,7 +1040,9 @@ export function definitionFromDraft(draft: ScheduleDraft): AgentControlAutomatio
     runtimeMode: draft.runtimeMode,
     ...(draft.tokenMode ? { tokenMode: draft.tokenMode } : {}),
     envMode: draft.envMode,
-    ...(draft.envMode === "worktree" && baseRef ? { baseRef } : {}),
+    // A heartbeat runs in its chat: a branch would only be checked on every run, hidden from
+    // the editor, and fail them all once it is gone.
+    ...(draft.envMode === "worktree" && baseRef && draft.target === null ? { baseRef } : {}),
     ...(draft.target === null ? {} : { target: draft.target }),
   };
   return {
