@@ -3,7 +3,7 @@ import os from "node:os";
 import path from "node:path";
 
 import { assert, describe, it } from "@effect/vitest";
-import { Effect, Layer, Logger, References, Tracer } from "effect";
+import { Clock, Duration, Effect, Layer, Logger, References, Tracer } from "effect";
 
 import type { EffectTraceRecord } from "./TraceRecord.ts";
 import { makeLocalFileTracer, type LocalFileTracerOptions } from "./LocalFileTracer.ts";
@@ -238,12 +238,40 @@ describe("LocalFileTracer", () => {
     yield* Effect.fail("boom").pipe(Effect.withSpan("failed-child"), Effect.ignore);
   }).pipe(Effect.withSpan("root"));
 
+  /**
+   * A clock that moves only when something sleeps, so the spans last exactly what they sleep:
+   * a runner that stalls for a few milliseconds inside the fast child cannot stretch it past
+   * a threshold.
+   */
+  const steppedClock = (): Clock.Clock => {
+    let nanos = BigInt(Date.now()) * 1_000_000n;
+    const millis = () => Number(nanos / 1_000_000n);
+    return {
+      currentTimeMillisUnsafe: millis,
+      currentTimeMillis: Effect.sync(millis),
+      currentTimeNanosUnsafe: () => nanos,
+      currentTimeNanos: Effect.sync(() => nanos),
+      monotonicTimeNanosUnsafe: () => nanos,
+      monotonicTimeNanos: Effect.sync(() => nanos),
+      sleep: (duration) =>
+        Effect.sync(() => {
+          nanos += Duration.toNanosUnsafe(duration);
+        }),
+    };
+  };
+
   const runChildSpans = (thresholds?: ThresholdOptions) =>
     Effect.gen(function* () {
       const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "ryco-local-tracer-"));
       const tracePath = path.join(tempDir, "server.trace.ndjson");
       try {
-        yield* Effect.scoped(childSpans.pipe(Effect.provide(makeTestLayer(tracePath, thresholds))));
+        yield* Effect.scoped(
+          childSpans.pipe(
+            // Only the spans run on it; the tracer's own batching keeps the live clock.
+            Effect.provideService(Clock.Clock, steppedClock()),
+            Effect.provide(makeTestLayer(tracePath, thresholds)),
+          ),
+        );
         return spanNames(tracePath);
       } finally {
         fs.rmSync(tempDir, { recursive: true, force: true });
