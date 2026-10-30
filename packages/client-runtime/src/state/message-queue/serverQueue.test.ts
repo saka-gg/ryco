@@ -76,6 +76,7 @@ import {
   followUpQueueEditOf,
   withoutFollowUpQueueEditAttachment,
 } from "./serverQueue.ts";
+import { followUpQueueBadgeOf } from "./queueBadge.ts";
 import { createMessageQueueStore } from "./store.ts";
 
 const THREAD_ID = ThreadId.make("t");
@@ -364,6 +365,51 @@ describe("editing the node's queued entry", () => {
     ]);
     // The entry left the queue meanwhile: nothing to show.
     expect(followUpQueueEditAttachments(dropped, undefined)).toEqual([]);
+  });
+});
+
+describe("follow-up queue badge", () => {
+  const hold = {
+    reason: "interrupted" as const,
+    detail: null,
+    causeKeys: ["interrupt:turn-1"],
+    heldAt: "2026-10-24T10:00:00.000Z",
+  };
+
+  it("counts queued follow-ups, and says why nothing goes out", () => {
+    expect(followUpQueueBadgeOf(undefined)).toBeNull();
+    expect(followUpQueueBadgeOf({ count: 1, hold: null, headStatus: "queued" })).toEqual({
+      label: "1 queued",
+      title: "1 queued follow-up",
+      held: false,
+    });
+    expect(followUpQueueBadgeOf({ count: 3, hold, headStatus: "queued" })).toEqual({
+      label: "3 held",
+      title: "3 queued follow-ups: Paused after Stop",
+      held: true,
+    });
+    expect(followUpQueueBadgeOf({ count: 2, hold: null, headStatus: "failed" })).toEqual({
+      label: "2 held",
+      title: "2 queued follow-ups: The next one waits for Retry",
+      held: true,
+    });
+  });
+
+  it("shows a delegated task waiting for a free slot as queued: the node sends it itself", () => {
+    const slot = { ...hold, reason: "paused" as const, causeKeys: ["delegation-slot:request-1"] };
+    expect(followUpQueueBadgeOf({ count: 1, hold: slot, headStatus: "queued" })).toEqual({
+      label: "1 queued",
+      title: "1 queued follow-up: Waiting for a free slot",
+      held: false,
+    });
+    // With another cause besides the slot, a person must act.
+    expect(
+      followUpQueueBadgeOf({
+        count: 1,
+        hold: { ...slot, causeKeys: ["delegation-slot:request-1", "paused:2026-10-24"] },
+        headStatus: "queued",
+      })?.held,
+    ).toBe(true);
   });
 });
 

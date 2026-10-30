@@ -1,7 +1,7 @@
 import { EnvironmentId, ProjectId, ThreadId } from "@ryco/contracts";
 import { DEFAULT_UNIFIED_SETTINGS } from "@ryco/contracts/settings";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
-import { userEvent } from "vite-plus/test/browser";
+import { page, userEvent } from "vite-plus/test/browser";
 import { render } from "vitest-browser-react";
 
 import { DraftId } from "../../composerDraftStore";
@@ -325,6 +325,109 @@ describe("SidebarThreadRow navigation intent", () => {
       expect(intent.press).not.toHaveBeenCalled();
     } finally {
       await mounted.unmount();
+    }
+  });
+});
+
+describe("SidebarThreadRow follow-up queue badge", () => {
+  afterEach(() => {
+    document.body.innerHTML = "";
+  });
+
+  it("marks a thread with queued follow-ups, and says why a held queue waits", async () => {
+    await page.viewport(1200, 900);
+    const queued = rowProps("queued");
+    const held = rowProps("held");
+    const mounted = await render(
+      <AppAtomRegistryProvider>
+        <ul>
+          <SidebarThreadRow {...rowProps("empty")} gitStatusTarget={null} />
+          <SidebarThreadRow
+            {...queued}
+            thread={{
+              ...queued.thread,
+              followUpQueueSummary: {
+                count: 2,
+                hold: null,
+                headStatus: "queued",
+                headPreview: "Next",
+              },
+            }}
+            gitStatusTarget={null}
+          />
+          <SidebarThreadRow
+            {...held}
+            thread={{
+              ...held.thread,
+              followUpQueueSummary: {
+                count: 1,
+                hold: {
+                  reason: "error",
+                  detail: "Provider died.",
+                  causeKeys: ["error:turn-1:Provider died."],
+                  heldAt: "2026-05-01T00:00:00.000Z",
+                },
+                headStatus: "queued",
+                headPreview: "Next",
+              },
+            }}
+            gitStatusTarget={null}
+          />
+        </ul>
+      </AppAtomRegistryProvider>,
+    );
+    try {
+      // The presentation tier follows the viewport through a media query listener.
+      await expect
+        .poll(() => document.querySelectorAll("[data-follow-up-queue-badge]").length)
+        .toBe(2);
+      const badges = [...document.querySelectorAll("[data-follow-up-queue-badge]")];
+      // What it shows, and the reason a screen reader reads instead.
+      const shown = (badge: Element | undefined) =>
+        badge?.querySelector('[aria-hidden="true"]')?.textContent;
+      expect(badges.map(shown)).toEqual(["2 queued", "1 held"]);
+      expect(badges.map((badge) => badge.querySelector(".sr-only")?.textContent)).toEqual([
+        "2 queued follow-ups",
+        "1 queued follow-up: Paused after an error",
+      ]);
+      expect(badges.map((badge) => badge.getAttribute("data-follow-up-queue-badge"))).toEqual([
+        "queued",
+        "held",
+      ]);
+      expect(badges[1]?.getAttribute("title")).toBe("1 queued follow-up: Paused after an error");
+    } finally {
+      await mounted.unmount();
+    }
+  });
+
+  it("leaves the frozen phone tier unmarked", async () => {
+    await page.viewport(390, 844);
+    const queued = rowProps("queued");
+    const mounted = await render(
+      <AppAtomRegistryProvider>
+        <ul>
+          <SidebarThreadRow
+            {...queued}
+            thread={{
+              ...queued.thread,
+              followUpQueueSummary: {
+                count: 2,
+                hold: null,
+                headStatus: "queued",
+                headPreview: "Next",
+              },
+            }}
+            gitStatusTarget={null}
+          />
+        </ul>
+      </AppAtomRegistryProvider>,
+    );
+    try {
+      await expect.element(page.getByText("queued", { exact: true })).toBeInTheDocument();
+      await expect.poll(() => document.querySelector("[data-follow-up-queue-badge]")).toBeNull();
+    } finally {
+      await mounted.unmount();
+      await page.viewport(1200, 900);
     }
   });
 });
