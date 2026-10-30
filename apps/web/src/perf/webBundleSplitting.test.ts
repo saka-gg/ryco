@@ -235,32 +235,23 @@ describe("web bundle splitting boundaries", () => {
 
   it("mounts sidebar worktree dialogs lazily and preloads them on intent", async () => {
     const worktreeList = await readSource("../components/sidebar/SidebarWorktreeList.tsx");
-    const projectDialogs = await readSource("../components/sidebar/SidebarProjectDialogOwner.tsx");
-    const projectItem = await readSource("../components/sidebar/SidebarProjectItem.tsx");
     const sharedDialogs = await readSource("../components/worktrees/lazyWorktreeDialogs.ts");
 
-    // One code-split wrapper per dialog, shared with the chat, so a preload
-    // from either surface serves both.
+    // One code-split wrapper, shared with the chat, so a preload from either
+    // surface serves both.
     expect(sharedDialogs).toContain('import("./LinkedWorktreeItemDialog")');
-    expect(sharedDialogs).toContain('import("./NewWorktreeDialog")');
     expect(sharedDialogs).toContain("preloadableLazy(");
-    expect(sharedDialogs).not.toMatch(
-      /^import \{[^}]*\} from "\.\/(?:LinkedWorktreeItemDialog|NewWorktreeDialog)";$/mu,
-    );
+    expect(sharedDialogs).not.toMatch(/^import \{[^}]*\} from "\.\/LinkedWorktreeItemDialog";$/mu);
     expect(worktreeList).not.toMatch(/import \{[^}]*\bLinkedWorktreeItemDialog\b/u);
-    expect(projectDialogs).not.toMatch(/import \{[^}]*\bNewWorktreeDialog\b/u);
-    for (const source of [worktreeList, projectDialogs]) {
-      expect(source).toContain('from "../worktrees/lazyWorktreeDialogs"');
-      expect(source).not.toContain("preloadableLazy(");
-      expect(source).toContain("useLazyComponentReady(");
-      // A failed chunk is a toast with a Retry, never the root error view.
-      expect(source).toContain("onLoadError:");
-      expect(source).not.toMatch(REACT_LAZY_IMPORT);
-      expect(source).not.toContain("<Suspense");
-    }
-    // Pointing at what opens them starts the chunk load.
+    expect(worktreeList).toContain('from "../worktrees/lazyWorktreeDialogs"');
+    expect(worktreeList).not.toContain("preloadableLazy(");
+    expect(worktreeList).toContain("useLazyComponentReady(");
+    // A failed chunk is a toast with a Retry, never the root error view.
+    expect(worktreeList).toContain("onLoadError:");
+    expect(worktreeList).not.toMatch(REACT_LAZY_IMPORT);
+    expect(worktreeList).not.toContain("<Suspense");
+    // Pointing at what opens it starts the chunk load.
     expect(worktreeList).toContain("onOpenLinkedItemIntent={preloadLinkedWorktreeItemDialog}");
-    expect(projectItem).toContain("onOpenNewWorktreeIntent={preloadNewWorktreeDialog}");
   });
 
   it("preloads the shell's on-demand dialogs from their entry points", async () => {

@@ -69,7 +69,6 @@ import {
 import { useThreadClipboardActions } from "../../sidebar/hooks/useThreadClipboardActions";
 import { Button } from "../../ui/button";
 import { stackedThreadToast, toastManager } from "../../ui/toast";
-import { NewWorktreeDialog } from "../../worktrees/NewWorktreeDialog";
 import { InlineNameField, ProjectImage, ProjectNameField } from "../detail/ProjectHero";
 import { useProjectsPage, useProjectsSelection } from "../ProjectsPageContext";
 import { projectRepositoryLabel } from "../projectsModel.logic";
@@ -421,14 +420,9 @@ function DevicePanel(props: {
   const { detail } = props;
   const { nav } = useProjectsPage();
   const access = useProjectEditAccess(detail.member.environmentId);
-  const createCapability = useHostedRpcCapability(
-    WS_METHODS.gitCreateWorktreeForProject,
-    detail.member.environmentId,
-  );
   const { copyPathToClipboard } = useThreadClipboardActions();
-  const router = useRouter();
+  const { handleNewThread } = useNewThreadHandler();
   const nowMs = useNowMs();
-  const [newWorktree, setNewWorktree] = useState(false);
   // This machine's checkouts, and checkouts on machines added over SSH.
   const primaryEnvironmentId = usePrimaryEnvironmentId();
   const editorAvailable = canOpenInEditor(detail.member.environmentId, primaryEnvironmentId);
@@ -480,8 +474,13 @@ function DevicePanel(props: {
         <Button
           size="sm"
           variant="outline"
-          disabled={!access.canEdit || !createCapability.allowed}
-          onClick={() => setNewWorktree(true)}
+          disabled={!access.canEdit}
+          onClick={() =>
+            void handleNewThread(scopeProjectRef(detail.member.environmentId, detail.member.id), {
+              envMode: "worktree",
+              worktreePath: null,
+            })
+          }
         >
           <GitBranchIcon className="size-3.5" />
           New worktree
@@ -600,22 +599,6 @@ function DevicePanel(props: {
           ))}
         </Section>
       ) : null}
-      <NewWorktreeDialog
-        open={newWorktree}
-        environmentId={detail.member.environmentId}
-        projectId={detail.member.id}
-        cwd={detail.member.cwd}
-        initialTab="branches"
-        onCreated={(result) =>
-          void router.navigate({
-            to: "/$environmentId/$threadId",
-            params: buildThreadRouteParams(
-              scopeThreadRef(detail.member.environmentId, result.sessionId),
-            ),
-          })
-        }
-        onOpenChange={setNewWorktree}
-      />
     </>
   );
 }

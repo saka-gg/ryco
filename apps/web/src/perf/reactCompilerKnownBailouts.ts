@@ -120,13 +120,6 @@ export const KNOWN_BAILOUTS: Readonly<Record<string, ReadonlyArray<string>>> = {
   "src/components/shell/phone/PhoneHome.tsx": ["PhoneHomeProjectSection"],
   "src/components/shell/phone/PhoneThreadDock.tsx": ["PhoneThreadDock"],
   "src/components/sidebar/ProjectSettingsDialog.tsx": ["ProjectSettingsGeneralSection"],
-  "src/components/worktrees/NewWorktreeDialog.tsx": [
-    "BranchRefPicker",
-    "BranchesTab",
-    "NewBranchTab",
-    "NewWorktreeDialog",
-    "useWorktreeBranchRefs",
-  ],
   "src/hooks/useChatSessionActions.ts": ["useChatSessionActions"],
   "src/hooks/useCopyToClipboard.ts": ["useCopyToClipboard"],
   "src/hooks/useLongPress.ts": ["useLongPress"],

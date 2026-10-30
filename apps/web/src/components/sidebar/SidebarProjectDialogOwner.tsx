@@ -1,30 +1,14 @@
 import { useNavigate } from "@tanstack/react-router";
-import { createContext, useCallback, useContext, useMemo, useState } from "react";
-import type { SidebarProjectGroupingMode, ScopedThreadRef } from "@ryco/contracts";
-import { scopeThreadRef } from "@ryco/client-runtime/scoped";
+import { createContext, useCallback, useContext, useMemo } from "react";
+import type { SidebarProjectGroupingMode } from "@ryco/contracts";
 
-import type {
-  SidebarProjectGroupMember,
-  SidebarProjectSnapshot,
-} from "../../sidebarProjectGrouping";
+import type { SidebarProjectGroupMember } from "../../sidebarProjectGrouping";
 import type { useUpdateSettings } from "~/hooks/useSettings";
-import { notifySurfaceLoadFailure } from "../ui/surfaceLoadFailure";
-import { useLazyComponentReady } from "../../lib/preloadableLazy";
 import { buildProjectsPageLocation } from "../../projectsRoute";
-import { LazyNewWorktreeDialog } from "../worktrees/lazyWorktreeDialogs";
-import type { NewWorktreeDialogTab } from "../worktrees/NewWorktreeDialog";
 import { SidebarProjectGroupingDialog } from "./SidebarProjectGroupingDialog";
 import { SidebarProjectRenameDialog } from "./SidebarProjectRenameDialog";
 import { useSidebarProjectGroupingDialog } from "./hooks/useSidebarProjectGroupingDialog";
 import { useSidebarProjectRenameDialog } from "./hooks/useSidebarProjectRenameDialog";
-
-/*
- * The new-workspace dialog (branch, pull request, issue, and Jira pickers) is
- * its own chunk, shared with the chat; nothing in it renders while the sidebar
- * boots. Pointing at or focusing a project's "New workspace" button starts the
- * load (`preloadNewWorktreeDialog`), so a click usually finds it ready.
- */
-export { preloadNewWorktreeDialog } from "../worktrees/lazyWorktreeDialogs";
 
 /**
  * Project actions the desktop sidebar offers. Overview and settings live on
@@ -38,10 +22,6 @@ interface SidebarProjectDialogActions {
    */
   readonly openOverview: (
     checkout: Pick<SidebarProjectGroupMember, "environmentId" | "id">,
-  ) => void;
-  readonly openNewWorktree: (
-    project: SidebarProjectSnapshot,
-    initialTab: NewWorktreeDialogTab,
   ) => void;
   /** The page for one checkout (the project on one device). */
   readonly openSettings: (member: SidebarProjectGroupMember) => void;
@@ -66,33 +46,7 @@ export function SidebarProjectDialogProvider(props: {
       | undefined;
   };
   readonly updateSettings: ReturnType<typeof useUpdateSettings>["updateSettings"];
-  readonly navigateToThread: (threadRef: ScopedThreadRef) => void;
 }) {
-  const [newWorktreeTarget, setNewWorktreeTarget] = useState<{
-    readonly project: SidebarProjectSnapshot;
-    readonly initialTab: NewWorktreeDialogTab;
-  } | null>(null);
-  const [newWorktreeOpen, setNewWorktreeOpen] = useState(false);
-  // Mounting only once the chunk resolved keeps the first open free of a
-  // committed Suspense fallback and React's fallback-reveal throttle.
-  // A failed chunk closes the request and offers a Retry that reopens it, so
-  // the mount never throws to the root error view.
-  const newWorktreeDialogReady = useLazyComponentReady(
-    LazyNewWorktreeDialog,
-    newWorktreeTarget !== null,
-    {
-      onLoadError: (error) => {
-        const target = newWorktreeTarget;
-        setNewWorktreeOpen(false);
-        setNewWorktreeTarget(null);
-        notifySurfaceLoadFailure("new workspace dialog", error, () => {
-          if (!target) return;
-          setNewWorktreeTarget(target);
-          setNewWorktreeOpen(true);
-        });
-      },
-    },
-  );
   const navigate = useNavigate();
   const renameDialog = useSidebarProjectRenameDialog();
   const groupingDialog = useSidebarProjectGroupingDialog({
@@ -116,24 +70,15 @@ export function SidebarProjectDialogProvider(props: {
     },
     [navigate],
   );
-  const openNewWorktree = useCallback(
-    (project: SidebarProjectSnapshot, initialTab: NewWorktreeDialogTab) => {
-      setNewWorktreeTarget({ project, initialTab });
-      setNewWorktreeOpen(true);
-    },
-    [],
-  );
   const actions = useMemo<SidebarProjectDialogActions>(
     () => ({
       openOverview: (checkout) => openProjectPage(checkout, "map"),
-      openNewWorktree,
       openSettings: (checkout) => openProjectPage(checkout, "settings"),
       openRename: renameDialog.openProjectRenameDialog,
       openGrouping: groupingDialog.openProjectGroupingDialog,
     }),
     [
       groupingDialog.openProjectGroupingDialog,
-      openNewWorktree,
       openProjectPage,
       renameDialog.openProjectRenameDialog,
     ],
@@ -142,24 +87,6 @@ export function SidebarProjectDialogProvider(props: {
   return (
     <SidebarProjectDialogContext.Provider value={actions}>
       {props.children}
-
-      {newWorktreeTarget && newWorktreeDialogReady ? (
-        <LazyNewWorktreeDialog
-          open={newWorktreeOpen}
-          environmentId={newWorktreeTarget.project.environmentId}
-          projectId={newWorktreeTarget.project.id}
-          cwd={newWorktreeTarget.project.cwd}
-          initialTab={newWorktreeTarget.initialTab}
-          onCreated={(result) => {
-            props.navigateToThread(
-              scopeThreadRef(newWorktreeTarget.project.environmentId, result.sessionId),
-            );
-          }}
-          onOpenChange={(open) => {
-            setNewWorktreeOpen(open);
-          }}
-        />
-      ) : null}
 
       <SidebarProjectRenameDialog
         target={renameDialog.projectRenameTarget}

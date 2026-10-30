@@ -295,7 +295,7 @@ describe("standard build static import graph", () => {
       forbiddenChains("components/RootAppShell.tsx", [
         ...HOSTED_RUNTIME,
         ...MARKDOWN,
-        /^apps\/web\/src\/components\/worktrees\/(?:LinkedWorktreeItemDialog|NewWorktreeDialog)\.tsx$/u,
+        /^apps\/web\/src\/components\/worktrees\/LinkedWorktreeItemDialog\.tsx$/u,
         /^apps\/web\/src\/components\/JetBrainsIcons\.tsx$/u,
       ]),
     ).toEqual([]);

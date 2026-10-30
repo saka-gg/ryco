@@ -1484,7 +1484,6 @@ export default function Sidebar() {
         <SidebarProjectDialogProvider
           projectGroupingSettings={projectGroupingSettings}
           updateSettings={updateSettings}
-          navigateToThread={navigateToThread}
         >
           {mountedSidebarModes.has("projects") ? (
             <Activity mode={projectsPaneVisible ? "visible" : "hidden"} name="sidebar-projects">
