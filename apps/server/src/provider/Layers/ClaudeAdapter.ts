@@ -197,6 +197,7 @@ import {
   probeClaudeCapabilities,
   resolveClaudeApiModelId,
   resolveClaudeEffort,
+  resolveClaudeFastMode,
 } from "./ClaudeProvider.ts";
 import {
   ProviderAdapterProcessError,
@@ -573,8 +574,8 @@ interface ClaudeSessionContext {
   compactionPolicy: ContextCompactionPolicyState;
   /** The CLI's latest init frame lists `/compact`, which the compaction policy sends. */
   supportsAutomaticCompaction: boolean;
-  /** Ryco started this runtime with Fast mode on. */
-  readonly fastModeRequested: boolean;
+  /** Ryco asked this runtime for Fast mode, at start or by a later turn's selection. */
+  fastModeRequested: boolean;
   /** `state:reason` of the Fast mode report last seen on this runtime; undefined before one. */
   lastFastModeSignature: string | undefined;
   compactionUnavailableWarningEmitted: boolean;
@@ -628,6 +629,8 @@ interface ClaudeQueryRuntime extends AsyncIterable<SDKMessage> {
   readonly setModel: (model?: string) => Promise<void>;
   readonly setPermissionMode: (mode: PermissionMode) => Promise<void>;
   readonly setMaxThinkingTokens: (maxThinkingTokens: number | null) => Promise<void>;
+  /** SDK Query.applyFlagSettings; `null` clears the key from the flag layer. */
+  readonly applyFlagSettings: (settings: { readonly fastMode: true | null }) => Promise<void>;
   readonly close: () => void;
   readonly mcpServerStatus?: () => Promise<
     ReadonlyArray<{ readonly name: string; readonly status: string }>
@@ -6309,14 +6312,10 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     const apiModelId = modelSelection ? resolveClaudeApiModelId(modelSelection) : undefined;
     const rawEffort = getModelSelectionStringOptionValue(modelSelection, "effort");
     const effort = resolveClaudeEffort(caps, rawEffort) ?? null;
-    const fastModeSupported = descriptors.some(
-      (descriptor) => descriptor.type === "boolean" && descriptor.id === "fastMode",
-    );
     const thinkingSupported = descriptors.some(
       (descriptor) => descriptor.type === "boolean" && descriptor.id === "thinking",
     );
-    const fastMode =
-      getModelSelectionBooleanOptionValue(modelSelection, "fastMode") === true && fastModeSupported;
+    const fastMode = resolveClaudeFastMode(modelSelection);
     const thinking = thinkingSupported
       ? getModelSelectionBooleanOptionValue(modelSelection, "thinking")
       : undefined;
@@ -6802,6 +6801,21 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       );
       context.currentEffort =
         getEffectiveClaudeAgentEffort(turnEffort ?? null, modelSelection.model) ?? undefined;
+      // Fast mode changes in-session (`modelSelectionChangeRestartsSession`), so background work
+      // the runtime still runs keeps running. `null` clears the flag-layer key, as Claude Code's
+      // own toggle does, which leaves the speed to Claude Code's settings as a start without
+      // Fast mode does.
+      const fastMode = resolveClaudeFastMode(modelSelection);
+      if (fastMode !== context.fastModeRequested) {
+        yield* Effect.tryPromise({
+          try: () => context.query.applyFlagSettings({ fastMode: fastMode ? true : null }),
+          catch: (cause) =>
+            toSessionRequestError(context, input.threadId, "turn/applyFlagSettings", cause),
+        });
+        context.fastModeRequested = fastMode;
+        // The next report republishes with the new request, even if the state holds.
+        context.lastFastModeSignature = undefined;
+      }
     }
 
     // Apply interaction mode by switching the SDK's permission mode.

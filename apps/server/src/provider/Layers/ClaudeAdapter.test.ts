@@ -104,6 +104,7 @@ class FakeClaudeQuery implements AsyncIterable<SDKMessage> {
   public readonly setModelCalls: Array<string | undefined> = [];
   public readonly setPermissionModeCalls: Array<string> = [];
   public readonly setMaxThinkingTokensCalls: Array<number | null> = [];
+  public readonly applyFlagSettingsCalls: Array<{ readonly fastMode: true | null }> = [];
   public closeCalls = 0;
   public mcpStatuses: ReadonlyArray<{ readonly name: string; readonly status: string }> = [];
   /** While set, setPermissionMode parks on it before recording the call. */
@@ -173,6 +174,10 @@ class FakeClaudeQuery implements AsyncIterable<SDKMessage> {
 
   readonly setMaxThinkingTokens = async (maxThinkingTokens: number | null): Promise<void> => {
     this.setMaxThinkingTokensCalls.push(maxThinkingTokens);
+  };
+
+  readonly applyFlagSettings = async (settings: { readonly fastMode: true | null }) => {
+    this.applyFlagSettingsCalls.push(settings);
   };
 
   readonly close = (): void => {
@@ -8350,12 +8355,22 @@ describe("ClaudeAdapterLive Fast mode state", () => {
         ]),
         runtimeMode: "full-access",
       });
-      const runTurn = (frames: ReadonlyArray<SDKMessage>) =>
+      /** `fastMode` sends the turn with that selection; without it the turn sends none. */
+      const runTurn = (frames: ReadonlyArray<SDKMessage>, fastMode?: boolean) =>
         Effect.gen(function* () {
           const turn = yield* adapter.sendTurn({
             threadId: THREAD_ID,
             input: "hello",
             attachments: [],
+            ...(fastMode !== undefined
+              ? {
+                  modelSelection: createModelSelection(
+                    ProviderInstanceId.make("claudeAgent"),
+                    FAST_MODEL,
+                    [{ id: "fastMode", value: fastMode }],
+                  ),
+                }
+              : {}),
           });
           for (const frame of frames) harness.query.emit(frame);
           yield* waitUntil(() =>
@@ -8441,6 +8456,42 @@ describe("ClaudeAdapterLive Fast mode state", () => {
           fastModeState: { state: "on", model: FAST_MODEL, requested: false },
         });
       }
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("switches fast mode in the live session when a turn asks for the other speed", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const { events, runTurn } = yield* startFastModeSession(harness);
+      const serving = { fast_mode_state: "on" };
+      yield* runTurn([fastResult("result-1", serving)], true);
+      assert.deepEqual(harness.query.applyFlagSettingsCalls, []);
+
+      yield* runTurn([fastResult("result-2", serving)], false);
+      yield* runTurn([fastResult("result-3", { fast_mode_state: "off" })], false);
+      yield* runTurn([fastResult("result-4", serving)], true);
+
+      // Each change of speed is one flag-layer update on the same runtime, never a restart.
+      assert.deepEqual(harness.query.applyFlagSettingsCalls, [
+        { fastMode: null },
+        { fastMode: true },
+      ]);
+      assert.equal(harness.query.closeCalls, 0);
+      // Every report after a change carries the new request, even when the state held.
+      assert.deepEqual(
+        fastModeReports(events).map((event) =>
+          event.type === "session.configured" ? event.payload.config.fastModeState : undefined,
+        ),
+        [
+          { state: "on", model: FAST_MODEL, requested: true },
+          { state: "on", model: FAST_MODEL, requested: false },
+          { state: "off", model: FAST_MODEL, requested: false },
+          { state: "on", model: FAST_MODEL, requested: true },
+        ],
+      );
     }).pipe(
       Effect.provideService(Random.Random, makeDeterministicRandomService()),
       Effect.provide(harness.layer),
