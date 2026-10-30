@@ -791,6 +791,7 @@ it.effect("refuses a client's turn start or steer that uses an id the server min
       "delegation-result:child",
       "message-agent-control-op-send-message",
       "goal-continuation:thread-1:turn-1",
+      "pull-request-watch:thread-1:uuid-1",
     ]) {
       const refused = yield* Effect.flip(refuseServerMintedMessageId(start(id)));
       expect(refused.message).toBe("This message id is reserved for messages Ryco sends.");

@@ -201,6 +201,7 @@ describe("follow-up queue decider: add", () => {
       "delegation-result:child:0",
       "message-agent-control-op-1",
       "pull-request-watch:thread:1",
+      "goal-continuation:thread:turn-1",
       `${threadId}:inherited:message-x`,
     ]) {
       const error = await refusal(modelWith(), addCommand(reserved));

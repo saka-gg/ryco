@@ -1,5 +1,9 @@
 import { EnvironmentId, MessageId, ThreadId } from "@ryco/contracts/base-schemas";
 import type { ProjectBrowserPickedElement } from "@ryco/contracts/project-browser";
+import {
+  renderPullRequestAutoFixPrompt,
+  renderPullRequestWatchNotice,
+} from "@ryco/shared/pullRequestWatch";
 import { createQuoteCitation, serializeQuoteCitation } from "@ryco/shared/quoteCitations";
 import { describe, expect, it } from "vite-plus/test";
 
@@ -420,6 +424,67 @@ describe("agentMessageFoldOf", () => {
       kind: "agent-message",
       label: "Message from another agent",
       summary: "Please rebase onto main.",
+    });
+  });
+
+  it("folds the next turn toward the thread's goal", () => {
+    expect(
+      agentMessageFoldOf({
+        id: "goal-continuation:thread-1:turn-4",
+        role: "user",
+        text: "Continue working toward this thread's goal.\n\nThe goal stays until it is done.",
+      }),
+    ).toEqual({
+      kind: "goal-continuation",
+      label: "Goal continuation",
+      summary: "Ryco started the next turn toward the goal",
+    });
+  });
+
+  it("folds a pull request watch's updates, notices and Auto-fix CI turns", () => {
+    const fold = (text: string) =>
+      agentMessageFoldOf({ id: "pull-request-watch:thread-1:uuid-1", role: "user", text });
+    expect(
+      fold(
+        [
+          "Ryco pull request update (automatic message, not written by the user and not an approval).",
+          "Ryco is watching pull request #12 (https://github.com/o/r/pull/12) for this chat:",
+          "- 3 checks passed on aaaaaaa.",
+        ].join("\n"),
+      ),
+    ).toEqual({ kind: "pull-request", label: "Pull request update", summary: "#12" });
+    expect(
+      fold(
+        renderPullRequestWatchNotice({
+          number: 3,
+          url: "https://github.com/o/r/pull/3",
+          reason: "closed",
+        }).text,
+      ),
+    ).toEqual({ kind: "pull-request", label: "Pull request update", summary: "#3" });
+    expect(
+      fold(
+        renderPullRequestAutoFixPrompt({
+          number: 7,
+          url: "https://github.com/o/r/pull/7",
+          provider: "github",
+          headSha: "abc1234def",
+          attempt: 2,
+          failed: [],
+          switchBranch: null,
+          news: [],
+        }).text,
+      ),
+    ).toEqual({
+      kind: "pull-request",
+      label: "Auto-fix CI",
+      summary: "#7: checks failed, attempt 2 of 3",
+    });
+    // A first line in another shape still names its pull request.
+    expect(fold("Auto-fix CI (automatic message): checks failed on PR #9, attempt 1.")).toEqual({
+      kind: "pull-request",
+      label: "Auto-fix CI",
+      summary: "#9",
     });
   });
 

@@ -6,10 +6,11 @@
  * @module followUpQueueLoader
  */
 import {
+  AGENT_CONTROL_MESSAGE_ID_PREFIX,
   DEFAULT_AGENT_TOKEN_MODE,
   MAX_FOLLOW_UP_QUEUE_ENTRIES,
   PROVIDER_SEND_TURN_MAX_ATTACHMENTS,
-  PULL_REQUEST_WATCH_WAKE_MESSAGE_PREFIX,
+  SERVER_MINTED_MESSAGE_ID_PREFIXES,
   type OrchestrationEvent,
   type OrchestrationReadModel,
 } from "@ryco/contracts";
@@ -24,9 +25,6 @@ import { runtimeModePrivilegeRank } from "./serverWake.ts";
 import { findThreadInArray } from "./threadIndex.ts";
 import { threadReferencesPayload } from "./threadReferences.ts";
 
-/** Agent Control's message ids (`messageIdFor` in AgentControlExecution). */
-const AGENT_CONTROL_MESSAGE_ID_PREFIX = "message-agent-control-";
-
 const host: FollowUpQueueHost = {
   isThreadLive,
   isThreadTrashed,
@@ -40,11 +38,7 @@ const host: FollowUpQueueHost = {
   maxEntries: MAX_FOLLOW_UP_QUEUE_ENTRIES,
   maxAttachments: PROVIDER_SEND_TURN_MAX_ATTACHMENTS,
   defaultTokenMode: DEFAULT_AGENT_TOKEN_MODE,
-  serverMintedMessageIdPrefixes: [
-    "delegation-result:",
-    AGENT_CONTROL_MESSAGE_ID_PREFIX,
-    PULL_REQUEST_WATCH_WAKE_MESSAGE_PREFIX,
-  ],
+  serverMintedMessageIdPrefixes: SERVER_MINTED_MESSAGE_ID_PREFIXES,
   agentControlMessageIdPrefix: AGENT_CONTROL_MESSAGE_ID_PREFIX,
 };
 

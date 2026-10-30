@@ -2226,18 +2226,21 @@ export type TurnOrigin = typeof TurnOrigin.Type;
  * Message ids the server mints for user-role messages no person typed: a delegated task's
  * result waking its parent (`delegation-result:`), Agent Control sends
  * (`message-agent-control-<operation>-<step>`; `-send-message` is an agent's message to an
- * existing thread) and the next turn toward a thread's goal (`goal-continuation:`). Clients
- * render them by origin and may never send them.
+ * existing thread), the next turn toward a thread's goal (`goal-continuation:`) and a pull
+ * request watch's update (`pull-request-watch:<thread>:<uuid>`). Clients render them by origin
+ * and may never send or queue them.
  */
 export const DELEGATION_RESULT_MESSAGE_ID_PREFIX = "delegation-result:";
 export const AGENT_CONTROL_MESSAGE_ID_PREFIX = "message-agent-control-";
 export const AGENT_SENT_MESSAGE_ID_SUFFIX = "-send-message";
 /** The server's goal continuation module keeps its own copy (it imports no values). */
 export const GOAL_CONTINUATION_MESSAGE_ID_PREFIX = "goal-continuation:";
+export const PULL_REQUEST_WATCH_WAKE_MESSAGE_PREFIX = "pull-request-watch:";
 export const SERVER_MINTED_MESSAGE_ID_PREFIXES: ReadonlyArray<string> = [
   DELEGATION_RESULT_MESSAGE_ID_PREFIX,
   AGENT_CONTROL_MESSAGE_ID_PREFIX,
   GOAL_CONTINUATION_MESSAGE_ID_PREFIX,
+  PULL_REQUEST_WATCH_WAKE_MESSAGE_PREFIX,
 ];
 
 /**
@@ -3028,9 +3031,6 @@ const ThreadGoalProviderClearCommand = Schema.Struct({
   expectedRequestId: Schema.optional(Schema.String),
   createdAt: IsoDateTime,
 });
-
-/** Message ids of pull request watch wakes carry this prefix (`pull-request-watch:<thread>:<uuid>`). */
-export const PULL_REQUEST_WATCH_WAKE_MESSAGE_PREFIX = "pull-request-watch:";
 
 /**
  * Server-only (the pull request watch service). One revision-fenced change of one watch and,

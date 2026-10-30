@@ -2,6 +2,8 @@ import {
   AGENT_CONTROL_MESSAGE_ID_PREFIX,
   AGENT_SENT_MESSAGE_ID_SUFFIX,
   DELEGATION_RESULT_MESSAGE_ID_PREFIX,
+  GOAL_CONTINUATION_MESSAGE_ID_PREFIX,
+  PULL_REQUEST_WATCH_WAKE_MESSAGE_PREFIX,
 } from "@ryco/contracts/orchestration";
 
 import {
@@ -318,10 +320,13 @@ export function deriveDisplayedUserMessageContext(prompt: string): DisplayedUser
 
 /** A user-role message no person typed, shown folded to one line until it is opened. */
 export interface AgentMessageFold {
-  readonly kind: "delegation-result" | "agent-message";
-  /** "Results from 2 delegated tasks" · "Message from another agent" */
+  readonly kind: "delegation-result" | "agent-message" | "goal-continuation" | "pull-request";
+  /**
+   * "Results from 2 delegated tasks" · "Message from another agent" · "Goal continuation" ·
+   * "Pull request update" or "Auto-fix CI".
+   */
   readonly label: string;
-  /** "2 completed, 1 interrupted" · the message's first line. */
+  /** "2 completed, 1 interrupted" · the message's first line · a fixed line · "#12". */
   readonly summary: string;
 }
 
@@ -329,6 +334,10 @@ const FOLD_SUMMARY_MAX_CHARS = 120;
 const DELEGATION_TASK_COUNT = /^(\d+) task\(s\) you delegated/m;
 const DELEGATION_SECTION_STATE =
   /^Delegated (?:initial-run result|result|task notice) \(([a-z-]+)[,)]/gm;
+/** `renderPullRequestAutoFixPrompt`'s first line (`@ryco/shared/pullRequestWatch`). */
+const AUTO_FIX_ATTEMPT = /^Auto-fix CI\b.*? PR #(\d+) at \S+, (attempt \d+ of \d+)/;
+/** The pull request an update or notice names first (`pull request #12`, `PR #12`). */
+const PULL_REQUEST_NUMBER = /\b(?:pull request|PR) #(\d+)/i;
 
 function firstLine(text: string): string {
   const line =
@@ -343,8 +352,9 @@ function firstLine(text: string): string {
 
 /**
  * How a server-written user-role message folds, from its id (the server mints those ids
- * and refuses them from clients): a delegated task's result waking its parent, or another
- * agent's message to this thread. Null for a message a person typed.
+ * and refuses them from clients): a delegated task's result waking its parent, another
+ * agent's message to this thread, the next turn toward the thread's goal, or a pull request
+ * watch's update. Null for a message a person typed.
  */
 export function agentMessageFoldOf(message: {
   readonly id?: string;
@@ -371,6 +381,29 @@ export function agentMessageFoldOf(message: {
       kind: "agent-message",
       label: "Message from another agent",
       summary: firstLine(message.text),
+    };
+  }
+  if (id.startsWith(GOAL_CONTINUATION_MESSAGE_ID_PREFIX)) {
+    return {
+      kind: "goal-continuation",
+      label: "Goal continuation",
+      summary: "Ryco started the next turn toward the goal",
+    };
+  }
+  if (id.startsWith(PULL_REQUEST_WATCH_WAKE_MESSAGE_PREFIX)) {
+    const autoFix = AUTO_FIX_ATTEMPT.exec(message.text);
+    if (autoFix !== null) {
+      return {
+        kind: "pull-request",
+        label: "Auto-fix CI",
+        summary: `#${autoFix[1]}: checks failed, ${autoFix[2]}`,
+      };
+    }
+    const number = PULL_REQUEST_NUMBER.exec(message.text)?.[1];
+    return {
+      kind: "pull-request",
+      label: message.text.startsWith("Auto-fix CI") ? "Auto-fix CI" : "Pull request update",
+      summary: number === undefined ? "" : `#${number}`,
     };
   }
   return null;
