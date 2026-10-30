@@ -16,6 +16,7 @@ type BackgroundAlertsModule = typeof import("./push/backgroundAlertsRuntime");
 const loadThreadAlerts = (): Promise<ThreadAlertsModule> => import("./threadAlerts");
 const loadBackgroundAlerts = (): Promise<BackgroundAlertsModule> =>
   import("./push/backgroundAlertsRuntime");
+const loadPushKeyCustody = () => import("./push/pushKeyCustody");
 
 /**
  * Loads thread alerts once they have ever been turned on, which keeps
@@ -25,7 +26,9 @@ const loadBackgroundAlerts = (): Promise<BackgroundAlertsModule> =>
  *
  * Background alerts (push through the Hub) load the same way once their switch
  * was ever touched, and keep running after it is turned off so they can remove
- * the registration again.
+ * the registration again. Only the push key's install check runs on every
+ * launch: after a reinstall the preferences are empty, and a key the earlier
+ * installation left must still go.
  */
 export function ThreadAlertsBridge() {
   const { driver } = useConnectionRegistry();
@@ -36,6 +39,12 @@ export function ThreadAlertsBridge() {
   const [alertsModule, setAlertsModule] = useState<ThreadAlertsModule | null>(null);
   const [backgroundModule, setBackgroundModule] = useState<BackgroundAlertsModule | null>(null);
   const backgroundRef = useRef<BackgroundAlertsModule | null>(null);
+
+  useEffect(() => {
+    void loadPushKeyCustody()
+      .then(({ ensureMobilePushKeyCustody }) => ensureMobilePushKeyCustody())
+      .catch((error: unknown) => console.warn("The push key install check failed.", error));
+  }, []);
 
   useEffect(() => {
     if (!enabled || alertsModule !== null) return;

@@ -42,6 +42,8 @@ interface HarnessVector {
   readonly rejects: Readonly<Record<string, boolean>>;
   readonly alert: Readonly<Record<string, string>> | null;
   readonly alertRejects: Readonly<Record<string, boolean>>;
+  readonly userInfo: Readonly<Record<string, unknown>>;
+  readonly userInfoWhenUnopened: Readonly<Record<string, unknown>>;
   readonly opensWithStoredEnrollmentOnly: boolean;
   readonly opensWithRoutedEnrollmentOnly: boolean;
 }
@@ -118,6 +120,14 @@ describe.skipIf(!swiftcAvailable)("the extension's Swift opener", () => {
           tampered: true,
           noEnrollment: true,
         });
+        // Only the opened payload names the thread a tap opens; the Hub's own
+        // `body` and `url` never reach the app, opened or not.
+        expect(opened.userInfo).toEqual({
+          keys: ["aps", "body", "url"],
+          body: { environmentId: vector.environmentId, threadId: plaintext.th },
+          url: `ryco-dev://threads/${vector.environmentId}/${plaintext.th}`,
+        });
+        expect(opened.userInfoWhenUnopened).toEqual({ keys: ["aps"] });
         expect(opened.opensWithStoredEnrollmentOnly).toBe(true);
         expect(opened.opensWithRoutedEnrollmentOnly).toBe(true);
       }

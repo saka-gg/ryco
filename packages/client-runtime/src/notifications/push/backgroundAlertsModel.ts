@@ -29,6 +29,8 @@ export const PUSH_PRESENCE_REFRESH_MS = 30_000;
 export const HUB_PUSH_CAPABILITY_RECHECK_MS = 60 * 60_000;
 /** A Hub that could not be reached is asked again after this, at the next trigger. */
 export const HUB_PUSH_CAPABILITY_RETRY_MS = 60_000;
+/** A node registration that failed is tried again after this, or on the next foreground. */
+export const NODE_PUSH_RETRY_MS = 60_000;
 
 /** What this build can do before any Hub or node is asked. */
 export type BackgroundAlertsSupport =
@@ -112,6 +114,18 @@ export function environmentPushStateFromError(error: unknown): EnvironmentPushSt
   if (isUnsupportedRpcError(error)) return { status: "update-needed" };
   if (errorTag(error) === "PushRpcError" || isAuthRpcError(error)) return { status: "ineligible" };
   return { status: "failed" };
+}
+
+/**
+ * The node took the key but cannot say yet that its Hub delivers: a node
+ * starts `offline` and reports `available` only after its first delivered
+ * signal. Until a later registration says so, the app keeps its own alerts.
+ */
+export function awaitsHubDelivery(state: EnvironmentPushState): boolean {
+  return (
+    state.status === "registered" &&
+    (state.hubDelivery === "offline" || state.hubDelivery === "unknown")
+  );
 }
 
 /** What the Hub's refusal of a registration means; codes are the public `push-hub` ones. */

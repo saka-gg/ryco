@@ -2,6 +2,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 
 const {
+  IOSConfig,
   withDangerousMod,
   withEntitlementsPlist,
   withInfoPlist,
@@ -44,6 +45,11 @@ function requireBundleIdentifier(config) {
   return bundleIdentifier;
 }
 
+/** The extension's bundle id, under the app's. */
+function notificationServiceBundleIdentifier(bundleIdentifier) {
+  return `${bundleIdentifier}.${TARGET_NAME}`;
+}
+
 /** The keychain group the app and its extension share for the push key. */
 function pushKeychainGroup(bundleIdentifier) {
   return `$(AppIdentifierPrefix)${bundleIdentifier}.push`;
@@ -71,7 +77,13 @@ function firstScheme(config) {
   return typeof scheme === "string" && scheme.length > 0 ? scheme : null;
 }
 
-/** The extension's Info.plist; its versions must equal the app's. */
+/**
+ * The extension's Info.plist. App Store Connect refuses an extension whose
+ * versions differ from its app's, so they come from Expo's own getters, the
+ * ones that write the app's Info.plist. A build number EAS assigns at build
+ * time (remote versioning, auto-increment) is written into every signed
+ * target's Info.plist, this one included once `extra.eas` names it below.
+ */
 function notificationServiceInfoPlist(config) {
   const bundleIdentifier = requireBundleIdentifier(config);
   const scheme = firstScheme(config);
@@ -83,8 +95,8 @@ function notificationServiceInfoPlist(config) {
     CFBundleInfoDictionaryVersion: "6.0",
     CFBundleName: "$(PRODUCT_NAME)",
     CFBundlePackageType: "$(PRODUCT_BUNDLE_PACKAGE_TYPE)",
-    CFBundleShortVersionString: config.version ?? "1.0.0",
-    CFBundleVersion: config.ios?.buildNumber ?? "1",
+    CFBundleShortVersionString: IOSConfig.Version.getVersion(config),
+    CFBundleVersion: IOSConfig.Version.getBuildNumber(config),
     NSExtension: {
       NSExtensionPointIdentifier: "com.apple.usernotifications.service",
       NSExtensionPrincipalClass: "$(PRODUCT_MODULE_NAME).NotificationService",
@@ -96,6 +108,37 @@ function notificationServiceInfoPlist(config) {
 
 function notificationServiceEntitlements(bundleIdentifier) {
   return { "keychain-access-groups": [pushKeychainGroup(bundleIdentifier)] };
+}
+
+/**
+ * EAS Build creates provisioning profiles only for the app extensions the app
+ * config names in `extra.eas.build.experimental.ios.appExtensions`; without
+ * this entry the extension has no profile on the builder and cannot be signed.
+ */
+function withEasAppExtension(config, bundleIdentifier) {
+  const eas = config.extra?.eas ?? {};
+  const ios = eas.build?.experimental?.ios ?? {};
+  const appExtensions = (Array.isArray(ios.appExtensions) ? ios.appExtensions : []).filter(
+    (extension) => extension?.targetName !== TARGET_NAME,
+  );
+  appExtensions.push({
+    targetName: TARGET_NAME,
+    bundleIdentifier: notificationServiceBundleIdentifier(bundleIdentifier),
+    entitlements: notificationServiceEntitlements(bundleIdentifier),
+  });
+  return {
+    ...config,
+    extra: {
+      ...config.extra,
+      eas: {
+        ...eas,
+        build: {
+          ...eas.build,
+          experimental: { ...eas.build?.experimental, ios: { ...ios, appExtensions } },
+        },
+      },
+    },
+  };
 }
 
 function quoted(value) {
@@ -170,7 +213,7 @@ function addNotificationServiceTarget(project, options) {
     TARGET_NAME,
     "app_extension",
     TARGET_NAME,
-    `${options.bundleIdentifier}.${TARGET_NAME}`,
+    notificationServiceBundleIdentifier(options.bundleIdentifier),
   );
   project.addBuildPhase(sourceNames, "PBXSourcesBuildPhase", "Sources", target.uuid);
   project.addBuildPhase([], "PBXResourcesBuildPhase", "Resources", target.uuid);
@@ -227,6 +270,7 @@ function writeNotificationServiceFiles(platformProjectRoot, config) {
 const withIosNotificationServiceExtension = (config) => {
   const bundleIdentifier = requireBundleIdentifier(config);
 
+  config = withEasAppExtension(config, bundleIdentifier);
   config = withEntitlementsPlist(config, (modConfig) => {
     modConfig.modResults = addPushKeychainGroup(modConfig.modResults, bundleIdentifier);
     return modConfig;

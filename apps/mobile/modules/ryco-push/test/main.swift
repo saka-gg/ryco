@@ -45,6 +45,19 @@ func apnsPayload(
   return ["aps": ["mutable-content": 1], "ryco": ryco]
 }
 
+/// What the app would get as `userInfo` for this payload, with the Hub's own
+/// `body` and `url` beside `ryco`, as a Hub could send them.
+func userInfoReport(_ payload: [AnyHashable: Any], alert: PushAlert?) -> [String: Any] {
+  var hubPayload = payload
+  hubPayload["body"] = ["environmentId": "env_hub", "threadId": "thread_hub"]
+  hubPayload["url"] = "ryco-dev://threads/env_hub/thread_hub"
+  let userInfo = PushAlertOpener.userInfo(hubPayload, alert: alert)
+  var report: [String: Any] = ["keys": userInfo.keys.map { "\($0)" }.sorted()]
+  if let body = userInfo["body"] { report["body"] = body }
+  if let url = userInfo["url"] { report["url"] = url }
+  return report
+}
+
 let vectorsPath = CommandLine.arguments[1]
 let document =
   try JSONSerialization.jsonObject(with: Data(contentsOf: URL(fileURLWithPath: vectorsPath)))
@@ -151,6 +164,16 @@ for vector in document["vectors"] as! [[String: Any]] {
         sealed: base64Url(tamperedCiphertext), routed: enrollmentId, stored: enrollmentId) == nil,
       "noEnrollment": alert(routed: nil, stored: nil) == nil,
     ],
+    "userInfo": userInfoReport(
+      apnsPayload(
+        environmentId: environmentId, sequence: sequenceNumber, sealed: sealedText,
+        enrollmentId: enrollmentId),
+      alert: opened),
+    "userInfoWhenUnopened": userInfoReport(
+      apnsPayload(
+        environmentId: environmentId, sequence: sequenceNumber, sealed: sealedText,
+        enrollmentId: enrollmentId),
+      alert: nil),
     "opensWithStoredEnrollmentOnly": alert(routed: nil, stored: enrollmentId) == opened,
     "opensWithRoutedEnrollmentOnly": alert(routed: enrollmentId, stored: nil) == opened,
   ])

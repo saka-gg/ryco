@@ -52,18 +52,32 @@ export function pushKeyOf(native: NativePushKey): PushKey {
   };
 }
 
-/** The store over the native module, or the unavailable one when there is none. */
-export function createPushKeyStore(native: RycoPushNativeModule | null): PushKeyStore {
+/**
+ * The store over the native module, or the unavailable one when there is none.
+ * Every call waits for `custody` first: a key an earlier installation left is
+ * gone before anything reads, records or registers one.
+ */
+export function createPushKeyStore(
+  native: RycoPushNativeModule | null,
+  custody: () => Promise<void>,
+): PushKeyStore {
   if (native === null || !native.isAvailable()) return UNAVAILABLE_PUSH_KEY_STORE;
+  const held =
+    <A>(operation: () => Promise<A>) =>
+    async (): Promise<A> => {
+      await custody();
+      return operation();
+    };
   return {
     available: true,
-    ensureKey: async () => pushKeyOf(await native.ensureKey()),
-    readKey: async () => {
+    ensureKey: held(async () => pushKeyOf(await native.ensureKey())),
+    readKey: held(async () => {
       // A missing key crosses the bridge as null or undefined.
       const stored = await native.readKey();
       return stored ? pushKeyOf(stored) : null;
-    },
-    setRegistration: ({ enrollmentId, sound }) => native.setRegistration(enrollmentId, sound),
-    deleteKey: () => native.deleteKey(),
+    }),
+    setRegistration: ({ enrollmentId, sound }) =>
+      held(() => native.setRegistration(enrollmentId, sound))(),
+    deleteKey: held(() => native.deleteKey()),
   };
 }

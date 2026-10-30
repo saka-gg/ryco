@@ -6,7 +6,6 @@ import {
   type BackgroundAlertsConnection,
 } from "@ryco/client-runtime/notifications/push";
 import type { EnvironmentConnection } from "@ryco/client-runtime/connection";
-import { requireOptionalNativeModule } from "expo";
 import * as Notifications from "expo-notifications";
 import { AppState } from "react-native";
 
@@ -15,14 +14,18 @@ import {
   subscribeMobileNativeE2eeEnrollment,
 } from "../../hostedHub/e2eeEnrollment";
 import { readMobileNativePlatform, readMobilePushBuild } from "../../platform/config";
+import { mobileKV } from "../../platform/kv";
 import { createMobileConnectionRegistry } from "../../runtime/bootstrap";
 import { getPreferencesSnapshot, subscribePreferences } from "../../state/preferencesStore";
 import { readThreadAlertPermission } from "../threadAlerts";
 import { backgroundAlertsSupport } from "./backgroundAlertsModel";
-import { createPushKeyStore, type RycoPushNativeModule } from "./pushKeyStore";
+import { ensureMobilePushKeyCustody, readMobileRycoPush } from "./pushKeyCustody";
+import { createPushKeyStore } from "./pushKeyStore";
 
 /** APNs answers a registration within seconds; past this the token counts as unavailable. */
 const DEVICE_TOKEN_TIMEOUT_MS = 30_000;
+/** The account whose Hub registration was turned off but not removed yet (`docs/push-alerts.md`). */
+const HUB_REMOVAL_OWED_KEY = "ryco.push.hubRemovalOwed.v1";
 
 const adapted = new WeakMap<EnvironmentConnection, BackgroundAlertsConnection>();
 
@@ -78,7 +81,7 @@ async function readDeviceToken(): Promise<string> {
 
 function createMobileBackgroundAlerts(): BackgroundAlerts {
   const build = readMobilePushBuild();
-  const pushKey = createPushKeyStore(requireOptionalNativeModule<RycoPushNativeModule>("RycoPush"));
+  const pushKey = createPushKeyStore(readMobileRycoPush(), ensureMobilePushKeyCustody);
   const supervisor = () => createMobileConnectionRegistry().driver.supervisor;
   return createBackgroundAlerts({
     support: backgroundAlertsSupport({
@@ -118,6 +121,13 @@ function createMobileBackgroundAlerts(): BackgroundAlerts {
       subscribe: (listener) => supervisor().subscribe(listener),
     },
     pushKey,
+    hubRemoval: {
+      read: () => mobileKV.getItem(HUB_REMOVAL_OWED_KEY),
+      write: (accountId) =>
+        accountId === null
+          ? mobileKV.removeItem(HUB_REMOVAL_OWED_KEY)
+          : mobileKV.setItem(HUB_REMOVAL_OWED_KEY, accountId),
+    },
     notifications: { readPermission: readThreadAlertPermission, readDeviceToken },
     app: {
       // The same test thread alerts use: whenever they would defer to push,

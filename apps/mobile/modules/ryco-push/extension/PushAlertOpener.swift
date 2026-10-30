@@ -117,6 +117,23 @@ enum PushAlertOpener {
     )
   }
 
+  /// The `userInfo` the app gets with the alert. expo-notifications hands a
+  /// remote alert's `body` to the app as its data, where the app's own alerts
+  /// keep the thread a tap opens, and the app checks it before it shows a
+  /// banner in front. Only an opened alert may name a thread: on any failure,
+  /// or when time runs out, the Hub's own `body` and `url` go too, so nothing
+  /// the Hub alone wrote reaches a tap.
+  static func userInfo(_ original: [AnyHashable: Any], alert: PushAlert?) -> [AnyHashable: Any] {
+    var userInfo = original
+    userInfo.removeValue(forKey: "ryco")
+    userInfo.removeValue(forKey: "body")
+    userInfo.removeValue(forKey: "url")
+    guard let alert else { return userInfo }
+    userInfo["body"] = ["environmentId": alert.environmentId, "threadId": alert.threadId]
+    if let url = alert.url { userInfo["url"] = url }
+    return userInfo
+  }
+
   /// The app's thread route, `threads/:environmentId/:threadId`.
   static func threadLink(scheme: String, environmentId: String, threadId: String) -> String? {
     guard

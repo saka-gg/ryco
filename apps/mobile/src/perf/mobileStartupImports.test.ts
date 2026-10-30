@@ -324,6 +324,24 @@ describe("mobile launch graph boundaries", () => {
     ).toEqual([]);
   });
 
+  it("checks the push key at every launch without loading push alerts", () => {
+    // ThreadAlertsBridge imports the install check lazily, on every launch; the
+    // check itself must stay a keychain call and a storage read.
+    expect(
+      [...staticGraph("src/notifications/push/pushKeyCustody.ts").keys()].map(display),
+    ).toContain("apps/mobile/src/platform/installCustody.ts");
+    expect(
+      chainsTo("src/notifications/push/pushKeyCustody.ts", [
+        /^pkg:expo-notifications$/u,
+        /^pkg:@noble\//u,
+        /^packages\/shared\/src\/pushSeal\.ts$/u,
+        /^packages\/client-runtime\/src\/notifications\//u,
+        /^apps\/mobile\/src\/notifications\/push\/(?:pushKeyStore|backgroundAlerts\w*)\.ts$/u,
+      ]),
+    ).toEqual([]);
+    expect(chainsTo(LAUNCH_ENTRY, [/^apps\/mobile\/src\/notifications\/push\//u])).toEqual([]);
+  });
+
   it("loads the hosted relay connection and E2EE session only with the hosted runtime", () => {
     expect(
       chainsTo(LAUNCH_ENTRY, [

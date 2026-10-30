@@ -9,7 +9,9 @@ import {
   BACKGROUND_ALERT_KINDS,
   HUB_PUSH_CAPABILITY_RECHECK_MS,
   HUB_PUSH_CAPABILITY_RETRY_MS,
+  NODE_PUSH_RETRY_MS,
   PUSH_PRESENCE_REFRESH_MS,
+  awaitsHubDelivery,
   environmentPushStateFromError,
   environmentPushStateFromStatus,
   hubRegistrationFailure,
@@ -96,6 +98,14 @@ export interface BackgroundAlertsPorts {
     readonly subscribe: (listener: () => void) => () => void;
   };
   readonly pushKey: PushKeyStore;
+  /**
+   * Survives a restart: the account whose Hub registration this device turned
+   * off but could not remove yet. Kept until the Hub confirms the removal.
+   */
+  readonly hubRemoval: {
+    readonly read: () => Promise<string | null>;
+    readonly write: (accountId: string | null) => Promise<void>;
+  };
   readonly notifications: {
     readonly readPermission: () => Promise<boolean>;
     /** The APNs device token, hex. */
@@ -129,11 +139,15 @@ interface CapabilityCheck {
   readonly checkedAt: number;
 }
 
-interface NodeRegistration {
+/** The last `push.registerDevice` on one connection, whatever it answered. */
+interface NodeAttempt {
   readonly connection: BackgroundAlertsConnection;
   readonly ready: object;
-  readonly keyId: string;
+  readonly keyId: PushKey["keyId"];
   readonly sound: boolean;
+  readonly state: EnvironmentPushState;
+  /** When it ran, or null once a presence tick or a foreground asked for it again. */
+  readonly at: number | null;
 }
 
 /**
@@ -144,13 +158,17 @@ interface NodeRegistration {
  * without push the capability read is the only request: no permission prompt,
  * no token, no node RPC, and the app's own alerts are untouched. Once the Hub
  * can: the push key, the APNs token, the Hub registration, then
- * `push.registerDevice` on every Hub channel each time it connects, and
- * `push.setPresence` while the app is in front.
+ * `push.registerDevice` once per connection on every Hub channel, and
+ * `push.setPresence` while the app is in front. Each connection's answer is
+ * kept: a refusal is not asked again until the next connect, a failure not
+ * before a minute or the next foreground, and a node that cannot confirm its
+ * Hub's delivery yet is asked again while the app is in front.
  *
  * Turned off, it removes the Hub registration, the live nodes' registrations
- * and the key. Signed out or switched account, it deletes the key: the next
- * account gets a new one. One reconcile runs at a time and reads everything
- * afresh, so any trigger just asks for one.
+ * and the key; a Hub removal that failed is owed, across restarts, until the
+ * Hub confirms it. Signed out or switched account, it deletes the key: the
+ * next account gets a new one. One reconcile runs at a time and reads
+ * everything afresh, so any trigger just asks for one.
  */
 export function createBackgroundAlerts(ports: BackgroundAlertsPorts): BackgroundAlerts {
   let snapshot = initialBackgroundAlertsSnapshot(ports.support);
@@ -158,20 +176,24 @@ export function createBackgroundAlerts(ports: BackgroundAlertsPorts): Background
 
   let capability: CapabilityCheck | null = null;
   let capabilityInFlight: Promise<void> | null = null;
+  /** Read once, then again on the next foreground or settings change. */
+  let permission: boolean | null = null;
   let key: PushKey | null = null;
   /** What the extension last got told this run: the enrollment and the sound setting. */
   let keyRegistration: string | null = null;
   let token: string | null = null;
   /** The account, enrollment and token the Hub holds a registration for. */
   let hubRegistration: string | null = null;
-  /** Turned off, but the Hub's registration could not be removed yet. */
-  let hubRemovalPending = false;
-  const nodes = new Map<EnvironmentId, NodeRegistration>();
+  /** The account whose Hub registration is still to be removed; undefined until read. */
+  let hubRemovalOwed: string | null | undefined;
+  const attempts = new Map<EnvironmentId, NodeAttempt>();
   /** While off: whether a key left from an earlier run was looked for yet. */
   let leftoverChecked = false;
   let signedInAccountId: string | null = null;
   /** After a failed Hub request or token read, the next waits for this or the next foreground. */
   let hubRetryAt = 0;
+  /** The same for a failed Hub removal; a failed registration never holds a removal back. */
+  let hubRemovalRetryAt = 0;
 
   let running = false;
   let rerun = false;
@@ -203,11 +225,27 @@ export function createBackgroundAlerts(ports: BackgroundAlertsPorts): Background
 
   const setHub = (hub: BackgroundAlertsHubStatus) => publish({ hub });
 
+  const isLive = (attempt: NodeAttempt) => attempt.connection.readReady() === attempt.ready;
+
+  const registeredNodes = () =>
+    [...attempts.values()].filter((attempt) => attempt.state.status === "registered");
+
+  /** Asks the matching connections again at the next reconcile; whether any did. */
+  const askAgain = (matches: (attempt: NodeAttempt) => boolean): boolean => {
+    let any = false;
+    for (const [environmentId, attempt] of attempts) {
+      if (!isLive(attempt) || !matches(attempt)) continue;
+      attempts.set(environmentId, { ...attempt, at: null });
+      any = true;
+    }
+    return any;
+  };
+
   const forgetLocally = () => {
     key = null;
     keyRegistration = null;
     hubRegistration = null;
-    nodes.clear();
+    attempts.clear();
     publish({ device: "idle", environments: new Map() });
   };
 
@@ -218,6 +256,27 @@ export function createBackgroundAlerts(ports: BackgroundAlertsPorts): Background
       report("Deleting the push key failed", error);
     }
     forgetLocally();
+  };
+
+  const readHubRemovalOwed = async (): Promise<string | null> => {
+    if (hubRemovalOwed !== undefined) return hubRemovalOwed;
+    try {
+      hubRemovalOwed = await ports.hubRemoval.read();
+    } catch (error) {
+      report("Reading the owed Hub push removal failed", error);
+      hubRemovalOwed = null;
+    }
+    return hubRemovalOwed;
+  };
+
+  const setHubRemovalOwed = async (accountId: string | null) => {
+    if (hubRemovalOwed === accountId) return;
+    hubRemovalOwed = accountId;
+    try {
+      await ports.hubRemoval.write(accountId);
+    } catch (error) {
+      report("Recording the owed Hub push removal failed", error);
+    }
   };
 
   const capabilityIsFresh = (accountId: string): boolean => {
@@ -248,25 +307,23 @@ export function createBackgroundAlerts(ports: BackgroundAlertsPorts): Background
     return capabilityInFlight;
   };
 
-  const isLive = (registration: NodeRegistration) =>
-    registration.connection.readReady() === registration.ready;
-
-  const sendPresence = (presence: PushPresence, registrations: Iterable<NodeRegistration>) => {
-    for (const registration of registrations) {
-      if (!isLive(registration)) continue;
-      void registration.connection.push
+  const sendPresence = (presence: PushPresence, nodes: Iterable<NodeAttempt>) => {
+    for (const attempt of nodes) {
+      if (!isLive(attempt)) continue;
+      void attempt.connection.push
         .setPresence({ state: presence })
         .catch((error: unknown) => report("Sending push presence failed", error));
     }
   };
 
   const syncPresenceTimer = () => {
-    const wanted = started > 0 && ports.app.isActive() && nodes.size > 0;
+    const wanted = started > 0 && ports.app.isActive() && registeredNodes().length > 0;
     if (wanted && presenceTimer === null) {
-      presenceTimer = ports.timers.setInterval(
-        () => sendPresence("foreground", nodes.values()),
-        PUSH_PRESENCE_REFRESH_MS,
-      );
+      presenceTimer = ports.timers.setInterval(() => {
+        sendPresence("foreground", registeredNodes());
+        // A node that could not confirm its Hub's delivery yet is asked again.
+        if (askAgain((attempt) => awaitsHubDelivery(attempt.state))) request();
+      }, PUSH_PRESENCE_REFRESH_MS);
     } else if (!wanted && presenceTimer !== null) {
       ports.timers.clearInterval(presenceTimer);
       presenceTimer = null;
@@ -274,48 +331,74 @@ export function createBackgroundAlerts(ports: BackgroundAlertsPorts): Background
   };
 
   /**
+   * Asks the live Hub channels holding `keyId` to forget it: those that took
+   * it this run, or, for a key an earlier run left, every one that is up.
+   */
+  const unregisterNodes = async (keyId: PushKey["keyId"], leftover: boolean) => {
+    const connections = leftover
+      ? ports.connections
+          .list()
+          .filter((connection) => connection.viaHub && connection.readReady() !== null)
+      : registeredNodes()
+          .filter((attempt) => attempt.keyId === keyId && isLive(attempt))
+          .map((attempt) => attempt.connection);
+    await Promise.all(
+      connections.map((connection) =>
+        connection.push.unregisterDevice({ keyId }).catch((error: unknown) => {
+          // An older node, or a channel that never could register, has nothing to remove.
+          if (environmentPushStateFromError(error).status === "failed") {
+            report("Removing a node push registration failed", error);
+          }
+        }),
+      ),
+    );
+  };
+
+  /**
    * Turned off: the Hub stops delivering, live nodes forget the key, and the
    * key goes, so a node that still seals to it reaches only the generic text.
-   * A key left by an earlier run counts too, so this survives a restart.
+   * Any key, from this run or an earlier one, means a Hub registration may
+   * exist; its removal is recorded as owed before the key goes, and stays owed
+   * across restarts until the Hub confirms it (a 404 is already gone).
    */
-  const turnOff = async () => {
-    if (key === null && !hubRemovalPending && !leftoverChecked) {
+  const turnOff = async (accountId: string) => {
+    const leftover = key === null;
+    if (leftover && !leftoverChecked) {
       leftoverChecked = true;
       try {
         key = await ports.pushKey.readKey();
       } catch (error) {
         report("Reading the push key failed", error);
       }
-      if (key !== null) hubRemovalPending = true;
     }
-    if (key === null && !hubRemovalPending) return;
-    if ((hubRegistration !== null || hubRemovalPending) && ports.now() >= hubRetryAt) {
+    if (key !== null || hubRegistration !== null) await setHubRemovalOwed(accountId);
+    if (hubRemovalOwed === accountId && ports.now() >= hubRemovalRetryAt) {
       try {
         await ports.hub().unregisterNativePush();
-        hubRemovalPending = false;
+        await setHubRemovalOwed(null);
       } catch (error) {
-        // A Hub without the route has nothing to remove.
-        hubRemovalPending = !(error instanceof HostedHubApiError && error.status === 404);
-        if (hubRemovalPending) {
+        if (error instanceof HostedHubApiError && error.status === 404) {
+          await setHubRemovalOwed(null);
+        } else {
           report("Removing the Hub push registration failed", error);
-          hubRetryAt = ports.now() + HUB_PUSH_CAPABILITY_RETRY_MS;
+          hubRemovalRetryAt = ports.now() + HUB_PUSH_CAPABILITY_RETRY_MS;
         }
       }
-    } else if (hubRegistration !== null) {
-      hubRemovalPending = true;
     }
-    await Promise.all(
-      [...nodes.values()]
-        .filter(isLive)
-        .map((registration) =>
-          registration.connection.push
-            .unregisterDevice({ keyId: registration.keyId })
-            .catch((error: unknown) => report("Removing a node push registration failed", error)),
-        ),
-    );
-    if (key !== null) await deleteKey();
-    else forgetLocally();
+    if (key !== null) {
+      await unregisterNodes(key.keyId, leftover);
+      await deleteKey();
+    }
   };
+
+  /**
+   * Whether a connection that answered already is asked again: when a presence
+   * tick or a foreground asked for it, or a minute after a failure. A refusal
+   * waits for the next connect.
+   */
+  const attemptDue = (attempt: NodeAttempt): boolean =>
+    attempt.at === null ||
+    (attempt.state.status === "failed" && ports.now() - attempt.at >= NODE_PUSH_RETRY_MS);
 
   const registerNodes = async (sound: boolean, pushKey: PushKey) => {
     const connections = ports.connections.list();
@@ -323,19 +406,22 @@ export function createBackgroundAlerts(ports: BackgroundAlertsPorts): Background
       if (!connection.viaHub) continue;
       const ready = connection.readReady();
       if (ready === null) continue;
-      const previous = nodes.get(connection.environmentId);
-      if (
+      const previous = attempts.get(connection.environmentId);
+      const same =
         previous?.connection === connection &&
         previous.ready === ready &&
         previous.sound === sound &&
-        previous.keyId === pushKey.keyId
-      ) {
-        continue;
+        previous.keyId === pushKey.keyId;
+      if (same && !attemptDue(previous)) continue;
+      // Asking a registered node again only refreshes what it reports.
+      const refreshed = same && previous.state.status === "registered" ? previous : null;
+      if (refreshed === null) {
+        attempts.delete(connection.environmentId);
+        setEnvironment(connection.environmentId, { status: "registering" });
       }
-      nodes.delete(connection.environmentId);
-      setEnvironment(connection.environmentId, { status: "registering" });
+      let state: EnvironmentPushState;
       try {
-        const state = environmentPushStateFromStatus(
+        state = environmentPushStateFromStatus(
           await connection.push.registerDevice({
             keyId: pushKey.keyId,
             publicKey: pushKey.publicKey,
@@ -343,16 +429,19 @@ export function createBackgroundAlerts(ports: BackgroundAlertsPorts): Background
             sound,
           }),
         );
-        setEnvironment(connection.environmentId, state);
-        if (state.status !== "registered") continue;
-        const registration = { connection, ready, keyId: pushKey.keyId, sound };
-        nodes.set(connection.environmentId, registration);
-        // The node pushes nothing to a device in front; local alerts cover it.
-        if (ports.app.isActive()) sendPresence("foreground", [registration]);
       } catch (error) {
-        const state = environmentPushStateFromError(error);
+        state = environmentPushStateFromError(error);
         if (state.status === "failed") report("Registering for push with a node failed", error);
-        setEnvironment(connection.environmentId, state);
+      }
+      // A refresh that did not get through leaves the registration as it was:
+      // the presence keeps going, and the next tick asks again.
+      if (refreshed !== null && state.status === "failed") state = refreshed.state;
+      const attempt = { connection, ready, keyId: pushKey.keyId, sound, state, at: ports.now() };
+      attempts.set(connection.environmentId, attempt);
+      setEnvironment(connection.environmentId, state);
+      // The node pushes nothing to a device in front; local alerts cover it.
+      if (state.status === "registered" && refreshed === null && ports.app.isActive()) {
+        sendPresence("foreground", [attempt]);
       }
     }
     // A connection that is down keeps its state until it is back; one that left
@@ -360,7 +449,7 @@ export function createBackgroundAlerts(ports: BackgroundAlertsPorts): Background
     const listed = new Set(connections.map((connection) => connection.environmentId));
     for (const environmentId of snapshot.environments.keys()) {
       if (listed.has(environmentId)) continue;
-      nodes.delete(environmentId);
+      attempts.delete(environmentId);
       setEnvironment(environmentId, null);
     }
     syncPresenceTimer();
@@ -378,32 +467,33 @@ export function createBackgroundAlerts(ports: BackgroundAlertsPorts): Background
     const accountId = account.status === "signed-in" ? account.accountId : null;
     if (signedInAccountId !== null && accountId !== signedInAccountId) {
       capability = null;
-      hubRemovalPending = false;
       await deleteKey();
       syncPresenceTimer();
     }
     signedInAccountId = accountId;
+    // A removal owed for another session went with that session.
+    const owed = await readHubRemovalOwed();
+    if (owed !== null && owed !== accountId) await setHubRemovalOwed(null);
     if (account.status === "signed-out") {
       setHub("signed-out");
       return;
     }
 
     if (!preferences.enabled) {
-      await turnOff();
+      await turnOff(account.accountId);
       if (capabilityInFlight === null) {
         setHub(capability?.accountId === account.accountId ? capability.support : "unknown");
       }
       syncPresenceTimer();
       return;
     }
-    // Turned on again: a removal still owed is overtaken by the new registration.
-    hubRemovalPending = false;
     leftoverChecked = false;
 
     await readCapability(account.accountId);
     if (capability?.support !== "available") return;
 
-    if (!(await ports.notifications.readPermission())) {
+    permission ??= await ports.notifications.readPermission();
+    if (!permission) {
       publish({ device: "permission-denied" });
       return;
     }
@@ -427,6 +517,8 @@ export function createBackgroundAlerts(ports: BackgroundAlertsPorts): Background
           sound: preferences.sound,
         });
         keyRegistration = recorded;
+        // The key now belongs to this enrollment, so a later one replaces it.
+        key = { ...key, enrollmentId: account.enrollmentId };
       }
     } catch (error) {
       report("Setting up the push key failed", error);
@@ -469,6 +561,8 @@ export function createBackgroundAlerts(ports: BackgroundAlertsPorts): Background
         return;
       }
     }
+    // The new registration overtakes a removal still owed from turning off.
+    await setHubRemovalOwed(null);
     setHub("registered");
     await registerNodes(preferences.sound, key);
   };
@@ -526,16 +620,27 @@ export function createBackgroundAlerts(ports: BackgroundAlertsPorts): Background
         const active = ports.app.isActive();
         if (active === wasActive) return;
         wasActive = active;
-        sendPresence(active ? "foreground" : "background", nodes.values());
+        sendPresence(active ? "foreground" : "background", registeredNodes());
         syncPresenceTimer();
         if (!active) return;
-        // Coming back retries what failed: the Hub, the token, a node.
+        // Coming back retries what failed (the Hub, the token, a node), asks a
+        // node again whether its Hub delivers, and reads the permission afresh:
+        // it can only change in Settings, outside the app.
         hubRetryAt = 0;
+        hubRemovalRetryAt = 0;
+        permission = null;
         if (capability?.support === "unreachable") capability = null;
+        askAgain(
+          (attempt) => attempt.state.status === "failed" || awaitsHubDelivery(attempt.state),
+        );
         request();
       };
       const unsubscribes = [
-        ports.preferences.subscribe(request),
+        ports.preferences.subscribe(() => {
+          // Turning alerts on asks for the permission first.
+          permission = null;
+          request();
+        }),
         ports.account.subscribe(request),
         ports.connections.subscribe(() => {
           followConnections();

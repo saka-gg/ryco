@@ -6,7 +6,9 @@ import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 
 const require = createRequire(import.meta.url);
-const plugin = require("./withIosNotificationServiceExtension.cjs") as {
+const plugin = require("./withIosNotificationServiceExtension.cjs") as ((
+  config: Record<string, unknown>,
+) => Record<string, any>) & {
   readonly TARGET_NAME: string;
   readonly addPushKeychainGroup: (
     entitlements: Readonly<Record<string, unknown>>,
@@ -28,6 +30,10 @@ const plugin = require("./withIosNotificationServiceExtension.cjs") as {
 const { IOSConfig } = require("expo/config-plugins") as {
   readonly IOSConfig: {
     readonly XcodeUtils: { getPbxproj: (projectRoot: string) => XcodeProject };
+    readonly Version: {
+      readonly getVersion: (config: Record<string, unknown>) => string;
+      readonly getBuildNumber: (config: Record<string, unknown>) => string;
+    };
   };
 };
 
@@ -135,6 +141,23 @@ describe("the extension's Info.plist", () => {
     });
   });
 
+  it("takes its versions from where Expo takes the app's", () => {
+    for (const config of [
+      CONFIG,
+      { ...CONFIG, ios: { ...CONFIG.ios, version: "0.2.0" } },
+      { ...CONFIG, ios: { bundleIdentifier: BUNDLE_ID } },
+      { name: "Ryco Dev", ios: { bundleIdentifier: BUNDLE_ID } },
+    ]) {
+      expect(plugin.notificationServiceInfoPlist(config)).toMatchObject({
+        CFBundleShortVersionString: IOSConfig.Version.getVersion(config),
+        CFBundleVersion: IOSConfig.Version.getBuildNumber(config),
+      });
+    }
+    expect(
+      plugin.notificationServiceInfoPlist({ ...CONFIG, ios: { ...CONFIG.ios, version: "0.2.0" } }),
+    ).toMatchObject({ CFBundleShortVersionString: "0.2.0" });
+  });
+
   it("writes the extension's sources next to its plist and entitlements", () => {
     withTemporaryDirectory((directory) => {
       plugin.writeNotificationServiceFiles(directory, CONFIG);
@@ -153,6 +176,39 @@ describe("the extension's Info.plist", () => {
         "com.apple.usernotifications.service",
       );
     });
+  });
+});
+
+describe("EAS Build", () => {
+  it("names the extension, so EAS signs it and gives it the app's build number", () => {
+    const configured = plugin({
+      ...CONFIG,
+      extra: { eas: { projectId: "project" }, appVariant: "x" },
+    });
+    expect(configured.extra).toMatchObject({ eas: { projectId: "project" }, appVariant: "x" });
+    expect(configured.extra.eas.build.experimental.ios.appExtensions).toEqual([
+      {
+        targetName: "RycoNotificationService",
+        bundleIdentifier: "dev.ryco.app.dev.RycoNotificationService",
+        entitlements: {
+          "keychain-access-groups": ["$(AppIdentifierPrefix)dev.ryco.app.dev.push"],
+        },
+      },
+    ]);
+
+    // Config is evaluated more than once; another extension stays, this one is listed once.
+    const other = { targetName: "Widget", bundleIdentifier: `${BUNDLE_ID}.Widget` };
+    const twice = plugin(
+      plugin({
+        ...CONFIG,
+        extra: { eas: { build: { experimental: { ios: { appExtensions: [other] } } } } },
+      }),
+    );
+    expect(
+      twice.extra.eas.build.experimental.ios.appExtensions.map(
+        (extension: { readonly targetName: string }) => extension.targetName,
+      ),
+    ).toEqual(["Widget", "RycoNotificationService"]);
   });
 });
 
