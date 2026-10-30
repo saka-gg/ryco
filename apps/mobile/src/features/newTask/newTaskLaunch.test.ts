@@ -366,15 +366,18 @@ describe("New Task launch", () => {
     expect(readNewTaskLaunchDraftForEdit(key)).toBeNull();
   });
 
-  it("drops a result that lands after the launch was discarded", async () => {
+  it("keeps a running launch until its outcome lands: Remove waits for it", async () => {
     const remote = node();
     const release = remote.hold();
     startNewTaskLaunch({ attempt: attempt({ worktree: NEW_WORKTREE }), draft, deps: remote.deps });
-    discardNewTaskLaunch(key);
-    expect(useWorktreeLaunchStore.getState().launchesByKey[key]).toBeUndefined();
+    // Its commands may be on their way: forgetting it now would hide what lands.
+    expect(discardNewTaskLaunch(key)).toBe(false);
+    expect(useWorktreeLaunchStore.getState().launchesByKey[key]).toBeDefined();
 
     release();
     await settle();
+    expect(readNewTaskLaunch(key)?.status).toBe("started");
+    expect(discardNewTaskLaunch(key)).toBe(true);
     expect(readNewTaskLaunch(key)).toBeNull();
     expect(useWorktreeLaunchStore.getState().launchesByKey[key]).toBeUndefined();
   });

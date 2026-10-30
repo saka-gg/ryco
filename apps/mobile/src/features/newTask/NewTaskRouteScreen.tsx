@@ -50,14 +50,20 @@ import {
 } from "./newTaskController";
 import {
   discardNewTaskLaunch,
+  queueNewTaskLaunch,
   readNewTaskLaunchDraftForEdit,
+  setNewTaskLaunchEditing,
   startNewTaskLaunch,
   type NewTaskLaunchDraft,
 } from "./newTaskLaunch";
 import { createNewTaskLaunchDeps } from "./newTaskLaunchRuntime";
 import { NewTaskComposer } from "./NewTaskComposer";
 import { NewTaskContextSheet, type NewTaskWorktreeSelection } from "./NewTaskContextSheet";
-import { deriveNewTaskDefaults, resolveNewTaskProjectChoice } from "./newTaskModel";
+import {
+  canQueueNewTaskFor,
+  deriveNewTaskDefaults,
+  resolveNewTaskProjectChoice,
+} from "./newTaskModel";
 import { useNewTaskRepository } from "./useNewTaskRepository";
 
 type NewTaskRouteScreenProps = StaticScreenProps<{
@@ -128,10 +134,16 @@ function NewTaskContent(props: NewTaskRouteScreenProps) {
   ]);
   const editLaunchKey = firstParam(props.route.params?.editLaunchKey);
   // Read once: the draft a failed launch hands back. The launch itself stays
-  // until the edited task is sent, so backing out of the sheet loses nothing.
+  // until the edited task is sent, so backing out of the sheet loses nothing;
+  // until then it is held, so the outbox cannot start it under the edit.
   const [restored] = useState<NewTaskLaunchDraft | null>(() =>
     editLaunchKey ? readNewTaskLaunchDraftForEdit(editLaunchKey) : null,
   );
+  useEffect(() => {
+    if (!restored || !editLaunchKey) return;
+    setNewTaskLaunchEditing(editLaunchKey, true);
+    return () => setNewTaskLaunchEditing(editLaunchKey, false);
+  }, [editLaunchKey, restored]);
   const initialized = useRef(restored !== null);
   const modelEdited = useRef(restored !== null);
   const locationEdited = useRef(restored !== null);
@@ -355,7 +367,7 @@ function NewTaskContent(props: NewTaskRouteScreenProps) {
       !environments.some(
         (candidate) =>
           candidate.environmentId === nextEnvironmentId &&
-          candidate.connectionState === "connected",
+          (candidate.connectionState === "connected" || canQueueNewTaskFor(candidate)),
       )
     )
       return;
@@ -377,19 +389,25 @@ function NewTaskContent(props: NewTaskRouteScreenProps) {
     resetAttempt();
   };
 
-  const canSend =
-    tokenModeReady &&
-    preferencesReady &&
+  const connected = environment?.connectionState === "connected";
+  // A machine that is away takes the task once it is back: it waits in this
+  // device's outbox, written with the settings shown here.
+  const queueing = environment !== undefined && !connected && canQueueNewTaskFor(environment);
+  const draftComplete =
     prompt.trim().length > 0 &&
-    environment?.connectionState === "connected" &&
     (project !== undefined || newProjectPath.trim().length > 0) &&
     (worktreeSelection.kind !== "new" || newBranch.trim().length > 0);
-  const sendDisabledReason =
-    !tokenModeReady || !preferencesReady
+  const canSend = draftComplete && (connected ? tokenModeReady && preferencesReady : queueing);
+  const sendDisabledReason = connected
+    ? !tokenModeReady || !preferencesReady
       ? "Loading node settings"
-      : environments.some((candidate) => candidate.connectionState === "connected")
-        ? null
-        : "No verified machine available";
+      : null
+    : queueing || environments.some((candidate) => candidate.connectionState === "connected")
+      ? null
+      : "No verified machine available";
+  const queueNotice = queueing
+    ? `${environment.label} is not connected. The task starts when it is back.`
+    : null;
 
   const createAttempt = (): NewTaskAttempt => {
     if (!environment) throw new Error("Choose a connected node.");
@@ -461,24 +479,23 @@ function NewTaskContent(props: NewTaskRouteScreenProps) {
       });
       return;
     }
-    startNewTaskLaunch({
-      attempt,
-      draft: {
-        environmentId: attempt.environmentId,
-        projectId,
-        newProjectPath,
-        newProjectTitle,
-        worktree: worktreeSelection,
-        newBranch,
-        baseBranch,
-        prompt,
-        attachments,
-        modelSelection,
-        runtimeMode,
-        interactionMode: selectedInteractionMode,
-      },
-      deps: createNewTaskLaunchDeps(attempt.environmentId),
-    });
+    const draft: NewTaskLaunchDraft = {
+      environmentId: attempt.environmentId,
+      projectId,
+      newProjectPath,
+      newProjectTitle,
+      worktree: worktreeSelection,
+      newBranch,
+      baseBranch,
+      prompt,
+      attachments,
+      modelSelection,
+      runtimeMode,
+      interactionMode: selectedInteractionMode,
+    };
+    if (queueing) queueNewTaskLaunch({ attempt, draft });
+    else
+      startNewTaskLaunch({ attempt, draft, deps: createNewTaskLaunchDeps(attempt.environmentId) });
     // The edited task replaces the one it came from, now that it is on its way.
     if (restored && editLaunchKey) discardNewTaskLaunch(editLaunchKey);
     useStore.getState().setActiveEnvironmentId(attempt.environmentId);
@@ -621,6 +638,7 @@ function NewTaskContent(props: NewTaskRouteScreenProps) {
             busy={false}
             canSend={canSend}
             sendDisabledReason={sendDisabledReason}
+            queueNotice={queueNotice}
             onChangePrompt={(value) => {
               setPrompt(value);
               resetAttempt();

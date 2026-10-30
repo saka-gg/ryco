@@ -44,6 +44,7 @@ import { createHomeScrollMemory, homeListFilterKey } from "./homeScrollMemory";
 import { useAutoSettleRuleHandOver } from "./useAutoSettleRuleHandOver";
 import { useHomeEnvironments } from "./useHomeEnvironments";
 import { NeedsVerificationSection } from "./NeedsVerificationSection";
+import { QueuedTasksSection } from "../newTask/QueuedTasksSection";
 
 const NO_INBOX_SECTIONS: ReadonlyArray<InboxSection> = [];
 const NO_PROJECT_ROWS: ReadonlyArray<ProjectListRow> = [];
@@ -278,6 +279,7 @@ export function HomeScreen() {
         <HomeModeControl mode={home.mode} onSelect={selectMode} />
         <View className="min-h-0 flex-1">
           <NeedsVerificationSection />
+          <QueuedTasksSection machines={environments} />
           {home.mode === "inbox" ? (
             <InboxScreen
               filterKey={inboxFilterKey}

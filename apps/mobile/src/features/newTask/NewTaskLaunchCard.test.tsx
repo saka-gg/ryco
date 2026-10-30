@@ -40,6 +40,7 @@ function buttons(tree: Element): Map<string, () => void> {
 }
 
 const FAILED: NewTaskLaunchView = {
+  queued: false,
   title: "Fix the header",
   prompt: "Fix the header",
   attachmentCount: 0,
@@ -51,31 +52,38 @@ const FAILED: NewTaskLaunchView = {
   failureMessage: "This project is archived.",
   canRetry: true,
   canEdit: true,
+  canRemove: true,
 };
 
+const noop = () => undefined;
+
 describe("NewTaskLaunchCard", () => {
-  it("shows the task as sent, its steps and the failure, with Retry and Edit task", () => {
+  it("shows the task as sent, its steps and the failure, with Retry, Edit task and Remove", () => {
     const onRetry = vi.fn();
     const onEdit = vi.fn();
-    const tree = NewTaskLaunchCard({ view: FAILED, onRetry, onEdit }) as Element;
+    const onRemove = vi.fn();
+    const tree = NewTaskLaunchCard({ view: FAILED, onRetry, onEdit, onRemove }) as Element;
     const copy = textOf(tree);
     expect(copy).toContain("Fix the header");
     expect(copy).toContain("Create task");
     expect(copy).toContain("This project is archived.");
 
     const actions = buttons(tree);
-    expect([...actions.keys()]).toEqual(["Retry", "Edit task"]);
+    expect([...actions.keys()]).toEqual(["Retry", "Edit task", "Remove"]);
     actions.get("Retry")?.();
     actions.get("Edit task")?.();
+    actions.get("Remove")?.();
     expect(onRetry).toHaveBeenCalledTimes(1);
     expect(onEdit).toHaveBeenCalledTimes(1);
+    expect(onRemove).toHaveBeenCalledTimes(1);
   });
 
   it("offers only Retry when the task may already be on the node", () => {
     const tree = NewTaskLaunchCard({
-      view: { ...FAILED, canEdit: false },
-      onRetry: () => undefined,
-      onEdit: () => undefined,
+      view: { ...FAILED, canEdit: false, canRemove: false },
+      onRetry: noop,
+      onEdit: noop,
+      onRemove: noop,
     }) as Element;
     expect([...buttons(tree).keys()]).toEqual(["Retry"]);
   });
@@ -89,11 +97,30 @@ describe("NewTaskLaunchCard", () => {
         failureMessage: null,
         canRetry: false,
         canEdit: false,
+        canRemove: false,
       },
-      onRetry: () => undefined,
-      onEdit: () => undefined,
+      onRetry: noop,
+      onEdit: noop,
+      onRemove: noop,
     }) as Element;
     expect(buttons(tree).size).toBe(0);
     expect(textOf(tree)).toContain("Check out files · 40%");
+  });
+
+  it("offers Edit task and Remove for a task waiting for its machine", () => {
+    const tree = NewTaskLaunchCard({
+      view: {
+        ...FAILED,
+        queued: true,
+        statusLabel: "Queued: starts when Studio Mac is back",
+        failureMessage: null,
+        canRetry: false,
+      },
+      onRetry: noop,
+      onEdit: noop,
+      onRemove: noop,
+    }) as Element;
+    expect([...buttons(tree).keys()]).toEqual(["Edit task", "Remove"]);
+    expect(textOf(tree)).toContain("Queued: starts when Studio Mac is back");
   });
 });

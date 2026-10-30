@@ -214,7 +214,10 @@ import { NewTaskLaunchCard } from "../newTask/NewTaskLaunchCard";
 import { useWorktreeLaunchStore } from "@ryco/client-runtime/state/worktree-setup";
 import {
   deriveNewTaskLaunchView,
+  discardNewTaskLaunch,
   newTaskLaunchKey,
+  requeueNewTaskLaunch,
+  setNewTaskLaunchEditing,
   retryNewTaskLaunch,
   useNewTaskLaunchStore,
 } from "../newTask/newTaskLaunch";
@@ -603,10 +606,6 @@ export function ThreadDetailScreen(props: {
   const newTaskLaunch = useNewTaskLaunchStore((state) => state.launchesByKey[launchKey]);
   const worktreeLaunch = useWorktreeLaunchStore((state) => state.launchesByKey[launchKey]);
   const threadHasMessages = (built?.timeline.length ?? 0) > 0;
-  const launchView = useMemo(
-    () => deriveNewTaskLaunchView({ launch: newTaskLaunch, worktreeLaunch, threadHasMessages }),
-    [newTaskLaunch, threadHasMessages, worktreeLaunch],
-  );
   // Capability-routed file attachments: capability + direct HTTP base enable the
   // streaming upload path; without either, only the legacy image dataUrl flow.
   const fileUploadMaxBytes = useComposerFileUploadMaxBytes(environmentId);
@@ -837,6 +836,16 @@ export function ThreadDetailScreen(props: {
   const environmentRow =
     environments.find((environment) => environment.environmentId === environmentId) ?? null;
   const nodeLabel = environmentRow?.label ?? null;
+  const launchView = useMemo(
+    () =>
+      deriveNewTaskLaunchView({
+        launch: newTaskLaunch,
+        worktreeLaunch,
+        threadHasMessages,
+        machineLabel: nodeLabel,
+      }),
+    [newTaskLaunch, nodeLabel, threadHasMessages, worktreeLaunch],
+  );
   const settlementModel = useMemo(() => {
     if (!sidebarThread || !environmentRow) return null;
     return buildThreadSettlementModel(
@@ -2562,12 +2571,28 @@ export function ThreadDetailScreen(props: {
             launchView ? (
               <NewTaskLaunchCard
                 view={launchView}
-                onRetry={() =>
-                  retryNewTaskLaunch(launchKey, createNewTaskLaunchDeps(environmentId))
-                }
-                onEdit={() =>
-                  navigation.dispatch(StackActions.replace("NewTask", { editLaunchKey: launchKey }))
-                }
+                onRetry={() => {
+                  let deps: ReturnType<typeof createNewTaskLaunchDeps>;
+                  try {
+                    deps = createNewTaskLaunchDeps(environmentId);
+                  } catch {
+                    // The machine is away: wait in the outbox and start once it is back.
+                    requeueNewTaskLaunch(launchKey);
+                    return;
+                  }
+                  retryNewTaskLaunch(launchKey, deps);
+                }}
+                onEdit={() => {
+                  // Held from the tap on: the outbox must not start it under the edit.
+                  setNewTaskLaunchEditing(launchKey, true);
+                  navigation.dispatch(
+                    StackActions.replace("NewTask", { editLaunchKey: launchKey }),
+                  );
+                }}
+                onRemove={() => {
+                  if (discardNewTaskLaunch(launchKey) && navigation.canGoBack())
+                    navigation.goBack();
+                }}
               />
             ) : (
               <View className="px-4 py-16">

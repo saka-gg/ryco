@@ -1,6 +1,6 @@
 import { scopeProjectRef, scopeThreadRef } from "@ryco/client-runtime/scoped";
 import { isArchivedThreadStub } from "@ryco/client-runtime/state/threads";
-import type { EnvironmentId } from "@ryco/contracts";
+import type { EnvironmentId, ThreadId } from "@ryco/contracts";
 
 import { ensureEnvironmentApi } from "../../connection/environmentApi";
 import { newCommandId } from "../../lib/ids";
@@ -21,6 +21,19 @@ async function waitForAuthoritative(read: () => boolean, label: string): Promise
   throw new Error(`${label} was not confirmed`);
 }
 
+/** Whether the node shows the thread with its first turn under way (not merely created). */
+export function isNewTaskThreadStarted(environmentId: EnvironmentId, threadId: ThreadId): boolean {
+  const summary = selectSidebarThreadSummaryByRef(
+    useStore.getState(),
+    scopeThreadRef(environmentId, threadId),
+  );
+  return (
+    summary !== undefined &&
+    !isArchivedThreadStub(summary) &&
+    (summary.latestTurn !== null || summary.latestUserMessageAt !== null)
+  );
+}
+
 /**
  * The live environment's side of a New Task launch: its dispatch, the node's
  * worktree setup feed, and the waits for the project and thread the node
@@ -33,17 +46,7 @@ export function createNewTaskLaunchDeps(environmentId: EnvironmentId): NewTaskLa
     newCommandId,
     controller: {
       dispatch: (command) => api.orchestration.dispatchCommand(command),
-      threadStarted: (threadId) => {
-        const summary = selectSidebarThreadSummaryByRef(
-          useStore.getState(),
-          scopeThreadRef(environmentId, threadId),
-        );
-        return (
-          summary !== undefined &&
-          !isArchivedThreadStub(summary) &&
-          (summary.latestTurn !== null || summary.latestUserMessageAt !== null)
-        );
-      },
+      threadStarted: (threadId) => isNewTaskThreadStarted(environmentId, threadId),
       waitForProject: (projectId) =>
         waitForAuthoritative(
           () =>

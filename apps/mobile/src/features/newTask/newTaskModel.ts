@@ -37,20 +37,38 @@ function mutationReady(environment: ProjectEnvironment): boolean {
   return environment.connectionState === "connected";
 }
 
+/**
+ * A machine a New Task can wait for on this device: away right now (offline or
+ * reconnecting) and not one this device may only read. The task is sent once
+ * it is live again.
+ */
+export function canQueueNewTaskFor(environment: ProjectEnvironment): boolean {
+  return (
+    (environment.connectionState === "offline" || environment.connectionState === "reconnecting") &&
+    environment.role !== "viewer"
+  );
+}
+
 export function deriveNewTaskDefaults(input: {
   readonly launch?: NewTaskLaunchContext;
   readonly environments: ReadonlyArray<ProjectEnvironment>;
   readonly projects: ReadonlyArray<Project>;
   readonly worktrees: ReadonlyArray<SidebarWorktreeSummary>;
 }): NewTaskDefaults {
-  const launchedEnvironment = input.launch?.environmentId
-    ? input.environments.find(
-        (environment) =>
-          environment.environmentId === input.launch?.environmentId && mutationReady(environment),
-      )
-    : null;
+  const launched = (accept: (environment: ProjectEnvironment) => boolean) =>
+    input.launch?.environmentId
+      ? input.environments.find(
+          (environment) =>
+            environment.environmentId === input.launch?.environmentId && accept(environment),
+        )
+      : undefined;
+  // A live machine first; with none, one the task can wait for.
   const environment =
-    launchedEnvironment ?? input.environments.find((candidate) => mutationReady(candidate)) ?? null;
+    launched(mutationReady) ??
+    input.environments.find((candidate) => mutationReady(candidate)) ??
+    launched(canQueueNewTaskFor) ??
+    input.environments.find((candidate) => canQueueNewTaskFor(candidate)) ??
+    null;
 
   const projects = environment
     ? input.projects.filter((project) => project.environmentId === environment.environmentId)
@@ -114,7 +132,8 @@ export function resolveNewTaskProjectChoice(input: {
   if (
     !input.environments.some(
       (environment) =>
-        environment.environmentId === input.target.environmentId && mutationReady(environment),
+        environment.environmentId === input.target.environmentId &&
+        (mutationReady(environment) || canQueueNewTaskFor(environment)),
     )
   )
     return null;

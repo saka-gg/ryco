@@ -56,6 +56,7 @@ import {
 import { NATIVE_LIQUID_GLASS_SUPPORTED } from "./native/native-glass";
 import { nativeHeaderScrollEdgeEffects } from "./native/StackHeader";
 import { useThreadOutboxDrain } from "./state/use-thread-outbox-drain";
+import { useNewTaskOutboxDrain } from "./state/use-new-task-outbox-drain";
 
 const HEADER_SCROLL_EDGE_EFFECTS = nativeHeaderScrollEdgeEffects(Platform.OS, Platform.Version);
 
@@ -300,6 +301,8 @@ function RootStackLayout(props: {
 }) {
   // Drain the offline outbox on reconnect (real drain lands with the send task).
   useThreadOutboxDrain();
+  // New tasks written while their machine was away start once it is live.
+  useNewTaskOutboxDrain();
   // Full pathname (sheets included) for keyboard-command scoping.
   const path = getPathFromState(props.state, navigationPathConfig);
   const pathname = path.startsWith("/") ? path : `/${path}`;
