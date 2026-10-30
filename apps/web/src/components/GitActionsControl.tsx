@@ -1,5 +1,5 @@
 import { selectNodeRecordsThreadBranch } from "@ryco/client-runtime/state/threads";
-import type { ChangeRequest, ScopedThreadRef } from "@ryco/contracts";
+import type { ChangeRequest, ScopedThreadRef, ServerConfig } from "@ryco/contracts";
 import type {
   SourceControlCloneProtocol,
   SourceControlProviderDiscoveryItem,
@@ -38,6 +38,7 @@ import { Spinner } from "~/components/ui/spinner";
 import { cn } from "~/lib/utils";
 import {
   buildMenuItems,
+  resolveCreatePrExecution,
   type GitActionIconName,
   type GitActionMenuItem,
   type GitQuickAction,
@@ -91,7 +92,9 @@ import { ensureEnvironmentApi } from "~/environmentApi";
 import { useSavedEnvironmentRuntimeStore } from "~/environments/runtime";
 import { usePrimaryEnvironmentId } from "~/environments/primary";
 import { useServerConfig } from "~/rpc/serverState";
-import { preloadableLazy } from "~/lib/preloadableLazy";
+import { preloadableLazy, useLazyComponentReady } from "~/lib/preloadableLazy";
+import { useEnvironmentServerConfigSelector } from "~/hooks/useChatsAvailability";
+import { notifySurfaceLoadFailure } from "~/components/ui/surfaceLoadFailure";
 import { readLocalApi } from "~/localApi";
 import { getSourceControlPresentation } from "~/sourceControlPresentation";
 import { useSettingsDialogStore } from "../settingsDialogStore";
@@ -223,15 +226,22 @@ function getMenuActionDisabledReason({
   gitStatus,
   isBusy,
   hasPrimaryRemote,
+  createPrDialog,
 }: {
   item: GitActionMenuItem;
   gitStatus: VcsStatusResult | null;
   isBusy: boolean;
   hasPrimaryRemote: boolean;
+  /** Create PR opens the dialog, which commits and pushes too: its own rule says why not. */
+  createPrDialog: boolean;
 }): string | null {
   if (!item.disabled) return null;
   if (isBusy) return GIT_ACTION_BUSY_HINT;
   if (!gitStatus) return GIT_STATUS_UNAVAILABLE_HINT;
+  if (item.id === "pr" && createPrDialog && item.kind === "open_dialog") {
+    const execution = resolveCreatePrExecution({ gitStatus, isBusy, hasPrimaryRemote });
+    if (execution.kind === "unavailable") return execution.hint;
+  }
 
   const hasBranch = gitStatus.refName !== null;
   const hasChanges = gitStatus.hasWorkingTreeChanges;
@@ -1097,17 +1107,9 @@ const LazyGitCreatePullRequestDialog = preloadableLazy(() =>
   import("./GitCreatePullRequestDialog").then((module) => module.default),
 );
 
-/** Whether the environment's node takes the Create PR dialog's title, body and draft choice. */
-function useNodeTakesPullRequestOptions(environmentId: ScopedThreadRef["environmentId"] | null) {
-  const primaryEnvironmentId = usePrimaryEnvironmentId();
-  const primaryServerConfig = useServerConfig();
-  const environmentServerConfig = useSavedEnvironmentRuntimeStore((state) =>
-    environmentId ? state.byId[environmentId]?.serverConfig : null,
-  );
-  const serverConfig =
-    environmentId === primaryEnvironmentId ? primaryServerConfig : environmentServerConfig;
-  return serverConfig?.environment.capabilities.pullRequestOptions === true;
-}
+// Module level, so unrelated config pushes (provider probes) never re-render the control.
+const selectPullRequestOptions = (config: ServerConfig | null): boolean =>
+  config?.environment.capabilities.pullRequestOptions === true;
 
 export default function GitActionsControl({
   gitCwd,
@@ -1150,7 +1152,22 @@ export default function GitActionsControl({
   const [isEditingFiles, setIsEditingFiles] = useState(false);
   const [isPublishDialogOpen, setIsPublishDialogOpen] = useState(false);
   const [isCreatePrDialogOpen, setIsCreatePrDialogOpen] = useState(false);
-  const createPrDialog = useNodeTakesPullRequestOptions(activeEnvironmentId);
+  // Whether the node takes the Create PR dialog's title, description and draft choice.
+  const createPrDialog = useEnvironmentServerConfigSelector(
+    activeEnvironmentId,
+    selectPullRequestOptions,
+  );
+  // A failed dialog chunk closes it and offers a Retry, so the mount never throws to the route.
+  const createPrDialogReady = useLazyComponentReady(
+    LazyGitCreatePullRequestDialog,
+    isCreatePrDialogOpen,
+    {
+      onLoadError: (error) => {
+        setIsCreatePrDialogOpen(false);
+        notifySurfaceLoadFailure("pull request dialog", error, () => setIsCreatePrDialogOpen(true));
+      },
+    },
+  );
 
   const allFiles = gitStatusForActions?.workingTree.files ?? [];
   const selectedFiles = allFiles.filter((f) => !excludedFiles.has(f.path));
@@ -1470,6 +1487,7 @@ export default function GitActionsControl({
                       gitStatus: gitStatusForActions,
                       isBusy: isGitActionRunning,
                       hasPrimaryRemote,
+                      createPrDialog,
                     });
                     if (item.disabled && disabledReason) {
                       return (
@@ -1719,7 +1737,7 @@ export default function GitActionsControl({
         gitCwd={gitCwd}
       />
 
-      {isCreatePrDialogOpen ? (
+      {isCreatePrDialogOpen && createPrDialogReady ? (
         <Suspense fallback={null}>
           <LazyGitCreatePullRequestDialog
             onOpenChange={setIsCreatePrDialogOpen}

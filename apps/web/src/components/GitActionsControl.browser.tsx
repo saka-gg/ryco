@@ -1294,6 +1294,7 @@ describe("Create PR dialog", () => {
     gitStatusOverridesRef.current = {};
     primaryServerConfigRef.current = null;
     resetPrimaryEnvironmentDescriptorForTests();
+    resetSavedEnvironmentRuntimeStoreForTests();
     liveBranchRef.current = "";
     document.body.innerHTML = "";
   });
@@ -1302,14 +1303,15 @@ describe("Create PR dialog", () => {
     pullRequestOptions: boolean;
     status: Partial<VcsStatusResult>;
   }) {
-    setEnvironmentConfig(ENVIRONMENT_A, "ryco", {
+    // A saved environment: the control reads its capabilities from the saved runtime store.
+    setEnvironmentConfig(ENVIRONMENT_B, "ryco", {
       ...(input.pullRequestOptions ? { pullRequestOptions: true } : {}),
     });
     gitStatusOverridesRef.current = input.status;
     const screen = await render(
       <GitActionsControl
         gitCwd={GIT_CWD}
-        activeThreadRef={scopeThreadRef(ENVIRONMENT_A, SHARED_THREAD_ID)}
+        activeThreadRef={scopeThreadRef(ENVIRONMENT_B, SHARED_THREAD_ID)}
       />,
     );
     mounted.push(() => screen.unmount());
@@ -1382,9 +1384,35 @@ describe("Create PR dialog", () => {
       .toHaveAttribute("aria-disabled", "true");
   });
 
+  it("carries the dialog's choices through the default-ref confirmation", async () => {
+    await mountControl({
+      pullRequestOptions: true,
+      status: { ...dirtyTree, isDefaultRef: true },
+    });
+    await page.getByRole("menuitem", { name: "Create PR" }).click();
+    const dialog = page.getByRole("dialog");
+    await dialog.getByRole("textbox", { name: "PR title" }).fill("Ship it");
+    await dialog.getByRole("button", { name: "Create draft PR" }).click();
+    expect(runStackedActionMutateAsyncSpy).not.toHaveBeenCalled();
+    const confirm = page.getByRole("dialog", {
+      name: "Commit, push & create PR from default ref?",
+    });
+    await expect.element(confirm).toBeVisible();
+    await confirm.getByRole("button", { name: "Checkout feature branch & continue" }).click();
+
+    await vi.waitFor(() => expect(runStackedActionMutateAsyncSpy).toHaveBeenCalledTimes(1));
+    expect(runStackedActionMutateAsyncSpy).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: "commit_push_pr",
+        featureBranch: true,
+        pullRequest: { title: "Ship it", draft: true },
+      }),
+    );
+  });
+
   it("sends the dialog's choices to the node", async () => {
     const runStackedAction = vi.fn(() => new Promise<never>(() => undefined));
-    __setEnvironmentApiOverrideForTests(ENVIRONMENT_A, {
+    __setEnvironmentApiOverrideForTests(ENVIRONMENT_B, {
       git: { runStackedAction },
     } as unknown as EnvironmentApi);
     await mountControl({ pullRequestOptions: true, status: {} });
