@@ -8,11 +8,9 @@ import { ChevronRightIcon, FolderIcon, FolderClosedIcon } from "lucide-react";
 import { cn } from "~/lib/utils";
 import { DiffStatLabel, hasNonZeroStat } from "./DiffStatLabel";
 import { VscodeEntryIcon } from "./VscodeEntryIcon";
-import { WindowedRows } from "./WindowedRows";
+import { WINDOW_FILE_ROWS_AFTER, WindowedRows } from "./WindowedRows";
 
 const EMPTY_DIRECTORY_OVERRIDES: Record<string, boolean> = {};
-// Above this many files in expanded folders, only the rows in view render.
-const VIRTUALIZE_AFTER_FILES = 250;
 // Rows are a fixed height so a long tree can lay them out without measuring
 // each one; the probe adds the 2px gap that separates them.
 const ROW_HEIGHT_CLASS = "h-6 phone:h-11";
@@ -84,12 +82,13 @@ export const ChangedFilesTree = memo(function ChangedFilesTree(props: {
     () => collectExpandedRows(treeNodes, expandedDirectories, allDirectoriesExpanded),
     [allDirectoriesExpanded, expandedDirectories, treeNodes],
   );
+  // Past this many files in expanded folders, only the rows in view render.
   const virtualized = useMemo(() => {
     let fileCount = 0;
     for (const row of rows) {
       if (row.node.kind === "file") fileCount += 1;
     }
-    return fileCount > VIRTUALIZE_AFTER_FILES;
+    return fileCount > WINDOW_FILE_ROWS_AFTER;
   }, [rows]);
 
   const renderRow = ({ node, depth }: ChangedFilesTreeRow) => {

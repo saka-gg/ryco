@@ -181,6 +181,29 @@ describe("ChangedFilesTree with thousands of files", () => {
     await mounted.unmount();
   });
 
+  it("re-windows when a transform that moved the tree ends", async () => {
+    // Transforms move rows without a scroll or a resize, as a card scaling in does.
+    const mounted = await render(
+      <div style={{ height: 280, overflowY: "auto" }}>
+        <div style={{ transform: "translateY(2000px)", transition: "transform 60ms linear" }}>
+          <ChangedFilesTree
+            files={manyFiles}
+            allDirectoriesExpanded
+            resolvedTheme="light"
+            onSelectFile={vi.fn()}
+          />
+        </div>
+      </div>,
+    );
+    // Pushed below the viewport, only the overscan before the first row renders.
+    await expect.poll(() => buttons().length).toBe(0);
+    const moved = mounted.container.firstElementChild!.firstElementChild as HTMLElement;
+    moved.style.transform = "none";
+    await expect.poll(() => text()).toContain("file-00005.ts");
+    expect(buttons().length).toBeLessThan(40);
+    await mounted.unmount();
+  });
+
   it("remeasures the rows in view when the viewport or content above it resizes", async () => {
     const content = (height: number, precedingHeight: number) => (
       <div style={{ height, overflowY: "auto" }}>

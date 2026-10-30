@@ -1593,6 +1593,68 @@ describe("MessagesTimeline", () => {
     }
   });
 
+  it("renders only the changed files in view once a huge checkpoint shows all its files", async () => {
+    const assistantMessageId = MessageId.make("message-assistant-huge");
+    const turnId = TurnId.make("turn-huge");
+    const files = Array.from({ length: 2_000 }, (_, index) => ({
+      path: `src/file-${index.toString().padStart(4, "0")}.ts`,
+      additions: 1,
+      deletions: 0,
+    }));
+    const props = {
+      ...buildProps(),
+      turnDiffSummaryByAssistantMessageId: new Map([
+        [
+          assistantMessageId,
+          { turnId, completedAt: "2026-04-13T12:00:03.000Z", files, assistantMessageId },
+        ],
+      ]),
+    };
+    const entry = {
+      id: "message-huge",
+      kind: "message" as const,
+      createdAt: "2026-04-13T12:00:00.000Z",
+      message: {
+        id: assistantMessageId,
+        role: "assistant" as const,
+        text: "Vendored the dependencies",
+        turnId,
+        createdAt: "2026-04-13T12:00:00.000Z",
+        completedAt: "2026-04-13T12:00:04.000Z",
+        streaming: false,
+      },
+    };
+    const fileRows = () => document.querySelectorAll("[data-changed-file-row]");
+    const screen = await render(
+      <div style={{ height: 480 }}>
+        <MessagesTimeline {...props} timelineEntries={[entry]} />
+      </div>,
+    );
+
+    try {
+      await expect.element(page.getByText("Edited 2000 files")).toBeVisible();
+      expect(fileRows()).toHaveLength(6);
+      await page.getByText("Show 1994 more files").click();
+      await expect.poll(() => fileRows().length).toBeGreaterThan(6);
+      expect(fileRows().length).toBeLessThan(60);
+
+      // The transcript scroller, not the row's own overflow-x box, bounds the window.
+      const scroller = page.getByTestId("legend-list").element() as HTMLElement;
+      expect(scroller.scrollHeight).toBeGreaterThan(2_000 * 35);
+      scroller.scrollTop = scroller.scrollHeight;
+      scroller.dispatchEvent(new Event("scroll"));
+      await expect.element(page.getByText("src/file-1999.ts")).toBeInTheDocument();
+      expect(fileRows().length).toBeLessThan(60);
+      await page.getByText("src/file-1999.ts").click();
+      expect(props.onOpenTurnDiff).toHaveBeenCalledWith(turnId, "src/file-1999.ts");
+
+      await page.getByText("Show less").click();
+      await expect.poll(() => fileRows().length).toBe(6);
+    } finally {
+      await screen.unmount();
+    }
+  });
+
   it("uses one collapsible activity design while running and auto-collapses on completion", async () => {
     const turnId = TurnId.make("turn-activity");
     const commentaryEntry = {

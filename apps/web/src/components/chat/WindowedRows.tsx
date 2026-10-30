@@ -2,16 +2,18 @@ import { type ReactNode, useLayoutEffect, useRef, useState } from "react";
 import { flushSync } from "react-dom";
 import { cn } from "~/lib/utils";
 
+/** File lists with more rows than this (T3 Code's threshold) render only the rows in view. */
+export const WINDOW_FILE_ROWS_AFTER = 250;
 // Rows rendered beyond the scrolled viewport on each side.
 const ROW_OVERSCAN = 8;
 const INITIAL_RANGE = { start: 0, end: 40, rowStride: 26 };
 
 /**
  * Renders a long list of equal-height rows: once `virtualized`, only the rows
- * inside the nearest scrolling ancestor's viewport (plus overscan) mount, laid
- * out at the stride `rowStrideClassName` gives an invisible probe. The list
- * needs no scroller of its own, so it also works inside a virtualized timeline
- * item. A row holding keyboard focus stays mounted when scrolled away.
+ * its ancestors leave in view (plus overscan) mount, laid out at the stride
+ * `rowStrideClassName` gives an invisible probe. The list needs no scroller of
+ * its own, so it also works inside a virtualized timeline item. A row holding
+ * keyboard focus stays mounted when scrolled away.
  */
 export function WindowedRows<Row>(props: {
   rows: ReadonlyArray<Row>;
@@ -34,36 +36,36 @@ export function WindowedRows<Row>(props: {
     const probe = probeRef.current;
     if (!virtualized || !container || !probe) return;
 
-    // Observe the ancestors up to the scroller too: content above the list (a
-    // streaming message, a timeline item resizing) moves it without a scroll.
-    const observed: HTMLElement[] = [container, probe];
-    let scrollElement: HTMLElement | null = null;
+    // The rows in view are those inside every ancestor that clips them. The
+    // first `overflow: auto` ancestor is not always the scroller: an element
+    // with only `overflow-x: hidden` computes `overflow-y: auto` too.
+    const ancestors: HTMLElement[] = [];
     for (let parent = container.parentElement; parent; parent = parent.parentElement) {
-      observed.push(parent);
-      if (/auto|scroll/.test(getComputedStyle(parent).overflowY)) {
-        scrollElement = parent;
-        break;
-      }
+      ancestors.push(parent);
     }
+    const clippingAncestors = ancestors.filter(
+      (ancestor) => getComputedStyle(ancestor).overflowY !== "visible",
+    );
 
     const measure = () => {
-      const rowStride = probe.getBoundingClientRect().height;
-      if (rowStride <= 0) return;
+      // The layout height: rows are placed in the list's own (untransformed) space.
+      const rowStride = Number.parseFloat(getComputedStyle(probe).height);
+      if (!(rowStride > 0)) return;
+      let viewportTop = 0;
+      let viewportBottom = document.documentElement.clientHeight;
+      for (const ancestor of clippingAncestors) {
+        const top = ancestor.getBoundingClientRect().top + ancestor.clientTop;
+        viewportTop = Math.max(viewportTop, top);
+        viewportBottom = Math.min(viewportBottom, top + ancestor.clientHeight);
+      }
       const listTop = container.getBoundingClientRect().top;
-      const viewportTop = scrollElement
-        ? scrollElement.getBoundingClientRect().top + scrollElement.clientTop
-        : 0;
-      const viewportHeight = scrollElement?.clientHeight ?? document.documentElement.clientHeight;
       const start = Math.max(
         0,
         Math.min(rows.length, Math.floor((viewportTop - listTop) / rowStride) - ROW_OVERSCAN),
       );
       const end = Math.max(
         start,
-        Math.min(
-          rows.length,
-          Math.ceil((viewportTop + viewportHeight - listTop) / rowStride) + ROW_OVERSCAN,
-        ),
+        Math.min(rows.length, Math.ceil((viewportBottom - listTop) / rowStride) + ROW_OVERSCAN),
       );
       setRange((current) =>
         current.start === start && current.end === end && current.rowStride === rowStride
@@ -73,7 +75,6 @@ export function WindowedRows<Row>(props: {
     };
     measure();
 
-    const scrollTarget: HTMLElement | Window = scrollElement ?? window;
     let frame = 0;
     const onScroll = () => {
       if (frame) return;
@@ -82,13 +83,22 @@ export function WindowedRows<Row>(props: {
         measure();
       });
     };
-    scrollTarget.addEventListener("scroll", onScroll, { passive: true });
+    // Scroll events do not bubble; capturing them on the document sees every
+    // scroller. A transform moves rows without a scroll or a resize: a card that
+    // scales in shifts a tall list's top by hundreds of pixels until it ends.
+    document.addEventListener("scroll", onScroll, { capture: true, passive: true });
+    document.addEventListener("animationend", onScroll, true);
+    document.addEventListener("transitionend", onScroll, true);
     window.addEventListener("resize", onScroll);
-    // Resizes land before paint, so render the new window in the same frame.
+    // Content above the list (a streaming message, a timeline item resizing)
+    // moves it without a scroll, so watch every ancestor's size too. Resizes
+    // land before paint: render the new window in the same frame.
     const resizeObserver = new ResizeObserver(() => flushSync(measure));
-    for (const element of observed) resizeObserver.observe(element);
+    for (const element of [container, probe, ...ancestors]) resizeObserver.observe(element);
     return () => {
-      scrollTarget.removeEventListener("scroll", onScroll);
+      document.removeEventListener("scroll", onScroll, { capture: true });
+      document.removeEventListener("animationend", onScroll, true);
+      document.removeEventListener("transitionend", onScroll, true);
       window.removeEventListener("resize", onScroll);
       if (frame) cancelAnimationFrame(frame);
       resizeObserver.disconnect();
