@@ -1,12 +1,19 @@
-import { getSharedHighlighter } from "@pierre/diffs";
-import { afterEach, describe, expect, it, vi } from "vite-plus/test";
+import { disposeHighlighter, getSharedHighlighter } from "@pierre/diffs";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vite-plus/test";
 
 import { resolveDiffThemeName } from "../../lib/diffRendering";
+import type { SyntaxHighlighterType } from "../../lib/syntaxHighlighterType";
 import {
   createHighlightCacheKey,
   requestCodeHighlight,
   resetCodeHighlightQueueForTests,
 } from "./codeHighlightQueue";
+
+const mainThread = vi.hoisted(() => ({ highlighter: "highlights" as SyntaxHighlighterType }));
+
+vi.mock("../../lib/syntaxHighlighterType", () => ({
+  getMainThreadSyntaxHighlighter: () => mainThread.highlighter,
+}));
 
 afterEach(() => {
   resetCodeHighlightQueueForTests();
@@ -27,13 +34,14 @@ const UNIT = [
   "",
 ];
 
-async function expectSlicedMatchesWhole(code: string): Promise<void> {
+async function expectSlicedMatchesWhole(type: SyntaxHighlighterType, code: string): Promise<void> {
   const themeName = resolveDiffThemeName("dark");
   const highlighter = await getSharedHighlighter({
     themes: [resolveDiffThemeName("dark"), resolveDiffThemeName("light")],
     langs: ["tsx"],
-    preferredHighlighter: "shiki-js",
+    preferredHighlighter: type,
   });
+  expect(highlighter.name).toBe(type);
   const whole = highlighter.codeToHtml(code, {
     lang: "tsx",
     theme: themeName,
@@ -50,16 +58,22 @@ async function expectSlicedMatchesWhole(code: string): Promise<void> {
   expect(onReady.mock.calls[0]![0]).toBe(whole);
 }
 
-describe("sliced highlighting with Shiki", () => {
+describe.each(["highlights", "shiki-js"] as const)("sliced highlighting with %s", (type) => {
+  beforeAll(async () => {
+    // A thread holds one highlighter type at a time.
+    await disposeHighlighter();
+    mainThread.highlighter = type;
+  });
+
   it("renders a large block exactly like one pass over it", async () => {
     const code = Array.from({ length: 33 }, () => UNIT.join("\n")).join("\n");
     expect(code.split("\n").length).toBeGreaterThan(300);
-    await expectSlicedMatchesWhole(code);
+    await expectSlicedMatchesWhole(type, code);
   });
 
   it("renders a large CRLF block exactly like one pass over it", async () => {
     const code = Array.from({ length: 33 }, () => UNIT.join("\r\n")).join("\r\n");
     expect(code.split("\r\n").length).toBeGreaterThan(300);
-    await expectSlicedMatchesWhole(code);
+    await expectSlicedMatchesWhole(type, code);
   });
 });

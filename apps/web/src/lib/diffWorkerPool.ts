@@ -8,12 +8,15 @@ import {
   type DiffThemeName,
 } from "./diffRendering";
 import {
-  canCompileWebAssembly,
   createDiffWorkerPoolOwner,
-  resolveDiffWorkerHighlighter,
   resolveDiffWorkerPoolSize,
   type DiffWorkerPoolLease,
 } from "./diffWorkerPoolOwner";
+import {
+  getMainThreadSyntaxHighlighter,
+  pageCanCompileWebAssembly,
+  resolveSyntaxHighlighter,
+} from "./syntaxHighlighterType";
 
 /**
  * App-lifetime owner of the `@pierre/diffs` highlight worker pool.
@@ -27,7 +30,6 @@ import {
 
 const DIFF_AST_CACHE_SIZE = 120;
 
-let webAssemblyCompiles: boolean | null = null;
 // Set once a WASM pool's workers fail to start (a CSP on the worker script
 // that the page's own probe could not see): later pools use the JS engine.
 let wasmPoolFailed = false;
@@ -45,22 +47,19 @@ function terminateDiffWorkerPool(pool: WorkerPoolManager): void {
 }
 
 function createDiffWorkerPool(themeName: DiffThemeName): WorkerPoolManager {
-  webAssemblyCompiles ??= canCompileWebAssembly();
-  const preferredHighlighter = resolveDiffWorkerHighlighter({
-    canCompileWebAssembly: webAssemblyCompiles,
-    wasmPoolFailed,
+  const preferredHighlighter = resolveSyntaxHighlighter({
+    canCompileWebAssembly: pageCanCompileWebAssembly(),
+    wasmFailed: wasmPoolFailed,
   });
-  if (preferredHighlighter === "shiki-wasm") {
-    // The pool passes its engine to the main-thread highlighter too, which is a
-    // page-wide singleton shared with chat markdown and fixed by its first
-    // caller. That one only renders plain-text placeholders and markdown, so
-    // claim it for the JS engine before the pool can load WASM on the main thread.
-    void getSharedHighlighter({
-      themes: [themeName],
-      langs: ["text"],
-      preferredHighlighter: "shiki-js",
-    }).catch(() => undefined);
-  }
+  // The pool loads the main-thread highlighter too (for its plain-text
+  // placeholders), a page-wide singleton shared with chat markdown and fixed by
+  // its first caller. Claim it for the main thread's own engine: after a failed
+  // WASM pool the workers fall back to the JS engine, the page need not.
+  void getSharedHighlighter({
+    themes: [themeName],
+    langs: ["text"],
+    preferredHighlighter: getMainThreadSyntaxHighlighter(),
+  }).catch(() => undefined);
   const pool = new WorkerPoolManager(
     {
       workerFactory: () => new DiffsWorker(),
@@ -75,7 +74,7 @@ function createDiffWorkerPool(themeName: DiffThemeName): WorkerPoolManager {
       preferredHighlighter,
     },
   );
-  if (preferredHighlighter === "shiki-wasm") {
+  if (preferredHighlighter === "highlights") {
     wasmPools.add(pool);
     const unsubscribe = pool.subscribeToStatChanges((stats) => {
       if (!stats.workersFailed) return;

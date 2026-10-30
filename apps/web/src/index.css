@@ -1932,7 +1932,9 @@ label:has(> select#reasoning-effort) select {
   cursor: default;
 }
 
-.chat-markdown .chat-markdown-shiki .shiki {
+/* `@pierre/diffs` renders highlighted code as `pre.diffs`, with either
+   highlighter, carrying the theme's own background inline. */
+.chat-markdown .chat-markdown-shiki .diffs {
   background: color-mix(in srgb, var(--muted) 78%, var(--background)) !important;
 }
 

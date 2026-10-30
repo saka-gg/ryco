@@ -21,6 +21,7 @@ vi.mock("../localApi", () => ({
 }));
 vi.mock("@pierre/diffs", () => ({
   getSharedHighlighter: async () => ({ codeToHtml: () => "<pre><code>fixture</code></pre>" }),
+  tokensToHtml: () => "",
 }));
 
 import ChatMarkdown from "./ChatMarkdown";

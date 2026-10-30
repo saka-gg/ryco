@@ -23,7 +23,7 @@ const {
   readLocalApiMock,
   workspaceFileOpenerMock,
 } = vi.hoisted(() => {
-  const codeToHtmlMock = vi.fn((code: string) => `<pre class="shiki"><code>${code}</code></pre>`);
+  const codeToHtmlMock = vi.fn((code: string) => `<pre class="diffs"><code>${code}</code></pre>`);
   const contextMenuShowMock = vi.fn(
     async (
       _items: ReadonlyArray<{ readonly id: string }>,
@@ -81,6 +81,8 @@ vi.mock("../localApi", () => ({
 
 vi.mock("@pierre/diffs", () => ({
   getSharedHighlighter: getSharedHighlighterMock,
+  // Only large blocks render tokens; these tests highlight small ones.
+  tokensToHtml: () => "",
 }));
 
 vi.mock("../workspaceFileNavigation", () => ({
