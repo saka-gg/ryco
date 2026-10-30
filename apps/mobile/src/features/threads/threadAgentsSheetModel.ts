@@ -52,6 +52,28 @@ export interface ThreadAgentDetails {
   readonly outcome: { readonly text: string; readonly failed: boolean } | null;
 }
 
+/**
+ * A row's time. A working row carries when it started rather than a measured text, so the
+ * sheet's model never changes as time passes: only the row's label reads the clock.
+ */
+export type ThreadAgentElapsed =
+  | { readonly kind: "live"; readonly since: string }
+  | { readonly kind: "frozen"; readonly text: string };
+
+/** The row's time as it reads at `nowMs`; a frozen time ignores the clock. */
+export function threadAgentElapsedText(
+  elapsed: ThreadAgentElapsed | null,
+  nowMs: number,
+): string | null {
+  if (elapsed === null) return null;
+  if (elapsed.kind === "frozen") return elapsed.text;
+  return elapsedBetween(elapsed.since, null, nowMs) || null;
+}
+
+function frozenElapsed(text: string | null): ThreadAgentElapsed | null {
+  return text ? { kind: "frozen", text } : null;
+}
+
 export interface ThreadAgentRow {
   readonly key: string;
   readonly label: string;
@@ -63,8 +85,8 @@ export interface ThreadAgentRow {
   readonly activity: string | null;
   /** The activity line reports a failure. */
   readonly activityFailed: boolean;
-  /** Ticking while it works (measured to `nowMs`), frozen once it settled. */
-  readonly elapsed: string | null;
+  /** Ticking while it works, frozen once it settled (`threadAgentElapsedText` reads it). */
+  readonly elapsed: ThreadAgentElapsed | null;
   /** A delegated task's own thread, which the row opens. */
   readonly childThreadId: ThreadId | null;
   /** What a provider subagent's row unfolds; delegated tasks open instead. */
@@ -109,7 +131,6 @@ export interface ThreadAgentsSheetInput {
   readonly offline: boolean;
   /** Result returns of the chat's delegated tasks, by child (`selectCompletionReturnsByChildThreadId`). */
   readonly completionReturns: ReadonlyMap<ThreadId, AgentControlCompletionReturn>;
-  readonly nowMs: number;
 }
 
 const SUBAGENT_TONE: Readonly<Record<RuntimeSubagentStatus, ThreadAgentTone>> = {
@@ -123,12 +144,12 @@ const SUBAGENT_TONE: Readonly<Record<RuntimeSubagentStatus, ThreadAgentTone>> = 
   interrupted: "muted",
 };
 
-function subagentElapsed(agent: RuntimeSubagent, nowMs: number): string | null {
+function subagentElapsed(agent: RuntimeSubagent): ThreadAgentElapsed | null {
   // Running and waiting agents tick from their start; the rest show how long they ran.
   if (agent.status === "running" || agent.status === "waiting") {
-    return agent.startedAt ? elapsedBetween(agent.startedAt, null, nowMs) || null : null;
+    return agent.startedAt ? { kind: "live", since: agent.startedAt } : null;
   }
-  return settledDuration(agent);
+  return frozenElapsed(settledDuration(agent));
 }
 
 function subagentDetails(agent: RuntimeSubagent, label: string): ThreadAgentDetails {
@@ -174,7 +195,7 @@ function subagentRow(
     tone,
     activity: agentActivityText(agent),
     activityFailed: tone === "failed",
-    elapsed: unknown ? null : subagentElapsed(agent, input.nowMs),
+    elapsed: unknown ? null : subagentElapsed(agent),
     childThreadId: null,
     details: subagentDetails(agent, label),
     stop:
@@ -200,7 +221,7 @@ interface DelegatedRow {
 }
 
 function delegatedRow(thread: SidebarThreadSummary, input: ThreadAgentsSheetInput): DelegatedRow {
-  const inbox = inboxThreadStatus(thread, input.environment, input.nowMs);
+  const inbox = inboxThreadStatus(thread, input.environment);
   const completionReturn = input.completionReturns.get(thread.id);
   let state = inbox.state;
   let task = resolveDelegatedTaskStatus({ thread, state, completionReturn });
@@ -212,12 +233,12 @@ function delegatedRow(thread: SidebarThreadSummary, input: ThreadAgentsSheetInpu
     inboxLabel = OFFLINE_LABEL;
   }
   const turn = thread.latestTurn;
-  const elapsed =
+  const elapsed: ThreadAgentElapsed | null =
     task.runningSince !== null
-      ? elapsedBetween(task.runningSince, null, input.nowMs)
+      ? { kind: "live", since: task.runningSince }
       : turn?.state === "completed" && turn.startedAt && turn.completedAt
-        ? elapsedBetween(turn.startedAt, turn.completedAt)
-        : "";
+        ? frozenElapsed(elapsedBetween(turn.startedAt, turn.completedAt))
+        : null;
   const result =
     completionReturn === undefined ? null : completionReturnPresentation(completionReturn.status);
   return {
@@ -230,7 +251,7 @@ function delegatedRow(thread: SidebarThreadSummary, input: ThreadAgentsSheetInpu
       // Where its result to this chat stands, as the dock's pill says it.
       activity: result?.label ?? null,
       activityFailed: result?.tone === "danger",
-      elapsed: elapsed || null,
+      elapsed,
       childThreadId: thread.id,
       details: null,
       stop: null,
