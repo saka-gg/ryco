@@ -157,7 +157,8 @@ async function collectStackedActionResult(
 export interface WsRpcClient {
   readonly dispose: () => Promise<void>;
   readonly reconnect: () => Promise<void>;
-  readonly isHeartbeatFresh: () => boolean;
+  /** Whether the server answered a heartbeat within `maxAgeMs` (15 s by default). */
+  readonly isHeartbeatFresh: (maxAgeMs?: number) => boolean;
   readonly device?: DeviceRpcClient;
   readonly terminal: {
     readonly open: RpcUnaryMethod<typeof WS_METHODS.terminalOpen>;
@@ -649,7 +650,7 @@ export function createWsRpcClient(transport: WsTransport, device?: DeviceRpcClie
       resetWsReconnectBackoff();
       await Promise.all([transport.reconnect(), device?.reconnect()]);
     },
-    isHeartbeatFresh: () => transport.isHeartbeatFresh(),
+    isHeartbeatFresh: (maxAgeMs) => transport.isHeartbeatFresh(maxAgeMs),
     ...(device ? { device } : {}),
     terminal: {
       open: (input) => transport.request((client) => client[WS_METHODS.terminalOpen](input)),

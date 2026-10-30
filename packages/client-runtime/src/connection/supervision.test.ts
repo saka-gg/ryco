@@ -42,6 +42,7 @@ import {
   SavedEnvironmentCredentialError,
   savedEnvironmentRetryDelayMs,
   type ShellAcceptance,
+  VIEW_RESUME_HEARTBEAT_GRACE_MS,
 } from "./supervision.ts";
 
 type Record = { readonly environmentId: EnvironmentId; readonly lastConnectedAt?: string };
@@ -282,6 +283,96 @@ describe("saved environment retry", () => {
     await vi.advanceTimersByTimeAsync(0);
     expect(attempts).toBe(3);
     stop();
+  });
+
+  describe("coming back into view", () => {
+    /** A connection whose server last answered a heartbeat at `pong.at` (0: never). */
+    const heartbeatConnection = (environmentId: string, reconnected: string[]) => {
+      const pong = { at: Date.now() - 60_000 };
+      const connection = {
+        environmentId: environmentId as EnvironmentId,
+        kind: "saved",
+        knownEnvironment: { source: "manual" },
+        client: {
+          isHeartbeatFresh: (maxAgeMs = 15_000) => pong.at > 0 && Date.now() - pong.at <= maxAgeMs,
+        },
+        reconnect: async () => void reconnected.push(environmentId),
+        dispose: async () => undefined,
+      } as unknown as EnvironmentConnection;
+      return { connection, pong };
+    };
+
+    it("keeps a socket that answers a heartbeat after the page comes back", async () => {
+      const reconnected: string[] = [];
+      const { supervisor, resume } = makeSupervisor(async (record) => connectionFor(record), {
+        records: [],
+      });
+      const stop = supervisor.start();
+      // Hidden, the pinger ran about once a minute: the last pong is a minute old.
+      const lan = heartbeatConnection("env-lan", reconnected);
+      supervisor.register(lan.connection);
+
+      resume("visibilitychange");
+      await vi.advanceTimersByTimeAsync(0);
+      expect(reconnected).toEqual([]);
+      // The pinger's first visible tick gets its answer.
+      await vi.advanceTimersByTimeAsync(3_000);
+      lan.pong.at = Date.now();
+      await vi.advanceTimersByTimeAsync(VIEW_RESUME_HEARTBEAT_GRACE_MS);
+      expect(reconnected).toEqual([]);
+      stop();
+    });
+
+    it("reconnects a socket that answers nothing within the grace window", async () => {
+      const reconnected: string[] = [];
+      const { supervisor, resume } = makeSupervisor(async (record) => connectionFor(record), {
+        records: [],
+      });
+      const stop = supervisor.start();
+      const lan = heartbeatConnection("env-lan", reconnected);
+      supervisor.register(lan.connection);
+
+      resume("pageshow");
+      await vi.advanceTimersByTimeAsync(VIEW_RESUME_HEARTBEAT_GRACE_MS - 1);
+      expect(reconnected).toEqual([]);
+      await vi.advanceTimersByTimeAsync(1);
+      expect(reconnected).toEqual(["env-lan"]);
+      stop();
+    });
+
+    it("still reconnects a stale socket at once after a wake from sleep or coming online", async () => {
+      for (const reason of ["system-resume", "online", "appstate-active"]) {
+        const reconnected: string[] = [];
+        const { supervisor, resume } = makeSupervisor(async (record) => connectionFor(record), {
+          records: [],
+        });
+        const stop = supervisor.start();
+        supervisor.register(heartbeatConnection("env-lan", reconnected).connection);
+        resume(reason);
+        await vi.advanceTimersByTimeAsync(0);
+        expect(reconnected, reason).toEqual(["env-lan"]);
+        stop();
+      }
+    });
+
+    it("does not reconnect a connection that is gone or replaced by the time it checks", async () => {
+      const reconnected: string[] = [];
+      const { supervisor, resume } = makeSupervisor(async (record) => connectionFor(record), {
+        records: [],
+      });
+      const stop = supervisor.start();
+      const first = heartbeatConnection("env-lan", reconnected);
+      supervisor.register(first.connection);
+      resume("visibilitychange");
+      // Replaced while the check waits; the new connection's pinger has not run yet.
+      await supervisor.remove("env-lan" as EnvironmentId);
+      const second = heartbeatConnection("env-lan", reconnected);
+      second.pong.at = 0;
+      supervisor.register(second.connection);
+      await vi.advanceTimersByTimeAsync(VIEW_RESUME_HEARTBEAT_GRACE_MS);
+      expect(reconnected).toEqual([]);
+      stop();
+    });
   });
 
   it("reconnects every direct connection when the network path changes, but not Hub relays", async () => {
