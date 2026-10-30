@@ -70,10 +70,10 @@ import {
 } from "../workspaceRouteSearch";
 import { buildOpenRightPanelTabSearch, isRightPanelTabMode } from "../rightPanelTabs.logic";
 import {
-  derivePhase,
   deriveThreadAgentPanelModel,
   deriveThreadSubagents,
   findThreadSubagent,
+  isThreadAgentSessionLive,
   type ThreadSubagentStatus,
   type ThreadSubagentView,
 } from "../threadWorkspaceViewModel";
@@ -1015,11 +1015,7 @@ export default function ThreadWorkspacePanel(props: {
   const activeThread = useStore(
     useMemo(() => createThreadStructureSelectorByRef(workspaceThreadRef), [workspaceThreadRef]),
   );
-  const agentSessionLive =
-    derivePhase(activeThread?.session ?? null) !== "disconnected" &&
-    activeThread?.session?.orchestrationStatus !== "stopped" &&
-    activeThread?.session?.orchestrationStatus !== "interrupted" &&
-    activeThread?.session?.orchestrationStatus !== "error";
+  const agentSessionLive = isThreadAgentSessionLive(activeThread?.session);
   const subagents = useMemo(
     () =>
       deriveThreadSubagents(activeThread?.activities ?? [], {

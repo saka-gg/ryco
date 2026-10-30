@@ -1,6 +1,9 @@
 import { scopeThreadRef } from "@ryco/client-runtime/scoped";
-import type { SubagentStopAction } from "@ryco/client-runtime/state/session/subagentStop";
-import { ORCHESTRATION_WS_METHODS, RuntimeSessionId, type ScopedThreadRef } from "@ryco/contracts";
+import {
+  subagentStopRequest,
+  type SubagentStopAction,
+} from "@ryco/client-runtime/state/session/subagentStop";
+import { ORCHESTRATION_WS_METHODS, type ScopedThreadRef } from "@ryco/contracts";
 import { useMemo } from "react";
 
 import { readEnvironmentApi } from "~/environmentApi";
@@ -78,14 +81,7 @@ export function useSubagentStopAction(
         if (refusal !== null) throw new Error(refusal);
         const stopTask = readEnvironmentApi(environmentId)?.orchestration.stopBackgroundTask;
         if (!stopTask) throw new Error("This environment can't stop agents.");
-        await stopTask({
-          threadId,
-          taskId: identity.taskId,
-          expected: {
-            runtimeSessionId: RuntimeSessionId.make(identity.runtimeSessionId),
-            attempt: identity.attempt,
-          },
-        });
+        await stopTask(subagentStopRequest(threadId, identity));
       },
     };
   }, [environmentId, hidden, runtimeSessionId, threadId, unavailableReason]);

@@ -4,7 +4,9 @@
  * offer it (the Agents panel and the crown), never with the chat route.
  */
 import {
+  describeSubagentStopFailure,
   subagentStopIdentity,
+  subagentStopKey,
   type SubagentStopAction,
   type SubagentStopIdentity,
 } from "@ryco/client-runtime/state/session/subagentStop";
@@ -19,7 +21,6 @@ import {
   type AgentRowDecorator,
   type AgentRowDensity,
 } from "./agentRoster";
-import { describeSubagentStopFailure, subagentStopKey } from "./agentStop.logic";
 import { agentStopRequests } from "./agentStopRequests";
 
 type AgentStopVariant = "icon" | "labeled";

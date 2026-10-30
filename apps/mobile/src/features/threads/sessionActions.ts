@@ -13,6 +13,10 @@ import {
   type ThreadId,
 } from "@ryco/contracts";
 
+import {
+  subagentStopRequest,
+  type SubagentStopIdentity,
+} from "@ryco/client-runtime/state/session/subagentStop";
 import type { SidebarActionCommand } from "@ryco/client-runtime/state/threads";
 import { newCommandId } from "../../lib/ids";
 import { uuidv4 } from "../../lib/uuid";
@@ -36,6 +40,21 @@ export async function interruptThreadTurn(
     ...(options?.holdQueue ? { holdQueue: true as const } : {}),
     createdAt: new Date().toISOString(),
   });
+}
+
+/**
+ * Stop one subagent and only it, as web's Stop on an agent row does: the turn keeps running, and
+ * the agent's row settles once the provider reports the task stopped. Rejects on a node that
+ * can't stop single agents.
+ */
+export async function stopThreadSubagent(
+  api: EnvironmentApi,
+  threadId: ThreadId,
+  identity: SubagentStopIdentity,
+): Promise<void> {
+  const stopTask = api.orchestration.stopBackgroundTask;
+  if (!stopTask) throw new Error("This node can't stop single agents.");
+  await stopTask(subagentStopRequest(threadId, identity));
 }
 
 /**

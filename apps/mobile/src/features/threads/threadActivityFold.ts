@@ -1,10 +1,12 @@
 import {
   collectTurnHtmlRenders,
+  deriveLiveThought,
   deriveReadableCommandDisplay,
   deriveTerminalAssistantMessageIds,
   formatDuration,
   isBlankSettledReply,
   isHtmlRenderOnlyMessage,
+  isLiveWorkStep,
   placeRepliesAfterHtmlRenders,
   type HtmlRenderAttachment,
   type TimelineEntry,
@@ -50,6 +52,14 @@ export interface ActivityRow {
   readonly completed: boolean;
 }
 
+/** The agent's latest thought, as a gray line among a working fold's rows. */
+export interface ActivityFoldThought {
+  /** One line, from the shared reading of the newest reasoning (`deriveLiveThought`). */
+  readonly text: string;
+  /** The running step the line sits above; null when none runs after it, so it closes the rows. */
+  readonly beforeRowId: string | null;
+}
+
 export interface ActivityFold {
   readonly kind: "activity-fold";
   readonly id: string;
@@ -59,6 +69,11 @@ export interface ActivityFold {
   readonly label: string;
   readonly rows: ReadonlyArray<ActivityRow>;
   readonly expanded: boolean;
+  /**
+   * Only on the work the agent is doing now: the running turn's fold when it is the feed's last
+   * row (an earlier fold of the turn, or one a reply already follows, is past work).
+   */
+  readonly liveThought: ActivityFoldThought | null;
 }
 
 /** One of a turn's HTML renders, as the turn's reply lists it. */
@@ -95,19 +110,22 @@ function firstLine(value: string | undefined): string | null {
  * A shell command reads as web's "verb + target" sentence ("Ran git status", "Read
  * App.tsx"), from the shared command labels; the raw command stays on the row below.
  */
-function commandHeading(entry: WorkLogEntry): string | null {
+function commandHeading(entry: WorkLogEntry, live: boolean): string | null {
   const command = entry.command ?? entry.rawCommand;
   if (!command?.trim()) return null;
-  const readable = deriveReadableCommandDisplay(command, entry.completed === false);
+  const readable = deriveReadableCommandDisplay(command, live);
   return readable.target ? `${readable.verb} ${readable.target}` : readable.verb;
 }
 
-function toRow(entry: WorkLogEntry): ActivityRow {
+function toRow(entry: WorkLogEntry, foldRunning: boolean): ActivityRow {
+  // In a working turn a step runs until its lifecycle settles, by the rule web shares
+  // (`isLiveWorkStep`); a settled turn's unsettled step was cut off, so it reads as done.
+  const live = foldRunning ? isLiveWorkStep(entry) : entry.completed === false;
   return {
     id: entry.id,
     // `toolTitle` is the tool's own name; `label` is the generic fallback
     // ("Tool call") that used to be the ONLY thing rendered.
-    heading: commandHeading(entry) ?? (entry.toolTitle?.trim() || entry.label),
+    heading: commandHeading(entry, live) ?? (entry.toolTitle?.trim() || entry.label),
     detail: entry.detail?.trim() || null,
     command: firstLine(entry.command ?? entry.rawCommand),
     output: entry.output?.trim() || null,
@@ -115,8 +133,13 @@ function toRow(entry: WorkLogEntry): ActivityRow {
     exitCode: entry.exitCode ?? null,
     changedFiles: entry.changedFiles ?? [],
     tone: entry.tone,
-    completed: entry.completed !== false,
+    completed: !live,
   };
+}
+
+function foldThought(entries: ReadonlyArray<WorkLogEntry>): ActivityFoldThought | null {
+  const thought = deriveLiveThought(entries);
+  return thought === null ? null : { text: thought.text, beforeRowId: thought.runningStepId };
 }
 
 function elapsedMs(startIso: string, endIso: string): number | null {
@@ -172,6 +195,8 @@ export function buildThreadTimelineRows(input: {
   let pending: WorkLogEntry[] = [];
   const lastPageRowIndexByTurn = new Map<string, number>();
   const blankReplyByTurn = new Map<string, ChatMessage>();
+  // The running turn's folds, by row index (pushed by `flush`).
+  const runningFolds: Array<{ readonly index: number; readonly entries: WorkLogEntry[] }> = [];
 
   const flush = () => {
     if (pending.length === 0) return;
@@ -195,6 +220,7 @@ export function buildThreadTimelineRows(input: {
         ? null
         : elapsedMs(startedAt, running ? input.now : (endedAt ?? input.now));
 
+    if (running) runningFolds.push({ index: rows.length, entries: group });
     rows.push({
       kind: "activity-fold",
       id: foldId,
@@ -205,13 +231,14 @@ export function buildThreadTimelineRows(input: {
         : duration === null
           ? "Worked"
           : `Worked for ${formatDuration(duration)}`,
-      rows: group.map(toRow),
+      rows: group.map((entry) => toRow(entry, running)),
       // Settled folds collapse to save space; the RUNNING one stays open,
       // because live progress is the main reason to have the phone open.
       // Once opened or closed by hand, the user's choice wins.
       expanded: input.expandedFoldIds.has(foldId)
         ? true
         : running && !input.expandedFoldIds.has(`collapsed:${foldId}`),
+      liveThought: null,
     });
   };
 
@@ -246,6 +273,13 @@ export function buildThreadTimelineRows(input: {
     );
   }
   flush();
+
+  // The agent's latest thought belongs to the work it is doing now: the running fold the feed ends on.
+  const live = runningFolds.at(-1);
+  const liveFold = live?.index === rows.length - 1 ? rows[live.index] : undefined;
+  if (live !== undefined && liveFold?.kind === "activity-fold") {
+    rows[live.index] = { ...liveFold, liveThought: foldThought(live.entries) };
+  }
 
   // A turn that ended on a blank reply under its page: the page's row stands in for the reply.
   for (const [turnId, forkReply] of blankReplyByTurn) {

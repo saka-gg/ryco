@@ -5,6 +5,7 @@ import {
   deriveThreadActivityStatus,
   deriveUsageLimitStatus,
   isThreadFailed,
+  resolveRunningSince,
   sessionFailureDetail,
   type UsageLimitStatus,
 } from "@ryco/client-runtime/state/threads";
@@ -674,15 +675,6 @@ function resolveAttention(thread: SidebarThreadSummary): InboxSidebarAttention {
   if (activity === "approval") return "approval";
   if (activity === "plan-ready") return "plan";
   return "input";
-}
-
-/** Start of the running turn; background work has no turn clock. */
-export function resolveRunningSince(
-  thread: Pick<SidebarThreadSummary, "latestTurn">,
-): string | null {
-  const turn = thread.latestTurn;
-  // Background liveness has no turn clock; the row falls back to recency.
-  return turn?.state === "running" ? (turn.startedAt ?? turn.requestedAt) : null;
 }
 
 function statusLabel(

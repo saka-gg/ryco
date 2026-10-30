@@ -8,8 +8,10 @@
 //          classifyToolCallSummaryCategory, summarizeToolCallGroup
 
 import type { WorkLogEntry } from "../../session-logic";
-import { deriveReadableCommandDisplay } from "@ryco/client-runtime/state/session";
-import { resolveWorkEntryStatus } from "./workEntryActivity";
+import {
+  deriveReadableCommandDisplay,
+  resolveWorkEntryStatus,
+} from "@ryco/client-runtime/state/session";
 
 // A single tool row collapses into nothing useful; only runs of 2+ fold.
 export const MIN_COLLAPSIBLE_TOOL_GROUP_SIZE = 2;

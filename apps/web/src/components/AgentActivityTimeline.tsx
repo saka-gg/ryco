@@ -5,8 +5,11 @@ import {
   type ThreadSubagentView,
   type WorkLogEntry,
 } from "../threadWorkspaceViewModel";
-import { deriveReadableCommandDisplay } from "@ryco/client-runtime/state/session";
-import { resolveWorkEntryStatus, formatWorkEntryElapsed } from "./chat/workEntryActivity";
+import {
+  deriveReadableCommandDisplay,
+  resolveWorkEntryStatus,
+} from "@ryco/client-runtime/state/session";
+import { formatWorkEntryElapsed } from "./chat/workEntryActivity";
 import ChatMarkdown from "./ChatMarkdown";
 
 function AgentToolRow({ entry, running }: { entry: WorkLogEntry; running: boolean }) {

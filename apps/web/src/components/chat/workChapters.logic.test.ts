@@ -8,7 +8,6 @@ import {
   deriveChapterStepDisplay,
   deriveChapterTallies,
   formatChapterDuration,
-  reasoningTail,
   selectTickerEntries,
 } from "./workChapters.logic";
 
@@ -190,11 +189,9 @@ describe("chapter summaries", () => {
     expect(selectTickerEntries([1, 2, 3, 4, 5], 3)).toEqual({ hiddenCount: 2, visible: [3, 4, 5] });
   });
 
-  it("formats chapter durations and reasoning tails", () => {
+  it("formats chapter durations", () => {
     expect(formatChapterDuration("2026-01-01T00:00:00Z", "2026-01-01T00:01:49Z")).toBe("1m 49s");
     expect(formatChapterDuration("2026-01-01T00:00:00Z", null)).toBeNull();
-    expect(reasoningTail("short thought")).toBe("short thought");
-    expect(reasoningTail(`${"lead ".repeat(40)}final words`, 20)).toBe("…lead final words");
   });
 
   it("classifies web and subagent steps", () => {

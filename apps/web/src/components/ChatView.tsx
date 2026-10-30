@@ -152,7 +152,11 @@ import { usePrimaryEnvironmentId } from "../environments/primary";
 import { readEnvironmentApi } from "../environmentApi";
 import { isElectron } from "../env";
 import { isRightPanelOpen, parseRightPanelRouteSearch } from "../rightPanelRouteSearch";
-import { deriveThreadAgentPanelModel, deriveThreadSubagents } from "../threadWorkspaceViewModel";
+import {
+  deriveThreadAgentPanelModel,
+  deriveThreadSubagents,
+  isThreadAgentSessionLive,
+} from "../threadWorkspaceViewModel";
 import {
   parseStandaloneComposerSlashCommand,
   parseThreadGoalSlashCommand,
@@ -2378,11 +2382,7 @@ export default function ChatView(props: ChatViewProps) {
   } = threadActivityViewModel;
   // Native subagent fold: memoized by activity-list identity, shared by the
   // Agents surface, timeline spawn CTAs, and the background-liveness banner.
-  const agentSessionLive =
-    phase !== "disconnected" &&
-    activeThread?.session?.orchestrationStatus !== "stopped" &&
-    activeThread?.session?.orchestrationStatus !== "interrupted" &&
-    activeThread?.session?.orchestrationStatus !== "error";
+  const agentSessionLive = isThreadAgentSessionLive(activeThread?.session);
   const threadSubagents = useMemo(
     () =>
       deriveThreadSubagents(threadActivities, {

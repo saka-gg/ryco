@@ -6,13 +6,24 @@
 //          duration); the live chapter shows its paragraph and a short ticker.
 // Layer: Web chat presentation helpers
 // Exports: step classification/labels, tallies, ticker windowing, titles, and
-//          the shared work-entry label helpers the row renderers use.
+//          the shared work-entry label helpers the row renderers use. The
+//          step status and reasoning readers are shared from client-runtime
+//          (`liveWorkSteps`), which the phone's live activity reads too.
 
 import { formatDuration, type WorkLogEntry } from "../../session-logic";
 import { formatWorkspaceRelativePath } from "../../filePathDisplay";
-import { basenameOfPath, deriveReadableCommandDisplay } from "@ryco/client-runtime/state/session";
+import {
+  basenameOfPath,
+  deriveReadableCommandDisplay,
+  isReasoningWorkEntry,
+  isWorkNoticeEntry,
+  reasoningEntryHeadline,
+  reasoningEntryText,
+  reasoningTail,
+  resolveWorkEntryStatus,
+  type WorkEntryStatus,
+} from "@ryco/client-runtime/state/session";
 import { classifyToolCallSummaryCategory } from "./toolCallGroup.logic";
-import { resolveWorkEntryStatus, type WorkEntryStatus } from "./workEntryActivity";
 
 /** Rows the live chapter keeps on screen; older steps scroll out the top. */
 export const CHAPTER_TICKER_WINDOW = 3;
@@ -177,35 +188,6 @@ export function workEntryPreview(
 }
 
 // ---------------------------------------------------------------------------
-// Reasoning
-// ---------------------------------------------------------------------------
-
-/** A projected reasoning block (Claude thinking, Codex reasoning summary, ACP thoughts). */
-export function isReasoningWorkEntry(entry: Pick<WorkLogEntry, "itemType" | "tone">): boolean {
-  return entry.itemType === "reasoning";
-}
-
-export function reasoningEntryText(entry: Pick<WorkLogEntry, "output">): string {
-  return (entry.output ?? "").trim();
-}
-
-/** Provider headline for the block (Codex summary titles), when one was sent. */
-export function reasoningEntryHeadline(entry: Pick<WorkLogEntry, "detail">): string | null {
-  return entry.detail?.trim() || null;
-}
-
-/** Last few words of streaming reasoning, for the one-line live preview. */
-export function reasoningTail(text: string, maxChars = 72): string {
-  const compact = text.replace(/\s+/g, " ").trim();
-  if (compact.length <= maxChars) {
-    return compact;
-  }
-  const slice = compact.slice(compact.length - maxChars);
-  const firstSpace = slice.indexOf(" ");
-  return `…${firstSpace > 0 ? slice.slice(firstSpace + 1) : slice}`;
-}
-
-// ---------------------------------------------------------------------------
 // Steps
 // ---------------------------------------------------------------------------
 
@@ -220,23 +202,9 @@ export function entryElapsedMs(
   return end - start;
 }
 
-/** Info/error rows that carry no tool lifecycle (runtime warnings, notices). */
-function isNoticeEntry(entry: WorkLogEntry): boolean {
-  return (
-    (entry.tone === "info" || entry.tone === "error") &&
-    entry.itemType === undefined &&
-    entry.requestKind === undefined &&
-    !entry.command &&
-    !entry.rawCommand &&
-    !entry.toolTitle &&
-    !entry.taskId &&
-    (entry.changedFiles?.length ?? 0) === 0
-  );
-}
-
 export function classifyChapterStep(entry: WorkLogEntry): ChapterStepKind {
   if (isReasoningWorkEntry(entry)) return "think";
-  if (isNoticeEntry(entry)) return "note";
+  if (isWorkNoticeEntry(entry)) return "note";
   if (entry.itemType === "web_search" || isWebFetchToolEntry(entry)) return "web";
   if (isFileReadToolEntry(entry)) return "read";
   if (isSearchToolEntry(entry)) return "search";

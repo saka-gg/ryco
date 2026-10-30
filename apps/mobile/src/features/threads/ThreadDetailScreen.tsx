@@ -260,6 +260,7 @@ import {
 import { buildModelPickerModel, listModelPickerEntries } from "./modelPickerModel";
 import { buildSessionPolicyModel, resolveSessionPolicySelection } from "./sessionPolicyModel";
 import { ThreadActionsSheet } from "./ThreadActionsSheet";
+import { ThreadAgents } from "./ThreadAgentsSheet";
 import { ThreadComposer } from "./ThreadComposer";
 import { SideChatCard } from "./SideChatCard";
 import { deriveThreadCachedView } from "./threadCachedViewModel";
@@ -2484,6 +2485,17 @@ export function ThreadDetailScreen(props: {
           }}
         />
       ) : null}
+      <ThreadAgents
+        key={outboxThreadKey}
+        environmentId={environmentId}
+        threadId={threadId}
+        thread={thread}
+        environment={environmentRow}
+        stopReady={(environmentRow?.mutationReady ?? false) && !cachedView.actionsDisabled}
+        offline={cachedView.headerForcedOffline}
+        agentControlProposals={agentControlProposals}
+        onOpenThread={openThread}
+      />
       {cachedView.banner ? (
         <ThreadCachedBanner text={cachedView.banner.text} tone={cachedView.banner.tone} />
       ) : null}

@@ -208,6 +208,78 @@ describe("thread activity folds", () => {
     // Absent means done — most settled entries never set it.
     expect(folds(build([work("c")]))[0]?.rows[0]?.completed).toBe(true);
   });
+
+  it("marks the steps a working turn has not settled as running, as web does", () => {
+    const [fold] = folds(
+      build(
+        [
+          work("done", { completed: true }),
+          work("cmd", { command: "rtk proxy cat src/App.tsx" }),
+          work("note", { tone: "info", label: "Runtime warning" }),
+        ],
+        { runningTurnId: "turn-1" },
+      ),
+    );
+    expect(fold?.rows.map((row) => row.completed)).toEqual([true, false, true]);
+    // The running command reads in the present tense.
+    expect(fold?.rows[1]?.heading).toBe("Reading src/App.tsx");
+  });
+});
+
+describe("live thought", () => {
+  const thinking = (id: string, output: string, overrides: Partial<WorkLogEntry> = {}) =>
+    work(id, { tone: "thinking", itemType: "reasoning", label: "Reasoning", output, ...overrides });
+
+  it("sits the latest thought above the running tool of the working fold", () => {
+    const [fold] = folds(
+      build(
+        [
+          thinking("t1", "First the config.", { completed: true }),
+          work("read", { toolTitle: "Read", completed: true }),
+          thinking("t2", "The retry never backs off. I'll add a delay.", { completed: true }),
+          work("test", { command: "bun run test" }),
+        ],
+        { runningTurnId: "turn-1" },
+      ),
+    );
+    expect(fold?.liveThought).toEqual({
+      text: "The retry never backs off.",
+      beforeRowId: "test",
+    });
+  });
+
+  it("closes the rows while the agent is still thinking", () => {
+    const [fold] = folds(
+      build(
+        [work("read", { completed: true }), thinking("t1", "Next, both clients. Then the relay")],
+        { runningTurnId: "turn-1" },
+      ),
+    );
+    // Only the sentence the block already closed, never the one it is still writing.
+    expect(fold?.liveThought).toEqual({ text: "Next, both clients.", beforeRowId: null });
+  });
+
+  it("belongs only to the work going on now", () => {
+    const entries = [thinking("t1", "Reading first.", { completed: true }), work("read")];
+    // A settled turn has no live thought.
+    expect(folds(build(entries))[0]?.liveThought).toBeNull();
+    // A reply already follows this fold: the agent moved on.
+    const answered = build([...entries, message("m")], { runningTurnId: "turn-1" });
+    expect(folds(answered)[0]?.liveThought).toBeNull();
+    // Only the turn's newest fold, at the end of the feed, carries it.
+    const resumed = build(
+      [...entries, message("m"), thinking("t2", "Now the tests.", { completed: true }), work("b")],
+      { runningTurnId: "turn-1" },
+    );
+    expect(folds(resumed).map((fold) => fold.liveThought?.text ?? null)).toEqual([
+      null,
+      "Now the tests.",
+    ]);
+  });
+
+  it("is absent when the work holds no readable reasoning", () => {
+    expect(folds(build([work("read")], { runningTurnId: "turn-1" }))[0]?.liveThought).toBeNull();
+  });
 });
 
 describe("thread feed HTML renders", () => {
