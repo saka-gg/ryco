@@ -32,7 +32,15 @@ function setup(principal: RpcPrincipal, withRegistry = true) {
       }),
     ),
     unregister: vi.fn(() => Effect.succeed({ removed: true })),
-    setPresence: vi.fn(() => Effect.void),
+    setPresence: vi.fn(() =>
+      Effect.succeed({
+        eligible: true,
+        registered: true,
+        keyId: input.keyId,
+        kinds: ["completed" as const],
+        hubDelivery: "available" as const,
+      }),
+    ),
   };
   const ctx = {
     withAccess: (access: WsRpcAccess, method: string, effect: Effect.Effect<unknown>) =>
@@ -65,10 +73,20 @@ describe("push RPCs", () => {
       expect.objectContaining({ enrollmentId: "enr_device00000000000000000", role: "viewer" }),
       input,
     );
-    await run(handlers[WS_METHODS.pushSetPresence]({ state: "foreground" }));
+    // Presence answers the registration as the node holds it, so the app need not register again.
+    expect(await run(handlers[WS_METHODS.pushSetPresence]({ state: "foreground" }))).toEqual({
+      status: expect.objectContaining({ registered: true, keyId: input.keyId }),
+    });
     expect(registry.setPresence).toHaveBeenCalledWith(
       expect.objectContaining({ enrollmentId: "enr_device00000000000000000" }),
       "foreground",
+    );
+    // A retired key's public half reaches the registry.
+    const retire = { keyId: input.keyId, publicKey: input.publicKey };
+    await run(handlers[WS_METHODS.pushUnregisterDevice](retire));
+    expect(registry.unregister).toHaveBeenCalledWith(
+      expect.objectContaining({ enrollmentId: "enr_device00000000000000000" }),
+      retire,
     );
   });
 

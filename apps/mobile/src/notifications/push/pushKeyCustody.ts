@@ -19,15 +19,43 @@ import type { RycoPushNativeModule } from "./pushKeyStore";
 export const PUSH_INSTALL_MARKER_KEY = "ryco.push.install.v1";
 const PUSH_INSTALL_MARKER_VALUE = "1";
 
+/**
+ * The public half of the key an earlier installation left, and when it was
+ * found (`pushMemos.ts` reads it). Its node registrations sit under that
+ * installation's enrollment, so this one retires them by the public key
+ * (`push.unregisterDevice`), which only that installation and its nodes ever
+ * held. The key itself is never adopted: it is deleted all the same.
+ */
+export const EARLIER_INSTALL_PUSH_KEY = "ryco.push.earlierInstallKey.v1";
+
+export interface EarlierInstallPushKeyRecord {
+  readonly publicKey: string;
+  readonly recordedAt: number;
+}
+
 export function createPushKeyCustody(
-  native: Pick<RycoPushNativeModule, "deleteKey">,
+  native: Pick<RycoPushNativeModule, "deleteKey" | "readKey">,
   kv: Pick<KVService, "getItem" | "setItem">,
+  now: () => number = Date.now,
 ): () => Promise<void> {
   return createInstallCustody({
     kv,
     markerKey: PUSH_INSTALL_MARKER_KEY,
     markerValue: PUSH_INSTALL_MARKER_VALUE,
-    destroy: () => native.deleteKey(),
+    destroy: async () => {
+      // Only its public half is kept, to retire it; unreadable, it is deleted all the same.
+      const left = await Promise.resolve()
+        .then(() => native.readKey())
+        .catch(() => null);
+      await native.deleteKey();
+      if (left && typeof left.publicKey === "string") {
+        const record: EarlierInstallPushKeyRecord = {
+          publicKey: left.publicKey,
+          recordedAt: now(),
+        };
+        await kv.setItem(EARLIER_INSTALL_PUSH_KEY, JSON.stringify(record));
+      }
+    },
   });
 }
 
@@ -52,4 +80,22 @@ export function ensureMobilePushKeyCustody(): Promise<void> {
   if (native === null) return Promise.resolve();
   mobileCustody ??= createPushKeyCustody(native, mobileKV);
   return mobileCustody();
+}
+
+/**
+ * What every launch does for push, before alerts were ever turned on: the
+ * install check, then whether an earlier installation's key still waits to be
+ * retired on its machines (background alerts then start just for that).
+ */
+export async function checkPushKeyAtLaunch(input: {
+  readonly custody: () => Promise<void>;
+  readonly kv: Pick<KVService, "getItem">;
+}): Promise<{ readonly retireEarlierKey: boolean }> {
+  await input.custody();
+  return { retireEarlierKey: (await input.kv.getItem(EARLIER_INSTALL_PUSH_KEY)) !== null };
+}
+
+/** {@link checkPushKeyAtLaunch} with this build's key and the app's storage. */
+export function checkMobilePushKeyAtLaunch(): Promise<{ readonly retireEarlierKey: boolean }> {
+  return checkPushKeyAtLaunch({ custody: ensureMobilePushKeyCustody, kv: mobileKV });
 }

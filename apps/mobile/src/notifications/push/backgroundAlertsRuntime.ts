@@ -21,11 +21,10 @@ import { readThreadAlertPermission } from "../threadAlerts";
 import { backgroundAlertsSupport } from "./backgroundAlertsModel";
 import { ensureMobilePushKeyCustody, readMobileRycoPush } from "./pushKeyCustody";
 import { createPushKeyStore } from "./pushKeyStore";
+import { createEarlierInstallKeyMemo, createHubRemovalMarker } from "./pushMemos";
 
 /** APNs answers a registration within seconds; past this the token counts as unavailable. */
 const DEVICE_TOKEN_TIMEOUT_MS = 30_000;
-/** The account whose Hub registration was turned off but not removed yet (`docs/push-alerts.md`). */
-const HUB_REMOVAL_OWED_KEY = "ryco.push.hubRemovalOwed.v1";
 
 const adapted = new WeakMap<EnvironmentConnection, BackgroundAlertsConnection>();
 
@@ -121,13 +120,8 @@ function createMobileBackgroundAlerts(): BackgroundAlerts {
       subscribe: (listener) => supervisor().subscribe(listener),
     },
     pushKey,
-    hubRemoval: {
-      read: () => mobileKV.getItem(HUB_REMOVAL_OWED_KEY),
-      write: (accountId) =>
-        accountId === null
-          ? mobileKV.removeItem(HUB_REMOVAL_OWED_KEY)
-          : mobileKV.setItem(HUB_REMOVAL_OWED_KEY, accountId),
-    },
+    hubRemoval: createHubRemovalMarker(mobileKV),
+    earlierInstallKey: createEarlierInstallKeyMemo(mobileKV),
     notifications: { readPermission: readThreadAlertPermission, readDeviceToken },
     app: {
       // The same test thread alerts use: whenever they would defer to push,

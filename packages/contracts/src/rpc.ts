@@ -129,6 +129,7 @@ import {
   PushRegisterDeviceInput,
   PushRpcError,
   PushSetPresenceInput,
+  PushSetPresenceResult,
   PushUnregisterDeviceInput,
   PushUnregisterDeviceResult,
 } from "./push.ts";
@@ -2452,7 +2453,7 @@ export const WsPushUnregisterDeviceRpc = Rpc.make(WS_METHODS.pushUnregisterDevic
 
 export const WsPushSetPresenceRpc = Rpc.make(WS_METHODS.pushSetPresence, {
   payload: PushSetPresenceInput,
-  success: Schema.Struct({}),
+  success: PushSetPresenceResult,
   error: Schema.Union([PushRpcError, AuthRpcError]),
 });
 

@@ -35,8 +35,8 @@ receive push.
 | RPC                     | Payload                                 | Result                                 |
 | ----------------------- | --------------------------------------- | -------------------------------------- |
 | `push.registerDevice`   | key id, public key, wanted kinds, sound | status: kinds after role, Hub delivery |
-| `push.unregisterDevice` | key id                                  | whether it was removed                 |
-| `push.setPresence`      | `foreground` or `background`            | —                                      |
+| `push.unregisterDevice` | key id, optional public key             | whether it was removed                 |
+| `push.setPresence`      | `foreground` or `background`            | this device's registration, as held    |
 
 - The node takes the enrollment and role from the channel's verified grant, never from the payload, so
   a device can only register itself.
@@ -44,6 +44,14 @@ receive push.
   identity state. The app registers again on every connect; a registration nobody refreshed for 30
   days is dropped. Leaving the Hub erases them; a revoked enrollment is dropped at once.
 - A viewer never gets approval, input or plan alerts: it cannot act on them.
+- `push.setPresence` answers the device's registration as the node holds it, without writing it, so
+  the app registers again only when the node lost it (it left its Hub, or dropped it). Older nodes
+  answer `{}`.
+- `push.unregisterDevice` with the key's public half removes the registration holding exactly that
+  key, whichever enrollment made it. Only the installation that created the key and the nodes ever
+  hold its public half, and a device wrongly named would register again on its next connect. A
+  reinstalled app uses it to retire the key its earlier installation left (below). Older nodes
+  ignore the public key and remove only the caller's own registration.
 - `foreground` holds for 45 seconds unless repeated. While it holds, the node sends that device
   nothing: the app's own local alerts cover the screen, including leaving out the thread on screen.
 
@@ -162,8 +170,11 @@ when the Hub can send to this build's bundle id:
 4. once the Hub took the token and a node reports `hubDelivery: available` for a kind, the app stops
    posting its own background alert of that kind for that machine, so the two never double up. In
    front nothing changes. A node reports `offline` from its start until its first delivered signal;
-   while it has not confirmed delivery, the app asks it again with each presence refresh and on
-   coming back, and keeps posting its own alerts, since a missed alert is worse than a double one.
+   each presence answer carries what it reports now, and the app registers again only when the
+   answer says the registration is gone (or names another key). An older node answers presence with
+   nothing: while it has not confirmed delivery, the app asks it again with each presence refresh and
+   on coming back. Either way the app keeps posting its own alerts until delivery is confirmed, since
+   a missed alert is worse than a double one.
 
 Turning it off removes the Hub registration, the connected nodes' registrations and the key. Any key
 means a Hub registration may exist, so its removal is recorded in the app's storage before the key
@@ -176,11 +187,22 @@ an install marker in the app's storage, like the E2EE keys: at every launch, als
 installation never turned background alerts on, a key without the marker is deleted before anything
 uses it.
 
+The earlier installation's registrations outlive it: its nodes hold its key under its own
+enrollment, and the Hub its token. Before deleting that key, the install check keeps its public half
+in the app's storage. Background alerts then start, also when this installation never turned them
+on, and retire it on every Hub machine the app lists with `push.unregisterDevice` and the public key.
+Once each has answered, or after 30 days (when nodes drop a registration nobody refreshes), the
+public key is forgotten. With no node registration left, no node signals the Hub for that
+enrollment, so the Hub's leftover registration for it gets nothing to deliver. The app cannot remove
+that Hub registration itself: it is keyed by the earlier installation's enrollment and session.
+
 ## Versions
 
-| Combination                            | What happens                                                         |
-| -------------------------------------- | -------------------------------------------------------------------- |
-| Older app                              | Never registers; local alerts as before                              |
-| New app, older node                    | `push.registerDevice` is unknown; the app asks to update the machine |
-| New node, Hub without the signal route | Registrations are kept; nothing is sent; status `hub-unsupported`    |
-| Build without the extension            | Push stays off (Personal Team builds cannot sign one)                |
+| Combination                            | What happens                                                                                                                    |
+| -------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------- |
+| Older app                              | Never registers; local alerts as before                                                                                         |
+| New app, older node                    | `push.registerDevice` is unknown; the app asks to update the machine                                                            |
+| New app, node without presence answers | Presence answers `{}`; the app registers again until delivery is confirmed; the earlier installation's key is not retired there |
+| Older app, newer node                  | The presence answer's registration and the public key are ignored                                                               |
+| New node, Hub without the signal route | Registrations are kept; nothing is sent; status `hub-unsupported`                                                               |
+| Build without the extension            | Push stays off (Personal Team builds cannot sign one)                                                                           |

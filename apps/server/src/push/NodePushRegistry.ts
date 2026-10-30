@@ -15,6 +15,7 @@ import type {
   PushHubDelivery,
   PushPresence,
   PushRegisterDeviceInput,
+  PushUnregisterDeviceInput,
 } from "@ryco/contracts/push";
 import { Context, type Effect } from "effect";
 
@@ -34,9 +35,16 @@ export interface NodePushRegistryShape {
   ) => Effect.Effect<PushDeviceStatus>;
   readonly unregister: (
     device: PushDeviceIdentity,
-    keyId: string,
+    input: PushUnregisterDeviceInput,
   ) => Effect.Effect<{ readonly removed: boolean }>;
-  readonly setPresence: (device: PushDeviceIdentity, presence: PushPresence) => Effect.Effect<void>;
+  /**
+   * Records the device's presence and answers its registration as held now,
+   * without writing it: the app registers again only when this says it is gone.
+   */
+  readonly setPresence: (
+    device: PushDeviceIdentity,
+    presence: PushPresence,
+  ) => Effect.Effect<PushDeviceStatus>;
   /** Live registrations, pruned. */
   readonly list: Effect.Effect<ReadonlyArray<PushRegistration>>;
   /** Enrollments whose device said it is in front within the hold. */

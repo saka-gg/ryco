@@ -83,6 +83,23 @@ describe("push registrations", () => {
     expect(result.state.registrations).toEqual([]);
   });
 
+  it("retires a key an earlier installation left, by its public key, whoever registered it", () => {
+    // The reinstalled app is a new enrollment; it names the key its earlier installation left.
+    const state = register(register(), { enrollmentId: "enr_new", keyId: KEY_B });
+    const otherPublic = "y".repeat(43);
+    expect(
+      unregisterPushDevice(state, { enrollmentId: "enr_new", keyId: KEY_A, publicKey: otherPublic })
+        .removed,
+    ).toBe(false);
+    const result = unregisterPushDevice(state, {
+      enrollmentId: "enr_new",
+      keyId: KEY_A,
+      publicKey: PUBLIC,
+    });
+    expect(result.removed).toBe(true);
+    expect(result.state.registrations.map((entry) => entry.enrollmentId)).toEqual(["enr_new"]);
+  });
+
   it("drops stale registrations and keeps the most recent within the cap", () => {
     let state = EMPTY_PUSH_REGISTRATION_STATE;
     for (let index = 0; index < PUSH_MAX_REGISTRATIONS + 3; index += 1) {

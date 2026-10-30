@@ -51,7 +51,17 @@ export const PushRegisterDeviceInput = Schema.Struct({
 });
 export type PushRegisterDeviceInput = typeof PushRegisterDeviceInput.Type;
 
-export const PushUnregisterDeviceInput = Schema.Struct({ keyId: PushKeyId });
+export const PushUnregisterDeviceInput = Schema.Struct({
+  keyId: PushKeyId,
+  /**
+   * The key's public half. With it the node removes the registration holding
+   * this key whichever enrollment registered it: a reinstalled app retires the
+   * key its earlier installation left (only that installation and the nodes
+   * ever held the public key). Without it, only the caller's own registration.
+   * Older nodes ignore it.
+   */
+  publicKey: Schema.optional(PushPublicKey),
+});
 export type PushUnregisterDeviceInput = typeof PushUnregisterDeviceInput.Type;
 
 /**
@@ -91,6 +101,15 @@ export const PushDeviceStatus = Schema.Struct({
   hubDelivery: PushHubDelivery,
 });
 export type PushDeviceStatus = typeof PushDeviceStatus.Type;
+
+/**
+ * What `push.setPresence` answers: this device's registration as the node
+ * holds it now, so the app registers again only when the node lost it.
+ * Absent from older nodes, which answer `{}`; the app then keeps registering
+ * again until delivery is confirmed.
+ */
+export const PushSetPresenceResult = Schema.Struct({ status: Schema.optional(PushDeviceStatus) });
+export type PushSetPresenceResult = typeof PushSetPresenceResult.Type;
 
 export const PushUnregisterDeviceResult = Schema.Struct({ removed: Schema.Boolean });
 export type PushUnregisterDeviceResult = typeof PushUnregisterDeviceResult.Type;

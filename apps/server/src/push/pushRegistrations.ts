@@ -140,14 +140,25 @@ export function registerPushDevice(
   );
 }
 
-/** Removes the device's registration if it still holds `keyId`. */
+/**
+ * Removes the device's registration if it still holds `keyId`. Given the key's
+ * `publicKey` too, removes the registration holding exactly that key whichever
+ * enrollment made it: the key an earlier installation of the same app left,
+ * which only that installation and the nodes ever held. A device it wrongly
+ * named would register again on its next connect.
+ */
 export function unregisterPushDevice(
   state: PushRegistrationState,
-  device: { readonly enrollmentId: string; readonly keyId: string },
+  device: {
+    readonly enrollmentId: string;
+    readonly keyId: string;
+    readonly publicKey?: string | undefined;
+  },
 ): { readonly state: PushRegistrationState; readonly removed: boolean } {
-  const registrations = state.registrations.filter(
-    (registration) =>
-      registration.enrollmentId !== device.enrollmentId || registration.keyId !== device.keyId,
+  const registrations = state.registrations.filter((registration) =>
+    device.publicKey === undefined
+      ? registration.enrollmentId !== device.enrollmentId || registration.keyId !== device.keyId
+      : registration.keyId !== device.keyId || registration.publicKey !== device.publicKey,
   );
   return registrations.length === state.registrations.length
     ? { state, removed: false }
