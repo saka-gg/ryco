@@ -544,9 +544,10 @@ ${CHECKPOINT_WORKER_SOURCE}
           yield* waitUntil("crash", () => stats().workerFailures === 1);
           yield* sleep(20);
           yield* writeFrames(sql, 100);
+          // The frames are copied before the worker's reply reaches this thread: wait for both.
           yield* waitUntil(
             "checkpoint after restart",
-            () => frames().checkpointed === frames().log,
+            () => frames().checkpointed === frames().log && stats().checkpoints >= 1,
           );
           assert.equal(stats().workerFailures, 1);
           assert.equal(stats().workerStarts, 2);
