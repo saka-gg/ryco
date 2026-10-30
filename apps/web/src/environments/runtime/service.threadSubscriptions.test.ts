@@ -6,6 +6,7 @@ import {
   TurnId,
   type OrchestrationShellSnapshot,
 } from "@ryco/contracts";
+import { VIEW_RESUME_HEARTBEAT_GRACE_MS } from "@ryco/client-runtime/connection";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 const mockSubscribeThread = vi.fn();
@@ -758,6 +759,10 @@ describe("retainThreadDetailSubscription", () => {
 
     visibilityState = "visible";
     documentTarget.dispatchEvent(new Event("visibilitychange"));
+    // Back in view, a socket gets one heartbeat window first: hidden, its pinger ran about once
+    // a minute, so an old pong does not mean a dead socket. This one never answers.
+    expect(mockConnectionReconnects[0]).not.toHaveBeenCalled();
+    await vi.advanceTimersByTimeAsync(VIEW_RESUME_HEARTBEAT_GRACE_MS);
     expect(mockConnectionReconnects[0]).toHaveBeenCalledTimes(1);
 
     stop();
