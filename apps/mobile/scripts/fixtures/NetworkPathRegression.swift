@@ -10,10 +10,14 @@ final class NWPath {
 final class NWPathMonitor {
   static var script: (NWPathMonitor) -> Void = { _ in }
   var pathUpdateHandler: ((NWPath) -> Void)?
-  private var queue: DispatchQueue?
+  private var updates: DispatchQueue?
 
   func start(queue: DispatchQueue) {
-    self.queue = queue
+    // A monitor reports its path changes one at a time and in order, on the queue it was
+    // given. That queue is concurrent (the module passes a global one), so the updates go
+    // through a serial queue that targets it: separate blocks on the global queue could run
+    // in any order, and the second path could arrive first.
+    updates = DispatchQueue(label: "NWPathMonitor.updates", target: queue)
     NWPathMonitor.script(self)
   }
 
@@ -21,7 +25,11 @@ final class NWPathMonitor {
 
   func deliver(_ path: NWPath, afterMilliseconds delay: Int = 0) {
     let handler = pathUpdateHandler
-    queue?.asyncAfter(deadline: .now() + .milliseconds(delay)) { handler?(path) }
+    if delay == 0 {
+      updates?.async { handler?(path) }
+    } else {
+      updates?.asyncAfter(deadline: .now() + .milliseconds(delay)) { handler?(path) }
+    }
   }
 }
 
