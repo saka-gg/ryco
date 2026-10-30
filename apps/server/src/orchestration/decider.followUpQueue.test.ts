@@ -720,6 +720,58 @@ describe("follow-up queue decider: dispatch", () => {
   });
 });
 
+describe("follow-up queue decider: other wakes wait behind the queue", () => {
+  // A wake's source asks ServerWakeFence first; these are follow-ups queued after it asked.
+  const wake = (
+    messageId: string,
+    source?: "pull-request-watch" | "goal-continuation",
+  ): OrchestrationCommand => ({
+    type: "thread.turn.start",
+    commandId: nextCommandId("wake"),
+    threadId,
+    message: { messageId: MessageId.make(messageId), role: "user", text: "wake", attachments: [] },
+    modelSelection: { instanceId: CODEX, model: "gpt-5.4" },
+    runtimeMode: "full-access",
+    interactionMode: "default",
+    delegationReturnGuard: {
+      latestUserMessageId: null,
+      projectId,
+      runtimeMode: "full-access",
+      worktreePath: null,
+      ...(source === undefined ? {} : { source }),
+    },
+    createdAt: at(5),
+  });
+  const delegated = () => wake("delegation-result:child-1");
+  const watch = () => wake("pull-request-watch:thread-queue:1", "pull-request-watch");
+  const goal = () => wake("goal-continuation:thread-queue:turn-1", "goal-continuation");
+
+  it("refuses a delegated result, a pull request update and a goal turn while the queue will send", async () => {
+    const model = await queued(["a"]);
+    for (const command of [delegated(), watch(), goal()]) {
+      expect((await refusal(model, command)).detail).toBe(
+        "The chat's queued follow-ups go first. This waits until they are sent.",
+      );
+    }
+    for (const command of [delegated(), watch(), goal()]) {
+      expect(types(await decide(modelWith(), command))).toContain("thread.turn-start-requested");
+    }
+  });
+
+  it("lets other wakes past a held queue, but not the goal", async () => {
+    const { model } = await apply(await queued(["a"]), {
+      type: "thread.queue.hold",
+      commandId: nextCommandId("hold"),
+      threadId,
+      createdAt: at(4),
+    });
+    expect(queueOf(model)?.hold?.reason).toBe("paused");
+    expect(types(await decide(model, delegated()))).toContain("thread.turn-start-requested");
+    expect(types(await decide(model, watch()))).toContain("thread.turn-start-requested");
+    expect((await refusal(model, goal())).detail).toContain("queued follow-ups go first");
+  });
+});
+
 describe("follow-up queue decider: holds other commands record", () => {
   const interrupt = (holdQueue: boolean): OrchestrationCommand => ({
     type: "thread.turn.interrupt",

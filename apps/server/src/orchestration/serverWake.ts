@@ -15,6 +15,8 @@ import type {
   OrchestrationThreadShell,
   RuntimeMode,
   ServerWakeSource,
+  ThreadFollowUpQueue,
+  ThreadFollowUpQueueShell,
 } from "@ryco/contracts";
 import { RUNTIME_MODE_RANK } from "@ryco/shared/runtimeMode";
 import type { QueuedTurnIdleInput } from "@ryco/shared/threadSettlement";
@@ -68,14 +70,30 @@ export const serverWakeGuard = (
   ...(source === "delegation-return" ? {} : { source }),
 });
 
+/** What the wake rules read of a thread's follow-up queue: a shell, or `followUpQueueWakeView`. */
+interface FollowUpQueueWakeView {
+  readonly followUpQueueSummary?: Pick<ThreadFollowUpQueueShell, "hold" | "headStatus">;
+}
+
+/**
+ * The decider's view of a thread's queue in the shell's terms: absent while it has no entry,
+ * even when held, like the shell's summary.
+ */
+export const followUpQueueWakeView = (
+  queue: ThreadFollowUpQueue | undefined,
+): FollowUpQueueWakeView => {
+  const head = queue?.entries[0];
+  return queue === undefined || head === undefined
+    ? {}
+    : { followUpQueueSummary: { hold: queue.hold, headStatus: head.status } };
+};
+
 /**
  * A follow-up queue that will send its head at the next idle edge: non-empty, not held, its head
  * ready. While one waits, other wake sources wait behind it, so the user's own follow-ups go
  * first; a held queue (or one whose head waits for Retry) blocks nothing.
  */
-export const followUpQueueWaiting = (
-  shell: Pick<OrchestrationThreadShell, "followUpQueueSummary">,
-) =>
+export const followUpQueueWaiting = (shell: FollowUpQueueWakeView) =>
   shell.followUpQueueSummary !== undefined &&
   shell.followUpQueueSummary.hold === null &&
   shell.followUpQueueSummary.headStatus === "queued";
@@ -84,10 +102,11 @@ export const followUpQueueWaiting = (
  * Whether the thread's follow-up queue keeps a wake from `source` waiting: every other source
  * waits while the queue will send its head. A goal's next turn also waits while queued
  * follow-ups sit held or wait for Retry, so automatic goal turns never run past messages the
- * person queued.
+ * person queued. `ServerWakeFence` asks before a wake is sent, and the decider asks again when
+ * it is, so a follow-up queued in between still goes first.
  */
 export const followUpQueueHoldsWake = (
-  shell: Pick<OrchestrationThreadShell, "followUpQueueSummary">,
+  shell: FollowUpQueueWakeView,
   source: ServerWakeSource | undefined,
 ): boolean =>
   source === "follow-up-queue"
@@ -95,6 +114,10 @@ export const followUpQueueHoldsWake = (
     : source === "goal-continuation"
       ? shell.followUpQueueSummary !== undefined
       : followUpQueueWaiting(shell);
+
+/** Decider: a follow-up was queued after the wake's source checked the fence. */
+export const SERVER_WAKE_QUEUE_FIRST =
+  "The chat's queued follow-ups go first. This waits until they are sent.";
 
 /** The shared queued-turn idle rule's input, read from a thread shell. */
 export const queuedTurnIdleInputFromShell = (

@@ -93,7 +93,13 @@ import {
   pullRequestWatchesOf,
   pullRequestWatchUpdateBlocker,
 } from "./pullRequestWatchUpdates.ts";
-import { serverWakeCopy, serverWakeSource } from "./serverWake.ts";
+import {
+  followUpQueueHoldsWake,
+  followUpQueueWakeView,
+  SERVER_WAKE_QUEUE_FIRST,
+  serverWakeCopy,
+  serverWakeSource,
+} from "./serverWake.ts";
 import { threadReferencesPayload } from "./threadReferences.ts";
 import { restartContinuationTargetBlocker } from "./restartContinuationPolicy.ts";
 import {
@@ -1957,6 +1963,20 @@ const decideCommand = Effect.fn("decideOrchestrationCommand.command")(function* 
         return yield* new OrchestrationCommandInvariantError({
           commandType: command.type,
           detail: serverWakeCopy(guard).originChanged,
+        });
+      }
+      // The wake's source asked ServerWakeFence before it sent, from the shell it read then: a
+      // follow-up queued since still goes first. The source tries again later.
+      if (
+        guard &&
+        followUpQueueHoldsWake(
+          followUpQueueWakeView(targetThread.followUpQueue),
+          guard.source ?? "delegation-return",
+        )
+      ) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: SERVER_WAKE_QUEUE_FIRST,
         });
       }
       // usage-limits §5.2: an accepted turn start clears the limit below, and only the user's
