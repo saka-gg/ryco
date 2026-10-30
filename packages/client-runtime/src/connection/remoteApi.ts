@@ -162,7 +162,9 @@ export function createRemoteEnvironmentApi(httpClient: HttpClientService, baseOr
         bearerToken: input.bearerToken,
         ...(input.signal === undefined ? {} : { signal: input.signal }),
       });
-      const url = new URL(input.wsBaseUrl, baseOrigin);
+      // The phone has no page origin unless a build pins a server; an empty
+      // base is an invalid URL and would throw even for an absolute address.
+      const url = new URL(input.wsBaseUrl, baseOrigin || undefined);
       url.searchParams.set("wsToken", issued.token);
       return url.toString();
     },
