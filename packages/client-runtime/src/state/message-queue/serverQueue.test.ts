@@ -384,13 +384,32 @@ describe("follow-up queue badge", () => {
       held: false,
     });
     expect(followUpQueueBadgeOf({ count: 3, hold, headStatus: "queued" })).toEqual({
-      label: "3 queued",
+      label: "3 held",
       title: "3 queued follow-ups: Paused after Stop",
       held: true,
     });
-    expect(followUpQueueBadgeOf({ count: 2, hold: null, headStatus: "failed" })?.title).toBe(
-      "2 queued follow-ups: The next one waits for Retry",
-    );
+    expect(followUpQueueBadgeOf({ count: 2, hold: null, headStatus: "failed" })).toEqual({
+      label: "2 held",
+      title: "2 queued follow-ups: The next one waits for Retry",
+      held: true,
+    });
+  });
+
+  it("shows a delegated task waiting for a free slot as queued: the node sends it itself", () => {
+    const slot = { ...hold, reason: "paused" as const, causeKeys: ["delegation-slot:request-1"] };
+    expect(followUpQueueBadgeOf({ count: 1, hold: slot, headStatus: "queued" })).toEqual({
+      label: "1 queued",
+      title: "1 queued follow-up: Waiting for a free slot",
+      held: false,
+    });
+    // With another cause besides the slot, a person must act.
+    expect(
+      followUpQueueBadgeOf({
+        count: 1,
+        hold: { ...slot, causeKeys: ["delegation-slot:request-1", "paused:2026-10-24"] },
+        headStatus: "queued",
+      })?.held,
+    ).toBe(true);
   });
 });
 

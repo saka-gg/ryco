@@ -29,7 +29,12 @@ import {
   type AppState,
 } from "../threads/store.ts";
 import { selectThreadLiveDetailLoaded } from "../threads/storeSelectors.ts";
-import { describeQueueHold, queueHoldInputOf, type QueueHold } from "./hold.ts";
+import {
+  describeQueueHold,
+  heldOnlyForDelegationSlot,
+  queueHoldInputOf,
+  type QueueHold,
+} from "./hold.ts";
 import { summarizeQueuedMessage } from "./logic.ts";
 
 // ---------------------------------------------------------------------------
@@ -102,7 +107,7 @@ export function followUpSendWaitsForServerQueue(input: {
 
 /** How a thread list marks a thread with queued follow-ups (the node's shell summary). */
 export interface FollowUpQueueBadge {
-  /** "2 queued" */
+  /** "2 queued", or "2 held" when nothing goes out without the person. */
   readonly label: string;
   /** "2 queued follow-ups: Paused after an error" */
   readonly title: string;
@@ -116,6 +121,14 @@ export function followUpQueueBadgeOf(
 ): FollowUpQueueBadge | null {
   if (!summary || summary.count <= 0) return null;
   const queued = `${summary.count} queued follow-up${summary.count === 1 ? "" : "s"}`;
+  // A delegated task waiting for a free slot: the node sends it on its own.
+  if (heldOnlyForDelegationSlot(summary.hold)) {
+    return {
+      label: `${summary.count} queued`,
+      title: `${queued}: Waiting for a free slot`,
+      held: false,
+    };
+  }
   const why =
     summary.hold !== null
       ? describeQueueHold(summary.hold).title
@@ -123,7 +136,7 @@ export function followUpQueueBadgeOf(
         ? "The next one waits for Retry"
         : null;
   return {
-    label: `${summary.count} queued`,
+    label: `${summary.count} ${why === null ? "queued" : "held"}`,
     title: why === null ? queued : `${queued}: ${why}`,
     held: why !== null,
   };

@@ -19,8 +19,9 @@ import type {
   QueuedFollowUp,
 } from "@ryco/contracts";
 
-/** Cause keys of slot holds: `delegation-slot:<proposalId>`. */
-export const DELEGATION_SLOT_CAUSE_PREFIX = "delegation-slot:";
+import { DELEGATION_SLOT_CAUSE_PREFIX } from "@ryco/shared/queueHold";
+
+export { DELEGATION_SLOT_CAUSE_PREFIX, heldOnlyForDelegationSlot } from "@ryco/shared/queueHold";
 
 /** The hold of a task that waits for a free slot of request `proposalId`. */
 export const delegationSlotHold = (
@@ -33,17 +34,6 @@ export const delegationSlotHold = (
   } at once.`,
   causeKeys: [`${DELEGATION_SLOT_CAUSE_PREFIX}${proposalId}`],
 });
-
-/**
- * Whether only slot holds keep the queue: the node releases those itself, so a restart adds no
- * hold of its own (the request goes on after it).
- */
-export const heldOnlyForDelegationSlot = (
-  hold: Pick<FollowUpQueueHold, "causeKeys"> | null | undefined,
-): boolean =>
-  hold != null &&
-  hold.causeKeys.length > 0 &&
-  hold.causeKeys.every((key) => key.startsWith(DELEGATION_SLOT_CAUSE_PREFIX));
 
 /** Whether the task's queue waits for a free slot of request `proposalId`. */
 export const waitsForDelegationSlot = (

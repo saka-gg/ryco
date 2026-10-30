@@ -667,11 +667,10 @@ export const SidebarThreadRowContent = memo(function SidebarThreadRowContent(
                     <TooltipPopup side="top">{threadEnvironmentLabel}</TooltipPopup>
                   </Tooltip>
                 )}
-                {queueBadge ? (
+                {queueBadge && !isMobile ? (
                   <span
                     data-follow-up-queue-badge={queueBadge.held ? "held" : "queued"}
                     title={queueBadge.title}
-                    aria-label={queueBadge.title}
                     className={cn(
                       "inline-flex h-4 items-center rounded-full border px-1.5 text-[10px] font-medium",
                       queueBadge.held
@@ -679,7 +678,8 @@ export const SidebarThreadRowContent = memo(function SidebarThreadRowContent(
                         : "border-border/80 text-muted-foreground",
                     )}
                   >
-                    {queueBadge.label}
+                    <span aria-hidden="true">{queueBadge.label}</span>
+                    <span className="sr-only">{queueBadge.title}</span>
                   </span>
                 ) : null}
                 {jumpLabel ? (

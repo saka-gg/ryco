@@ -168,6 +168,23 @@ export function pausedCauseKey(pausedAt: string): string {
   return `paused:${pausedAt}`;
 }
 
+/**
+ * Cause keys of the hold a capped `ryco_create_threads` request (`maxConcurrent`) puts on a task
+ * that waits for a free slot: `delegation-slot:<proposalId>`.
+ */
+export const DELEGATION_SLOT_CAUSE_PREFIX = "delegation-slot:";
+
+/**
+ * Whether only slot holds keep the queue: the node releases those itself, so nothing waits for
+ * the person (and a restart adds no hold of its own).
+ */
+export const heldOnlyForDelegationSlot = (
+  hold: { readonly causeKeys: ReadonlyArray<string> } | null | undefined,
+): boolean =>
+  hold != null &&
+  hold.causeKeys.length > 0 &&
+  hold.causeKeys.every((key) => key.startsWith(DELEGATION_SLOT_CAUSE_PREFIX));
+
 /** The server queue's hold when its thread goes to Trash (a pause; restoring keeps it). */
 export function trashedCauseKey(trashedAt: string): string {
   return `trash:${trashedAt}`;
