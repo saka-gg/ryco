@@ -3,6 +3,7 @@ import { Schema } from "effect";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  headExemptCauseKeys,
   createInterruptQueueHold,
   deriveQueueFailureCauses,
   describeQueueHold,
@@ -18,6 +19,7 @@ import {
   turnStartFailedCauseKey,
   type QueueHoldThreadView,
 } from "./queueHold.ts";
+import { ORPHANED_PROVIDER_SESSION_ERROR } from "./restartContinuation.ts";
 
 const at = "2026-10-24T10:00:00.000Z";
 
@@ -136,5 +138,73 @@ describe("holds a device hands to the node", () => {
 
   it("reads a Trash cause as a pause", () => {
     expect(queueHoldReasonForCauseKey(trashedCauseKey(at))).toBe("paused");
+  });
+});
+
+describe("headExemptCauseKeys", () => {
+  const hold = (causeKeys: string[]) => ({
+    reason: "error" as const,
+    detail: null,
+    causeKeys,
+    heldAt: "2026-10-30T10:00:00.000Z",
+  });
+  const restartError = sessionErrorCauseKey("turn-1", ORPHANED_PROVIDER_SESSION_ERROR);
+
+  it("releases another instance's session error and usage limit, with the limited turn's error", () => {
+    expect(
+      headExemptCauseKeys({
+        hold: hold([
+          "limit:turn-2",
+          "error:turn-2:Limit.",
+          "error:turn-1:Died.",
+          "interrupt:turn-1",
+        ]),
+        headProviderInstanceId: "claude",
+        sessionProviderInstanceId: "codex",
+        usageLimit: { turnId: "turn-2", providerInstanceId: "codex" },
+      }),
+    ).toEqual(["limit:turn-2", "error:turn-2:Limit.", "error:turn-1:Died."]);
+  });
+
+  it("keeps causes of the head's own instance, a restart, a failed start and a Stop", () => {
+    const keys = [
+      "error:turn-1:Died.",
+      restartError,
+      "start-failed:activity-1",
+      "interrupt:turn-1",
+    ];
+    expect(
+      headExemptCauseKeys({
+        hold: hold(keys),
+        headProviderInstanceId: "codex",
+        sessionProviderInstanceId: "codex",
+        usageLimit: null,
+      }),
+    ).toEqual([]);
+    expect(
+      headExemptCauseKeys({
+        hold: hold(keys),
+        headProviderInstanceId: "claude",
+        sessionProviderInstanceId: "codex",
+        usageLimit: null,
+      }),
+    ).toEqual(["error:turn-1:Died."]);
+    // No head, or no known instance: nothing is exempt.
+    expect(
+      headExemptCauseKeys({
+        hold: hold(keys),
+        headProviderInstanceId: null,
+        sessionProviderInstanceId: "codex",
+        usageLimit: null,
+      }),
+    ).toEqual([]);
+    expect(
+      headExemptCauseKeys({
+        hold: hold(keys),
+        headProviderInstanceId: "claude",
+        sessionProviderInstanceId: null,
+        usageLimit: null,
+      }),
+    ).toEqual([]);
   });
 });

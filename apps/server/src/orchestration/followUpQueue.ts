@@ -33,6 +33,7 @@ import type {
 } from "@ryco/contracts";
 import {
   createInterruptQueueHold,
+  headExemptCauseKeys,
   isQueueFailureCauseExempt,
   mergeQueueHold,
   pausedCauseKey,
@@ -342,6 +343,49 @@ function addedEntry(command: ThreadQueueAddCommand): QueuedFollowUp {
 
 /** The decision of one `thread.queue.*` command on `thread` (which exists). */
 export function decideFollowUpQueueCommand(
+  host: FollowUpQueueHost,
+  readModel: OrchestrationReadModel,
+  thread: Thread,
+  command: FollowUpQueueCommand,
+): FollowUpQueueDecision {
+  const decision = decideQueueCommand(host, readModel, thread, command);
+  return "refused" in decision ? decision : withHeadExemptions(thread, decision, command.createdAt);
+}
+
+/**
+ * Releases the hold's causes a changed head no longer runs into: the person moved or edited a
+ * follow-up for another provider instance to the front, which is how they recover from that
+ * instance's error or usage limit (`headExemptCauseKeys`).
+ */
+function withHeadExemptions(
+  thread: Thread,
+  decision: Extract<FollowUpQueueDecision, { readonly drafts: unknown }>,
+  occurredAt: string,
+): FollowUpQueueDecision {
+  const before = followUpQueueOf(thread);
+  const after = decision.drafts.reduce(
+    (queue, draft) =>
+      draft.type === "thread.turn-steer-requested" ? queue : applyQueueEvent(queue, draft),
+    before,
+  );
+  const headInstance = (queue: ThreadFollowUpQueue) =>
+    queue.entries[0]?.modelSelection.instanceId ?? null;
+  if (after.hold === null || headInstance(after) === headInstance(before)) return decision;
+  const released = releasedDraft(
+    thread.id,
+    after.hold,
+    headExemptCauseKeys({
+      hold: after.hold,
+      headProviderInstanceId: headInstance(after),
+      sessionProviderInstanceId: thread.session?.providerInstanceId ?? null,
+      usageLimit: thread.usageLimit ?? null,
+    }),
+    occurredAt,
+  );
+  return released === null ? decision : { drafts: [...decision.drafts, released] };
+}
+
+function decideQueueCommand(
   host: FollowUpQueueHost,
   readModel: OrchestrationReadModel,
   thread: Thread,
