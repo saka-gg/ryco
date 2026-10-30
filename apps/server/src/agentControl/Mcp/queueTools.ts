@@ -23,18 +23,18 @@ import {
   type ThreadId,
   type TurnId,
 } from "@ryco/contracts";
-import { extractThreadReferences } from "@ryco/shared/threadMentions";
+import type { extractThreadReferences } from "@ryco/shared/threadMentions";
 import { Effect, Option, Schema } from "effect";
 
 import type { OrchestrationEngineShape } from "../../orchestration/Services/OrchestrationEngine.ts";
 import type { ProjectionSnapshotQueryShape } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
-import { findThreadInArray } from "../../orchestration/threadIndex.ts";
+import type { findThreadInArray } from "../../orchestration/threadIndex.ts";
 import type { AgentControlPolicyShape } from "../Services/AgentControlPolicy.ts";
 import type {
   AgentControlSessionRecord,
   AgentControlSessionRegistryShape,
 } from "../Services/AgentControlSessionRegistry.ts";
-import { toMcpFollowUpQueue } from "./threadTranscript.ts";
+import type { toMcpFollowUpQueue } from "./threadTranscript.ts";
 import type {
   AgentControlMcpToolDescriptor,
   AgentControlMcpToolResult,
@@ -118,6 +118,15 @@ export interface QueueToolDeps {
   readonly registry: Pick<AgentControlSessionRegistryShape, "getTurnAuthority">;
   readonly projections: Pick<ProjectionSnapshotQueryShape, "getThreadShellById">;
   readonly engine: Pick<OrchestrationEngineShape, "dispatch" | "getReadModel">;
+  /**
+   * Helpers the boot path already holds, passed in: a lazily loaded module that imported them
+   * would split them out of the boot chunk.
+   */
+  readonly helpers: {
+    readonly findThreadInArray: typeof findThreadInArray;
+    readonly toMcpFollowUpQueue: typeof toMcpFollowUpQueue;
+    readonly extractThreadReferences: typeof extractThreadReferences;
+  };
 }
 
 /** Whether `entry` is one this chat's agent queued and may still change. */
@@ -168,7 +177,10 @@ export function withQueueTools(
       if (deps.engine.getReadModel === undefined) {
         return yield* Effect.fail(new ToolFailure("The follow-up queue is unavailable."));
       }
-      const thread = findThreadInArray((yield* deps.engine.getReadModel()).threads, threadId);
+      const thread = deps.helpers.findThreadInArray(
+        (yield* deps.engine.getReadModel()).threads,
+        threadId,
+      );
       if (thread === undefined) return yield* Effect.fail(new ToolFailure(NOT_FOUND));
       return thread.followUpQueue ?? ({ entries: [], hold: null } satisfies ThreadFollowUpQueue);
     });
@@ -199,7 +211,7 @@ export function withQueueTools(
       const queue = yield* queueOf(input.threadId);
       return textResult({
         threadId: input.threadId,
-        followUpQueue: toMcpFollowUpQueue(queue, { threadId: session.threadId }),
+        followUpQueue: deps.helpers.toMcpFollowUpQueue(queue, { threadId: session.threadId }),
       });
     });
 
@@ -215,7 +227,7 @@ export function withQueueTools(
       if (entry.revision !== input.expectedRevision) {
         return yield* Effect.fail(new ToolFailure(CHANGED));
       }
-      const threadReferences = extractThreadReferences(input.text, input.threadId);
+      const threadReferences = deps.helpers.extractThreadReferences(input.text, input.threadId);
       yield* dispatch({
         type: "thread.queue.edit",
         // One id per edit of one revision: a retry after a lost reply replays its receipt.

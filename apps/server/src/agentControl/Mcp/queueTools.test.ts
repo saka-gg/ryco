@@ -15,6 +15,9 @@ import {
 import { Effect, Option } from "effect";
 
 import type { AgentControlSessionRecord } from "../Services/AgentControlSessionRegistry.ts";
+import { findThreadInArray } from "../../orchestration/threadIndex.ts";
+import { toMcpFollowUpQueue } from "./threadTranscript.ts";
+import { extractThreadReferences } from "@ryco/shared/threadMentions";
 import { withQueueTools } from "./queueTools.ts";
 import type { AgentControlMcpTools } from "./tools.ts";
 
@@ -72,6 +75,7 @@ const harness = (input: { readonly authority?: boolean } = {}) => {
     callTool: () => Effect.die("not used"),
   };
   const tools = withQueueTools(base, {
+    helpers: { findThreadInArray, toMcpFollowUpQueue, extractThreadReferences },
     policy: {
       isEnabled: Effect.succeed(true),
       authorize: (request: {
