@@ -100,6 +100,10 @@ ryco service install --tailscale-serve --hub ~/code
 ryco service status
 ```
 
+For scripts and health checks, `ryco service status --ready` asks the node this home runs (as a
+service or under `ryco serve`) for its identity, within 3 seconds, and exits 1 unless it answers as
+this home's node. `--json` prints `{ "ready", "reason", "origin" }`.
+
 A node that runs as a service updates itself from the apps. It checks the new release against a
 copy of its database before it restarts into it, and rolls back a release that fails to start,
 database included. See [node-updates.md](../../docs/node-updates.md).
@@ -159,7 +163,7 @@ ryco setup
 ryco config [show | path | edit | set <key> <value> | unset <key>]
 
 ryco service install [serve flags] [cwd]
-ryco service status | logs [-f] | restart | stop | start | uninstall
+ryco service status [--ready] | logs [-f] | restart | stop | start | uninstall
 
 ryco hub login | enroll | status | pending | cancel | resume | leave
 

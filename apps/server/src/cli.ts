@@ -151,6 +151,7 @@ import { ProjectAvatarStoreLive } from "./project/Layers/ProjectAvatarStore.ts";
 import { RepositoryIdentityResolverLive } from "./project/Layers/RepositoryIdentityResolver.ts";
 import {
   clearPersistedServerRuntimeStateIfStale,
+  isPersistedServerRunning,
   readPersistedServerRuntimeState,
 } from "./serverRuntimeState.ts";
 import { WorkspacePaths } from "./workspace/Services/WorkspacePaths.ts";
@@ -3587,13 +3588,65 @@ const serviceRestartCommand = Command.make("restart", { ...serviceLocationFlags 
   ),
 );
 
+/**
+ * `ryco service status --ready`: probe the node this home runs (as a service or
+ * a foreground `ryco serve`) instead of the service manager, and fail (exit 1)
+ * unless it answers as this home's node. For scripts and health checks.
+ */
+const probeServiceReadiness = Effect.fn("probeServiceReadiness")(function* (flags: {
+  readonly baseDir: Option.Option<string>;
+  readonly json: boolean;
+}) {
+  const logLevel = yield* GlobalFlag.LogLevel;
+  const config = yield* resolveCliAuthConfig({ baseDir: flags.baseDir }, logLevel);
+  const fileSystem = yield* FileSystem.FileSystem;
+  const runtime = yield* readPersistedServerRuntimeState(config.serverRuntimeStatePath).pipe(
+    Effect.map(Option.getOrUndefined),
+    Effect.orElseSucceed(() => undefined),
+  );
+  const environmentId = yield* fileSystem
+    .readFileString(config.environmentIdPath)
+    .pipe(Effect.orElseSucceed(() => undefined));
+  const { describeServerReadiness, probeServerReadiness } = yield* Effect.promise(
+    () => import("./cliStatus/readiness.ts"),
+  );
+  const readiness = yield* Effect.promise(() =>
+    probeServerReadiness({
+      runtime,
+      environmentId,
+      isRunning: (state) => isPersistedServerRunning(state),
+    }),
+  );
+  const description = describeServerReadiness(readiness);
+  yield* Console.log(
+    flags.json
+      ? JSON.stringify({
+          ready: readiness.ready,
+          reason: readiness.reason,
+          origin: readiness.origin,
+        })
+      : readiness.ready
+        ? `Ready:      ${readiness.origin}`
+        : `Ready:      no (${description.replace(/^not ready: /u, "")})`,
+  );
+  if (!readiness.ready) {
+    return yield* Effect.fail(new Error(description));
+  }
+});
+
 const serviceStatusCommand = Command.make("status", {
   ...serviceLocationFlags,
   json: jsonFlag,
+  ready: Flag.Boolean("ready").pipe(
+    Flag.withDescription(
+      "Only check that this home's node answers as itself within 3 seconds; exit 1 when it does not.",
+    ),
+  ),
 }).pipe(
   Command.withDescription("Show whether the background service is installed and running."),
   Command.withHandler((flags) =>
     Effect.gen(function* () {
+      if (flags.ready) return yield* probeServiceReadiness(flags);
       const { platform, config, label, logPath } = yield* resolveServiceContext(flags.baseDir);
       const status = yield* serviceProcess(() => readNodeServiceStatus(platform, label));
       const runtime = yield* readPersistedServerRuntimeState(config.serverRuntimeStatePath).pipe(

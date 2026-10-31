@@ -1754,3 +1754,74 @@ it.layer(NodeServices.layer)("cli log-level parsing", (it) => {
     }),
   );
 });
+
+it.layer(NodeServices.layer)("cli service status --ready", (it) => {
+  it.effect("fails unless this home's node answers with its own environment id", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const baseDir = mkdtempSync(join(tmpdir(), "ryco-cli-ready-test-"));
+        const { serverRuntimeStatePath, environmentIdPath } = yield* deriveServerPaths(
+          baseDir,
+          undefined,
+        );
+        const readyArgs = ["service", "status", "--ready", "--json", "--base-dir", baseDir];
+
+        // No server of this home has started.
+        const down = yield* captureStdout(runCli(readyArgs).pipe(Effect.flip));
+        assert.deepEqual(JSON.parse(down.output), {
+          ready: false,
+          reason: "not-running",
+          origin: null,
+        });
+        assert.include(String((down.result as Error).message), "not ready");
+
+        let answeredId = "env-ready-test";
+        const server = NodeHttp.createServer((request, response) => {
+          if (request.url === "/.well-known/ryco/environment") {
+            response.writeHead(200, { "content-type": "application/json" });
+            response.end(JSON.stringify({ environmentId: answeredId, label: "box" }));
+            return;
+          }
+          response.writeHead(404).end();
+        });
+        yield* Effect.acquireRelease(
+          Effect.promise(
+            () => new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve())),
+          ),
+          () => Effect.promise(() => new Promise<void>((resolve) => server.close(() => resolve()))),
+        );
+        const address = server.address();
+        const port = typeof address === "object" && address !== null ? address.port : 0;
+        const origin = `http://127.0.0.1:${port}`;
+        mkdirSync(join(serverRuntimeStatePath, ".."), { recursive: true });
+        writeFileSync(
+          serverRuntimeStatePath,
+          JSON.stringify({
+            version: 1,
+            pid: process.pid,
+            port,
+            origin,
+            startedAt: new Date().toISOString(),
+          }),
+        );
+        writeFileSync(environmentIdPath, "env-ready-test\n");
+
+        const ready = yield* captureStdout(runCli(readyArgs));
+        assert.deepEqual(JSON.parse(ready.output), { ready: true, reason: null, origin });
+        const human = yield* captureStdout(
+          runCli(["service", "status", "--ready", "--base-dir", baseDir]),
+        );
+        assert.equal(human.output, `Ready:      ${origin}`);
+
+        // Another node answering on the recorded port is not this home's node.
+        answeredId = "env-someone-else";
+        const other = yield* captureStdout(runCli(readyArgs).pipe(Effect.flip));
+        assert.deepEqual(JSON.parse(other.output), {
+          ready: false,
+          reason: "other-node",
+          origin,
+        });
+      }),
+    ),
+  );
+});
