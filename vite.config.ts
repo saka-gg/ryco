@@ -160,6 +160,8 @@ const rootConfig = {
       "react/no-object-type-as-default-prop": "off",
       "react/no-unstable-nested-components": "off",
       "unicorn/consistent-function-scoping": "off",
+      "ryco/no-partial-runtime-mock-in-browser-tests": "error",
+      "ryco/no-raw-mcp-dispatch": "error",
       "ryco/require-suppression-reason": "error",
     },
     overrides: [
