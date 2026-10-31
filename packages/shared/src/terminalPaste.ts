@@ -44,7 +44,7 @@ export function encodeTerminalPaste(text: string, bracketed: boolean): string {
   let contained = normalized;
   for (let previous: string | null = null; previous !== contained;) {
     previous = contained;
-    // oxlint-disable-next-line no-control-regex
+    // oxlint-disable-next-line no-control-regex -- ESC[200~ and ESC[201~ are the paste markers it removes
     contained = contained.replace(/\x1b\[20[01]~/g, "");
   }
   return `${BRACKETED_PASTE_START}${contained}${BRACKETED_PASTE_END}`;

@@ -529,7 +529,7 @@ export function createSourceControlRpcMock(original?: object): Record<string, un
           for (const runId of input.runIds) jobsByRunId.set(runId, runJobs(runId).jobs);
         }
         return { jobsByRunId, isLoading: false };
-        // oxlint-disable-next-line react-hooks/exhaustive-deps
+        // oxlint-disable-next-line react-hooks/exhaustive-deps -- signature stands in for input.runIds, so an equal new array keeps the memo
       }, [signature, input.enabled]);
     },
     useSourceControlWorkflowJobLog: (input: SourceControlWorkflowJobLogInput) =>
@@ -769,7 +769,7 @@ export function createPullRequestFilesViewedMock(original?: object): Record<stri
             }));
           },
         };
-        // oxlint-disable-next-line react-hooks/exhaustive-deps
+        // oxlint-disable-next-line react-hooks/exhaustive-deps -- version counts store updates, so filesViewed is read again after one
       }, [input.active, input.headSha, input.reference, number, version]);
     },
   };

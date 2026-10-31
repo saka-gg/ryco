@@ -294,7 +294,7 @@ export function gitLabListRowRollup(
 // GitLab job logs mark collapsible sections inline and colour with ANSI escapes.
 // oxlint-disable-next-line no-control-regex
 const SECTION_MARKER = /section_(?:start|end):\d+:[^\r\n\u001b]*(?:\r?\u001b\[0K)?/gu;
-// oxlint-disable-next-line no-control-regex
+// oxlint-disable-next-line no-control-regex -- ANSI colour codes start with ESC
 const ANSI_ESCAPE = /\u001b\[[0-9;?]*[A-Za-z]/gu;
 
 /**

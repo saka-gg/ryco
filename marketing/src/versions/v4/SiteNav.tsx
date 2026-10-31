@@ -99,7 +99,7 @@ export function SiteNav() {
     const onResize = () => slideTo(active);
     window.addEventListener("resize", onResize);
     return () => window.removeEventListener("resize", onResize);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // oxlint-disable-next-line react/exhaustive-effect-dependencies -- slideTo reads only refs, so active is the one dependency
   }, [active]);
 
   /* Scroll progress bar + scrolled state (rAF-throttled). */

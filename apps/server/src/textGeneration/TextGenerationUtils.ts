@@ -188,7 +188,7 @@ const CLI_FAILURE_DETAIL_LINES = 2;
 const CLI_ERROR_LINE =
   /\b(error|fatal|failed|unauthori[sz]ed|forbidden|denied|not logged in|log ?in)\b/i;
 const CLI_LOG_PREFIX = /^\d{4}-\d{2}-\d{2}T[\d:.]+Z\s+/;
-// eslint-disable-next-line no-control-regex
+// eslint-disable-next-line no-control-regex -- ANSI colour codes start with ESC
 const ANSI_ESCAPE = /\u001b\[[0-9;]*[A-Za-z]/g;
 
 /**

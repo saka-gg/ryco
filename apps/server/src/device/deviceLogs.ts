@@ -44,7 +44,7 @@ const MAX_CACHED_EXECUTABLES = 64;
 const MAX_LINE_LENGTH = 500;
 const MAX_CRASH_REPORTS = 5;
 const MAX_CRASH_REPORT_BYTES = 4 * 1024 * 1024;
-// eslint-disable-next-line no-control-regex
+// eslint-disable-next-line no-control-regex -- text with control characters stays out of the log predicate
 const CONTROL_CHARACTERS = /[\u0000-\u001f\u007f]/u;
 /** `log show --style compact` entries start with a date; its column header does not. */
 const LOG_ENTRY_LINE = /^\d{4}-\d{2}-\d{2} /u;
