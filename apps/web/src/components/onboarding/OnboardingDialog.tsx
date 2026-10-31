@@ -27,6 +27,10 @@ import { applyProvidersUpdated, usePrimaryServerConfigSelector } from "../../rpc
 import { useCommandPaletteStore } from "../../commandPaletteStore";
 import { cn } from "../../lib/utils";
 import { useSettingsDialogStore } from "../../settingsDialogStore";
+import {
+  openProjectImportDialog,
+  preloadProjectImportDialog,
+} from "../projectImport/projectImportDialogStore";
 import { getProviderSummary } from "../settings/providerStatus";
 import { PROVIDER_CLIENT_DEFINITIONS } from "../settings/providerDriverMeta";
 import { PAIRING_LINK_TARGET_ID, requestSettingsReveal } from "../settings/settingsSearchReveal";
@@ -455,11 +459,11 @@ export function OnboardingDialog({
               <Button
                 variant="outline"
                 disabled={!ready}
-                onClick={() =>
-                  useSettingsDialogStore.getState().openSettings("general", environmentId)
-                }
+                onPointerEnter={preloadProjectImportDialog}
+                onFocus={preloadProjectImportDialog}
+                onClick={() => openProjectImportDialog({ environmentId })}
               >
-                Import Codex or Claude conversations
+                Import from Codex or Claude Code
               </Button>
             </div>
           )}

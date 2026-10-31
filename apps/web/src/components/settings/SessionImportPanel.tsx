@@ -6,9 +6,13 @@ import {
   type SessionImportSource,
   type SessionImportStore,
   type SessionImportRecovery,
-  type ServerProvider,
 } from "@ryco/contracts";
 import type { WsRpcClient } from "@ryco/client-runtime/rpc";
+import {
+  resolveSessionImportContinuation,
+  sessionImportContinuationProviders,
+  type SessionImportContinuationProvider,
+} from "@ryco/client-runtime/state/sessionImport";
 import { SearchIcon } from "lucide-react";
 
 import { cn } from "../../lib/utils";
@@ -23,10 +27,7 @@ export interface SessionImportPanelProps {
   readonly nodeLabel: string;
   readonly allowed: boolean;
   readonly projects: readonly { id: string; name: string }[];
-  readonly providerOptions: readonly Pick<
-    ServerProvider,
-    "instanceId" | "driver" | "enabled" | "installed" | "availability" | "displayName" | "models"
-  >[];
+  readonly providerOptions: readonly SessionImportContinuationProvider[];
   readonly client: () => WsRpcClient["sessionImport"];
 }
 export function SessionImportPanel({
@@ -86,20 +87,11 @@ export function SessionImportPanel({
   const activeStore = storeKey
     ? stores.find((store) => store.key === storeKey)
     : stores.find((store) => store.isDefault);
-  const providers = providerOptions.filter(
-    (p) =>
-      p.driver === source &&
-      p.enabled &&
-      p.installed &&
-      p.availability !== "unavailable" &&
-      !!activeStore?.instanceIds.includes(p.instanceId),
+  const providers = sessionImportContinuationProviders(providerOptions, source, activeStore);
+  const { provider: activeProvider, model: activeModel } = resolveSessionImportContinuation(
+    providers,
+    { instanceId: instance, model },
   );
-  const activeProvider =
-    providers.find((provider) => provider.instanceId === instance) ?? providers[0];
-  const activeModel =
-    activeProvider?.models.find((choice) => choice.slug === model) ??
-    activeProvider?.models.find((choice) => choice.isDefault) ??
-    activeProvider?.models[0];
   const discover = async (offset = 0) => {
     if (!current.current.allowed) return;
     setBusy(true);
