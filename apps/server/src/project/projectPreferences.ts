@@ -75,7 +75,7 @@ function inheritNodeSettings(
     {};
   for (const key of PROJECT_PREFERENCE_VALUE_KEYS) {
     inherited[key] = {
-      value: overrides?.[key] ?? settings[key],
+      value: inheritedValue(settings, overrides, key),
       source: overrides?.[key] !== undefined ? "project" : "node",
     };
   }
@@ -91,10 +91,17 @@ export function resolveProjectPreferenceValue<K extends ProjectPreferenceValueKe
   projectId: string | null | undefined,
   key: K,
 ): ServerSettings[K] {
-  const override = projectId
-    ? settings.projectPreferences[projectId as ProjectId]?.[key]
-    : undefined;
-  return (override ?? settings[key]) as ServerSettings[K];
+  const overrides = projectId ? settings.projectPreferences[projectId as ProjectId] : undefined;
+  return inheritedValue(settings, overrides, key);
+}
+
+/** A project override wins; otherwise the node setting of the same name applies. */
+function inheritedValue<K extends ProjectPreferenceValueKey>(
+  settings: ServerSettings,
+  overrides: ProjectPreferences | undefined,
+  key: K,
+): ServerSettings[K] {
+  return (overrides?.[key] ?? settings[key]) as ServerSettings[K];
 }
 
 /** Omitted creation choices inherit; explicit choices (including false/empty) win. */

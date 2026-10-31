@@ -736,6 +736,13 @@ export const PROJECT_PREFERENCE_VALUE_KEYS = Object.keys(
   PROJECT_PREFERENCE_VALUES.fields,
 ) as ReadonlyArray<ProjectPreferenceValueKey>;
 /**
+ * The overrides an older node's effective preferences omit: a client shows their rows only once
+ * a node's reply has them.
+ */
+export const PROJECT_PREFERENCE_ADDED_KEYS = Object.keys(
+  ADDED_PROJECT_PREFERENCE_VALUES,
+) as ReadonlyArray<ProjectPreferenceValueKey>;
+/**
  * Every project preference. The initial model is the one special key: null masks a model saved
  * on the project before project defaults existed, and without a node default it falls back to
  * Ryco's built-in model.

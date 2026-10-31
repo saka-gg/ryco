@@ -198,6 +198,17 @@ describe("project inheritance controls", () => {
         },
       ]);
   });
+  it("waits for the node's reply before it shows the overrides added since", async () => {
+    harness.read.mockImplementation(() => new Promise(() => {}));
+    await render(
+      <SettingsCard>
+        <ProjectPreferenceSettings projectId="p" projects={FIXTURE_PROJECT_CHOICES} />
+      </SettingsCard>,
+    );
+    await expect.element(page.getByRole("combobox", { name: "Worktree setup" })).toBeVisible();
+    expect(page.getByRole("combobox", { name: "Generated branch names" }).elements()).toEqual([]);
+    expect(page.getByRole("combobox", { name: "Pull request template" }).elements()).toEqual([]);
+  });
   it("hides the added overrides for an older node, and their node defaults keep their own rows", async () => {
     const older = await render(
       <SettingsCard>

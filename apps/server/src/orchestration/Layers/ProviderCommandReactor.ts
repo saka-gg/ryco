@@ -83,10 +83,7 @@ import {
   buildGeneratedWorktreeBranchName,
   extractTemporaryWorktreeBranchPrefix,
 } from "@ryco/shared/git";
-import {
-  resolveProjectPreferences,
-  resolveProjectPreferenceValue,
-} from "../../project/projectPreferences.ts";
+import { resolveProjectPreferences } from "../../project/projectPreferences.ts";
 import {
   Cache,
   Cause,
@@ -1712,15 +1709,13 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
         return;
       }
       // The temporary branch was named with the project's effective prefix.
-      const worktreeBranchPrefix = resolveProjectPreferences({
+      const effective = resolveProjectPreferences({
         settings: settings.value,
         ...(input.project !== undefined ? { project: input.project } : {}),
-      }).worktreeBranchPrefix.value;
-      const worktreeBranchChangeTypes = resolveProjectPreferenceValue(
-        settings.value,
-        input.project?.id,
-        "worktreeBranchChangeTypes",
-      );
+      });
+      const worktreeBranchPrefix = effective.worktreeBranchPrefix.value;
+      const worktreeBranchChangeTypes =
+        effective.worktreeBranchChangeTypes?.value ?? settings.value.worktreeBranchChangeTypes;
       const wantsTitle = canReplaceThreadTitle(thread.title, input.titleSeed);
       const oldBranch = thread.branch;
       const worktreePath = thread.worktreePath;

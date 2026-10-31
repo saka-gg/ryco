@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import {
   DEFAULT_UNIFIED_SETTINGS,
   INITIAL_MODEL_OPTION_IDS,
+  PROJECT_PREFERENCE_ADDED_KEYS,
   PROJECT_PREFERENCE_VALUE_KEYS,
   ProjectId,
   type EffectiveProjectPreferences,
@@ -160,6 +161,9 @@ function ProjectPreferenceEditor(props: {
     );
   }
   function valueRow(key: ProjectPreferenceValueKey) {
+    // A key added since effective preferences first existed waits for the node's reply: an older
+    // node's reply has no such key, so its row would show while loading and then go.
+    if (!effective && PROJECT_PREFERENCE_ADDED_KEYS.includes(key)) return null;
     if (effective && !projectPreferenceSupported(effective, key)) return null;
     const field = PROJECT_PREFERENCE_FIELDS[key];
     if (!projectId && field.nodeDefaultRow === "separate") return null;

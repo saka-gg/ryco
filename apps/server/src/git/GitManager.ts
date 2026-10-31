@@ -2637,12 +2637,17 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* (
             gitManagerError("runStackedAction", "Failed to get server settings.", cause),
           ),
         );
+        // The checkout's project, looked up at most once per action: the writing policy and the
+        // pull request template setting both read it.
+        const checkoutProjectId = yield* Effect.cached(
+          options?.checkoutProjectId ?? Effect.succeed(null),
+        );
         const writing: GitWriting = {
           modelSelection: settings.textGenerationModelSelection,
           policy: yield* Effect.cached(
-            resolveWritingPolicy(input.cwd, settings, options?.checkoutProjectId),
+            resolveWritingPolicy(input.cwd, settings, checkoutProjectId),
           ),
-          pullRequestTemplates: (options?.checkoutProjectId ?? Effect.succeed(null)).pipe(
+          pullRequestTemplates: checkoutProjectId.pipe(
             Effect.map((projectId) =>
               resolveProjectPreferenceValue(settings, projectId, "pullRequestTemplates"),
             ),

@@ -6,6 +6,7 @@ import { ModelSelection } from "./orchestration.ts";
 import {
   EffectiveProjectPreferences,
   InitialModelSelection,
+  PROJECT_PREFERENCE_ADDED_KEYS,
   PROJECT_PREFERENCE_KEYS,
   PROJECT_PREFERENCE_VALUE_KEYS,
   PROJECT_PREFERENCE_VALUES,
@@ -210,6 +211,10 @@ describe("project preference registry", () => {
           : "Failure",
       );
     }
+  });
+
+  it("names the keys added since for clients", () => {
+    expect([...PROJECT_PREFERENCE_ADDED_KEYS]).toEqual([...ADDED_PROJECT_PREFERENCE_KEYS]);
   });
 
   it("accepts a reply that has the keys added since, and one without them", () => {
