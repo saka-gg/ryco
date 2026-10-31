@@ -156,11 +156,14 @@ const requestPath = (fixture: Fixture) =>
   join(fixture.nightlyHome, FLAVOR_IMPORT_REQUEST_FILE_NAME);
 const resultPath = (fixture: Fixture) => join(fixture.nightlyHome, FLAVOR_IMPORT_RESULT_FILE_NAME);
 
+const LAUNCH_TOKEN = "launch-token-0123456789abcdef";
+
 const writeRequest = (
   fixture: Fixture,
   sourceHomeDir = fixture.stableHome,
   requestedAt = new Date(),
-) => write(requestPath(fixture), formatFlavorImportRequest({ sourceHomeDir, requestedAt }));
+  token = LAUNCH_TOKEN,
+) => write(requestPath(fixture), formatFlavorImportRequest({ sourceHomeDir, requestedAt, token }));
 
 const importInto = (fixture: Fixture, overrides: Partial<FlavorImportInput> = {}) =>
   consumeFlavorImport({
@@ -168,6 +171,7 @@ const importInto = (fixture: Fixture, overrides: Partial<FlavorImportInput> = {}
     stateDir: fixture.nightlyState,
     dbPath: fixture.nightlyDb,
     allowedSourceHome: fixture.stableHome,
+    requestToken: LAUNCH_TOKEN,
     supportedMigrationId: SUPPORTED_MIGRATION_ID,
     openSqlite: makeRuntimeSqliteLayer,
     migratedCopy: makePrivateSqliteCopyLive,
@@ -424,6 +428,24 @@ describe("consumeFlavorImport", () => {
       expectRefused(await run(fixture), fixture, FLAVOR_IMPORT_MESSAGES.unreadable);
     }
   }, 10_000);
+
+  it("takes only the request of the launch that carried its token", async () => {
+    const fixture = makeFixture();
+    // Written while Ryco Nightly was already open: no launch carried this token.
+    writeRequest(fixture, fixture.stableHome, new Date(), "another-launch-0123456789abc");
+    expectRefused(await run(fixture), fixture, FLAVOR_IMPORT_MESSAGES.otherLaunch);
+
+    // A request without a token is one this version never writes.
+    write(
+      requestPath(fixture),
+      JSON.stringify({
+        version: 1,
+        requestedAt: new Date().toISOString(),
+        sourceHomeDir: fixture.stableHome,
+      }),
+    );
+    expectRefused(await run(fixture), fixture, FLAVOR_IMPORT_MESSAGES.unreadable);
+  });
 
   it("refuses a source other than the home the app allows", async () => {
     const fixture = makeFixture();

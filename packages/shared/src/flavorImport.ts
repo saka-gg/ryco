@@ -27,12 +27,22 @@ export const FLAVOR_IMPORT_RESULT_FILE_NAME = "import-result.json";
 export const FLAVOR_IMPORT_REQUEST_MAX_AGE_MS = 60 * 60_000;
 /** Set by Ryco when it opens Ryco Nightly: the data home to copy from, when not `~/.ryco`. */
 export const RYCO_STABLE_HOME_ENV = "RYCO_STABLE_HOME";
+/**
+ * Set by Ryco when it opens Ryco Nightly to take a copy: a one-time value also written into the
+ * request. Nightly's server takes only the request of the launch that carried it, so a request
+ * written while Nightly was already open (and so never received its launch) is never taken later.
+ */
+export const RYCO_FLAVOR_IMPORT_TOKEN_ENV = "RYCO_FLAVOR_IMPORT_TOKEN";
+/** A launch token: URL-safe, 22 to 128 characters. */
+export const FLAVOR_IMPORT_TOKEN_PATTERN = /^[A-Za-z0-9_-]{22,128}$/u;
 
 export interface FlavorImportRequest {
   readonly version: 1;
   readonly requestedAt: string;
   /** Absolute path of Ryco's data home. */
   readonly sourceHomeDir: string;
+  /** The launch this request belongs to (`RYCO_FLAVOR_IMPORT_TOKEN_ENV`). */
+  readonly token: string;
 }
 
 export interface FlavorImportResult {
@@ -53,11 +63,13 @@ export const flavorImportResultPath = (nightlyHome: string): string =>
 export function formatFlavorImportRequest(input: {
   readonly sourceHomeDir: string;
   readonly requestedAt: Date;
+  readonly token: string;
 }): string {
   const request: FlavorImportRequest = {
     version: 1,
     requestedAt: input.requestedAt.toISOString(),
     sourceHomeDir: Path.resolve(input.sourceHomeDir),
+    token: input.token,
   };
   return `${JSON.stringify(request)}\n`;
 }
@@ -92,6 +104,19 @@ export function parseFlavorImportResult(text: string): FlavorImportResult | null
  * The only data home Ryco Nightly may copy from: the absolute `RYCO_STABLE_HOME` Ryco handed
  * over when it opened Nightly, else Ryco's default home. Null when that is Nightly's own home.
  */
+/**
+ * Ryco Nightly's desktop app, once at start: the copy-request token its launch carried, removed
+ * from `env` so nothing it starts inherits it. Null when the launch carried none (or a malformed
+ * one): then no request is taken this run.
+ */
+export function takeFlavorImportLaunchToken(
+  env: Record<string, string | undefined>,
+): string | null {
+  const token = env[RYCO_FLAVOR_IMPORT_TOKEN_ENV];
+  delete env[RYCO_FLAVOR_IMPORT_TOKEN_ENV];
+  return token !== undefined && FLAVOR_IMPORT_TOKEN_PATTERN.test(token) ? token : null;
+}
+
 export function flavorImportAllowedSourceHome(input: {
   readonly env: Readonly<Record<string, string | undefined>>;
   readonly homeDir: string;

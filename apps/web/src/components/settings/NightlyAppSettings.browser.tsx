@@ -23,11 +23,12 @@ function install(state: DesktopNightlyState) {
   const open = vi.fn(async () => {});
   const switchBack = vi.fn(async () => {});
   const openExternal = vi.fn(async () => true);
+  const getState = vi.fn(async () => state);
   window.desktopBridge = {
-    nightly: { getState: async () => state, open, switchBack },
+    nightly: { getState, open, switchBack },
     openExternal,
   } as unknown as DesktopBridge;
-  return { open, switchBack, openExternal };
+  return { open, switchBack, openExternal, getState };
 }
 
 it("opens Ryco Nightly as it is, or with a copy of Ryco's data once confirmed", async () => {
@@ -73,4 +74,34 @@ it("switches back from Ryco Nightly and says how the last copy went", async () =
     .toBeVisible();
   await view.getByRole("button", { name: "Switch back to Ryco" }).click();
   expect(switchBack).toHaveBeenCalledOnce();
+});
+
+it("looks again when the window comes back, so quitting Ryco Nightly frees the copy", async () => {
+  const { getState } = install({ ...stable, nightlyRunning: true });
+  const view = await render(<NightlyAppSettings scope="This device" />);
+  const copy = view.getByRole("button", { name: "Copy my data and open" });
+  await expect.element(copy).toBeDisabled();
+  getState.mockResolvedValue(stable);
+  window.dispatchEvent(new Event("focus"));
+  await expect.element(copy).toBeEnabled();
+  // The confirmation says what really comes over.
+  const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+  await copy.click();
+  expect(confirm).toHaveBeenCalledWith(
+    expect.stringContaining("schedules and chat goals come over paused"),
+  );
+});
+
+it("says so when it cannot check for Ryco Nightly, and when Ryco is missing on the way back", async () => {
+  const { getState } = install(stable);
+  getState.mockRejectedValue(new Error("no handler"));
+  const failed = await render(<NightlyAppSettings scope="This device" />);
+  await expect
+    .element(failed.getByRole("alert"))
+    .toHaveTextContent("Could not check for Ryco Nightly.");
+  await failed.unmount();
+
+  install({ ...stable, flavor: "nightly", otherAppInstalled: false });
+  const nightly = await render(<NightlyAppSettings scope="This device" />);
+  await expect.element(nightly.getByText("Ryco is not in Applications.")).toBeVisible();
 });

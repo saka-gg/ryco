@@ -1,7 +1,7 @@
 import { saveThreadExport } from "./threadExportSave.ts";
 import { createQuitShortcutGuard } from "./quitShortcut.ts";
 import type { DesktopCliCommandEnvironment } from "./desktopCliCommand.ts";
-import type { NightlyHandoffEnvironment } from "./nightlyHandoff.ts";
+import type { ExpectedTeamId, NightlyHandoffEnvironment } from "./nightlyHandoff.ts";
 import { buildEditMenu, PASTE_AS_TEXT_CHANNEL, resolvePasteAsTextTarget } from "./editMenu.ts";
 import { navigateWindow, swipeNavigation } from "./desktopNavigationCommands.ts";
 import { createQuitCleanupHandler } from "./quitCleanup.ts";
@@ -79,7 +79,10 @@ import { isRemoteEditorLink } from "@ryco/shared/remoteEditorLink";
 import { AsyncRotatingFileSink, DESKTOP_BACKEND_LOG_FILE_NAME } from "@ryco/shared/logging";
 import { normalizeHubNodeName } from "@ryco/shared/nodeIdentity";
 import { rycoDesktopFlavorIdentity, updateFilesBelongToFlavor } from "@ryco/shared/desktopFlavor";
-import { flavorImportAllowedSourceHome } from "@ryco/shared/flavorImport";
+import {
+  flavorImportAllowedSourceHome,
+  takeFlavorImportLaunchToken,
+} from "@ryco/shared/flavorImport";
 import { readEnv } from "@ryco/shared/runtimeEnv";
 import { parsePersistedServerObservabilitySettings } from "@ryco/shared/serverSettings";
 import {
@@ -379,6 +382,12 @@ const FLAVOR_IMPORT_SOURCE_HOME =
         nightlyHome: BACKEND_BASE_DIR,
       })
     : null;
+/**
+ * Ryco Nightly only: the token of the launch Ryco opened it with to take a copy. Taken out of this
+ * process's environment so nothing it starts inherits it; the backend takes only that request.
+ */
+const FLAVOR_IMPORT_TOKEN =
+  DESKTOP_FLAVOR === "nightly" ? takeFlavorImportLaunchToken(process.env) : null;
 const STATE_DIR = DESKTOP_PATHS.stateDir;
 const DESKTOP_SETTINGS_PATH = DESKTOP_PATHS.desktopSettingsPath;
 const CLIENT_SETTINGS_PATH = Path.join(STATE_DIR, "client-settings.json");
@@ -3864,9 +3873,14 @@ function writeBackendBootstrapEnvelope(
       desktopControlToken: input.controlToken,
       ...(desktopShellEnvironment === null ? {} : { shellEnvironment: desktopShellEnvironment }),
       ...(computerUseRuntime ? { computerUseBridge: computerUseRuntime.backendBinding() } : {}),
-      ...(FLAVOR_IMPORT_SOURCE_HOME === null
+      ...(FLAVOR_IMPORT_SOURCE_HOME === null || FLAVOR_IMPORT_TOKEN === null
         ? {}
-        : { flavorImport: { allowedSourceHome: FLAVOR_IMPORT_SOURCE_HOME } }),
+        : {
+            flavorImport: {
+              allowedSourceHome: FLAVOR_IMPORT_SOURCE_HOME,
+              requestToken: FLAVOR_IMPORT_TOKEN,
+            },
+          }),
       tailscaleServeEnabled: tailscaleServe.enabled,
       tailscaleServePort: tailscaleServe.port,
       hubConnectorEnabled: hubLaunch.enabled,
@@ -4218,7 +4232,7 @@ function registerIpcHandlers(): void {
   ipcMain.handle("desktop:nightly-state", async (event) => {
     nightlyHandoffSender(event);
     const handoff = await import("./nightlyHandoff.ts");
-    return handoff.readNightlyState(nightlyHandoffEnvironment());
+    return handoff.readNightlyState(await nightlyHandoffEnvironment());
   });
   ipcMain.removeHandler("desktop:nightly-open");
   ipcMain.handle("desktop:nightly-open", async (event, input: unknown) => {
@@ -4226,14 +4240,20 @@ function registerIpcHandlers(): void {
     const copyData =
       typeof input === "object" && input !== null && (input as { copyData?: unknown }).copyData;
     if (typeof copyData !== "boolean") throw new Error("Invalid Ryco Nightly request.");
-    const handoff = await import("./nightlyHandoff.ts");
-    await handoff.openNightly(nightlyHandoffEnvironment(), { copyData });
+    if (nightlyOpenInFlight) throw new Error("Ryco Nightly is already opening.");
+    nightlyOpenInFlight = true;
+    try {
+      const handoff = await import("./nightlyHandoff.ts");
+      await handoff.openNightly(await nightlyHandoffEnvironment(), { copyData });
+    } finally {
+      nightlyOpenInFlight = false;
+    }
   });
   ipcMain.removeHandler("desktop:nightly-switch-back");
   ipcMain.handle("desktop:nightly-switch-back", async (event) => {
     nightlyHandoffSender(event);
     const handoff = await import("./nightlyHandoff.ts");
-    await handoff.switchBackToRyco(nightlyHandoffEnvironment());
+    await handoff.switchBackToRyco(await nightlyHandoffEnvironment());
   });
   ipcMain.removeHandler("desktop:quit-shortcut-get");
   ipcMain.handle("desktop:quit-shortcut-get", () => desktopSettings.quitShortcutMode);
@@ -5794,7 +5814,17 @@ function refreshDesktopCliLauncher(): void {
 }
 
 /** What Ryco and Ryco Nightly read to find and open each other (`nightlyHandoff.ts`). */
-function nightlyHandoffEnvironment(): NightlyHandoffEnvironment {
+/** One "Open Ryco Nightly" at a time: a second would write a request no launch carries. */
+let nightlyOpenInFlight = false;
+let ownTeamIdLookup: Promise<ExpectedTeamId> | null = null;
+
+async function nightlyHandoffEnvironment(): Promise<NightlyHandoffEnvironment> {
+  const handoff = await import("./nightlyHandoff.ts");
+  ownTeamIdLookup ??= handoff.ownAppTeamId({
+    platform: process.platform,
+    isPackaged: app.isPackaged,
+    executable: process.execPath,
+  });
   return {
     platform: process.platform,
     flavor: DESKTOP_FLAVOR,
@@ -5810,6 +5840,7 @@ function nightlyHandoffEnvironment(): NightlyHandoffEnvironment {
           }).backendBaseDir,
     executable: process.execPath,
     env: process.env,
+    expectedTeamId: await ownTeamIdLookup,
   };
 }
 

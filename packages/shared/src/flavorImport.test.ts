@@ -8,6 +8,7 @@ import {
   flavorImportResultPath,
   formatFlavorImportRequest,
   parseFlavorImportResult,
+  takeFlavorImportLaunchToken,
 } from "./flavorImport.ts";
 
 const home = Path.resolve("/Users/someone");
@@ -68,13 +69,30 @@ describe("flavor import files", () => {
     const text = formatFlavorImportRequest({
       sourceHomeDir: Path.join(home, ".ryco", "..", ".ryco"),
       requestedAt: new Date("2026-10-31T10:00:00.000Z"),
+      token: "launch-token-0123456789abcdef",
     });
     expect(text.endsWith("\n")).toBe(true);
     expect(JSON.parse(text)).toEqual({
       version: 1,
       requestedAt: "2026-10-31T10:00:00.000Z",
       sourceHomeDir: Path.join(home, ".ryco"),
+      token: "launch-token-0123456789abcdef",
     });
+  });
+
+  it("takes the launch token out of the environment, and only a well-formed one", () => {
+    const env: Record<string, string | undefined> = {
+      RYCO_FLAVOR_IMPORT_TOKEN: "launch-token-0123456789abcdef",
+      PATH: "/usr/bin",
+    };
+    expect(takeFlavorImportLaunchToken(env)).toBe("launch-token-0123456789abcdef");
+    expect(env).toEqual({ PATH: "/usr/bin" });
+    expect(takeFlavorImportLaunchToken(env)).toBeNull();
+    for (const token of ["short", "has space in it 0123456789", "x".repeat(129), ""]) {
+      const malformed: Record<string, string | undefined> = { RYCO_FLAVOR_IMPORT_TOKEN: token };
+      expect(takeFlavorImportLaunchToken(malformed), token).toBeNull();
+      expect(malformed).toEqual({});
+    }
   });
 
   it("reads a result and rejects anything else", () => {

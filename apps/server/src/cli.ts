@@ -211,9 +211,12 @@ const BootstrapEnvelopeSchema = Schema.Struct({
   shellEnvironment: Schema.optional(Schema.Record(Schema.String, Schema.String)),
   /**
    * Ryco Nightly only: the one Ryco data home this backend may copy from when Ryco left a copy
-   * request in its home (flavorImportStartup.ts). Honoured only in desktop mode.
+   * request in its home (flavorImportStartup.ts), and the token of the launch Ryco opened it
+   * with (only that launch's request is taken). Honoured only in desktop mode.
    */
-  flavorImport: Schema.optional(Schema.Struct({ allowedSourceHome: Schema.String })),
+  flavorImport: Schema.optional(
+    Schema.Struct({ allowedSourceHome: Schema.String, requestToken: Schema.String }),
+  ),
 });
 
 const modeFlag = Flag.Literals("mode", RuntimeMode.literals).pipe(

@@ -947,13 +947,16 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
 
       const desktop = yield* resolveWith({
         mode: "desktop",
-        flavorImport: { allowedSourceHome: stableHome },
+        flavorImport: { allowedSourceHome: stableHome, requestToken: "launch-token" },
       });
-      expect(desktop.flavorImport).toEqual({ allowedSourceHome: stableHome });
+      expect(desktop.flavorImport).toEqual({
+        allowedSourceHome: stableHome,
+        requestToken: "launch-token",
+      });
 
       const web = yield* resolveWith({
         mode: "web",
-        flavorImport: { allowedSourceHome: stableHome },
+        flavorImport: { allowedSourceHome: stableHome, requestToken: "launch-token" },
       });
       expect(web.mode).toBe("web");
       expect(web.flavorImport).toBeUndefined();

@@ -6,7 +6,9 @@ import { Button } from "../ui/button";
 import { SettingsRow } from "./settingsLayout";
 
 const COPY_CONFIRMATION =
-  "Ryco Nightly's chats and settings are replaced by a copy of Ryco's when it starts. Ryco stays as it is. Ryco's node identity, sessions and schedules are not copied.";
+  "Ryco Nightly's chats and settings are replaced by a copy of Ryco's when it starts. Ryco stays as it is. Ryco's node identity and sessions are not copied; schedules and chat goals come over paused.";
+
+const CHECK_FAILED = "Could not check for Ryco Nightly.";
 
 function describe(state: DesktopNightlyState): string {
   if (state.flavor === "nightly") {
@@ -35,11 +37,29 @@ export function NightlyAppSettings({ scope }: { readonly scope: string }) {
     if (!api) return;
     void api
       .getState()
-      .then(setState)
-      .catch(() => setError("Could not check for Ryco Nightly."));
+      .then((next) => {
+        setState(next);
+        setError((current) => (current === CHECK_FAILED ? null : current));
+      })
+      .catch(() => setError(CHECK_FAILED));
   }, [api]);
   useEffect(refresh, [refresh]);
-  if (!api || state === null) return null;
+  // Quitting or opening the other app happens outside this window: look again on return.
+  useEffect(() => {
+    window.addEventListener("focus", refresh);
+    return () => window.removeEventListener("focus", refresh);
+  }, [refresh]);
+  if (!api) return null;
+  if (state === null) {
+    return error ? (
+      <SettingsRow
+        title="Ryco Nightly"
+        scope={scope}
+        description="Ryco Nightly is the nightly build as a separate app."
+        status={<span role="alert">{error}</span>}
+      />
+    ) : null;
+  }
 
   const run = (action: () => Promise<void>) => {
     setPending(true);
@@ -59,7 +79,9 @@ export function NightlyAppSettings({ scope }: { readonly scope: string }) {
         <Button size="sm" variant="outline" disabled={pending} onClick={() => run(api.switchBack)}>
           Switch back to Ryco
         </Button>
-      ) : null
+      ) : (
+        <span className="text-xs text-muted-foreground">Ryco is not in Applications.</span>
+      )
     ) : !state.otherAppInstalled ? (
       <Button size="sm" variant="outline" onClick={openExternal}>
         Get Ryco Nightly
