@@ -60,3 +60,34 @@ describe("runRecoveryDialogLoop", () => {
     expect(options.openLogs).not.toHaveBeenCalled();
   });
 });
+
+describe("runRecoveryDialogLoop with an extra action", () => {
+  it("ends when the extra action takes over, and shows the dialog again when it does not", async () => {
+    const extra = vi
+      .fn(async () => false)
+      .mockResolvedValueOnce(false)
+      .mockResolvedValueOnce(true);
+    const options = { ...loopOptions(answers(2, 2)), extra };
+    await runRecoveryDialogLoop(options);
+    expect(extra).toHaveBeenCalledTimes(2);
+    expect(options.show).toHaveBeenCalledTimes(2);
+    expect(options.primary).not.toHaveBeenCalled();
+    expect(options.quit).not.toHaveBeenCalled();
+  });
+
+  it("treats a failing extra action as not taking over", async () => {
+    const extra = vi.fn(async () => Promise.reject(new Error("restore failed")));
+    const options = { ...loopOptions(answers(2, 3)), extra };
+    await runRecoveryDialogLoop(options);
+    expect(options.show).toHaveBeenCalledTimes(2);
+    expect(options.quit).toHaveBeenCalledTimes(1);
+  });
+
+  it("quits for the button after the extra action", async () => {
+    const extra = vi.fn(async () => true);
+    const options = { ...loopOptions(answers(3)), extra };
+    await runRecoveryDialogLoop(options);
+    expect(extra).not.toHaveBeenCalled();
+    expect(options.quit).toHaveBeenCalledTimes(1);
+  });
+});

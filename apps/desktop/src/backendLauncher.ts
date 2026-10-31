@@ -35,8 +35,8 @@ export function resolveDesktopBackendEntry(appRoot: string): string {
   return Path.join(appRoot, "apps/server/dist/bin.mjs");
 }
 
-export function desktopBackendSpawnArgs(input: {
-  readonly backendEntry: string;
+/** The runtime flags before the backend entry, for the backend and for the server CLI alike. */
+export function desktopBackendRuntimeArgs(input: {
   /** Electron in Node mode accepts V8 and `--require` flags; Bun (development) does not. */
   readonly nodeRuntime: boolean;
   readonly compileCacheHook: string | null;
@@ -46,6 +46,17 @@ export function desktopBackendSpawnArgs(input: {
     ...(input.nodeRuntime && input.compileCacheHook !== null
       ? ["--require", input.compileCacheHook]
       : []),
+  ];
+}
+
+export function desktopBackendSpawnArgs(input: {
+  readonly backendEntry: string;
+  /** Electron in Node mode accepts V8 and `--require` flags; Bun (development) does not. */
+  readonly nodeRuntime: boolean;
+  readonly compileCacheHook: string | null;
+}): string[] {
+  return [
+    ...desktopBackendRuntimeArgs(input),
     input.backendEntry,
     "--bootstrap-fd",
     String(DESKTOP_BACKEND_BOOTSTRAP_FD),
