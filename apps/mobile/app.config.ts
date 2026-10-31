@@ -18,7 +18,12 @@ const repoEnv = loadMobileEnv();
 Object.assign(process.env, repoEnv);
 
 const APP_VARIANT = resolveAppVariant(repoEnv.APP_VARIANT);
-const mobileUpdates = resolveMobileUpdates(repoEnv.RYCO_EAS_PROJECT_ID);
+const mobileRuntimeVersionPolicy = process.env.MOBILE_VERSION_POLICY ?? "fingerprint";
+const mobileUpdates = resolveMobileUpdates({
+  projectId: repoEnv.RYCO_EAS_PROJECT_ID,
+  certificatePath: repoEnv.RYCO_EAS_UPDATE_CERTIFICATE,
+  runtimePolicy: mobileRuntimeVersionPolicy,
+});
 
 // Local, capability-reduced device builds (free Apple Personal Team) can only
 // sign their own bundle id; expose an override so `expo run:ios` on a device
@@ -159,7 +164,7 @@ const config: ExpoConfig = {
     // project — native deps, config plugins, AND patches/ — matches the update.
     // Patches count only through fingerprint.config.js: under Bun's store the
     // fingerprint does not hash native package sources.
-    policy: process.env.MOBILE_VERSION_POLICY ?? "fingerprint",
+    policy: mobileRuntimeVersionPolicy,
   },
   orientation: "portrait",
   icon: "./assets/icon.png",
@@ -167,7 +172,8 @@ const config: ExpoConfig = {
   // a future appearance preference plugs into; this forces the native shell dark so
   // first paint (splash + system chrome) is dark before JS resolves.
   userInterfaceStyle: "dark",
-  // Off unless RYCO_EAS_PROJECT_ID names the Ryco EAS project (config/env.ts).
+  // Off unless RYCO_EAS_PROJECT_ID names the Ryco EAS project, and never checks
+  // unless RYCO_EAS_UPDATE_CERTIFICATE makes every update verifiable (config/env.ts).
   updates: mobileUpdates.updates,
   // Turns on babel-preset-expo's React Compiler pass. Which sources it compiles
   // is scoped in babel.config.js (all of apps/mobile/src);
@@ -322,6 +328,8 @@ const config: ExpoConfig = {
   ],
   extra: {
     ...(mobileUpdates.projectId ? { eas: { projectId: mobileUpdates.projectId } } : {}),
+    // Whether this binary verifies updates; app code must never check for one otherwise.
+    updates: { signed: mobileUpdates.signed },
     appVariant: APP_VARIANT,
     iosPersonalTeamBuild: isIosPersonalTeamBuild,
     // Background push alerts (docs/push-alerts.md): the APNs topic is the
