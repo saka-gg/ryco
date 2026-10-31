@@ -10,7 +10,7 @@
  */
 export const KNOWN_BAILOUTS: Readonly<Record<string, ReadonlyArray<string>>> = {
   "src/browser/BackgroundBrowserPreview.tsx": ["BackgroundBrowserPreview"],
-  "src/browser/BrowserPanel.tsx": ["BrowserPanel"],
+  "src/browser/BrowserPanel.tsx": ["ProjectBrowserPanel"],
   "src/browser/browserState.ts": ["useProjectBrowserTabs"],
   "src/components/ChatMarkdown.tsx": ["RenderedChatMarkdown"],
   "src/components/CommandPalette.tsx": ["CommandPalette"],

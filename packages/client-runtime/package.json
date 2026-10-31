@@ -58,6 +58,10 @@
       "types": "./src/connection/directRouteIdentity.ts",
       "import": "./src/connection/directRouteIdentity.ts"
     },
+    "./nodeBrowser/viewerInput": {
+      "types": "./src/nodeBrowser/viewerInput.ts",
+      "import": "./src/nodeBrowser/viewerInput.ts"
+    },
     "./connection/nodeBrowserFrameSource": {
       "types": "./src/connection/nodeBrowserFrameSource.ts",
       "import": "./src/connection/nodeBrowserFrameSource.ts"

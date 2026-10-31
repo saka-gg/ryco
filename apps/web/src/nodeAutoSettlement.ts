@@ -1,4 +1,4 @@
-import { WS_METHODS, type AuthSessionRole, type EnvironmentId } from "@ryco/contracts";
+import { WS_METHODS, type EnvironmentId } from "@ryco/contracts";
 import type { SidebarAutoSettleAfterDays } from "@ryco/contracts/settings";
 import {
   getWsConnectionStatusForEnvironment,
@@ -13,25 +13,19 @@ import {
   describeAutoSettleRuleApplyResult,
   nodeAwaitsAutoSettleRule,
   readAutoSettleRuleHandOverKey,
-  type AutoSettleRuleHandOverCandidate,
   type AutoSettleRuleHandOverListing,
   type AutoSettleRuleNodeView,
   type AutoSettleRuleTarget,
 } from "@ryco/client-runtime/state/settings";
 import { useEffect, useMemo } from "react";
 
-import { isElectron, isHostedHubMode } from "./env";
+import { isHostedHubMode } from "./env";
 import { readNodeServerConfig } from "./environments/nodeServerConfig";
-import { fetchSessionState, getPrimaryKnownEnvironment } from "./environments/primary";
-import {
-  readEnvironmentConnection,
-  updateEnvironmentServerSettings,
-  useSavedEnvironmentRuntimeStore,
-} from "./environments/runtime";
+import { readNodeRole, subscribePrimarySessionRole } from "./environments/nodeRole";
+import { getPrimaryKnownEnvironment } from "./environments/primary";
+import { readEnvironmentConnection, updateEnvironmentServerSettings } from "./environments/runtime";
 import { updateClientAutoSettleAfterDays } from "./hooks/useSettings";
 import { readHostedRpcCapability } from "./hostedHub/capabilities";
-import { useHostedHubStore } from "./hostedHub/state";
-import { readDesktopWorkspaceState } from "./platform/desktopWorkspace";
 
 /**
  * The web side of node-owned automatic settlement: which nodes a rule can be
@@ -43,62 +37,6 @@ import { readDesktopWorkspaceState } from "./platform/desktopWorkspace";
 export interface AutoSettleRuleNode {
   readonly environmentId: EnvironmentId;
   readonly label: string;
-}
-
-type NodeRole = AutoSettleRuleHandOverCandidate["role"];
-
-/**
- * This page's own session role on the primary node, once asked. The desktop
- * app's session is its owner's; a browser asks the node once per page (again
- * only after asking failed) and tells its listeners the answer.
- */
-let primarySessionRole: {
-  readonly environmentId: EnvironmentId;
-  readonly role: AuthSessionRole | null;
-} | null = null;
-let primarySessionRequest: Promise<void> | null = null;
-const primarySessionRoleListeners = new Set<() => void>();
-
-function readPrimarySessionRole(environmentId: EnvironmentId): NodeRole {
-  if (isElectron) return "owner";
-  if (primarySessionRole?.environmentId === environmentId) return primarySessionRole.role;
-  primarySessionRequest ??= fetchSessionState().then(
-    (session) => {
-      primarySessionRequest = null;
-      primarySessionRole = {
-        environmentId,
-        role: session.authenticated ? (session.role ?? null) : null,
-      };
-      for (const listener of Array.from(primarySessionRoleListeners)) listener();
-    },
-    () => {
-      // Asked again on the next check, not in a loop.
-      primarySessionRequest = null;
-    },
-  );
-  return undefined;
-}
-
-/**
- * The role this client holds on a node: a hosted node's own role, a Desktop
- * workspace machine's, a saved environment's session role, or this page's own
- * session on the primary. Undefined while the primary's is being asked.
- */
-function readNodeRole(environmentId: EnvironmentId): NodeRole {
-  if (isHostedHubMode()) {
-    return (
-      useHostedHubStore.getState().nodes.find((node) => node.environmentId === environmentId)
-        ?.effectiveRole ?? null
-    );
-  }
-  if (environmentId === getPrimaryKnownEnvironment()?.environmentId) {
-    return readPrimarySessionRole(environmentId);
-  }
-  const machine = readDesktopWorkspaceState().machines.find(
-    (candidate) => candidate.environmentId === environmentId,
-  );
-  if (machine) return machine.canConnect ? machine.effectiveRole : null;
-  return useSavedEnvironmentRuntimeStore.getState().byId[environmentId]?.role ?? null;
 }
 
 /**
@@ -214,10 +152,10 @@ export function useAutoSettleRuleHandOver(
     };
     run();
     const unsubscribe = subscribeEnvironmentServerConfigs(run);
-    primarySessionRoleListeners.add(run);
+    const unsubscribeRole = subscribePrimarySessionRole(run);
     return () => {
       unsubscribe();
-      primarySessionRoleListeners.delete(run);
+      unsubscribeRole();
     };
   }, [clientValue, key]);
 }
