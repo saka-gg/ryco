@@ -1,4 +1,5 @@
 import { Schema } from "effect";
+import { useEffect, useRef } from "react";
 import { GitWritingStyle, WS_METHODS, type ServerConfig } from "@ryco/contracts";
 import { DEFAULT_UNIFIED_SETTINGS, type ServerSettings } from "@ryco/contracts/settings";
 import type { NodeSettingsConfig } from "@ryco/client-runtime/state/settings/nodeSettingsFanOut";
@@ -44,6 +45,60 @@ const GIT_WRITING_INSTRUCTION_ROWS = [
 ] as const;
 
 const GIT_WRITING_INSTRUCTIONS_MAX_LENGTH = 4_000;
+
+/**
+ * One instructions row. "Apply to all nodes" sends the text committed last, even while this
+ * node's save is still on its way: clicking the button commits the text first, and a node other
+ * than the primary one shows it only once the node answers.
+ */
+function GitWritingInstructionsRow(props: {
+  readonly row: (typeof GIT_WRITING_INSTRUCTION_ROWS)[number];
+  readonly value: string;
+  readonly onCommit: (next: string) => void;
+  readonly allowed: boolean;
+}) {
+  const { row, value } = props;
+  const committed = useRef<string | null>(null);
+  // A value from the node (this save's answer, or a change made elsewhere) replaces it.
+  useEffect(() => {
+    committed.current = null;
+  }, [value]);
+  return (
+    <SettingsRow
+      title={row.title}
+      description={row.description}
+      status={
+        <ApplyToAllNodes
+          label={row.title.toLowerCase()}
+          select={row.select}
+          format={formatInstructions}
+          patch={() => ({ [row.key]: committed.current ?? value })}
+          disabled={!props.allowed}
+        />
+      }
+      resetAction={
+        value !== DEFAULT_UNIFIED_SETTINGS[row.key] ? (
+          <SettingResetButton
+            label={row.title.toLowerCase()}
+            onClick={() => props.onCommit(DEFAULT_UNIFIED_SETTINGS[row.key])}
+          />
+        ) : null
+      }
+    >
+      <DraftTextarea
+        value={value}
+        onCommit={(next) => {
+          committed.current = next.trim();
+          props.onCommit(next.trim());
+        }}
+        placeholder={row.placeholder}
+        maxLength={GIT_WRITING_INSTRUCTIONS_MAX_LENGTH}
+        disabled={!props.allowed}
+        aria-label={row.title}
+      />
+    </SettingsRow>
+  );
+}
 
 /** Instructions as the "Mixed" list shows them: the start of the text, or None. */
 function formatInstructions(text: string): string {
@@ -126,37 +181,13 @@ export function GitWritingSettingsSection() {
     <SettingsSection title="Commit & pull request writing" owner="node">
       <GitWritingStyleSettings projectId="" projects={[]} />
       {GIT_WRITING_INSTRUCTION_ROWS.map((row) => (
-        <SettingsRow
+        <GitWritingInstructionsRow
           key={row.key}
-          title={row.title}
-          description={row.description}
-          status={
-            <ApplyToAllNodes
-              label={row.title.toLowerCase()}
-              select={row.select}
-              format={formatInstructions}
-              patch={{ [row.key]: settings[row.key] }}
-              disabled={!settingsCapability.allowed}
-            />
-          }
-          resetAction={
-            settings[row.key] !== DEFAULT_UNIFIED_SETTINGS[row.key] ? (
-              <SettingResetButton
-                label={row.title.toLowerCase()}
-                onClick={() => updateSettings({ [row.key]: DEFAULT_UNIFIED_SETTINGS[row.key] })}
-              />
-            ) : null
-          }
-        >
-          <DraftTextarea
-            value={settings[row.key]}
-            onCommit={(next) => updateSettings({ [row.key]: next.trim() })}
-            placeholder={row.placeholder}
-            maxLength={GIT_WRITING_INSTRUCTIONS_MAX_LENGTH}
-            disabled={!settingsCapability.allowed}
-            aria-label={row.title}
-          />
-        </SettingsRow>
+          row={row}
+          value={settings[row.key]}
+          onCommit={(next) => updateSettings({ [row.key]: next })}
+          allowed={settingsCapability.allowed}
+        />
       ))}
       <SettingsRow
         title="Pull request templates"

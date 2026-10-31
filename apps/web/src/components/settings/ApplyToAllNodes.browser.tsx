@@ -46,6 +46,9 @@ const harness = vi.hoisted(() => {
     /** Each node's own current settings, which its settings write checks. */
     nodeSettings: new Map<string, unknown>(),
     writes: [] as Array<{ environmentId: string; patch: unknown }>,
+    /** Holds the next write's answer until `release` runs, as a slow node would. */
+    holdNext: false,
+    release: () => {},
   };
 });
 
@@ -100,6 +103,12 @@ vi.mock("../../environments/runtime", async () => {
     // The node's own `server.updateSettings`, then the client's snapshot of it.
     updateEnvironmentServerSettings: async (environmentId: string, patch: ServerSettingsPatch) => {
       harness.writes.push({ environmentId, patch });
+      if (harness.holdNext) {
+        harness.holdNext = false;
+        await new Promise<void>((resolve) => {
+          harness.release = resolve;
+        });
+      }
       const current = harness.nodeSettings.get(environmentId) as ServerSettings;
       const next = applyServerSettingsPatch(current, patch);
       harness.nodeSettings.set(environmentId, next);
@@ -126,6 +135,7 @@ import {
 } from "../../environmentApi";
 import { AppAtomRegistryProvider } from "../../rpc/atomRegistry";
 import { SettingsEditingScopeProvider, SettingsTargetProvider } from "../../settingsTarget";
+import { GitWritingSettingsSection } from "./GitWritingStyleSettings";
 import { ProjectPreferenceSettings } from "./ProjectPreferenceSettings";
 import { SettingsCard } from "./settingsLayout";
 
@@ -194,7 +204,7 @@ function saveNodes(input: {
   } as unknown as EnvironmentApi);
 }
 
-function StudioDefaults() {
+function StudioDefaults(props: { readonly writing?: boolean }) {
   const config = harness.runtime.getState().byId[STUDIO]!.serverConfig as ServerConfig;
   return (
     <AppAtomRegistryProvider>
@@ -209,9 +219,13 @@ function StudioDefaults() {
             canManage: true,
           }}
         >
-          <SettingsCard>
-            <ProjectPreferenceSettings projectId="" projects={[]} />
-          </SettingsCard>
+          {props.writing ? (
+            <GitWritingSettingsSection />
+          ) : (
+            <SettingsCard>
+              <ProjectPreferenceSettings projectId="" projects={[]} />
+            </SettingsCard>
+          )}
         </SettingsTargetProvider>
       </SettingsEditingScopeProvider>
     </AppAtomRegistryProvider>
@@ -227,6 +241,7 @@ beforeEach(async () => {
   // A desktop window: the frozen phone tier never offers this.
   await page.viewport(1_280, 900);
   harness.writes = [];
+  harness.holdNext = false;
   harness.nodeSettings.clear();
   harness.registry.setState({ byId: {} });
   harness.runtime.setState({ byId: {} });
@@ -289,6 +304,27 @@ describe("Apply to all nodes", () => {
         "Applied to Studio. Not changed: Laptop (Node preferences changed elsewhere. Reload before saving.).",
       );
     expect(harness.writes.map((write) => write.environmentId)).toEqual([STUDIO, LAPTOP]);
+  });
+
+  it("sends the instructions just typed, while this node's save is still on its way", async () => {
+    saveNodes({
+      studio: DEFAULT_SERVER_SETTINGS,
+      laptop: { seen: DEFAULT_SERVER_SETTINGS, actual: DEFAULT_SERVER_SETTINGS },
+    });
+    mounted = await render(<StudioDefaults writing />);
+
+    await page.getByRole("textbox", { name: "Commit message instructions" }).fill("Be brief.");
+    // Clicking the button commits the text first; Studio answers that save only later.
+    harness.holdNext = true;
+    await page
+      .getByRole("button", { name: "Apply to all nodes: commit message instructions" })
+      .click();
+    await vi.waitFor(() => expect(harness.writes).toHaveLength(3));
+    expect(harness.writes.slice(1)).toEqual([
+      { environmentId: STUDIO, patch: { commitMessageInstructions: "Be brief." } },
+      { environmentId: LAPTOP, patch: { commitMessageInstructions: "Be brief." } },
+    ]);
+    harness.release();
   });
 
   it("shows nothing to apply with one known node", async () => {
