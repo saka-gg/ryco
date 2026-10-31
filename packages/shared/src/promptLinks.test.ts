@@ -41,6 +41,41 @@ describe("sanitizeLinkedPrompt", () => {
     });
     expect(sanitizeLinkedPrompt("a\u200Db").hiddenCharacters).toBe(1);
     expect(sanitizeLinkedPrompt("\u{1F468}\u200D").hiddenCharacters).toBe(1);
+    // A flag with its presentation selector before the joiner, a keycap, a text-style arrow.
+    const rainbowFlag = "\u{1F3F3}\uFE0F\u200D\u{1F308}";
+    const keycap = "1\uFE0F\u20E3";
+    const arrow = "\u21A9\uFE0E";
+    expect(sanitizeLinkedPrompt(`${rainbowFlag} ${keycap} ${arrow} \u00A9\uFE0F`)).toEqual({
+      text: `${rainbowFlag} ${keycap} ${arrow} \u00A9\uFE0F`,
+      hiddenCharacters: 0,
+    });
+  });
+
+  it("removes presentation selectors that follow no emoji", () => {
+    // After a letter, after a digit outside a keycap, and repeated after an emoji.
+    expect(sanitizeLinkedPrompt("a\uFE0Fb\uFE0Ec 1\uFE0F")).toEqual({
+      text: "abc 1",
+      hiddenCharacters: 3,
+    });
+    expect(sanitizeLinkedPrompt("\u2764\uFE0F\uFE0F\uFE0E")).toEqual({
+      text: "\u2764\uFE0F",
+      hiddenCharacters: 2,
+    });
+  });
+
+  it("keeps a zero-width non-joiner between Persian or Indic letters, and only there", () => {
+    // Persian "\u0645\u06CC\u200C\u062E\u0648\u0627\u0647\u0645" and Hindi "\u0915\u094D\u200C\u0937" spell with it.
+    const persian = "\u0645\u06CC\u200C\u062E\u0648\u0627\u0647\u0645";
+    const hindi = "\u0915\u094D\u200C\u0937";
+    expect(sanitizeLinkedPrompt(`${persian} ${hindi}`)).toEqual({
+      text: `${persian} ${hindi}`,
+      hiddenCharacters: 0,
+    });
+    // Between Latin letters, doubled, or at an edge it hides nothing a reader could see.
+    expect(sanitizeLinkedPrompt("a\u200Cb \u0645\u200C\u200C\u062E \u200C\u0645")).toEqual({
+      text: "ab \u0645\u062E \u0645",
+      hiddenCharacters: 4,
+    });
   });
 });
 

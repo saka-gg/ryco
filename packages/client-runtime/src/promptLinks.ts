@@ -9,6 +9,7 @@ import { normalizeGitRemoteUrl } from "@ryco/shared/git";
 import { resolveSelectableModel, type SelectableModelOption } from "@ryco/shared/model";
 import { isChatProject, type ProjectKindCarrier } from "@ryco/shared/projectKind";
 import {
+  parsePromptLinkPullRequest,
   promptLinkRepositoryKey,
   promptLinkRepositoryName,
   type LinkedPrompt,
@@ -175,10 +176,21 @@ export interface PromptLinkPullRequestTarget<P, T, W> {
 const isLiveWorktree = (worktree: PromptLinkWorktree) =>
   worktree.archivedAt === null && worktree.worktreePath !== null && !worktree.checkoutRemovedAt;
 
-const carriesPullRequest = (worktree: PromptLinkWorktree, number: number) =>
-  readWorktreePullRequestLinks(worktree).some(
-    (link) => link.number === number && !link.dismissedAt,
-  );
+/**
+ * Whether the checkout carries the linked pull request. A link with a URL names its repository
+ * too: a worktree can carry a pull request of another repository (a fork's, or one linked by
+ * hand) with the same number. Links without a URL can only be matched by number.
+ */
+const carriesPullRequest = (worktree: PromptLinkWorktree, pullRequest: PromptLinkPullRequest) =>
+  readWorktreePullRequestLinks(worktree).some((link) => {
+    if (link.dismissedAt || link.number !== pullRequest.number) return false;
+    const linked = link.url ? parsePromptLinkPullRequest(link.url) : null;
+    return (
+      linked === null ||
+      (linked.number === pullRequest.number &&
+        promptLinkRepositoryKey(linked) === promptLinkRepositoryKey(pullRequest))
+    );
+  });
 
 /**
  * Where a pull request link opens: the thread most recently working on it (in a live checkout
@@ -211,7 +223,7 @@ export function resolvePromptLinkPullRequest<
   const carrying = input.worktrees.filter(
     (worktree) =>
       isLiveWorktree(worktree) &&
-      carriesPullRequest(worktree, input.pullRequest.number) &&
+      carriesPullRequest(worktree, input.pullRequest) &&
       candidates.some(
         (project) =>
           project.environmentId === worktree.environmentId && project.id === worktree.projectId,
@@ -336,13 +348,36 @@ export function resolvePromptLinkModelSelection(
   };
 }
 
-/** How a linked prompt lands in a composer that may hold a draft already. */
+/** What a composer holds when a link arrives, as {@link linkedPromptDraftAction} weighs it. */
+export interface LinkedPromptDraft {
+  /** The text in the composer now. */
+  readonly text: string;
+  /** Images, files and contexts (terminal output, file references, issues) besides the text. */
+  readonly attachments: number;
+  /** The link would give the draft another model than the one it has. */
+  readonly changesModel: boolean;
+  /** The link would move the draft to another project or checkout. */
+  readonly changesLocation: boolean;
+  /**
+   * The model or location the link would change is one the user picked by hand (surfaces that
+   * track this pass it; an untracked pick counts only when the draft holds something).
+   */
+  readonly replacesUserChoice?: boolean;
+}
+
+/**
+ * How a link lands in a composer that may hold a draft already: `keep` when it would change
+ * nothing, `fill` when the draft holds nothing of the user's, and otherwise `ask`. A draft with
+ * attachments asks too, even without text: the linked prompt would be sent with them.
+ */
 export function linkedPromptDraftAction(
-  currentText: string,
-  prompt: string,
+  draft: LinkedPromptDraft,
+  prompt: string | null,
 ): "fill" | "keep" | "ask" {
-  if (currentText.trim().length === 0) return "fill";
-  return currentText === prompt ? "keep" : "ask";
+  const changesText = prompt !== null && draft.text !== prompt;
+  if (!changesText && !draft.changesModel && !draft.changesLocation) return "keep";
+  const holdsUserContent = draft.text.trim().length > 0 || draft.attachments > 0;
+  return holdsUserContent || draft.replacesUserChoice === true ? "ask" : "fill";
 }
 
 /** The warning a prompt with hidden characters gets, or null when it had none. */
@@ -360,15 +395,11 @@ export function promptLinkModelNote(
   if (resolved === null) {
     return `The link asked for ${request.provider}, which is not set up here, so your default model is used.`;
   }
+  // The model text is never shown: an unknown one is free text a stranger chose.
   if (!resolved.exact && request.model !== null) {
-    return `The link asked for ${request.model}, which ${request.provider} does not offer here, so its default model is used.`;
+    return `${request.provider} does not offer the requested model here, so its default model is used.`;
   }
   return null;
-}
-
-/** Said whenever Send would check a pull request out, because that runs code from it. */
-export function promptLinkPullRequestCheckoutNote(pullRequest: PromptLinkPullRequest): string {
-  return `Send checks out ${promptLinkRepositoryName(pullRequest)}#${pullRequest.number} into a new worktree first, which runs your project's setup script on its code.`;
 }
 
 /**

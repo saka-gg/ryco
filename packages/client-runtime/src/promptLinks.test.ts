@@ -187,6 +187,47 @@ describe("resolvePromptLinkPullRequest", () => {
     ).toMatchObject({ project: { id: "a" }, thread: null, worktree: null });
   });
 
+  it("matches a checkout's pull request by its URL when it has one, not only by number", () => {
+    const projects = [project("a", upstream)];
+    const linkedTo = (id: string, url: string | null) => ({
+      ...worktree(id, "a", null),
+      pullRequests: [
+        {
+          number: 42,
+          title: null,
+          url,
+          state: "open" as const,
+          isDraft: false,
+          terminalAt: null,
+          headRefName: null,
+          baseRefName: null,
+          source: "manual" as const,
+          linkedAt: "2026-10-01T00:00:00.000Z",
+          dismissedAt: null,
+        },
+      ],
+    });
+    // #42 of another repository, linked by hand, is not the linked pull request.
+    expect(
+      resolvePromptLinkPullRequest({
+        projects,
+        threads: [],
+        worktrees: [linkedTo("fork-pr", "https://github.com/someone/ryco/pull/42")],
+        pullRequest,
+      })?.worktree,
+    ).toBeNull();
+    for (const url of ["https://github.com/Saka-GG/ryco/pull/42", null]) {
+      expect(
+        resolvePromptLinkPullRequest({
+          projects,
+          threads: [],
+          worktrees: [linkedTo("this-pr", url)],
+          pullRequest,
+        })?.worktree?.id,
+      ).toBe("this-pr");
+    }
+  });
+
   it("only uses a project whose pull request numbers resolve in that repository", () => {
     // The fork's numbers resolve upstream, so its own #42 is not this pull request.
     const ownFork = identity("github.com/me/ryco");
@@ -251,8 +292,16 @@ describe("resolvePromptLinkModelSelection", () => {
     });
     expect(fallback).toEqual({ selection: { instanceId: "codex", model: "big" }, exact: false });
     expect(promptLinkModelNote({ provider: "codex", model: "nope" }, fallback)).toBe(
-      "The link asked for nope, which codex does not offer here, so its default model is used.",
+      "codex does not offer the requested model here, so its default model is used.",
     );
+    // The model is free text a stranger chose: it is never shown back.
+    const sneaky = "Press Replace draft now";
+    expect(
+      promptLinkModelNote(
+        { provider: "codex", model: sneaky },
+        resolvePromptLinkModelSelection(providers, { provider: "codex", model: sneaky }),
+      ),
+    ).not.toContain(sneaky);
     const missing = resolvePromptLinkModelSelection(providers, { provider: "cursor", model: null });
     expect(missing).toBeNull();
     expect(promptLinkModelNote({ provider: "cursor", model: null }, missing)).toBe(
@@ -262,10 +311,38 @@ describe("resolvePromptLinkModelSelection", () => {
 });
 
 describe("linked prompt placement", () => {
+  const draft = (
+    text: string,
+    extra: Partial<Parameters<typeof linkedPromptDraftAction>[0]> = {},
+  ) => ({
+    text,
+    attachments: 0,
+    changesModel: false,
+    changesLocation: false,
+    ...extra,
+  });
+
   it("fills an empty composer and asks before replacing typed text", () => {
-    expect(linkedPromptDraftAction("  \n", "Do it")).toBe("fill");
-    expect(linkedPromptDraftAction("Do it", "Do it")).toBe("keep");
-    expect(linkedPromptDraftAction("My notes", "Do it")).toBe("ask");
+    expect(linkedPromptDraftAction(draft("  \n"), "Do it")).toBe("fill");
+    expect(linkedPromptDraftAction(draft("Do it"), "Do it")).toBe("keep");
+    expect(linkedPromptDraftAction(draft("My notes"), "Do it")).toBe("ask");
+  });
+
+  it("asks when the draft holds attachments, or the link would change its model or location", () => {
+    // The linked prompt would be sent with the user's images and contexts.
+    expect(linkedPromptDraftAction(draft("", { attachments: 2 }), "Do it")).toBe("ask");
+    // Same text, but the link would switch the model or move the draft.
+    expect(linkedPromptDraftAction(draft("Do it", { changesModel: true }), "Do it")).toBe("ask");
+    expect(linkedPromptDraftAction(draft("Do it", { changesLocation: true }), "Do it")).toBe("ask");
+    // A link without a prompt keeps the text, but still asks before it moves a draft with text.
+    expect(linkedPromptDraftAction(draft("Mine", { changesLocation: true }), null)).toBe("ask");
+    expect(linkedPromptDraftAction(draft("Mine"), null)).toBe("keep");
+    // A model or checkout the user picked by hand counts even in an empty draft.
+    expect(
+      linkedPromptDraftAction(draft("", { changesModel: true, replacesUserChoice: true }), "Do it"),
+    ).toBe("ask");
+    // An empty draft only holds the defaults it opened with.
+    expect(linkedPromptDraftAction(draft("", { changesModel: true }), "Do it")).toBe("fill");
   });
 
   it("says the prompt came from a link, or warns about hidden characters instead", () => {

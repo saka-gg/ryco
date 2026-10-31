@@ -1,6 +1,7 @@
 import {
   findPromptLinkProject,
   isPromptLinkLookupSettled,
+  linkedPromptDraftAction,
   promptLinkModelNote,
   promptLinkNotice,
   resolvePromptLinkModelSelection,
@@ -31,7 +32,8 @@ import {
  * `?pr=owner/name/123`. The New Task sheet reads the same keys through the shared parser and
  * resolver the web app uses, fills its draft and stops there: the user reads the prompt and
  * sends. A link never changes the runtime mode, and moves the task's checkout only to a
- * checkout of the linked pull request that exists already.
+ * checkout of the linked pull request that exists already: the phone never creates one for it,
+ * and the sheet keeps the link's notice on screen until it is dismissed.
  */
 
 interface PromptLinkEnvironment {
@@ -167,4 +169,53 @@ export function planMobilePromptLink(input: {
     modelSelection,
     notice: promptLinkNotice(prompt, notes),
   };
+}
+
+/** What the New Task sheet holds when a link arrives. */
+export interface MobilePromptLinkSheet {
+  readonly prompt: string;
+  readonly attachments: number;
+  readonly environmentId: EnvironmentId | null;
+  readonly projectId: ProjectId | null;
+  /** The existing checkout the task starts in, if any. */
+  readonly worktreeId: WorktreeId | null;
+  readonly modelSelection: ModelSelection;
+  /** The user picked the model by hand. */
+  readonly modelEdited: boolean;
+  /** The user picked the checkout by hand. */
+  readonly locationEdited: boolean;
+}
+
+/**
+ * How a planned link lands in the sheet (`linkedPromptDraftAction`): it asks before it replaces
+ * the user's text, adds its prompt to their attachments, or changes a model or checkout they
+ * picked by hand. Moving the task to another project resets the sheet's model, so that counts
+ * as changing a picked model too.
+ */
+export function mobilePromptLinkDraftAction(
+  plan: Extract<MobilePromptLinkPlan, { readonly kind: "draft" }>,
+  sheet: MobilePromptLinkSheet,
+): "fill" | "keep" | "ask" {
+  const movesProject =
+    plan.target !== null &&
+    (plan.target.environmentId !== sheet.environmentId ||
+      plan.target.projectId !== sheet.projectId);
+  const changesModel =
+    plan.modelSelection !== null &&
+    (plan.modelSelection.instanceId !== sheet.modelSelection.instanceId ||
+      plan.modelSelection.model !== sheet.modelSelection.model);
+  const changesLocation =
+    movesProject || (plan.worktreeId !== null && plan.worktreeId !== sheet.worktreeId);
+  return linkedPromptDraftAction(
+    {
+      text: sheet.prompt,
+      attachments: sheet.attachments,
+      changesModel,
+      changesLocation,
+      replacesUserChoice:
+        (sheet.modelEdited && (changesModel || movesProject)) ||
+        (sheet.locationEdited && changesLocation),
+    },
+    plan.prompt.length > 0 ? plan.prompt : null,
+  );
 }

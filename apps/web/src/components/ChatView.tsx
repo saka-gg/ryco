@@ -364,6 +364,7 @@ import {
   useFailedTurnBannerItem,
   useRestartInterruptionBannerItem,
 } from "./chat/restartInterruptionBanner";
+import { usePromptLinkCheckoutBannerItem } from "./chat/promptLinkCheckoutBanner";
 import { ComposerBannerStack, type ComposerBannerStackItem } from "./chat/ComposerBannerStack";
 import { useSnoozeBannerItem } from "./chat/snoozeBanner";
 import { useUsageLimitBannerItem } from "./chat/usageLimitBanner";
@@ -2255,6 +2256,12 @@ export default function ChatView(props: ChatViewProps) {
       ? (activeThread ?? null)
       : null,
   );
+  // A pull request link's draft offers the checkout instead of recording it: only the user's
+  // click runs the setup script on the pull request's code. Same tier rule as above.
+  const promptLinkCheckoutBannerItem = usePromptLinkCheckoutBannerItem({
+    draftId: presentationTier !== "phone" ? draftId : null,
+    draftSession: routeKind === "draft" ? (draftThread ?? null) : null,
+  });
   // A failed last turn stays visible with what failed, Continue and Change model, instead
   // of only a toast. Same tier rule as above.
   const continueAfterFailure = useEvent(() => {
@@ -2405,6 +2412,9 @@ export default function ChatView(props: ChatViewProps) {
     if (restartInterruptionBannerItem) {
       items.push(restartInterruptionBannerItem);
     }
+    if (promptLinkCheckoutBannerItem) {
+      items.push(promptLinkCheckoutBannerItem);
+    }
     if (failedTurnBanner.item) {
       items.push(failedTurnBanner.item);
     }
@@ -2423,6 +2433,7 @@ export default function ChatView(props: ChatViewProps) {
     openSettings,
     reconnectingEnvironmentId,
     restartInterruptionBannerItem,
+    promptLinkCheckoutBannerItem,
     failedTurnBanner.item,
     showVersionMismatchBanner,
     versionMismatch,

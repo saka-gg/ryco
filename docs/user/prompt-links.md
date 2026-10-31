@@ -5,8 +5,7 @@ request comment, in a doc, or in a note to yourself.
 
 A link never runs anything. It opens a draft. You read the prompt, then press Send. A link cannot
 change your permission mode or your branch, and it does not create a worktree. Your own defaults
-apply. Only a pull request link says where the draft runs, and its checkout happens when you press
-Send.
+apply. A pull request link can only offer to check the pull request out; you decide.
 
 ## Make a link
 
@@ -48,15 +47,22 @@ until the machine you selected is connected again with a fresh session.
   is used, and Ryco tells you.
 - **`pr`**: puts the prompt in the composer of the thread that works on that pull request, on any
   of your machines. When no thread does, the draft opens in the project, on the pull request's
-  checkout when you have one. Otherwise Send checks the pull request out into a new worktree first.
-  That runs your project's setup script on the pull request's code, so Ryco says so before you
-  send.
+  checkout when you have one. Otherwise the draft stays in the project's checkout, and a notice
+  above the composer offers **Check out #123 (runs your setup script)**. Checking a pull request
+  out puts its code in a new worktree and runs your project's setup script on it, so only your
+  click does it. The notice stays until you click it or close it.
 
-If the composer already holds text you typed, Ryco asks before it replaces it.
+If the composer already holds something of yours (text, images, files or other context), Ryco
+asks before it changes the draft's text, model or checkout.
 
 Ryco removes characters you cannot see, such as zero-width, direction and hidden tag characters,
-because they can hide instructions for the agent. When a prompt had them, Ryco warns you that it
-may be malicious, and the warning stays until you close it.
+because they can hide instructions for the agent. It keeps the few that do visible work: emoji
+joiners and style selectors inside emoji, and the zero-width non-joiner between Persian, Arabic or
+Indic letters. When a prompt had hidden characters, Ryco warns you that it may be malicious, and
+the warning stays until you close it.
+
+A model that is not available is never shown back to you: Ryco says that the requested model is
+not offered and uses the provider's default.
 
 ## On the phone
 
@@ -64,6 +70,7 @@ The Ryco app opens the same parameters on its New Task sheet, for example
 `ryco://tasks/new?prompt=Fix%20the%20build&repo=owner/name`. Without a `repo` the sheet keeps the
 project it picked. The phone cannot create a pull request worktree yet: a pull request link starts
 in the pull request's checkout when you have one, and in the project's checkout otherwise, and
-says so.
+says so. The link's notice stays on the sheet until you dismiss it, and the sheet asks before it
+changes your text, images, or a model or checkout you picked.
 
 The web app's phone layout does not open prompt links; use the Ryco app there.

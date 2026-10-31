@@ -59,20 +59,70 @@ export type PromptLinkResult<T> =
 
 // Zero-width and bidi controls, tag and variation-selector blocks, and other characters that
 // render as nothing. A model reads them; the person checking the draft cannot see them, which
-// makes them the usual way to hide instructions in a prompt. U+FE0E/U+FE0F stay: emoji use them.
-// Tab and newline stay. Line and paragraph separators become plain newlines first, so the draft
-// shows the break the model reads.
+// makes them the usual way to hide instructions in a prompt. Three of them do visible work in
+// the right place, so `sanitizeLinkedPrompt` keeps them only there: U+FE0E/U+FE0F after an emoji,
+// the zero-width joiner inside an emoji sequence, and the zero-width non-joiner between letters
+// of the scripts that spell with it (Persian, Arabic, Indic). Tab and newline stay. Line and
+// paragraph separators become plain newlines first, so the draft shows the break the model reads.
 const HIDDEN_CHARACTERS =
   // oxlint-disable-next-line no-control-regex, no-misleading-character-class -- these are the characters it removes.
-  /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F\u00AD\u034F\u061C\u115F\u1160\u17B4\u17B5\u180B-\u180F\u200B\u200C\u200E\u200F\u202A-\u202E\u2060-\u206F\u3164\uFE00-\uFE0D\uFEFF\uFFA0\uFFF0-\uFFFB\u{1BCA0}-\u{1BCA3}\u{1D173}-\u{1D17A}\u{E0000}-\u{E0FFF}]/gu;
+  /[\u0000-\u0008\u000B\u000C\u000E-\u001F\u007F-\u009F\u00AD\u034F\u061C\u115F\u1160\u17B4\u17B5\u180B-\u180F\u200B\u200E\u200F\u202A-\u202E\u2060-\u206F\u3164\uFE00-\uFE0D\uFEFF\uFFA0\uFFF0-\uFFFB\u{1BCA0}-\u{1BCA3}\u{1D173}-\u{1D17A}\u{E0000}-\u{E0FFF}]/gu;
 
-// Emoji and the pieces emoji sequences are built from: pictographs, symbols, skin tones and the
-// emoji presentation selector. Numeric ranges, because Hermes lacks Unicode property escapes.
-const isEmojiPart = (codePoint: number | undefined) =>
+const ZERO_WIDTH_JOINER = "\u200D";
+const ZERO_WIDTH_NON_JOINER = "\u200C";
+const TEXT_PRESENTATION = "\uFE0E";
+const EMOJI_PRESENTATION = "\uFE0F";
+const KEYCAP = 0x20e3;
+
+// Numeric ranges throughout, because Hermes lacks Unicode property escapes.
+
+/** Pictographs, symbols and skin tones: what an emoji sequence is built from. */
+const isEmojiBase = (codePoint: number | undefined) =>
   codePoint !== undefined &&
   ((codePoint >= 0x1f000 && codePoint <= 0x1faff) ||
     (codePoint >= 0x2190 && codePoint <= 0x2bff) ||
-    codePoint === 0xfe0f);
+    // ©, ®, ‼, ⁉, ™, ℹ, 〰, 〽, ㊗, ㊙: symbols with an emoji form outside those blocks.
+    [0xa9, 0xae, 0x203c, 0x2049, 0x2122, 0x2139, 0x3030, 0x303d, 0x3297, 0x3299].includes(
+      codePoint,
+    ));
+
+/** `#`, `*` and digits: the bases of keycap emoji (`1`, U+FE0F, U+20E3). */
+const isKeycapBase = (codePoint: number | undefined) =>
+  codePoint !== undefined &&
+  (codePoint === 0x23 || codePoint === 0x2a || (codePoint >= 0x30 && codePoint <= 0x39));
+
+/** Letters and marks of the scripts that use the zero-width non-joiner in their spelling. */
+const isNonJoinerScript = (codePoint: number | undefined) =>
+  codePoint !== undefined &&
+  ((codePoint >= 0x0600 && codePoint <= 0x08ff) || // Arabic, Syriac, Thaana and their extensions
+    (codePoint >= 0x0900 && codePoint <= 0x0dff) || // Devanagari through Sinhala
+    (codePoint >= 0xfb50 && codePoint <= 0xfdff) || // Arabic presentation forms A
+    (codePoint >= 0xfe70 && codePoint <= 0xfefc)); // Arabic presentation forms B
+
+/** Whether a character that is invisible on its own does visible work where it stands. */
+function keepsInvisibleCharacter(characters: ReadonlyArray<string>, index: number): boolean {
+  const character = characters[index];
+  const previous = characters[index - 1]?.codePointAt(0);
+  const next = characters[index + 1]?.codePointAt(0);
+  switch (character) {
+    case ZERO_WIDTH_JOINER:
+      // Inside an emoji sequence, such as a family; a presentation selector may precede it.
+      return (
+        (isEmojiBase(previous) ||
+          (characters[index - 1] === EMOJI_PRESENTATION &&
+            isEmojiBase(characters[index - 2]?.codePointAt(0)))) &&
+        isEmojiBase(next)
+      );
+    case ZERO_WIDTH_NON_JOINER:
+      return isNonJoinerScript(previous) && isNonJoinerScript(next);
+    case TEXT_PRESENTATION:
+    case EMOJI_PRESENTATION:
+      // Right after the emoji it styles (never after another selector), or inside a keycap.
+      return isEmojiBase(previous) || (isKeycapBase(previous) && next === KEYCAP);
+    default:
+      return true;
+  }
+}
 
 /** Removes characters a reader cannot see, and counts them. */
 export function sanitizeLinkedPrompt(raw: string): LinkedPrompt {
@@ -83,13 +133,9 @@ export function sanitizeLinkedPrompt(raw: string): LinkedPrompt {
       return "";
     }),
   );
-  // A zero-width joiner does visible work only inside an emoji sequence, such as a family.
   const text = visible
-    .filter((character, index) => {
-      if (character !== "\u200D") return true;
-      const kept =
-        isEmojiPart(visible[index - 1]?.codePointAt(0)) &&
-        isEmojiPart(visible[index + 1]?.codePointAt(0));
+    .filter((_, index) => {
+      const kept = keepsInvisibleCharacter(visible, index);
       if (!kept) hiddenCharacters++;
       return kept;
     })
