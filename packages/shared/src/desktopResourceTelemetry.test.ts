@@ -204,6 +204,21 @@ describe("private desktop telemetry protocol", () => {
     expect(desktopAppAutomaticUpdateMode({ platform: "linux", appImage: "/x.AppImage" })).toBe(
       "install-on-quit",
     );
+    // electron-updater overwrites an AppImage named without a version in place.
+    expect(
+      desktopAppAutomaticUpdateMode({
+        platform: "linux",
+        appImage: "/home/sam/Applications/0.1.36/Ryco.AppImage",
+      }),
+    ).toBe("install-on-quit");
+    // A release file name carries its version: the update would land under a new name that
+    // nothing starts, so it waits for Restart.
+    for (const appImage of [
+      "/home/sam/Applications/Ryco-0.1.36-x86_64.AppImage",
+      "/opt/Ryco-Nightly-0.1.37-nightly.20261031.1-arm64.AppImage",
+    ]) {
+      expect(desktopAppAutomaticUpdateMode({ platform: "linux", appImage })).toBe("restart");
+    }
     expect(desktopAppAutomaticUpdateMode({ platform: "linux", appImage: undefined })).toBeNull();
     expect(desktopAppAutomaticUpdateMode({ platform: "linux", appImage: "" })).toBeNull();
     expect(desktopAppAutomaticUpdateMode({ platform: "freebsd", appImage: undefined })).toBeNull();

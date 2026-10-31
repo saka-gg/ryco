@@ -221,15 +221,26 @@ export type DesktopAppUpdateRequestFrame =
 
 /**
  * What the desktop app does with its own updates while automatic updates are on:
- * - `install-on-quit` (Windows NSIS, Linux AppImage): downloads them in the background and
- *   installs a downloaded one when it quits normally, without starting again.
- * - `restart` (macOS): downloads them in the background and installs one only when the person
- *   chooses Restart. Squirrel.Mac stages an update for quit irreversibly, and the installer for
- *   unsigned builds replaces the app bundle, so nothing installs at quit there.
+ * - `install-on-quit` (Windows NSIS, a Linux AppImage the update replaces in place): downloads
+ *   them in the background and installs a downloaded one when it quits normally, without
+ *   starting again.
+ * - `restart` (macOS, a Linux AppImage whose file name carries its version): downloads them in
+ *   the background and installs one only when the person chooses Restart. Squirrel.Mac stages an
+ *   update for quit irreversibly, and the installer for unsigned builds replaces the app bundle,
+ *   so nothing installs at quit there. electron-updater gives the new AppImage its own versioned
+ *   name next to a versioned old one (which it deletes), and nothing would start it: the person's
+ *   launcher would point at a deleted file. Restart starts the new file.
  *
  * `null` where the app cannot update itself (Linux outside the AppImage).
  */
 export type DesktopAppAutomaticUpdateMode = "install-on-quit" | "restart";
+
+/**
+ * electron-updater's test (`AppImageUpdater.doInstall`): an AppImage named without a version is
+ * overwritten in place; one named with a version (as the releases are) is replaced by a file
+ * named after the new version.
+ */
+const APPIMAGE_VERSIONED_NAME = /\d+\.\d+\.\d+/u;
 
 export function desktopAppAutomaticUpdateMode(input: {
   readonly platform: string;
@@ -241,8 +252,11 @@ export function desktopAppAutomaticUpdateMode(input: {
       return "restart";
     case "win32":
       return "install-on-quit";
-    case "linux":
-      return input.appImage ? "install-on-quit" : null;
+    case "linux": {
+      if (!input.appImage) return null;
+      const fileName = input.appImage.slice(input.appImage.lastIndexOf("/") + 1);
+      return APPIMAGE_VERSIONED_NAME.test(fileName) ? "restart" : "install-on-quit";
+    }
     default:
       return null;
   }

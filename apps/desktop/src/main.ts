@@ -3492,10 +3492,16 @@ async function configureAutoUpdater(): Promise<void> {
   // Armed only while the node's owner has automatic updates on (automaticAppUpdates).
   autoUpdater.autoInstallOnAppQuit = false;
   // Added before any download, so it runs before the quit installer electron-updater adds once
-  // a download completes armed. A relaunch or a failed exit installs nothing.
+  // a download completes armed. A relaunch or a failed exit installs nothing, and neither does a
+  // quit during a system shutdown or logout (it disarms here): the update waits for a later quit.
   app.once("quit", (_event, exitCode) => {
-    if (exitCode !== 0 || updateInstallInFlight) return;
-    recordUpdateInstall(automaticAppUpdates.quitInstallVersion());
+    if (updateInstallInFlight) return;
+    recordUpdateInstall(
+      automaticAppUpdates.quitting({
+        exitCode,
+        sessionEnding: terminatedBySignal || systemShutdownNotice.active(),
+      }),
+    );
   });
   applyAutoUpdaterChannel(DESKTOP_UPDATE_CHANNEL);
   let lastLoggedDownloadMilestone = -1;
@@ -3579,7 +3585,7 @@ async function configureAutoUpdater(): Promise<void> {
   autoUpdater.on("update-downloaded", (info: UpdateDownloadedEvent) => {
     downloadedUpdateFilePath = info.downloadedFile;
     // Read before electron-updater adds its quit installer, which it does only if armed now.
-    automaticAppUpdates.downloaded(autoUpdater.autoInstallOnAppQuit);
+    automaticAppUpdates.downloaded(info.version, autoUpdater.autoInstallOnAppQuit);
     setUpdateState(reduceDesktopUpdateStateOnDownloadComplete(updateState, info.version));
     console.info(
       `[desktop-updater] Update downloaded: ${info.version} file=${info.downloadedFile}`,
@@ -6210,6 +6216,8 @@ app.on("child-process-gone", (_event, details) => {
  * its parent out); no confirmation can open then, as no backend child or usable window exists.
  */
 let terminationSignalsHandled = false;
+// SIGTERM arrived (a Linux shutdown, or a `kill`): an update armed for quit waits for a later quit.
+let terminatedBySignal = false;
 function handleTerminationSignals(): void {
   if (terminationSignalsHandled || process.platform === "win32") return;
   terminationSignalsHandled = true;
@@ -6225,6 +6233,8 @@ function handleTerminationSignals(): void {
   });
 
   process.on("SIGTERM", () => {
+    // A Linux shutdown ends apps with SIGTERM: nothing installs at this quit.
+    terminatedBySignal = true;
     if (isQuitting) return;
     isQuitting = true;
     writeDesktopLogHeader("SIGTERM received");

@@ -18,7 +18,11 @@ import { writeFileAtomicallySync } from "./atomicFileWrite.ts";
 
 export const DESKTOP_UPDATE_INSTALL_RECORD_FILE = "desktop-update-install.json";
 
-const VERSION_MAX_LENGTH = 256;
+// The record names the versions the "Updated to X" notice shows: only release versions (semver,
+// e.g. `0.1.37` or `0.1.38-nightly.20261031.1`) are read from it, never other text.
+const VERSION_MAX_LENGTH = 64;
+const VERSION_PATTERN =
+  /^\d+\.\d+\.\d+(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?(?:\+[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/u;
 
 export interface DesktopUpdateInstallRecord {
   readonly fromVersion: string;
@@ -31,7 +35,7 @@ export type DesktopUpdateInstallOutcome =
   | { readonly kind: "none" };
 
 const versionText = (value: unknown): value is string =>
-  typeof value === "string" && value.length > 0 && value.length <= VERSION_MAX_LENGTH;
+  typeof value === "string" && value.length <= VERSION_MAX_LENGTH && VERSION_PATTERN.test(value);
 
 export function parseDesktopUpdateInstallRecord(text: string): DesktopUpdateInstallRecord | null {
   let value: unknown;

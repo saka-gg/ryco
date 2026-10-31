@@ -39,7 +39,7 @@ export function automaticUpdatesDesktopNote(config: ServerConfig | null): string
     case "install-on-quit":
       return "This desktop app also downloads its own updates in the background and installs one when you quit it. It never restarts by itself.";
     case "restart":
-      return "This desktop app also downloads its own updates in the background. On macOS one installs only when you choose Restart.";
+      return "This desktop app also downloads its own updates in the background. One installs only when you choose Restart.";
     default:
       return null;
   }

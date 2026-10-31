@@ -69,7 +69,7 @@ function harness(options: {
         return;
       }
       state = reduceDesktopUpdateStateOnDownloadComplete(state, version!);
-      updates.downloaded(installOnQuit);
+      updates.downloaded(version!, installOnQuit);
     },
     setInstallOnQuit: (armed) => {
       installOnQuit = armed;
@@ -236,8 +236,41 @@ describe("AutomaticAppUpdates", () => {
     // A person downloads it while the policy is off.
     app.updates.downloadStarting("1.1.0");
     app.setState(reduceDesktopUpdateStateOnDownloadComplete(app.state(), "1.1.0"));
-    app.updates.downloaded(app.installOnQuit());
+    app.updates.downloaded("1.1.0", app.installOnQuit());
     app.updates.report(app.backend, true);
+    expect(app.installOnQuit()).toBe(false);
+    expect(app.updates.quitInstallVersion()).toBeNull();
+  });
+
+  it("never arms a later download that completed while disarmed, though an earlier one was armed", async () => {
+    const app = harness({ mode: "install-on-quit", offer: "1.1.0" });
+    app.updates.report(app.backend, true);
+    await app.updates.runScheduledCheck("startup");
+    expect(app.updates.quitInstallVersion()).toBe("1.1.0");
+    // electron-updater's quit installer stays; it would install whatever was downloaded last.
+    app.updates.report(app.backend, false);
+    // A person downloads a newer version while the policy is off.
+    app.updates.downloadStarting("1.2.0");
+    app.setState(reduceDesktopUpdateStateOnDownloadComplete(app.state(), "1.2.0"));
+    app.updates.downloaded("1.2.0", app.installOnQuit());
+    app.updates.report(app.backend, true);
+    expect(app.installOnQuit()).toBe(false);
+    expect(app.updates.quitInstallVersion()).toBeNull();
+    expect(app.updates.quitting({ exitCode: 0, sessionEnding: false })).toBeNull();
+  });
+
+  it("installs at a normal quit, but never at one during a system shutdown or logout", async () => {
+    const app = harness({ mode: "install-on-quit", offer: "1.1.0" });
+    app.updates.report(app.backend, true);
+    await app.updates.runScheduledCheck("startup");
+    // A failed exit installs nothing (electron-updater checks it too) and changes nothing.
+    expect(app.updates.quitting({ exitCode: 1, sessionEnding: false })).toBeNull();
+    expect(app.installOnQuit()).toBe(true);
+    expect(app.updates.quitting({ exitCode: 0, sessionEnding: false })).toBe("1.1.0");
+    expect(app.installOnQuit()).toBe(true);
+    // The session ends (Windows logoff, a Linux shutdown's SIGTERM): disarmed before
+    // electron-updater's quit installer reads it, so the update waits for a later quit.
+    expect(app.updates.quitting({ exitCode: 0, sessionEnding: true })).toBeNull();
     expect(app.installOnQuit()).toBe(false);
     expect(app.updates.quitInstallVersion()).toBeNull();
   });
@@ -292,6 +325,20 @@ describe("AutomaticAppUpdates", () => {
     app.updates.begin(next);
     app.updates.report(app.backend, true);
     expect(app.updates.automatic).toBe(false);
+    app.updates.report(next, true);
+    expect(app.installOnQuit()).toBe(true);
+  });
+
+  it("turns the policy off when a new backend starts, until that backend reports", async () => {
+    const app = harness({ mode: "install-on-quit", offer: "1.1.0" });
+    app.updates.report(app.backend, true);
+    await app.updates.runScheduledCheck("startup");
+    expect(app.installOnQuit()).toBe(true);
+    // The next backend starts before the old one's exit was seen.
+    const next = {};
+    app.updates.begin(next);
+    expect(app.updates.automatic).toBe(false);
+    expect(app.installOnQuit()).toBe(false);
     app.updates.report(next, true);
     expect(app.installOnQuit()).toBe(true);
   });

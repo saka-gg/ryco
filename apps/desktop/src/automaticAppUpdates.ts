@@ -18,9 +18,11 @@
  *   run, is not downloaded or armed again in the background. The person can still install it.
  *
  * electron-updater registers its quit installer when a download completes, and only while
- * armed, so a download is armed before it starts. Turning the policy off, a failed install and a
- * relaunch disarm it. The checks themselves are unchanged: same channel, no downgrade, and the
- * updater's signature and checksum verification.
+ * armed, so a download is armed before it starts. Once registered, that installer installs
+ * whatever was downloaded last, so only the version whose download completed armed is armed
+ * again. Turning the policy off, a new backend, a failed install, a relaunch and a system
+ * shutdown or logout disarm it. The checks themselves are unchanged: same channel, no downgrade,
+ * and the updater's signature and checksum verification.
  *
  * Pure apart from the injected effects, so the flow is testable without Electron.
  *
@@ -86,8 +88,9 @@ export class AutomaticAppUpdates {
   readonly #failed = new Set<string>();
   #reservation: Promise<void> | null = null;
   #armed = false;
-  // electron-updater added its quit installer: a download completed while armed. It stays.
-  #installerRegistered = false;
+  // The version whose download completed while armed: electron-updater added its quit installer
+  // then (it stays), and installs the last download. A download completed disarmed clears it.
+  #armedDownload: string | null = null;
   #relaunching = false;
 
   constructor(effects: AutomaticAppUpdatesEffects) {
@@ -99,9 +102,10 @@ export class AutomaticAppUpdates {
     return this.#automatic;
   }
 
-  /** `child` is the backend now; only its reports count. */
+  /** `child` is the backend now: only its reports count, and the policy is off until it reports. */
   begin(child: object): void {
     this.#child = child;
+    this.#setPolicy(false);
   }
 
   /** The backend's policy frame; dropped unless `child` is the current backend. */
@@ -147,9 +151,9 @@ export class AutomaticAppUpdates {
     this.#setArmed(this.#shouldArm(version));
   }
 
-  /** A download completed; `armed` is `autoInstallOnAppQuit` at that moment. */
-  downloaded(armed: boolean): void {
-    if (armed) this.#installerRegistered = true;
+  /** A download of `version` completed; `armed` is `autoInstallOnAppQuit` at that moment. */
+  downloaded(version: string, armed: boolean): void {
+    this.#armedDownload = armed ? version : null;
   }
 
   /** A download of `version` failed: not downloaded again in the background. */
@@ -172,9 +176,25 @@ export class AutomaticAppUpdates {
 
   /** The version electron-updater installs when the app quits now, or `null`. */
   quitInstallVersion(): string | null {
-    return this.#armed && this.#installerRegistered
-      ? this.#effects.state().downloadedVersion
+    return this.#armed && this.#isArmedDownload(this.#effects.state().downloadedVersion)
+      ? this.#armedDownload
       : null;
+  }
+
+  /**
+   * The app quits (Electron's `quit`, which reaches this before electron-updater's quit
+   * installer): the version that installs now, to record, or `null`. Nothing installs while the
+   * system shuts down or logs out (`sessionEnding`): the installer would run as the session
+   * dies. The update then installs at a later normal quit.
+   */
+  quitting(input: { readonly exitCode: number; readonly sessionEnding: boolean }): string | null {
+    if (input.exitCode !== 0) return null;
+    if (input.sessionEnding) {
+      if (this.#armed) this.#effects.log("The system is shutting down: no install at this quit.");
+      this.#setArmed(false);
+      return null;
+    }
+    return this.quitInstallVersion();
   }
 
   async #runScheduledCheck(reason: ScheduledUpdateCheckReason): Promise<void> {
@@ -200,8 +220,15 @@ export class AutomaticAppUpdates {
       this.#setArmed(this.#shouldArm(state.availableVersion));
       return;
     }
-    // Re-arming a finished download helps only where electron-updater added its installer.
-    this.#setArmed(this.#installerRegistered && this.#shouldArm(state.downloadedVersion));
+    // Re-arming a finished download helps only where electron-updater added its installer for
+    // that download; it would install any later one too.
+    this.#setArmed(
+      this.#isArmedDownload(state.downloadedVersion) && this.#shouldArm(state.downloadedVersion),
+    );
+  }
+
+  #isArmedDownload(version: string | null): boolean {
+    return version !== null && version === this.#armedDownload;
   }
 
   #shouldArm(version: string | null): boolean {

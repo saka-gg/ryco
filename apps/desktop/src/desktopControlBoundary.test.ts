@@ -79,4 +79,29 @@ describe("Desktop-main local control credential boundary", () => {
     expect(preload).not.toContain("app-update-policy");
     expect(preload).not.toContain("automatic");
   });
+
+  it("installs nothing at a quit during a system shutdown, logout or SIGTERM", () => {
+    const main = source("main.ts");
+    const hookStart = main.indexOf('app.once("quit", (_event, exitCode) => {');
+    const quitHook = main.slice(hookStart, main.indexOf("\n  });\n", hookStart));
+    const sigtermStart = main.indexOf('process.on("SIGTERM", () => {');
+    const sigterm = main.slice(sigtermStart, main.indexOf("\n  });\n", sigtermStart));
+
+    // Registered with the updater, before electron-updater's own quit installer can be.
+    expect(hookStart).toBeGreaterThan(main.indexOf("async function configureAutoUpdater("));
+    expect(quitHook).toContain("automaticAppUpdates.quitting({");
+    expect(quitHook).toContain(
+      "sessionEnding: terminatedBySignal || systemShutdownNotice.active()",
+    );
+    // Set even when the app was already quitting (a shutdown notice quits it first).
+    expect(sigterm.indexOf("terminatedBySignal = true;")).toBeGreaterThan(-1);
+    expect(sigterm.indexOf("terminatedBySignal = true;")).toBeLessThan(
+      sigterm.indexOf("if (isQuitting) return;"),
+    );
+    // The shutdown notice and Windows' session end mark it.
+    expect(main).toMatch(
+      /powerMonitor\.on\("shutdown", \(\) => \{\n\s+systemShutdownNotice\.mark\(\);/,
+    );
+    expect(main).toMatch(/const onSessionEnd = \(\) => \{\n\s+systemShutdownNotice\.mark\(\);/);
+  });
 });

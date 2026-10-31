@@ -1,6 +1,7 @@
 import * as nodePath from "node:path";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { expect, it } from "@effect/vitest";
+import { desktopAppAutomaticUpdateMode } from "@ryco/shared/desktopResourceTelemetry";
 import { Effect, Exit, FileSystem, Layer, PlatformError } from "effect";
 
 import { deriveServerPaths, ServerConfig, type ServerConfigShape } from "../../config.ts";
@@ -112,14 +113,16 @@ it.layer(NodeServices.layer)("ServerEnvironmentLive", (it) => {
         );
 
       const desktop = yield* describe({ ...serverConfig, mode: "desktop" });
-      const expected =
-        process.platform === "darwin"
-          ? "restart"
-          : process.platform === "win32" ||
-              (process.platform === "linux" && Boolean(process.env.APPIMAGE))
-            ? "install-on-quit"
-            : undefined;
-      expect(desktop.capabilities.desktopAppUpdates).toBe(expected);
+      // The desktop app's own answer for this platform and AppImage file name.
+      expect(desktop.capabilities.desktopAppUpdates).toBe(
+        desktopAppAutomaticUpdateMode({
+          platform: process.platform,
+          appImage: process.env.APPIMAGE,
+        }) ?? undefined,
+      );
+      if (process.platform === "darwin") {
+        expect(desktop.capabilities.desktopAppUpdates).toBe("restart");
+      }
       // Development builds never update themselves.
       const development = yield* describe({
         ...serverConfig,

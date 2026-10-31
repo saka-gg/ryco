@@ -127,7 +127,7 @@ describe("Settings → Updates", () => {
     await expect
       .element(
         page.getByText(
-          "This desktop app also downloads its own updates in the background. On macOS one installs only when you choose Restart.",
+          "This desktop app also downloads its own updates in the background. One installs only when you choose Restart.",
         ),
       )
       .toBeVisible();

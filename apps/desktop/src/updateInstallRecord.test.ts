@@ -30,6 +30,13 @@ describe("updateInstallRecord", () => {
   it("reads back what the quit wrote, and rejects anything else", () => {
     const record = { fromVersion: "1.0.0", targetVersion: "1.1.0" };
     expect(parseDesktopUpdateInstallRecord(JSON.stringify(record))).toEqual(record);
+    const nightly = {
+      fromVersion: "0.1.37-nightly.20261030.2",
+      targetVersion: "0.1.38-nightly.20261031.1",
+    };
+    expect(parseDesktopUpdateInstallRecord(JSON.stringify(nightly))).toEqual(nightly);
+    const longest = { fromVersion: "1.0.0", targetVersion: `1.1.0-${"a".repeat(58)}` };
+    expect(parseDesktopUpdateInstallRecord(JSON.stringify(longest))).toEqual(longest);
     for (const text of [
       "",
       "not json",
@@ -39,6 +46,13 @@ describe("updateInstallRecord", () => {
       JSON.stringify({ fromVersion: "1.0.0", targetVersion: 1 }),
       JSON.stringify({ fromVersion: "1.0.0", targetVersion: "1.0.0" }),
       JSON.stringify({ fromVersion: "1.0.0", targetVersion: "x".repeat(300) }),
+      // Only version-shaped text reaches the "Updated to X" notice.
+      JSON.stringify({ fromVersion: "Visit example.com to finish", targetVersion: "1.1.0" }),
+      JSON.stringify({ fromVersion: "1.0.0", targetVersion: "1.1.0 is ready, call us" }),
+      JSON.stringify({ fromVersion: "1.0.0", targetVersion: "1.1" }),
+      JSON.stringify({ fromVersion: "1.0.0", targetVersion: "v1.1.0" }),
+      JSON.stringify({ fromVersion: "1.0.0", targetVersion: "1.1.0\nline" }),
+      JSON.stringify({ fromVersion: "1.0.0", targetVersion: `1.1.0-${"a".repeat(59)}` }),
     ]) {
       expect(parseDesktopUpdateInstallRecord(text)).toBeNull();
     }
