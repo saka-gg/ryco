@@ -177,6 +177,7 @@ import {
   workEntryRawCommand,
 } from "./workChapters.logic";
 import { WorkChapterRow } from "./WorkChapterRow";
+import { WINDOW_FILE_ROWS_AFTER, WindowedRows } from "./WindowedRows";
 import { StreamedMessageMarkdown } from "./StreamedMessageMarkdown";
 import { useEnvironmentServerConfigSelector } from "../../hooks/useChatsAvailability";
 import { PROVIDER_ICON_BY_PROVIDER } from "./providerIconUtils";
@@ -2565,14 +2566,34 @@ function AssistantChangedFilesSectionInner({
         </div>
       </div>
       <DisclosureRegion open={expanded}>
-        {visibleFiles.map((file) => (
-          <ChangedFileRow
-            key={file.path}
-            file={file}
-            resolvedTheme={resolvedTheme}
-            onOpen={() => onOpenTurnDiff(turnSummary.turnId, file.path)}
+        {visibleFiles.length > WINDOW_FILE_ROWS_AFTER ? (
+          // "Show more" on a huge checkpoint renders only the rows in view.
+          <WindowedRows
+            rows={visibleFiles}
+            rowKey={changedFileRowKey}
+            renderRow={(file) => (
+              <ChangedFileRow
+                file={file}
+                first={file === visibleFiles[0]}
+                windowed
+                resolvedTheme={resolvedTheme}
+                onOpen={() => onOpenTurnDiff(turnSummary.turnId, file.path)}
+              />
+            )}
+            virtualized
+            rowStrideClassName={WINDOWED_CHANGED_FILE_ROW_HEIGHT_CLASS}
           />
-        ))}
+        ) : (
+          visibleFiles.map((file, index) => (
+            <ChangedFileRow
+              key={file.path}
+              file={file}
+              first={index === 0}
+              resolvedTheme={resolvedTheme}
+              onOpen={() => onOpenTurnDiff(turnSummary.turnId, file.path)}
+            />
+          ))
+        )}
         {overflowCount > 0 || fileListExpanded ? (
           <button
             type="button"
@@ -2594,9 +2615,17 @@ function AssistantChangedFilesSectionInner({
   );
 }
 
+// A changed-file row's height with its divider, fixed so a windowed list can lay rows out.
+const WINDOWED_CHANGED_FILE_ROW_HEIGHT_CLASS = "h-[35px]";
+const changedFileRowKey = (file: TurnDiffSummary["files"][number]) => file.path;
+
 /** One file in the changed-files card: icon, path, and its own +N/-M. */
 function ChangedFileRow(props: {
   file: TurnDiffSummary["files"][number];
+  /** The first row draws no divider above it. */
+  first: boolean;
+  /** In a windowed list, where every row is the same height. */
+  windowed?: boolean;
   resolvedTheme: "light" | "dark";
   onOpen: () => void;
 }) {
@@ -2610,7 +2639,11 @@ function ChangedFileRow(props: {
       type="button"
       data-changed-file-row="true"
       title={file.path}
-      className="group/file-row flex w-full items-center gap-2 border-t border-border/70 px-3 py-2 text-left transition-colors first:border-t-0 hover:bg-foreground/5"
+      className={cn(
+        "group/file-row flex w-full items-center gap-2 border-border/70 px-3 py-2 text-left transition-colors hover:bg-foreground/5",
+        !props.first && "border-t",
+        props.windowed && WINDOWED_CHANGED_FILE_ROW_HEIGHT_CLASS,
+      )}
       onClick={onOpen}
     >
       <VscodeEntryIcon
