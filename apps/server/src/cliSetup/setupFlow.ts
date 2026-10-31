@@ -21,7 +21,7 @@ import path from "node:path";
 import type { HubConnectorStatus, HubEnrollmentCeremonyDetail } from "@ryco/contracts";
 import { DEFAULT_HOSTED_APP_ORIGIN } from "@ryco/shared/hostedApp";
 import { NetService } from "@ryco/shared/Net";
-import { Console, Data, Effect, Option } from "effect";
+import { Console, Effect, Option } from "effect";
 import { Prompt } from "effect/cli";
 import type { ChildProcessSpawner } from "effect/process";
 import type * as Terminal from "effect/Terminal";
@@ -48,6 +48,7 @@ import {
 } from "./machine.ts";
 import { type NodeConfig, parseNodeConfig, readNodeConfig, writeNodeConfig } from "./nodeConfig.ts";
 import { installServiceForNode } from "./nodeSetup.ts";
+import { SetupError } from "./setupError.ts";
 import { bold, cyan, dim, heading, statusLine } from "./ui.ts";
 
 export interface SetupContext {
@@ -83,11 +84,6 @@ export interface SetupOperations {
   /** Run `ryco serve` in this terminal with the saved settings; returns when it stops. */
   readonly runInForeground: Effect.Effect<void, Error>;
 }
-
-export class SetupError extends Data.TaggedError("SetupError")<{
-  readonly message: string;
-  readonly cause?: unknown;
-}> {}
 
 const toSetupError = (cause: unknown) =>
   cause instanceof SetupError

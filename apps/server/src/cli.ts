@@ -104,15 +104,8 @@ import {
   readCliPreferences,
   writeCliPreferences,
 } from "./cliSetup/preferences.ts";
-import {
-  editNodeConfigFile,
-  runFirstTimeSetup,
-  runNodeManager,
-  runSetup,
-  SetupError,
-  type SetupContext,
-  type SetupOperations,
-} from "./cliSetup/setupFlow.ts";
+import { SetupError } from "./cliSetup/setupError.ts";
+import type { SetupContext, SetupOperations } from "./cliSetup/setupFlow.ts";
 import {
   discoverPairingLinks,
   formatPairingQrBlock,
@@ -4332,6 +4325,9 @@ const remoteCommand = Command.make("remote").pipe(
 
 // ─── ryco setup / ryco config ─────────────────────────────────────────────────
 
+// The setup guide and the node manager load when a command opens them, never on the `serve` path.
+const loadSetupFlow = Effect.promise(() => import("./cliSetup/setupFlow.ts"));
+
 const resolveSetupContext = (baseDir: Option.Option<string>) =>
   Effect.gen(function* () {
     const logLevel = yield* GlobalFlag.LogLevel;
@@ -4491,7 +4487,9 @@ const setupCommand = Command.make("setup", { baseDir: baseDirFlag }).pipe(
       const { config, context } = yield* resolveSetupContext(flags.baseDir);
       yield* refuseDesktopOwnedNode(config.baseDir);
       const operations = yield* makeSetupOperations(flags, config.serverRuntimeStatePath);
-      yield* setupClosed(runSetup(context, operations));
+      yield* setupClosed(
+        Effect.flatMap(loadSetupFlow, (flow) => flow.runSetup(context, operations)),
+      );
     }),
   ),
 );
@@ -4616,7 +4614,9 @@ const configEditCommand = Command.make("edit", { ...configLocationFlags }).pipe(
         });
       }
       const { context } = yield* resolveSetupContext(flags.baseDir);
-      const changed = yield* editNodeConfigFile(context).pipe(
+      const changed = yield* Effect.flatMap(loadSetupFlow, (flow) =>
+        flow.editNodeConfigFile(context),
+      ).pipe(
         Effect.catchIf(
           (error) => error._tag === "QuitError",
           () => Effect.succeed(false),
@@ -4694,7 +4694,9 @@ const runBareCommand = (flags: CliServerFlags) =>
               readNodeServiceStatus(context.platform!, context.serviceLabel),
             ).pipe(Effect.orElseSucceed(() => null));
       if (running || service?.installed) {
-        return yield* setupClosed(runNodeManager(context, operations));
+        return yield* setupClosed(
+          Effect.flatMap(loadSetupFlow, (flow) => flow.runNodeManager(context, operations)),
+        );
       }
       return yield* runServerCommand(flags);
     }
@@ -4723,7 +4725,9 @@ const runBareCommand = (flags: CliServerFlags) =>
     ).pipe(Effect.catchTag("QuitError", () => Effect.succeed("quit" as const)));
     if (choice === "quit") return;
     if (choice === "setup") {
-      return yield* setupClosed(runFirstTimeSetup(context, operations));
+      return yield* setupClosed(
+        Effect.flatMap(loadSetupFlow, (flow) => flow.runFirstTimeSetup(context, operations)),
+      );
     }
     if (choice === "always-open") {
       yield* Effect.promise(() =>

@@ -455,6 +455,34 @@ export function decodeForgejoPullRequestDetailJson(
   );
 }
 
+// ── Draft state ───────────────────────────────────────────────────────
+
+/**
+ * Forgejo derives "draft" from a title prefix (`[repository.pull-request]
+ * WORK_IN_PROGRESS_PREFIXES`, default `WIP:,[WIP]`, matched
+ * case-insensitively); the API's `draft` is read-only. Ryco adds `WIP: ` and
+ * strips either default prefix.
+ */
+export const FORGEJO_WORK_IN_PROGRESS_PREFIXES: ReadonlyArray<string> = ["WIP:", "[WIP]"];
+
+export function hasForgejoWorkInProgressPrefix(title: string): boolean {
+  const upper = title.trimStart().toUpperCase();
+  return FORGEJO_WORK_IN_PROGRESS_PREFIXES.some((prefix) => upper.startsWith(prefix));
+}
+
+export function forgejoWorkInProgressTitle(title: string, draft: boolean): string {
+  if (draft) return hasForgejoWorkInProgressPrefix(title) ? title : `WIP: ${title.trimStart()}`;
+  let next = title.trimStart();
+  while (hasForgejoWorkInProgressPrefix(next)) {
+    const prefix = FORGEJO_WORK_IN_PROGRESS_PREFIXES.find((candidate) =>
+      next.toUpperCase().startsWith(candidate),
+    );
+    if (!prefix) break;
+    next = next.slice(prefix.length).trimStart();
+  }
+  return next.length > 0 ? next : title;
+}
+
 /** The pull request number in a reference (`42`, `#42`, or a pull request URL). */
 export function forgejoPullRequestIndex(reference: string): string {
   const trimmed = reference.trim().replace(/^#/, "");

@@ -4,6 +4,8 @@ import { DateTime, Option, Result } from "effect";
 import {
   decodeForgejoPullRequestDetailJson,
   decodeForgejoPullRequestListJson,
+  forgejoWorkInProgressTitle,
+  hasForgejoWorkInProgressPrefix,
   normalizeForgejoPullRequestDetail,
 } from "./forgejoPullRequests.ts";
 
@@ -132,5 +134,17 @@ describe("normalizeForgejoPullRequestDetail", () => {
     expect(detail.deletions).toBe(2);
     expect(detail.changedFiles).toBe(1);
     expect(detail.files).toEqual([{ path: "src/forgejo.ts", additions: 10, deletions: 2 }]);
+  });
+});
+
+describe("work-in-progress titles", () => {
+  it("adds and strips Forgejo's default prefixes", () => {
+    expect(forgejoWorkInProgressTitle("Add page", true)).toBe("WIP: Add page");
+    expect(forgejoWorkInProgressTitle("[WIP] Add page", true)).toBe("[WIP] Add page");
+    expect(forgejoWorkInProgressTitle("WIP: Add page", false)).toBe("Add page");
+    expect(forgejoWorkInProgressTitle("wip: [WIP] Add page", false)).toBe("Add page");
+    expect(forgejoWorkInProgressTitle("Add page", false)).toBe("Add page");
+    expect(hasForgejoWorkInProgressPrefix("[wip] x")).toBe(true);
+    expect(hasForgejoWorkInProgressPrefix("Wipe the cache")).toBe(false);
   });
 });
