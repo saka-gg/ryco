@@ -1206,7 +1206,7 @@ const toInstanceSummary = (provider: ServerProvider): AgentControlMcpProviderIns
  * a provider-session principal of the same thread. Everything else reads
  * as not-found — absence and authorization failure stay indistinguishable.
  */
-const proposalVisibleToSession = (
+export const proposalVisibleToSession = (
   proposal: AgentControlProposal,
   session: AgentControlSessionRecord,
 ): boolean =>

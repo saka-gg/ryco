@@ -27,7 +27,9 @@ import {
   type AgentControlResultEnvelope,
   type ChatAttachment,
   type ClientOrchestrationCommand,
+  type OrchestrationProjectShell,
   type OrchestrationThreadShell,
+  type ServerSettings,
   type SourceControlSetPullRequestWatchResult,
   type ThreadDelegatedCreateCommand,
   type ThreadQueueAddCommand,
@@ -100,7 +102,9 @@ const isProjectAction = (proposal: AgentControlProposal): boolean =>
 
 /** Actions whose failure the agent reads in the node's own words (what to do about it). */
 const explainsFailure = (proposal: AgentControlProposal): boolean =>
-  isProjectAction(proposal) || proposal.plan.kind === "pullRequestWatch";
+  isProjectAction(proposal) ||
+  proposal.plan.kind === "pullRequestWatch" ||
+  proposal.plan.kind === "worktreeHandoff";
 
 class AgentControlDeviceExecutionError extends Error {
   readonly code: AgentControlErrorCode;
@@ -243,6 +247,9 @@ const executionReceipt = (operation: AgentControlOperation): AgentControlExecuti
   worktreeIds: operation.state.resources.worktreeIds,
   ...(operation.state.delivery === undefined ? {} : { delivery: operation.state.delivery }),
   ...(operation.state.interrupt === undefined ? {} : { interrupt: operation.state.interrupt }),
+  ...(operation.state.worktreeHandoff === undefined
+    ? {}
+    : { worktreeHandoff: operation.state.worktreeHandoff }),
   ...(operation.state.compensation === undefined
     ? {}
     : { compensation: operation.state.compensation }),
@@ -331,6 +338,8 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
 
     /** A heartbeat's run logic, loaded on its first run or recovery (`heartbeatRuns.ts`). */
     const heartbeatRuns = Effect.promise(() => import("../heartbeatRuns.ts"));
+    /** An agent's move of its own chat into a worktree (`worktreeHandoffRuns.ts`), on first use. */
+    const worktreeHandoffRuns = Effect.promise(() => import("../worktreeHandoffRuns.ts"));
     const queuedIn = (threadId: ThreadId) =>
       engine.getReadModel === undefined
         ? Effect.succeed([])
@@ -574,6 +583,53 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
         return current;
       });
 
+    /**
+     * The checkout path of a worktree an operation will create, checked before anything is made
+     * (delegated worktrees and handoffs alike): the setup it needs, the path policy, the base ref.
+     */
+    const planWorktreeCheckout = (input: {
+      readonly project: OrchestrationProjectShell;
+      readonly settings: ServerSettings;
+      readonly branch: string;
+      readonly initialName: string;
+      readonly baseRef: string;
+      readonly runSetupScript: boolean;
+    }) =>
+      Effect.gen(function* () {
+        const { project } = input;
+        if (
+          input.runSetupScript &&
+          Option.isNone(setupScriptRunner) &&
+          setupProjectScript(project.scripts ?? [])
+        )
+          return yield* Effect.fail(
+            new Error("Project setup is unavailable. Retry when the server is ready."),
+          );
+        const checkoutPath = yield* resolveWorktreeCheckoutPath({
+          location: undefined,
+          appWorktreesRoot: yield* resolveConfiguredWorktreeRoot({
+            settings: input.settings,
+            projectId: project.id,
+            config,
+            policy: workspaceAccess,
+          }),
+          projectId: project.id,
+          workspaceRoot: project.workspaceRoot,
+          projectMetadataDir: project.projectMetadataDir,
+          projectTitle: project.title,
+          initialName: input.initialName,
+          branchName: input.branch,
+        });
+        yield* preflightAgentControlWorktreeCheckout({
+          cwd: project.workspaceRoot,
+          checkoutPath,
+          baseRef: input.baseRef,
+          workspaceAccess,
+          git,
+        });
+        return checkoutPath;
+      });
+
     const runAction = (proposal: AgentControlProposal, initial: AgentControlOperation) =>
       Effect.gen(function* () {
         let operation = initial;
@@ -629,6 +685,128 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
             );
             return result;
           });
+
+        /**
+         * Creates a planned worktree, then records it as the operation's own (the durable
+         * ownership point compensation removes) and creates its workspace record.
+         */
+        const createOwnedWorktree = (worktree: {
+          readonly index: number;
+          readonly settings: ServerSettings;
+          readonly project: OrchestrationProjectShell;
+          readonly worktreeId: WorktreeId;
+          readonly branch: string;
+          readonly checkoutPath: string;
+          readonly baseRef: string;
+          readonly fetchOrigin?: boolean;
+        }) =>
+          Effect.gen(function* () {
+            const created = yield* git.createWorktree({
+              settingsSnapshot: worktree.settings,
+              projectId: worktree.project.id,
+              cwd: worktree.project.workspaceRoot,
+              refName: worktree.baseRef,
+              newRefName: worktree.branch,
+              path: worktree.checkoutPath,
+              ...(worktree.fetchOrigin === true ? { fetchOrigin: true } : {}),
+            });
+            const authorizedCreatedPath = yield* workspaceAccess.assertExistingPath({
+              path: created.worktree.path,
+              operation: "AgentControlExecution.createWorktree",
+            });
+            if (path.resolve(authorizedCreatedPath) !== path.resolve(worktree.checkoutPath)) {
+              return yield* Effect.fail(new Error("Created worktree path did not match its plan."));
+            }
+
+            // This is the durable ownership point. No dependent thread step
+            // runs before the exact id/project/branch/path evidence is stored.
+            yield* checkpoint({
+              ...operation.state,
+              completedSteps: unique([
+                ...operation.state.completedSteps,
+                `worktree-owned:${worktree.index}`,
+              ]),
+              resources: {
+                ...operation.state.resources,
+                worktreeIds: unique([
+                  ...operation.state.resources.worktreeIds,
+                  worktree.worktreeId,
+                ]),
+                ownedWorktrees: [
+                  ...operation.state.resources.ownedWorktrees,
+                  {
+                    worktreeId: worktree.worktreeId,
+                    projectId: worktree.project.id,
+                    branch: worktree.branch,
+                    checkoutPath: authorizedCreatedPath,
+                  },
+                ],
+              },
+            });
+            yield* dispatch(`worktree-created:${worktree.index}`, {
+              type: "worktree.create",
+              commandId: commandIdFor(operation.operationId, `worktree-create-${worktree.index}`),
+              worktreeId: worktree.worktreeId,
+              projectId: worktree.project.id,
+              branch: worktree.branch,
+              worktreePath: authorizedCreatedPath,
+              origin: "manual",
+              prNumber: null,
+              issueNumber: null,
+              prTitle: null,
+              issueTitle: null,
+              workItemProvider: null,
+              workItemKey: null,
+              workItemTitle: null,
+              workItemState: null,
+              workItemStateName: null,
+              workItemUrl: null,
+              createdAt: new Date().toISOString(),
+            });
+            return authorizedCreatedPath;
+          });
+
+        /** Starts the project's setup script for a thread in its new worktree, and records it. */
+        const launchSetupScript = (
+          index: number,
+          input: {
+            readonly threadId: ThreadId;
+            readonly projectId: string;
+            readonly projectCwd: string;
+            readonly worktreePath: string;
+          },
+        ) =>
+          Option.isNone(setupScriptRunner)
+            ? Effect.succeed({ status: "no-script" as const })
+            : setupScriptRunner.value
+                .runForThread(input)
+                .pipe(
+                  Effect.tap(() =>
+                    checkpoint(appendStep(operation.state, `setup-launched:${index}`)),
+                  ),
+                );
+
+        if (proposal.plan.kind === "worktreeHandoff") {
+          const { runWorktreeHandoff } = yield* worktreeHandoffRuns;
+          yield* runWorktreeHandoff(
+            {
+              settings: settingsService,
+              projects: readProjectShells(projections),
+              loadThread,
+              git,
+              ids: { commandIdFor, messageIdFor, worktreeIdFor },
+              operation: () => operation,
+              checkpoint,
+              dispatch,
+              planWorktreeCheckout,
+              createOwnedWorktree,
+              launchSetupScript,
+              resolvePreferences: resolveProjectPreferences,
+            },
+            proposal.plan,
+          );
+          return operation;
+        }
 
         if (
           isAgentControlDevicePlan(proposal.plan) ||
@@ -1114,41 +1292,19 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
             const project = projects.find((candidate) => candidate.id === entry.projectId);
             if (!project) return yield* Effect.fail(new Error("Requested project is unavailable."));
             const effective = resolveProjectPreferences({ settings: worktreeSettings, project });
-            if (
-              effective.runSetupScript.value &&
-              Option.isNone(setupScriptRunner) &&
-              setupProjectScript(project.scripts ?? [])
-            )
-              return yield* Effect.fail(
-                new Error("Project setup is unavailable. Retry when the server is ready."),
-              );
             const branch = branchFor(
               operation.operationId,
               index,
               effective.worktreeBranchPrefix.value,
             );
-            const checkoutPath = yield* resolveWorktreeCheckoutPath({
-              location: undefined,
-              appWorktreesRoot: yield* resolveConfiguredWorktreeRoot({
-                settings: worktreeSettings,
-                projectId: project.id,
-                config,
-                policy: workspaceAccess,
-              }),
-              projectId: project.id,
-              workspaceRoot: project.workspaceRoot,
-              projectMetadataDir: project.projectMetadataDir,
-              projectTitle: project.title,
-              initialName: entry.title,
-              branchName: branch,
-            });
             const baseRef = entry.baseRef ?? "HEAD";
-            yield* preflightAgentControlWorktreeCheckout({
-              cwd: project.workspaceRoot,
-              checkoutPath,
+            const checkoutPath = yield* planWorktreeCheckout({
+              project,
+              settings: worktreeSettings,
+              branch,
+              initialName: entry.title,
               baseRef,
-              workspaceAccess,
-              git,
+              runSetupScript: effective.runSetupScript.value,
             });
             prepared.push({
               index,
@@ -1163,68 +1319,7 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
           }
 
           for (const worktree of prepared) {
-            const created = yield* git.createWorktree({
-              settingsSnapshot: worktreeSettings,
-              projectId: worktree.project.id,
-              cwd: worktree.project.workspaceRoot,
-              refName: worktree.baseRef,
-              newRefName: worktree.branch,
-              path: worktree.checkoutPath,
-            });
-            const authorizedCreatedPath = yield* workspaceAccess.assertExistingPath({
-              path: created.worktree.path,
-              operation: "AgentControlExecution.createWorktree",
-            });
-            if (path.resolve(authorizedCreatedPath) !== path.resolve(worktree.checkoutPath)) {
-              return yield* Effect.fail(new Error("Created worktree path did not match its plan."));
-            }
-
-            // This is the durable ownership point. No dependent thread step
-            // runs before the exact id/project/branch/path evidence is stored.
-            yield* checkpoint({
-              ...operation.state,
-              completedSteps: unique([
-                ...operation.state.completedSteps,
-                `worktree-owned:${worktree.index}`,
-              ]),
-              resources: {
-                ...operation.state.resources,
-                worktreeIds: unique([
-                  ...operation.state.resources.worktreeIds,
-                  worktree.worktreeId,
-                ]),
-                ownedWorktrees: [
-                  ...operation.state.resources.ownedWorktrees,
-                  {
-                    worktreeId: worktree.worktreeId,
-                    projectId: worktree.project.id,
-                    branch: worktree.branch,
-                    checkoutPath: authorizedCreatedPath,
-                  },
-                ],
-              },
-            });
-            const createdAt = new Date().toISOString();
-            yield* dispatch(`worktree-created:${worktree.index}`, {
-              type: "worktree.create",
-              commandId: commandIdFor(operation.operationId, `worktree-create-${worktree.index}`),
-              worktreeId: worktree.worktreeId,
-              projectId: worktree.project.id,
-              branch: worktree.branch,
-              worktreePath: authorizedCreatedPath,
-              origin: "manual",
-              prNumber: null,
-              issueNumber: null,
-              prTitle: null,
-              issueTitle: null,
-              workItemProvider: null,
-              workItemKey: null,
-              workItemTitle: null,
-              workItemState: null,
-              workItemStateName: null,
-              workItemUrl: null,
-              createdAt,
-            });
+            yield* createOwnedWorktree({ ...worktree, settings: worktreeSettings });
           }
 
           for (const [index, entry] of entries.entries()) {
@@ -1283,13 +1378,12 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
               // finish before setup. Required plan model/env inputs stay explicit.
               if (worktree.runSetupScript && Option.isSome(setupScriptRunner)) {
                 yield* validator.revalidateExecution(proposal);
-                yield* setupScriptRunner.value.runForThread({
+                yield* launchSetupScript(index, {
                   threadId,
                   projectId: project.id,
                   projectCwd: project.workspaceRoot,
                   worktreePath: worktree.checkoutPath,
                 });
-                yield* checkpoint(appendStep(operation.state, `setup-launched:${index}`));
               }
             }
             if ("returnToOrigin" in entry && entry.returnToOrigin) {
@@ -1992,6 +2086,20 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
               );
               continue;
             }
+          }
+          // A handoff whose chat already moved keeps the move: the chat works in the worktree.
+          if (
+            operation.status === "running" &&
+            proposal.plan.kind === "worktreeHandoff" &&
+            operation.state.completedSteps.includes("handoff-thread-moved")
+          ) {
+            yield* completeRecovered(proposal, operation, {
+              ...operation.state,
+              note:
+                operation.state.note ??
+                "Ryco restarted during the move; this chat works in its new worktree now.",
+            });
+            continue;
           }
           if (proposal.plan.kind === "workspaceLifecycle") {
             yield* settleProposalFailure(proposal, operation, {

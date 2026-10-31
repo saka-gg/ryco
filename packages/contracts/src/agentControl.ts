@@ -281,6 +281,7 @@ export const AgentControlActionKind = Schema.Literals([
   "deviceControlConsent",
   "deleteLocalTask",
   "pullRequestWatch",
+  "worktreeHandoff",
 ]);
 export type AgentControlActionKind = typeof AgentControlActionKind.Type;
 
@@ -333,6 +334,7 @@ export const AGENT_CONTROL_ACTION_CAPABILITIES: Record<
   deviceControlConsent: AGENT_CONTROL_CAPABILITIES.controlDevices,
   deleteLocalTask: AGENT_CONTROL_CAPABILITIES.manageLocalTasks,
   pullRequestWatch: AGENT_CONTROL_CAPABILITIES.watchPullRequests,
+  worktreeHandoff: AGENT_CONTROL_CAPABILITIES.manageWorkspaces,
 };
 
 export const AGENT_CONTROL_PLAN_VERSION = 1;
@@ -976,6 +978,41 @@ export const AgentControlPullRequestWatchPlan = Schema.Struct({
 }).pipe(rejectExcessProperties);
 export type AgentControlPullRequestWatchPlan = typeof AgentControlPullRequestWatchPlan.Type;
 
+/** Private-session tools that move the caller's own chat into a worktree (loaded on first use). */
+export const AGENT_CONTROL_WORKTREE_MCP_TOOLS = {
+  handoff: "ryco_worktree_handoff",
+  status: "ryco_worktree_status",
+} as const;
+
+const AgentControlGitRefName = TrimmedNonEmptyString.check(Schema.isMaxLength(256));
+
+/**
+ * Moves the calling chat itself into a new worktree on a new branch, created from `baseRef` (the
+ * branch the project's checkout has when absent), and queues `continuationPrompt` as its next
+ * turn there. Changes in the shared checkout stay there. Provider-session callers only, and only
+ * for their own chat; the defaults are resolved before the plan is made.
+ */
+export const AgentControlWorktreeHandoffPlan = Schema.Struct({
+  kind: Schema.Literal("worktreeHandoff"),
+  threadId: ThreadId,
+  branch: AgentControlGitRefName,
+  baseRef: Schema.optional(AgentControlGitRefName),
+  startFromOrigin: Schema.Boolean,
+  runSetupScript: Schema.Boolean,
+  continuationPrompt: Schema.optional(AgentControlPrompt),
+}).pipe(rejectExcessProperties);
+export type AgentControlWorktreeHandoffPlan = typeof AgentControlWorktreeHandoffPlan.Type;
+
+/** How a handoff went once the chat moved: no paths (the chat reads its own). */
+export const AgentControlWorktreeHandoffOutcome = Schema.Struct({
+  branch: AgentControlGitRefName,
+  baseRef: AgentControlGitRefName,
+  startedFromOrigin: Schema.Boolean,
+  setupScript: Schema.Literals(["started", "no-script", "skipped", "failed"]),
+  continuation: Schema.Literals(["queued", "skipped", "failed"]),
+});
+export type AgentControlWorktreeHandoffOutcome = typeof AgentControlWorktreeHandoffOutcome.Type;
+
 export const AgentControlActionPlan = Schema.Union([
   AgentControlCreateThreadsPlan,
   AgentControlSendMessagePlan,
@@ -994,6 +1031,7 @@ export const AgentControlActionPlan = Schema.Union([
   AgentControlDeviceControlConsentPlan,
   AgentControlDeleteLocalTaskPlan,
   AgentControlPullRequestWatchPlan,
+  AgentControlWorktreeHandoffPlan,
 ]);
 export type AgentControlActionPlan = typeof AgentControlActionPlan.Type;
 
@@ -1124,6 +1162,7 @@ export const AgentControlExecutionReceipt = Schema.Struct({
       settledActiveTurnId: Schema.NullOr(TurnId),
     }),
   ),
+  worktreeHandoff: Schema.optional(AgentControlWorktreeHandoffOutcome),
   compensation: Schema.optional(
     Schema.Struct({
       attempted: Schema.Boolean,
@@ -1443,6 +1482,7 @@ export const AgentControlOperationState = Schema.Struct({
       settledActiveTurnId: Schema.NullOr(TurnId),
     }),
   ),
+  worktreeHandoff: Schema.optional(AgentControlWorktreeHandoffOutcome),
   compensation: Schema.optional(
     Schema.Struct({ attempted: Schema.Boolean, completed: Schema.Boolean }),
   ),

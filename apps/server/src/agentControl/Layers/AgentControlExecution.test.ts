@@ -40,6 +40,7 @@ import { assert, it, vi } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
   Clock,
+  Deferred,
   Effect,
   Fiber,
   FileSystem,
@@ -76,6 +77,7 @@ import {
   createPullRequestWatchHarness,
 } from "../../sourceControl/pullRequestWatch.fixtures.ts";
 import { LocalTaskService } from "../../tasks/LocalTaskService.ts";
+import { ProjectSetupScriptRunner } from "../../project/Services/ProjectSetupScriptRunner.ts";
 import { WorkspaceAccessPolicy } from "../../workspace/Services/WorkspaceAccessPolicy.ts";
 import {
   WorkspaceLifecycle,
@@ -3392,4 +3394,378 @@ it.effect("a waiting task's completion return binds to its queued first message"
       CompletionReturnRepositoryLive.pipe(Layer.provideMerge(SqlitePersistenceMemory)),
     ),
   ),
+);
+
+// ── Worktree handoff: an agent moves its own chat into a new worktree ──
+
+const callerThreadId = ThreadId.make("thread-origin");
+const handoffPlan = {
+  kind: "worktreeHandoff" as const,
+  threadId: callerThreadId,
+  branch: "feature/handoff",
+  startFromOrigin: false,
+  runSetupScript: true,
+  continuationPrompt: "Run the tests in the worktree",
+};
+const handoffProposal = (
+  id: string,
+  overrides: Partial<typeof handoffPlan> = {},
+): AgentControlProposal => {
+  const nextPlan = { ...handoffPlan, ...overrides };
+  return {
+    ...approvedProposal,
+    proposalId: AgentControlProposalId.make(`proposal-${id}`),
+    requestId: AgentControlRequestId.make(`request-${id}`),
+    plan: nextPlan,
+    planDigest: computeAgentControlPlanDigest(nextPlan),
+  };
+};
+
+const makeHandoffHarness = (input: {
+  readonly proposal: AgentControlProposal;
+  /** The chat as each successive read sees it (the last one repeats). */
+  readonly threadReads?: ReadonlyArray<Partial<OrchestrationThreadShell>>;
+  readonly localBranches?: ReadonlyArray<string>;
+  readonly isRepo?: boolean;
+  /** Holds the worktree creation until it completes. */
+  readonly createGate?: Effect.Effect<void>;
+}) =>
+  Effect.gen(function* () {
+    const stores = yield* makeExecutionStores(input.proposal);
+    const commands: Array<{ readonly type: string } & Record<string, unknown>> = [];
+    const created: Array<Record<string, unknown>> = [];
+    const removed: string[] = [];
+    const deletedBranches: string[] = [];
+    const setups: Array<Record<string, unknown>> = [];
+    let reads = 0;
+    let movedTo: string | null = null;
+    const threadRead = () => {
+      const scripted = input.threadReads ?? [{}];
+      const overrides = scripted[Math.min(reads, scripted.length - 1)]!;
+      reads += 1;
+      return {
+        ...target,
+        id: callerThreadId,
+        branch: "main",
+        worktreePath: movedTo,
+        settledAt: null,
+        ...overrides,
+      } as OrchestrationThreadShell;
+    };
+    const project = {
+      id: projectId,
+      title: "Project",
+      workspaceRoot: "/workspace/project",
+      projectMetadataDir: null,
+      scripts: [
+        {
+          id: "setup",
+          name: "Install",
+          command: "bun install",
+          icon: "configure",
+          runOnWorktreeCreate: true,
+        },
+      ],
+    };
+    const executor = yield* makeTestExecution({
+      ...stores,
+      projections: {
+        getShellSnapshot: () => Effect.succeed({ projects: [project] }),
+        getThreadShellById: () => Effect.sync(() => Option.some(threadRead())),
+        getProjectShellById: () => Effect.succeed(Option.some(project)),
+        getWorktreeShellById: (worktreeId: WorktreeId) =>
+          Effect.succeed(
+            created.length === 0
+              ? Option.none()
+              : Option.some({
+                  worktreeId,
+                  projectId,
+                  branch: created[0]!.newRefName,
+                  worktreePath: created[0]!.path,
+                }),
+          ),
+      },
+      workspaceAccess: {
+        assertPath: ({ path }: { path: string }) => Effect.succeed(path),
+        assertExistingPath: ({ path }: { path: string }) => Effect.succeed(path),
+      },
+      git: {
+        localStatus: () => Effect.succeed({ isRepo: input.isRepo ?? true, refName: "main" }),
+        listLocalBranchNames: () => Effect.succeed(input.localBranches ?? ["main"]),
+        listRefs: () => Effect.succeed({ refs: [{ name: "main" }] }),
+        createWorktree: (request: { path: string; newRefName: string }) =>
+          (input.createGate ?? Effect.void).pipe(
+            Effect.andThen(
+              Effect.sync(() => {
+                created.push(request);
+                return { worktree: { path: request.path, refName: request.newRefName } };
+              }),
+            ),
+          ),
+        listWorktreePaths: () =>
+          Effect.sync(() => created.map((request) => request.path as string)),
+        removeWorktree: (request: { readonly path: string }) =>
+          Effect.sync(() => void removed.push(request.path)),
+        deleteBranch: (request: { readonly refName: string }) =>
+          Effect.sync(() => void deletedBranches.push(request.refName)),
+      },
+      commandApplication: {
+        apply: (command: { readonly type: string } & Record<string, unknown>) =>
+          Effect.sync(() => {
+            commands.push(command);
+            if (command.type === "thread.meta.update") movedTo = command.worktreePath as string;
+            return { sequence: commands.length };
+          }),
+      },
+    }).pipe(
+      Effect.provideService(ProjectSetupScriptRunner, {
+        runForThread: (request) =>
+          Effect.sync(() => {
+            setups.push({ ...request });
+            return {
+              status: "started" as const,
+              scriptId: "setup",
+              scriptName: "Install",
+              terminalId: "terminal-1",
+              cwd: request.worktreePath,
+            };
+          }),
+      }),
+    );
+    return { stores, executor, commands, created, removed, deletedBranches, setups };
+  });
+
+it.effect("moves the caller's chat into a new worktree and queues its continuation", () =>
+  Effect.gen(function* () {
+    const proposal = handoffProposal("handoff");
+    const h = yield* makeHandoffHarness({ proposal });
+    yield* h.executor.executeApproved(proposal.proposalId);
+
+    const settled = yield* Ref.get(h.stores.proposalRef);
+    assert.strictEqual(settled.status, "completed");
+    assert.lengthOf(h.created, 1);
+    assert.deepInclude(h.created[0], {
+      cwd: "/workspace/project",
+      refName: "main",
+      newRefName: "feature/handoff",
+    });
+    const checkoutPath = h.created[0]!.path as string;
+    assert.deepStrictEqual(
+      h.commands.map((command) => command.type),
+      ["worktree.create", "thread.meta.update", "thread.attach-to-worktree", "thread.queue.add"],
+    );
+    // Re-pointed with the existing commands, fenced on the branch the chat had.
+    assert.deepInclude(h.commands[1], {
+      threadId: callerThreadId,
+      branch: "feature/handoff",
+      expectedBranch: "main",
+      worktreePath: checkoutPath,
+    });
+    assert.deepInclude(h.commands[2], {
+      threadId: callerThreadId,
+      worktreeId: h.commands[0]!.worktreeId,
+    });
+    // The continuation waits in the chat's own queue, as its agent's, until the chat is idle.
+    const queued = h.commands[3] as unknown as ThreadQueueAddCommand;
+    assert.strictEqual(queued.threadId, callerThreadId);
+    assert.strictEqual(queued.author, "agent");
+    assert.strictEqual(queued.queuedBy, callerThreadId);
+    assert.strictEqual(queued.entry.text, "Run the tests in the worktree");
+    assert.deepStrictEqual(h.setups, [
+      {
+        threadId: callerThreadId,
+        projectId,
+        projectCwd: "/workspace/project",
+        worktreePath: checkoutPath,
+      },
+    ]);
+
+    assert.strictEqual(settled.result?.outcome, "completed");
+    if (settled.result?.outcome !== "completed") return;
+    assert.deepStrictEqual(settled.result.execution?.worktreeHandoff, {
+      branch: "feature/handoff",
+      baseRef: "main",
+      startedFromOrigin: false,
+      setupScript: "started",
+      continuation: "queued",
+    });
+    assert.include(settled.result.detail, checkoutPath);
+    assert.include(settled.result.detail, "End your turn now");
+    // The chat holds the worktree now: nothing would roll it back.
+    const operation = Option.getOrThrow(yield* Ref.get(h.stores.operationRef));
+    assert.deepStrictEqual(operation.state.resources.ownedWorktrees, []);
+    assert.include(operation.state.resources.threadIds, callerThreadId);
+  }),
+);
+
+it.effect("rolls the worktree back when the chat was archived while it was made", () =>
+  Effect.gen(function* () {
+    const proposal = handoffProposal("handoff-archived");
+    const h = yield* makeHandoffHarness({
+      proposal,
+      // Open at the start, archived once the worktree exists.
+      threadReads: [{}, { archivedAt: now }],
+    });
+    yield* h.executor.executeApproved(proposal.proposalId);
+
+    const settled = yield* Ref.get(h.stores.proposalRef);
+    assert.strictEqual(settled.status, "failed");
+    if (settled.result?.outcome !== "failed") return assert.fail("expected a failure");
+    assert.match(settled.result.error.message, /archived or settled.*rolled back/);
+    const checkoutPath = h.created[0]!.path as string;
+    assert.deepStrictEqual(h.removed, [checkoutPath]);
+    assert.deepStrictEqual(h.deletedBranches, ["feature/handoff"]);
+    assert.deepStrictEqual(
+      h.commands.map((command) => command.type),
+      ["worktree.create", "worktree.delete"],
+    );
+    assert.lengthOf(h.setups, 0);
+  }),
+);
+
+it.effect("refuses an existing branch or a project without Git, creating nothing", () =>
+  Effect.gen(function* () {
+    const existing = handoffProposal("handoff-existing");
+    const branchTaken = yield* makeHandoffHarness({
+      proposal: existing,
+      localBranches: ["main", "feature/handoff"],
+    });
+    yield* branchTaken.executor.executeApproved(existing.proposalId);
+    const taken = yield* Ref.get(branchTaken.stores.proposalRef);
+    assert.strictEqual(taken.status, "failed");
+    if (taken.result?.outcome !== "failed") return assert.fail("expected a failure");
+    assert.match(taken.result.error.message, /feature\/handoff already exists/);
+
+    const noGit = handoffProposal("handoff-no-git");
+    const plain = yield* makeHandoffHarness({ proposal: noGit, isRepo: false });
+    yield* plain.executor.executeApproved(noGit.proposalId);
+    const refused = yield* Ref.get(plain.stores.proposalRef);
+    if (refused.result?.outcome !== "failed") return assert.fail("expected a failure");
+    assert.match(refused.result.error.message, /not a Git repository/);
+
+    const moved = handoffProposal("handoff-moved");
+    const inWorktree = yield* makeHandoffHarness({
+      proposal: moved,
+      threadReads: [{ worktreePath: "/workspace/worktrees/other" }],
+    });
+    yield* inWorktree.executor.executeApproved(moved.proposalId);
+    const already = yield* Ref.get(inWorktree.stores.proposalRef);
+    if (already.result?.outcome !== "failed") return assert.fail("expected a failure");
+    assert.match(already.result.error.message, /already works in its own worktree/);
+
+    for (const run of [branchTaken, plain, inWorktree]) {
+      assert.lengthOf(run.created, 0);
+      assert.lengthOf(run.commands, 0);
+    }
+  }),
+);
+
+it.effect("refuses a second handoff of the same chat while the first one runs", () =>
+  Effect.gen(function* () {
+    const gate = yield* Deferred.make<void>();
+    const first = handoffProposal("handoff-first");
+    const firstRun = yield* makeHandoffHarness({
+      proposal: first,
+      createGate: Deferred.await(gate),
+    });
+    const second = handoffProposal("handoff-second", { branch: "feature/other" });
+    const secondRun = yield* makeHandoffHarness({ proposal: second });
+
+    const running = yield* Effect.forkChild(firstRun.executor.executeApproved(first.proposalId));
+    while ((yield* Ref.get(firstRun.stores.operationRef)).pipe(Option.isNone)) {
+      yield* Effect.yieldNow;
+    }
+    yield* secondRun.executor.executeApproved(second.proposalId);
+    const refused = yield* Ref.get(secondRun.stores.proposalRef);
+    if (refused.result?.outcome !== "failed") return assert.fail("expected a failure");
+    assert.match(refused.result.error.message, /already in progress/);
+    assert.lengthOf(secondRun.created, 0);
+
+    yield* Deferred.succeed(gate, undefined);
+    yield* Fiber.join(running);
+    assert.strictEqual((yield* Ref.get(firstRun.stores.proposalRef)).status, "completed");
+  }),
+);
+
+const recoverHandoff = (completedSteps: ReadonlyArray<string>) =>
+  Effect.gen(function* () {
+    const proposal = { ...handoffProposal("handoff-restart"), status: "executing" as const };
+    const proposalRef = yield* Ref.make<AgentControlProposal>(proposal);
+    const operationRef = yield* Ref.make<AgentControlOperation>({
+      operationId: AgentControlOperationId.make("operation-handoff-restart"),
+      proposalId: proposal.proposalId,
+      actionKind: "worktreeHandoff",
+      status: "running",
+      attempt: 1,
+      state: {
+        completedSteps: [...completedSteps],
+        resources: {
+          threadIds: [callerThreadId],
+          ownedThreadIds: [],
+          worktreeIds: [],
+          // Given up just before the move.
+          ownedWorktrees: [],
+        },
+        commandReceipts: [],
+      },
+      result: null,
+      createdAt: now,
+      updatedAt: now,
+    });
+    const execution = yield* makeTestExecution({
+      proposalStore: {
+        getById: () => Ref.get(proposalRef).pipe(Effect.map(Option.some)),
+        listActive: () => Effect.succeed([]),
+        settleExecution: (input: { readonly result: AgentControlResultEnvelope }) =>
+          Ref.update(proposalRef, (current): AgentControlProposal => ({
+            ...current,
+            status: input.result.outcome === "completed" ? "completed" : "failed",
+            result: input.result,
+          })),
+      },
+      operationStore: {
+        listRecoverable: () => Ref.get(operationRef).pipe(Effect.map((operation) => [operation])),
+        getByProposalId: () => Ref.get(operationRef).pipe(Effect.map(Option.some)),
+        transition: (input: {
+          readonly nextStatus: AgentControlOperation["status"];
+          readonly state: AgentControlOperation["state"];
+          readonly result: AgentControlOperation["result"];
+        }) =>
+          Ref.updateAndGet(operationRef, (current) => ({
+            ...current,
+            status: input.nextStatus,
+            state: input.state,
+            result: input.result,
+          })),
+        checkpoint: (input: { readonly state: AgentControlOperation["state"] }) =>
+          Ref.updateAndGet(operationRef, (current) => ({ ...current, state: input.state })),
+      },
+      commandApplication: { apply: () => Effect.die("recovery replays no command") },
+      projections: { getThreadShellById: () => Effect.succeed(Option.none()) },
+      git: { removeWorktree: () => Effect.die("recovery never removes a moved chat's checkout") },
+    });
+    yield* execution.recoverIncomplete;
+    return yield* Ref.get(proposalRef);
+  });
+
+it.effect("a restart after the chat moved completes the handoff and keeps the worktree", () =>
+  Effect.gen(function* () {
+    const moved = yield* recoverHandoff([
+      "worktree-owned:0",
+      "worktree-created:0",
+      "handoff-bind-started",
+      "handoff-thread-moved",
+    ]);
+    assert.strictEqual(moved.status, "completed");
+    if (moved.result?.outcome !== "completed") return assert.fail("expected completion");
+    assert.include(moved.result.detail, "works in its new worktree now");
+
+    // Before the move, it fails and removes only what the operation still owns (nothing here).
+    const cut = yield* recoverHandoff([
+      "worktree-owned:0",
+      "worktree-created:0",
+      "handoff-bind-started",
+    ]);
+    assert.strictEqual(cut.status, "failed");
+  }),
 );

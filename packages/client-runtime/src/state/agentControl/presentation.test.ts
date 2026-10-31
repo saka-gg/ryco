@@ -568,3 +568,25 @@ it("names the pull request an agent watches, and the chat it wakes", () => {
   expect(stop.actionLabel).toBe("Stop watching pull request");
   expect(stop.detailSections[0]?.lines).toContain("Pull request: the chat's own");
 });
+
+it("names the branch a chat moved to and the step it continues with", () => {
+  const moved = buildAgentControlProposalCardModel(
+    makeProposal({
+      status: "completed",
+      plan: {
+        kind: "worktreeHandoff",
+        threadId: ThreadId.make("thread-target-5678"),
+        branch: "feature/login",
+        startFromOrigin: false,
+        runSetupScript: true,
+        continuationPrompt: "Run the login tests",
+      },
+      promptSummary: "Move thread thread-target-5678 into a new worktree on branch feature/login",
+    }),
+    (threadId) => (threadId === "thread-target-5678" ? "Fix the login loop" : undefined),
+  );
+  expect(moved.actionLabel).toBe("Move chat into a worktree");
+  expect(moved.targetLabel).toBe("Fix the login loop");
+  expect(moved.isDestructive).toBe(false);
+  expect(moved.detailSections[0]?.lines).toEqual(["Branch: feature/login", "Run the login tests"]);
+});
