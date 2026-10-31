@@ -2,6 +2,7 @@ import { networkInterfaces } from "node:os";
 
 import type { AdvertisedEndpoint } from "@ryco/contracts";
 import { DEFAULT_HOSTED_APP_ORIGIN } from "@ryco/shared/hostedApp";
+import { isLoopbackHost, isWildcardHost, pairingQrUrl } from "@ryco/shared/pairingQr";
 import { buildDirectPairingUrl, buildHostedPairingUrl } from "@ryco/shared/pairingUrl";
 import { isTailscaleIpv4Address } from "@ryco/tailscale";
 import { DateTime, Effect } from "effect";
@@ -37,19 +38,8 @@ export interface HeadlessServeAccessInfo {
 
 type NetworkInterfacesMap = ReturnType<typeof networkInterfaces>;
 
-export const isLoopbackHost = (host: string | undefined): boolean => {
-  if (!host || host.length === 0) {
-    return true;
-  }
-
-  return (
-    host === "localhost" ||
-    host === "127.0.0.1" ||
-    host === "::1" ||
-    host === "[::1]" ||
-    host.startsWith("127.")
-  );
-};
+// The loopback rule lives with the pairing links, so the web's QR codes follow it too.
+export { isLoopbackHost, isWildcardHost, pairingQrUrl };
 
 /**
  * Printed instead of a QR code when the only pairing link is a loopback address: a
@@ -57,34 +47,6 @@ export const isLoopbackHost = (host: string | undefined): boolean => {
  */
 export const LOOPBACK_ONLY_PAIRING_NOTE =
   "Only this computer can reach this node. Turn on network access or Tailscale Serve to pair another device.";
-
-/**
- * A host a phone scanning a QR code cannot reach this node at: loopback in any spelling the URL
- * parser leaves (127/8, `::1`, IPv4-mapped `::ffff:7f..`, `localhost` and its subdomains, with or
- * without a trailing dot) and the unspecified addresses.
- */
-const isUnreachableFromAnotherDevice = (hostname: string): boolean => {
-  const host = hostname.toLowerCase().replace(/\.$/u, "");
-  return (
-    isLoopbackHost(host) ||
-    host.endsWith(".localhost") ||
-    isWildcardHost(host) ||
-    /^\[::ffff:7f[0-9a-f]{2}:[0-9a-f]{1,4}\]$/u.test(host) ||
-    /^\[::ffff:127\./u.test(host)
-  );
-};
-
-/** A pairing link worth drawing as a QR code: one another device can reach. */
-export const pairingQrUrl = (pairingUrl: string): string | null => {
-  try {
-    return isUnreachableFromAnotherDevice(new URL(pairingUrl).hostname) ? null : pairingUrl;
-  } catch {
-    return null;
-  }
-};
-
-export const isWildcardHost = (host: string | undefined): boolean =>
-  host === "0.0.0.0" || host === "::" || host === "[::]";
 
 /**
  * Does the listener accept connections on every interface? An unset host does:

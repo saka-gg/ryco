@@ -564,6 +564,10 @@
     "./computerAuditFile": "./src/computerAuditFile.ts",
     "./computerAuditHistory": "./src/computerAuditHistory.ts",
     "./regularFile": "./src/regularFile.ts",
+    "./pairingQr": {
+      "types": "./src/pairingQr.ts",
+      "import": "./src/pairingQr.ts"
+    },
     "./pairingUrl": {
       "types": "./src/pairingUrl.ts",
       "import": "./src/pairingUrl.ts"
