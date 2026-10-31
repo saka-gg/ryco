@@ -30,6 +30,11 @@ import {
 export const DELEGATION_WAKE_MESSAGE_PREFIX = DELEGATION_RESULT_MESSAGE_ID_PREFIX;
 /** Wake command ids carry this prefix (user-stop attribution). */
 export const DELEGATION_WAKE_COMMAND_PREFIX = "delegation-return:";
+/**
+ * A stall notice's wake (`delegationStallWakeIds`): a person's Stop of its turn stops that turn
+ * only, never the delegating chat's other returns (`cohortUserStop`).
+ */
+export const DELEGATION_STALL_NOTICE_COMMAND_PATTERN = `${DELEGATION_WAKE_COMMAND_PREFIX}%:stall:%`;
 
 export const CompletionReturnOutcome = Schema.Literals([
   "completed",
@@ -73,6 +78,37 @@ export const CompletionReturnBatch = Schema.Struct({
   cold: Schema.Boolean,
 });
 export type CompletionReturnBatch = typeof CompletionReturnBatch.Type;
+
+/**
+ * Why a task that still runs needs attention (`CompletionReturnDelivery`'s stall notices):
+ * its first message never started a turn, it waits on the person's approval or answer, or its
+ * provider went silent on a running turn.
+ */
+export const CompletionReturnStallKind = Schema.Literals([
+  "never-started",
+  "waiting-on-you",
+  "silent",
+]);
+export type CompletionReturnStallKind = typeof CompletionReturnStallKind.Type;
+
+/**
+ * A running task's stall notices: at most one per episode, and a few per task in all. The row
+ * stays `waiting`: a notice is never the task's result.
+ */
+export const CompletionReturnStallNotice = Schema.Struct({
+  /** Notices recorded for this task so far, the current one included. */
+  count: NonNegativeInt,
+  /** The current episode, or null once the task is moving again. */
+  current: Schema.NullOr(
+    Schema.Struct({
+      kind: CompletionReturnStallKind,
+      since: IsoDateTime,
+      /** `pending` until the delegating chat took the notice, `dropped` when it never will. */
+      state: Schema.Literals(["pending", "sent", "dropped"]),
+    }),
+  ),
+});
+export type CompletionReturnStallNotice = typeof CompletionReturnStallNotice.Type;
 
 export const CompletionReturnRecord = Schema.Struct({
   ...AgentControlCompletionReturn.fields,
@@ -124,6 +160,8 @@ export const CompletionReturnRecord = Schema.Struct({
    * return's time limit runs from it (`waitingReturnExpired`). Remembered once known.
    */
   startedAt: Schema.optional(IsoDateTime),
+  /** The task's stall notices; absent until one was recorded. */
+  stallNotice: Schema.optional(CompletionReturnStallNotice),
 });
 export type CompletionReturnRecord = typeof CompletionReturnRecord.Type;
 const decode = Schema.decodeUnknownSync(Schema.fromJsonString(CompletionReturnRecord));
@@ -531,6 +569,25 @@ export const makeCompletionReturnRepository = Effect.gen(function* () {
     WHERE thread_id = ${threadId} AND turn_id = ${turnId} LIMIT 1
   `.pipe(Effect.map((rows) => rows[0] ?? null)),
     );
+  /**
+   * When the provider went quiet on this turn, if it still is: the liveness sweep's one-time
+   * `provider.turn.unresponsive` notice for the turn (its `lastActivityAt`), with no activity of
+   * the thread after it. Null when the turn was never reported quiet or moved on since.
+   */
+  const silentTurnSince = (threadId: ThreadId, turnId: TurnId) =>
+    safe(
+      sql<{ since: string | null; noticedAt: string }>`
+    SELECT json_extract(notice.payload_json, '$.lastActivityAt') AS since, notice.created_at AS "noticedAt"
+    FROM projection_thread_activities notice
+    WHERE notice.kind = 'provider.turn.unresponsive' AND notice.thread_id = ${threadId}
+      AND notice.turn_id = ${turnId}
+      AND NOT EXISTS (
+        SELECT 1 FROM projection_thread_activities later
+        WHERE later.thread_id = notice.thread_id AND later.sequence > notice.sequence)
+    ORDER BY notice.sequence DESC LIMIT 1`.pipe(
+        Effect.map((rows) => (rows[0] ? (rows[0].since ?? rows[0].noticedAt) : null)),
+      ),
+    );
   /** The shared server-wake reads (`serverWakeQueries.ts`); the fence takes the same ones. */
   const pendingTurnStart = (threadId: ThreadId) => safe(readPendingTurnStart(sql, threadId));
   const wakeStartState = (threadId: ThreadId, messageId: MessageId) =>
@@ -590,6 +647,7 @@ export const makeCompletionReturnRepository = Effect.gen(function* () {
       AND ((${input.delegatingMessageId} IS NOT NULL
             AND json_extract(start.payload_json, '$.messageId') = ${input.delegatingMessageId})
         OR (substr(start.command_id, 1, ${DELEGATION_WAKE_COMMAND_PREFIX.length}) = ${DELEGATION_WAKE_COMMAND_PREFIX}
+            AND start.command_id NOT LIKE ${DELEGATION_STALL_NOTICE_COMMAND_PATTERN}
             AND start.occurred_at >= ${input.wakesSince}))
     LIMIT 1
   `.pipe(Effect.map((rows) => rows.length > 0)),
@@ -726,6 +784,7 @@ export const makeCompletionReturnRepository = Effect.gen(function* () {
     cancelOwned,
     hasOutstandingDelegations,
     turnInfo,
+    silentTurnSince,
     pendingTurnStart,
     wakeStartState,
     firstEventSequence,

@@ -84,7 +84,7 @@ export const MAX_DELIVERY_ATTEMPTS = 5;
 export const MAX_REPLAYS = 2;
 export const CHILD_OUTPUT_MAX_CHARS = 8000;
 
-const threadLink = (label: string, threadId: string) =>
+export const threadLink = (label: string, threadId: string) =>
   `[${label}](/ryco/thread/${encodeURIComponent(threadId)})`;
 
 export function renderCompletionReturn(
@@ -280,3 +280,16 @@ export function buildDelegationReturnCommand(input: {
     ? command
     : { ...command, message: { ...command.message, attachments } };
 }
+
+// ── Stall notices ───────────────────────────────────────────────────────
+
+/**
+ * Stall thresholds (Synara's worker health: `WORKER_NEVER_STARTED_MS`, `WORKER_STUCK_WAITING_MS`).
+ * A silent turn is the liveness sweep's `unresponsive` verdict (`providerTurnLiveness`), 15
+ * minutes by default.
+ */
+export const STALL_NEVER_STARTED_MS = 3 * 60 * 1000;
+export const STALL_WAITING_ON_YOU_MS = 5 * 60 * 1000;
+/** Notices one task may send its delegating chat in all, across episodes. */
+export const MAX_STALL_NOTICES = 3;
+// The notices' texts and wake commands load on the first notice (`completionReturnStallMessages.ts`).

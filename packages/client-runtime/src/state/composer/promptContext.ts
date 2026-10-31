@@ -332,6 +332,12 @@ export interface AgentMessageFold {
 
 const FOLD_SUMMARY_MAX_CHARS = 120;
 const DELEGATION_TASK_COUNT = /^(\d+) task\(s\) you delegated/m;
+/** Section states of a stall notice (`CompletionReturnStallKind`). */
+const DELEGATION_STALL_STATES: ReadonlySet<string> = new Set([
+  "never-started",
+  "waiting-on-you",
+  "silent",
+]);
 const DELEGATION_SECTION_STATE =
   /^Delegated (?:initial-run result|result|task notice) \(([a-z-]+)[,)]/gm;
 /** `renderPullRequestAutoFixPrompt`'s first line (`@ryco/shared/pullRequestWatch`). */
@@ -370,9 +376,16 @@ export function agentMessageFoldOf(message: {
       const state = match[1]!;
       states.set(state, (states.get(state) ?? 0) + 1);
     }
+    // A stall notice (`renderStallWake`): the task still runs, so it is no result.
+    const stalled = [...states.keys()].every((state) => DELEGATION_STALL_STATES.has(state));
     return {
       kind: "delegation-result",
-      label: count === 1 ? "Result from a delegated task" : `Results from ${count} delegated tasks`,
+      label:
+        states.size > 0 && stalled
+          ? "A delegated task needs attention"
+          : count === 1
+            ? "Result from a delegated task"
+            : `Results from ${count} delegated tasks`,
       summary: [...states].map(([state, n]) => `${n} ${state}`).join(", "),
     };
   }

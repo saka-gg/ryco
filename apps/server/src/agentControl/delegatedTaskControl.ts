@@ -226,6 +226,14 @@ export const makeDelegatedTaskControl = (deps: DelegatedTaskControlDeps) => {
           hasPendingUserInput: child?.hasPendingUserInput ?? false,
           backgroundLiveness: child?.backgroundLiveness ?? null,
           advanced: yield* advanced(record, child),
+          ...(record.status === "waiting" && record.stallNotice?.current
+            ? {
+                stalled: {
+                  kind: record.stallNotice.current.kind,
+                  since: record.stallNotice.current.since,
+                },
+              }
+            : {}),
         },
         result,
         notice,
