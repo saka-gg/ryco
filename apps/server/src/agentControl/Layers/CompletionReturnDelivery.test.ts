@@ -2588,4 +2588,65 @@ describe("stall notices", () => {
       assert.deepEqual((yield* h.read()).stallNotice, { count: 1, current: null });
     }).pipe(Effect.provide(layer)),
   );
+
+  it.effect("reaches a delegating chat whose session ended, through the cold-start budget", () =>
+    Effect.gen(function* () {
+      const h = yield* setup();
+      yield* h.sql`DELETE FROM projection_turns WHERE thread_id = 'child'`;
+      // The person went away: the delegating chat's session was reaped.
+      h.live.delete("parent");
+      yield* h.tick(181);
+      assert.deepEqual(
+        stallWakes(h.sent).map((command) => command.commandId),
+        ["delegation-return:child:stall:1"],
+      );
+      assert.equal((yield* h.read()).stallNotice?.current?.state, "sent");
+    }).pipe(Effect.provide(layer)),
+  );
+
+  it.effect("never wakes a chat whose delegating turn the person reverted away", () =>
+    Effect.gen(function* () {
+      const h = yield* setup();
+      yield* h.appendEvent({
+        stream: "parent",
+        type: "thread.turn-start-requested",
+        commandId: "web:send",
+        payload: { messageId: "parent-initial" },
+      });
+      yield* h.appendEvent({
+        stream: "parent",
+        type: "thread.reverted",
+        commandId: "server:checkpoint-revert",
+        actor: "server",
+        payload: { turnCount: 0, droppedTurnIds: ["parent-turn"] },
+      });
+      yield* h.sql`DELETE FROM projection_turns WHERE thread_id = 'child'`;
+      yield* h.tick(181);
+      assert.lengthOf(stallWakes(h.sent), 0);
+      assert.equal((yield* h.read()).stallNotice?.current?.state, "dropped");
+    }).pipe(Effect.provide(layer)),
+  );
+
+  it.effect("keeps the chat's other returns when the person stops a notice's turn", () =>
+    Effect.gen(function* () {
+      const h = yield* setup();
+      yield* h.appendEvent({
+        stream: "parent",
+        type: "thread.turn-start-requested",
+        commandId: "delegation-return:child:stall:1",
+        occurredAt: at(200),
+        payload: { messageId: "delegation-result:child:stall:1" },
+      });
+      yield* h.appendEvent({
+        stream: "parent",
+        type: "thread.turn-interrupt-requested",
+        commandId: "web:stop",
+        occurredAt: at(201),
+      });
+      yield* h.ack();
+      yield* h.tick(210);
+      // The task's result still returns: the Stop ended the notice's turn only.
+      assert.equal((yield* h.read()).status, "delivered");
+    }).pipe(Effect.provide(layer)),
+  );
 });

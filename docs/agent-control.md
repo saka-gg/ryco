@@ -174,8 +174,10 @@ chat with one automatic message, a normal queued turn that starts or resumes its
   for the person's approval or answer (`waiting-on-you`), or its provider was reported quiet on
   its running turn (`silent`, after the 15-minute liveness notice) and nothing happened since.
   `ryco_task_status` shows the current one as `run.stalled`. The message waits behind the same
-  checks as results (the chat idle, in scope, not reverting, not stopped by the person) and never
-  starts a chat's session on its own. A task sends at most 3 such messages. Ryco never nudges,
+  checks as results (the chat idle, in scope, not reverting, not stopped by the person, the
+  delegating turn not reverted away) and, like a result, may start a chat's ended session through
+  the shared cold-start budget. Stopping the turn a notice started stops that turn only; the
+  task's result still returns. A task sends at most 3 such messages. Ryco never nudges,
   re-sends, interrupts or answers for a stalled task: that stays with the person or the
   delegating agent (`ryco_task_cancel`). The thresholds follow Synara's worker health.
 - **Scope of the tools.** They cover only tasks created with `returnToOrigin` by this chat. Local

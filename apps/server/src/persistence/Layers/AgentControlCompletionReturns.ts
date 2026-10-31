@@ -30,6 +30,11 @@ import {
 export const DELEGATION_WAKE_MESSAGE_PREFIX = DELEGATION_RESULT_MESSAGE_ID_PREFIX;
 /** Wake command ids carry this prefix (user-stop attribution). */
 export const DELEGATION_WAKE_COMMAND_PREFIX = "delegation-return:";
+/**
+ * A stall notice's wake (`delegationStallWakeIds`): a person's Stop of its turn stops that turn
+ * only, never the delegating chat's other returns (`cohortUserStop`).
+ */
+export const DELEGATION_STALL_NOTICE_COMMAND_PATTERN = `${DELEGATION_WAKE_COMMAND_PREFIX}%:stall:%`;
 
 export const CompletionReturnOutcome = Schema.Literals([
   "completed",
@@ -642,6 +647,7 @@ export const makeCompletionReturnRepository = Effect.gen(function* () {
       AND ((${input.delegatingMessageId} IS NOT NULL
             AND json_extract(start.payload_json, '$.messageId') = ${input.delegatingMessageId})
         OR (substr(start.command_id, 1, ${DELEGATION_WAKE_COMMAND_PREFIX.length}) = ${DELEGATION_WAKE_COMMAND_PREFIX}
+            AND start.command_id NOT LIKE ${DELEGATION_STALL_NOTICE_COMMAND_PATTERN}
             AND start.occurred_at >= ${input.wakesSince}))
     LIMIT 1
   `.pipe(Effect.map((rows) => rows.length > 0)),

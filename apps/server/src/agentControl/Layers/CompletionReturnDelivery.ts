@@ -232,7 +232,10 @@ export const makeCompletionReturnDelivery = Effect.gen(function* () {
    * question). Lost on restart, so a wait is timed again from the next scan; the notice itself is
    * recorded on the row and never sent twice.
    */
-  const waitingOnYouSince = new Map<ThreadId, number>();
+  const waitingOnYouSince = new Map<
+    ThreadId,
+    { readonly sinceMs: number; readonly checkedMs: number }
+  >();
 
   const publish = (proposalIds: Iterable<AgentControlProposalId>) =>
     Effect.forEach(
@@ -869,8 +872,8 @@ export const makeCompletionReturnDelivery = Effect.gen(function* () {
         return null;
       }
       if (child.hasPendingApprovals || child.hasPendingUserInput) {
-        const sinceMs = waitingOnYouSince.get(child.id) ?? ctx.nowMs;
-        waitingOnYouSince.set(child.id, sinceMs);
+        const sinceMs = waitingOnYouSince.get(child.id)?.sinceMs ?? ctx.nowMs;
+        waitingOnYouSince.set(child.id, { sinceMs, checkedMs: ctx.nowMs });
         return ctx.nowMs - sinceMs >= STALL_WAITING_ON_YOU_MS
           ? stall("waiting-on-you", sinceMs)
           : null;
@@ -923,26 +926,39 @@ export const makeCompletionReturnDelivery = Effect.gen(function* () {
 
   /**
    * One stall notice as its own wake, behind the same fence as results: the delegating chat must
-   * be idle, in scope, warm (a notice never starts a session) and not reverting, and its person
-   * must not have stopped it. `held` retries on the next scan; `dropped` never sends. Its ids are
-   * fixed per notice, so a retry after a restart cannot send it twice.
+   * be idle, in scope and not reverting, the delegating turn must not have been reverted away,
+   * and its person must not have stopped it. A chat whose session ended takes a cold slot from the
+   * shared budget, as a result does (a delegating chat is usually reaped long before a task has
+   * waited on the person for five minutes). `held` retries on the next scan; `dropped` never
+   * sends. Its ids are fixed per notice, so a retry after a restart or a lost receipt cannot send
+   * it twice.
    */
   const sendStallNotice = (
     record: CompletionReturnRecord,
     notice: number,
     stall: { readonly kind: CompletionReturnStallKind; readonly forMs: number },
     ctx: ScanContext,
-  ) =>
-    Effect.gen(function* () {
+  ) => {
+    let reserved: MessageId | null = null;
+    return Effect.gen(function* () {
       const parent = yield* readShell(record.parentThreadId);
       if (Option.isNone(parent)) return "dropped" as const;
       if (!(yield* policy.isEnabled)) return "held" as const;
       if (!inScope(record, parent.value)) return "dropped" as const;
       if ((yield* parentHoldDetail(parent.value, ctx)) !== null) return "held" as const;
+      const { cold, budgetFull } = yield* fence.coldStart(record.parentThreadId, ctx.nowMs);
+      if (cold && budgetFull) return "held" as const;
       const cache = stopCache();
       const bounded = yield* withStopBound(record, cache);
       if (yield* userStopped(bounded, bounded.sinceSequence ?? 0, cache)) return "dropped" as const;
-      if ((yield* fence.coldStart(record.parentThreadId, ctx.nowMs)).cold) return "held" as const;
+      if (
+        yield* repository.turnDroppedByRevert({
+          threadId: record.parentThreadId,
+          turnId: record.parentTurnId,
+          sinceSequence: bounded.sinceSequence ?? 0,
+        })
+      )
+        return "dropped" as const;
       if (yield* parentReverting(record.parentThreadId, ctx)) return "held" as const;
       const command = buildStallNoticeCommand({
         parent: parent.value,
@@ -952,10 +968,39 @@ export const makeCompletionReturnDelivery = Effect.gen(function* () {
         section: renderStallNotice(record, stall.kind, stall.forMs),
         now: ctx.now,
       });
-      wakesAppliedHere.set(command.message.messageId, ctx.nowMs);
+      const messageId = command.message.messageId;
+      if (
+        cold &&
+        !(yield* reserveColdSlot(record.parentThreadId, messageId, ctx, () => {
+          reserved = messageId;
+        }))
+      )
+        return "held" as const;
+      wakesAppliedHere.set(messageId, ctx.nowMs);
       const applied = yield* Effect.exit(commands.apply(command));
-      return Exit.isSuccess(applied) ? ("sent" as const) : ("dropped" as const);
-    });
+      if (Exit.isSuccess(applied)) {
+        if (cold) yield* fence.noteColdWake(record.parentThreadId, messageId, ctx.nowMs);
+        return "sent" as const;
+      }
+      // A rejection is final; a failure that left no receipt (a storage error) is retried with
+      // the same ids on the next scan.
+      const receipt = yield* receipts
+        .getByCommandId({ commandId: command.commandId })
+        .pipe(Effect.catch(() => Effect.succeed(Option.none())));
+      if (Option.isSome(receipt) && receipt.value.status === "accepted") {
+        if (cold) yield* fence.noteColdWake(record.parentThreadId, messageId, ctx.nowMs);
+        return "sent" as const;
+      }
+      return Option.isSome(receipt) ? ("dropped" as const) : ("held" as const);
+    }).pipe(
+      // An accepted wake's slot was noted; any other outcome gives it back.
+      Effect.ensuring(
+        Effect.suspend(() =>
+          reserved === null ? Effect.void : fence.releaseColdSlot(record.parentThreadId, reserved),
+        ),
+      ),
+    );
+  };
 
   /**
    * The child's own newest delegation wake (delivered after `record` began), when `settled`
@@ -1284,6 +1329,10 @@ export const makeCompletionReturnDelivery = Effect.gen(function* () {
         for (const [childThreadId, checked] of waitingStopCheckedThrough)
           if (ctx.nowMs - checked.checkedMs > STOP_CHECK_FORGET_MS)
             waitingStopCheckedThrough.delete(childThreadId);
+        // A row that ended elsewhere (`ryco_task_cancel`) while its task waited on the person.
+        for (const [childThreadId, waiting] of waitingOnYouSince)
+          if (ctx.nowMs - waiting.checkedMs > STOP_CHECK_FORGET_MS)
+            waitingOnYouSince.delete(childThreadId);
         for (const record of yield* repository.listDue(now)) {
           yield* processDue(record, ctx).pipe(
             Effect.catch(() =>
