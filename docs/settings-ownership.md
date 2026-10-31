@@ -13,6 +13,13 @@ the destination is stated once instead of on every row:
   Only sections permitted by the current node role are offered. Node security is
   its own Security section. The device name and icon live in its General section.
 
+A node section says which device it changes above its title: "Changes apply
+to [device]". Its menu is the nav header's own device menu (the same devices,
+the same rule for which ones a hosted browser may open, and the same switch),
+with a search field above six devices; a device that is not reachable shows
+Offline or Connecting. This app's sections, and browser or device sections,
+keep their one-line label instead.
+
 Hub account and device enrollment remain on the Hub account pages. Browser
 appearance on those pages is still local to that browser.
 

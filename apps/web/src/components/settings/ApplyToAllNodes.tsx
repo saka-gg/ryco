@@ -38,6 +38,14 @@ function useFanOutShown(nodes: ReadonlyArray<KnownSettingsNode>): boolean {
 }
 
 /**
+ * Whether node rows offer "Apply to all nodes" and may show "Mixed": two or
+ * more known nodes, outside the frozen phone tier.
+ */
+export function useApplyToAllNodesShown(): boolean {
+  return useFanOutShown(useKnownSettingsNodes());
+}
+
+/**
  * Reads the agreement of `nodes` now; the same agreement keeps its identity,
  * so a config push that changes nothing here (a provider probe) re-renders
  * nothing.
