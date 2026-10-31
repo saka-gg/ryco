@@ -35,6 +35,7 @@ import {
   useRelativeTimeTick,
 } from "./settingsLayout";
 import { Input } from "../ui/input";
+import { usePresentationTier } from "../../hooks/usePresentationTier";
 import {
   Dialog,
   DialogClose,
@@ -1016,10 +1017,100 @@ const AuthorizedClientsHeaderAction = memo(function AuthorizedClientsHeaderActio
       >
         {isRevokingOtherClients ? "Revoking…" : "Revoke others"}
       </Button>
+      {/* The frozen phone tier keeps the link it had (AGENTS.md); others get the dialog. */}
+      <PhonePairingLinkAction />
       <AddDeviceButton onClick={onAddDevice} />
     </div>
   );
 });
+
+/**
+ * The phone tier's one-time pairing link, as it was before the "Add a device" dialog. The web
+ * phone tier is frozen: it keeps this and gets nothing new.
+ */
+function PhonePairingLinkAction() {
+  const isPhoneTier = usePresentationTier() === "phone";
+  const [dialogOpen, setDialogOpen] = useState(false);
+  const [pairingLabel, setPairingLabel] = useState("");
+  const [isCreatingPairingLink, setIsCreatingPairingLink] = useState(false);
+
+  const handleCreatePairingLink = useCallback(async () => {
+    setIsCreatingPairingLink(true);
+    try {
+      await createServerPairingCredential(pairingLabel);
+      setPairingLabel("");
+      setDialogOpen(false);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Failed to create pairing URL.";
+      toastManager.add(
+        stackedThreadToast({
+          type: "error",
+          title: "Could not create pairing URL",
+          description: message,
+        }),
+      );
+    } finally {
+      setIsCreatingPairingLink(false);
+    }
+  }, [pairingLabel]);
+
+  if (!isPhoneTier) return null;
+  return (
+    <Dialog
+      open={dialogOpen}
+      onOpenChange={(open) => {
+        setDialogOpen(open);
+        if (!open) {
+          setPairingLabel("");
+        }
+      }}
+    >
+      <DialogTrigger
+        render={
+          <Button size="xs" variant="default">
+            <PlusIcon className="size-3" />
+            Create link
+          </Button>
+        }
+      />
+      <DialogPopup className="max-w-sm">
+        <DialogHeader>
+          <DialogTitle>Create pairing link</DialogTitle>
+          <DialogDescription>
+            Generate a one-time link that another device can use to pair with this backend as an
+            authorized client.
+          </DialogDescription>
+        </DialogHeader>
+        <DialogPanel>
+          <label className="block">
+            <span className="mb-1.5 block text-xs font-medium text-foreground">
+              Client label (optional)
+            </span>
+            <Input
+              value={pairingLabel}
+              onChange={(event) => setPairingLabel(event.target.value)}
+              placeholder="e.g. Living room iPad"
+              disabled={isCreatingPairingLink}
+              autoFocus
+            />
+          </label>
+        </DialogPanel>
+        <DialogFooter variant="bare">
+          <Button
+            variant="outline"
+            disabled={isCreatingPairingLink}
+            onClick={() => setDialogOpen(false)}
+          >
+            Cancel
+          </Button>
+          <Button disabled={isCreatingPairingLink} onClick={() => void handleCreatePairingLink()}>
+            {isCreatingPairingLink ? "Creating…" : "Create link"}
+          </Button>
+        </DialogFooter>
+      </DialogPopup>
+    </Dialog>
+  );
+}
 
 type PairingClientsListProps = {
   endpointUrl: string | null | undefined;
