@@ -67,6 +67,7 @@ import {
   type LinkedAccessCheck,
 } from "./linkedAccessCheck.ts";
 import { makeLinkedAccessAsker } from "./linkedAccessCheckHttp.ts";
+import { linkedAccessRevocation } from "./linkedAccessRevocation.ts";
 import type { RelayChannelSessionFactory } from "./RelayChannelRegistry.ts";
 import type { ProjectionRepositoryError } from "../persistence/Errors.ts";
 import {
@@ -444,26 +445,28 @@ const makeHubConnectorService = (dependencies: HubConnectorLiveDependencies) =>
     // withdrawn local authorization or an access the Hub withdrew or narrowed
     // ends them, like the relay lease. Its unredeemed linked codes go with them,
     // so a code issued just before cannot link it again.
-    const revokeLinkedSessions = (selector: LinkedSessionSelector) =>
-      Option.isNone(authSessions)
-        ? Promise.resolve()
-        : runPromise(
-            Effect.all(
-              [
-                authSessions.value.revokeLinked(selector),
-                linkedCodes === undefined
-                  ? Effect.void
-                  : linkedCodes.revoke(linkedCodeSelector(selector)),
-              ],
-              { discard: true },
-            ).pipe(
-              Effect.catchCause((cause) =>
-                Effect.logError("Failed to revoke Hub-linked direct sessions", { cause }),
-              ),
-            ),
-          );
+    // `resweep` sweeps the sessions again a few seconds later, for a code redeemed during the
+    // revocation (`linkedAccessRevocation`). Only where the device cannot legitimately link again
+    // within those seconds: the second sweep would end a link it rightly got after the first.
+    const revokeLinkedSessions = (
+      selector: LinkedSessionSelector,
+      options: { readonly resweep: boolean } = { resweep: false },
+    ) => {
+      if (Option.isNone(authSessions)) return Promise.resolve();
+      const revocation = linkedAccessRevocation({
+        revokeCodes:
+          linkedCodes === undefined
+            ? Effect.void
+            : linkedCodes.revoke(linkedCodeSelector(selector)),
+        revokeSessions: authSessions.value.revokeLinked(selector),
+      });
+      const done = runPromise(revocation.now);
+      if (options.resweep) void done.then(() => runPromise(revocation.resweep));
+      return done;
+    };
     // A device's pending codes go with its sessions, narrowed the same way (all roles).
     const linkedCodeSelector = (selector: LinkedSessionSelector): LinkedCodeSelector => {
+      if ("allLinks" in selector) return selector;
       if (!("clientFingerprint" in selector)) return { enrollmentId: selector.enrollmentId };
       const { roles: _roles, ...narrowed } = selector;
       return narrowed;
@@ -830,12 +833,18 @@ const makeHubConnectorService = (dependencies: HubConnectorLiveDependencies) =>
       },
       onE2eeEnrollmentRevoked: async (frame) => {
         await sessionDirectory.revokeEnrollment(frame);
-        await revokeLinkedSessions({ enrollmentId: frame.enrollmentId });
+        // The enrollment is gone for good: nothing links under it again.
+        await revokeLinkedSessions({ enrollmentId: frame.enrollmentId }, { resweep: true });
         await forgetPushEnrollment(frame.enrollmentId);
       },
       features: [NODE_LINKED_ACCESS_CHECK_FEATURE],
       onOnline: () => linkedAccessCheck?.request("online"),
       onLinkedAccessChanged: () => linkedAccessCheck?.request("nudge"),
+      // A TLS-authenticated Hub said this node is revoked: every link it issued on the Hub's
+      // word ends now, and the devices link again once the node is enrolled again. Pairings the
+      // owner made by hand and the owner's own sessions carry no link and stay.
+      // A revoked node issues no link until it enrolls again.
+      onRevoked: () => void revokeLinkedSessions({ allLinks: true }, { resweep: true }),
       processLock,
       // Only a lock actually held: past an unusable one the connector asks
       // again each time it needs the identity.
@@ -870,14 +879,19 @@ const makeHubConnectorService = (dependencies: HubConnectorLiveDependencies) =>
                 }),
               ),
             ask: makeLinkedAccessAsker({ hubOrigin, identity, connector, signal: abort.signal }),
+            // Withdrawn access can't link again, and a narrowed device links again only below
+            // the roles swept.
             revoke: (device, roles) =>
-              revokeLinkedSessions({
-                clientFingerprint: device.clientFingerprint,
-                trustSource: device.trustSource,
-                enrollmentId: device.enrollmentId,
-                accountId: device.accountId,
-                ...(roles === undefined ? {} : { roles }),
-              }),
+              revokeLinkedSessions(
+                {
+                  clientFingerprint: device.clientFingerprint,
+                  trustSource: device.trustSource,
+                  enrollmentId: device.enrollmentId,
+                  accountId: device.accountId,
+                  ...(roles === undefined ? {} : { roles }),
+                },
+                { resweep: true },
+              ),
             isOnline: () => connector.status().state === "online",
             now: Date.now,
             random: Math.random,

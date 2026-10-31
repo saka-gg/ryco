@@ -93,4 +93,46 @@ it.layer(NodeServices.layer)("LinkedAccessCodes", (it) => {
         expect(yield* codes.listPending()).toEqual([]);
       }).pipe(Effect.provide(layer)),
   );
+
+  it.effect(
+    "revokes every unredeemed linked code, and no other code, when the Hub revokes the node",
+    () =>
+      Effect.gen(function* () {
+        const bootstrap = yield* BootstrapCredentialService;
+        const codes = yield* makeLinkedAccessCodes;
+        const enrolled = yield* bootstrap.issueOneTimeToken({
+          ttl: Duration.minutes(2),
+          subject: "hub-linked",
+          link: {
+            trustSource: "account-enrolled",
+            enrollmentId: "enr_laptop",
+            clientFingerprint: "fp-laptop",
+            role: "owner",
+            accountId: "acct_1",
+          },
+        });
+        const local = yield* bootstrap.issueOneTimeToken({
+          ttl: Duration.minutes(2),
+          subject: "hub-linked",
+          link: {
+            trustSource: "locally-verified",
+            enrollmentId: null,
+            clientFingerprint: "fp-desk",
+            role: "viewer",
+          },
+        });
+        // The owner's own pairing links (a pasted code, an owner code) have no link.
+        const pasted = yield* bootstrap.issueOneTimeToken();
+        const ownerCode = yield* bootstrap.issueOneTimeToken({ role: "owner" });
+
+        expect(yield* codes.revoke({ allLinks: true })).toBe(2);
+        for (const code of [enrolled, local]) {
+          const refused = yield* Effect.flip(bootstrap.consume(code.credential));
+          expect(refused.message).toContain("no longer available");
+        }
+        yield* bootstrap.consume(pasted.credential);
+        yield* bootstrap.consume(ownerCode.credential);
+        expect(yield* codes.revoke({ allLinks: true })).toBe(0);
+      }).pipe(Effect.provide(layer)),
+  );
 });

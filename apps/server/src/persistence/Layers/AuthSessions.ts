@@ -323,8 +323,18 @@ const makeAuthSessionRepository = Effect.gen(function* () {
     Request: RevokeLinkedAuthSessionsInput,
     Result: Schema.Struct({ sessionId: AuthSessionId, chainId: AuthSessionId }),
     execute: (input) =>
-      !("clientFingerprint" in input)
+      "allLinks" in input
         ? sql`
+            UPDATE auth_sessions
+            SET revoked_at = ${input.revokedAt}
+            WHERE link_trust_source IS NOT NULL
+              AND revoked_at IS NULL
+            RETURNING
+              session_id AS "sessionId",
+              COALESCE(chain_id, session_id) AS "chainId"
+          `
+        : !("clientFingerprint" in input)
+          ? sql`
             UPDATE auth_sessions
             SET revoked_at = ${input.revokedAt}
             WHERE link_enrollment_id = ${input.enrollmentId}
@@ -333,7 +343,7 @@ const makeAuthSessionRepository = Effect.gen(function* () {
               session_id AS "sessionId",
               COALESCE(chain_id, session_id) AS "chainId"
           `
-        : sql`
+          : sql`
             UPDATE auth_sessions
             SET revoked_at = ${input.revokedAt}
             WHERE ${sql.and([

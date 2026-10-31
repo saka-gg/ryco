@@ -16,6 +16,13 @@ account, device or Hub session ends, the node revokes or narrows that member's l
 | The connector comes online                                   | Asks the Hub (within 10 s, spread across nodes)        |
 | Every 15 minutes while any linked session stands             | Asks the Hub                                           |
 | The Hub sends `e2ee.enrollment-revoked`                      | Revokes that enrollment's links at once (as before)    |
+| The Hub refuses the node's connection as revoked             | Revokes every linked session and unredeemed code       |
+
+A node the Hub revoked (a relay `error` with `revoked` or `node_revoked`, which puts the connector
+in its terminal `revoked` state) can no longer ask about its links, so it ends all of them, of either
+trust source, each time it enters that state. Only sessions and codes with a link are touched: the
+owner's own sessions and pairings made by hand stay. A failure the connector retries never does
+this. Devices link again over the relay once the node is enrolled again.
 
 The Hub sends `node.linked-access.changed` only on a node connection whose relay auth listed the
 `linked-access-check` feature ([relay-protocol.md](relay-protocol.md)), so an older node never

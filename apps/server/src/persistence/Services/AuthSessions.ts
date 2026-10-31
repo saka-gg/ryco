@@ -105,7 +105,8 @@ export type RevokeOtherAuthSessionsInput = typeof RevokeOtherAuthSessionsInput.T
  * Linked sessions to end because their device lost its authorization: its Hub
  * enrollment was revoked, its local client authorization was withdrawn, or the
  * Hub withdrew or lowered its access. By client key, optionally narrowed, or by
- * Hub enrollment alone.
+ * Hub enrollment alone; or every linked session, because the Hub revoked this
+ * node. A session without a link is never selected.
  */
 export const RevokeLinkedAuthSessionsInput = Schema.Union([
   Schema.Struct({
@@ -122,6 +123,7 @@ export const RevokeLinkedAuthSessionsInput = Schema.Union([
   }),
   // Last: a selector with a client key is never read as this one.
   Schema.Struct({ enrollmentId: Schema.String, revokedAt: Schema.DateTimeUtcFromString }),
+  Schema.Struct({ allLinks: Schema.Literal(true), revokedAt: Schema.DateTimeUtcFromString }),
 ]);
 export type RevokeLinkedAuthSessionsInput = typeof RevokeLinkedAuthSessionsInput.Type;
 

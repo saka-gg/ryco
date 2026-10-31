@@ -596,6 +596,49 @@ it.layer(NodeServices.layer)("SessionCredentialServiceLive", (it) => {
     }).pipe(Effect.provide(withClock())),
   );
 
+  it.effect("ends every Hub-linked session, and only those, when the Hub revokes the node", () =>
+    Effect.gen(function* () {
+      const sessions = yield* SessionCredentialService;
+      const enrolled = yield* sessions.issue({
+        method: "bearer-session-token",
+        subject: "hub-linked",
+        link: studioLink,
+      });
+      const local = yield* sessions.issue({
+        method: "bearer-session-token",
+        subject: "hub-linked",
+        link: {
+          trustSource: "locally-verified",
+          enrollmentId: null,
+          clientFingerprint: "fp-desk",
+          role: "operator",
+        },
+      });
+      const owner = yield* sessions.issue({
+        method: "bearer-session-token",
+        subject: "owner-bootstrap",
+        role: "owner",
+      });
+      const cookie = yield* sessions.issue({ subject: "browser", role: "owner" });
+      const pasted = yield* sessions.issue({ method: "bearer-session-token", subject: "paired" });
+      const verifiedLink = yield* sessions.verify(local.token);
+      const linkSocket = yield* sessions
+        .awaitEnd({ sessionId: verifiedLink.sessionId, chainId: verifiedLink.chainId })
+        .pipe(Effect.forkChild({ startImmediately: true }));
+
+      expect(yield* sessions.revokeLinked({ allLinks: true })).toBe(2);
+      // A live linked socket closes at once.
+      yield* Fiber.join(linkSocket);
+      expect((yield* Effect.flip(sessions.verify(enrolled.token))).message).toContain("revoked");
+      expect((yield* Effect.flip(sessions.verify(local.token))).message).toContain("revoked");
+      // The owner's sessions and a pairing made by hand carry no link and stay.
+      for (const kept of [owner, cookie, pasted]) {
+        expect((yield* sessions.verify(kept.token)).link).toBeNull();
+      }
+      expect(yield* sessions.revokeLinked({ allLinks: true })).toBe(0);
+    }).pipe(Effect.provide(withClock())),
+  );
+
   it.effect("narrows a linked revocation by trust source, enrollment, account and role", () =>
     Effect.gen(function* () {
       const sessions = yield* SessionCredentialService;
