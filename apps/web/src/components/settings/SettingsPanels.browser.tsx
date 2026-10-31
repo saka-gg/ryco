@@ -1804,7 +1804,8 @@ describe("GeneralSettingsPanel observability", () => {
     await expect.element(linkTarget).toMatchTextContent("Browser");
   });
 
-  it("creates and shows a pairing link when network access is enabled", async () => {
+  it("adds a device through the dialog and lists its link when network access is enabled", async () => {
+    await page.viewport(1280, 800);
     window.desktopBridge = createDesktopBridgeStub({
       serverExposureState: {
         mode: "network-accessible",
@@ -1813,7 +1814,33 @@ describe("GeneralSettingsPanel observability", () => {
         tailscaleServeEnabled: false,
         tailscaleServePort: 443,
       },
+      advertisedEndpoints: [
+        {
+          id: "desktop-loopback:3773",
+          label: "This machine",
+          provider: { id: "desktop-core", label: "Desktop", kind: "core", isAddon: false },
+          httpBaseUrl: "http://127.0.0.1:3773/",
+          wsBaseUrl: "ws://127.0.0.1:3773/",
+          reachability: "loopback",
+          compatibility: { hostedHttpsApp: "mixed-content-blocked", desktopApp: "compatible" },
+          source: "desktop-core",
+          status: "available",
+        },
+        {
+          id: "desktop-lan:http://192.168.1.44:3773",
+          label: "Local network",
+          provider: { id: "desktop-core", label: "Desktop", kind: "core", isAddon: false },
+          httpBaseUrl: "http://192.168.1.44:3773/",
+          wsBaseUrl: "ws://192.168.1.44:3773/",
+          reachability: "lan",
+          compatibility: { hostedHttpsApp: "mixed-content-blocked", desktopApp: "compatible" },
+          source: "desktop-core",
+          status: "available",
+        },
+      ],
     });
+    // An owner who once made loopback the default: the QR code still never encodes it.
+    useUiStateStore.setState({ defaultAdvertisedEndpointKey: "desktop-core:loopback:http" });
     let pairingLinks: Array<AuthAccessSnapshot["pairingLinks"][number]> = [];
     let clientSessions: Array<AuthAccessSnapshot["clientSessions"][number]> = [
       makeClientSession({
@@ -1838,12 +1865,33 @@ describe("GeneralSettingsPanel observability", () => {
       pairingLinks,
       clientSessions,
     });
+    const revokedPairingLinkIds: string[] = [];
+    let mintedCount = 0;
     vi.stubGlobal(
       "fetch",
       vi.fn<typeof fetch>().mockImplementation(async (input, init) => {
         const url = String(input);
         const method = init?.method ?? "GET";
+        if (url.endsWith("/api/auth/pairing-links/revoke") && method === "POST") {
+          revokedPairingLinkIds.push((JSON.parse(String(init?.body)) as { id: string }).id);
+          return new Response(JSON.stringify({ revoked: true }), {
+            status: 200,
+            headers: { "content-type": "application/json" },
+          });
+        }
         if (url.endsWith("/api/auth/pairing-token") && method === "POST") {
+          mintedCount += 1;
+          if (mintedCount === 1) {
+            // The code the dialog mints when it opens, before it has a name.
+            return new Response(
+              JSON.stringify({
+                id: "pairing-link-0",
+                credential: "first-token",
+                expiresAt: "2036-04-10T00:05:00.000Z",
+              }),
+              { status: 200, headers: { "content-type": "application/json" } },
+            );
+          }
           pairingLinks = [
             makePairingLink({
               id: "pairing-link-1",
@@ -1908,10 +1956,21 @@ describe("GeneralSettingsPanel observability", () => {
     await expect.element(page.getByText("Authorized clients")).toBeInTheDocument();
     await expect.element(page.getByText("Revoke others")).toBeInTheDocument();
     await expect.element(page.getByText("This Mac", { exact: true })).toBeInTheDocument();
-    await page.getByRole("button", { name: "Create link", exact: true }).click();
-    await expect.element(page.getByText("Create pairing link")).toBeInTheDocument();
-    await page.getByRole("button", { name: "Create link", exact: true }).click();
+    // One entry in the backend header, the same one in Authorized clients.
+    await expect.element(page.getByRole("button", { name: "Create link" })).not.toBeInTheDocument();
+    await page.getByRole("button", { name: "Add a device" }).last().click();
+    await page.getByRole("button", { name: "More options" }).click();
+    await page.getByLabelText("Device name (optional)").fill("Julius iPhone");
+    await page.getByRole("button", { name: "New code with this name" }).click();
+    await expect
+      .element(page.getByRole("img", { name: "Pairing link — scan to open on another device" }))
+      .toBeInTheDocument();
+    await page.getByRole("tab", { name: "Computer" }).click();
+    await expect
+      .element(page.getByText("http://192.168.1.44:3773", { exact: true }))
+      .toBeInTheDocument();
     authAccessHarness.emitPairingLinkUpserted(pairingLinks[0]!);
+    await page.getByRole("button", { name: "Close" }).click();
     authAccessHarness.emitClientUpserted(clientSessions[1]!);
     await expect
       .element(page.getByText("Client · Mobile · iOS · Safari · 192.168.1.88"))
@@ -1920,6 +1979,8 @@ describe("GeneralSettingsPanel observability", () => {
       .element(page.getByRole("button", { name: /^Copy pairing URL for:/ }))
       .toBeInTheDocument();
     await expect.element(page.getByText("Revoke others")).toBeInTheDocument();
+    // Naming the device replaced only the dialog's own unused code.
+    expect(revokedPairingLinkIds).toEqual(["pairing-link-0"]);
   });
 
   it("revokes all other paired clients from settings", async () => {

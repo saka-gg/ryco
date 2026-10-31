@@ -35,6 +35,7 @@ import {
   useRelativeTimeTick,
 } from "./settingsLayout";
 import { Input } from "../ui/input";
+import { usePresentationTier } from "../../hooks/usePresentationTier";
 import {
   Dialog,
   DialogClose,
@@ -72,11 +73,20 @@ import { DesktopKeepAwakeRow } from "./DesktopKeepAwakeRow";
 import { PAIRING_LINK_TARGET_ID } from "./settingsSearchReveal";
 import { savedChangeRelaunch, useDesktopRelaunchGuard } from "./useDesktopRelaunchGuard";
 import {
+  endpointDefaultPreferenceKey,
+  isHostedAppPairingUrl,
+  isQrShareableBaseUrl,
+  isTailscaleHttpsEndpoint,
+  resolveAdvertisedEndpointPairingUrl,
   savedBackendConnectionActionLabel,
   savedBackendNeedsRepair,
   savedBackendRepairHost,
   savedPairingLifetimeNote,
+  selectPairingEndpoint,
+  selectQrEndpoint,
 } from "./ConnectionsSettings.logic";
+import type { AddDeviceCode, AddDeviceOperations } from "./AddDeviceDialog.logic";
+import { AddDeviceButton, AddDeviceDialogHost } from "./AddDeviceEntry";
 import {
   Menu,
   MenuGroup,
@@ -443,55 +453,6 @@ function removeDesktopClientSession(
   return current.filter((clientSession) => clientSession.sessionId !== sessionId);
 }
 
-function selectPairingEndpoint(
-  endpoints: ReadonlyArray<AdvertisedEndpoint>,
-  defaultEndpointKey?: string | null,
-): AdvertisedEndpoint | null {
-  const availableEndpoints = endpoints.filter((endpoint) => endpoint.status !== "unavailable");
-  if (defaultEndpointKey) {
-    const selectedEndpoint = availableEndpoints.find(
-      (endpoint) => endpointDefaultPreferenceKey(endpoint) === defaultEndpointKey,
-    );
-    if (selectedEndpoint) {
-      return selectedEndpoint;
-    }
-  }
-  return (
-    availableEndpoints.find((endpoint) => endpoint.isDefault) ??
-    availableEndpoints.find((endpoint) => endpoint.reachability !== "loopback") ??
-    availableEndpoints.find((endpoint) => endpoint.compatibility.hostedHttpsApp === "compatible") ??
-    null
-  );
-}
-
-function isTailscaleHttpsEndpoint(endpoint: AdvertisedEndpoint): boolean {
-  return endpoint.id.startsWith("tailscale-magicdns:");
-}
-
-function endpointDefaultPreferenceKey(endpoint: AdvertisedEndpoint): string {
-  if (endpoint.id.startsWith("desktop-loopback:") || endpoint.id.startsWith("server-loopback:")) {
-    return "desktop-core:loopback:http";
-  }
-  if (endpoint.id.startsWith("desktop-lan:") || endpoint.id.startsWith("server-network:")) {
-    return "desktop-core:lan:http";
-  }
-  if (endpoint.id.startsWith("tailscale-ip:")) {
-    return "tailscale:ip:http";
-  }
-  if (isTailscaleHttpsEndpoint(endpoint)) {
-    return "tailscale:magicdns:https";
-  }
-
-  let scheme = "unknown";
-  try {
-    scheme = new URL(endpoint.httpBaseUrl).protocol.replace(/:$/u, "");
-  } catch {
-    // Keep the stored preference stable even if a custom endpoint is malformed.
-  }
-
-  return `${endpoint.provider.id}:${endpoint.reachability}:${scheme}:${endpoint.label}`;
-}
-
 function hostedHttpsCompatibilityLabel(
   compatibility: AdvertisedEndpoint["compatibility"]["hostedHttpsApp"],
 ): string | null {
@@ -518,31 +479,32 @@ function hostedHttpsCompatibilityDescription(
   }
 }
 
-function resolveAdvertisedEndpointPairingUrl(
-  endpoint: AdvertisedEndpoint,
-  credential: string,
-): string {
-  if (endpoint.compatibility.hostedHttpsApp === "compatible") {
-    return (
-      resolveHostedPairingUrl(endpoint.httpBaseUrl, credential) ??
-      resolveDesktopPairingUrl(endpoint.httpBaseUrl, credential)
-    );
-  }
-  return resolveDesktopPairingUrl(endpoint.httpBaseUrl, credential);
+/**
+ * A minted pairing code for the "Add a device" dialog. The response is read
+ * off JSON undecoded, so `expiresAt` arrives as an ISO string.
+ */
+function toAddDeviceCode(
+  result: Awaited<ReturnType<typeof createServerPairingCredential>>,
+): AddDeviceCode {
+  const expiresAt: unknown = result.expiresAt;
+  return {
+    id: result.id,
+    credential: result.credential,
+    label: result.label ?? null,
+    expiresAt: typeof expiresAt === "string" ? expiresAt : DateTime.formatIso(result.expiresAt),
+  };
 }
+
+/** The dialog's only reach into the node: mint a client code, revoke one code. */
+const ADD_DEVICE_OPERATIONS: AddDeviceOperations = {
+  createCode: async (label) =>
+    toAddDeviceCode(await createServerPairingCredential(label ?? undefined)),
+  revokeCode: (id) => revokeServerPairingLink(id),
+};
 
 function resolveCurrentOriginPairingUrl(credential: string): string {
   const url = new URL("/pair", window.location.href);
   return setPairingTokenOnUrl(url, credential).toString();
-}
-
-function isHostedAppPairingUrl(value: string): boolean {
-  try {
-    const url = new URL(value);
-    return url.pathname === "/pair" && url.searchParams.has("host");
-  } catch {
-    return false;
-  }
 }
 
 type PairingLinkListRowProps = {
@@ -608,6 +570,29 @@ const PairingLinkListRow = memo(function PairingLinkListRow({
       : isLoopbackHostname(window.location.hostname)
         ? null
         : currentOriginPairingUrl);
+  // A QR code never encodes loopback. A saved loopback default still copies as
+  // the row's link, but the code shows the endpoint another device can reach
+  // (`selectQrEndpoint`); with no endpoint list, the fallback address must pass
+  // the same rule.
+  const qrPairingUrl = useMemo(() => {
+    const selection = selectQrEndpoint(endpoints, { defaultEndpointKey });
+    if (selection !== null) {
+      return selection.qrShareable
+        ? resolveAdvertisedEndpointPairingUrl(selection.endpoint, pairingLink.credential)
+        : null;
+    }
+    if (endpointPairingUrl !== null || shareablePairingUrl === null) return null;
+    const fallbackBaseUrl =
+      endpointUrl != null && endpointUrl !== "" ? endpointUrl : window.location.origin;
+    return isQrShareableBaseUrl(fallbackBaseUrl) ? shareablePairingUrl : null;
+  }, [
+    defaultEndpointKey,
+    endpointPairingUrl,
+    endpointUrl,
+    endpoints,
+    pairingLink.credential,
+    shareablePairingUrl,
+  ]);
   const revealValue = shareablePairingUrl ?? pairingLink.credential;
   const isShareableHostedAppPairingUrl =
     shareablePairingUrl !== null && isHostedAppPairingUrl(shareablePairingUrl);
@@ -777,7 +762,7 @@ const PairingLinkListRow = memo(function PairingLinkListRow({
               {primaryLabel}
             </h3>
             <Popover>
-              {shareablePairingUrl ? (
+              {qrPairingUrl ? (
                 <>
                   <PopoverTrigger
                     openOnHover
@@ -795,7 +780,7 @@ const PairingLinkListRow = memo(function PairingLinkListRow({
                   </PopoverTrigger>
                   <PopoverPopup side="top" align="start" tooltipStyle className="w-max">
                     <QRCodeSvg
-                      value={shareablePairingUrl}
+                      value={qrPairingUrl}
                       size={88}
                       level="M"
                       marginSize={2}
@@ -887,16 +872,21 @@ const PairingLinkListRow = memo(function PairingLinkListRow({
                   onFocus={(event) => event.currentTarget.select()}
                   onClick={(event) => event.currentTarget.select()}
                 />
-                {shareablePairingUrl ? (
+                {qrPairingUrl ? (
                   <div className="flex justify-center rounded-xl border border-border/60 bg-muted/30 p-4">
                     <QRCodeSvg
-                      value={shareablePairingUrl}
+                      value={qrPairingUrl}
                       size={132}
                       level="M"
                       marginSize={2}
                       title="Pairing link — scan to open on another device"
                     />
                   </div>
+                ) : shareablePairingUrl ? (
+                  <p className="text-center text-[11px] text-muted-foreground/70">
+                    No QR for this endpoint. Another device scanning a loopback link would reach
+                    itself.
+                  </p>
                 ) : null}
               </DialogPanel>
               <DialogFooter variant="bare">
@@ -1006,37 +996,15 @@ type AuthorizedClientsHeaderActionProps = {
   clientSessions: ReadonlyArray<ServerClientSessionRecord>;
   isRevokingOtherClients: boolean;
   onRevokeOtherClients: () => void;
+  onAddDevice: () => void;
 };
 
 const AuthorizedClientsHeaderAction = memo(function AuthorizedClientsHeaderAction({
   clientSessions,
   isRevokingOtherClients,
   onRevokeOtherClients,
+  onAddDevice,
 }: AuthorizedClientsHeaderActionProps) {
-  const [dialogOpen, setDialogOpen] = useState(false);
-  const [pairingLabel, setPairingLabel] = useState("");
-  const [isCreatingPairingLink, setIsCreatingPairingLink] = useState(false);
-
-  const handleCreatePairingLink = useCallback(async () => {
-    setIsCreatingPairingLink(true);
-    try {
-      await createServerPairingCredential(pairingLabel);
-      setPairingLabel("");
-      setDialogOpen(false);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "Failed to create pairing URL.";
-      toastManager.add(
-        stackedThreadToast({
-          type: "error",
-          title: "Could not create pairing URL",
-          description: message,
-        }),
-      );
-    } finally {
-      setIsCreatingPairingLink(false);
-    }
-  }, [pairingLabel]);
-
   return (
     <div className="flex items-center gap-2">
       <Button
@@ -1049,62 +1017,100 @@ const AuthorizedClientsHeaderAction = memo(function AuthorizedClientsHeaderActio
       >
         {isRevokingOtherClients ? "Revoking…" : "Revoke others"}
       </Button>
-      <Dialog
-        open={dialogOpen}
-        onOpenChange={(open) => {
-          setDialogOpen(open);
-          if (!open) {
-            setPairingLabel("");
-          }
-        }}
-      >
-        <DialogTrigger
-          render={
-            <Button size="xs" variant="default">
-              <PlusIcon className="size-3" />
-              Create link
-            </Button>
-          }
-        />
-        <DialogPopup className="max-w-sm">
-          <DialogHeader>
-            <DialogTitle>Create pairing link</DialogTitle>
-            <DialogDescription>
-              Generate a one-time link that another device can use to pair with this backend as an
-              authorized client.
-            </DialogDescription>
-          </DialogHeader>
-          <DialogPanel>
-            <label className="block">
-              <span className="mb-1.5 block text-xs font-medium text-foreground">
-                Client label (optional)
-              </span>
-              <Input
-                value={pairingLabel}
-                onChange={(event) => setPairingLabel(event.target.value)}
-                placeholder="e.g. Living room iPad"
-                disabled={isCreatingPairingLink}
-                autoFocus
-              />
-            </label>
-          </DialogPanel>
-          <DialogFooter variant="bare">
-            <Button
-              variant="outline"
-              disabled={isCreatingPairingLink}
-              onClick={() => setDialogOpen(false)}
-            >
-              Cancel
-            </Button>
-            <Button disabled={isCreatingPairingLink} onClick={() => void handleCreatePairingLink()}>
-              {isCreatingPairingLink ? "Creating…" : "Create link"}
-            </Button>
-          </DialogFooter>
-        </DialogPopup>
-      </Dialog>
+      {/* The frozen phone tier keeps the link it had (AGENTS.md); others get the dialog. */}
+      <PhonePairingLinkAction />
+      <AddDeviceButton onClick={onAddDevice} />
     </div>
   );
 });
+
+/**
+ * The phone tier's one-time pairing link, as it was before the "Add a device" dialog. The web
+ * phone tier is frozen: it keeps this and gets nothing new.
+ */
+function PhonePairingLinkAction() {
+  const isPhoneTier = usePresentationTier() === "phone";
+  const [dialogOpen, setDialogOpen] = useState(false);
+  const [pairingLabel, setPairingLabel] = useState("");
+  const [isCreatingPairingLink, setIsCreatingPairingLink] = useState(false);
+
+  const handleCreatePairingLink = useCallback(() => {
+    setIsCreatingPairingLink(true);
+    void createServerPairingCredential(pairingLabel)
+      .then(() => {
+        setPairingLabel("");
+        setDialogOpen(false);
+      })
+      .catch((error: unknown) => {
+        const message = error instanceof Error ? error.message : "Failed to create pairing URL.";
+        toastManager.add(
+          stackedThreadToast({
+            type: "error",
+            title: "Could not create pairing URL",
+            description: message,
+          }),
+        );
+      })
+      .finally(() => setIsCreatingPairingLink(false));
+  }, [pairingLabel]);
+
+  if (!isPhoneTier) return null;
+  return (
+    <Dialog
+      open={dialogOpen}
+      onOpenChange={(open) => {
+        setDialogOpen(open);
+        if (!open) {
+          setPairingLabel("");
+        }
+      }}
+    >
+      <DialogTrigger
+        render={
+          <Button size="xs" variant="default">
+            <PlusIcon className="size-3" />
+            Create link
+          </Button>
+        }
+      />
+      <DialogPopup className="max-w-sm">
+        <DialogHeader>
+          <DialogTitle>Create pairing link</DialogTitle>
+          <DialogDescription>
+            Generate a one-time link that another device can use to pair with this backend as an
+            authorized client.
+          </DialogDescription>
+        </DialogHeader>
+        <DialogPanel>
+          <label className="block">
+            <span className="mb-1.5 block text-xs font-medium text-foreground">
+              Client label (optional)
+            </span>
+            <Input
+              value={pairingLabel}
+              onChange={(event) => setPairingLabel(event.target.value)}
+              placeholder="e.g. Living room iPad"
+              disabled={isCreatingPairingLink}
+              autoFocus
+            />
+          </label>
+        </DialogPanel>
+        <DialogFooter variant="bare">
+          <Button
+            variant="outline"
+            disabled={isCreatingPairingLink}
+            onClick={() => setDialogOpen(false)}
+          >
+            Cancel
+          </Button>
+          <Button disabled={isCreatingPairingLink} onClick={handleCreatePairingLink}>
+            {isCreatingPairingLink ? "Creating…" : "Create link"}
+          </Button>
+        </DialogFooter>
+      </DialogPopup>
+    </Dialog>
+  );
+}
 
 type PairingClientsListProps = {
   endpointUrl: string | null | undefined;
@@ -1618,6 +1624,8 @@ export function ConnectionsSettings() {
     string | null
   >(null);
   const [isRevokingOtherDesktopClients, setIsRevokingOtherDesktopClients] = useState(false);
+  const [addDeviceOpening, setAddDeviceOpening] = useState(0);
+  const [isAddDeviceOpen, setIsAddDeviceOpen] = useState(false);
   const [addBackendDialogOpen, setAddBackendDialogOpen] = useState(false);
   const [savedBackendMode, setSavedBackendMode] = useState<"remote" | "ssh">("remote");
   const [savedBackendHost, setSavedBackendHost] = useState("");
@@ -1872,6 +1880,29 @@ export function ConnectionsSettings() {
       setIsUpdatingTailscaleServe(false);
     }
   }, [desktopBridge, desktopServerExposureState]);
+
+  const handleOpenAddDevice = useCallback(() => {
+    setAddDeviceOpening((opening) => opening + 1);
+    setIsAddDeviceOpen(true);
+  }, []);
+
+  // The dialog's "Turn on network access" opens the same confirmation as the
+  // switch; it never changes exposure by itself.
+  const canTurnOnNetworkAccess =
+    desktopBridge !== undefined &&
+    desktopServerExposureState !== null &&
+    desktopServerExposureState.mode !== "network-accessible" &&
+    !isUpdatingDesktopServerExposure;
+  const handleTurnOnNetworkAccess = useMemo(
+    () =>
+      canTurnOnNetworkAccess
+        ? () => {
+            setPendingDesktopServerExposureMode("network-accessible");
+            setIsDesktopServerExposureDialogOpen(true);
+          }
+        : null,
+    [canTurnOnNetworkAccess],
+  );
 
   const handleRevokeDesktopPairingLink = useCallback(async (id: string) => {
     setRevokingDesktopPairingLinkId(id);
@@ -2762,7 +2793,10 @@ export function ConnectionsSettings() {
     <SettingsPageContainer>
       {canManageLocalBackend ? (
         <>
-          <SettingsSection title="Manage local backend">
+          <SettingsSection
+            title="Manage local backend"
+            headerAction={<AddDeviceButton onClick={handleOpenAddDevice} />}
+          >
             {primaryVersionMismatch ? (
               <SettingsRow
                 title="Version drift"
@@ -2797,12 +2831,24 @@ export function ConnectionsSettings() {
                   clientSessions={desktopClientSessions}
                   isRevokingOtherClients={isRevokingOtherDesktopClients}
                   onRevokeOtherClients={handleRevokeOtherDesktopClients}
+                  onAddDevice={handleOpenAddDevice}
                 />
               }
             >
               {renderAuthorizedClients("current")}
             </SettingsSection>
           ) : null}
+          <AddDeviceDialogHost
+            open={isAddDeviceOpen}
+            onOpenChange={setIsAddDeviceOpen}
+            opening={addDeviceOpening}
+            operations={ADD_DEVICE_OPERATIONS}
+            pairingLinks={desktopPairingLinks}
+            clientSessions={desktopClientSessions}
+            endpoints={visibleDesktopAdvertisedEndpoints}
+            defaultEndpointKey={defaultDesktopAdvertisedEndpointKey}
+            onTurnOnNetworkAccess={handleTurnOnNetworkAccess}
+          />
           <AlertDialog
             open={isDesktopServerExposureDialogOpen}
             onOpenChange={(open) => {
