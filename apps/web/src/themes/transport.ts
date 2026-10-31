@@ -117,7 +117,8 @@ export async function copyThemeToClipboard(theme: ThemeDefinition): Promise<void
   await navigator.clipboard.writeText(json);
 }
 
-export function downloadTheme(theme: ThemeDefinition): void {
+/** Saves `text` as a JSON file through the browser's download. */
+export function downloadJsonFile(fileName: string, text: string): void {
   if (
     typeof document === "undefined" ||
     typeof URL === "undefined" ||
@@ -125,16 +126,20 @@ export function downloadTheme(theme: ThemeDefinition): void {
   ) {
     throw new Error("Download not supported in this environment.");
   }
-  const blob = new Blob([serializeTheme(theme)], { type: "application/json" });
+  const blob = new Blob([text], { type: "application/json" });
   const url = URL.createObjectURL(blob);
   const anchor = document.createElement("a");
   anchor.href = url;
-  anchor.download = themeFilename(theme);
+  anchor.download = fileName;
   anchor.rel = "noopener";
   document.body.append(anchor);
   anchor.click();
   anchor.remove();
   URL.revokeObjectURL(url);
+}
+
+export function downloadTheme(theme: ThemeDefinition): void {
+  downloadJsonFile(themeFilename(theme), serializeTheme(theme));
 }
 
 export type ImportFromFileOptions = {
