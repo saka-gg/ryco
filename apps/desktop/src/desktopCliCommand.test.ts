@@ -232,6 +232,19 @@ describe("installing the ryco command", () => {
       "was not written by Ryco",
     );
     expect(FS.readFileSync(launcher, "utf8")).toBe("#!/bin/sh\necho mine\n");
+
+    // Nor a file a link at the staging name points to: the link is replaced, never written through.
+    const linked = setup();
+    const linkedLauncher = desktopCliLauncherPath(linked.environment);
+    const victim = Path.join(linked.homeDirectory, "notes.txt");
+    FS.mkdirSync(Path.dirname(linkedLauncher), { recursive: true });
+    FS.writeFileSync(victim, "my notes\n", { mode: 0o600 });
+    FS.symlinkSync(victim, `${linkedLauncher}.${process.pid}.tmp`);
+    await installDesktopCliCommand(linked.environment);
+    expect(FS.readFileSync(victim, "utf8")).toBe("my notes\n");
+    expect(FS.statSync(victim).mode & 0o777).toBe(0o600);
+    expect(FS.lstatSync(linkedLauncher).isFile()).toBe(true);
+    expect(FS.readFileSync(linkedLauncher, "utf8")).toContain(DESKTOP_CLI_MARKER);
   });
 
   it("removes only its own links, and never reads a large file to decide", async () => {

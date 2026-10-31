@@ -278,7 +278,9 @@ export async function writeDesktopCliLauncher(
   await FS.mkdir(Path.dirname(launcher), { recursive: true, mode: 0o700 });
   const staging = `${launcher}.${process.pid}.tmp`;
   try {
-    await FS.writeFile(staging, content, { mode: 0o755 });
+    // A fresh file: a link left at the staging name is removed, never written through.
+    await FS.rm(staging, { force: true });
+    await FS.writeFile(staging, content, { mode: 0o755, flag: "wx" });
     await FS.chmod(staging, 0o755);
     await FS.rename(staging, launcher);
   } catch (error) {
