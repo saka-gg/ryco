@@ -20,6 +20,8 @@ export interface NodeRowProps {
   readonly platformOs?: string | undefined;
   readonly label: string;
   readonly detail: string;
+  /** Which part of the way to the machine failed (`diagnoseNodeRoute`). */
+  readonly routeNotice?: string | null | undefined;
   /** Why the machine just dropped, when the node reported it froze. */
   readonly freezeNotice?: string | null | undefined;
   readonly transportLabel: string;
@@ -61,6 +63,11 @@ function NodeRowContent(props: NodeRowProps) {
         <Text className="text-xs font-ryco-medium text-foreground-muted" numberOfLines={2}>
           {props.transportLabel} · {props.detail}
         </Text>
+        {props.routeNotice ? (
+          <Text className="text-xs font-ryco-medium text-warning" numberOfLines={2}>
+            {props.routeNotice}
+          </Text>
+        ) : null}
         {props.freezeNotice ? (
           <Text className="text-xs font-ryco-medium text-warning" numberOfLines={2}>
             {props.freezeNotice}
@@ -111,7 +118,7 @@ export function NodeRow(props: NodeRowProps) {
     props.showDivider && "border-t border-border-subtle",
     props.disabled && "opacity-45",
   );
-  const accessibilityLabel = `${props.label}, ${props.transportLabel}, ${props.detail}, ${props.statusTone.label}${props.freezeNotice ? `, ${props.freezeNotice}` : ""}`;
+  const accessibilityLabel = `${props.label}, ${props.transportLabel}, ${props.detail}, ${props.statusTone.label}${props.routeNotice ? `, ${props.routeNotice}` : ""}${props.freezeNotice ? `, ${props.freezeNotice}` : ""}`;
 
   return (
     <View className={className}>

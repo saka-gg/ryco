@@ -15,6 +15,7 @@ import type { HostedHubNode } from "../../hostedHub/types";
 import {
   deriveHostedConnectionChip,
   deriveHostedEnvironmentConnectionChip,
+  deriveHostedEnvironmentRouteNotice,
   HOSTED_CONNECTING_STATUS_TEXT,
   hostedConnectionAnnouncement,
   hostedConnectionChipQuiet,
@@ -297,6 +298,7 @@ function sessionRecord(
     sessionEstablished: true,
     sessionRecoveredAfterUnknown: false,
     failure: null,
+    outageFailure: null,
     terminalNodeKey: null,
     syncFailed: false,
     snapshotAcceptedAt: 1,
@@ -447,6 +449,67 @@ describe("the open thread's connection chip", () => {
     expect(
       deriveHostedEnvironmentConnectionChip(environmentChipInput({ nodes: [SOURCE_NODE] })),
     ).toBeNull();
+  });
+});
+
+describe("the open thread's route line", () => {
+  const nowMs = new Date(2026, 9, 31, 15, 30).getTime();
+  const notice = (
+    overrides: Partial<HostedEnvironmentConnectionChipInput>,
+    ownRecord = overrides.record,
+  ) => deriveHostedEnvironmentRouteNotice({ ...environmentChipInput(overrides), ownRecord, nowMs });
+
+  it("is empty while the node answers", () => {
+    expect(notice({})).toBeNull();
+  });
+
+  it("names the Hub when the node's own connection waits out a DNS failure", () => {
+    const record = sessionRecord(TARGET_NODE, {
+      transportStatus: "reconnecting",
+      sessionStatus: "closed",
+      outageFailure: "dns",
+    });
+    expect(notice({ record })).toBe("Can't reach the Hub (DNS)");
+    // Once the transport is back online, the failure it kept is history.
+    expect(
+      notice({ record: { ...record, transportStatus: "online", sessionStatus: "ready" } }),
+    ).toBeNull();
+  });
+
+  it("says since when an offline node was last heard from", () => {
+    const offline = {
+      ...TARGET_NODE,
+      presence: { online: false, lastHeartbeatAt: new Date(2026, 9, 31, 14, 2).getTime() },
+    };
+    expect(
+      notice({
+        nodes: [SOURCE_NODE, offline],
+        record: sessionRecord(offline, {
+          transportStatus: "reconnecting",
+          sessionStatus: "closed",
+        }),
+      }),
+    ).toBe("Target node is offline since 14:02");
+  });
+
+  it("reads the selected environment's own record for its failure", () => {
+    const selectedRecord = sessionRecord(SOURCE_NODE, {
+      transportStatus: "reconnecting",
+      sessionStatus: "closed",
+      outageFailure: "tls",
+    });
+    expect(
+      deriveHostedEnvironmentRouteNotice({
+        ...environmentChipInput({
+          environmentId: SOURCE_NODE.environmentId,
+          transportStatus: "reconnecting",
+          sessionStatus: "closed",
+          record: undefined,
+        }),
+        ownRecord: selectedRecord,
+        nowMs,
+      }),
+    ).toBe("Can't reach the Hub (secure connection failed)");
   });
 });
 

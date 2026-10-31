@@ -17,6 +17,7 @@ import {
   selectedProjectionFields,
   type HostedEnvironmentSessionRecord,
   type HostedEnvironmentSessions,
+  hostedOutageFailure,
 } from "./hostedEnvironmentSessions.ts";
 import type { HostedHubNode } from "./types.ts";
 
@@ -285,6 +286,23 @@ describe("hosted environment sessions", () => {
     expect(record(sessions, ENV_A)).toEqual(next);
   });
 
+  it("forgets an outage's failure once the transport is online, so a later plain drop has none", () => {
+    const sessions = createSessions();
+    const generation = establish(sessions, ENV_A);
+    sessions.failure(ENV_A, generation, {
+      kind: "dns",
+      retryable: true,
+      message: "lookup",
+    } as never);
+    expect(hostedOutageFailure(record(sessions, ENV_A))).toBe("dns");
+    sessions.transportStatus(ENV_A, generation, "online");
+    expect(record(sessions, ENV_A).outageFailure).toBeNull();
+    // The record still keeps its last failure, but a plain disconnect is no DNS outage.
+    sessions.connectionClosed(ENV_A, generation);
+    expect(record(sessions, ENV_A).transportStatus).toBe("reconnecting");
+    expect(hostedOutageFailure(record(sessions, ENV_A))).toBeNull();
+  });
+
   it("ignores a snapshot inside a relay gap and adopts the replacement only after its own", () => {
     const sessions = createSessions();
     const generation = establish(sessions, ENV_A);
@@ -373,6 +391,7 @@ describe("hosted environment sessions", () => {
       transportStatus: "idle",
       sessionStatus: "synchronizing",
       failure: null,
+      outageFailure: null,
       terminalNodeKey: null,
       syncFailed: false,
       connectRequested: false,
