@@ -1,6 +1,12 @@
+import { canHtmlRenderSendFromMessage } from "@ryco/client-runtime/state/session";
 import { memo, useState, type ReactNode } from "react";
 import { useAttachmentSource, type AttachmentContext } from "./useAttachmentSource";
-import { isChatFileAttachment, isChatImageAttachment, type ChatAttachment } from "../../types";
+import {
+  isChatFileAttachment,
+  isChatImageAttachment,
+  type ChatAttachment,
+  type ChatMessage,
+} from "../../types";
 import {
   attachmentDownloadUrl,
   AttachmentFileRow,
@@ -110,6 +116,12 @@ export const MessageAttachments = memo(function MessageAttachments(
     attachments: ReadonlyArray<ChatAttachment>;
     onImageExpand: (preview: ExpandedImagePreview) => void;
     variant?: "user" | "assistant";
+    /**
+     * The role of the message these attachments are on, when they are on a
+     * message of the thread showing them: its pages may then send the
+     * reader's answers (`canHtmlRenderSendFromMessage`, see `HtmlRenderFrame`).
+     */
+    messageRole?: ChatMessage["role"];
   },
 ) {
   // An HTML render shows as its page wherever it turns up (beside text, in an
@@ -152,6 +164,10 @@ export const MessageAttachments = memo(function MessageAttachments(
               messageId={props.messageId}
               attachment={attachment}
               htmlRender={htmlRender}
+              canSendMessages={
+                props.messageRole !== undefined &&
+                canHtmlRenderSendFromMessage({ role: props.messageRole }, attachment)
+              }
             />
           ))}
         </div>

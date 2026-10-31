@@ -16,6 +16,7 @@ export * from "./backgroundWork.ts";
 export * from "./approvalPresentation.ts";
 export * from "./approvalResponses.ts";
 export * from "./htmlRenderTimeline.ts";
+export * from "./htmlRenderMessages.ts";
 export * from "./threadArtifacts.ts";
 export * from "./checkpointRevert.ts";
 export * from "./commandLabel.ts";

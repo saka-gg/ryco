@@ -1,3 +1,4 @@
+import { canHtmlRenderSendFromMessage } from "@ryco/client-runtime/state/session";
 import type { EnvironmentId, ThreadId } from "@ryco/contracts";
 import { defaultHtmlRenderTheme, htmlRenderThumbnail } from "@ryco/shared/htmlRender";
 import type { ThemeAppearance } from "@ryco/shared/themePalettes";
@@ -105,6 +106,9 @@ export function HtmlRenderCards(props: {
               messageId,
               attachment,
               title: htmlRender.title,
+              // A turn's pages are on this thread's agent's messages; one
+              // handed over still never sends.
+              canSendMessages: canHtmlRenderSendFromMessage({ role: "assistant" }, attachment),
             })
           }
         />

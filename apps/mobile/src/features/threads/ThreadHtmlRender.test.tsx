@@ -12,6 +12,7 @@ const hoisted = vi.hoisted(() => ({
   source: { status: "loading" } as Record<string, unknown>,
   windowWidth: 400,
   openFullScreen: vi.fn(),
+  sendMessage: vi.fn(async (_text: string) => undefined),
 }));
 
 vi.mock("react", async (importOriginal) => {
@@ -47,6 +48,10 @@ vi.mock("../../components/AppSymbol", () => ({ SymbolView: "SymbolView" }));
 vi.mock("../../lib/motion", () => ({ appMotion: { enter: {}, resize: {} } }));
 vi.mock("../../lib/useThemeColor", () => ({ useThemeColor: () => "#ffffff" }));
 vi.mock("./useHtmlRenderSource", () => ({ useHtmlRenderSource: () => hoisted.source }));
+vi.mock("./useHtmlRenderMessageSend", () => ({
+  useHtmlRenderMessageSend: (input: { readonly enabled: boolean }) =>
+    input.enabled ? hoisted.sendMessage : undefined,
+}));
 vi.mock("./HtmlRenderFullScreen", () => ({
   useHtmlRenderFullScreen: () => ({ open: hoisted.openFullScreen, modal: null }),
 }));
@@ -116,6 +121,7 @@ const attachment: ChatFileAttachment = {
 function renderRow(
   input: Partial<ChatFileAttachment> = {},
   htmlRender = attachment.htmlRender as HtmlRenderMetadata,
+  options: { readonly canSendMessages?: boolean } = {},
 ) {
   return ThreadHtmlRender({
     environmentId,
@@ -123,6 +129,7 @@ function renderRow(
     messageId,
     attachment: { ...attachment, ...input },
     htmlRender,
+    ...options,
   });
 }
 
@@ -194,7 +201,25 @@ describe("ThreadHtmlRender", () => {
       attachment,
       title: "Bundle size",
       html: "<p>page</p>",
+      canSendMessages: false,
     });
+  });
+
+  it("lets a page its thread's agent published send, inline and full screen", () => {
+    hoisted.source = { status: "ready", html: "<p>page</p>" };
+    const frameOf = (row: ReactElement) =>
+      collect(row, (element) => element.type === "HtmlRenderWebView")[0]?.props as {
+        onSendMessage?: unknown;
+      };
+    expect(frameOf(renderRow()).onSendMessage).toBeUndefined();
+    const row = renderRow({}, attachment.htmlRender as HtmlRenderMetadata, {
+      canSendMessages: true,
+    });
+    expect(frameOf(row).onSendMessage).toBe(hoisted.sendMessage);
+    propsOf<{ onPress: () => void }>(pressable(row, "Open Bundle size full size")).onPress();
+    expect(hoisted.openFullScreen).toHaveBeenCalledWith(
+      expect.objectContaining({ canSendMessages: true }),
+    );
   });
 
   it("holds the box with a retry when the page cannot be read", () => {

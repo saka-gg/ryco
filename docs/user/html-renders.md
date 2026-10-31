@@ -41,6 +41,32 @@ the page the same way. A page Ryco could not take a thumbnail of, such as one pu
 preview browser was installed, shows an icon instead. A turn that is only pages has no cards; it
 already ends with them.
 
+## Answering from a page
+
+A page can offer choices or a short form and send your answer back to the thread. When you click
+its send button, Ryco opens a small confirmation of its own, outside the page, with the page's title
+on one short line and, in a box of its own, the exact text it would send, with its number of lines
+and characters. **Send** turns on after a moment (each click, tap or key press while it waits starts the
+wait over) and once you have scrolled to the end of the text; it posts the text to the thread as
+your message. **Cancel**, Escape, or leaving the thread sends nothing, and the page can tell you so.
+After a confirmation closes, the page can ask again only once you click or tab back into it, and
+after a Cancel it waits a few seconds (longer after each Cancel in a row).
+The message goes through the thread's queue like one you typed: it waits behind a running turn, a
+paused queue, or a node that is not connected yet, and on a node that keeps queues itself it is
+queued there. It never touches your draft. On web and desktop it goes with the model and modes
+the composer would send now; in the mobile app, with the thread's own.
+
+This works for a page the thread's own agent published, wherever it shows: inline, full size from
+the page or its card, and in the workspace panel's page tab, on web, desktop, and the mobile app
+(where the confirmation is the app's own dialog on iOS and Android). A
+page handed over from another thread, the web app's phone layout, a downloaded page, and the
+agent's own previews cannot send. A page sends only right after you click, tap, or press a key in
+it, at most one request a second and one confirmation at a time. It sends text only: up to 1,000
+characters and 20 lines, with no invisible characters (the Braille blank and the Hangul fillers
+included), letters buried under stacked accents, long runs of blank space or blank lines, slash
+commands, thread mentions, or quotes. For agents, the page calls `ryco.send(text)`; its Promise resolves once the
+message is queued and rejects with a reason the page can show.
+
 ## The Artifacts tab
 
 On web and desktop, **Artifacts** in the workspace panel's launcher (the **+** in its tab bar)
@@ -69,7 +95,15 @@ cards open the page full screen, with the agent's source; on iOS, **Share** send
 
 A page is agent output, not part of Ryco. It runs in a sandboxed frame with an opaque origin: its
 scripts run, but it cannot reach Ryco, your session, cookies, or the rest of the app, open windows,
-show dialogs, or navigate the thread. Links you click in a page open in your browser. Ryco never
+show dialogs, or navigate the thread. Links you click in a page open in your browser. The only
+thing a page can ask Ryco for besides opening a link is to send a message, and only as described in
+[Answering from a page](#answering-from-a-page): you see and confirm every message in Ryco's own
+confirmation, it goes only to the thread the page belongs to, and it is an ordinary message of
+yours. A page can never answer an approval or a question, start another thread, or use any other
+part of Ryco. Page titles show as one line, without hidden characters. Known limits: a page can
+still word a misleading title or options; anything a page embeds (an iframe from a CDN) is trusted
+like the page; and a page that navigates its own frame to another address keeps its permission to
+ask, so that page can ask too, still only after your click in it and your confirmation. Ryco never
 serves a page from its own address; clients read the stored bytes and show them in the sandbox, and
 the attachment download stays an inert file. Anyone who can read the thread, including a device
 paired as a client, can open its pages.

@@ -61,6 +61,7 @@ import {
 } from "@ryco/client-runtime/connection";
 import {
   deriveThreadBackgroundWork,
+  HTML_RENDER_MESSAGE_REFUSALS,
   keptChangesRestoreNote,
   revertKeptChangesDiscardedBy,
   selectConversationRevertSupported,
@@ -450,6 +451,8 @@ import {
 } from "~/composerFileUpload";
 import { getEnvironmentHttpBaseUrl } from "~/environments/runtime/catalog";
 import { readLocalApi } from "~/localApi";
+import { buildHtmlRenderQueuedMessage } from "./chat/htmlRenderMessages";
+import { useHtmlRenderMessages } from "./chat/HtmlRenderMessageConfirmation";
 import {
   CheckpointRevertChoiceDialog,
   useCheckpointRevertChoice,
@@ -6328,6 +6331,37 @@ export default function ChatView(props: ChatViewProps) {
   );
   useForegroundQueueSender(activeThreadKey, foregroundQueueSender);
 
+  // A page the agent published in this thread sends the reader's answer
+  // (`ryco.send`) once they confirm it, through this thread's queue as a
+  // message they typed: the composer's model and modes, never its draft.
+  // Busy, idle, held or waiting for the node, the queue decides when it goes.
+  // The page hears only fixed reasons, never this connection's own (its
+  // target's name) or the queue's.
+  const sendHtmlRenderMessage = async (text: string) => {
+    const notReady = new Error(HTML_RENDER_MESSAGE_REFUSALS.notReady);
+    if (!dispatchCapability.allowed && !dispatchEstablishing) throw notReady;
+    if (activeThreadKey === null || !isServerThread) throw notReady;
+    const sendCtx = readComposer()?.getSendContext();
+    if (!sendCtx) throw notReady;
+    if (!canSendModelSelection(sendCtx.selectedModelSelection)) {
+      throw new Error(HTML_RENDER_MESSAGE_REFUSALS.failed);
+    }
+    enqueueMessage(
+      activeThreadKey,
+      buildHtmlRenderQueuedMessage({
+        id: newMessageId(),
+        createdAt: new Date().toISOString(),
+        text,
+        selection: sendCtx,
+        settings: { runtimeMode, interactionMode, tokenMode },
+      }),
+    );
+  };
+  const htmlRenderMessageConfirmation = useHtmlRenderMessages(
+    activeThreadKey,
+    isServerThread ? sendHtmlRenderMessage : null,
+  );
+
   const onSubmitPlanFollowUp = useCallback(
     // True once the turn is dispatched; the caller puts its draft back otherwise.
     async ({
@@ -7986,6 +8020,7 @@ export default function ChatView(props: ChatViewProps) {
             request={revertChoice.request}
             onSettle={settleRevertChoice}
           />
+          {htmlRenderMessageConfirmation}
         </div>
         {/* end chat column */}
         {isPhoneTier ? null : inspectedContextHandoff && !shouldUseRightPanelSheet ? (

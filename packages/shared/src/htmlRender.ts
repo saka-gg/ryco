@@ -110,9 +110,46 @@ export function clampHtmlRenderHeight(height: number): number {
   return Math.min(HTML_RENDER_MAX_HEIGHT, Math.max(HTML_RENDER_MIN_HEIGHT, Math.round(height)));
 }
 
-/** A display title: trimmed, bounded, never empty. */
+// Title characters that read as a gap: white space (line breaks included) and
+// blank-looking letters, the Braille blank and the Hangul fillers.
+const TITLE_GAP_CHARACTER = /[\s\u2800\u115f\u1160\u3164\uffa0]/u;
+const TITLE_GAPS = /[\s\u2800\u115f\u1160\u3164\uffa0]+/gu;
+
+/** `text` cut to at most `max` UTF-16 code units, never inside a surrogate pair. */
+function truncateUtf16(text: string, max: number): string {
+  if (text.length <= max) return text;
+  const cut = text.slice(0, max);
+  return /[\ud800-\udbff]$/.test(cut) ? cut.slice(0, -1) : cut;
+}
+
+/**
+ * A display title: one line, as a reader sees it. Gaps (white space, line
+ * breaks, blank-looking characters) collapse to single spaces; characters a
+ * reader cannot see (controls, zero-width and other default-ignorable
+ * characters, emoji joiners and selectors aside) and accents stacked past a
+ * few per letter are dropped; it is bounded and never empty. The server
+ * applies it when a page is published and clients again when they read its
+ * metadata, so a title can never pass for lines of the text around it, such
+ * as the message a page asks to send.
+ */
 export function normalizeHtmlRenderTitle(title: string): string {
-  return title.trim().slice(0, HTML_RENDER_MAX_TITLE_LENGTH).trim() || "HTML";
+  // Bounded before the per-character pass; a title is at most 200 code units when stored.
+  const characters = Array.from(title.slice(0, HTML_RENDER_MAX_TITLE_LENGTH * 4));
+  let marks = 0;
+  const shown = characters
+    .filter((character, index) => {
+      if (TITLE_GAP_CHARACTER.test(character)) {
+        marks = 0;
+        return true;
+      }
+      if (isHiddenAt(characters, index)) return false;
+      marks = MARK.test(character) ? marks + 1 : 0;
+      return marks <= MAX_MARKS_PER_CHARACTER;
+    })
+    .join("")
+    .replace(TITLE_GAPS, " ")
+    .trim();
+  return truncateUtf16(shown, HTML_RENDER_MAX_TITLE_LENGTH).trim() || "HTML";
 }
 
 function readMeasuredHeights(value: unknown) {
@@ -482,12 +519,30 @@ export const HTML_RENDER_LAYOUT_GUIDE = [
   "Links to http(s) pages open in the reader's browser; the page cannot open windows, show dialogs, or submit forms, so handle form input with script.",
 ].join(" ");
 
+/**
+ * The longest message a page may send, in UTF-16 code units. A page answer is
+ * a choice or a short form, which needs far less; the reader reads all of it
+ * in the confirmation before it goes out, so it must fit a small box that
+ * they can take in at a glance (about 20 lines of a phone-wide column) rather
+ * than a document to page through.
+ */
+export const HTML_RENDER_MESSAGE_MAX_CHARS = 1_000;
+/** The most lines a page's message may have; the confirmation shows them all. */
+export const HTML_RENDER_MESSAGE_MAX_LINES = 20;
+
+/** Agent-facing reference for `ryco.send`, used in the render tool's description. */
+export const HTML_RENDER_MESSAGE_GUIDE = [
+  "To let the reader answer from the page (a choice, a short form), call ryco.send(text) from a click or key handler. Ryco shows the reader the exact text and sends it to this thread as their own message only once they confirm, queued after any running turn.",
+  `Write the text as the reader would say it: plain text of at most ${HTML_RENDER_MESSAGE_MAX_CHARS.toLocaleString("en-US")} characters and ${HTML_RENDER_MESSAGE_MAX_LINES} lines, with no slash command, thread mention, invisible characters or runs of blank space.`,
+  `The Promise resolves when Ryco has queued the message, not when you reply, and rejects with an Error to show in the page: the reader cancelled (the page then waits for the reader's next click, a little longer after each cancel), a second request came within a second, or sending is unavailable (in ${HTML_PREVIEW_TOOL_NAME}, a downloaded page, a page handed to another thread).`,
+].join(" ");
+
 /** Agent-facing rules for the HTML both tools accept. */
 export const HTML_RENDER_PAGE_RULES =
   'Write one self-contained document with inline <style> and <script>. Local images written as absolute file paths inside this thread\'s workspace or the system temp directory (src="/abs/shot.png", CSS url(/abs/bg.webp), or a JS string) are inlined automatically; symbolic and hard links are refused, so copy such files into the temp directory first. Remote https URLs, such as a CDN chart library, load as-is; use https, since readers on HTTPS clients block plain-http scripts and styles. The page runs in a sandbox with an opaque origin: localStorage, sessionStorage, document.cookie and opening an IndexedDB database throw a SecurityError, so keep state in memory.';
 
 /** The paragraph that tells agents when to reach for HTML renders. */
-export const HTML_RENDER_AGENT_INSTRUCTIONS = `When a chart, table, diagram, image collage, or UI mockup would say more than prose, build a self-contained HTML page, check it with ${HTML_PREVIEW_TOOL_NAME}, then publish it with ${HTML_RENDER_TOOL_NAME} before your final reply. The reader sees the page above that reply, so don't announce or restate it; add only what it doesn't say.`;
+export const HTML_RENDER_AGENT_INSTRUCTIONS = `When a chart, table, diagram, image collage, or UI mockup would say more than prose, build a self-contained HTML page, check it with ${HTML_PREVIEW_TOOL_NAME}, then publish it with ${HTML_RENDER_TOOL_NAME} before your final reply. The reader sees the page above that reply, so don't announce or restate it; add only what it doesn't say. To ask the reader to pick between options, a page can send their answer back with ryco.send, which ${HTML_RENDER_TOOL_NAME} describes.`;
 
 // The bridge between a render and its client speaks the MCP Apps protocol
 // (JSON-RPC over postMessage), so the same host code can later drive upstream
@@ -495,6 +550,8 @@ export const HTML_RENDER_AGENT_INSTRUCTIONS = `When a chart, table, diagram, ima
 const HOST_CONTEXT_CHANGED_METHOD = "ui/notifications/host-context-changed";
 const OPEN_LINK_METHOD = "ui/open-link";
 const SIZE_CHANGED_METHOD = "ui/notifications/size-changed";
+// A page's `ryco.send(text)`: the reader's answer, posted to the thread once they confirm it.
+const MESSAGE_METHOD = "ui/message";
 // Not part of MCP Apps. A sandboxed page runs out of process, so the client's
 // document never sees the pointer over it (no :hover, no boundary events); the
 // page reports it instead, for hover-only controls such as the expand button.
@@ -562,6 +619,159 @@ export function htmlRenderResult(id: string | number) {
   return { jsonrpc: "2.0", id, result: {} } as const;
 }
 
+/** The error a client sends back for a render's request; the page shows `message`. */
+export function htmlRenderError(id: string | number, message: string) {
+  return { jsonrpc: "2.0", id, error: { code: -32000, message } } as const;
+}
+
+/** A page's `ui/message` request: the text to send, or why it cannot go out. */
+export type HtmlRenderMessageRequest =
+  | { readonly id: string | number; readonly text: string }
+  | { readonly id: string | number; readonly refusal: string };
+
+const MAX_REQUEST_ID_CHARS = 128;
+const MAX_MESSAGE_BLOCKS = 16;
+const MESSAGE_TOO_LONG = `A page's message can be at most ${HTML_RENDER_MESSAGE_MAX_CHARS.toLocaleString("en-US")} characters.`;
+// Accents a letter can carry before they pile up over the lines around it.
+const MAX_MARKS_PER_CHARACTER = 4;
+// Blank lines in a row a message may have, and more than 16 spaces or tabs in a row.
+const MAX_BLANK_LINES_IN_A_ROW = 2;
+const BLANK_RUN = /[^\S\n]{17}/;
+
+// What a reader cannot see in the confirmation but an agent reads: controls
+// (tab and line feed aside), line and paragraph separators, the composer's
+// terminal placeholder, the Braille blank, and every default-ignorable code
+// point (zero-width characters, bidi overrides, tag characters, variation
+// selectors, the Hangul fillers U+115F, U+1160, U+3164 and U+FFA0). The emoji
+// joiner and the emoji presentation selectors are the exceptions, checked in
+// place below.
+const HIDDEN_CHARACTER =
+  // oxlint-disable-next-line no-control-regex -- control characters are what it finds
+  /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u2028\u2029\u2800\ufffc]|\p{Default_Ignorable_Code_Point}|\p{Cs}/u;
+const EMOJI_BEFORE_JOINER = /[\p{Extended_Pictographic}\p{Emoji_Modifier}\ufe0f]/u;
+const EXTENDED_PICTOGRAPHIC = /\p{Extended_Pictographic}/u;
+const KEYCAP_BASE = /^[0-9#*]$/;
+const MARK = /\p{M}/u;
+// A line a reader sees as empty: only white space, or marks with no letter to sit on.
+const BLANK_LINE = /^[\s\p{M}]*$/u;
+
+/**
+ * Whether `characters[index]` (code points) is one a reader would not see. An
+ * emoji joiner counts as seen only between two emoji, and a presentation
+ * selector only right after a pictograph or as part of a keycap (`1️⃣`), so
+ * neither can carry bits between ordinary letters.
+ */
+function isHiddenAt(characters: ReadonlyArray<string>, index: number): boolean {
+  const character = characters[index]!;
+  if (!HIDDEN_CHARACTER.test(character)) return false;
+  const before = characters[index - 1];
+  const after = characters[index + 1];
+  if (character === "\u200d") {
+    return !(
+      before !== undefined &&
+      after !== undefined &&
+      EMOJI_BEFORE_JOINER.test(before) &&
+      EXTENDED_PICTOGRAPHIC.test(after)
+    );
+  }
+  if (character === "\ufe0e" || character === "\ufe0f") {
+    if (before === undefined) return true;
+    if (EXTENDED_PICTOGRAPHIC.test(before)) return false;
+    return !(character === "\ufe0f" && KEYCAP_BASE.test(before) && after === "\u20e3");
+  }
+  return true;
+}
+
+function hasHiddenCharacter(characters: ReadonlyArray<string>): boolean {
+  return characters.some((_, index) => isHiddenAt(characters, index));
+}
+
+function hasStackedMarks(characters: ReadonlyArray<string>): boolean {
+  let marks = 0;
+  for (const character of characters) {
+    marks = MARK.test(character) ? marks + 1 : 0;
+    if (marks > MAX_MARKS_PER_CHARACTER) return true;
+  }
+  return false;
+}
+
+function hasBlankRun(lines: ReadonlyArray<string>): boolean {
+  let blankLines = 0;
+  for (const line of lines) {
+    blankLines = BLANK_LINE.test(line) ? blankLines + 1 : 0;
+    if (blankLines > MAX_BLANK_LINES_IN_A_ROW) return true;
+  }
+  return lines.some((line) => BLANK_RUN.test(line));
+}
+
+/**
+ * Why a page's message text cannot be sent, or undefined when it can. The
+ * reader confirms what they see, so the text must say everything it carries
+ * and fit the confirmation: no hidden characters, no accents stacked over the
+ * lines around them, no blank runs that push words out of view, a bounded
+ * length and line count, and none of the composer syntax a send would turn
+ * into something else (a slash command, a thread mention that reads another
+ * thread, a quote token).
+ */
+function htmlRenderMessageRefusal(text: string): string | undefined {
+  if (text === "") return "ryco.send needs text.";
+  if (text.length > HTML_RENDER_MESSAGE_MAX_CHARS) return MESSAGE_TOO_LONG;
+  const lines = text.split("\n");
+  if (lines.length > HTML_RENDER_MESSAGE_MAX_LINES) {
+    return `A page's message can be at most ${HTML_RENDER_MESSAGE_MAX_LINES} lines.`;
+  }
+  const characters = Array.from(text);
+  if (hasHiddenCharacter(characters)) return "The message has invisible or control characters.";
+  if (hasStackedMarks(characters)) return "The message stacks too many accents on one letter.";
+  if (hasBlankRun(lines)) return "The message has long runs of blank space.";
+  if (text.startsWith("/")) return "A page cannot send a slash command.";
+  if (/@thread:/i.test(text)) return "A page cannot mention a thread.";
+  if (/ryco-quote:/i.test(text)) return "A page cannot send a quote.";
+  return undefined;
+}
+
+/**
+ * A render's MCP Apps `ui/message` request (role user, text blocks), if `data`
+ * is one with a usable id. Its text blocks join with line breaks, line endings
+ * become `\n`, and the text is trimmed; it comes back with the reason it
+ * cannot be sent when it breaks a rule the confirmation relies on.
+ */
+export function readHtmlRenderMessageRequest(data: unknown): HtmlRenderMessageRequest | undefined {
+  if (typeof data !== "object" || data === null) return undefined;
+  const { jsonrpc, id, method, params } = data as Record<string, unknown>;
+  if (jsonrpc !== "2.0" || method !== MESSAGE_METHOD) return undefined;
+  if (typeof id === "string" ? id.length > MAX_REQUEST_ID_CHARS : !Number.isSafeInteger(id)) {
+    return undefined;
+  }
+  const requestId = id as string | number;
+  const refuse = (refusal: string) => ({ id: requestId, refusal });
+  const { role, content } =
+    typeof params === "object" && params !== null
+      ? (params as Record<string, unknown>)
+      : ({} as Record<string, unknown>);
+  if (role !== "user") return refuse("A page sends only the reader's own message.");
+  const blocks = Array.isArray(content) ? content : [content];
+  if (blocks.length === 0 || blocks.length > MAX_MESSAGE_BLOCKS) {
+    return refuse("A page's message is one or a few text blocks.");
+  }
+  const texts: string[] = [];
+  for (const block of blocks) {
+    const { type, text } =
+      typeof block === "object" && block !== null
+        ? (block as Record<string, unknown>)
+        : ({} as Record<string, unknown>);
+    if (type !== "text" || typeof text !== "string") {
+      return refuse("A page can send only text.");
+    }
+    // Checked before joining, so a huge block is never copied around.
+    if (text.length > HTML_RENDER_MESSAGE_MAX_CHARS * 2) return refuse(MESSAGE_TOO_LONG);
+    texts.push(text);
+  }
+  const text = texts.join("\n").replace(/\r\n?/g, "\n").trim();
+  const refusal = htmlRenderMessageRefusal(text);
+  return refusal === undefined ? { id: requestId, text } : refuse(refusal);
+}
+
 export const HTML_RENDER_THEME_STYLE_ID = "ryco-theme";
 const THEME_FRAGMENT_KEY = "ryco-theme";
 const THEME_WINDOW_NAME_PREFIX = "ryco-theme:";
@@ -573,10 +783,18 @@ export function htmlRenderThemeFragment(theme: HtmlRenderTheme): string {
 
 /**
  * Frame `name` that hands a `srcdoc` render its theme before first paint; a
- * srcdoc document has no URL fragment. The bootstrap clears it once read.
+ * srcdoc document has no URL fragment. The bootstrap keeps the latest theme in
+ * it. `sendMessages` tells the page's `ryco.send` that this client may send
+ * its messages (the frame's own client still decides each one): the name
+ * survives the page reloading itself, and the page can write it, so it is a
+ * hint for the page and never what lets a message through.
  */
-export function htmlRenderThemeWindowName(theme: HtmlRenderTheme): string {
-  return `${THEME_WINDOW_NAME_PREFIX}${JSON.stringify(theme)}`;
+export function htmlRenderThemeWindowName(
+  theme: HtmlRenderTheme,
+  options: { readonly sendMessages?: boolean } = {},
+): string {
+  const state = options.sendMessages === true ? { ...theme, send: true } : theme;
+  return `${THEME_WINDOW_NAME_PREFIX}${JSON.stringify(state)}`;
 }
 
 /** The `host-context-changed` notification a client posts into a mounted render when the theme changes. */
@@ -619,8 +837,13 @@ function rootRule(theme: HtmlRenderTheme): string {
 // framed page asks its client to open absolute http(s) links and drops others
 // (in-page `#` anchors still scroll), and a top-level page opens them as a new
 // window. A framed page also reports its content height, measured as the
-// server measures it, so its client can fit the frame to the page.
-const BOOTSTRAP_SCRIPT = `(function(){var s=document.getElementById(${JSON.stringify(HTML_RENDER_THEME_STYLE_ID)}),n=0,f=window.parent!==window;if(!s)return;var b=${JSON.stringify(BASE_CSS)};function a(t){if(!t||typeof t!=="object"||!t.variables||typeof t.variables!=="object")return;var c=":root{color-scheme:"+(t.appearance==="light"?"light":"dark")+";";for(var k in t.variables){if(/^--[a-z0-9-]+$/.test(k))c+=k+":"+String(t.variables[k]).replace(/[;{}<>]/g,"")+";";}s.textContent=c+"}"+b;try{window.name=${JSON.stringify(THEME_WINDOW_NAME_PREFIX)}+JSON.stringify({appearance:t.appearance==="light"?"light":"dark",variables:t.variables});}catch(x){}}try{var m=/[#&]${THEME_FRAGMENT_KEY}=([^&]*)/.exec(location.hash),w=window.name;if(m){a(JSON.parse(decodeURIComponent(m[1])));history.replaceState(history.state,"",location.pathname+location.search);}else if(typeof w==="string"&&w.indexOf(${JSON.stringify(THEME_WINDOW_NAME_PREFIX)})===0){a(JSON.parse(w.slice(${THEME_WINDOW_NAME_PREFIX.length})));}}catch(e){}window.addEventListener("message",function(e){var d=e.data,p=d&&d.params;if(f&&e.source!==window.parent)return;if(d&&d.jsonrpc==="2.0"&&d.method===${JSON.stringify(HOST_CONTEXT_CHANGED_METHOD)}&&p&&p.styles){a({appearance:p.theme,variables:p.styles.variables});try{window.dispatchEvent(new Event(${JSON.stringify(HTML_RENDER_THEME_CHANGE_EVENT)}));}catch(x){}}});document.addEventListener("click",function(e){var l=e.isTrusted?e.composedPath().find(function(t){return t&&t.matches&&t.matches("a[href]");}):null,h,u;if(!l)return;h=(l.getAttribute("href")||"").trim();if(h.charAt(0)==="#")return;try{u=new URL(h,document.baseURI);}catch(x){u=null;}if(!u||!/^https?:\\/\\//i.test(h)||!/^https?:$/.test(u.protocol)){if(f)e.preventDefault();return;}if(u.href.split("#")[0]===location.href.split("#")[0])return;if(f){e.preventDefault();window.parent.postMessage({jsonrpc:"2.0",id:"ryco-link-"+(++n),method:${JSON.stringify(OPEN_LINK_METHOD)},params:{url:u.href}},"*");}else{l.setAttribute("target","_blank");l.setAttribute("rel","noopener noreferrer");}},true);if(f){window.addEventListener("keydown",function(e){if(e.key==="Escape"&&!e.defaultPrevented&&!e.isComposing)window.parent.postMessage({jsonrpc:"2.0",method:${JSON.stringify(ESCAPE_METHOD)}},"*");});var pv=false,pp=function(v){if(v===pv)return;pv=v;window.parent.postMessage({jsonrpc:"2.0",method:${JSON.stringify(POINTER_CHANGED_METHOD)},params:{inside:v}},"*");};document.addEventListener("pointerover",function(){pp(true);},true);document.addEventListener("pointerout",function(e){if(!e.relatedTarget)pp(false);},true);document.documentElement.addEventListener("pointerleave",function(){pp(false);});window.addEventListener("blur",function(){pp(false);});var h0,o,z=function(){var r=document.documentElement,v=Math.ceil(r.scrollHeight>r.clientHeight?r.scrollHeight:r.getBoundingClientRect().height);if(v===h0)return;h0=v;window.parent.postMessage({jsonrpc:"2.0",method:${JSON.stringify(SIZE_CHANGED_METHOD)},params:{height:v}},"*");};if(window.ResizeObserver){o=new ResizeObserver(z);o.observe(document.documentElement);}document.addEventListener("DOMContentLoaded",function(){if(o&&document.body)o.observe(document.body);z();});window.addEventListener("load",z);}})();`;
+// server measures it, so its client can fit the frame to the page. `ryco.send`
+// asks the client to send the reader's answer (`ui/message`) and settles with
+// the client's reply. It refuses early where the frame name carries no send
+// hint, outside a frame, and without a user gesture, but those checks only
+// spare a page a round trip: the client checks everything again and asks the
+// reader before anything is sent.
+const BOOTSTRAP_SCRIPT = `(function(){var s=document.getElementById(${JSON.stringify(HTML_RENDER_THEME_STYLE_ID)}),n=0,f=window.parent!==window,v=false,q={};if(!s)return;var b=${JSON.stringify(BASE_CSS)};function a(t){if(!t||typeof t!=="object"||!t.variables||typeof t.variables!=="object")return;var c=":root{color-scheme:"+(t.appearance==="light"?"light":"dark")+";";for(var k in t.variables){if(/^--[a-z0-9-]+$/.test(k))c+=k+":"+String(t.variables[k]).replace(/[;{}<>]/g,"")+";";}s.textContent=c+"}"+b;try{var o={appearance:t.appearance==="light"?"light":"dark",variables:t.variables};if(v)o.send=true;window.name=${JSON.stringify(THEME_WINDOW_NAME_PREFIX)}+JSON.stringify(o);}catch(x){}}try{var m=/[#&]${THEME_FRAGMENT_KEY}=([^&]*)/.exec(location.hash),w=window.name;if(m){a(JSON.parse(decodeURIComponent(m[1])));history.replaceState(history.state,"",location.pathname+location.search);}else if(typeof w==="string"&&w.indexOf(${JSON.stringify(THEME_WINDOW_NAME_PREFIX)})===0){var p=JSON.parse(w.slice(${THEME_WINDOW_NAME_PREFIX.length}));v=f&&!!p&&p.send===true;a(p);}}catch(e){}window.addEventListener("message",function(e){var d=e.data,p=d&&d.params;if(f&&e.source!==window.parent)return;if(f&&d&&d.jsonrpc==="2.0"&&typeof d.id==="string"&&Object.prototype.hasOwnProperty.call(q,d.id)&&(d.error||d.result)){var c=q[d.id];delete q[d.id];if(d.error)c[1](new Error(String(d.error.message||"The message was not sent.")));else c[0]();return;}if(d&&d.jsonrpc==="2.0"&&d.method===${JSON.stringify(HOST_CONTEXT_CHANGED_METHOD)}&&p&&p.styles){a({appearance:p.theme,variables:p.styles.variables});try{window.dispatchEvent(new Event(${JSON.stringify(HTML_RENDER_THEME_CHANGE_EVENT)}));}catch(x){}}});window.ryco=Object.freeze({send:function(t){return new Promise(function(r,j){var u=navigator.userActivation,i;if(typeof t!=="string"||!t.trim())return j(new Error("ryco.send needs text."));if(!v)return j(new Error("Sending messages is not available here."));if(u&&!u.isActive)return j(new Error("ryco.send works only from a click or key press in the page."));i="ryco-message-"+(++n);q[i]=[r,j];try{window.parent.postMessage({jsonrpc:"2.0",id:i,method:${JSON.stringify(MESSAGE_METHOD)},params:{role:"user",content:[{type:"text",text:t}]}},"*");}catch(x){delete q[i];j(x);}});}});document.addEventListener("click",function(e){var l=e.isTrusted?e.composedPath().find(function(t){return t&&t.matches&&t.matches("a[href]");}):null,h,u;if(!l)return;h=(l.getAttribute("href")||"").trim();if(h.charAt(0)==="#")return;try{u=new URL(h,document.baseURI);}catch(x){u=null;}if(!u||!/^https?:\\/\\//i.test(h)||!/^https?:$/.test(u.protocol)){if(f)e.preventDefault();return;}if(u.href.split("#")[0]===location.href.split("#")[0])return;if(f){e.preventDefault();window.parent.postMessage({jsonrpc:"2.0",id:"ryco-link-"+(++n),method:${JSON.stringify(OPEN_LINK_METHOD)},params:{url:u.href}},"*");}else{l.setAttribute("target","_blank");l.setAttribute("rel","noopener noreferrer");}},true);if(f){window.addEventListener("keydown",function(e){if(e.key==="Escape"&&!e.defaultPrevented&&!e.isComposing)window.parent.postMessage({jsonrpc:"2.0",method:${JSON.stringify(ESCAPE_METHOD)}},"*");});var pv=false,pp=function(v){if(v===pv)return;pv=v;window.parent.postMessage({jsonrpc:"2.0",method:${JSON.stringify(POINTER_CHANGED_METHOD)},params:{inside:v}},"*");};document.addEventListener("pointerover",function(){pp(true);},true);document.addEventListener("pointerout",function(e){if(!e.relatedTarget)pp(false);},true);document.documentElement.addEventListener("pointerleave",function(){pp(false);});window.addEventListener("blur",function(){pp(false);});var h0,o,z=function(){var r=document.documentElement,v=Math.ceil(r.scrollHeight>r.clientHeight?r.scrollHeight:r.getBoundingClientRect().height);if(v===h0)return;h0=v;window.parent.postMessage({jsonrpc:"2.0",method:${JSON.stringify(SIZE_CHANGED_METHOD)},params:{height:v}},"*");};if(window.ResizeObserver){o=new ResizeObserver(z);o.observe(document.documentElement);}document.addEventListener("DOMContentLoaded",function(){if(o&&document.body)o.observe(document.body);z();});window.addEventListener("load",z);}})();`;
 
 const INJECTED_CHARSET = '<meta charset="utf-8">';
 const INJECTED_VIEWPORT = '<meta name="viewport" content="width=device-width, initial-scale=1">';

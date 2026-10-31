@@ -205,7 +205,7 @@ describe("HtmlRenderCards", () => {
     expect(collect(tree, (element) => element.type === "SymbolView")).toHaveLength(1);
   });
 
-  it("opens the page full screen, which reads it", () => {
+  it("opens the page full screen, which reads it and lets it send the reader's answer", () => {
     const [first, second] = cards(renderCards());
     (second!.props as { onPress: () => void }).onPress();
     expect(hoisted.open).toHaveBeenCalledWith({
@@ -214,9 +214,34 @@ describe("HtmlRenderCards", () => {
       messageId: "render-2",
       attachment: renders[1]!.attachment,
       title: "Settings mockup",
+      canSendMessages: true,
     });
     (first!.props as { onPress: () => void }).onPress();
     expect(hoisted.open.mock.calls[1]?.[0]).toMatchObject({ messageId: "render-1" });
+  });
+
+  it("never lets a page handed over from another thread send", () => {
+    const handedOver = turnRender("render-5", "handed-html", { title: "Handed over", height: 300 });
+    const tree = expand(
+      HtmlRenderCards({
+        environmentId: EnvironmentId.make("env-1"),
+        threadId: ThreadId.make("thread-1"),
+        renders: [
+          {
+            ...handedOver,
+            attachment: {
+              ...handedOver.attachment,
+              handoff: {
+                threadId: ThreadId.make("parent"),
+                messageId: MessageId.make("parent-message"),
+              },
+            },
+          },
+        ],
+      }),
+    );
+    (cards(tree)[0]!.props as { onPress: () => void }).onPress();
+    expect(hoisted.open).toHaveBeenCalledWith(expect.objectContaining({ canSendMessages: false }));
   });
 
   it("hosts full screen itself outside the feed's provider", () => {
