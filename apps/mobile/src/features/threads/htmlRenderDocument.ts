@@ -124,9 +124,10 @@ export type HtmlRenderBridgeMessage =
   | { readonly kind: "message"; readonly request: HtmlRenderMessageRequest };
 
 // A link request is at most an 8 KiB URL plus its envelope, and a message
-// request at most 4,000 characters of text, each escaped to at most six; the
-// rest is not one, and is dropped before it is parsed.
-const MAX_BRIDGE_MESSAGE_CHARS = 32 * 1024;
+// request at most 1,000 characters of text, each escaped to at most two (the
+// characters JSON escapes to more are ones a message may not have); the rest
+// is not one, and is dropped before it is parsed.
+const MAX_BRIDGE_MESSAGE_CHARS = 16 * 1024;
 const MAX_REQUEST_ID_CHARS = 128;
 
 /**

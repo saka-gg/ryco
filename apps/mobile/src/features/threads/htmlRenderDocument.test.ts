@@ -1,6 +1,7 @@
 import {
   defaultHtmlRenderTheme,
   HTML_RENDER_DOCUMENT_CSP,
+  HTML_RENDER_MESSAGE_MAX_CHARS,
   htmlRenderResult,
   htmlRenderThemeMessage,
   htmlRenderThemeWindowName,
@@ -204,8 +205,11 @@ describe("parseHtmlRenderBridgeMessage", () => {
     ],
     [
       "a message request at the length cap, escaped",
-      message('"'.repeat(4_000)),
-      { kind: "message", request: { id: "ryco-message-1", text: '"'.repeat(4_000) } },
+      message('"'.repeat(HTML_RENDER_MESSAGE_MAX_CHARS)),
+      {
+        kind: "message",
+        request: { id: "ryco-message-1", text: '"'.repeat(HTML_RENDER_MESSAGE_MAX_CHARS) },
+      },
     ],
     [
       "a message request the page may not send, with its reason",

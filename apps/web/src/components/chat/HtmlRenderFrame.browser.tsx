@@ -928,3 +928,129 @@ it("never lets a page send where it may not, a page handed over or the phone tie
   expect(send).not.toHaveBeenCalled();
   page$.stop();
 });
+
+/** The frame of a page that may send, inside the thread's open view. */
+async function renderSendingFrame(bytes: Uint8Array, send: (text: string) => Promise<void>) {
+  serve(bytes);
+  const screen = await renderFrame(
+    bytes,
+    { title: "Pick a plan", height: 300 },
+    {
+      canSendMessages: true,
+      wrap: (node) => (
+        <>
+          <ThreadMessages send={send} />
+          {node}
+        </>
+      ),
+    },
+  );
+  await vi.waitFor(() => expect(frameElement()?.className).toContain("opacity-100"));
+  return screen;
+}
+
+it("keeps Send off until the reader has scrolled to the end of the text, and states its size", async () => {
+  const send = vi.fn(async (_text: string) => undefined);
+  const text = Array.from({ length: 20 }, (_, index) => `Line ${index + 1}`).join("\n");
+  const page$ = collectPageMessages();
+  const screen = await renderSendingFrame(sendingPage(text), send);
+  await userEvent.click(frameElement());
+  await expect.element(confirmation()).toBeVisible();
+  const box = confirmation()
+    .element()
+    .querySelector<HTMLElement>("[data-html-render-message-text]")!;
+  expect(box.scrollHeight).toBeGreaterThan(box.clientHeight);
+  const size = () =>
+    confirmation().element().querySelector("[data-html-render-message-size]")?.textContent;
+  expect(size()).toBe(
+    `20 lines, ${Array.from(text).length} characters · Scroll to the end to send it.`,
+  );
+  // Long past Send's delay, the hidden tail still keeps it off.
+  await new Promise((resolve) => setTimeout(resolve, 1_500));
+  const sendButton = sendInConfirmation().element() as HTMLButtonElement;
+  expect(sendButton.disabled).toBe(true);
+  box.scrollTop = box.scrollHeight / 3;
+  box.dispatchEvent(new Event("scroll"));
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  expect(sendButton.disabled).toBe(true);
+  box.scrollTop = box.scrollHeight;
+  box.dispatchEvent(new Event("scroll"));
+  await vi.waitFor(() => expect(sendButton.disabled).toBe(false));
+  expect(size()).toBe(`20 lines, ${Array.from(text).length} characters`);
+  await sendInConfirmation().click();
+  await vi.waitFor(() => expect(page$.messages).toContainEqual({ sent: text }));
+  expect(send).toHaveBeenCalledExactlyOnceWith(text);
+  page$.stop();
+  await screen.unmount();
+});
+
+it("hands focus back to the page's container, so a page cannot ask again right after Cancel", async () => {
+  const send = vi.fn(async (_text: string) => undefined);
+  // The page asks again the moment a request fails, as a page looping its dialog would.
+  const page$ = collectPageMessages();
+  const screen = await renderSendingFrame(
+    sendingPage("Option C", { retryWith: "Option C again" }),
+    send,
+  );
+  await userEvent.click(frameElement());
+  await expect.element(confirmation()).toBeVisible();
+  // Past the one-a-second limit, so only the focus rule can stop the page.
+  await vi.waitFor(
+    () => expect((sendInConfirmation().element() as HTMLButtonElement).disabled).toBe(false),
+    { timeout: 3_000 },
+  );
+  await confirmation().getByRole("button", { name: "Cancel" }).click();
+  const gesture = "Messages send only from a click, key press or tap in the page.";
+  await vi.waitFor(() =>
+    expect(page$.messages).toContainEqual({ failed: "Option C again", reason: gesture }),
+  );
+  await expect.element(confirmation()).not.toBeInTheDocument();
+  // Focus is back on the page's container, never inside the page.
+  await vi.waitFor(() => expect(document.activeElement).toBe(frameBox()));
+  expect(document.activeElement).not.toBe(frameElement());
+
+  // The reader clicks into the page again: that counts as using it, and the
+  // page still waits out the cancel.
+  await userEvent.click(frameElement());
+  const cooldown = "You cancelled the last message. Try again in a moment.";
+  await vi.waitFor(() =>
+    expect(page$.messages).toContainEqual({ failed: "Option C", reason: cooldown }),
+  );
+  expect(document.querySelector("[data-html-render-message-confirmation]")).toBeNull();
+  expect(send).not.toHaveBeenCalled();
+  page$.stop();
+  await screen.unmount();
+});
+
+it("starts Send's delay over with every press, and ignores a click pressed before Send turned on", async () => {
+  const send = vi.fn(async (_text: string) => undefined);
+  const page$ = collectPageMessages();
+  const screen = await renderSendingFrame(sendingPage("Option F"), send);
+  await userEvent.click(frameElement());
+  await expect.element(confirmation()).toBeVisible();
+  const sendButton = sendInConfirmation().element() as HTMLButtonElement;
+  // Presses every 200 ms for two seconds, as a page's "click fast" game would
+  // have the reader do: Send stays off throughout.
+  for (let index = 0; index < 10; index += 1) {
+    await new Promise((resolve) => setTimeout(resolve, 200));
+    expect(sendButton.disabled).toBe(true);
+    if (index % 2 === 0) {
+      window.dispatchEvent(new PointerEvent("pointerdown", { bubbles: true }));
+    } else {
+      await userEvent.keyboard("{Shift}");
+    }
+  }
+  expect(sendButton.disabled).toBe(true);
+  await vi.waitFor(() => expect(sendButton.disabled).toBe(false), { timeout: 3_000 });
+  // A pointer click whose press came while Send was off does nothing.
+  sendButton.dispatchEvent(new MouseEvent("click", { bubbles: true, detail: 1 }));
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  expect(send).not.toHaveBeenCalled();
+  await expect.element(confirmation()).toBeVisible();
+  // The reader's own click, pressed and released on the enabled Send, sends.
+  await sendInConfirmation().click();
+  await vi.waitFor(() => expect(page$.messages).toContainEqual({ sent: "Option F" }));
+  expect(send).toHaveBeenCalledExactlyOnceWith("Option F");
+  page$.stop();
+  await screen.unmount();
+});

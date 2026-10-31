@@ -109,8 +109,10 @@ export const HtmlRenderFrame = memo(function HtmlRenderFrame(props: {
       ref={boxRef}
       data-html-render-frame=""
       aria-busy={source.loading || undefined}
+      // Where a send confirmation returns focus: the page's container, not the page.
+      tabIndex={-1}
       className={cn(
-        "group/html-render relative w-full",
+        "group/html-render relative w-full outline-none",
         // The page's first report snaps the box to its height; later changes
         // (the page growing, the column resizing) ease to the new height.
         report.count > 1 &&

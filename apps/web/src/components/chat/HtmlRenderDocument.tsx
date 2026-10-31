@@ -14,6 +14,7 @@ import { memo, useEffect, useEffectEvent, useLayoutEffect, useRef, useState } fr
 
 import { cn } from "~/lib/utils";
 import { useHtmlRenderTheme } from "~/themes/htmlRenderTheme";
+import { createHtmlRenderFrameFocus, type HtmlRenderPageMessageSender } from "./htmlRenderMessages";
 
 /** Posts a theme to the frame's running page. */
 function postTheme(frame: HTMLIFrameElement, theme: HtmlRenderTheme) {
@@ -48,7 +49,7 @@ export const HtmlRenderDocument = memo(function HtmlRenderDocument(props: {
    * whether it is present must not change while the frame lives, since the
    * frame name tells the page.
    */
-  readonly onSendMessage?: ((text: string) => Promise<void>) | undefined;
+  readonly onSendMessage?: HtmlRenderPageMessageSender | undefined;
 }) {
   const theme = useHtmlRenderTheme();
   const frameRef = useRef<HTMLIFrameElement>(null);
@@ -91,13 +92,25 @@ export const HtmlRenderDocument = memo(function HtmlRenderDocument(props: {
 
   // A page's `ryco.send`. Only this frame's own window is heard, and only
   // while the reader is using it: the frame has focus in a focused, visible
-  // app and the app holds the user activation their click or key press in the
-  // page gave it, so a page cannot send on load, on a timer, or while the
-  // reader is elsewhere. The gate allows one request at a time and one a
-  // second; the reader still confirms each one. The listener outlives prop
-  // changes, so a re-render cannot reset the limit.
+  // app, it took that focus after the latest confirmation closed (the reader
+  // clicked or tabbed into it; a confirmation hands focus back to the frame's
+  // container, never the frame), and the app holds the user activation their
+  // click or key press gave it, so a page cannot send on load, on a timer,
+  // while the reader is elsewhere, or right after they answered a
+  // confirmation. The gate allows one request at a time, one a second, and
+  // none for a while after a cancel; the reader still confirms each one. The
+  // listener outlives prop changes, so a re-render cannot reset the limits.
   const readSendMessage = useEffectEvent(() => props.onSendMessage);
   useEffect(() => {
+    const focus = createHtmlRenderFrameFocus();
+    const frameTookFocus = () => {
+      if (frameRef.current !== null && document.activeElement === frameRef.current) {
+        focus.focused();
+      }
+    };
+    // The nearest focusable container of the frame: where its confirmation returns focus.
+    const returnFocus = () =>
+      frameRef.current?.parentElement?.closest<HTMLElement>("[tabindex]") ?? null;
     const gate = createHtmlRenderMessageGate({
       available: () => readSendMessage() !== undefined,
       takeGesture: () => {
@@ -105,6 +118,7 @@ export const HtmlRenderDocument = memo(function HtmlRenderDocument(props: {
         return (
           frame !== null &&
           document.activeElement === frame &&
+          focus.regained() &&
           document.hasFocus() &&
           document.visibilityState === "visible" &&
           navigator.userActivation?.isActive === true
@@ -112,7 +126,7 @@ export const HtmlRenderDocument = memo(function HtmlRenderDocument(props: {
       },
       deliver: (text) => {
         const send = readSendMessage();
-        return send === undefined ? Promise.reject(new Error()) : send(text);
+        return send === undefined ? Promise.reject(new Error()) : send(text, { returnFocus });
       },
       reply: (message) => frameRef.current?.contentWindow?.postMessage(message, "*"),
     });
@@ -122,8 +136,13 @@ export const HtmlRenderDocument = memo(function HtmlRenderDocument(props: {
       const request = readHtmlRenderMessageRequest(event.data);
       if (request !== undefined) gate(request);
     };
+    // Focus moving into the frame blurs this window with the frame active.
+    window.addEventListener("blur", frameTookFocus);
     window.addEventListener("message", sendMessage);
-    return () => window.removeEventListener("message", sendMessage);
+    return () => {
+      window.removeEventListener("blur", frameTookFocus);
+      window.removeEventListener("message", sendMessage);
+    };
   }, []);
 
   const { onContentHeight } = props;

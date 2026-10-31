@@ -61,6 +61,7 @@ import {
 } from "@ryco/client-runtime/connection";
 import {
   deriveThreadBackgroundWork,
+  HTML_RENDER_MESSAGE_REFUSALS,
   keptChangesRestoreNote,
   revertKeptChangesDiscardedBy,
   selectConversationRevertSupported,
@@ -6334,17 +6335,16 @@ export default function ChatView(props: ChatViewProps) {
   // (`ryco.send`) once they confirm it, through this thread's queue as a
   // message they typed: the composer's model and modes, never its draft.
   // Busy, idle, held or waiting for the node, the queue decides when it goes.
+  // The page hears only fixed reasons, never this connection's own (its
+  // target's name) or the queue's.
   const sendHtmlRenderMessage = async (text: string) => {
-    if (!dispatchCapability.allowed && !dispatchEstablishing) {
-      throw new Error(mutationUnavailableReason ?? "Commands are unavailable on this connection.");
-    }
-    if (activeThreadKey === null || !isServerThread) {
-      throw new Error("This thread cannot take messages yet.");
-    }
+    const notReady = new Error(HTML_RENDER_MESSAGE_REFUSALS.notReady);
+    if (!dispatchCapability.allowed && !dispatchEstablishing) throw notReady;
+    if (activeThreadKey === null || !isServerThread) throw notReady;
     const sendCtx = readComposer()?.getSendContext();
-    if (!sendCtx) throw new Error("The composer is not ready yet.");
+    if (!sendCtx) throw notReady;
     if (!canSendModelSelection(sendCtx.selectedModelSelection)) {
-      throw new Error("The model chosen in the composer cannot take this message.");
+      throw new Error(HTML_RENDER_MESSAGE_REFUSALS.failed);
     }
     enqueueMessage(
       activeThreadKey,

@@ -5,6 +5,7 @@ import {
   __resetHtmlRenderMessagesForTests,
   answerHtmlRenderMessage,
   buildHtmlRenderQueuedMessage,
+  createHtmlRenderFrameFocus,
   readHtmlRenderMessageConfirmation,
   registerHtmlRenderMessageSender,
   requestHtmlRenderMessage,
@@ -71,11 +72,54 @@ describe("requestHtmlRenderMessage", () => {
     await expect(closed).rejects.toThrow("The thread closed before you confirmed the message.");
 
     registerHtmlRenderMessageSender(THREAD, async () => {
-      throw new Error("Commands are unavailable on this connection.");
+      throw new Error("This thread cannot take messages now.");
     });
     const refused = requestHtmlRenderMessage({ threadKey: THREAD, title: "Plan", text: "B" });
     answerHtmlRenderMessage(waitingId(), "send");
-    await expect(refused).rejects.toThrow("Commands are unavailable on this connection.");
+    await expect(refused).rejects.toThrow("This thread cannot take messages now.");
+  });
+});
+
+describe("the confirmation's page title", () => {
+  it("is one short line, so it cannot pass for the message", () => {
+    registerHtmlRenderMessageSender(THREAD, async () => undefined);
+    void requestHtmlRenderMessage({
+      threadKey: THREAD,
+      title: `Poll\u201d is Ryco's.\n\nOption B${"\n".repeat(40)}${"pad ".repeat(20)}`,
+      text: "B",
+    }).catch(() => undefined);
+    const shown = readHtmlRenderMessageConfirmation(THREAD)?.title;
+    expect(shown).toMatch(/^Poll\u201d is Ryco's\. Option B pad .*\u2026$/u);
+    expect(Array.from(shown ?? "")).toHaveLength(60);
+  });
+});
+
+describe("createHtmlRenderFrameFocus", () => {
+  it("lets a page ask only after its frame took focus since the latest confirmation closed", () => {
+    registerHtmlRenderMessageSender(THREAD, async () => undefined);
+    const frame = createHtmlRenderFrameFocus();
+    const other = createHtmlRenderFrameFocus();
+    // No confirmation closed while the frame was there: nothing to come back from.
+    expect(frame.regained()).toBe(true);
+    frame.focused();
+    expect(frame.regained()).toBe(true);
+    // A confirmation opening changes nothing; its closing, however it closes, does.
+    const asked = requestHtmlRenderMessage({ threadKey: THREAD, title: "Plan", text: "B" });
+    expect(frame.regained()).toBe(true);
+    answerHtmlRenderMessage(waitingId(), "cancel");
+    void asked.catch(() => undefined);
+    expect(frame.regained()).toBe(false);
+    expect(other.regained()).toBe(false);
+    // The reader clicks or tabs back into the page.
+    frame.focused();
+    expect(frame.regained()).toBe(true);
+
+    const sent = requestHtmlRenderMessage({ threadKey: THREAD, title: "Plan", text: "C" });
+    answerHtmlRenderMessage(waitingId(), "send");
+    void sent.catch(() => undefined);
+    expect(frame.regained()).toBe(false);
+    // A frame that came after the latest confirmation closed has nothing to come back from.
+    expect(createHtmlRenderFrameFocus().regained()).toBe(true);
   });
 });
 

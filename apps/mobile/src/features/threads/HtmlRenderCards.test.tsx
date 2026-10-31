@@ -220,6 +220,30 @@ describe("HtmlRenderCards", () => {
     expect(hoisted.open.mock.calls[1]?.[0]).toMatchObject({ messageId: "render-1" });
   });
 
+  it("never lets a page handed over from another thread send", () => {
+    const handedOver = turnRender("render-5", "handed-html", { title: "Handed over", height: 300 });
+    const tree = expand(
+      HtmlRenderCards({
+        environmentId: EnvironmentId.make("env-1"),
+        threadId: ThreadId.make("thread-1"),
+        renders: [
+          {
+            ...handedOver,
+            attachment: {
+              ...handedOver.attachment,
+              handoff: {
+                threadId: ThreadId.make("parent"),
+                messageId: MessageId.make("parent-message"),
+              },
+            },
+          },
+        ],
+      }),
+    );
+    (cards(tree)[0]!.props as { onPress: () => void }).onPress();
+    expect(hoisted.open).toHaveBeenCalledWith(expect.objectContaining({ canSendMessages: false }));
+  });
+
   it("hosts full screen itself outside the feed's provider", () => {
     expect(JSON.stringify(renderCards())).toContain("own-modal");
   });

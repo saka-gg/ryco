@@ -439,7 +439,7 @@ export function ThreadMessage(props: {
                 messageId={props.message.id}
                 attachment={attachment}
                 htmlRender={htmlRender}
-                canSendMessages={canHtmlRenderSendFromMessage(props.message)}
+                canSendMessages={canHtmlRenderSendFromMessage(props.message, attachment)}
               />
             ))}
           </View>

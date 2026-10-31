@@ -1,5 +1,8 @@
 import { scopedThreadKey, scopeThreadRef } from "@ryco/client-runtime/scoped";
-import { HTML_RENDER_MESSAGE_REFUSALS } from "@ryco/client-runtime/state/session";
+import {
+  HTML_RENDER_MESSAGE_REFUSALS,
+  htmlRenderMessageConfirmationTitle,
+} from "@ryco/client-runtime/state/session";
 import type { EnvironmentId, ThreadId } from "@ryco/contracts";
 import { useCallback, useSyncExternalStore } from "react";
 
@@ -23,14 +26,32 @@ import type { WebQueuedMessage } from "../../messageQueueStore";
 /** Queues a page's message in the thread; rejects with the reason the page sees. */
 export type HtmlRenderMessageSender = (text: string) => Promise<void>;
 
+/** What a page's frame hands its request besides the text. */
+export interface HtmlRenderMessageRequestOptions {
+  /**
+   * The element focus returns to when the confirmation closes: the frame's
+   * container, never the frame itself, so closing it does not hand the page
+   * the focus (and the user activation of the reader's click on Send or
+   * Cancel) to ask again with.
+   */
+  readonly returnFocus?: () => HTMLElement | null;
+}
+
+/** A page's `onSendMessage`: its text, and how its confirmation hands focus back. */
+export type HtmlRenderPageMessageSender = (
+  text: string,
+  options?: HtmlRenderMessageRequestOptions,
+) => Promise<void>;
+
 /** A page's message waiting for the reader's answer. */
 export interface HtmlRenderMessageConfirmationRequest {
   readonly id: number;
   readonly threadKey: string;
-  /** The page's title, as the agent wrote it. */
+  /** The page's title, as the confirmation names it (`htmlRenderMessageConfirmationTitle`). */
   readonly title: string;
   /** Exactly what is sent. */
   readonly text: string;
+  readonly returnFocus?: (() => HTMLElement | null) | undefined;
 }
 
 interface PendingRequest extends HtmlRenderMessageConfirmationRequest {
@@ -43,19 +64,49 @@ let pending: PendingRequest | null = null;
 // The last request asked, kept so its confirmation can close with its text on screen.
 let lastAsked: PendingRequest | null = null;
 let nextRequestId = 1;
+// Confirmations closed so far, however they closed: a frame must take focus
+// again after the latest one before its page may ask (`createHtmlRenderFrameFocus`).
+let closedConfirmations = 0;
 const listeners = new Set<() => void>();
 
-const THREAD_NOT_OPEN = "Open this page's thread to send its message.";
-const THREAD_CLOSED = "The thread closed before you confirmed the message.";
+const THREAD_NOT_OPEN = HTML_RENDER_MESSAGE_REFUSALS.threadNotOpen;
+const THREAD_CLOSED = HTML_RENDER_MESSAGE_REFUSALS.threadClosed;
 
 function notify() {
   for (const listener of listeners) listener();
 }
 
 function setPending(next: PendingRequest | null) {
+  if (pending !== null && next === null) closedConfirmations += 1;
   pending = next;
   if (next !== null) lastAsked = next;
   notify();
+}
+
+/**
+ * Tracks whether a page's frame took focus after the latest confirmation
+ * closed, if one closed while the frame was there. Its document calls
+ * `focused()` when the frame takes focus (the window's `blur` while the frame
+ * is the active element: the reader clicked or tabbed into the page); a page
+ * may ask only while `regained()`. Closing a confirmation never focuses a
+ * frame, so the reader's click on Send or Cancel (and the user activation it
+ * gives the app) cannot be spent by the page on asking again: the reader has
+ * to come back to the page first. The confirmation had the focus, so the app's
+ * window has it then, and focus moving into the frame blurs it. Before any
+ * confirmation closes (when the window may never have had focus to lose, such
+ * as the reader's first click in an unfocused window) the other checks apply.
+ */
+export function createHtmlRenderFrameFocus(): {
+  readonly focused: () => void;
+  readonly regained: () => boolean;
+} {
+  let focusedAfter = closedConfirmations;
+  return {
+    focused: () => {
+      focusedAfter = closedConfirmations;
+    },
+    regained: () => focusedAfter === closedConfirmations,
+  };
 }
 
 function currentSender(threadKey: string): HtmlRenderMessageSender | undefined {
@@ -98,13 +149,20 @@ export function requestHtmlRenderMessage(input: {
   readonly threadKey: string;
   readonly title: string;
   readonly text: string;
+  readonly returnFocus?: (() => HTMLElement | null) | undefined;
 }): Promise<void> {
   if (currentSender(input.threadKey) === undefined) {
     return Promise.reject(new Error(THREAD_NOT_OPEN));
   }
   if (pending !== null) return Promise.reject(new Error(HTML_RENDER_MESSAGE_REFUSALS.pending));
   return new Promise<void>((resolve, reject) => {
-    setPending({ ...input, id: nextRequestId++, resolve, reject });
+    setPending({
+      ...input,
+      title: htmlRenderMessageConfirmationTitle(input.title),
+      id: nextRequestId++,
+      resolve,
+      reject,
+    });
   });
 }
 
@@ -180,18 +238,18 @@ export function useHtmlRenderMessageSend(input: {
   readonly threadId: ThreadId | null | undefined;
   readonly title: string;
   readonly enabled: boolean;
-}): HtmlRenderMessageSender | undefined {
+}): HtmlRenderPageMessageSender | undefined {
   const { environmentId, threadId, title } = input;
   const phoneTier = usePresentationTier() === "phone";
   const threadKey =
     input.enabled && !phoneTier && environmentId && threadId
       ? scopedThreadKey(scopeThreadRef(environmentId, threadId))
       : null;
-  const send = useCallback(
-    (text: string) =>
+  const send = useCallback<HtmlRenderPageMessageSender>(
+    (text, options) =>
       threadKey === null
         ? Promise.reject(new Error(HTML_RENDER_MESSAGE_REFUSALS.unavailable))
-        : requestHtmlRenderMessage({ threadKey, title, text }),
+        : requestHtmlRenderMessage({ threadKey, title, text, returnFocus: options?.returnFocus }),
     [threadKey, title],
   );
   return threadKey === null ? undefined : send;

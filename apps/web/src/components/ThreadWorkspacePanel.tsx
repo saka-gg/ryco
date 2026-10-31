@@ -1121,12 +1121,18 @@ export default function ThreadWorkspacePanel(props: {
   // loaded, may send the reader's answers.
   const renderMessageId = renderKey ? parseWorkspaceRenderKey(renderKey)?.messageId : undefined;
   const threadMessages = activeThread?.messages;
+  const renderAttachment =
+    workspaceRender.status === "found" ? workspaceRender.render.attachment : undefined;
   const renderCanSendMessages = useMemo(() => {
     const message = renderMessageId
       ? threadMessages?.find((candidate) => candidate.id === renderMessageId)
       : undefined;
-    return message !== undefined && canHtmlRenderSendFromMessage(message);
-  }, [renderMessageId, threadMessages]);
+    return (
+      message !== undefined &&
+      renderAttachment !== undefined &&
+      canHtmlRenderSendFromMessage(message, renderAttachment)
+    );
+  }, [renderMessageId, threadMessages, renderAttachment]);
   const renderTitle =
     renderKey && parseWorkspaceRenderKey(renderKey)
       ? workspaceRender.status === "found"

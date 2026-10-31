@@ -1766,7 +1766,7 @@ function TimelineRowContent({ row }: { row: TimelineRow }) {
                   environmentId={ctx.activeThreadEnvironmentId}
                   threadId={parseScopedThreadKey(ctx.routeThreadKey)?.threadId}
                   messageId={row.message.id}
-                  rendersCanSendMessages={canHtmlRenderSendFromMessage(row.message)}
+                  messageRole={row.message.role}
                 />
                 {!assistantResponseStillInProgress && row.turnHtmlRenders && (
                   <HtmlRenderCards
@@ -1774,8 +1774,8 @@ function TimelineRowContent({ row }: { row: TimelineRow }) {
                     threadId={parseScopedThreadKey(ctx.routeThreadKey)?.threadId}
                     renders={row.turnHtmlRenders}
                     appearance={ctx.resolvedTheme}
-                    // A turn's pages are the ones this thread's agent published.
-                    canSendMessages
+                    // A turn's pages are on this thread's agent's messages.
+                    onAgentMessages
                   />
                 )}
                 {!assistantResponseStillInProgress && (
@@ -1853,8 +1853,8 @@ function TimelineRowContent({ row }: { row: TimelineRow }) {
             messageId={row.messageId}
             attachment={row.attachment}
             htmlRender={row.htmlRender}
-            // A render row is a page this thread's agent published.
-            canSendMessages
+            // A render row is a page on this thread's agent's message.
+            canSendMessages={canHtmlRenderSendFromMessage({ role: "assistant" }, row.attachment)}
           />
           {!(
             ctx.activeTurnInProgress &&

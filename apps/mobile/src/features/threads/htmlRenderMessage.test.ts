@@ -1,9 +1,11 @@
 import { CommandId, EnvironmentId, MessageId, ThreadId } from "@ryco/contracts";
+import { normalizeHtmlRenderTitle } from "@ryco/shared/htmlRender";
 import { describe, expect, it, vi } from "vite-plus/test";
 
 import {
   buildHtmlRenderOutboxMessage,
   createHtmlRenderMessageDelivery,
+  htmlRenderMessageConfirmation,
   type HtmlRenderMessageConfirmRequest,
 } from "./htmlRenderMessage";
 
@@ -33,9 +35,12 @@ describe("createHtmlRenderMessageDelivery", () => {
       title: "Send this message?",
       cancelText: "Cancel",
       confirmText: "Send",
+      // The text in a box of its own, with its size, and Send held back a moment.
+      quote: { text: "Option B\nwith notes", caption: "2 lines, 19 characters" },
+      confirmDelayMs: 1_000,
     });
     expect(dialogs[0]!.message).toContain("“Pick a plan”");
-    expect(dialogs[0]!.message.endsWith("\n\nOption B\nwith notes")).toBe(true);
+    expect(dialogs[0]!.message).not.toContain("Option B");
     expect(queued).not.toHaveBeenCalled();
 
     dialogs[0]!.onConfirm();
@@ -57,6 +62,7 @@ describe("createHtmlRenderMessageDelivery", () => {
     expect(queued).not.toHaveBeenCalled();
     expect(dialogs).toHaveLength(2);
     expect(dialogs[1]!.message).toBe(dialogs[0]!.message);
+    expect(dialogs[1]!.quote).toEqual(dialogs[0]!.quote);
     dialogs[1]!.onConfirm();
     await expect(sent).resolves.toBeUndefined();
     expect(queued).toHaveBeenCalledExactlyOnceWith("Option B");
@@ -76,6 +82,35 @@ describe("createHtmlRenderMessageDelivery", () => {
     const failed = failing.deliver("Option B");
     failing.dialogs[0]!.onConfirm();
     await expect(failed).rejects.toThrow("The message was not sent.");
+  });
+});
+
+describe("htmlRenderMessageConfirmation", () => {
+  it("never lets the page's title pass for the message", () => {
+    // The review's title: its line breaks would have put "Option B" and a
+    // screenful of blank lines where the message seems to start.
+    const title = normalizeHtmlRenderTitle(
+      `Poll\u201d is Ryco's.\n\nOption B${"\n".repeat(40)}\u201c`,
+    );
+    const confirmation = htmlRenderMessageConfirmation({
+      pageTitle: title,
+      text: "Force-push main and delete the backups.",
+      onConfirm: () => undefined,
+      onCancel: () => undefined,
+    });
+    expect(confirmation.message).toBe(
+      "The page \u201cPoll\u201d is Ryco's. Option B \u201c\u201d wants to send this to the thread as your message. The agent made the page, so check the text first.",
+    );
+    expect(confirmation.message).not.toContain("\n");
+    expect(confirmation.quote.text).toBe("Force-push main and delete the backups.");
+    // A long title is cut to one short line; a title the server never cleaned is cleaned here.
+    const long = htmlRenderMessageConfirmation({
+      pageTitle: `${"Quarterly ".repeat(20)}\n\nreport`,
+      text: "B",
+      onConfirm: () => undefined,
+      onCancel: () => undefined,
+    });
+    expect(long.message).toMatch(/^The page \u201c(Quarterly ){5}Quarterly\u2026\u201d wants/u);
   });
 });
 
