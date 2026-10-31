@@ -17,6 +17,7 @@ import { Route as SettingsRouteImport } from './routes/settings'
 import { Route as StatisticsRouteImport } from './routes/statistics'
 import { Route as TasksRouteImport } from './routes/tasks'
 import { Route as ChatIndexRouteImport } from './routes/_chat.index'
+import { Route as ChatNewRouteImport } from './routes/_chat.new'
 import { Route as SettingsDiagnosticsRouteImport } from './routes/_settings.diagnostics'
 import { Route as ChatEnvironmentIdThreadIdRouteImport } from './routes/_chat.$environmentId.$threadId'
 import { Route as ChatDraftDraftIdRouteImport } from './routes/_chat.draft.$draftId'
@@ -61,6 +62,11 @@ const ChatIndexRoute = ChatIndexRouteImport.update({
   path: '/',
   getParentRoute: () => ChatRoute,
 } as any)
+const ChatNewRoute = ChatNewRouteImport.update({
+  id: '/new',
+  path: '/new',
+  getParentRoute: () => ChatRoute,
+} as any)
 const SettingsDiagnosticsRoute = SettingsDiagnosticsRouteImport.update({
   id: '/_settings/diagnostics',
   path: '/diagnostics',
@@ -92,6 +98,7 @@ export interface FileRoutesByFullPath {
   '/settings': typeof SettingsRoute
   '/statistics': typeof StatisticsRoute
   '/tasks': typeof TasksRoute
+  '/new': typeof ChatNewRoute
   '/diagnostics': typeof SettingsDiagnosticsRoute
   '/$environmentId/$threadId': typeof ChatEnvironmentIdThreadIdRoute
   '/draft/$draftId': typeof ChatDraftDraftIdRoute
@@ -104,6 +111,7 @@ export interface FileRoutesByTo {
   '/settings': typeof SettingsRoute
   '/statistics': typeof StatisticsRoute
   '/tasks': typeof TasksRoute
+  '/new': typeof ChatNewRoute
   '/diagnostics': typeof SettingsDiagnosticsRoute
   '/': typeof ChatIndexRoute
   '/$environmentId/$threadId': typeof ChatEnvironmentIdThreadIdRoute
@@ -119,6 +127,7 @@ export interface FileRoutesById {
   '/settings': typeof SettingsRoute
   '/statistics': typeof StatisticsRoute
   '/tasks': typeof TasksRoute
+  '/_chat/new': typeof ChatNewRoute
   '/_settings/diagnostics': typeof SettingsDiagnosticsRoute
   '/_chat/': typeof ChatIndexRoute
   '/_chat/$environmentId/$threadId': typeof ChatEnvironmentIdThreadIdRoute
@@ -135,6 +144,7 @@ export interface FileRouteTypes {
     | '/settings'
     | '/statistics'
     | '/tasks'
+    | '/new'
     | '/diagnostics'
     | '/$environmentId/$threadId'
     | '/draft/$draftId'
@@ -147,6 +157,7 @@ export interface FileRouteTypes {
     | '/settings'
     | '/statistics'
     | '/tasks'
+    | '/new'
     | '/diagnostics'
     | '/'
     | '/$environmentId/$threadId'
@@ -161,6 +172,7 @@ export interface FileRouteTypes {
     | '/settings'
     | '/statistics'
     | '/tasks'
+    | '/_chat/new'
     | '/_settings/diagnostics'
     | '/_chat/'
     | '/_chat/$environmentId/$threadId'
@@ -238,6 +250,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ChatIndexRouteImport
       parentRoute: typeof ChatRoute
     }
+    '/_chat/new': {
+      id: '/_chat/new'
+      path: '/new'
+      fullPath: '/new'
+      preLoaderRoute: typeof ChatNewRouteImport
+      parentRoute: typeof ChatRoute
+    }
     '/_settings/diagnostics': {
       id: '/_settings/diagnostics'
       path: '/diagnostics'
@@ -270,12 +289,14 @@ declare module '@tanstack/react-router' {
 }
 
 interface ChatRouteChildren {
+  ChatNewRoute: typeof ChatNewRoute
   ChatIndexRoute: typeof ChatIndexRoute
   ChatEnvironmentIdThreadIdRoute: typeof ChatEnvironmentIdThreadIdRoute
   ChatDraftDraftIdRoute: typeof ChatDraftDraftIdRoute
 }
 
 const ChatRouteChildren: ChatRouteChildren = {
+  ChatNewRoute: ChatNewRoute,
   ChatIndexRoute: ChatIndexRoute,
   ChatEnvironmentIdThreadIdRoute: ChatEnvironmentIdThreadIdRoute,
   ChatDraftDraftIdRoute: ChatDraftDraftIdRoute,
