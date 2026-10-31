@@ -1,4 +1,16 @@
 import "./polyfills";
+// First, so a crash anywhere after it is kept for Settings > About > Diagnostics. Its file
+// store loads only when an error is fatal (mobileStartupImports.test.ts).
+import {
+  type ErrorUtilsLike,
+  installFatalErrorRecorder,
+} from "./src/diagnostics/fatalErrorRecorder";
+import { fatalErrorFileStore } from "./src/diagnostics/fatalErrorStore";
+
+installFatalErrorRecorder({
+  errorUtils: (globalThis as { ErrorUtils?: ErrorUtilsLike }).ErrorUtils,
+  store: fatalErrorFileStore,
+});
 // Import-time registrations. Metro inlines requires (metro.config.js), so a
 // module is evaluated at its first use; bare imports are never inlined, which
 // keeps these lazy configurators registered at startup, before any runtime
