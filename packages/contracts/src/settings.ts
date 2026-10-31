@@ -12,6 +12,7 @@ import {
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import * as SchemaTransformation from "effect/SchemaTransformation";
+import * as Struct from "effect/Struct";
 import {
   EnvironmentId,
   TrimmedNonEmptyString,
@@ -703,21 +704,58 @@ export const InitialModelSelection = ModelSelection.check(
   }),
 );
 
+/** Overrides every node with project preferences reports in its effective preferences. */
+const REPORTED_PROJECT_PREFERENCE_VALUES = {
+  defaultThreadEnvMode: ThreadEnvMode,
+  worktreeBranchPrefix: WorktreeBranchPrefix,
+  runSetupScript: Schema.Boolean,
+};
+/**
+ * Overrides added since: an older node's effective preferences omit them, so they are optional
+ * in {@link EffectiveProjectPreferences} and a client hides their rows. New keys go here.
+ */
+const ADDED_PROJECT_PREFERENCE_VALUES = {};
+/**
+ * The whole opt-in for project overrides. Each key is the node setting of the same name, with
+ * its plain value schema; a project may set it for itself and otherwise inherits the node's
+ * value. The stored overrides, their patch, the compare-and-set values and the effective
+ * preferences derive from this list, so a key added here reaches every one of them.
+ * Deliberately bounded to creation preferences, never execution authority: no runtime or
+ * interaction mode, approvals, providers, scripts, environment variables or paths.
+ */
+export const PROJECT_PREFERENCE_VALUES = Schema.Struct({
+  ...REPORTED_PROJECT_PREFERENCE_VALUES,
+  ...ADDED_PROJECT_PREFERENCE_VALUES,
+});
+/** A project override that inherits the node setting of the same name. */
+export type ProjectPreferenceValueKey = keyof typeof PROJECT_PREFERENCE_VALUES.fields;
+export const PROJECT_PREFERENCE_VALUE_KEYS = Object.keys(
+  PROJECT_PREFERENCE_VALUES.fields,
+) as ReadonlyArray<ProjectPreferenceValueKey>;
+/**
+ * Every project preference. The initial model is the one special key: null masks a model saved
+ * on the project before project defaults existed, and without a node default it falls back to
+ * Ryco's built-in model.
+ */
+export type ProjectPreferenceKey = "initialModelSelection" | ProjectPreferenceValueKey;
+
+const ProjectInitialModelSelection = Schema.optionalKey(Schema.NullOr(InitialModelSelection));
+
 /** Deliberately bounded: these are creation preferences, never execution authority. */
 export const ProjectPreferences = Schema.Struct({
-  initialModelSelection: Schema.optionalKey(Schema.NullOr(InitialModelSelection)),
-  defaultThreadEnvMode: Schema.optionalKey(ThreadEnvMode),
-  worktreeBranchPrefix: Schema.optionalKey(WorktreeBranchPrefix),
-  runSetupScript: Schema.optionalKey(Schema.Boolean),
+  initialModelSelection: ProjectInitialModelSelection,
+  ...Struct.map(PROJECT_PREFERENCE_VALUES.fields, Schema.optionalKey),
 });
 export type ProjectPreferences = typeof ProjectPreferences.Type;
+/** {@link ProjectPreferenceKey} in order: the initial model, then the registry. */
+export const PROJECT_PREFERENCE_KEYS = /* @__PURE__ */ Object.keys(
+  ProjectPreferences.fields,
+) as ReadonlyArray<ProjectPreferenceKey>;
 
 /** Null resets a single field to inheritance. Model null also masks a legacy project preset. */
 export const ProjectPreferencesPatch = Schema.Struct({
-  initialModelSelection: Schema.optionalKey(Schema.NullOr(InitialModelSelection)),
-  defaultThreadEnvMode: Schema.optionalKey(Schema.NullOr(ThreadEnvMode)),
-  worktreeBranchPrefix: Schema.optionalKey(Schema.NullOr(WorktreeBranchPrefix)),
-  runSetupScript: Schema.optionalKey(Schema.NullOr(Schema.Boolean)),
+  initialModelSelection: ProjectInitialModelSelection,
+  ...Struct.map(Struct.map(PROJECT_PREFERENCE_VALUES.fields, Schema.NullOr), Schema.optionalKey),
 }).pipe(rejectExcessProperties);
 export type ProjectPreferencesPatch = typeof ProjectPreferencesPatch.Type;
 
@@ -732,13 +770,23 @@ export type ProjectPreferencesExpected = typeof ProjectPreferencesExpected.Type;
 
 export const PreferenceSource = Schema.Literals(["project", "legacy-project", "node", "builtin"]);
 export type PreferenceSource = typeof PreferenceSource.Type;
-const sourced = <S extends Schema.Top>(value: S) =>
-  Schema.Struct({ value, source: PreferenceSource });
+type Sourced<S extends Schema.Top> = Schema.Struct<{
+  readonly value: S;
+  readonly source: typeof PreferenceSource;
+}>;
+interface SourcedLambda extends Struct.Lambda {
+  <S extends Schema.Top>(value: S): Sourced<S>;
+  readonly "~lambda.out": this["~lambda.in"] extends Schema.Top
+    ? Sourced<this["~lambda.in"]>
+    : never;
+}
+const sourced = Struct.lambda<SourcedLambda>((value) =>
+  Schema.Struct({ value, source: PreferenceSource }),
+);
 export const EffectiveProjectPreferences = Schema.Struct({
   initialModelSelection: sourced(ModelSelection),
-  defaultThreadEnvMode: sourced(ThreadEnvMode),
-  worktreeBranchPrefix: sourced(WorktreeBranchPrefix),
-  runSetupScript: sourced(Schema.Boolean),
+  ...Struct.map(REPORTED_PROJECT_PREFERENCE_VALUES, sourced),
+  ...Struct.map(Struct.map(ADDED_PROJECT_PREFERENCE_VALUES, sourced), Schema.optionalKey),
   worktreeRoot: sourced(WorktreeRoot),
   overrides: ProjectPreferences.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
 });

@@ -1,18 +1,27 @@
 import { useHostedRpcCapability } from "../../hostedHub/capabilities";
 import { WS_METHODS } from "@ryco/contracts";
 import { useEffect, useRef, useState } from "react";
-import { Schema } from "effect";
 import {
   DEFAULT_UNIFIED_SETTINGS,
   INITIAL_MODEL_OPTION_IDS,
-  type ProjectPreferencesExpected,
+  PROJECT_PREFERENCE_VALUE_KEYS,
   ProjectId,
-  WorktreeBranchPrefix,
   type EffectiveProjectPreferences,
+  type ProjectPreferenceKey,
   type ProjectPreferencesPatch,
-  type ServerSettingsPatch,
+  type ProjectPreferenceValueKey,
 } from "@ryco/contracts";
 import { readEffectiveProjectPreferences } from "@ryco/client-runtime/state/settings";
+import {
+  projectPreferenceCanReset,
+  projectPreferenceResetValue,
+  projectPreferencesWritePatch,
+  projectPreferenceSupported,
+} from "@ryco/client-runtime/state/settings/projectPreferenceEditing";
+import {
+  PROJECT_PREFERENCE_FIELDS,
+  readProjectPreferenceText,
+} from "@ryco/shared/projectPreferences";
 import { createModelSelection } from "@ryco/shared/model";
 import { useServerConfig, applySettingsUpdated } from "../../rpc/serverState";
 import { useSettingsEditingScope, useSettingsTarget } from "../../settingsTarget";
@@ -111,36 +120,11 @@ function ProjectPreferenceEditor(props: {
   const blocked = props.disabled || projectMissing || saving || effective === null;
 
   async function save(patch: ProjectPreferencesPatch) {
-    if (blocked || !config) return;
+    if (blocked || !config || !effective) return;
     const request = generation.current;
     setSaving(true);
     setError(null);
-    const current = effective?.overrides ?? {};
-    const expected = Object.fromEntries(
-      Object.keys(patch).map((field) => [
-        field,
-        field === "initialModelSelection" && !Object.hasOwn(current, field)
-          ? "absent"
-          : (current[field as keyof typeof current] ?? null),
-      ]),
-    );
-    const nodePatch: ServerSettingsPatch = projectId
-      ? {
-          projectPreferences: { [projectId]: patch },
-          expectedProjectPreferences: { [projectId]: expected as ProjectPreferencesExpected },
-        }
-      : ({
-          ...patch,
-          expectedNodePreferences: Object.fromEntries(
-            Object.keys(patch).map((field) => [
-              field,
-              field === "initialModelSelection" &&
-              effective?.initialModelSelection.source === "builtin"
-                ? null
-                : effective?.[field as keyof ProjectPreferencesPatch]?.value,
-            ]),
-          ),
-        } as ServerSettingsPatch);
+    const nodePatch = projectPreferencesWritePatch({ effective, projectId, patch });
     try {
       if (target) await updateEnvironmentServerSettings(target.environmentId, nodePatch);
       else applySettingsUpdated(await ensureLocalApi().server.updateSettings(nodePatch));
@@ -152,7 +136,7 @@ function ProjectPreferenceEditor(props: {
       setSaving(false);
     }
   }
-  function source(field: keyof ProjectPreferencesPatch) {
+  function source(field: ProjectPreferenceKey) {
     const result = effective?.[field];
     if (!result) return "Loading…";
     return result.source === "project" || result.source === "legacy-project"
@@ -163,28 +147,69 @@ function ProjectPreferenceEditor(props: {
           ? "Ryco default"
           : "Device default";
   }
-  function reset(field: keyof ProjectPreferencesPatch, label: string) {
-    const overridden =
-      effective?.[field]?.source === "project" || effective?.[field]?.source === "legacy-project";
-    const changedOnNode =
-      field === "initialModelSelection"
-        ? effective?.initialModelSelection.source === "node"
-        : effective !== null && effective[field].value !== DEFAULT_UNIFIED_SETTINGS[field];
-    if (projectId ? !overridden : !changedOnNode) return null;
+  function reset(field: ProjectPreferenceKey, label: string) {
+    if (!projectPreferenceCanReset({ effective, projectId, field })) return null;
     return (
       <SettingResetButton
         label={label}
         tooltip={projectId ? "Use device default" : "Reset to default"}
         ariaLabel={projectId ? `Use device default for ${label}` : undefined}
         disabled={blocked}
-        onClick={() => {
-          const value = projectId
-            ? null
-            : field === "initialModelSelection"
-              ? null
-              : DEFAULT_UNIFIED_SETTINGS[field];
-          void save({ [field]: value });
-        }}
+        onClick={() => void save({ [field]: projectPreferenceResetValue(field, projectId) })}
+      />
+    );
+  }
+  function valueRow(key: ProjectPreferenceValueKey) {
+    if (effective && !projectPreferenceSupported(effective, key)) return null;
+    const field = PROJECT_PREFERENCE_FIELDS[key];
+    const value = effective?.[key]?.value;
+    const control =
+      field.kind === "text" ? (
+        <DraftInput
+          className={SETTINGS_CONTROL_WIDTH.md}
+          value={typeof value === "string" ? value : ""}
+          disabled={blocked}
+          placeholder={field.placeholder}
+          aria-label={field.controlLabel}
+          spellCheck={false}
+          autoCapitalize="none"
+          onCommit={(input) => {
+            const next = readProjectPreferenceText(key, input);
+            if (next === null) {
+              setError(field.invalidMessage);
+              return;
+            }
+            void save({ [key]: next });
+          }}
+        />
+      ) : (
+        <SettingsSelect<string>
+          ariaLabel={field.controlLabel}
+          width="sm"
+          // The first option stands in while the effective value loads.
+          value={String(
+            (field.options.find((option) => option.value === value) ?? field.options[0])?.value,
+          )}
+          disabled={blocked}
+          onValueChange={(id) => {
+            const option = field.options.find((candidate) => String(candidate.value) === id);
+            if (option) void save({ [key]: option.value });
+          }}
+          options={field.options.map((option) => ({
+            value: String(option.value),
+            label: option.label,
+          }))}
+        />
+      );
+    return (
+      <SettingsRow
+        key={key}
+        title={field.title}
+        owner="node"
+        description={field.description}
+        status={source(key)}
+        resetAction={reset(key, field.resetLabel)}
+        control={control}
       />
     );
   }
@@ -257,74 +282,7 @@ function ProjectPreferenceEditor(props: {
           ) : null
         }
       />
-      <SettingsRow
-        title="New threads"
-        owner="node"
-        description="Whether new threads work in the project folder or a fresh worktree."
-        status={source("defaultThreadEnvMode")}
-        resetAction={reset("defaultThreadEnvMode", "new threads")}
-        control={
-          <SettingsSelect<"local" | "worktree">
-            ariaLabel="Default thread mode"
-            width="sm"
-            value={effective?.defaultThreadEnvMode.value ?? "local"}
-            disabled={blocked}
-            onValueChange={(value) => void save({ defaultThreadEnvMode: value })}
-            options={[
-              { value: "local", label: "Local" },
-              { value: "worktree", label: "New worktree" },
-            ]}
-          />
-        }
-      />
-      <SettingsRow
-        title="Worktree branch prefix"
-        owner="node"
-        description="A Git namespace for generated branches. Empty means no prefix; existing branches keep their names."
-        status={source("worktreeBranchPrefix")}
-        resetAction={reset("worktreeBranchPrefix", "worktree branch prefix")}
-        control={
-          <DraftInput
-            className={SETTINGS_CONTROL_WIDTH.md}
-            value={effective?.worktreeBranchPrefix.value ?? ""}
-            disabled={blocked}
-            placeholder="No prefix"
-            aria-label="Worktree branch prefix"
-            spellCheck={false}
-            autoCapitalize="none"
-            onCommit={(value) => {
-              const prefix = value.trim();
-              if (!Schema.is(WorktreeBranchPrefix)(prefix)) {
-                setError(
-                  "Use a valid Git namespace of up to 128 characters without a trailing slash.",
-                );
-                return;
-              }
-              void save({ worktreeBranchPrefix: prefix });
-            }}
-          />
-        }
-      />
-      <SettingsRow
-        title="Worktree setup"
-        owner="node"
-        description="Run the project's setup script after creating a worktree."
-        status={source("runSetupScript")}
-        resetAction={reset("runSetupScript", "worktree setup")}
-        control={
-          <SettingsSelect<"run" | "skip">
-            ariaLabel="Worktree setup"
-            width="sm"
-            value={effective?.runSetupScript.value === false ? "skip" : "run"}
-            disabled={blocked}
-            onValueChange={(value) => void save({ runSetupScript: value === "run" })}
-            options={[
-              { value: "run", label: "Run setup" },
-              { value: "skip", label: "Skip setup" },
-            ]}
-          />
-        }
-      />
+      {PROJECT_PREFERENCE_VALUE_KEYS.map(valueRow)}
       {error ? (
         <SettingsBlock>
           <SettingsNotice

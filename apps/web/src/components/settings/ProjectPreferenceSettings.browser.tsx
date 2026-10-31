@@ -1,6 +1,6 @@
 import "../../index.css";
 import { render } from "vitest-browser-react";
-import { page } from "vite-plus/test/browser";
+import { page, userEvent } from "vite-plus/test/browser";
 import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import {
   DEFAULT_SERVER_SETTINGS,
@@ -149,6 +149,45 @@ describe("project inheritance controls", () => {
         },
       ]);
     expect(harness.local).not.toHaveBeenCalled();
+  });
+  it("guards a node default with the value the editor showed", async () => {
+    await render(<ProjectDefaultsSection />);
+    await expect.element(page.getByRole("combobox", { name: "Default thread mode" })).toBeEnabled();
+    await page.getByRole("combobox", { name: "Default thread mode" }).click();
+    await page.getByRole("option", { name: "New worktree" }).click();
+    await expect
+      .poll(() => harness.update.mock.calls)
+      .toEqual([
+        [
+          "fixture-node",
+          {
+            defaultThreadEnvMode: "worktree",
+            expectedNodePreferences: { defaultThreadEnvMode: "local" },
+          },
+        ],
+      ]);
+  });
+  it("saves a trimmed project branch prefix and refuses one Git would reject", async () => {
+    await render(<ProjectPreferenceSettings projectId="p" projects={FIXTURE_PROJECT_CHOICES} />);
+    const input = page.getByRole("textbox", { name: "Worktree branch prefix" });
+    await expect.element(input).toBeEnabled();
+    await input.fill("team/");
+    await userEvent.keyboard("{Enter}");
+    await expect.element(page.getByRole("alert")).toMatchTextContent("valid Git namespace");
+    expect(harness.update).not.toHaveBeenCalled();
+    await input.fill(" team/tasks ");
+    await userEvent.keyboard("{Enter}");
+    await expect
+      .poll(() => harness.update.mock.calls)
+      .toEqual([
+        [
+          "fixture-node",
+          {
+            projectPreferences: { p: { worktreeBranchPrefix: "team/tasks" } },
+            expectedProjectPreferences: { p: { worktreeBranchPrefix: null } },
+          },
+        ],
+      ]);
   });
   it("keeps disconnected, read-only and hosted-unready targets disabled without reading another node", async () => {
     harness.connected = false;
