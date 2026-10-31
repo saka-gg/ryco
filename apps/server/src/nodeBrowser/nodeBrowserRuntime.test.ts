@@ -149,7 +149,6 @@ const makeRuntime = Effect.gen(function* () {
   const chrome = makeFakeChrome();
   const runtime = yield* makeNodeBrowserRuntime({
     baseCapability: { available: true },
-    noSandbox: false,
     launch: chrome.launch,
   });
   return { chrome, runtime };
@@ -451,6 +450,27 @@ describe("node browser runtime", () => {
       expect(viewer.closes()).toEqual([NODE_BROWSER_FRAME_CLOSE.restarted]);
       const listed = yield* runtime.read({ type: "list" });
       expect(listed.type === "list" && listed.tabs[0]?.state).toBe("suspended");
+    }).pipe(Effect.scoped, Effect.provide(TestLayer)),
+  );
+
+  it.effect("launches Chrome with its sandbox unless the capability says it is off", () =>
+    Effect.gen(function* () {
+      const { chrome, runtime } = yield* makeRuntime;
+      yield* openTab(runtime);
+      expect(chrome.hooks().args).not.toContain("--no-sandbox");
+    }).pipe(Effect.scoped, Effect.provide(TestLayer)),
+  );
+
+  it.effect("keeps reporting tabs without the sandbox once the browser runs", () =>
+    Effect.gen(function* () {
+      const chrome = makeFakeChrome();
+      const runtime = yield* makeNodeBrowserRuntime({
+        baseCapability: { available: true, sandbox: false },
+        launch: chrome.launch,
+      });
+      yield* openTab(runtime);
+      expect(chrome.hooks().args).toContain("--no-sandbox");
+      expect(yield* runtime.capability).toEqual({ available: true, sandbox: false });
     }).pipe(Effect.scoped, Effect.provide(TestLayer)),
   );
 
@@ -845,7 +865,6 @@ describe.skipIf(liveBrowser === undefined)("node browser runtime with a real bro
         const port = typeof address === "object" && address ? address.port : 0;
         const runtime = yield* makeNodeBrowserRuntime({
           baseCapability: { available: true },
-          noSandbox: false,
         });
         const opened = yield* runtime.command({
           type: "open",
@@ -877,7 +896,6 @@ describe.skipIf(liveBrowser === undefined)("node browser runtime with a real bro
         const port = typeof address === "object" && address ? address.port : 0;
         const runtime = yield* makeNodeBrowserRuntime({
           baseCapability: { available: true },
-          noSandbox: false,
         });
         const opened = yield* runtime.command({
           type: "open",

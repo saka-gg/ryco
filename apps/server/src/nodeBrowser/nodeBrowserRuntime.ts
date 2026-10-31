@@ -133,10 +133,11 @@ export interface NodeBrowserLaunchInput {
 }
 
 export interface NodeBrowserRuntimeOptions {
-  /** What the node allows before anything runs: platform, sandbox and opt-out. */
+  /**
+   * What the node allows before anything runs: platform, sandbox and opt-out. `sandbox: false`
+   * both launches Chrome without its sandbox and reports it, so the two cannot disagree.
+   */
   readonly baseCapability: NodeBrowserCapability;
-  /** Only when the operator turned Chrome's sandbox off for this host. */
-  readonly noSandbox: boolean;
   /** Tests swap the browser process for a scripted peer. */
   readonly launch?: (
     input: NodeBrowserLaunchInput,
@@ -505,7 +506,9 @@ export const makeNodeBrowserRuntime = Effect.fn("NodeBrowser.makeRuntime")(funct
     if (!options.baseCapability.available) return options.baseCapability;
     if (pausedUntil !== null && now() < pausedUntil) return { available: false, reason: "crashed" };
     if (sandboxBlocked) return { available: false, reason: "sandbox-blocked" };
-    return { available: true };
+    return options.baseCapability.sandbox === false
+      ? { available: true, sandbox: false }
+      : { available: true };
   });
 
   const snapshot = (tab: Tab): NodeBrowserTab => ({
@@ -916,7 +919,10 @@ export const makeNodeBrowserRuntime = Effect.fn("NodeBrowser.makeRuntime")(funct
     const started = yield* Effect.gen(function* () {
       const raw = yield* launch({
         executable,
-        args: nodeBrowserArguments({ noSandbox: options.noSandbox, profileDirectory }),
+        args: nodeBrowserArguments({
+          noSandbox: options.baseCapability.sandbox === false,
+          profileDirectory,
+        }),
         onEvent,
         onOversizedEvent,
         onExit,

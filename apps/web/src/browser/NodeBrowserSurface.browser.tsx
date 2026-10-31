@@ -243,6 +243,16 @@ describe("node browser panel", () => {
       .toContainEqual({ type: "open", scope: "/work/app", url: "http://localhost:5173/" });
   });
 
+  it("warns while the node runs tabs without Chrome's sandbox", async () => {
+    const fake = fakeClient();
+    unmount = (await render(<NodeBrowserPanel client={fake.client} cwd="/work/app" />)).unmount;
+    await expect.poll(() => fake.mock.subscribe.mock.calls.length).toBe(1);
+    fake.publish({ type: "availability", capability: { available: true, sandbox: false } });
+    await expect.element(page.getByText(/sandbox is off on this node/u)).toBeVisible();
+    fake.publish({ type: "availability", capability: { available: true } });
+    await expect.poll(() => page.getByText(/sandbox is off on this node/u).query()).toBeNull();
+  });
+
   it("says why the node cannot run tabs", async () => {
     const fake = fakeClient();
     unmount = (await render(<NodeBrowserPanel client={fake.client} cwd="/work/app" />)).unmount;
