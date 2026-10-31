@@ -97,3 +97,30 @@ describe("inboxThreadAtPosition", () => {
     ).toBeNull();
   });
 });
+
+describe("mobile Inbox Hidden shelf", () => {
+  const sections: InboxSection[] = [
+    { key: "active", title: "Active", rows: rows(1) },
+    { key: "hidden", title: "Hidden", rows: rows(2) },
+  ];
+
+  it("starts collapsed and opens on request", () => {
+    const closed = flattenInboxSections({
+      sections,
+      settledOpen: true,
+      settledVisibleCount: MOBILE_SETTLED_PAGE_SIZE,
+    });
+    expect(closed.find((item) => item.key === "section:hidden")).toMatchObject({
+      expanded: false,
+      count: 2,
+    });
+    expect(closed.filter((item) => item.kind === "thread")).toHaveLength(1);
+    const open = flattenInboxSections({
+      sections,
+      settledOpen: false,
+      hiddenOpen: true,
+      settledVisibleCount: MOBILE_SETTLED_PAGE_SIZE,
+    });
+    expect(open.filter((item) => item.kind === "thread")).toHaveLength(3);
+  });
+});

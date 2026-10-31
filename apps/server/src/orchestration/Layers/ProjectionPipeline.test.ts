@@ -10,6 +10,7 @@ import {
   TurnId,
   ProviderInstanceId,
   RuntimeSessionId,
+  type OrchestrationEvent,
 } from "@ryco/contracts";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, it } from "@effect/vitest";
@@ -83,6 +84,11 @@ it("routes each event only to its explicit projection owners", () => {
   assert.deepEqual(ORCHESTRATION_EVENT_PROJECTORS["thread.unsettled"], ["projection.threads"]);
   assert.deepEqual(ORCHESTRATION_EVENT_PROJECTORS["thread.snoozed"], ["projection.threads"]);
   assert.deepEqual(ORCHESTRATION_EVENT_PROJECTORS["thread.unsnoozed"], ["projection.threads"]);
+  assert.deepEqual(ORCHESTRATION_EVENT_PROJECTORS["thread.settle-deferred"], [
+    "projection.threads",
+  ]);
+  assert.deepEqual(ORCHESTRATION_EVENT_PROJECTORS["thread.hidden"], ["projection.threads"]);
+  assert.deepEqual(ORCHESTRATION_EVENT_PROJECTORS["thread.unhidden"], ["projection.threads"]);
   assert.deepEqual(ORCHESTRATION_EVENT_PROJECTORS["thread.usage-limit-set"], [
     "projection.threads",
   ]);
@@ -122,7 +128,7 @@ it("routes each event only to its explicit projection owners", () => {
   assert.deepEqual(ORCHESTRATION_EVENT_PROJECTORS["thread.queue-entry-added"], [
     ORCHESTRATION_PROJECTOR_NAMES.threadFollowUpQueues,
   ]);
-  assert.equal(Object.keys(ORCHESTRATION_EVENT_PROJECTORS).length, 60);
+  assert.equal(Object.keys(ORCHESTRATION_EVENT_PROJECTORS).length, 63);
 });
 
 it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
@@ -317,6 +323,66 @@ it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {
         yield* sql`SELECT snoozed_until, snoozed_at FROM projection_threads WHERE thread_id = 'thread-1'`,
         [{ snoozed_until: null, snoozed_at: null }],
       );
+
+      // The Hidden shelf and a settle filed while the thread worked.
+      const triageEvent = (
+        id: string,
+        event: Pick<OrchestrationEvent, "type" | "payload">,
+      ): Parameters<typeof eventStore.append>[0] =>
+        ({
+          ...event,
+          eventId: EventId.make(id),
+          aggregateKind: "thread",
+          aggregateId: ThreadId.make("thread-1"),
+          occurredAt: settledAt,
+          commandId: CommandId.make(`cmd-${id}`),
+          causationEventId: null,
+          correlationId: null,
+          metadata: {},
+        }) as Parameters<typeof eventStore.append>[0];
+      const appendAndProject = (event: Parameters<typeof eventStore.append>[0]) =>
+        eventStore
+          .append(event)
+          .pipe(Effect.flatMap((savedEvent) => projectionPipeline.projectEvent(savedEvent)));
+      const triageRows = sql`SELECT hidden_at, settle_when_idle_at, settled_override FROM projection_threads WHERE thread_id = 'thread-1'`;
+      yield* appendAndProject(
+        triageEvent("evt-hide", {
+          type: "thread.hidden",
+          payload: {
+            threadId: ThreadId.make("thread-1"),
+            hiddenAt: settledAt,
+            updatedAt: settledAt,
+          },
+        }),
+      );
+      yield* appendAndProject(
+        triageEvent("evt-file", {
+          type: "thread.settle-deferred",
+          payload: {
+            threadId: ThreadId.make("thread-1"),
+            settleWhenIdleAt: settledAt,
+            updatedAt: settledAt,
+          },
+        }),
+      );
+      assert.deepEqual(yield* triageRows, [
+        { hidden_at: settledAt, settle_when_idle_at: settledAt, settled_override: "active" },
+      ]);
+      yield* appendAndProject(
+        triageEvent("evt-settle-filed", {
+          type: "thread.settled",
+          payload: { threadId: ThreadId.make("thread-1"), settledAt, updatedAt: settledAt },
+        }),
+      );
+      yield* appendAndProject(
+        triageEvent("evt-unhide", {
+          type: "thread.unhidden",
+          payload: { threadId: ThreadId.make("thread-1"), updatedAt: settledAt },
+        }),
+      );
+      assert.deepEqual(yield* triageRows, [
+        { hidden_at: null, settle_when_idle_at: null, settled_override: "settled" },
+      ]);
     }),
   );
 

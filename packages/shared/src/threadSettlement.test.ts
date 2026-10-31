@@ -4,6 +4,7 @@ import {
   resolveAutoSettleAfterDays,
   compareActiveInboxEntries,
   compareSettledInboxEntries,
+  canFileThreadForSettlement,
   canSettleThread,
   classifyThreadSettlement,
   getEffectiveSettlementTimestamp,
@@ -192,6 +193,33 @@ describe("canSettleThread", () => {
 
   it("allows an eligible idle thread", () => {
     expect(canSettleThread(input())).toEqual({ canSettle: true, blocker: null });
+  });
+});
+
+describe("canFileThreadForSettlement", () => {
+  it("files a thread whose running turn is all that keeps it from settling", () => {
+    expect(canFileThreadForSettlement(input({ sessionStatus: "running" }))).toBe(true);
+    expect(canFileThreadForSettlement(input({ sessionStatus: "starting" }))).toBe(true);
+    expect(
+      canFileThreadForSettlement(input({ sessionStatus: "ready", latestTurnState: "running" })),
+    ).toBe(true);
+  });
+
+  it("does not file an idle thread, which settles at once", () => {
+    expect(canFileThreadForSettlement(input())).toBe(false);
+  });
+
+  it("does not file a thread waiting on the user or with undelivered work", () => {
+    for (const overrides of [
+      { hasPendingApprovals: true },
+      { hasPendingUserInput: true },
+      { hasLocalQueuedMessage: true },
+      { archivedAt: "2026-07-31T11:00:00.000Z" },
+    ] satisfies ReadonlyArray<Partial<ThreadSettlementInput>>) {
+      expect(canFileThreadForSettlement(input({ sessionStatus: "running", ...overrides }))).toBe(
+        false,
+      );
+    }
   });
 });
 

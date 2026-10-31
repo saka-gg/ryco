@@ -77,7 +77,13 @@ export function selectDelegatedChildThreads<T extends DelegatedChildCandidate>(
 }
 
 /** State-derived attention bucket, ignoring pin placement. */
-export type DelegatedNestingUrgency = "needs-input" | "active" | "recent" | "snoozed" | "settled";
+export type DelegatedNestingUrgency =
+  | "needs-input"
+  | "active"
+  | "recent"
+  | "snoozed"
+  | "settled"
+  | "hidden";
 
 export interface DelegatedNestingItem {
   /** `scopedThreadKey(scopeThreadRef(environmentId, threadId))` */
@@ -103,6 +109,7 @@ const URGENCY_RANK: Record<DelegatedNestingUrgency, number> = {
   recent: 2,
   snoozed: 3,
   settled: 4,
+  hidden: 5,
 };
 
 /** Every delegated child folds, whatever its state, unless the user pinned it. */
@@ -111,7 +118,7 @@ function canNest(item: DelegatedNestingItem): boolean {
 }
 
 /**
- * Snoozed and Settled hosts sit out of sight, so only a child at least as quiet
+ * Snoozed, Settled and Hidden hosts sit out of sight, so only a child at least as quiet
  * folds under one. Any other host carries its children's state (adapter-owned).
  */
 function canHost(host: DelegatedNestingItem, child: DelegatedNestingItem): boolean {

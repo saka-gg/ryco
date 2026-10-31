@@ -1261,6 +1261,17 @@ export const OrchestrationThread = Schema.Struct({
   settledAt: Schema.NullOr(IsoDateTime).pipe(Schema.withDecodingDefault(Effect.succeed(null))),
   snoozedUntil: Schema.optional(Schema.NullOr(IsoDateTime)),
   snoozedAt: Schema.optional(Schema.NullOr(IsoDateTime)),
+  /**
+   * When the thread was put on the Hidden shelf: it leaves the Inbox until it needs the user
+   * (an approval, an answer, a plan to review, a failure since). Optional so mixed-version
+   * snapshots decode; older clients strip it and list the thread as before.
+   */
+  hiddenAt: Schema.optional(Schema.NullOr(IsoDateTime)),
+  /**
+   * When the user settled the thread while it was still working: the node settles it once
+   * that work ends (`thread.settle-deferred`). Optional, like `hiddenAt`.
+   */
+  settleWhenIdleAt: Schema.optional(Schema.NullOr(IsoDateTime)),
   /** Optional so mixed-version snapshots decode; older clients strip it. */
   usageLimit: Schema.optional(Schema.NullOr(ThreadUsageLimit)),
   /**
@@ -1358,6 +1369,17 @@ export const OrchestrationThreadShell = Schema.Struct({
   settledAt: Schema.NullOr(IsoDateTime).pipe(Schema.withDecodingDefault(Effect.succeed(null))),
   snoozedUntil: Schema.optional(Schema.NullOr(IsoDateTime)),
   snoozedAt: Schema.optional(Schema.NullOr(IsoDateTime)),
+  /**
+   * When the thread was put on the Hidden shelf: it leaves the Inbox until it needs the user
+   * (an approval, an answer, a plan to review, a failure since). Optional so mixed-version
+   * snapshots decode; older clients strip it and list the thread as before.
+   */
+  hiddenAt: Schema.optional(Schema.NullOr(IsoDateTime)),
+  /**
+   * When the user settled the thread while it was still working: the node settles it once
+   * that work ends (`thread.settle-deferred`). Optional, like `hiddenAt`.
+   */
+  settleWhenIdleAt: Schema.optional(Schema.NullOr(IsoDateTime)),
   /** Optional so mixed-version snapshots decode; older clients strip it. */
   usageLimit: Schema.optional(Schema.NullOr(ThreadUsageLimit)),
   session: Schema.NullOr(OrchestrationSession),
@@ -2043,6 +2065,18 @@ const ThreadSnoozeCommand = Schema.Struct({
 });
 const ThreadUnsnoozeCommand = Schema.Struct({
   type: Schema.Literal("thread.unsnooze"),
+  commandId: CommandId,
+  threadId: ThreadId,
+});
+
+/** Puts a thread on the Hidden shelf until it needs the user. Hiding again restarts the shelf time. */
+const ThreadHideCommand = Schema.Struct({
+  type: Schema.Literal("thread.hide"),
+  commandId: CommandId,
+  threadId: ThreadId,
+});
+const ThreadUnhideCommand = Schema.Struct({
+  type: Schema.Literal("thread.unhide"),
   commandId: CommandId,
   threadId: ThreadId,
 });
@@ -2858,6 +2892,8 @@ const DispatchableClientOrchestrationCommand = Schema.Union([
   ThreadUnarchiveCommand,
   ThreadSnoozeCommand,
   ThreadUnsnoozeCommand,
+  ThreadHideCommand,
+  ThreadUnhideCommand,
   ThreadUsageLimitConfigureCommand,
   ThreadSettleCommand,
   ThreadUnsettleCommand,
@@ -2913,6 +2949,8 @@ export const ClientOrchestrationCommand = Schema.Union([
   ThreadUnarchiveCommand,
   ThreadSnoozeCommand,
   ThreadUnsnoozeCommand,
+  ThreadHideCommand,
+  ThreadUnhideCommand,
   ThreadUsageLimitConfigureCommand,
   ThreadSettleCommand,
   ThreadUnsettleCommand,
@@ -3224,7 +3262,20 @@ const ThreadForkCreateCommand = Schema.Struct({
 });
 export type ThreadForkCreateCommand = typeof ThreadForkCreateCommand.Type;
 
+/**
+ * Server-only (the settle-when-idle runtime): settles a thread the user settled while it was
+ * working, once its work ended. The decider checks the thread again: a failed or stopped turn
+ * clears the intent instead, and a thread that is busy again waits.
+ */
+const ThreadSettleWhenIdleCommand = Schema.Struct({
+  type: Schema.Literal("thread.settle-when-idle"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  createdAt: IsoDateTime,
+});
+
 const InternalOrchestrationCommand = Schema.Union([
+  ThreadSettleWhenIdleCommand,
   ThreadDelegatedCreateCommand,
   ThreadForkCreateCommand,
   Schema.Struct({
@@ -3289,6 +3340,9 @@ export const OrchestrationEventType = Schema.Literals([
   "thread.unsnoozed",
   "thread.settled",
   "thread.unsettled",
+  "thread.settle-deferred",
+  "thread.hidden",
+  "thread.unhidden",
   "thread.usage-limit-set",
   "thread.usage-limit-cleared",
   "thread.meta-updated",
@@ -3458,6 +3512,24 @@ export const ThreadUnsettledPayload = Schema.Struct({
   reason: Schema.Literals(["user", "activity"]),
   updatedAt: IsoDateTime,
   restoredSidebarState: Schema.optional(ThreadSidebarRestoreState),
+});
+
+/** A settle of a working thread: the node settles it when its work ends. */
+export const ThreadSettleDeferredPayload = Schema.Struct({
+  threadId: ThreadId,
+  settleWhenIdleAt: IsoDateTime,
+  updatedAt: IsoDateTime,
+});
+
+export const ThreadHiddenPayload = Schema.Struct({
+  threadId: ThreadId,
+  hiddenAt: IsoDateTime,
+  updatedAt: IsoDateTime,
+});
+
+export const ThreadUnhiddenPayload = Schema.Struct({
+  threadId: ThreadId,
+  updatedAt: IsoDateTime,
 });
 
 export const ThreadUsageLimitSetPayload = Schema.Struct({
@@ -3975,6 +4047,21 @@ export const OrchestrationEvent = Schema.Union([
     ...EventBaseFields,
     type: Schema.Literal("thread.unsettled"),
     payload: ThreadUnsettledPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("thread.settle-deferred"),
+    payload: ThreadSettleDeferredPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("thread.hidden"),
+    payload: ThreadHiddenPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("thread.unhidden"),
+    payload: ThreadUnhiddenPayload,
   }),
   Schema.Struct({
     ...EventBaseFields,

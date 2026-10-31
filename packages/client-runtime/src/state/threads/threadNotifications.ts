@@ -62,12 +62,18 @@ function describe(
       ? JSON.stringify([thread.latestTurn!.turnId, terminal])
       : null;
   const suppressed = thread.archivedAt !== null || isSnoozed(thread, nowMs);
+  // A hidden thread, and one settled while it worked, finish quietly (T3 Code #21105, #18606);
+  // their requests and failures still alert.
+  const quietCompletion =
+    thread.hiddenAt != null ||
+    thread.settleWhenIdleAt != null ||
+    thread.settledOverride === "settled";
   let kind: ThreadNotificationKind | null = null;
   if (!suppressed) {
     if (activity === "approval" || activity === "input" || activity === "plan-ready")
       kind = activity;
     else if (activity === "idle" && thread.latestTurn?.completedAt) {
-      if (terminal === "completed") kind = "completed";
+      if (terminal === "completed" && !quietCompletion) kind = "completed";
       if (terminal === "error") kind = "failed";
       // Ended before it finished: the provider exited or aborted it, or someone
       // pressed Stop. The shell does not say which; the alert policy decides.

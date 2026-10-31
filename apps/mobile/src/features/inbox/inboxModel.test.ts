@@ -838,3 +838,82 @@ describe("inbox Woke mark", () => {
     });
   });
 });
+
+describe("inbox Hidden shelf and settling a working task", () => {
+  const environment: InboxEnvironment = {
+    environmentId: NODE_A,
+    label: "Mac",
+    connectionState: "connected",
+    threadSettlementSupported: true,
+    threadSnoozeSupported: true,
+    threadTriageSupported: true,
+    mutationReady: true,
+    shellCurrent: true,
+  };
+  const running = {
+    session: {
+      provider: "codex",
+      status: "running",
+      orchestrationStatus: "running",
+      activeTurnId: "turn-1",
+      createdAt: "2026-07-26T08:00:00.000Z",
+      updatedAt: "2026-07-26T08:00:00.000Z",
+    },
+    latestTurn: {
+      turnId: "turn-1",
+      state: "running",
+      requestedAt: "2026-07-26T08:00:00.000Z",
+      startedAt: "2026-07-26T08:00:00.000Z",
+      completedAt: null,
+      assistantMessageId: null,
+    },
+  } as unknown as Partial<SidebarThreadSummary>;
+  const build = (threads: ReadonlyArray<SidebarThreadSummary>) =>
+    buildInboxSections({
+      projects: [project(NODE_A, "p", "Ryco")],
+      worktrees: [],
+      environments: [environment],
+      threads,
+      nowMs: Date.parse("2026-07-26T12:00:00.000Z"),
+    });
+
+  it("lists hidden tasks last in their own Hidden section", () => {
+    const sections = build([
+      thread(NODE_A, "nightly", "p", { hiddenAt: "2026-07-26T09:00:00.000Z" }),
+      thread(NODE_A, "visible", "p"),
+    ]);
+    expect(sections.map((section) => section.key)).toEqual(["active", "hidden"]);
+    expect(sections[1]?.rows[0]).toMatchObject({
+      attentionState: "hidden",
+      hiddenByUser: true,
+      hideActionEnabled: true,
+    });
+    expect(sections[0]?.rows[0]).toMatchObject({ hiddenByUser: false, hideActionEnabled: true });
+  });
+
+  it("brings a hidden task that needs an answer back to Active", () => {
+    const sections = build([
+      thread(NODE_A, "asking", "p", {
+        hiddenAt: "2026-07-26T09:00:00.000Z",
+        hasPendingUserInput: true,
+      }),
+    ]);
+    expect(sections.map((section) => section.key)).toEqual(["active"]);
+  });
+
+  it("lets a working task settle, and lists a filed one as settled while it works", () => {
+    const [active] = build([thread(NODE_A, "working", "p", running)]);
+    expect(active?.rows[0]).toMatchObject({ canSettle: true, state: "working" });
+
+    const sections = build([
+      thread(NODE_A, "filed", "p", { ...running, settleWhenIdleAt: "2026-07-26T09:00:00.000Z" }),
+    ]);
+    expect(sections.map((section) => section.key)).toEqual(["settled"]);
+    expect(sections[0]?.rows[0]).toMatchObject({
+      attentionState: "settled",
+      filed: true,
+      state: "working",
+      statusLabel: "Settles when done",
+    });
+  });
+});

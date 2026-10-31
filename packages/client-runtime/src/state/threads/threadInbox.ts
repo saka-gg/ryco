@@ -2,6 +2,7 @@ import { isChatProject } from "@ryco/shared/projectKind";
 import { threadHasConversation } from "@ryco/shared/threadFork";
 import { canSnoozeThread, isThreadSnoozed } from "@ryco/shared/threadSnooze";
 import { deriveThreadActivityStatus } from "./threadActivityStatus.ts";
+import { isThreadFailed } from "./threadFailure.ts";
 import type {
   EnvironmentId,
   ProjectId,
@@ -12,6 +13,7 @@ import type {
 } from "@ryco/contracts";
 import {
   resolveAutoSettleAfterDays,
+  canFileThreadForSettlement,
   canSettleThread,
   classifyThreadSettlement,
   compareActiveInboxEntries,
@@ -55,6 +57,8 @@ export interface ThreadInboxEnvironment {
    */
   readonly threadSettlementSupported: ThreadCapabilitySupport;
   readonly threadSnoozeSupported?: ThreadCapabilitySupport | undefined;
+  /** The Hidden shelf and settling a working thread (`threadTriage`). */
+  readonly threadTriageSupported?: ThreadCapabilitySupport | undefined;
   /**
    * The node's own automatic settlement rule, so every client lists its threads
    * alike. Undefined for a node that leaves the rule to clients (an older one)
@@ -100,7 +104,17 @@ export type ThreadInboxConnectionBlocker = Extract<
 >;
 
 export interface ThreadInboxLifecycle {
-  readonly classification: Exclude<ThreadSettlementClassification, "excluded"> | "snoozed";
+  readonly classification:
+    | Exclude<ThreadSettlementClassification, "excluded">
+    | "snoozed"
+    | "hidden";
+  /**
+   * Settled while it worked: it lists as settled, and the node settles it when the work ends
+   * (`settleWhenIdleAt`).
+   */
+  readonly filed?: boolean | undefined;
+  /** Settle would file the thread now: it is working and its node supports filing. */
+  readonly settleFiles?: boolean | undefined;
   readonly eligibility: CanSettleThreadResult;
   readonly effectiveSettlementTimestamp: string | null;
   readonly settlementBlocker: ThreadSettlementBlocker | null;
@@ -185,8 +199,52 @@ export interface ThreadInboxModel {
   readonly active: ThreadInboxEntry[];
   readonly settled: ThreadInboxEntry[];
   readonly snoozed: ThreadInboxEntry[];
+  /** The Hidden shelf, newest first. */
+  readonly hidden: ThreadInboxEntry[];
   readonly excludedCount: number;
   readonly nextSettlementEvaluationAtMs: number | null;
+}
+
+export type ThreadHiddenShelfInput = Pick<
+  SidebarThreadSummary,
+  | "hiddenAt"
+  | "session"
+  | "latestTurn"
+  | "interactionMode"
+  | "hasPendingApprovals"
+  | "hasPendingUserInput"
+  | "hasActionableProposedPlan"
+  | "backgroundLiveness"
+>;
+
+/**
+ * Whether a thread needs the person: an approval, an answer or a plan to review, or a failure
+ * since it was put on the Hidden shelf (`since`). Hiding it again after the failure puts it back.
+ */
+export function threadNeedsAttention(
+  thread: ThreadHiddenShelfInput,
+  since: string | null,
+): boolean {
+  const activity = deriveThreadActivityStatus(thread);
+  if (activity === "approval" || activity === "input" || activity === "plan-ready") return true;
+  if (!isThreadFailed(thread)) return false;
+  const failedAt = Date.parse(
+    (thread.latestTurn?.state === "error" ? thread.latestTurn.completedAt : null) ??
+      thread.session?.updatedAt ??
+      "",
+  );
+  const sinceMs = Date.parse(since ?? "");
+  // A failure of unknown time counts as new.
+  return !Number.isFinite(failedAt) || !Number.isFinite(sinceMs) || failedAt >= sinceMs;
+}
+
+/**
+ * The Hidden shelf (T3 Code #21105): a hidden thread stays out of the Inbox while it works and
+ * after it finishes, and comes back on its own only while it needs the person.
+ */
+export function isThreadOnHiddenShelf(thread: ThreadHiddenShelfInput): boolean {
+  if (thread.hiddenAt == null) return false;
+  return !threadNeedsAttention(thread, thread.hiddenAt);
 }
 
 export function scopedInboxWorktreeKey(
@@ -628,6 +686,13 @@ export function buildThreadInbox(input: BuildThreadInboxInput): ThreadInboxModel
       const wake = Date.parse(thread.snoozedUntil!);
       nextSettlementEvaluationAtMs = Math.min(nextSettlementEvaluationAtMs ?? wake, wake);
     }
+    const hidden = isThreadOnHiddenShelf(thread);
+    // Settled while it worked: listed as settled until the node settles it, unless it needs
+    // the person meanwhile.
+    const filed =
+      thread.settleWhenIdleAt != null &&
+      classification === "active" &&
+      !threadNeedsAttention(thread, thread.settleWhenIdleAt);
     const eligibility = canSettleThread(policyInput);
     const snoozeEligibility = canSnoozeThread(policyInput);
     const blocker = mutationBlocker(environment, false);
@@ -642,9 +707,21 @@ export function buildThreadInbox(input: BuildThreadInboxInput): ThreadInboxModel
       worktree,
       environment,
       lifecycle: {
-        classification: snoozed ? "snoozed" : classification,
+        classification: hidden
+          ? "hidden"
+          : snoozed
+            ? "snoozed"
+            : filed
+              ? "settled"
+              : classification,
+        ...(filed ? { filed } : {}),
+        ...(environment.threadTriageSupported === true && canFileThreadForSettlement(policyInput)
+          ? { settleFiles: true }
+          : {}),
         eligibility,
-        effectiveSettlementTimestamp: getEffectiveSettlementTimestamp(policyInput),
+        effectiveSettlementTimestamp: filed
+          ? thread.settleWhenIdleAt!
+          : getEffectiveSettlementTimestamp(policyInput),
         settlementBlocker: eligibility.blocker,
         snoozeBlocker: snoozeEligibility.blocker,
         autoSettlementBlocker: getThreadAutoSettlementBlocker(policyInput),
@@ -719,6 +796,11 @@ export function buildThreadInbox(input: BuildThreadInboxInput): ThreadInboxModel
     );
 
   return {
+    hidden: visibleEntries
+      .filter((entry) => entry.lifecycle.classification === "hidden")
+      .toSorted((left, right) =>
+        (right.thread?.hiddenAt ?? "").localeCompare(left.thread?.hiddenAt ?? ""),
+      ),
     snoozed: visibleEntries
       .filter((entry) => entry.lifecycle.classification === "snoozed")
       .toSorted((left, right) =>
@@ -772,8 +854,11 @@ export function resolveThreadLifecycleAvailability(
     lifecycle.classification === "snoozed" ? (thread?.snoozedUntil ?? null) : null;
   return {
     settle: {
-      // Moving a settled thread back to Active needs only the node.
-      ...availability(entry.mutationBlocker ?? (settled ? null : lifecycle.settlementBlocker)),
+      // Moving a settled thread back to Active needs only the node; a working thread files.
+      ...availability(
+        entry.mutationBlocker ??
+          (settled || lifecycle.settleFiles === true ? null : lifecycle.settlementBlocker),
+      ),
       settled,
     },
     snooze: {
@@ -789,4 +874,21 @@ export function resolveThreadLifecycleAvailability(
     // Local to this client: only a completed turn has anything to mark.
     markUnread: availability(thread?.latestTurn?.completedAt ? null : "no-completed-turn"),
   };
+}
+
+/** Why hiding a thread, or showing a hidden one again, cannot run. */
+export type ThreadHideBlocker = ThreadInboxMutationBlocker;
+
+/**
+ * Hide and Unhide for one Inbox thread. `hidden` says what the toggle runs: Unhide for a thread
+ * the person hid, whether it is on the shelf or came back because it needs them.
+ */
+export function resolveThreadHideAvailability(
+  entry: ThreadInboxEntry,
+): ThreadLifecycleActionAvailability<ThreadHideBlocker> & { readonly hidden: boolean } {
+  const blocker =
+    entry.thread === null
+      ? "client-draft"
+      : capabilityBlocker(entry.environment, entry.environment.threadTriageSupported);
+  return { ...availability(blocker), hidden: entry.thread?.hiddenAt != null };
 }

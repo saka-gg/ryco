@@ -73,6 +73,12 @@ export function buildInboxRowMenuActions(
     title: row.attentionState === "settled" ? "Move to Active" : "Settle task",
     attributes: { disabled: !row.mutationEnabled || !row.canSettle },
   });
+  // Hide keeps a task out of the Inbox until it needs the person.
+  actions.push(
+    row.hiddenByUser === true
+      ? { id: "unhide", title: "Show in Inbox", attributes: { disabled: !row.hideActionEnabled } }
+      : { id: "hide", title: "Hide task", attributes: { disabled: !row.hideActionEnabled } },
+  );
   // Reads nothing from the node, so it works offline too.
   actions.push({
     id: COPY_TASK_ID_ACTION_ID,

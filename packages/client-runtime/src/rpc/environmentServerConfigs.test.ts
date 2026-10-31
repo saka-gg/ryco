@@ -181,7 +181,11 @@ describe("environment server config store", () => {
 describe("environment thread capabilities", () => {
   function withCapabilities(
     environmentId: EnvironmentId,
-    capabilities: { readonly threadSettlement: boolean; readonly threadSnooze?: boolean },
+    capabilities: {
+      readonly threadSettlement: boolean;
+      readonly threadSnooze?: boolean;
+      readonly threadTriage?: boolean;
+    },
     providers: ReadonlyArray<string> = ["codex"],
   ): ServerConfig {
     const base = config(environmentId, providers);
@@ -201,7 +205,7 @@ describe("environment thread capabilities", () => {
         descriptor: { threadSettlement: false },
         directory: { threadSettlement: false, threadSnooze: false },
       }),
-    ).toEqual({ threadSettlement: true, threadSnooze: true });
+    ).toEqual({ threadSettlement: true, threadSnooze: true, threadTriage: false });
   });
 
   it("keeps a node's last answer after its config is forgotten", () => {
@@ -212,6 +216,7 @@ describe("environment thread capabilities", () => {
     expect(resolveEnvironmentThreadCapabilities(NODE_A)).toEqual({
       threadSettlement: true,
       threadSnooze: false,
+      threadTriage: false,
     });
   });
 
@@ -221,19 +226,35 @@ describe("environment thread capabilities", () => {
         descriptor: { threadSettlement: true },
         directory: { threadSettlement: false },
       }),
-    ).toEqual({ threadSettlement: true, threadSnooze: false });
+    ).toEqual({ threadSettlement: true, threadSnooze: false, threadTriage: false });
     expect(
       resolveEnvironmentThreadCapabilities(NODE_B, { directory: { threadSettlement: false } }),
-    ).toEqual({ threadSettlement: false, threadSnooze: "unknown" });
+    ).toEqual({ threadSettlement: false, threadSnooze: "unknown", threadTriage: "unknown" });
     expect(
       resolveEnvironmentThreadCapabilities(NODE_B, {
         directory: { threadSettlement: true, threadSnooze: true },
       }),
-    ).toEqual({ threadSettlement: true, threadSnooze: true });
+    ).toEqual({ threadSettlement: true, threadSnooze: true, threadTriage: "unknown" });
+  });
+
+  it("reports the Hidden shelf and settling a working thread only from a node that states it", () => {
+    writeEnvironmentServerConfig(
+      NODE_A,
+      withCapabilities(NODE_A, { threadSettlement: true, threadSnooze: true, threadTriage: true }),
+    );
+    expect(resolveEnvironmentThreadCapabilities(NODE_A).threadTriage).toBe(true);
+    expect(
+      resolveEnvironmentThreadCapabilities(NODE_B, { descriptor: { threadSettlement: true } })
+        .threadTriage,
+    ).toBe(false);
   });
 
   it("is unknown for a node nothing has stated anything about", () => {
-    const unknown = { threadSettlement: "unknown", threadSnooze: "unknown" };
+    const unknown = {
+      threadSettlement: "unknown",
+      threadSnooze: "unknown",
+      threadTriage: "unknown",
+    };
     expect(resolveEnvironmentThreadCapabilities(NODE_B)).toEqual(unknown);
     expect(resolveEnvironmentThreadCapabilities(NODE_B, { directory: {} })).toEqual(unknown);
     expect(resolveEnvironmentThreadCapabilities(NODE_B, { descriptor: null })).toEqual(unknown);
@@ -354,6 +375,7 @@ describe("environment auto-settle rule", () => {
     expect(resolveEnvironmentThreadCapabilities(NODE_A)).toEqual({
       threadSettlement: "unknown",
       threadSnooze: "unknown",
+      threadTriage: "unknown",
       autoSettleAfterDays: 14,
     });
 

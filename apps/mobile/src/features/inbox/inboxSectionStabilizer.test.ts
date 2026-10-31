@@ -114,6 +114,8 @@ describe("inbox row menu", () => {
       { id: "settle", title: "Settle task", attributes: { disabled: false } },
       { id: "hour", title: "In 1 hour", attributes: { disabled: true } },
       { id: "snooze-custom", title: "Custom…", attributes: { disabled: true } },
+      // A node without the Hidden shelf leaves Hide disabled.
+      { id: "hide", title: "Hide task", attributes: { disabled: true } },
       // Copying the ID reads nothing from the node, so it is never disabled.
       { id: "copy-id", title: "Copy task ID", attributes: { disabled: false } },
     ]);
@@ -129,7 +131,21 @@ describe("inbox row menu", () => {
     ).toEqual([
       { id: "unsettle", title: "Move to Active", attributes: { disabled: false } },
       { id: "unsnooze", title: "Unsnooze", attributes: { disabled: false } },
+      { id: "hide", title: "Hide task", attributes: { disabled: true } },
       { id: "copy-id", title: "Copy task ID", attributes: { disabled: false } },
     ]);
+  });
+
+  it("hides a task, and shows one the person hid in the Inbox again", () => {
+    const presets = [{ id: "hour", label: "In 1 hour" }];
+    expect(buildInboxRowMenuActions(row("a", { hideActionEnabled: true }), presets).at(-1)).toEqual(
+      { id: "hide", title: "Hide task", attributes: { disabled: false } },
+    );
+    expect(
+      buildInboxRowMenuActions(
+        row("a", { attentionState: "hidden", hiddenByUser: true, hideActionEnabled: true }),
+        presets,
+      ).at(-1),
+    ).toEqual({ id: "unhide", title: "Show in Inbox", attributes: { disabled: false } });
   });
 });

@@ -999,6 +999,8 @@ const makeProjectionSnapshotQueryOn = Effect.fn("makeProjectionSnapshotQueryOn")
     settled_at AS "settledAt",
     snoozed_until AS "snoozedUntil",
     snoozed_at AS "snoozedAt",
+    hidden_at AS "hiddenAt",
+    settle_when_idle_at AS "settleWhenIdleAt",
     latest_user_message_at AS "latestUserMessageAt",
     ${latestCompletedTurnAt} AS "latestCompletedTurnAt",
     pending_approval_count AS "pendingApprovalCount",
@@ -1843,6 +1845,8 @@ const makeProjectionSnapshotQueryOn = Effect.fn("makeProjectionSnapshotQueryOn")
           settled_at AS "settledAt",
           snoozed_until AS "snoozedUntil",
           snoozed_at AS "snoozedAt",
+          hidden_at AS "hiddenAt",
+          settle_when_idle_at AS "settleWhenIdleAt",
           latest_user_message_at AS "latestUserMessageAt",
           ${latestCompletedTurnAt} AS "latestCompletedTurnAt",
           pending_approval_count AS "pendingApprovalCount",
@@ -2805,6 +2809,11 @@ const makeProjectionSnapshotQueryOn = Effect.fn("makeProjectionSnapshotQueryOn")
           settledAt: input.threadRow.settledAt,
           snoozedUntil: input.threadRow.snoozedUntil ?? null,
           snoozedAt: input.threadRow.snoozedAt ?? null,
+          // Only while set, so the shells of other threads do not grow.
+          ...(input.threadRow.hiddenAt ? { hiddenAt: input.threadRow.hiddenAt } : {}),
+          ...(input.threadRow.settleWhenIdleAt
+            ? { settleWhenIdleAt: input.threadRow.settleWhenIdleAt }
+            : {}),
           usageLimit: input.threadRow.usageLimit ?? null,
           ...(input.followUpQueue === undefined ? {} : { followUpQueue: input.followUpQueue }),
           deletedAt: null,
@@ -3102,6 +3111,9 @@ const makeProjectionSnapshotQueryOn = Effect.fn("makeProjectionSnapshotQueryOn")
                     settledAt: row.settledAt,
                     snoozedUntil: row.snoozedUntil ?? null,
                     snoozedAt: row.snoozedAt ?? null,
+                    // Only while set, so the shells of other threads do not grow.
+                    ...(row.hiddenAt ? { hiddenAt: row.hiddenAt } : {}),
+                    ...(row.settleWhenIdleAt ? { settleWhenIdleAt: row.settleWhenIdleAt } : {}),
                     usageLimit: row.usageLimit ?? null,
                     deletedAt: row.deletedAt,
                     trashedAt: row.trashedAt,
@@ -3418,6 +3430,9 @@ const makeProjectionSnapshotQueryOn = Effect.fn("makeProjectionSnapshotQueryOn")
                       settledAt: row.settledAt,
                       snoozedUntil: row.snoozedUntil ?? null,
                       snoozedAt: row.snoozedAt ?? null,
+                      // Only while set, so the shells of other threads do not grow.
+                      ...(row.hiddenAt ? { hiddenAt: row.hiddenAt } : {}),
+                      ...(row.settleWhenIdleAt ? { settleWhenIdleAt: row.settleWhenIdleAt } : {}),
                       usageLimit: row.usageLimit ?? null,
                       ...(pullRequestWatchState === undefined ? {} : { pullRequestWatchState }),
                       ...(followUpQueue === undefined ? {} : { followUpQueue }),
@@ -3662,6 +3677,9 @@ const makeProjectionSnapshotQueryOn = Effect.fn("makeProjectionSnapshotQueryOn")
                     settledAt: row.settledAt,
                     snoozedUntil: row.snoozedUntil ?? null,
                     snoozedAt: row.snoozedAt ?? null,
+                    // Only while set, so the shells of other threads do not grow.
+                    ...(row.hiddenAt ? { hiddenAt: row.hiddenAt } : {}),
+                    ...(row.settleWhenIdleAt ? { settleWhenIdleAt: row.settleWhenIdleAt } : {}),
                     usageLimit: row.usageLimit ?? null,
                     session: sessionByThread.get(row.threadId) ?? null,
                     latestUserMessageAt: row.latestUserMessageAt,
@@ -4092,6 +4110,11 @@ const makeProjectionSnapshotQueryOn = Effect.fn("makeProjectionSnapshotQueryOn")
             settledAt: threadRow.value.settledAt,
             snoozedUntil: threadRow.value.snoozedUntil ?? null,
             snoozedAt: threadRow.value.snoozedAt ?? null,
+            // Only while set, so the shells of other threads do not grow.
+            ...(threadRow.value.hiddenAt ? { hiddenAt: threadRow.value.hiddenAt } : {}),
+            ...(threadRow.value.settleWhenIdleAt
+              ? { settleWhenIdleAt: threadRow.value.settleWhenIdleAt }
+              : {}),
             usageLimit: threadRow.value.usageLimit ?? null,
             session: Option.isSome(sessionRow) ? mapSessionRow(sessionRow.value) : null,
             latestUserMessageAt: threadRow.value.latestUserMessageAt,

@@ -18,13 +18,17 @@ export function flattenInboxSections(input: {
   readonly sections: ReadonlyArray<InboxSection>;
   readonly settledOpen: boolean;
   readonly snoozedOpen?: boolean;
+  /** The Hidden shelf starts collapsed, like Snoozed. */
+  readonly hiddenOpen?: boolean;
   readonly settledVisibleCount: number;
 }): ReadonlyArray<InboxListItem> {
   return input.sections.flatMap((section): ReadonlyArray<InboxListItem> => {
     const expanded =
       section.key === "snoozed"
         ? input.snoozedOpen === true
-        : section.key !== "settled" || input.settledOpen;
+        : section.key === "hidden"
+          ? input.hiddenOpen === true
+          : section.key !== "settled" || input.settledOpen;
     const visibleRows =
       section.key === "settled" ? section.rows.slice(0, input.settledVisibleCount) : section.rows;
     return [

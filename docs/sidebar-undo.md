@@ -1,6 +1,6 @@
 # Sidebar Undo
 
-Archive, Settle, Snooze, and Unpin offer an accessible **Undo** notice for five seconds.
+Archive, Settle, Snooze, Hide, and Unpin offer an accessible **Undo** notice for five seconds.
 The notice appears immediately, shows progress while the original command is pending, and
 queues an early Undo behind its acknowledgment. An Undo submitted while valid shows progress
 until its result arrives. Delete has no Undo.
@@ -34,8 +34,10 @@ results stay. Bulk Settle and Snooze, Settle finished included, use the notice a
 keeps its confirmation. The frozen web phone presentation offers neither selection nor Settle
 finished.
 
-Undo restores the prior settlement override, settlement time, snooze deadline and time, and
-sorting timestamp. Existing manual positions, local pins, and priority rankings are preserved.
+Undo restores the prior settlement override, settlement time, snooze deadline and time, Hidden
+shelf time (see [Hide until needed](user/hide-and-settle-when-done.md)), and sorting timestamp.
+Settling a thread that is still working files it to settle when done; its Undo takes the filing
+back. Existing manual positions, local pins, and priority rankings are preserved.
 Unpin restores the local pin using the existing sorter. Archive Undo also reopens the thread
 when Archive displaced it and the user has stayed on the resulting route. Manual navigation wins.
 
@@ -74,7 +76,8 @@ Restoring a prior settled or snoozed state rechecks current requests, queued tur
 synchronization, so provider progress cannot hide newly pending work. Unrelated thread changes do not.
 A restart discards receipts. Clients cannot supply restoration values.
 
-The server reverses through the existing Unarchive, Unsettle, and Unsnooze event paths.
+The server reverses through the existing Unarchive, Unsettle, Unsnooze, and Unhide event paths
+(an Undo of a second Hide puts back the earlier shelf time).
 Optional restoration fields on the latter two events retain exact prior state in both durable
 and client projections. No new persistent history, provider interaction, or mobile authorization
 policy is introduced.

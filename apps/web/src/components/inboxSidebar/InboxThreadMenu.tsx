@@ -10,6 +10,8 @@ import {
   Columns2Icon,
   CopyIcon,
   ExternalLinkIcon,
+  EyeIcon,
+  EyeOffIcon,
   GitPullRequestIcon,
   FolderGit2Icon,
   FolderIcon,
@@ -32,7 +34,7 @@ import type { ReactNode } from "react";
 
 import { useProjectGroupingSettings } from "../../hooks/useProjectGroupingSettings";
 import { deriveLogicalProjectKeyFromSettings } from "../../logicalProject";
-import { requestCustomSnooze } from "../../threadLifecycleCommands";
+import { dispatchThreadHidden, requestCustomSnooze } from "../../threadLifecycleCommands";
 import { DeviceIcon } from "../DeviceIcon";
 import type {
   ThreadMenuActionId,
@@ -223,6 +225,8 @@ export function InboxThreadMenuItems(props: {
   readonly snoozePresets: ReadonlyArray<InboxSnoozePreset>;
   /** Off on the frozen phone tier (AGENTS.md). */
   readonly showFilters: boolean;
+  /** Hide and Show in Inbox; off on the frozen phone tier (AGENTS.md). */
+  readonly offerHide: boolean;
   readonly onSettle: () => void;
   readonly onSnooze: (snoozedUntil: string | null) => void;
   readonly onOpenPullRequest: (url: string) => void;
@@ -356,6 +360,24 @@ export function InboxThreadMenuItems(props: {
           {row.settled ? <Undo2Icon aria-hidden /> : <CheckIcon aria-hidden />}
           {props.settleLabel}
         </MenuItem>,
+        // The Hidden shelf: out of the Inbox until the thread needs the person.
+        ...(props.offerHide
+          ? [
+              <MenuItem
+                key="hide"
+                disabled={!row.hideActionEnabled || props.pending}
+                onClick={() =>
+                  void dispatchThreadHidden(
+                    scopeThreadRef(row.environmentId, row.threadId),
+                    !row.hiddenByUser,
+                  )
+                }
+              >
+                {row.hiddenByUser ? <EyeIcon aria-hidden /> : <EyeOffIcon aria-hidden />}
+                {row.hiddenByUser ? "Show in Inbox" : "Hide until needed"}
+              </MenuItem>,
+            ]
+          : []),
       ],
     ],
     ["session", inGroup("session")],
