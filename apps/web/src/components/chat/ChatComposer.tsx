@@ -474,6 +474,8 @@ export interface ChatComposerProps {
 
   // Follow-up while a turn runs (desktop and tablet; the frozen phone tier always queues)
   followUpSurfaceAllowsSteer: boolean;
+  /** The running turn's provider steers by stopping the turn and sending the message next. */
+  followUpSteerRestarts?: boolean;
   getFollowUpSteerUnavailableReason: (snapshot: {
     readonly modelSelection: ModelSelection;
     readonly runtimeMode: RuntimeMode;
@@ -646,6 +648,7 @@ export const ChatComposer = memo(
       scheduleStickToBottom,
       followUpSurfaceAllowsSteer,
       getFollowUpSteerUnavailableReason,
+      followUpSteerRestarts = false,
       onSend,
       onInterrupt,
       onImplementPlanInNewThread,
@@ -2207,6 +2210,7 @@ export const ChatComposer = memo(
         steerUnavailableReason,
         surfaceAllowsSteer: followUpSurfaceAllowsSteer,
         sendShortcut: composerSendShortcut,
+        steerRestarts: followUpSteerRestarts,
         // The same decision the send makes, from the same inputs.
         approvalRedirect: resolveApprovalRedirect({
           approvals: pendingApprovals,
@@ -2224,6 +2228,7 @@ export const ChatComposer = memo(
       activeTurnId,
       approvalRedirectedTurnId,
       composerSendShortcut,
+      followUpSteerRestarts,
       followUpSurfaceAllowsSteer,
       getFollowUpSteerUnavailableReason,
       interactionMode,

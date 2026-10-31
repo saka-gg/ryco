@@ -83,7 +83,7 @@ export class ProviderTurnNotSteerableError extends Schema.TaggedError<ProviderTu
     provider: Schema.String,
     threadId: Schema.String,
     turnId: Schema.optional(Schema.String),
-    reason: Schema.Literals(["turn-ended", "busy", "unsupported"]),
+    reason: Schema.Literals(["turn-ended", "busy", "unsupported", "restarting"]),
     /** User-facing sentence; surfaced verbatim in the deferred activity. */
     detail: Schema.String,
     cause: Schema.optional(Schema.Defect()),

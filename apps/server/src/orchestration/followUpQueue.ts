@@ -909,6 +909,25 @@ export function followUpQueueFollowOns(
                   },
                 },
               },
+          // Its provider stopped the turn to take it (interrupt-restart): it goes next, ahead of
+          // anything queued before it.
+          ...(payload.restartedTurn === true && queue.entries[0]?.messageId !== entry.messageId
+            ? [
+                {
+                  type: "thread.queue-reordered" as const,
+                  payload: {
+                    threadId,
+                    order: [
+                      entry.messageId,
+                      ...queue.entries
+                        .map((candidate) => candidate.messageId)
+                        .filter((messageId) => messageId !== entry.messageId),
+                    ],
+                    updatedAt: event.occurredAt,
+                  },
+                },
+              ]
+            : []),
         ]);
         break;
       }

@@ -1954,6 +1954,25 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           "The turn finished before this message could be steered. It stays queued and is sent next.",
       });
     }
+    if (routed.adapter.capabilities.turnSteering === "interrupt-restart") {
+      // No native steering: stop the turn and defer, so the message goes as the next turn from
+      // the follow-up queue. A server stop holds no queue (only a person's Stop does).
+      const stopped = yield* interruptTurn({
+        threadId: input.threadId,
+        turnId: input.expectedTurnId,
+      }).pipe(Effect.exit);
+      const displayName =
+        PROVIDER_DISPLAY_NAMES[routed.adapter.provider] ?? routed.adapter.provider;
+      return yield* new ProviderTurnNotSteerableError({
+        provider: routed.adapter.provider,
+        threadId: input.threadId,
+        turnId: input.expectedTurnId,
+        reason: "restarting",
+        detail: Exit.isSuccess(stopped)
+          ? `${displayName} can't take a message mid-turn, so Ryco stopped the turn. Your message is sent next.`
+          : `${displayName} can't take a message mid-turn and the turn could not be stopped. The message stays queued.`,
+      });
+    }
     const steer = routed.adapter.steerTurn;
     if (routed.adapter.capabilities.turnSteering !== "native" || steer === undefined) {
       const displayName =

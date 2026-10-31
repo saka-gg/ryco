@@ -49,6 +49,7 @@ const CURSOR_PRESENTATION = {
   badgeLabel: "Early Access",
   showInteractionModeToggle: true,
   supportsAskMode: true,
+  turnSteeringMode: "interrupt-restart",
 } as const;
 const EMPTY_CAPABILITIES: ModelCapabilities = createModelCapabilities({
   optionDescriptors: [],

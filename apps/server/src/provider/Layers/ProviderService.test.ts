@@ -125,7 +125,7 @@ function makeFakeCodexAdapter(
     /** "none" omits the capability, which ProviderService treats as unsupported. */
     readonly conversationRollback?: "native" | "none";
     /** Defaults to native for Codex only. */
-    readonly turnSteering?: "native" | "unsupported";
+    readonly turnSteering?: "native" | "interrupt-restart" | "unsupported";
     readonly turnSubmission?: "acceptance" | "completion";
     /** Defaults to true for Codex only, as the real adapters declare. */
     readonly resumeSurvivesCwdChange?: boolean;
@@ -3469,6 +3469,70 @@ it.live("ProviderServiceLive routes steering to a Claude-shaped adapter and defe
         }),
       );
       assert.isTrue(Schema.is(ProviderSessionNotFoundError)(inactive));
+    }).pipe(Effect.provide(providerLayer));
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.live("ProviderServiceLive steers a provider without native steering by stopping the turn", () =>
+  Effect.gen(function* () {
+    const codex = makeFakeCodexAdapter();
+    const cursor = makeFakeCodexAdapter(CURSOR_DRIVER, { turnSteering: "interrupt-restart" });
+    const providerLayer = makeStandaloneProviderServiceLayer([codex, cursor]);
+
+    yield* Effect.gen(function* () {
+      const provider = yield* ProviderService;
+      const thread = asThreadId("thread-cursor-restart");
+      yield* provider.startSession(thread, {
+        provider: CURSOR_DRIVER,
+        providerInstanceId: ProviderInstanceId.make("cursor"),
+        threadId: thread,
+        runtimeMode: "full-access",
+      });
+      const turn = yield* provider.sendTurn({ threadId: thread, input: "work", attachments: [] });
+      const deferred = yield* Effect.flip(
+        provider.steerTurn({
+          threadId: thread,
+          expectedTurnId: turn.turnId,
+          messageId: MessageId.make("message-cursor-restart"),
+          input: "change course",
+          attachments: [],
+        }),
+      );
+      // The turn is stopped and the steer deferred: the queue sends the message next.
+      assert.deepEqual(cursor.interruptTurn.mock.calls.at(-1)?.slice(0, 2), [thread, turn.turnId]);
+      assert.isTrue(Schema.is(ProviderTurnNotSteerableError)(deferred));
+      if (Schema.is(ProviderTurnNotSteerableError)(deferred)) {
+        assert.equal(deferred.reason, "restarting");
+        assert.equal(
+          deferred.detail,
+          "Cursor can't take a message mid-turn, so Ryco stopped the turn. Your message is sent next.",
+        );
+      }
+      assert.equal(cursor.steerTurn.mock.calls.length, 0);
+
+      const stopsBefore = cursor.interruptTurn.mock.calls.length;
+      cursor.interruptTurn.mockImplementationOnce(() =>
+        Effect.fail(
+          new ProviderAdapterRequestError({
+            provider: CURSOR_DRIVER,
+            method: "session/cancel",
+            detail: "cancel refused",
+          }),
+        ),
+      );
+      const stuck = yield* Effect.flip(
+        provider.steerTurn({
+          threadId: thread,
+          expectedTurnId: turn.turnId,
+          messageId: MessageId.make("message-cursor-stuck"),
+          input: "change course",
+          attachments: [],
+        }),
+      );
+      assert.equal(cursor.interruptTurn.mock.calls.length, stopsBefore + 1);
+      if (Schema.is(ProviderTurnNotSteerableError)(stuck)) {
+        assert.include(stuck.detail, "could not be stopped. The message stays queued.");
+      } else assert.fail("expected a deferred steer");
     }).pipe(Effect.provide(providerLayer));
   }).pipe(Effect.provide(NodeServices.layer)),
 );

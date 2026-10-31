@@ -290,6 +290,12 @@ export const ServerProvider = Schema.Struct({
   // option disabled with an explanation.
   supportsAskMode: Schema.optional(Schema.Boolean),
   supportsTurnSteering: Schema.optional(Schema.Boolean),
+  /**
+   * How a steer reaches a running turn when `supportsTurnSteering` is not set. Known value:
+   * "interrupt-restart" (the node stops the turn and sends the message next). A plain string,
+   * so a value an older client does not know reads as no steering instead of failing the decode.
+   */
+  turnSteeringMode: Schema.optional(TrimmedNonEmptyString.check(Schema.isMaxLength(32))),
   // Whether a checkpoint revert can make this provider forget turns. Stamped by
   // the server from the adapter capability; absent means an older server (unknown).
   supportsConversationRollback: Schema.optional(Schema.Boolean),

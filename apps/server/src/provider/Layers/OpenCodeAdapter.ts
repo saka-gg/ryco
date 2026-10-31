@@ -3217,6 +3217,8 @@ export function makeOpenCodeAdapter(
       capabilities: {
         sessionModelSwitch: "in-session",
         conversationRollback: "native",
+        // A steer stops the turn and sends the message next (ProviderService).
+        turnSteering: "interrupt-restart",
         // Unverified: OpenCode scopes sessions to a project directory.
         resumeSurvivesCwdChange: false,
       },

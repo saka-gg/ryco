@@ -753,6 +753,39 @@ describe("follow-up queue decider: steer", () => {
     });
   });
 
+  it("sends a steer its provider stopped the turn for next, ahead of earlier follow-ups", async () => {
+    const steered = await apply(await queued(["a", "b", "c"], running), steer("c"));
+    const deferred = (restartedTurn: boolean): OrchestrationCommand => ({
+      type: "thread.turn.steer.resolve",
+      commandId: nextCommandId("resolve"),
+      requestCommandId: steered.events[1]!.commandId!,
+      threadId,
+      expectedTurnId: runningTurn,
+      message: { messageId: MessageId.make("c"), role: "user", text: "text c", attachments: [] },
+      createdAt: at(2),
+      requestedAt: at(2),
+      resolution: {
+        status: "rejected",
+        error: "Cursor can't take a message mid-turn, so Ryco stopped the turn.",
+        reason: "deferred",
+        ...(restartedTurn ? { restartedTurn: true } : {}),
+        resolvedAt: at(3),
+      },
+    });
+    const restarted = await apply(steered.model, deferred(true));
+    expect(types(restarted.events)).toContain("thread.queue-reordered");
+    expect(
+      queueOf(restarted.model)?.entries.map((entry) => [entry.messageId, entry.status]),
+    ).toEqual([
+      ["c", "queued"],
+      ["a", "queued"],
+      ["b", "queued"],
+    ]);
+    // A plain deferral (the turn ended first) keeps its place.
+    const plain = await apply(steered.model, deferred(false));
+    expect(queueOf(plain.model)?.entries.map((entry) => entry.messageId)).toEqual(["a", "b", "c"]);
+  });
+
   it("leaves the entry queued when the turn it targets is no longer running", async () => {
     expect(await decide(await queued(["a"], running), steer("a", TurnId.make("old")))).toEqual([]);
     expect(await decide(await queued(["a"]), steer("a"))).toEqual([]);

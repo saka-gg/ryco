@@ -476,6 +476,8 @@ export const makeCopilotAdapter = Effect.fn("makeCopilotAdapter")(function* (
     provider: COPILOT_DRIVER_KIND,
     capabilities: {
       sessionModelSwitch: "in-session",
+      // A steer stops the turn and sends the message next (ProviderService).
+      turnSteering: "interrupt-restart",
       // Unverified for a moved working directory; carry context over instead.
       resumeSurvivesCwdChange: false,
     },

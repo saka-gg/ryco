@@ -341,9 +341,13 @@ function planTurnSteerRejection(input: {
   readonly reason: TurnSteerRejectionReason;
   /** The provider may have received it: clients hold the message for an explicit retry. */
   readonly deliveryUncertain?: boolean | undefined;
+  /** The provider stopped the turn to take it: the queue sends it next. */
+  readonly restartedTurn?: boolean | undefined;
   readonly occurredAt: string;
 }): ReadonlyArray<PlannedOrchestrationEvent> {
   const deliveryUncertain = input.deliveryUncertain === true ? { deliveryUncertain: true } : {};
+  const restartedTurn =
+    input.reason === "deferred" && input.restartedTurn === true ? { restartedTurn: true } : {};
   const rejectedEvent: PlannedOrchestrationEvent = {
     ...withEventBase({
       aggregateKind: "thread",
@@ -359,6 +363,7 @@ function planTurnSteerRejection(input: {
       error: input.error,
       reason: input.reason,
       ...deliveryUncertain,
+      ...restartedTurn,
       resolvedAt: input.occurredAt,
     },
   };
@@ -3635,6 +3640,7 @@ const decideCommand = Effect.fn("decideOrchestrationCommand.command")(function* 
         error: command.resolution.error,
         reason: command.resolution.reason ?? "failed",
         deliveryUncertain: command.resolution.deliveryUncertain,
+        restartedTurn: command.resolution.restartedTurn,
         occurredAt: resolvedAt,
       });
     }

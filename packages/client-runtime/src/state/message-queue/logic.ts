@@ -31,6 +31,24 @@ export interface QueuedMessage<Composer = unknown, Settings = unknown> {
   readonly settings: Settings;
 }
 
+/**
+ * How a provider takes a steer, from its status: `native` adds the message to the running turn,
+ * `restart` stops the turn and sends the message next (`ServerProvider.turnSteeringMode`).
+ * Null: the message waits for the turn to end.
+ */
+export function providerSteering(
+  provider:
+    | {
+        readonly supportsTurnSteering?: boolean | undefined;
+        readonly turnSteeringMode?: string | undefined;
+      }
+    | null
+    | undefined,
+): "native" | "restart" | null {
+  if (provider?.supportsTurnSteering === true) return "native";
+  return provider?.turnSteeringMode === "interrupt-restart" ? "restart" : null;
+}
+
 export type QueuedMessageSteerEligibility =
   | { readonly allowed: true; readonly expectedTurnId: TurnId }
   | { readonly allowed: false; readonly reason: string };

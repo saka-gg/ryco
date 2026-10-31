@@ -96,6 +96,7 @@ import {
   resolveQueuedMessageEditUnavailableReason,
   resolveFollowUpQueueEditState,
   resolveQueuedMessageSteerEligibility,
+  providerSteering,
   selectServerFollowUpQueueSupported,
   selectThreadFollowUpQueue,
   shouldQueueFollowUpOnServer,
@@ -1408,7 +1409,7 @@ export function ThreadDetailScreen(props: {
         mutationReady: connectionUiState === "connected" && hydratedFromCacheAt === null,
         turnRunning: thread?.latestTurn?.state === "running",
         activeTurnId: thread?.session?.activeTurnId,
-        supportsTurnSteering: provider?.supportsTurnSteering === true,
+        supportsTurnSteering: providerSteering(provider) !== null,
         queuedModelSelection: message.modelSelection,
         activeModelSelection: activeSelection,
         queuedRuntimeMode: message.runtimeMode,
@@ -1633,6 +1634,14 @@ export function ThreadDetailScreen(props: {
     [environmentId, navigation, threadId],
   );
 
+  // A steer on the running turn's provider stops the turn and sends the message next.
+  const activeProviderSteering = providerSteering(
+    providers.find(
+      (entry) =>
+        entry.instanceId ===
+        (thread?.session?.providerInstanceId ?? thread?.modelSelection?.instanceId),
+    ),
+  );
   const openTerminal = useCallback(
     () =>
       navigation.navigate("ThreadTerminal", {
@@ -2749,6 +2758,7 @@ export function ThreadDetailScreen(props: {
       )}
 
       <ThreadQueuedMessages
+        steerRestarts={activeProviderSteering === "restart"}
         rows={queueView.rows}
         localMessages={localQueuedMessages}
         hold={queueView.hold}
