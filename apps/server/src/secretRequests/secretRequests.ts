@@ -5,7 +5,12 @@
  * A request is two thread activities: `secret.requested` (key, purpose, file, expiry) and one
  * `secret.resolved` (provided, declined or expired). Their command and activity ids derive from
  * the request id, so a request is opened once and resolved once, whoever records first. Answers,
- * expiry and the tool's own expiry check for one request run one at a time in this process.
+ * expiry and the tool's own expiry check for one request run one at a time in this process, and
+ * so do the requests one thread opens (its pending limit holds under parallel tool calls).
+ *
+ * A request records the identity of the checkout it was opened for (`checkoutId`, never a path);
+ * an answer is written only while the thread's checkout still has it. An expiry whose record
+ * fails is tried again, with backoff, until it is recorded.
  *
  * The value exists only in `answerSecretRequest`'s input and in the dotenv file it writes: it is
  * not dispatched, logged, traced, returned or kept.
@@ -37,13 +42,15 @@ import type {
   SecretRequestedActivityPayload,
   SecretResolvedActivityPayload,
 } from "@ryco/contracts/secret-request-details";
+import { secretRequestFailureMessage } from "@ryco/shared/secretRequests";
 import {
   deriveSecretRequests,
   isSecretRequestExpired,
-  secretRequestFailureMessage,
+  pendingSecretRequests,
   type SecretRequestView,
-} from "@ryco/shared/secretRequests";
+} from "@ryco/shared/secretRequestState";
 import { Clock, Duration, Effect, Option } from "effect";
+import * as Semaphore from "effect/Semaphore";
 
 import type { OrchestrationEngineShape } from "../orchestration/Services/OrchestrationEngine.ts";
 import type { ProjectionSnapshotQueryShape } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
@@ -51,8 +58,10 @@ import type { findThreadInArray } from "../orchestration/threadIndex.ts";
 import type { WorkspaceAccessPolicyShape } from "../workspace/Services/WorkspaceAccessPolicy.ts";
 import {
   DotenvSinkError,
+  LEFTOVER_TEMPORARY_MIN_AGE_MS,
   normalizeDotenvRelativePath,
   normalizeSecretValue,
+  removeDotenvSecretLeftovers,
   resolveDotenvTarget,
   writeDotenvSecret,
 } from "./dotenvSink.ts";
@@ -99,7 +108,11 @@ export const readThreadSecretRequests = (deps: SecretRequestDeps, threadId: Thre
     return deriveSecretRequests(thread.activities, nowMs);
   });
 
-/** The thread's own checkout: its worktree, else its project's folder. */
+/**
+ * The thread's own checkout now: its worktree, else its project's folder. An answer writes here
+ * only when it is still the checkout the request recorded (`checkoutId`): a worktree removed or
+ * a thread moved since never sends the value into the project's folder instead.
+ */
 export const threadCheckout = (deps: SecretRequestDeps, threadId: ThreadId) =>
   Effect.gen(function* () {
     const context = Option.getOrUndefined(
@@ -163,8 +176,11 @@ const recordResolution = (
     });
   }).pipe(Effect.mapError(() => new SecretRequestError({ reason: "record-failed" })));
 
-/** Records the expiry of a request whose day passed unanswered; anything else is left alone. */
-export const expireSecretRequestIfDue = (
+/**
+ * Records the expiry of a request whose day passed unanswered; anything else is left alone.
+ * Fails `busy` while an answer is in progress and `record-failed` when the record failed.
+ */
+const recordExpiryIfDue = (
   deps: SecretRequestDeps,
   threadId: ThreadId,
   requestId: SecretRequestId,
@@ -182,21 +198,31 @@ export const expireSecretRequestIfDue = (
       if (!isSecretRequestExpired(request, yield* Clock.currentTimeMillis)) return;
       yield* recordResolution(deps, threadId, request, "expired");
     }),
-  ).pipe(
-    Effect.catch((error) =>
-      error.reason === "busy"
-        ? Effect.void
-        : Effect.logWarning("Could not record a secret request's expiry", {
-            reason: error.reason,
-          }),
-    ),
   );
+
+const logExpiryFailure = (error: SecretRequestError) =>
+  error.reason === "busy"
+    ? Effect.void
+    : Effect.logWarning("Could not record a secret request's expiry", { reason: error.reason });
+
+/** {@link recordExpiryIfDue} for a polling agent: a failure is logged, the timer tries again. */
+export const expireSecretRequestIfDue = (
+  deps: SecretRequestDeps,
+  threadId: ThreadId,
+  requestId: SecretRequestId,
+) => recordExpiryIfDue(deps, threadId, requestId).pipe(Effect.catch(logExpiryFailure));
+
+/** The wait before trying a failed expiry record again: doubling from this, up to an hour. */
+export const SECRET_REQUEST_EXPIRY_RETRY_MS = 5_000;
+const SECRET_REQUEST_EXPIRY_RETRY_MAX_MS = 60 * 60 * 1_000;
 
 const scheduled = new Set<string>();
 
 /**
- * Expires the request when its day is up. The timer lives in this process; after a restart the
- * startup reconciliation schedules it again (`scheduleSecretRequestExpiries`).
+ * Expires the request when its day is up, trying again with backoff while the record fails (or
+ * an answer holds the request), so a request never stays pending past its day. The timer lives
+ * in this process; after a restart the startup reconciliation schedules it again
+ * (`scheduleSecretRequestExpiries`).
  */
 export const scheduleSecretRequestExpiry = (
   deps: SecretRequestDeps,
@@ -211,28 +237,107 @@ export const scheduleSecretRequestExpiry = (
     const delayMs = Number.isFinite(expiresAtMs)
       ? Math.max(0, expiresAtMs - (yield* Clock.currentTimeMillis))
       : 0;
+    const attempt = (retryMs: number): Effect.Effect<void> =>
+      recordExpiryIfDue(deps, threadId, request.requestId).pipe(
+        Effect.catch((error) =>
+          logExpiryFailure(error).pipe(
+            Effect.andThen(Effect.sleep(Duration.millis(retryMs))),
+            Effect.andThen(
+              Effect.suspend(() =>
+                attempt(Math.min(retryMs * 2, SECRET_REQUEST_EXPIRY_RETRY_MAX_MS)),
+              ),
+            ),
+          ),
+        ),
+      );
     yield* Effect.sleep(Duration.millis(delayMs)).pipe(
-      Effect.andThen(expireSecretRequestIfDue(deps, threadId, request.requestId)),
+      Effect.andThen(attempt(SECRET_REQUEST_EXPIRY_RETRY_MS)),
       Effect.ensuring(Effect.sync(() => scheduled.delete(key))),
       Effect.forkDetach,
     );
   });
 
+type RestartedThread = Pick<OrchestrationThread, "id" | "deletedAt" | "activities">;
+
 /** After a restart: expiry timers for every pending request of these threads. */
 export const scheduleSecretRequestExpiries = (
   deps: SecretRequestDeps,
-  threads: ReadonlyArray<Pick<OrchestrationThread, "id" | "deletedAt" | "activities">>,
+  threads: ReadonlyArray<RestartedThread>,
 ) =>
   Effect.forEach(
     threads.filter((thread) => thread.deletedAt === null),
     (thread) =>
       Effect.forEach(
-        deriveSecretRequests(thread.activities).filter((request) => request.status === "pending"),
+        pendingSecretRequests(thread.activities),
         (request) => scheduleSecretRequestExpiry(deps, thread.id, request),
         { discard: true },
       ),
     { discard: true },
   );
+
+/**
+ * After a restart: removes the temporary files an answer that crashed mid-write left behind
+ * (in the checkout's Git directory or beside the file) for every pending request's file. Such
+ * a request is still pending: its answer is recorded only after the rename. Never fails.
+ */
+export const sweepSecretRequestLeftovers = (
+  deps: SecretRequestDeps,
+  threads: ReadonlyArray<RestartedThread>,
+) =>
+  Effect.forEach(
+    threads.filter((thread) => thread.deletedAt === null),
+    (thread) => {
+      const files = new Set(
+        pendingSecretRequests(thread.activities).map((request) => request.file),
+      );
+      if (files.size === 0) return Effect.void;
+      return threadCheckout(deps, thread.id).pipe(
+        Effect.flatMap((checkout) =>
+          Effect.promise(() =>
+            Promise.all(
+              Array.from(files, (file) => removeDotenvSecretLeftovers({ checkout, file })),
+            ),
+          ),
+        ),
+        Effect.ignore,
+      );
+    },
+    { discard: true },
+  );
+
+/**
+ * What a restart owes pending secret requests: their expiry timers now, and the sweep of crash
+ * leftovers once a leftover is old enough to be one (a write in progress elsewhere is younger).
+ */
+export const reconcileSecretRequestsAfterRestart = (
+  deps: SecretRequestDeps,
+  threads: ReadonlyArray<RestartedThread>,
+) =>
+  scheduleSecretRequestExpiries(deps, threads).pipe(
+    Effect.andThen(
+      Effect.sleep(Duration.millis(LEFTOVER_TEMPORARY_MIN_AGE_MS)).pipe(
+        Effect.andThen(sweepSecretRequestLeftovers(deps, threads)),
+        Effect.forkDetach,
+      ),
+    ),
+    Effect.asVoid,
+  );
+
+// Requests one thread opens, one at a time in this process: the count of pending requests and
+// the record of a new one cannot interleave with another call's.
+const openLocks = new Map<string, Semaphore.Semaphore>();
+const withThreadOpenLock = <A, E, R>(
+  threadId: ThreadId,
+  effect: Effect.Effect<A, E, R>,
+): Effect.Effect<A, E, R> =>
+  Effect.suspend(() => {
+    let lock = openLocks.get(threadId);
+    if (lock === undefined) {
+      lock = Semaphore.makeUnsafe(1);
+      openLocks.set(threadId, lock);
+    }
+    return lock.withPermits(1)(effect);
+  });
 
 /** Why a request could not be opened, in words for the agent. */
 export class SecretRequestOpenError {
@@ -245,8 +350,9 @@ export class SecretRequestOpenError {
 
 /**
  * Opens a request in the caller's thread, or finds the one this caller id opened before. The
- * file is checked now (checkout, links, `.git`, Git ignore), so the agent hears about a bad
- * file at once and the user is never shown a card that cannot be saved.
+ * file is checked now (checkout, links, `.git`, Git ignore and tracking), so the agent hears
+ * about a bad file at once and the user is never shown a card that cannot be saved. The
+ * checkout's identity is recorded with the request. One open at a time per thread.
  */
 export const openSecretRequest = (
   deps: SecretRequestDeps,
@@ -260,93 +366,100 @@ export const openSecretRequest = (
     readonly maxPending: number;
   },
 ) =>
-  Effect.gen(function* () {
-    const requestId = secretRequestIdFor(input.threadId, input.callerRequestId);
-    const requests = yield* readThreadSecretRequests(deps, input.threadId);
-    if (requests === undefined) {
-      return yield* Effect.fail(new SecretRequestOpenError("Thread not found."));
-    }
-    const file = normalizeDotenvRelativePath(input.file);
-    if (file === null) {
-      return yield* Effect.fail(
-        new SecretRequestOpenError(
-          "Use a dotenv file relative to this thread's checkout (.env, .env.local, name.env or .dev.vars), without .., links or .git.",
-        ),
-      );
-    }
-    const existing = requests.find((request) => request.requestId === requestId);
-    if (existing !== undefined) {
-      if (existing.key !== input.key || existing.file !== file) {
+  withThreadOpenLock(
+    input.threadId,
+    Effect.gen(function* () {
+      const requestId = secretRequestIdFor(input.threadId, input.callerRequestId);
+      const requests = yield* readThreadSecretRequests(deps, input.threadId);
+      if (requests === undefined) {
+        return yield* Effect.fail(new SecretRequestOpenError("Thread not found."));
+      }
+      const file = normalizeDotenvRelativePath(input.file);
+      if (file === null) {
         return yield* Effect.fail(
           new SecretRequestOpenError(
-            "This requestId already asked for another key or file. Use a new requestId.",
+            "Use a dotenv file relative to this thread's checkout (.env, .env.local, name.env or .dev.vars), without .., links or .git.",
           ),
         );
       }
-      return existing;
-    }
-    if (requests.filter((request) => request.status === "pending").length >= input.maxPending) {
-      return yield* Effect.fail(
-        new SecretRequestOpenError(
-          "This thread already has as many unanswered secret requests as it may. Wait for the user to answer or decline them.",
-        ),
-      );
-    }
-    const checkout = yield* threadCheckout(deps, input.threadId).pipe(
-      Effect.mapError(
-        (error) => new SecretRequestOpenError(secretRequestFailureMessage(error.reason)),
-      ),
-    );
-    yield* Effect.tryPromise({
-      try: () => resolveDotenvTarget({ checkout, file }),
-      catch: (cause) =>
-        new SecretRequestOpenError(
-          secretRequestFailureMessage(
-            cause instanceof DotenvSinkError ? cause.reason : "unsafe-path",
+      const existing = requests.find((request) => request.requestId === requestId);
+      if (existing !== undefined) {
+        if (existing.key !== input.key || existing.file !== file) {
+          return yield* Effect.fail(
+            new SecretRequestOpenError(
+              "This requestId already asked for another key or file. Use a new requestId.",
+            ),
+          );
+        }
+        return existing;
+      }
+      if (requests.filter((request) => request.status === "pending").length >= input.maxPending) {
+        return yield* Effect.fail(
+          new SecretRequestOpenError(
+            "This thread already has as many unanswered secret requests as it may. Wait for the user to answer or decline them.",
           ),
+        );
+      }
+      const checkout = yield* threadCheckout(deps, input.threadId).pipe(
+        Effect.mapError(
+          (error) => new SecretRequestOpenError(secretRequestFailureMessage(error.reason)),
         ),
-    });
-    const nowMs = yield* Clock.currentTimeMillis;
-    const createdAt = new Date(nowMs).toISOString();
-    const payload: SecretRequestedActivityPayload = {
-      requestId,
-      key: input.key,
-      purpose: input.purpose,
-      file,
-      expiresAt: new Date(nowMs + SECRET_REQUEST_TTL_MS).toISOString(),
-    };
-    yield* deps.engine
-      .dispatch({
-        type: "thread.activity.append",
-        commandId: CommandId.make(`secret-request:${requestId}:requested`),
-        threadId: input.threadId,
-        activity: {
-          id: EventId.make(requestedActivityId(requestId)),
-          tone: "info",
-          kind: SECRET_REQUESTED_ACTIVITY_KIND,
-          summary: `Asked for ${input.key} for ${file}`,
-          payload,
-          turnId: input.turnId,
-          createdAt,
-        },
-        createdAt,
-      })
-      .pipe(
-        Effect.mapError(() => new SecretRequestOpenError("The node could not record the request.")),
       );
-    yield* scheduleSecretRequestExpiry(deps, input.threadId, payload);
-    const view: SecretRequestView = {
-      requestId,
-      key: input.key,
-      purpose: input.purpose,
-      file,
-      requestedAt: createdAt,
-      expiresAt: payload.expiresAt,
-      turnId: input.turnId,
-      status: "pending",
-    };
-    return view;
-  });
+      const target = yield* Effect.tryPromise({
+        try: () => resolveDotenvTarget({ checkout, file }),
+        catch: (cause) =>
+          new SecretRequestOpenError(
+            secretRequestFailureMessage(
+              cause instanceof DotenvSinkError ? cause.reason : "unsafe-path",
+            ),
+          ),
+      });
+      const nowMs = yield* Clock.currentTimeMillis;
+      const createdAt = new Date(nowMs).toISOString();
+      const payload: SecretRequestedActivityPayload = {
+        requestId,
+        key: input.key,
+        purpose: input.purpose,
+        file,
+        expiresAt: new Date(nowMs + SECRET_REQUEST_TTL_MS).toISOString(),
+        checkoutId: target.checkoutId,
+      };
+      yield* deps.engine
+        .dispatch({
+          type: "thread.activity.append",
+          commandId: CommandId.make(`secret-request:${requestId}:requested`),
+          threadId: input.threadId,
+          activity: {
+            id: EventId.make(requestedActivityId(requestId)),
+            tone: "info",
+            kind: SECRET_REQUESTED_ACTIVITY_KIND,
+            summary: `Asked for ${input.key} for ${file}`,
+            payload,
+            turnId: input.turnId,
+            createdAt,
+          },
+          createdAt,
+        })
+        .pipe(
+          Effect.mapError(
+            () => new SecretRequestOpenError("The node could not record the request."),
+          ),
+        );
+      yield* scheduleSecretRequestExpiry(deps, input.threadId, payload);
+      const view: SecretRequestView = {
+        requestId,
+        key: input.key,
+        purpose: input.purpose,
+        file,
+        requestedAt: createdAt,
+        expiresAt: payload.expiresAt,
+        checkoutId: payload.checkoutId,
+        turnId: input.turnId,
+        status: "pending",
+      };
+      return view;
+    }),
+  );
 
 /**
  * The status of the caller's request now; a pending one past its expiry is recorded expired.
@@ -397,7 +510,14 @@ export const answerSecretRequest = (
       if (value.length === 0) return yield* failWith("empty-value");
       const checkout = yield* threadCheckout(deps, input.threadId);
       yield* Effect.tryPromise({
-        try: () => writeDotenvSecret({ checkout, file: request.file, key: request.key, value }),
+        try: () =>
+          writeDotenvSecret({
+            checkout,
+            file: request.file,
+            key: request.key,
+            value,
+            checkoutId: request.checkoutId,
+          }),
         catch: (cause) =>
           new SecretRequestError({
             reason: cause instanceof DotenvSinkError ? cause.reason : "write-failed",

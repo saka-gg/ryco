@@ -1,5 +1,13 @@
 import { execFileSync } from "node:child_process";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdtempSync,
+  readdirSync,
+  readFileSync,
+  rmSync,
+  utimesSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { parseEnv } from "node:util";
@@ -38,7 +46,12 @@ import { OrchestrationEventStoreLive } from "../persistence/Layers/Orchestration
 import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
 import { RepositoryIdentityResolverLive } from "../project/Layers/RepositoryIdentityResolver.ts";
 import { ProjectAvatarStore } from "../project/Services/ProjectAvatarStore.ts";
-import { answerSecretRequest, secretRequestIdFor } from "./secretRequests.ts";
+import { LEFTOVER_TEMPORARY_MIN_AGE_MS } from "./dotenvSink.ts";
+import {
+  answerSecretRequest,
+  secretRequestIdFor,
+  sweepSecretRequestLeftovers,
+} from "./secretRequests.ts";
 
 // Built from parts, so no fixture looks like a real credential.
 const SECRET = ["ryco", "integration", "secret", "c0ffee"].join("-");
@@ -99,11 +112,13 @@ const session = (
   injectionMode: "codex-http",
 });
 
-const setup = (key: string) =>
+const setup = (key: string, options: { readonly worktree?: boolean } = {}) =>
   Effect.gen(function* () {
     const engine = yield* OrchestrationEngineService;
     const projections = yield* ProjectionSnapshotQuery;
     const root = gitCheckout();
+    // A thread in a worktree of its own: another checkout than the project's folder.
+    const worktree = options.worktree === true ? gitCheckout() : null;
     const threadId = ThreadId.make(`thread-${key}`);
     const projectId = ProjectId.make(`project-${key}`);
     const createdAt = new Date().toISOString();
@@ -126,7 +141,7 @@ const setup = (key: string) =>
       runtimeMode: "full-access",
       interactionMode: "default",
       branch: null,
-      worktreePath: null,
+      worktreePath: worktree,
       createdAt,
     });
     const tools = withSecretRequestTools(noTools, {
@@ -156,7 +171,7 @@ const setup = (key: string) =>
       helpers: { findThreadInArray, waitUntil, threadWakeSource },
     });
     const deps = { engine, projections, findThreadInArray };
-    return { engine, projections, root, threadId, tools, deps };
+    return { engine, projections, root, worktree, threadId, tools, deps };
   });
 
 const hasPendingUserInput = (threadId: ThreadId) =>
@@ -293,6 +308,98 @@ layer("secret requests", (it) => {
       // Declining writes nothing.
       assert.throws(() => readFileSync(path.join(root, ".env"), "utf8"));
     }),
+  );
+
+  it.effect("never writes into another checkout than the one the request was opened for", () =>
+    Effect.gen(function* () {
+      const { engine, root, worktree, threadId, tools, deps } = yield* setup("moved", {
+        worktree: true,
+      });
+      const asked = yield* tools.callTool(
+        session(threadId),
+        AGENT_CONTROL_SECRET_REQUEST_MCP_TOOL,
+        {
+          requestId: "moved",
+          key: "API_KEY",
+          purpose: "Call the API",
+          waitMs: 0,
+        },
+      );
+      assert.strictEqual((asked.structuredContent as { status: string }).status, "pending");
+      // The worktree is gone: the thread falls back to the project's folder, which also ignores
+      // `.env`. The answer must not land there.
+      yield* engine.dispatch({
+        type: "thread.meta.update",
+        commandId: CommandId.make("cmd-moved-worktree"),
+        threadId,
+        worktreePath: null,
+      });
+      const refused = yield* Effect.flip(
+        answerSecretRequest(deps, {
+          threadId,
+          requestId: secretRequestIdFor(threadId, "moved"),
+          answer: { type: "provide", value: SECRET },
+        }),
+      );
+      assert.strictEqual(refused.reason, "checkout-changed");
+      assert.isFalse(existsSync(path.join(root, ".env")));
+      assert.isFalse(existsSync(path.join(worktree!, ".env")));
+      assert.isTrue(yield* hasPendingUserInput(threadId));
+    }),
+  );
+
+  it.effect("holds a thread to 5 unanswered requests, also when the agent asks in parallel", () =>
+    Effect.gen(function* () {
+      const { threadId, tools, engine } = yield* setup("parallel");
+      const results = yield* Effect.forEach(
+        Array.from({ length: 7 }, (_, index) => index),
+        (index) =>
+          tools.callTool(session(threadId), AGENT_CONTROL_SECRET_REQUEST_MCP_TOOL, {
+            requestId: `parallel-${index}`,
+            key: `KEY_${index}`,
+            purpose: "Call the API",
+            waitMs: 0,
+          }),
+        { concurrency: "unbounded" },
+      );
+      assert.strictEqual(results.filter((result) => result.isError !== true).length, 5);
+      const events = yield* Stream.runCollect(engine.readEvents(0));
+      const opened = Array.from(events).filter(
+        (event) =>
+          event.type === "thread.activity-appended" &&
+          event.payload.threadId === threadId &&
+          event.payload.activity.kind === "secret.requested",
+      );
+      assert.strictEqual(opened.length, 5);
+    }),
+  );
+
+  it.effect(
+    "sweeps what a crashed answer left in the checkout's Git directory after a restart",
+    () =>
+      Effect.gen(function* () {
+        const { engine, root, threadId, tools, deps } = yield* setup("sweep");
+        yield* tools.callTool(session(threadId), AGENT_CONTROL_SECRET_REQUEST_MCP_TOOL, {
+          requestId: "sweep",
+          key: "API_KEY",
+          purpose: "Call the API",
+          waitMs: 0,
+        });
+        const leftover = path.join(
+          root,
+          ".git",
+          `ryco-secret-${"0".repeat(8)}-0000-0000-0000-${"0".repeat(12)}.tmp`,
+        );
+        writeFileSync(leftover, `API_KEY='${SECRET}'\n`);
+        const then = new Date(Date.now() - LEFTOVER_TEMPORARY_MIN_AGE_MS - 1_000);
+        utimesSync(leftover, then, then);
+        const model = yield* engine.getReadModel!();
+        yield* sweepSecretRequestLeftovers(deps, model.threads);
+        assert.deepEqual(
+          readdirSync(path.join(root, ".git")).filter((name) => name.startsWith("ryco-")),
+          [],
+        );
+      }),
   );
 
   it.effect("refuses an answer to an unknown request and a blank value", () =>

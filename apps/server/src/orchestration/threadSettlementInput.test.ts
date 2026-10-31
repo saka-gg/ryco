@@ -1,4 +1,5 @@
 import {
+  EventId,
   MessageId,
   ProjectId,
   ProviderInstanceId,
@@ -108,6 +109,37 @@ describe("threadSettlementInput", () => {
     expect(input.latestUserMessageAt).toBe(ownPrompt.createdAt);
     expect(canSettleThread(input)).toEqual({ canSettle: false, blocker: "queued-turn" });
     expect(canSnoozeThread(input).canSnooze).toBe(false);
+  });
+});
+
+describe("threadSettlementInput and secret requests", () => {
+  it("lets a thread settle once its unanswered secret request expired, recorded or not", () => {
+    const expiresAt = "2026-10-12T10:00:00.000Z";
+    const waiting: OrchestrationThread = {
+      ...fork,
+      activities: [
+        {
+          id: EventId.make("secret-request:requested"),
+          tone: "info",
+          kind: "secret.requested",
+          summary: "Asked for API_KEY for .env",
+          payload: {
+            requestId: `secret-request-${"1".repeat(32)}`,
+            key: "API_KEY",
+            purpose: "Call the API",
+            file: ".env",
+            expiresAt,
+            checkoutId: "c".repeat(32),
+          },
+          turnId: null,
+          createdAt: NOW,
+        },
+      ],
+    };
+    const before = threadSettlementInput(readModelWith(waiting), waiting, NOW);
+    expect(before.hasPendingUserInput).toBe(true);
+    const after = threadSettlementInput(readModelWith(waiting), waiting, expiresAt);
+    expect(after.hasPendingUserInput).toBe(false);
   });
 });
 

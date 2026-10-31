@@ -4,10 +4,8 @@ import {
   callbackRepositories,
   pendingCallbackInvalidation,
 } from "./orchestration/approvalResponses.ts";
-import {
-  derivePendingProviderCallbackRequests,
-  derivePendingThreadRequests,
-} from "@ryco/shared/threadActivity";
+import { pendingSecretRequests } from "@ryco/shared/secretRequestState";
+import { derivePendingProviderCallbackRequests } from "@ryco/shared/threadActivity";
 import {
   TURN_FINALIZATION_REASON,
   fallbackReleasedTurnState,
@@ -724,7 +722,8 @@ const repairHandoffDigestFailures = Effect.fn("repairHandoffDigestFailures")(fun
 
 /**
  * Secret requests (`ryco_request_secret`) outlive a restart, but their expiry timers do not: set
- * them again. Their module loads only when a request is pending.
+ * them again, and sweep what an answer that crashed mid-write left behind. Their module loads
+ * only when a request is pending.
  */
 const rescheduleSecretRequestExpiries = (
   snapshot: OrchestrationReadModel,
@@ -732,13 +731,11 @@ const rescheduleSecretRequestExpiries = (
   projections: typeof ProjectionSnapshotQuery.Service,
 ) =>
   snapshot.threads.some(
-    (thread) =>
-      thread.deletedAt === null &&
-      derivePendingThreadRequests(thread.activities).some((request) => request.kind === "secret"),
+    (thread) => thread.deletedAt === null && pendingSecretRequests(thread.activities).length > 0,
   )
     ? Effect.promise(() => import("./secretRequests/secretRequests.ts")).pipe(
         Effect.flatMap((module) =>
-          module.scheduleSecretRequestExpiries(
+          module.reconcileSecretRequestsAfterRestart(
             { engine, projections, findThreadInArray },
             snapshot.threads,
           ),

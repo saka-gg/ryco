@@ -13,7 +13,7 @@ import {
   type SecretRequestDraftAnswer,
   type SecretRequestView,
 } from "@ryco/client-runtime/secretRequests";
-import type { SecretRequestActivity } from "@ryco/shared/secretRequests";
+import type { SecretRequestActivity } from "@ryco/shared/secretRequestState";
 
 /**
  * The thread screen's secret request cards (`ryco_request_secret`): the unanswered requests and

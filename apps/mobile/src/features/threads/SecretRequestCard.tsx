@@ -4,8 +4,8 @@ import { Pressable, TextInput, View } from "react-native";
 import type { EnvironmentId, ThreadId } from "@ryco/contracts";
 import {
   SECRET_REQUEST_FIELD_PLACEHOLDER,
-  SECRET_REQUEST_PRIVACY_NOTE,
   secretRequestOutcomeText,
+  secretRequestPrivacyNote,
   type SecretRequestDraftAnswer,
   type SecretRequestView,
 } from "@ryco/client-runtime/secretRequests";
@@ -83,7 +83,9 @@ export function SecretRequestCard(props: {
             onChangeText={setValue}
             className="mt-3 rounded-xl border border-border px-3 py-2 font-mono text-foreground"
           />
-          <Text className="mt-2 text-xs text-foreground-muted">{SECRET_REQUEST_PRIVACY_NOTE}</Text>
+          <Text className="mt-2 text-xs text-foreground-muted">
+            {secretRequestPrivacyNote(props.request.file)}
+          </Text>
           <Pressable
             disabled={locked || value.trim().length === 0}
             onPress={() => void submit({ type: "provide", value })}

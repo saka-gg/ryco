@@ -9,6 +9,7 @@ import {
   secretRequestCards,
   secretRequestFailureText,
   secretRequestOutcomeText,
+  secretRequestPrivacyNote,
 } from "./secretRequests.ts";
 
 const threadId = ThreadId.make("thread-1");
@@ -26,6 +27,7 @@ const requested = {
     purpose: "Run the evals",
     file: ".env.local",
     expiresAt: "2026-11-01T08:00:00.000Z",
+    checkoutId: "c".repeat(32),
   },
 };
 
@@ -101,5 +103,13 @@ describe("secret request cards", () => {
       "Saved OPENAI_API_KEY to .env.local",
     );
     expect(secretRequestOutcomeText(requested.payload, "declined")).toBe("Declined OPENAI_API_KEY");
+  });
+
+  it("promises only what is true: the agent's code on the node can read the file", () => {
+    const note = secretRequestPrivacyNote(".env.local");
+    expect(note).toBe(
+      "Written to .env.local on your node, where the agent's code can read it. Not kept in the chat.",
+    );
+    expect(note).not.toMatch(/never shown/iu);
   });
 });

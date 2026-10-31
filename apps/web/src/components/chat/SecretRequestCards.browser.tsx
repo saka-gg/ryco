@@ -45,6 +45,7 @@ const requested: OrchestrationThreadActivity = {
     purpose: "Charge test cards in the checkout flow",
     file: ".env",
     expiresAt: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+    checkoutId: "c".repeat(32),
   },
   turnId: TurnId.make("turn-1"),
   createdAt: new Date().toISOString(),

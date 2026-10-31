@@ -28,6 +28,7 @@ const props = {
     file: ".env",
     requestedAt: "2026-10-31T08:00:00.000Z",
     expiresAt: "2026-11-01T08:00:00.000Z",
+    checkoutId: "c".repeat(32),
     turnId: null,
     status: "pending" as const,
   },

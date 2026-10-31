@@ -16,7 +16,7 @@ import {
   type OrchestrationEventType,
   ThreadId,
 } from "@ryco/contracts";
-import { derivePendingThreadRequestState } from "@ryco/shared/threadActivity";
+import { derivePendingThreadRequestState } from "@ryco/shared/pendingThreadRequests";
 import { projectKindOf } from "@ryco/shared/projectKind";
 import {
   checkpointStatusToTurnState,
@@ -782,8 +782,11 @@ export const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationP
       }
     });
 
+    // `nowMs` is the event's time: a secret request past its expiry no longer counts as pending
+    // input from then on, also when its expiry was never recorded.
     const recomputeThreadShellSummary = Effect.fn("recomputeThreadShellSummary")(function* (
       threadId: ThreadId,
+      nowMs?: number,
     ) {
       const perfEnabled = isServerPerfProfileEnabled();
       const startedAtMs = perfEnabled ? Date.now() : 0;
@@ -813,8 +816,10 @@ export const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationP
       const pendingApprovalCount = pendingApprovals.filter(
         (approval) => approval.status === "pending",
       ).length;
-      const pendingUserInputCount =
-        derivePendingThreadRequestState(activities).pendingUserInputCount;
+      const pendingUserInputCount = derivePendingThreadRequestState(
+        activities,
+        nowMs,
+      ).pendingUserInputCount;
       const hasActionableProposedPlan = deriveHasActionableProposedPlan({
         latestTurnId: existingRow.value.latestTurnId,
         proposedPlans,
@@ -1248,7 +1253,10 @@ export const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationP
             (event.payload.activity.kind === SECRET_REQUESTED_ACTIVITY_KIND ||
               event.payload.activity.kind === SECRET_RESOLVED_ACTIVITY_KIND)
           ) {
-            yield* recomputeThreadShellSummary(event.payload.threadId);
+            yield* recomputeThreadShellSummary(
+              event.payload.threadId,
+              Date.parse(event.occurredAt),
+            );
           }
           return;
         }
@@ -1373,7 +1381,7 @@ export const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationP
             latestTurnId,
             updatedAt: event.occurredAt,
           });
-          yield* recomputeThreadShellSummary(event.payload.threadId);
+          yield* recomputeThreadShellSummary(event.payload.threadId, Date.parse(event.occurredAt));
           return;
         }
 
