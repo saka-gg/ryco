@@ -12,6 +12,7 @@ import {
 import { readRpcClient } from "../../../connection/environmentApi";
 import { mobileCliProxyHubReads } from "../../../state/cliProxyHubReads";
 import type { InboxEnvironment } from "../../inbox/inboxModel";
+import { statisticsUnavailableReason } from "./statisticsAccess";
 import type { StatisticsTab } from "./statisticsRoute";
 
 export type { StatisticsTab } from "./statisticsRoute";
@@ -23,15 +24,6 @@ export interface NodeStatistics {
   /** The node's CLIProxyAPI hubs, read with its providers for the Limits tab. */
   readonly hubs?: CliProxyHubRead;
   readonly error?: string;
-}
-
-/** Why this device is not asked for statistics right now, or `null` when it is. */
-function statisticsUnavailableReason(environment: InboxEnvironment): string | null {
-  if (environment.connectionState !== "connected" && environment.connectionState !== "read-only")
-    return "Connect this device to load current data.";
-  if (environment.role === "viewer" || environment.role === "operator")
-    return "Statistics and provider limits require owner access on this device.";
-  return null;
 }
 
 export interface NodeStatisticsLoadOptions {

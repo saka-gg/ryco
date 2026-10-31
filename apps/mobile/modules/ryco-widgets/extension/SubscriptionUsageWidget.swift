@@ -222,7 +222,7 @@ struct SubscriptionUsageWidgetView: View {
             .font(.caption.weight(.semibold))
             .lineLimit(1)
           Spacer(minLength: 2)
-          Text(row.map { "\($0.remaining)% left" } ?? "Open Ryco")
+          Text(row.map { "\($0.remaining)% left" } ?? SubscriptionUsageContent.tapToRefresh)
             .font(.caption.weight(.semibold))
             .lineLimit(1)
             .layoutPriority(1)
@@ -294,7 +294,7 @@ struct SubscriptionUsageWidgetView: View {
           "As of \(Date(timeIntervalSince1970: content.observedAt / 1000).formatted(date: .omitted, time: .shortened))"
         )
       } else {
-        Text("Open Ryco to refresh")
+        Text(SubscriptionUsageContent.tapToRefresh)
       }
     }
     .font(.caption2)

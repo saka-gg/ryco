@@ -81,5 +81,7 @@ output["usageAfterExpiry"] = usage.last.map { entry in
   }
 }
 
+output["tapToRefresh"] = SubscriptionUsageContent.tapToRefresh
+
 let json = try JSONSerialization.data(withJSONObject: output, options: [.sortedKeys])
 print(String(decoding: json, as: UTF8.self))

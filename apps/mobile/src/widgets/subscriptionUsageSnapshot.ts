@@ -7,6 +7,7 @@ import {
   formatCliProxyPlan,
   groupSubscriptionLimits,
   listDirectProviderAccounts,
+  poolLimitWindows,
   rateLimitsObservedAt,
   type CliProxyEnvironmentHub,
   type CliProxyHubAccountEntry,
@@ -28,14 +29,23 @@ import type { WidgetTimelineEntry } from "./widgetTimeline";
  * It holds only what a Lock Screen may show: percentages, reset times, plans, account counts and
  * account names that are not email-like. No email, Hub or hub address, instance id or node name.
  */
-export const SUBSCRIPTION_USAGE_WIDGET_KIND = "subscription-usage";
-/** How long a read stays on the widget, past which it asks to open Ryco. */
+
+/** How long an account's read stays on the widget. */
 export const SUBSCRIPTION_USAGE_MAX_AGE_MS = 15 * 60_000;
+/**
+ * Deadlines fall on whole minutes (an account leaves at most a minute early), so the timeline has
+ * at most one entry per minute of {@link SUBSCRIPTION_USAGE_MAX_AGE_MS}, however many accounts.
+ */
+const DEADLINE_STEP_MS = 60_000;
 /** Windows kept per provider and view: the largest widget shows six. */
 export const SUBSCRIPTION_USAGE_MAX_WINDOWS = 6;
 /** Provider columns kept: the largest widget shows three. */
 export const SUBSCRIPTION_USAGE_MAX_PROVIDERS = 3;
-export const OPEN_RYCO_TO_REFRESH = "Open Ryco to refresh";
+/**
+ * A provider with no current read left. A tap opens Limits, which reads every provider again;
+ * opening Ryco from its icon only reads the hubs again.
+ */
+export const TAP_TO_REFRESH = "Tap to refresh";
 
 /** What the widget's period filter picks: the short window, the week, or neither (monthly…). */
 export type UsageWindowKind = "session" | "weekly" | "other";
@@ -60,14 +70,13 @@ export interface UsageView {
   readonly total: number;
 }
 
+/** One provider as the widget shows it at one moment. */
 export interface UsageProvider {
   readonly provider: string;
   readonly name: string;
-  /** False once {@link expiresAt} passed: no rows, and the detail asks to open Ryco. */
+  /** False once none of its accounts has a current read: no rows, and the detail says to tap. */
   readonly fresh: boolean;
-  /** The oldest of its reads plus {@link SUBSCRIPTION_USAGE_MAX_AGE_MS}, or a reset that comes sooner. */
-  readonly expiresAt: number;
-  /** When the oldest of its numbers was read, epoch ms. */
+  /** When the oldest of the numbers it shows was read, epoch ms; 0 when it shows none. */
   readonly observedAt: number;
   /** The hub accounts' pool, and each direct account on its own. */
   readonly pooled: UsageView;
@@ -75,14 +84,43 @@ export interface UsageProvider {
   readonly accounts: UsageView;
 }
 
+/** An account with windows of its own on the widget: a hub account or a direct account. */
+export interface UsageAccount {
+  readonly name: string;
+  readonly plan: string | undefined;
+  readonly rows: readonly UsageRow[];
+  readonly observedAt: number;
+  /**
+   * When it leaves the widget: {@link SUBSCRIPTION_USAGE_MAX_AGE_MS} after its read, or at the
+   * soonest of its resets if that comes first (past a reset the numbers describe a window that is
+   * over). Each account goes on its own, so one idle machine never hides the others.
+   */
+  readonly expiresAt: number;
+}
+
+export interface UsageHubAccount extends UsageAccount {
+  /** What it adds to its hubs' pool. */
+  readonly windows: readonly LabelledLimitWindow[];
+}
+
+/** One provider's accounts, before a moment decides which of them are still current. */
+export interface UsageSource {
+  readonly provider: string;
+  readonly name: string;
+  readonly hubAccounts: readonly UsageHubAccount[];
+  readonly directAccounts: readonly UsageAccount[];
+}
+
 export interface SubscriptionUsageSnapshot {
   /** What a tap opens: the Limits tab. */
   readonly url: string;
-  readonly providers: readonly UsageProvider[];
+  readonly providers: readonly UsageSource[];
 }
 
 /** One entry's content: the snapshot as it reads from the entry's time on. */
-export interface SubscriptionUsageContent extends SubscriptionUsageSnapshot {
+export interface SubscriptionUsageContent {
+  readonly url: string;
+  readonly providers: readonly UsageProvider[];
   /** When the oldest number still shown was read, epoch ms; 0 when none is. */
   readonly observedAt: number;
 }
@@ -130,35 +168,56 @@ function parsedMs(value: string | undefined): number {
   return Number.isFinite(ms) ? ms : 0;
 }
 
-/** Something that has windows of its own on the widget: a hub pool, a hub account, a direct account. */
-interface UsageUnit {
-  readonly name: string;
-  readonly plan: string | undefined;
-  readonly rows: readonly UsageRow[];
-  readonly observedAt: number;
+function expiry(rows: readonly UsageRow[], observedAt: number): number {
+  const resets = rows.flatMap((row) => (row.resetsAt === null ? [] : [row.resetsAt]));
+  const deadline = Math.min(observedAt + SUBSCRIPTION_USAGE_MAX_AGE_MS, ...resets);
+  return Math.floor(deadline / DEADLINE_STEP_MS) * DEADLINE_STEP_MS;
 }
 
-function directUnit(account: DirectProviderAccount, providerName: string): UsageUnit {
+function directAccount(account: DirectProviderAccount, providerName: string): UsageAccount {
+  const rows = account.windows.flatMap((window) => rowOf(window) ?? []);
+  const observedAt = parsedMs(rateLimitsObservedAt(account.snapshot));
   return {
     name: publicText(account.snapshot.displayName) ?? publicText(account.plan) ?? providerName,
     plan: publicText(account.plan),
-    rows: account.windows.flatMap((window) => rowOf(window) ?? []),
-    observedAt: parsedMs(rateLimitsObservedAt(account.snapshot)),
+    rows,
+    observedAt,
+    expiresAt: expiry(rows, observedAt),
   };
 }
 
-function hubAccountUnit(
+function hubAccount(
   entry: CliProxyHubAccountEntry,
   position: number,
   hubCheckedAt: ReadonlyMap<string, string>,
-): UsageUnit {
+): UsageHubAccount {
   const { account } = entry;
+  const windows = cliProxyPoolableWindows(account);
+  const rows = windows.flatMap((window) => rowOf(window) ?? []);
+  const observedAt = parsedMs(account.quota.checkedAt ?? hubCheckedAt.get(entry.hubKey));
   return {
+    // Numbered by its place among all of the provider's hub accounts, as in the Limits tab.
     name: cliProxyAccountPublicName(account, position),
     plan: publicText(formatCliProxyPlan(account.quota.planType)),
-    rows: cliProxyPoolableWindows(account).flatMap((window) => rowOf(window) ?? []),
-    observedAt: parsedMs(account.quota.checkedAt ?? hubCheckedAt.get(entry.hubKey)),
+    rows,
+    observedAt,
+    expiresAt: expiry(rows, observedAt),
+    windows,
   };
+}
+
+function source(
+  group: SubscriptionLimitGroup,
+  hubCheckedAt: ReadonlyMap<string, string>,
+): UsageSource | null {
+  const hubAccounts = group.hubAccounts
+    .map((entry, index) => hubAccount(entry, index + 1, hubCheckedAt))
+    .filter((account) => account.rows.length > 0);
+  const directAccounts = group.directAccounts
+    .map((account) => directAccount(account, group.label))
+    .filter((account) => account.rows.length > 0);
+  if (hubAccounts.length === 0 && directAccounts.length === 0) return null;
+  return { provider: group.provider, name: group.label, hubAccounts, directAccounts };
 }
 
 const byRemaining = (left: UsageRow, right: UsageRow) => left.remaining - right.remaining;
@@ -182,7 +241,7 @@ function selectRows(rows: readonly UsageRow[]): UsageRow[] {
 }
 
 /** An account's tightest window of each kind, labelled with the account when it has company. */
-function tightestPerKind(unit: UsageUnit, labelled: boolean): UsageRow[] {
+function tightestPerKind(unit: UsageAccount, labelled: boolean): UsageRow[] {
   const tightest = new Map<UsageWindowKind, UsageRow>();
   for (const row of unit.rows) {
     const current = tightest.get(row.kind);
@@ -195,27 +254,34 @@ function count(amount: number, noun: string): string {
   return `${amount} ${noun}${amount === 1 ? "" : "s"}`;
 }
 
-function provider(
-  group: SubscriptionLimitGroup,
-  hubCheckedAt: ReadonlyMap<string, string>,
-): UsageProvider | null {
-  const hubUnits = group.hubAccounts
-    .map((entry, index) => hubAccountUnit(entry, index + 1, hubCheckedAt))
-    .filter((unit) => unit.rows.length > 0);
-  const directUnits = group.directAccounts
-    .map((account) => directUnit(account, group.label))
-    .filter((unit) => unit.rows.length > 0);
-  const accountUnits = [...hubUnits, ...directUnits];
-  if (accountUnits.length === 0) return null;
+const EXPIRED_VIEW: UsageView = { detail: TAP_TO_REFRESH, rows: [], total: 0 };
 
-  // The pool averages hub accounts only; a single hub account is its own unit.
-  const pool: UsageUnit | null =
+/** A provider at `atMs`, from its accounts whose reads are still current then. */
+function providerAt(entry: UsageSource, atMs: number): UsageProvider {
+  const current = (account: UsageAccount) => account.expiresAt > atMs;
+  const hubUnits = entry.hubAccounts.filter(current);
+  const directUnits = entry.directAccounts.filter(current);
+  const accountUnits: UsageAccount[] = [...hubUnits, ...directUnits];
+  if (accountUnits.length === 0) {
+    return {
+      provider: entry.provider,
+      name: entry.name,
+      fresh: false,
+      observedAt: 0,
+      pooled: EXPIRED_VIEW,
+      accounts: EXPIRED_VIEW,
+    };
+  }
+
+  // The pool averages the current hub accounts only; a single hub account is its own unit.
+  const pool: UsageAccount | null =
     hubUnits.length > 1
       ? {
           name: "Pooled",
           plan: undefined,
-          rows: group.pooled.map(pooledRowOf),
+          rows: poolLimitWindows(hubUnits.map((unit) => unit.windows)).map(pooledRowOf),
           observedAt: Math.min(...hubUnits.map((unit) => unit.observedAt)),
+          expiresAt: Math.min(...hubUnits.map((unit) => unit.expiresAt)),
         }
       : (hubUnits[0] ?? null);
   const pooledUnits = pool === null ? directUnits : [pool, ...directUnits];
@@ -238,31 +304,25 @@ function provider(
   const accountRows = accountUnits.flatMap((unit) =>
     tightestPerKind(unit, accountUnits.length > 1),
   );
-  const shownPooled = selectRows(pooledRows);
-  const shownAccounts = selectRows(accountRows);
-  const observedAt = Math.min(...accountUnits.map((unit) => unit.observedAt));
-  // Past a reset the numbers describe a window that is over.
-  const resets = [...pooledRows, ...accountRows].flatMap((row) =>
-    row.resetsAt === null ? [] : [row.resetsAt],
-  );
   return {
-    provider: group.provider,
-    name: group.label,
+    provider: entry.provider,
+    name: entry.name,
     fresh: true,
-    expiresAt: Math.min(observedAt + SUBSCRIPTION_USAGE_MAX_AGE_MS, ...resets),
-    observedAt,
-    pooled: { detail: pooledDetail, rows: shownPooled, total: pooledRows.length },
+    observedAt: Math.min(...accountUnits.map((unit) => unit.observedAt)),
+    pooled: { detail: pooledDetail, rows: selectRows(pooledRows), total: pooledRows.length },
     accounts: {
       detail: accountUnits.length === 1 ? pooledDetail : count(accountUnits.length, "account"),
-      rows: shownAccounts,
+      rows: selectRows(accountRows),
       total: accountRows.length,
     },
   };
 }
 
 /**
- * The widget's providers across every environment the app has a config for: Claude and Codex
- * first, then other providers with limits, at most {@link SUBSCRIPTION_USAGE_MAX_PROVIDERS}.
+ * The widget's providers across the environments it may show: Claude and Codex first, then other
+ * providers with limits, at most {@link SUBSCRIPTION_USAGE_MAX_PROVIDERS}. It does not depend on
+ * the time, so it changes only when the numbers do; {@link subscriptionUsageAt} decides which
+ * accounts are still current.
  */
 export function buildSubscriptionUsageSnapshot(
   environments: ReadonlyArray<SubscriptionLimitsEnvironment>,
@@ -276,34 +336,45 @@ export function buildSubscriptionUsageSnapshot(
   );
   const { accounts, routed } = listDirectProviderAccounts(environments);
   const providers = groupSubscriptionLimits({ hubs, direct: accounts, routed })
-    .flatMap((group) => provider(group, hubCheckedAt) ?? [])
+    .flatMap((group) => source(group, hubCheckedAt) ?? [])
     .slice(0, SUBSCRIPTION_USAGE_MAX_PROVIDERS);
   return { url, providers };
 }
 
-const EXPIRED_VIEW: UsageView = { detail: OPEN_RYCO_TO_REFRESH, rows: [], total: 0 };
-
-function contentAt(snapshot: SubscriptionUsageSnapshot, atMs: number): SubscriptionUsageContent {
-  const providers = snapshot.providers.map((entry) =>
-    entry.expiresAt > atMs
-      ? entry
-      : { ...entry, fresh: false, pooled: EXPIRED_VIEW, accounts: EXPIRED_VIEW },
-  );
+/**
+ * What the widget shows at `atMs`: each provider from its accounts still current then. An
+ * account past its deadline leaves its provider's rows, pool and counts; a provider says to tap
+ * only once none of its accounts is current.
+ */
+export function subscriptionUsageAt(
+  snapshot: SubscriptionUsageSnapshot,
+  atMs: number,
+): SubscriptionUsageContent {
+  const providers = snapshot.providers.map((entry) => providerAt(entry, atMs));
   const shown = providers.filter((entry) => entry.fresh).map((entry) => entry.observedAt);
-  return { ...snapshot, providers, observedAt: shown.length > 0 ? Math.min(...shown) : 0 };
+  return {
+    url: snapshot.url,
+    providers,
+    observedAt: shown.length > 0 ? Math.min(...shown) : 0,
+  };
 }
 
 /**
- * The widget's timeline: the snapshot now, then again at each later deadline, where the
- * providers that expired by then ask to open Ryco. The extension switches entries by itself,
- * also while the app is not running.
+ * The widget's timeline: the snapshot now, then again at each later account deadline. The
+ * extension switches entries by itself, also while the app is not running.
  */
 export function buildSubscriptionUsageTimeline(
   snapshot: SubscriptionUsageSnapshot,
   nowMs: number,
 ): Array<WidgetTimelineEntry<SubscriptionUsageContent>> {
-  const deadlines = [...new Set(snapshot.providers.map((entry) => entry.expiresAt))]
+  const deadlines = [
+    ...new Set(
+      snapshot.providers.flatMap((entry) =>
+        [...entry.hubAccounts, ...entry.directAccounts].map((account) => account.expiresAt),
+      ),
+    ),
+  ]
     .filter((deadline) => deadline > nowMs)
     .toSorted((left, right) => left - right);
-  return [nowMs, ...deadlines].map((at) => ({ at, content: contentAt(snapshot, at) }));
+  return [nowMs, ...deadlines].map((at) => ({ at, content: subscriptionUsageAt(snapshot, at) }));
 }

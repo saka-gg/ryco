@@ -7,8 +7,12 @@ import type {
 import { CLI_PROXY_HUB_POLL_INTERVAL_MS, type CliProxyHubRead } from "@ryco/client-runtime/usage";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
-import { SUBSCRIPTION_USAGE_WIDGET_KIND } from "./subscriptionUsageSnapshot";
-import { startWidgetsRuntime, type WidgetsRuntimeDeps } from "./widgetsRuntime";
+import { SUBSCRIPTION_USAGE_WIDGET_KIND } from "./widgetKinds";
+import {
+  startWidgetsRuntime,
+  type WidgetEnvironment,
+  type WidgetsRuntimeDeps,
+} from "./widgetsRuntime";
 
 const NOW = Date.parse("2026-10-31T10:00:00Z");
 const ENV = "env-1" as EnvironmentId;
@@ -92,6 +96,22 @@ function harness(initialConfigs: ReadonlyMap<EnvironmentId, ServerConfig>, activ
   return { deps, configs, hubs, native, read, setActive, appListeners };
 }
 
+const owner = (environmentId: EnvironmentId): WidgetEnvironment => ({
+  environmentId,
+  connectionState: "connected",
+  role: "owner",
+});
+
+/** Starts the runtime and reports the machines, as the app's feed does once it mounts. */
+function start(
+  deps: WidgetsRuntimeDeps,
+  environments: readonly WidgetEnvironment[] = [owner(ENV), owner(OTHER)],
+) {
+  const runtime = startWidgetsRuntime(deps);
+  runtime.setEnvironments(environments);
+  return runtime;
+}
+
 function writtenTimeline(native: { writeTimeline: { mock: { calls: unknown[][] } } }) {
   const call = native.writeTimeline.mock.calls.at(-1)!;
   return { kind: call[0], timeline: JSON.parse(call[1] as string) };
@@ -108,7 +128,7 @@ describe("the widgets runtime", () => {
 
   it("writes the timeline once, and not again for config events that leave the limits alone", async () => {
     const h = harness(new Map([[ENV, config([provider(40)])]]));
-    const runtime = startWidgetsRuntime(h.deps);
+    const runtime = start(h.deps);
     await runtime.settled();
     expect(h.native.writeTimeline).toHaveBeenCalledTimes(1);
     const { kind, timeline } = writtenTimeline(h.native);
@@ -137,7 +157,7 @@ describe("the widgets runtime", () => {
 
   it("follows the hubs a node reports", async () => {
     const h = harness(new Map([[ENV, config([])]]));
-    const runtime = startWidgetsRuntime(h.deps);
+    const runtime = start(h.deps);
     await runtime.settled();
     expect(h.native.writeTimeline).not.toHaveBeenCalled();
 
@@ -177,7 +197,7 @@ describe("the widgets runtime", () => {
 
   it("clears the widget when nothing is left to show, and on sign-out", async () => {
     const h = harness(new Map([[ENV, config([provider(40)])]]));
-    const runtime = startWidgetsRuntime(h.deps);
+    const runtime = start(h.deps);
     await runtime.settled();
     h.configs.set(new Map());
     await runtime.settled();
@@ -200,7 +220,7 @@ describe("the widgets runtime", () => {
   it("writes again after a write failed", async () => {
     const h = harness(new Map([[ENV, config([provider(40)])]]));
     h.native.writeTimeline.mockRejectedValueOnce(new Error("disk full"));
-    const runtime = startWidgetsRuntime(h.deps);
+    const runtime = start(h.deps);
     await runtime.settled();
     h.configs.set(new Map([[ENV, config([provider(40)])]]));
     await runtime.settled();
@@ -210,7 +230,7 @@ describe("the widgets runtime", () => {
 
   it("reads hubs in the foreground, every five minutes there, and for a node that connects", async () => {
     const h = harness(new Map([[ENV, config([])]]));
-    const runtime = startWidgetsRuntime(h.deps);
+    const runtime = start(h.deps);
     expect(h.read.mock.calls).toEqual([[ENV]]);
 
     h.configs.set(
@@ -242,9 +262,64 @@ describe("the widgets runtime", () => {
     expect(h.read).toHaveBeenCalledTimes(6);
   });
 
+  it("shows only the machines the Limits tab reads: connected, with owner access", async () => {
+    const VIEWER = "env-viewer" as EnvironmentId;
+    const OPERATOR = "env-operator" as EnvironmentId;
+    const h = harness(
+      new Map([
+        [ENV, config([provider(40)])],
+        [OTHER, config([provider(10, { instanceId: "codex-offline" })])],
+        [VIEWER, config([provider(80, { instanceId: "codex-viewer", driver: "claudeAgent" })])],
+        [OPERATOR, config([provider(90, { instanceId: "codex-operator", driver: "opencode" })])],
+      ]),
+    );
+    const runtime = startWidgetsRuntime(h.deps);
+    await runtime.settled();
+    // Nothing before the app reports its machines: an unknown list is not an empty one.
+    expect(h.native.writeTimeline).not.toHaveBeenCalled();
+    expect(h.native.clear).not.toHaveBeenCalled();
+    expect(h.read).not.toHaveBeenCalled();
+
+    runtime.setEnvironments([
+      owner(ENV),
+      { environmentId: OTHER, connectionState: "reconnecting", role: "owner" },
+      { environmentId: VIEWER, connectionState: "read-only", role: "viewer" },
+      { environmentId: OPERATOR, connectionState: "connected", role: "operator" },
+    ]);
+    await runtime.settled();
+    const { timeline } = writtenTimeline(h.native);
+    expect(timeline.entries[0].content.providers).toEqual([
+      expect.objectContaining({
+        name: "Codex",
+        pooled: expect.objectContaining({ rows: [expect.objectContaining({ remaining: 60 })] }),
+      }),
+    ]);
+    // Their hubs are not read either.
+    expect(h.read.mock.calls).toEqual([[ENV]]);
+
+    // The same list again changes nothing; the machine that reconnects is read and shown.
+    runtime.setEnvironments([owner(ENV), { ...owner(VIEWER), role: "viewer" }]);
+    await runtime.settled();
+    expect(h.native.writeTimeline).toHaveBeenCalledTimes(1);
+    runtime.setEnvironments([owner(ENV), owner(OTHER)]);
+    await runtime.settled();
+    expect(h.read.mock.calls).toEqual([[ENV], [OTHER]]);
+    expect(writtenTimeline(h.native).timeline.entries[0].content.providers[0].accounts.detail).toBe(
+      "2 accounts",
+    );
+
+    // A machine where this phone loses owner access leaves the widget.
+    runtime.setEnvironments([{ ...owner(ENV), role: "operator" }, owner(OTHER)]);
+    await runtime.settled();
+    expect(writtenTimeline(h.native).timeline.entries[0].content.providers[0].pooled.rows).toEqual([
+      expect.objectContaining({ remaining: 90 }),
+    ]);
+    await runtime.stop();
+  });
+
   it("starts in the background without reading hubs", async () => {
     const h = harness(new Map([[ENV, config([provider(40)])]]), false);
-    const runtime = startWidgetsRuntime(h.deps);
+    const runtime = start(h.deps);
     await runtime.settled();
     expect(h.read).not.toHaveBeenCalled();
     expect(h.native.writeTimeline).toHaveBeenCalledTimes(1);

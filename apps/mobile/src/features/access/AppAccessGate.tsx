@@ -18,7 +18,7 @@ import { deriveAppAccess, isWorkspaceDeepLink } from "./appAccessModel";
 import { watchDirectCredentialAccess } from "./directCredentialAccess";
 import { HOSTED_LAUNCH_DECISION_DEADLINE_MS, markAppAccessDecided } from "./launchDecision";
 import { ThreadAlertsBridge } from "../../notifications/ThreadAlertsBridge";
-import { WidgetsBridge } from "../../widgets/WidgetsBridge";
+import { LockedWidgetsBridge, WidgetsBridge } from "../../widgets/WidgetsBridge";
 
 const logo = require("../../../../../assets/logo_letter_only.svg");
 
@@ -136,7 +136,12 @@ export function AppAccessGate(props: {
 
   if (access.status === "hydrating") return <LaunchSurface />;
   if (access.status === "locked") {
-    return <LockedNavigation linking={props.linking} theme={props.theme} />;
+    return (
+      <>
+        <LockedWidgetsBridge />
+        <LockedNavigation linking={props.linking} theme={props.theme} />
+      </>
+    );
   }
   return (
     <>

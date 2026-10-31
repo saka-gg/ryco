@@ -11,8 +11,9 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   buildSubscriptionUsageSnapshot,
   buildSubscriptionUsageTimeline,
-  OPEN_RYCO_TO_REFRESH,
   SUBSCRIPTION_USAGE_MAX_AGE_MS,
+  subscriptionUsageAt,
+  TAP_TO_REFRESH,
 } from "./subscriptionUsageSnapshot";
 
 const NOW = Date.parse("2026-10-31T10:00:00Z");
@@ -102,17 +103,21 @@ function environment(
   };
 }
 
+/** What the widget shows now. */
+function usageNow(environments: readonly SubscriptionLimitsEnvironment[]) {
+  return subscriptionUsageAt(buildSubscriptionUsageSnapshot(environments, URL), NOW);
+}
+
+const minutesAgo = (minutes: number) => new Date(NOW - minutes * 60_000).toISOString();
+
 describe("the subscription usage snapshot", () => {
   it("pools a hub's accounts and lists them one by one, Claude first", () => {
-    const snapshot = buildSubscriptionUsageSnapshot(
-      [
-        environment(
-          [directProvider([session(30), weekly(10)])],
-          [hub([account("a", [session(20), weekly(50)]), account("b", [session(60), weekly(70)])])],
-        ),
-      ],
-      URL,
-    );
+    const snapshot = usageNow([
+      environment(
+        [directProvider([session(30), weekly(10)])],
+        [hub([account("a", [session(20), weekly(50)]), account("b", [session(60), weekly(70)])])],
+      ),
+    ]);
     expect(snapshot.url).toBe(URL);
     expect(snapshot.providers.map((provider) => provider.name)).toEqual(["Claude", "Codex"]);
     const [claude, codex] = snapshot.providers;
@@ -143,21 +148,18 @@ describe("the subscription usage snapshot", () => {
   });
 
   it("keeps direct accounts out of the hub pool, as accounts of their own", () => {
-    const snapshot = buildSubscriptionUsageSnapshot(
-      [
-        environment(
-          [
-            directProvider([session(10)], {
-              instanceId: "claude",
-              driver: "claudeAgent",
-              displayName: "Claude Work",
-            }),
-          ],
-          [hub([account("a", [session(20)]), account("b", [session(40)])])],
-        ),
-      ],
-      URL,
-    );
+    const snapshot = usageNow([
+      environment(
+        [
+          directProvider([session(10)], {
+            instanceId: "claude",
+            driver: "claudeAgent",
+            displayName: "Claude Work",
+          }),
+        ],
+        [hub([account("a", [session(20)]), account("b", [session(40)])])],
+      ),
+    ]);
     const claude = snapshot.providers[0]!;
     expect(claude.pooled.detail).toBe("2 pooled · 1 direct");
     expect(claude.pooled.rows.map((row) => [row.account, row.remaining])).toEqual([
@@ -181,11 +183,12 @@ describe("the subscription usage snapshot", () => {
       ],
       URL,
     );
-    const claude = snapshot.providers[0]!;
+    const content = subscriptionUsageAt(snapshot, NOW);
+    const claude = content.providers[0]!;
     // Numbered in the Limits tab's order, where the email-named account comes first.
     expect(claude.accounts.rows.map((row) => row.account)).toEqual(["Account 1", "Alpha"]);
     // The direct Codex account named by its email falls back to its plan.
-    expect(snapshot.providers[1]!.pooled.detail).toBe("Pro");
+    expect(content.providers[1]!.pooled.detail).toBe("Pro");
     const json = JSON.stringify(buildSubscriptionUsageTimeline(snapshot, NOW));
     expect(json).not.toContain("@");
     expect(json).not.toContain("hub.private.example.test");
@@ -204,10 +207,9 @@ describe("the subscription usage snapshot", () => {
         windowDurationMins: 30 * 24 * 60,
       }),
     );
-    const snapshot = buildSubscriptionUsageSnapshot(
-      [environment([], [hub([account("a", [session(5), weekly(10), ...monthly])])])],
-      URL,
-    );
+    const snapshot = usageNow([
+      environment([], [hub([account("a", [session(5), weekly(10), ...monthly])])]),
+    ]);
     const pooled = snapshot.providers[0]!.pooled;
     expect(pooled.total).toBe(8);
     expect(pooled.rows.map((row) => [row.label, row.kind, row.remaining])).toEqual([
@@ -221,10 +223,7 @@ describe("the subscription usage snapshot", () => {
   });
 
   it("files a scoped weekly window as weekly", () => {
-    const snapshot = buildSubscriptionUsageSnapshot(
-      [environment([], [hub([account("a", [weekly(30, "Opus")])])])],
-      URL,
-    );
+    const snapshot = usageNow([environment([], [hub([account("a", [weekly(30, "Opus")])])])]);
     expect(snapshot.providers[0]!.pooled.rows).toEqual([
       expect.objectContaining({ label: "Weekly · Opus", kind: "weekly", remaining: 70 }),
     ]);
@@ -235,12 +234,68 @@ describe("the subscription usage snapshot", () => {
       [environment([], [hub([account("a", [session(20, 5)])])])],
       URL,
     );
-    expect(soon.providers[0]!.expiresAt).toBe(NOW + 5 * 60_000);
+    expect(soon.providers[0]!.hubAccounts[0]!.expiresAt).toBe(NOW + 5 * 60_000);
     const later = buildSubscriptionUsageSnapshot(
       [environment([], [hub([account("a", [session(20, 300)])])])],
       URL,
     );
-    expect(later.providers[0]!.expiresAt).toBe(NOW + SUBSCRIPTION_USAGE_MAX_AGE_MS);
+    expect(later.providers[0]!.hubAccounts[0]!.expiresAt).toBe(NOW + SUBSCRIPTION_USAGE_MAX_AGE_MS);
+  });
+
+  it("drops an account whose read is too old, and keeps its provider's current ones", () => {
+    const usage = usageNow([
+      environment(
+        [
+          // A direct Claude instance on a machine that has been idle for twenty minutes.
+          directProvider([session(5)], {
+            instanceId: "claude",
+            driver: "claudeAgent",
+            displayName: "Claude Work",
+            rateLimits: { observedAt: minutesAgo(20), windows: [session(5)] },
+          }),
+        ],
+        [
+          hub([
+            account("a", [session(20)]),
+            account("b", [session(40)]),
+            account("c", [session(90)], {
+              quota: {
+                status: "ok",
+                checkedAt: minutesAgo(16),
+                windows: [session(90)],
+              },
+            }),
+          ]),
+        ],
+      ),
+    ]);
+    const claude = usage.providers[0]!;
+    expect(claude.fresh).toBe(true);
+    // The pool averages the two current accounts only: 80 and 60 left, not 10 from the third.
+    expect(claude.pooled.detail).toBe("2 accounts · pooled");
+    expect(claude.pooled.rows).toEqual([expect.objectContaining({ label: "5h", remaining: 70 })]);
+    expect(claude.accounts.detail).toBe("2 accounts");
+    expect(claude.accounts.rows.map((row) => row.account)).toEqual(["b.json", "a.json"]);
+    expect(JSON.stringify(claude)).not.toContain("Claude Work");
+    expect(usage.observedAt).toBe(NOW);
+  });
+
+  it("asks for a tap only once none of a provider's accounts is current", () => {
+    const usage = usageNow([
+      environment([
+        directProvider([session(30)], {
+          rateLimits: { observedAt: minutesAgo(15), windows: [session(30)] },
+        }),
+      ]),
+    ]);
+    expect(usage.providers).toEqual([
+      expect.objectContaining({
+        name: "Codex",
+        fresh: false,
+        pooled: { detail: TAP_TO_REFRESH, rows: [], total: 0 },
+      }),
+    ]);
+    expect(usage.observedAt).toBe(0);
   });
 
   it("leaves out accounts with nothing to show and providers without limits", () => {
@@ -275,7 +330,7 @@ describe("the subscription usage timeline", () => {
     URL,
   );
 
-  it("starts now and changes at each deadline, where an expired provider asks to open Ryco", () => {
+  it("starts now and changes at each deadline, where an expired provider asks for a tap", () => {
     const timeline = buildSubscriptionUsageTimeline(snapshot, NOW);
     expect(timeline.map((entry) => entry.at)).toEqual([
       NOW,
@@ -288,12 +343,65 @@ describe("the subscription usage timeline", () => {
     expect(second!.providers[0]).toMatchObject({
       name: "Claude",
       fresh: false,
-      pooled: { detail: OPEN_RYCO_TO_REFRESH, rows: [] },
-      accounts: { detail: OPEN_RYCO_TO_REFRESH, rows: [] },
+      pooled: { detail: TAP_TO_REFRESH, rows: [] },
+      accounts: { detail: TAP_TO_REFRESH, rows: [] },
     });
     expect(second!.providers[1]!.fresh).toBe(true);
     expect(last!.providers.every((provider) => !provider.fresh)).toBe(true);
     expect(last!.observedAt).toBe(0);
+  });
+
+  it("drops each account at its own deadline, and the provider only with the last one", () => {
+    const staggered = buildSubscriptionUsageSnapshot(
+      [
+        environment(
+          [
+            directProvider([session(10, 600)], {
+              instanceId: "claude",
+              driver: "claudeAgent",
+              displayName: "Claude Work",
+              rateLimits: { observedAt: minutesAgo(10), windows: [session(10, 600)] },
+            }),
+          ],
+          [hub([account("a", [session(20, 600)]), account("b", [session(40, 600)])])],
+        ),
+      ],
+      URL,
+    );
+    const timeline = buildSubscriptionUsageTimeline(staggered, NOW);
+    expect(timeline.map((entry) => entry.at)).toEqual([
+      NOW,
+      NOW + 5 * 60_000,
+      NOW + SUBSCRIPTION_USAGE_MAX_AGE_MS,
+    ]);
+    const [first, second, last] = timeline.map((entry) => entry.content.providers[0]!);
+    expect(first!.pooled.detail).toBe("2 pooled · 1 direct");
+    expect(first!.observedAt).toBe(NOW - 10 * 60_000);
+    // Five minutes on, the direct account's read is fifteen minutes old: the hub pool stays.
+    expect(second).toMatchObject({ fresh: true, observedAt: NOW });
+    expect(second!.pooled).toMatchObject({
+      detail: "2 accounts · pooled",
+      rows: [{ label: "5h", remaining: 70 }],
+    });
+    expect(last).toMatchObject({ fresh: false, pooled: { detail: TAP_TO_REFRESH } });
+  });
+
+  it("puts deadlines on whole minutes, so many accounts make few entries", () => {
+    const accounts = Array.from({ length: 30 }, (_, index) =>
+      account(`a${index}`, [session(20, 600)], {
+        quota: {
+          status: "ok",
+          checkedAt: new Date(NOW - index * 7_000).toISOString(),
+          windows: [session(20, 600)],
+        },
+      }),
+    );
+    const timeline = buildSubscriptionUsageTimeline(
+      buildSubscriptionUsageSnapshot([environment([], [hub(accounts)])], URL),
+      NOW,
+    );
+    // Reads spread over three and a half minutes: five deadlines, not thirty.
+    expect(timeline.map((entry) => (entry.at - NOW) / 60_000)).toEqual([0, 11, 12, 13, 14, 15]);
   });
 
   it("shows a snapshot read too long ago as expired from the start", () => {

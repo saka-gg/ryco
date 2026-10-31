@@ -11,6 +11,7 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   buildSubscriptionUsageSnapshot,
   buildSubscriptionUsageTimeline,
+  TAP_TO_REFRESH,
 } from "../../../src/widgets/subscriptionUsageSnapshot";
 import { encodeWidgetTimeline } from "../../../src/widgets/widgetTimeline";
 
@@ -175,10 +176,11 @@ describe.skipIf(!swiftcAvailable)("the widget extension's Swift", () => {
         notJson: [],
         afterRemove: [],
       });
-      // Now, then the soonest reset (in an hour) is past the fifteen minutes: one deadline.
+      // Now, then the soonest reset (in an hour) is past the fifteen minutes: one deadline, on
+      // the whole minute before them.
       expect(output.usageEntries).toEqual([
         { at: NOW, fresh: [true, true] },
-        { at: NOW + 15 * 60_000, fresh: [false, false] },
+        { at: Math.floor((NOW + 15 * 60_000) / 60_000) * 60_000, fresh: [false, false] },
       ]);
       // Claude pools 5h and Weekly over both accounts; only one reports Weekly · Opus, the
       // tightest weekly window, so the two-row sizes show it beside the session.
@@ -226,9 +228,11 @@ describe.skipIf(!swiftcAvailable)("the widget extension's Swift", () => {
         ],
       });
       expect(output.usageAfterExpiry).toEqual([
-        { detail: "Open Ryco to refresh", rows: 0, more: 0 },
-        { detail: "Open Ryco to refresh", rows: 0, more: 0 },
+        { detail: TAP_TO_REFRESH, rows: 0, more: 0 },
+        { detail: TAP_TO_REFRESH, rows: 0, more: 0 },
       ]);
+      // The footer and the Lock Screen say what the app's expired detail says.
+      expect(output.tapToRefresh).toBe(TAP_TO_REFRESH);
     });
   }, 180_000);
 });

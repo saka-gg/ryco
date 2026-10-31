@@ -1,23 +1,25 @@
 import * as Linking from "expo-linking";
+import { useEffect } from "react";
 import { AppState } from "react-native";
 
+import { useHomeEnvironments } from "../features/home/useHomeEnvironments";
 import { mobileCliProxyHubReads } from "../state/cliProxyHubReads";
 import {
   getEnvironmentServerConfigsSnapshot,
   subscribeEnvironmentServerConfigs,
 } from "../state/environmentServerConfigs";
 import { rycoWidgetsNative } from "./rycoWidgetsNative";
-import { startWidgetsRuntime } from "./widgetsRuntime";
+import { startWidgetsRuntime, type WidgetsRuntime } from "./widgetsRuntime";
 
 /**
- * The app's widgets, for as long as the workspace is unlocked (`WidgetsBridge`). Nothing runs in
- * a build without them. The returned stop empties the widgets: the workspace locks when the
- * account signs out or its last credential goes.
+ * The app's widgets, for as long as the workspace is unlocked (`WidgetsBridge`), or null in a
+ * build without them. Its `stop({ clear: true })` empties the widgets: the workspace locks when
+ * the account signs out or its last credential goes.
  */
-export function startMobileWidgets(): () => void {
+export function startMobileWidgets(): WidgetsRuntime | null {
   const native = rycoWidgetsNative();
-  if (native === null) return () => undefined;
-  const runtime = startWidgetsRuntime({
+  if (native === null) return null;
+  return startWidgetsRuntime({
     native,
     configs: {
       snapshot: getEnvironmentServerConfigsSnapshot,
@@ -39,7 +41,16 @@ export function startMobileWidgets(): () => void {
     },
     url: Linking.createURL("settings/statistics", { queryParams: { tab: "limits" } }),
   });
-  return () => {
-    void runtime.stop({ clear: true });
-  };
+}
+
+/**
+ * Hands the runtime the machines as Home lists them, with their connection and role, so the
+ * widget shows only the machines whose limits the Limits tab reads.
+ */
+export function WidgetsFeed({ runtime }: { readonly runtime: WidgetsRuntime }) {
+  const environments = useHomeEnvironments();
+  useEffect(() => {
+    runtime.setEnvironments(environments);
+  }, [environments, runtime]);
+  return null;
 }

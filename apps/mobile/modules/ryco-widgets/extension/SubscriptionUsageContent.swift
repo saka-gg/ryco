@@ -5,6 +5,9 @@ import Foundation
 /// plans and account names that are not email-like; nothing else.
 struct SubscriptionUsageContent: Decodable {
   static let kind = "subscription-usage"
+  /// What a provider without a current read says (the app's `TAP_TO_REFRESH`). A tap opens
+  /// Limits, which reads every provider again; opening Ryco from its icon reads only the hubs.
+  static let tapToRefresh = "Tap to refresh"
 
   struct Row: Decodable {
     /// The account, when the view lists more than one.

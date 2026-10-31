@@ -346,10 +346,20 @@ describe("mobile launch graph boundaries", () => {
     expect(reachable).toContain("apps/mobile/src/navigation/idlePrewarm.ts");
     expect(chainsTo(LAUNCH_ENTRY, [/^apps\/mobile\/src\/widgets\/(?!WidgetsBridge)/u])).toEqual([]);
     expect(
-      chainsTo("src/widgets/mobileWidgetsRuntime.ts", [
+      chainsTo("src/widgets/mobileWidgetsRuntime.tsx", [
         /^apps\/mobile\/src\/widgets\/widgetsRuntime\.ts$/u,
       ]),
     ).not.toEqual([]);
+    // The sign-in screen empties the widgets with a module that loads none of their models.
+    expect([...staticGraph("src/widgets/clearWidgets.ts").keys()].map(display)).toContain(
+      "apps/mobile/src/widgets/rycoWidgetsNative.ts",
+    );
+    expect(
+      chainsTo("src/widgets/clearWidgets.ts", [
+        /^apps\/mobile\/src\/widgets\/(?:subscriptionUsageSnapshot|widgetsRuntime|mobileWidgetsRuntime)\.tsx?$/u,
+        /^packages\/client-runtime\/src\/usage\//u,
+      ]),
+    ).toEqual([]);
   });
 
   it("checks the push key at every launch without loading push alerts", () => {
