@@ -50,6 +50,22 @@ export function imageCompressionPassSizes(source: ImageSize): ImageSize[] {
   });
 }
 
+const HEIC_IMAGE_MIME_TYPE = /^image\/hei[cf]$/i;
+const HEIC_IMAGE_EXTENSION = /\.hei[cf]$/i;
+
+/**
+ * Whether a file is a HEIC or HEIF photo. No provider reads one, so it is converted to JPEG
+ * before it is sent: by the browser where it decodes HEIC (Safari), otherwise by the node. Finder
+ * and some browsers leave the type out when a photo is dragged, so the extension counts too.
+ */
+export function isHeicImageFile(file: { readonly name: string; readonly type: string }): boolean {
+  if (HEIC_IMAGE_MIME_TYPE.test(file.type)) return true;
+  return (
+    (file.type === "" || file.type.toLowerCase() === "application/octet-stream") &&
+    HEIC_IMAGE_EXTENSION.test(file.name)
+  );
+}
+
 /** Re-encoding changes the format, so `shot.png` saved as WebP becomes `shot.webp`. */
 export function compressedImageFileName(name: string, mimeType: ImageCompressionMimeType): string {
   const extension = mimeType === "image/webp" ? ".webp" : ".jpg";

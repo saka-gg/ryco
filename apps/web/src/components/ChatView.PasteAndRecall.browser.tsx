@@ -2,6 +2,7 @@ import {
   EnvironmentId,
   EventId,
   MessageId,
+  OrchestrationDispatchCommandError,
   PROVIDER_SEND_TURN_MAX_ATTACHMENTS,
   PROVIDER_SEND_TURN_MAX_INPUT_CHARS,
   ThreadId,
@@ -16,11 +17,17 @@ import {
 import { describe, expect, it, vi } from "vite-plus/test";
 
 import { useComposerDraftStore } from "../composerDraftStore";
+import {
+  __resetEnvironmentApiOverridesForTests,
+  __setEnvironmentApiOverrideForTests,
+  readEnvironmentApi,
+} from "../environmentApi";
 import { composerFileUploadEngine } from "../composerFileUpload";
 import { PASTE_AS_TEXT_EVENT } from "../lib/desktopPasteAsText";
 import { isMacPlatform } from "../lib/utils";
 import {
   DEFAULT_VIEWPORT,
+  LOCAL_ENVIRONMENT_ID,
   THREAD_ID,
   THREAD_KEY,
   THREAD_REF,
@@ -592,6 +599,92 @@ describe("ChatView large pastes", () => {
         interval: 16,
       });
     } finally {
+      await mounted.cleanup();
+    }
+  });
+});
+
+describe("ChatView HEIC photos", () => {
+  setupChatViewBrowserSuite();
+
+  it("hands a photo Chromium cannot decode to the node and shows the node's refusal", async () => {
+    const refusal =
+      "HEIC photos can be converted only on a Mac node. Convert 'IMG_0001.HEIC' to JPEG first.";
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot: snapshotWithPrompts([NEWEST_PROMPT]),
+    });
+    const turnStarts: Array<{ readonly message: { readonly attachments: readonly unknown[] } }> =
+      [];
+    const api = readEnvironmentApi(LOCAL_ENVIRONMENT_ID)!;
+    __setEnvironmentApiOverrideForTests(LOCAL_ENVIRONMENT_ID, {
+      ...api,
+      orchestration: {
+        ...api.orchestration,
+        dispatchCommand: async (command) => {
+          if (command.type !== "thread.turn.start")
+            return api.orchestration.dispatchCommand(command);
+          turnStarts.push(command);
+          throw new OrchestrationDispatchCommandError({ message: refusal });
+        },
+      },
+    });
+    try {
+      await waitForTranscriptText(NEWEST_PROMPT);
+      const editor = await waitForComposerEditor();
+      editor.focus();
+      // An HEIF header Chromium has no decoder for, typed as the photo app types it.
+      const photo = new File(
+        [new TextEncoder().encode("\0\0\0\x18ftypheic\0\0\0\0mif1heic")],
+        "IMG_0001.HEIC",
+        { type: "image/heic" },
+      );
+      const clipboardData = new DataTransfer();
+      clipboardData.items.add(photo);
+      editor.dispatchEvent(
+        new ClipboardEvent("paste", { clipboardData, bubbles: true, cancelable: true }),
+      );
+
+      await vi.waitFor(
+        () => {
+          expect(
+            draftAttachments().map(({ type, name, mimeType, previewUrl }) => ({
+              type,
+              name,
+              mimeType,
+              previewUrl,
+            })),
+          ).toEqual([
+            { type: "image", name: "IMG_0001.HEIC", mimeType: "image/heic", previewUrl: "" },
+          ]);
+        },
+        { timeout: 8_000, interval: 16 },
+      );
+      // The chip names the photo instead of drawing a preview Chromium cannot decode.
+      expect(document.querySelector('img[alt="IMG_0001.HEIC"]')).toBeNull();
+
+      useComposerDraftStore.getState().setPrompt(THREAD_REF, "What is in this photo?");
+      await waitForComposerText("What is in this photo?");
+      editor.dispatchEvent(
+        new KeyboardEvent("keydown", { key: "Enter", bubbles: true, cancelable: true }),
+      );
+
+      await waitForTranscriptText(refusal);
+      expect(turnStarts[0]?.message.attachments).toEqual([
+        expect.objectContaining({
+          type: "image",
+          name: "IMG_0001.HEIC",
+          mimeType: "image/heic",
+          dataUrl: expect.stringMatching(/^data:image\/heic;base64,/),
+        }),
+      ]);
+      // The photo is back in the composer, to remove or send elsewhere.
+      await vi.waitFor(
+        () => expect(draftAttachments().map(({ name }) => name)).toEqual(["IMG_0001.HEIC"]),
+        { timeout: 8_000, interval: 16 },
+      );
+    } finally {
+      __resetEnvironmentApiOverridesForTests();
       await mounted.cleanup();
     }
   });

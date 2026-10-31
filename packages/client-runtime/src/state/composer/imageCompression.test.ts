@@ -8,6 +8,7 @@ import {
   imageAttachmentSizeAction,
   imageCompressionPassSizes,
   imagePreparationSendBlock,
+  isHeicImageFile,
   type ImageCompressionCodec,
   type ImageCompressionMimeType,
   type ImageSize,
@@ -92,6 +93,18 @@ describe("compressedImageFileName", () => {
     );
     expect(compressedImageFileName("pasted", "image/webp")).toBe("pasted.webp");
     expect(compressedImageFileName("", "image/jpeg")).toBe("image.jpg");
+  });
+});
+
+describe("isHeicImageFile", () => {
+  it("knows a HEIC or HEIF photo by its type, or by its name when the type is missing", () => {
+    expect(isHeicImageFile({ name: "IMG_0001.HEIC", type: "image/heic" })).toBe(true);
+    expect(isHeicImageFile({ name: "photo", type: "image/HEIF" })).toBe(true);
+    expect(isHeicImageFile({ name: "IMG_0001.HEIC", type: "" })).toBe(true);
+    expect(isHeicImageFile({ name: "scan.heif", type: "application/octet-stream" })).toBe(true);
+    expect(isHeicImageFile({ name: "photo.heic", type: "image/jpeg" })).toBe(false);
+    expect(isHeicImageFile({ name: "notes.heic.txt", type: "" })).toBe(false);
+    expect(isHeicImageFile({ name: "shot.png", type: "image/png" })).toBe(false);
   });
 });
 

@@ -8,6 +8,7 @@ import {
   OrchestrationDispatchCommandError,
   ProjectMetadataDir,
   PROVIDER_SEND_TURN_MAX_ATTACHMENT_TOTAL_BYTES,
+  PROVIDER_SEND_TURN_MAX_IMAGE_BYTES,
   SERVER_MINTED_MESSAGE_ID_PREFIXES,
   type UploadChatAttachment,
   type UploadChatFileAttachment,
@@ -39,6 +40,35 @@ function isKnownUploadAttachment(
 ): attachment is UploadChatImageAttachment | UploadChatFileAttachment {
   return attachment.type === "image" || attachment.type === "file";
 }
+
+/**
+ * A HEIC or HEIF photo, which no provider reads, continues as a JPEG converted with macOS's `sips`;
+ * a node without it refuses the photo with a message the composer shows. The converter loads only
+ * when such a photo arrives.
+ */
+const convertHeicUpload = (name: string, bytes: Uint8Array) =>
+  Effect.tryPromise({
+    try: (signal) =>
+      import("../heicConversion.ts").then((conversion) =>
+        conversion.convertHeicAttachment({
+          name,
+          bytes,
+          maxOutputBytes: PROVIDER_SEND_TURN_MAX_IMAGE_BYTES,
+          signal,
+        }),
+      ),
+    catch: (cause) =>
+      new OrchestrationDispatchCommandError({
+        message: `'${name}' could not be converted from HEIC to JPEG.`,
+        cause,
+      }),
+  }).pipe(
+    Effect.flatMap((converted) =>
+      converted.ok
+        ? Effect.succeed(converted)
+        : Effect.fail(new OrchestrationDispatchCommandError({ message: converted.message })),
+    ),
+  );
 
 /** The id a command gives a new message: a turn start's, a steer's or a queued follow-up's. */
 const newMessageIdOf = (command: OrchestrationCommand): string | null => {
@@ -337,7 +367,14 @@ export const normalizeDispatchCommand = (command: ClientOrchestrationCommand) =>
           if (!decoded.ok) {
             return yield* new OrchestrationDispatchCommandError({ message: decoded.message });
           }
-          const { bytes, mimeType: normalizedMimeType } = decoded;
+          const {
+            name,
+            bytes,
+            mimeType: normalizedMimeType,
+          } = attachment.type === "image" &&
+          (decoded.mimeType === "image/heic" || decoded.mimeType === "image/heif")
+            ? yield* convertHeicUpload(attachment.name, decoded.bytes)
+            : { name: attachment.name, ...decoded };
 
           const attachmentId = createAttachmentId(command.threadId);
           if (!attachmentId) {
@@ -349,7 +386,7 @@ export const normalizeDispatchCommand = (command: ClientOrchestrationCommand) =>
           const persistedAttachment = {
             type: attachment.type,
             id: attachmentId,
-            name: attachment.name,
+            name,
             mimeType: normalizedMimeType,
             sizeBytes: bytes.byteLength,
           };
