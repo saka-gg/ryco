@@ -50,6 +50,11 @@ export interface GitWorktreeCreationContext {
    * storage cleanup keeps its quarantine's Git metadata.
    */
   readonly replaceMissingRegistration?: boolean | undefined;
+  /**
+   * `false`: leave out the gitignored files the source checkout's `.worktreeinclude` names (a
+   * pull request from another repository: its code must not get the user's `.env`).
+   */
+  readonly copyDeclaredIncludes?: boolean | undefined;
 }
 
 export interface GitWorktreeCreationProgress {

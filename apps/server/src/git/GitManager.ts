@@ -2466,6 +2466,8 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* (
 
       const worktree = yield* gitCore.createWorktree({
         settingsSnapshot: settings,
+        // Only a pull request known to be this repository's gets the declared local files.
+        copyDeclaredIncludes: pullRequestWithRemoteInfo.isCrossRepository === false,
         projectId: project?.id,
         projectTitle: project?.title,
         initialName: pullRequest.title || localPullRequestBranch,
