@@ -2,7 +2,8 @@
 // this test runs under Node, so it pulls the types in for itself.
 /// <reference types="node" />
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -24,18 +25,19 @@ import { encodeWidgetTimeline } from "../../../src/widgets/widgetTimeline";
  */
 const MODULE_DIR = fileURLToPath(new URL("..", import.meta.url));
 const SHARED_SOURCES = [join(MODULE_DIR, "ios/WidgetGroupStore.swift")];
-const EXTENSION_SOURCES = [
-  ...readdirSync(join(MODULE_DIR, "extension"))
-    .filter((file) => file.endsWith(".swift"))
-    .map((file) => join(MODULE_DIR, "extension", file)),
-  ...SHARED_SOURCES,
-];
+/** What the config plugin compiles into the extension: its sources and the app module's shared ones. */
+const EXTENSION_SOURCES = (
+  createRequire(import.meta.url)("../../../plugins/withIosWidgetExtension.cjs") as {
+    readonly EXTENSION_SOURCES: readonly string[];
+  }
+).EXTENSION_SOURCES;
 /** The extension's Foundation-only sources: what reads and selects, not what renders. */
 const READER_SOURCES = [
   join(MODULE_DIR, "extension/WidgetTimelineStore.swift"),
   join(MODULE_DIR, "extension/SubscriptionUsageContent.swift"),
   ...SHARED_SOURCES,
 ];
+
 
 const NOW = 1_700_000_000_000;
 

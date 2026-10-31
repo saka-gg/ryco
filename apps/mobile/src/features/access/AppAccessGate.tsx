@@ -17,6 +17,7 @@ import { ServerStateBootstrap } from "../../state/serverStateSync";
 import { deriveAppAccess, isWorkspaceDeepLink } from "./appAccessModel";
 import { watchDirectCredentialAccess } from "./directCredentialAccess";
 import { HOSTED_LAUNCH_DECISION_DEADLINE_MS, markAppAccessDecided } from "./launchDecision";
+import { LiveActivityBridge } from "../../liveActivity/LiveActivityBridge";
 import { ThreadAlertsBridge } from "../../notifications/ThreadAlertsBridge";
 import { LockedWidgetsBridge, WidgetsBridge } from "../../widgets/WidgetsBridge";
 
@@ -148,6 +149,7 @@ export function AppAccessGate(props: {
       <ServerStateBootstrap />
       <ThreadAlertsBridge />
       <WidgetsBridge />
+      <LiveActivityBridge />
       <WorkspaceNavigation linking={props.linking} theme={props.theme} />
     </>
   );

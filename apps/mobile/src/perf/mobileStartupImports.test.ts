@@ -362,6 +362,20 @@ describe("mobile launch graph boundaries", () => {
     ).toEqual([]);
   });
 
+  it("loads the Live Activity only after idle, once its switch was turned on", () => {
+    const reachable = [...staticGraph(LAUNCH_ENTRY).keys()].map(display);
+    expect(reachable).toContain("apps/mobile/src/liveActivity/LiveActivityBridge.tsx");
+    expect(
+      chainsTo(LAUNCH_ENTRY, [/^apps\/mobile\/src\/liveActivity\/(?!LiveActivityBridge)/u]),
+    ).toEqual([]);
+    // The walker sees the lazy module's own graph, so an empty result is not a blind spot.
+    expect(
+      chainsTo("src/liveActivity/mobileLiveActivity.tsx", [
+        /^apps\/mobile\/src\/liveActivity\/liveActivityRuntime\.ts$/u,
+      ]),
+    ).not.toEqual([]);
+  });
+
   it("checks the push key at every launch without loading push alerts", () => {
     // ThreadAlertsBridge imports the install check lazily, on every launch; the
     // check itself must stay a keychain call and a storage read.

@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from "react";
 
 import { updatePreferences, usePreferences } from "../../state/preferencesStore";
 import { BackgroundAlertSettings } from "./BackgroundAlertSettings";
+import { LiveActivitySettings } from "./LiveActivitySettings";
 import { SettingsSection } from "./components/SettingsSection";
 import { SettingsSwitchRow } from "./components/SettingsSwitchRow";
 
@@ -75,6 +76,7 @@ export function ThreadAlertSettings() {
         />
       ) : null}
       {alertsOn ? <BackgroundAlertSettings /> : null}
+      <LiveActivitySettings />
     </SettingsSection>
   );
 }
