@@ -63,6 +63,8 @@ import {
   THREAD_REF,
   WIDE_FOOTER_VIEWPORT,
   configureContextHandoffProviders,
+  enableLiveThreadModelSelection,
+  pushThreadModelSelection,
   createBrowserComposerImage,
   createDraftOnlySnapshot,
   createPromptStashEntry,
@@ -2056,6 +2058,84 @@ describe("ChatView Composer (full app)", () => {
         { timeout: 8_000, interval: 16 },
       );
       expect(document.querySelector('[data-pending-context-handoff="true"]')).toBeNull();
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("stores a model pick on the chat at once and shows a pick another client stored", async () => {
+    const codex = ProviderInstanceId.make("codex");
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot: createSnapshotForTargetUser({
+        targetMessageId: "msg-user-live-model-pick" as MessageId,
+        targetText: "live model pick thread",
+      }),
+      configureFixture: (nextFixture) => {
+        configureContextHandoffProviders(nextFixture);
+        enableLiveThreadModelSelection(nextFixture);
+      },
+      resolveRpc: (body) => {
+        if (body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand) {
+          return { sequence: fixture.snapshot.snapshotSequence + 1 };
+        }
+        return undefined;
+      },
+    });
+    const storedPicks = () =>
+      wsRequests.filter(
+        (request) =>
+          request._tag === ORCHESTRATION_WS_METHODS.dispatchCommand &&
+          request.type === "thread.meta.update" &&
+          "modelSelection" in request,
+      );
+
+    try {
+      await waitForServerConfigToApply();
+      const picker = await waitForElement(
+        findComposerProviderModelPicker,
+        "Unable to find provider/model picker for a live model pick.",
+      );
+      await picker.click();
+      await page.getByRole("button", { name: "Codex", exact: true }).click();
+      await page.getByText("GPT-5.1", { exact: true }).click();
+
+      // Stored on the thread without a send, so every client of the node shows it.
+      await vi.waitFor(
+        () => {
+          expect(storedPicks()).toHaveLength(1);
+          expect(storedPicks()[0]).toMatchObject({
+            threadId: THREAD_ID,
+            modelSelection: { instanceId: codex, model: "gpt-5.1" },
+          });
+        },
+        { timeout: 8_000, interval: 16 },
+      );
+      expect(
+        wsRequests.some(
+          (request) =>
+            request._tag === ORCHESTRATION_WS_METHODS.dispatchCommand &&
+            request.type === "thread.turn.start",
+        ),
+      ).toBe(false);
+      pushThreadModelSelection(THREAD_ID, { instanceId: codex, model: "gpt-5.1" });
+
+      // The phone picks GPT-5 again: this composer follows without writing anything back.
+      pushThreadModelSelection(THREAD_ID, { instanceId: codex, model: "gpt-5" });
+      await vi.waitFor(
+        () => {
+          expect(
+            useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.modelSelectionByProvider[
+              codex
+            ],
+          ).toMatchObject({ model: "gpt-5" });
+          const trigger = findComposerProviderModelPicker();
+          expect(trigger?.textContent).toContain("GPT-5");
+          expect(trigger?.textContent).not.toContain("GPT-5.1");
+        },
+        { timeout: 8_000, interval: 16 },
+      );
+      expect(storedPicks()).toHaveLength(1);
     } finally {
       await mounted.cleanup();
     }

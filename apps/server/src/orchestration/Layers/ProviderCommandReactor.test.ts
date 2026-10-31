@@ -27,6 +27,8 @@ import {
   ContextHandoffActivityPayload,
   GitCommandError,
   ModelSelection,
+  type OrchestrationSession,
+  type OrchestrationTurnOutcome,
   ProviderRuntimeEvent,
   ProviderSession,
   ProviderDriverKind,
@@ -51,6 +53,7 @@ import {
 import {
   Deferred,
   Effect,
+  Equal,
   Exit,
   Layer,
   ManagedRuntime,
@@ -113,6 +116,14 @@ import {
 import { OrchestrationProjectionPipelineLive } from "./ProjectionPipeline.ts";
 import { OrchestrationProjectionSnapshotQueryLive } from "./ProjectionSnapshotQuery.ts";
 import * as ThreadBackgroundLiveness from "../ThreadBackgroundLiveness.ts";
+import { buildThreadContinuationTurnStart } from "../threadContinuation.ts";
+import { buildDelegationReturnCommand } from "../../agentControl/completionReturnMessages.ts";
+import { runtimeModePrivilegeRank, serverWakeGuard } from "../serverWake.ts";
+import { queueDispatchCommand, queueDispatchModes } from "../serverQueueDrainRuntime.ts";
+import {
+  make as makeThreadSessionModelSelections,
+  ThreadSessionModelSelectionsService,
+} from "../ThreadSessionModelSelections.ts";
 import {
   makeProviderCommandReactorLayer,
   makeProviderCommandReactorLive,
@@ -701,6 +712,7 @@ describe("ProviderCommandReactor", () => {
           streamChanges: Stream.empty,
         })
       : Layer.empty;
+    const sessionModelSelections = makeThreadSessionModelSelections();
     const layer = reactorLayer.pipe(
       Layer.provideMerge(prewarmLayer),
       Layer.provideMerge(providerRegistryLayer),
@@ -765,6 +777,10 @@ describe("ProviderCommandReactor", () => {
       ),
       Layer.provideMerge(ServerConfig.layerTest(process.cwd(), baseDir)),
       Layer.provideMerge(NodeServices.layer),
+      // One record of what each session runs, shared by the reactor and the engine.
+      Layer.provideMerge(
+        Layer.succeed(ThreadSessionModelSelectionsService, sessionModelSelections),
+      ),
     );
     runtime = ManagedRuntime.make(layer);
 
@@ -889,6 +905,7 @@ describe("ProviderCommandReactor", () => {
       reactor,
       stopSessionBinding,
       retireSessionBinding,
+      sessionModelSelections,
       prewarm: Option.getOrUndefined(
         await runtime.runPromise(Effect.serviceOption(ProviderSessionPrewarm)),
       ),
@@ -4721,6 +4738,401 @@ describe("ProviderCommandReactor", () => {
     expect(harness.startSession).toHaveBeenCalledTimes(1);
     expect(harness.sendTurn.mock.calls[1]?.[0]).toMatchObject({
       modelSelection: { model: "gpt-5.1-codex" },
+    });
+  });
+
+  describe("a model pick stored on the thread", () => {
+    const threadId = ThreadId.make("thread-1");
+    const setSession = (
+      harness: ReactorHarness,
+      id: string,
+      session: OrchestrationSession,
+      turnOutcome?: OrchestrationTurnOutcome,
+    ) =>
+      Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.make(id),
+          threadId,
+          session,
+          ...(turnOutcome ? { turnOutcome } : {}),
+          createdAt: new Date().toISOString(),
+        }),
+      );
+    const sentModel = (harness: ReactorHarness, call: number) =>
+      (harness.sendTurn.mock.calls[call]?.[0] as { readonly modelSelection?: ModelSelection })
+        ?.modelSelection?.model;
+    /** Ends the thread's turn, as the provider runtime reports it. */
+    const settleTurn = async (harness: ReactorHarness, id: string) => {
+      const bound = (await readThread(harness))?.session;
+      if (!bound) throw new Error("expected a bound session");
+      const turnId = asTurnId(`turn-${id}`);
+      await setSession(harness, `${id}-running`, {
+        ...bound,
+        status: "running",
+        activeTurnId: turnId,
+      });
+      await setSession(
+        harness,
+        `${id}-ready`,
+        { ...bound, status: "ready", activeTurnId: null },
+        {
+          turnId,
+          state: "completed",
+          reason: "provider-turn-completed",
+          completedAt: new Date().toISOString(),
+        },
+      );
+    };
+    /** The entry the node recorded for the last follow-up queued (with its server-only fields). */
+    const lastQueuedEntry = async (harness: ReactorHarness) => {
+      const { events } = await Effect.runPromise(harness.engine.readEventsPage(0, 10_000));
+      const added = events.filter((event) => event.type === "thread.queue-entry-added").at(-1);
+      if (added?.type !== "thread.queue-entry-added") throw new Error("expected a queued entry");
+      return added.payload.entry;
+    };
+    const readShellThread = async (harness: ReactorHarness) => {
+      const shell = (await harness.readShell()).threads.find((entry) => entry.id === threadId);
+      if (!shell) throw new Error("expected the thread's shell");
+      return shell;
+    };
+    /** A goal continuation, as the server builds it. */
+    const dispatchGoalContinuation = async (
+      harness: ReactorHarness,
+      id: string,
+      latestUserMessageId: string,
+    ) => {
+      const shell = await readShellThread(harness);
+      await Effect.runPromise(
+        harness.engine.dispatch(
+          buildThreadContinuationTurnStart(shell, {
+            commandId: CommandId.make(`cmd-${id}`),
+            messageId: asMessageId(id),
+            text: "Continue toward the goal.",
+            createdAt: new Date().toISOString(),
+            guards: {
+              delegationReturnGuard: serverWakeGuard(
+                shell,
+                asMessageId(latestUserMessageId),
+                "goal-continuation",
+              ),
+            },
+          }),
+        ),
+      );
+    };
+    const storePick = async (harness: ReactorHarness, modelSelection: ModelSelection) => {
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.meta.update",
+          commandId: CommandId.make(`pick-${modelSelection.model}`),
+          threadId,
+          modelSelection,
+        }),
+      );
+      await waitFor(async () =>
+        Equal.equals((await readThread(harness))?.modelSelection, modelSelection),
+      );
+    };
+
+    it("neither restarts nor interrupts a running Claude turn, and the next turn applies it", async () => {
+      const claude = ProviderInstanceId.make("claudeAgent");
+      const first = createModelSelection(claude, "claude-sonnet-4-6", [
+        { id: "effort", value: "medium" },
+      ]);
+      const picked = createModelSelection(claude, "claude-sonnet-4-6", [
+        { id: "effort", value: "max" },
+      ]);
+      const harness = await createHarness({ threadModelSelection: first });
+      await dispatchTurnStart(harness, "stored-pick-1", first);
+      await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+      const bound = (await readThread(harness))?.session;
+      if (!bound) throw new Error("expected the first turn to bind a session");
+      const turnId = asTurnId("turn-stored-pick-1");
+      await setSession(harness, "stored-pick-running", {
+        ...bound,
+        status: "running",
+        activeTurnId: turnId,
+      });
+
+      // Another client stores the user's pick while the turn runs.
+      await storePick(harness, picked);
+      await harness.drain();
+      expect(harness.startSession).toHaveBeenCalledTimes(1);
+      expect(harness.stopSession).not.toHaveBeenCalled();
+      expect(harness.interruptTurn).not.toHaveBeenCalled();
+      expect((await readThread(harness))?.session).toMatchObject({
+        status: "running",
+        activeTurnId: turnId,
+        runtimeSessionId: bound.runtimeSessionId,
+      });
+
+      // The turn ends; the server's goal continuation runs on the pick.
+      await setSession(
+        harness,
+        "stored-pick-ready",
+        { ...bound, status: "ready", activeTurnId: null },
+        {
+          turnId,
+          state: "completed",
+          reason: "provider-turn-completed",
+          completedAt: new Date().toISOString(),
+        },
+      );
+      await dispatchGoalContinuation(harness, "stored-pick-2", "stored-pick-1");
+      await waitFor(() => harness.sendTurn.mock.calls.length === 2);
+      expect(harness.startSession).toHaveBeenCalledTimes(2);
+      expect(harness.startSession.mock.calls[1]?.[1]).toMatchObject({
+        resumeCursor: { opaque: "resume-1" },
+        modelSelection: picked,
+      });
+      expect(harness.sendTurn.mock.calls[1]?.[0]).toMatchObject({ modelSelection: picked });
+    });
+
+    it("switches an in-session provider at a delegated result's turn", async () => {
+      const harness = await createHarness();
+      await dispatchTurnStart(harness, "stored-codex-1");
+      await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+      await settleTurn(harness, "stored-codex-1");
+      const picked = { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.1-codex" };
+      await storePick(harness, picked);
+      // A delegated result, as the server builds it.
+      const command = buildDelegationReturnCommand({
+        parent: await readShellThread(harness),
+        latestUserMessageId: asMessageId("stored-codex-1"),
+        sections: ["The child finished."],
+        anchorChildThreadId: ThreadId.make("thread-child"),
+        attempt: 1,
+        now: new Date().toISOString(),
+      });
+      expect(command).not.toHaveProperty("modelSelection");
+      await Effect.runPromise(harness.engine.dispatch(command));
+      await waitFor(() => harness.sendTurn.mock.calls.length === 2);
+      expect(harness.startSession).toHaveBeenCalledTimes(1);
+      expect(harness.sendTurn.mock.calls[1]?.[0]).toMatchObject({ modelSelection: picked });
+    });
+
+    it("keeps the session's model when a goal continuation meets a session that cannot switch models", async () => {
+      const harness = await createHarness({ sessionModelSwitch: "unsupported" });
+      await dispatchTurnStart(harness, "acp-1");
+      await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+      await settleTurn(harness, "acp-1");
+      const running = sentModel(harness, 0);
+      // The pick waits for the next send; it does not fail the server's own turn.
+      await storePick(harness, {
+        instanceId: ProviderInstanceId.make("codex"),
+        model: "gpt-5.1-codex",
+      });
+      await dispatchGoalContinuation(harness, "acp-2", "acp-1");
+      await waitFor(() => harness.sendTurn.mock.calls.length === 2);
+      await harness.drain();
+      expect(await turnStartFailures(harness)).toHaveLength(0);
+      expect(harness.startSession).toHaveBeenCalledTimes(1);
+      expect(sentModel(harness, 1)).toBe(running);
+    });
+
+    it("keeps the session's model when an agent's queued follow-up meets a session that cannot switch models", async () => {
+      const harness = await createHarness({ sessionModelSwitch: "unsupported" });
+      await dispatchTurnStart(harness, "acp-queue-1");
+      await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+      await settleTurn(harness, "acp-queue-1");
+      const running = sentModel(harness, 0);
+      await storePick(harness, {
+        instanceId: ProviderInstanceId.make("codex"),
+        model: "gpt-5.1-codex",
+      });
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.queue.add",
+          commandId: CommandId.make("queue-add-agent"),
+          threadId,
+          author: "agent",
+          queuedBy: ThreadId.make("thread-agent"),
+          entry: {
+            messageId: asMessageId("agent-follow-up"),
+            text: "agent follow-up",
+            attachments: [],
+            modelSelection: {
+              instanceId: ProviderInstanceId.make("codex"),
+              model: "gpt-5.1-codex",
+            },
+            runtimeMode: "approval-required",
+            interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          },
+          createdAt: new Date().toISOString(),
+        }),
+      );
+      // The drain's own dispatch of the head.
+      const head = await lastQueuedEntry(harness);
+      const shell = await readShellThread(harness);
+      const command = queueDispatchCommand({
+        threadId,
+        head,
+        modes: queueDispatchModes(head, shell, runtimeModePrivilegeRank),
+        guard: serverWakeGuard(shell, asMessageId("acp-queue-1"), "follow-up-queue"),
+        attemptId: "attempt-1",
+        createdAt: new Date().toISOString(),
+      });
+      expect(command).not.toHaveProperty("modelSelection");
+      await Effect.runPromise(harness.engine.dispatch(command));
+      await waitFor(() => harness.sendTurn.mock.calls.length === 2);
+      await harness.drain();
+      expect(await turnStartFailures(harness)).toHaveLength(0);
+      expect(sentModel(harness, 1)).toBe(running);
+    });
+
+    it("forgets what a stopped session ran", async () => {
+      const harness = await createHarness();
+      await dispatchTurnStart(harness, "forget-1");
+      await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+      await harness.drain();
+      expect(harness.sessionModelSelections.get(threadId)).toBeDefined();
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.session.stop",
+          commandId: CommandId.make("cmd-forget-stop"),
+          threadId,
+          createdAt: new Date().toISOString(),
+        }),
+      );
+      await waitFor(() => harness.stopSession.mock.calls.length === 1);
+      await harness.drain();
+      expect(harness.sessionModelSelections.get(threadId)).toBeUndefined();
+    });
+
+    it("keeps a pick stored while a sent turn started over the turn's own selection", async () => {
+      // Once the provider accepted the turn, the reactor either records the turn's selection
+      // (a dispatch) or first reads the thread and finds a newer pick: either settles the test.
+      let accepted = false;
+      let commitSettled = false;
+      const harness = await createHarness({
+        decorateDispatch:
+          (dispatch) =>
+          (command, ...rest) => {
+            if (command.commandId.startsWith("server:accepted-model-selection:")) {
+              return dispatch(command, ...rest).pipe(
+                Effect.ensuring(Effect.sync(() => void (commitSettled = true))),
+              );
+            }
+            return dispatch(command, ...rest);
+          },
+        decorateSnapshotQuery: (live) => ({
+          ...live,
+          getThreadShellById: (id) =>
+            live
+              .getThreadShellById(id)
+              .pipe(Effect.ensuring(Effect.sync(() => void (commitSettled ||= accepted)))),
+        }),
+      });
+      const codex = ProviderInstanceId.make("codex");
+      const gate = Effect.runSync(Deferred.make<void>());
+      harness.sendTurn.mockImplementationOnce(() =>
+        Deferred.await(gate).pipe(
+          Effect.andThen(Effect.sync(() => void (accepted = true))),
+          Effect.as({ threadId: ThreadId.make("thread-1"), turnId: asTurnId("turn-1") }),
+        ),
+      );
+      const sent = { instanceId: codex, model: "gpt-5.1-codex" };
+      await dispatchTurnStart(harness, "pick-while-starting", sent);
+      await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+      // The user picks again on another device before the provider accepted the turn.
+      const picked = { instanceId: codex, model: "gpt-5.2-codex" };
+      await storePick(harness, picked);
+      Effect.runSync(Deferred.succeed(gate, undefined));
+      await waitFor(() => commitSettled);
+      await harness.drain();
+      expect((await readThread(harness))?.modelSelection).toEqual(picked);
+    });
+
+    it("still records a send's own selection when no pick was stored meanwhile", async () => {
+      const harness = await createHarness();
+      const sent = { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.1-codex" };
+      await dispatchTurnStart(harness, "older-client-send", sent);
+      await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+      await harness.drain();
+      // An older client stores a pick only by sending it.
+      await waitFor(async () => Equal.equals((await readThread(harness))?.modelSelection, sent));
+    });
+
+    /** A person's queued follow-up, then the drain's dispatch of it. */
+    const queueAndRunFollowUp = async (
+      harness: ReactorHarness,
+      queuedWith: ModelSelection,
+      beforeDispatch: () => Promise<void> = async () => {},
+    ) => {
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.queue.add",
+          commandId: CommandId.make("queue-add-follow-up"),
+          threadId,
+          entry: {
+            messageId: asMessageId("queued-follow-up"),
+            text: "queued follow-up",
+            attachments: [],
+            modelSelection: queuedWith,
+            runtimeMode: "approval-required",
+            interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          },
+          createdAt: new Date().toISOString(),
+        }),
+      );
+      await beforeDispatch();
+      const head = await lastQueuedEntry(harness);
+      const shell = await readShellThread(harness);
+      await Effect.runPromise(
+        harness.engine.dispatch(
+          queueDispatchCommand({
+            threadId,
+            head,
+            modes: queueDispatchModes(head, shell, runtimeModePrivilegeRank),
+            guard: serverWakeGuard(shell, asMessageId("before-queue"), "follow-up-queue"),
+            attemptId: "attempt-1",
+            createdAt: new Date().toISOString(),
+          }),
+        ),
+      );
+      await waitFor(() => harness.sendTurn.mock.calls.length === 2);
+      await harness.drain();
+      expect(harness.sendTurn.mock.calls[1]?.[0]).toMatchObject({ modelSelection: queuedWith });
+    };
+
+    it("makes a queued follow-up's model the chat's when no pick was stored since it was queued", async () => {
+      // An older client keeps a pick in its composer and stores it only by sending or queueing.
+      const harness = await createHarness();
+      await dispatchTurnStart(harness, "before-queue");
+      await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+      await settleTurn(harness, "before-queue");
+      const queuedWith = { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.1-codex" };
+      await queueAndRunFollowUp(harness, queuedWith);
+      await waitFor(async () =>
+        Equal.equals((await readThread(harness))?.modelSelection, queuedWith),
+      );
+    });
+
+    it("keeps a pick stored after the follow-up was queued", async () => {
+      const harness = await createHarness();
+      await dispatchTurnStart(harness, "before-queue");
+      await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+      await settleTurn(harness, "before-queue");
+      const codex = ProviderInstanceId.make("codex");
+      const queuedWith = { instanceId: codex, model: "gpt-5.1-codex" };
+      const pickedSince = { instanceId: codex, model: "gpt-5.2-codex" };
+      await queueAndRunFollowUp(harness, queuedWith, () => storePick(harness, pickedSince));
+      expect((await readThread(harness))?.modelSelection).toEqual(pickedSince);
+    });
+
+    it("keeps the session's model for a pick of another instance, which only a send hands off", async () => {
+      const harness = await createHarness();
+      await dispatchTurnStart(harness, "stored-other-1");
+      await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+      await storePick(harness, {
+        instanceId: ProviderInstanceId.make("codex_personal"),
+        model: "gpt-5.1-codex",
+      });
+      await dispatchTurnStart(harness, "stored-other-2");
+      await waitFor(() => harness.sendTurn.mock.calls.length === 2);
+      expect(harness.startSession).toHaveBeenCalledTimes(1);
+      expect(harness.sendTurn.mock.calls[1]?.[0]).not.toHaveProperty("modelSelection");
     });
   });
 

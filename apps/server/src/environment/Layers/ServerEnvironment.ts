@@ -143,6 +143,7 @@ export const makeServerEnvironment = Effect.fn("makeServerEnvironment")(function
       ...(desktopAppUpdates === null ? {} : { desktopAppUpdates }),
       usagePriceOverrides: true,
       serverFollowUpQueue: true,
+      liveThreadModelSelection: true,
       fileAttachments: { maxUploadBytes: PROVIDER_SEND_TURN_MAX_FILE_BYTES },
     },
   };

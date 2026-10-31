@@ -227,7 +227,10 @@ export function queueDispatchCommand(input: {
       text: head.text,
       attachments: head.attachments,
     },
-    modelSelection: input.modes.modelSelection,
+    // A person's entry names the model it was queued with. An agent's or an automation's names
+    // none: it runs on the chat's stored pick where the session can take it, as every other
+    // server wake does (`threadContinuation.ts`).
+    ...(head.author === "user" ? { modelSelection: input.modes.modelSelection } : {}),
     runtimeMode: input.modes.runtimeMode,
     interactionMode: input.modes.interactionMode,
     ...(input.modes.tokenMode === undefined ? {} : { tokenMode: input.modes.tokenMode }),

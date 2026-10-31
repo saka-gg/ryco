@@ -722,7 +722,7 @@ export function deriveEffectiveComposerModelState(input: {
   };
 }
 
-type ComposerThreadLookupState = Pick<
+export type ComposerThreadLookupState = Pick<
   ComposerDraftStoreState,
   "draftsByThreadKey" | "draftThreadsByThreadKey"
 >;
@@ -738,7 +738,8 @@ function normalizeComposerTarget(
   return target;
 }
 
-function resolveComposerDraftKey(
+/** The draft key a composer target reads and writes (a server thread may own a promoted draft). */
+export function resolveComposerDraftKey(
   state: ComposerThreadLookupState,
   target: ComposerThreadTarget,
 ): string | null {

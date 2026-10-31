@@ -41,3 +41,4 @@ export * from "./sessionPrewarm.ts";
 export * from "./projectProviderCommands.ts";
 export * from "./promptHistory.ts";
 export * from "./textPaste.ts";
+export * from "./threadModelSelectionSync.ts";

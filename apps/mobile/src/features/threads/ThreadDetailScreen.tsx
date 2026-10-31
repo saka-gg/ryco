@@ -3,6 +3,8 @@ import { ClaudeCacheDetails } from "./ClaudeCacheDetails";
 import { mobileClaudeCacheReview } from "./claudeCacheReview";
 import { mobileConfirmStopBackgroundWork } from "./stopBackgroundWork";
 import { prewarmThreadProviderSession } from "./threadSessionPrewarm";
+import { liveThreadModelSelectionSupported } from "./liveThreadModelSelection";
+import { useLiveThreadModelSelection } from "./useLiveThreadModelSelection";
 import {
   readServerFollowUpQueueWaiting,
   readThreadOutboxEnvironment,
@@ -1008,6 +1010,16 @@ export function ThreadDetailScreen(props: {
   const providers = useMemo(() => serverConfig?.providers ?? [], [serverConfig]);
   const canonicalModelSelection = thread?.modelSelection ?? null;
   const selectedModelSelection = stagedModelSelection ?? canonicalModelSelection;
+  // The model, effort and speed follow the selection the node stores, live with its other clients.
+  const noteModelSelectionPicked = useLiveThreadModelSelection({
+    environmentId,
+    threadId,
+    enabled: liveThreadModelSelectionSupported(serverConfig),
+    serverModelSelection: canonicalModelSelection,
+    composerModelSelection: selectedModelSelection,
+    updateStaged: setStagedModelSelection,
+    reportFailure: setSendError,
+  });
   const sideChatReady = !cachedView.actionsDisabled && connectionUiState === "connected";
   useEffect(() => {
     if (!sideChatReady) sideChatStore.getState().disconnect(sideChatKey);
@@ -1595,6 +1607,7 @@ export function ThreadDetailScreen(props: {
   const stageModelSelection = useCallback(
     (next: ModelSelection) => {
       setStagedModelSelection(next);
+      noteModelSelectionPicked();
       if (!thread) return;
       const targetProvider = providers.find((provider) => provider.instanceId === next.instanceId);
       const normalizedMode = normalizeInteractionModeForProviderTarget(
@@ -1607,7 +1620,7 @@ export function ThreadDetailScreen(props: {
         );
       }
     },
-    [applyPolicy, environmentId, providers, thread, threadId],
+    [applyPolicy, environmentId, noteModelSelectionPicked, providers, thread, threadId],
   );
 
   // One lookup for the open thread only. See useThreadChecks for why the inbox

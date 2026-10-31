@@ -210,6 +210,14 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
    * their own queue.
    */
   serverFollowUpQueue: Schema.optionalKey(Schema.Literal(true)),
+  /**
+   * Clients store a chat's model, effort and speed picks on the thread when they are made
+   * (`thread.meta.update`): the session applies a stored pick at its next turn, a turn that names
+   * no selection runs on it, and the background-work check compares a turn's selection with the
+   * one the session runs. Absent on older servers, whose clients keep a pick in the composer
+   * until it is sent.
+   */
+  liveThreadModelSelection: Schema.optionalKey(Schema.Literal(true)),
   fileAttachments: Schema.optional(Schema.Struct({ maxUploadBytes: NonNegativeInt })),
 });
 export type ExecutionEnvironmentCapabilities = typeof ExecutionEnvironmentCapabilities.Type;

@@ -7,6 +7,7 @@ import { OrchestrationProjectionPipelineLive } from "./Layers/ProjectionPipeline
 import { OrchestrationProjectionSnapshotQueryLive } from "./Layers/ProjectionSnapshotQuery.ts";
 import { StatisticsQueryLive } from "../statistics/StatisticsQuery.ts";
 import * as ThreadBackgroundLiveness from "./ThreadBackgroundLiveness.ts";
+import * as ThreadSessionModelSelections from "./ThreadSessionModelSelections.ts";
 import * as ThreadViewers from "./ThreadViewers.ts";
 
 export const OrchestrationEventInfrastructureLayerLive = Layer.mergeAll(
@@ -30,6 +31,9 @@ export const OrchestrationInfrastructureLayerLive = Layer.mergeAll(
   Layer.provideMerge(ThreadBackgroundLiveness.layer),
   // One viewer count per process: held by thread subscriptions, read by the session reaper.
   Layer.provideMerge(ThreadViewers.layer),
+  // What each session runs: written by the provider command reactor, read by the engine's
+  // background-work check on turn starts.
+  Layer.provideMerge(ThreadSessionModelSelections.layer),
 );
 
 export const OrchestrationLayerLive = Layer.mergeAll(

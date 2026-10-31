@@ -353,8 +353,13 @@ function removedDrafts(
   return drafts;
 }
 
-function addedEntry(command: ThreadQueueAddCommand): QueuedFollowUp {
+/** Model selections compare as the decider's wake fence compares them. */
+const sameSelection = (left: QueuedFollowUp["modelSelection"], right: Thread["modelSelection"]) =>
+  JSON.stringify(left) === JSON.stringify(right);
+
+function addedEntry(command: ThreadQueueAddCommand, thread: Thread): QueuedFollowUp {
   const { entry } = command;
+  const author = command.author ?? "user";
   return {
     messageId: entry.messageId,
     text: entry.text,
@@ -372,7 +377,9 @@ function addedEntry(command: ThreadQueueAddCommand): QueuedFollowUp {
     revision: 1,
     status: entry.failure === undefined ? "queued" : "failed",
     ...(entry.failure === undefined ? {} : { failure: entry.failure }),
-    author: command.author ?? "user",
+    author,
+    // A person's entry remembers the chat's selection it was queued over (see the field).
+    ...(author === "user" ? { queuedOverModelSelection: thread.modelSelection } : {}),
     // Only an agent's entry names the chat that queued it.
     ...(command.author === "agent" && command.queuedBy !== undefined
       ? { queuedBy: command.queuedBy }
@@ -494,7 +501,7 @@ function decideQueueCommand(
         type: "thread.queue-entry-added",
         payload: {
           threadId: thread.id,
-          entry: addedEntry(command),
+          entry: addedEntry(command, thread),
           beforeMessageId:
             command.position === "head" ? (queue.entries[0]?.messageId ?? null) : null,
         },
@@ -557,6 +564,14 @@ function decideQueueCommand(
             status: entry.status,
             ...(entry.failure === undefined ? {} : { failure: entry.failure }),
             author: entry.author,
+            // An edit to another model is queued over the chat's selection of now.
+            ...(entry.author !== "user"
+              ? {}
+              : !sameSelection(command.modelSelection, entry.modelSelection)
+                ? { queuedOverModelSelection: thread.modelSelection }
+                : entry.queuedOverModelSelection === undefined
+                  ? {}
+                  : { queuedOverModelSelection: entry.queuedOverModelSelection }),
             // A person's edit makes the text theirs: the agent no longer changes it.
             ...(entry.queuedBy === undefined || command.queuedBy === undefined
               ? {}
@@ -786,7 +801,17 @@ export function followUpQueueDispatchModes(
       payload: { threadId: thread.id, tokenMode: modes.tokenMode, updatedAt: at },
     });
   }
-  return { modes, drafts };
+  // A person's entry: the selection its turn may replace (`queuedOverModelSelection`).
+  const head = followUpQueueOf(thread).entries[0];
+  const queuedOverModelSelection =
+    head?.author === "user" && head.messageId === command.queueDispatch?.messageId
+      ? head.queuedOverModelSelection
+      : undefined;
+  return {
+    modes,
+    drafts,
+    ...(queuedOverModelSelection === undefined ? {} : { queuedOverModelSelection }),
+  };
 }
 
 // ── holds and removals other commands record ─────────────────────────────

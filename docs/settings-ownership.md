@@ -62,6 +62,23 @@ process priority, continue after restart) are never written across nodes.
 `@ryco/client-runtime/state/settings/nodeSettingsFanOut` holds the shared
 mechanism for web and mobile.
 
+## A chat's model, effort and speed
+
+In a started chat, the model, effort and speed belong to the chat on its node, not to the
+client. A pick is stored on the thread when it is made, so every client of that node (web,
+desktop, a hosted browser, the native app) shows it at once; the last stored pick wins, and a
+client's own pick that is still being written wins over a change that arrives meanwhile. The
+session applies a stored pick at its next turn and never restarts or interrupts a running one.
+A pick of another provider is a handoff and stays in the composer until it is sent. Nodes
+without the `liveThreadModelSelection` capability keep a pick in the composer until it is sent.
+Turns the node starts by itself (goal continuations, usage-limit resumes, delegated results,
+watch updates, an agent's or an automation's queued follow-up) name no model: they take the
+stored pick only where the session can, and keep the session's model when it cannot switch
+models or when a restart would end its background work. A person's queued follow-up runs with
+the model it was queued with, and that model becomes the chat's only while nobody stored another
+pick since it was queued (an older client stores a pick only by sending or queueing it).
+New-chat defaults (the last model per provider) stay in each client for now.
+
 ## Project inheritance
 
 Node General settings expose initial model/effort, thread location, generated
