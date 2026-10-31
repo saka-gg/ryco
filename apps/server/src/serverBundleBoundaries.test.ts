@@ -353,6 +353,14 @@ describe("server boot import boundaries", () => {
     );
   });
 
+  it("loads the open-file watch with its first subscription", () => {
+    // `projects.subscribeFileChanges` imports it with import(); a static import anywhere on the
+    // serve path would put it in every boot.
+    const watch = "apps/server/src/workspace/workspaceFileWatch.ts";
+    expect(staticGraph("src/cliMain.ts").files).not.toContain(watch);
+    expect(staticGraph("src/cliMain.ts", { dynamic: true }).files).toContain(watch);
+  });
+
   it("loads the agents' usage limits read and its limit presentation on the first call", () => {
     const usageLimits = [
       "apps/server/src/agentControl/Mcp/usageLimits.ts",
@@ -520,6 +528,8 @@ describe.skipIf(!hasCurrentBuild)("built server bundle", () => {
       expect(source).not.toMatch(/^\/\/#region src\/provider\/acp\/AcpRegistryCatalog\.ts$/mu);
       // Loaded with the first chunked PDF or image preview.
       expect(source).not.toMatch(/^\/\/#region src\/workspace\/previewFileChunk\.ts$/mu);
+      // Loaded with the first open-file watch.
+      expect(source).not.toMatch(/^\/\/#region src\/workspace\/workspaceFileWatch\.ts$/mu);
       // Loaded once an OpenCode server is detected as 2.x.
       expect(source).not.toMatch(/^\/\/#region .*@opencode\//mu);
       expect(source).not.toMatch(/^\/\/#region src\/provider\/openCodeV2\w*\.ts$/mu);

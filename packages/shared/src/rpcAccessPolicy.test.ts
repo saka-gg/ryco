@@ -168,6 +168,7 @@ describe("shared RPC access policy", () => {
     for (const method of [
       WS_METHODS.projectsReadFile,
       WS_METHODS.projectsReadFileChunk,
+      WS_METHODS.projectsSubscribeFileChanges,
       WS_METHODS.vcsReadLocalChanges,
       // Attaching to a running Git action again observes it and never starts Git.
       WS_METHODS.gitResumeStackedAction,
@@ -182,6 +183,9 @@ describe("shared RPC access policy", () => {
     // Chunked previews read workspace bytes, which a viewer may not.
     expect(hostedRoleAllows("viewer", WS_METHODS.projectsReadFileChunk)).toBe(false);
     expect(hostedRoleAllows("operator", WS_METHODS.projectsReadFileChunk)).toBe(true);
+    // A file's change notices reveal what its read would: operators, not viewers.
+    expect(hostedRoleAllows("viewer", WS_METHODS.projectsSubscribeFileChanges)).toBe(false);
+    expect(hostedRoleAllows("operator", WS_METHODS.projectsSubscribeFileChanges)).toBe(true);
     // Long-lived read streams outside the session-sync set.
     expect(rpcDeliveryEffectFor(AGENT_CONTROL_WS_METHODS.subscribeProposals)).toBe("read");
     expect(rpcDeliveryEffectFor(DEVICE_WS_METHODS.subscribeEvents)).toBe("read");

@@ -134,6 +134,9 @@ export const RPC_ACCESS_POLICY = {
   [WS_METHODS.projectsReadIcon]: "viewer",
   [WS_METHODS.projectsReadFileBinary]: "operator",
   [WS_METHODS.projectsReadFileChunk]: "operator",
+  // Reports a file's existence and content hash wherever projectsReadFile reaches, never its
+  // content: the same tier as the read it revalidates.
+  [WS_METHODS.projectsSubscribeFileChanges]: "operator",
   [WS_METHODS.projectsRemove]: "operator",
   [WS_METHODS.projectsSearchEntries]: "operator",
   [WS_METHODS.projectsSearchContent]: "operator",
@@ -414,6 +417,7 @@ export const RPC_DELIVERY_EFFECT_POLICY = {
   [WS_METHODS.projectsReadIcon]: "read",
   [WS_METHODS.projectsReadFileBinary]: "read",
   [WS_METHODS.projectsReadFileChunk]: "read",
+  [WS_METHODS.projectsSubscribeFileChanges]: "read",
   [WS_METHODS.projectsRemove]: "mutation",
   [WS_METHODS.projectsSearchEntries]: "read",
   [WS_METHODS.projectsSearchContent]: "read",

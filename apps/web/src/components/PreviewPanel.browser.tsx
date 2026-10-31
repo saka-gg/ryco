@@ -74,8 +74,20 @@ const previewHarness = vi.hoisted(() => {
   };
   /** The live server config; a capable node unless a test says otherwise. */
   const capableConfig = {
-    environment: { capabilities: { projectReadFileChunk: true } },
+    environment: { capabilities: { projectReadFileChunk: true, projectFileWatch: true } },
   } as unknown;
+  /** One `projects.subscribeFileChanges` the panel opened, driven by the test. */
+  type FileWatch = {
+    readonly input: { readonly cwd: string; readonly relativePath: string };
+    readonly emit: (
+      event:
+        | { readonly type: "current" | "changed"; readonly version: string | null }
+        | {
+            readonly type: "deleted";
+          },
+    ) => void;
+    stopped: boolean;
+  };
 
   return {
     entries: [] as Entry[],
@@ -96,6 +108,7 @@ const previewHarness = vi.hoisted(() => {
     serverConfig: capableConfig as unknown,
     writeAttempts: [] as PreviewWriteFileInput[],
     writeFailure: null as { readonly reason: string; readonly message: string } | null,
+    fileWatches: [] as FileWatch[],
     savedVersion: 0,
     serverThreadEnabled: true,
     /** Server threads' worktrees by thread id; a thread without one works in the project. */
@@ -121,6 +134,7 @@ const previewHarness = vi.hoisted(() => {
       this.serverConfig = capableConfig;
       this.writeAttempts = [];
       this.writeFailure = null;
+      this.fileWatches = [];
       this.savedVersion = 0;
       this.serverThreadEnabled = true;
       this.draftThread = null;
@@ -296,6 +310,20 @@ vi.mock("../environmentApi", () => {
               ),
               mimeType: file.mimeType,
               fingerprint: `stat:${input.relativePath}`,
+            };
+          },
+        ),
+      subscribeFileChanges: vi
+        .fn()
+        .mockImplementation(
+          (
+            input: { readonly cwd: string; readonly relativePath: string },
+            listener: (typeof previewHarness.fileWatches)[number]["emit"],
+          ) => {
+            const watch = { input, emit: listener, stopped: false };
+            previewHarness.fileWatches.push(watch);
+            return () => {
+              watch.stopped = true;
             };
           },
         ),
@@ -1292,6 +1320,147 @@ describe("PreviewPanel", () => {
     await page.getByRole("button", { name: "src/app.ts" }).click();
 
     await expect.element(page.getByText("const draft = true;")).toBeInTheDocument();
+  });
+
+  describe("live revalidation", () => {
+    const activeWatches = () => previewHarness.fileWatches.filter((watch) => !watch.stopped);
+    const settle = (milliseconds: number) =>
+      new Promise((resolve) => setTimeout(resolve, milliseconds));
+
+    async function openWatchedFile() {
+      previewHarness.entries = [{ path: "src/app.ts", kind: "file", sizeBytes: 64 }];
+      previewHarness.readFiles.set("src/app.ts", {
+        relativePath: "src/app.ts",
+        contents: "const answer = 41;",
+        version: "sha256:opened",
+      });
+      mounted = await renderPreviewPanel();
+      await page.getByRole("button", { name: "src/app.ts" }).click();
+      await expect
+        .element(page.getByRole("textbox", { name: "Edit src/app.ts" }))
+        .toHaveValue("const answer = 41;");
+      await vi.waitFor(() => expect(activeWatches()).toHaveLength(1));
+      return activeWatches()[0]!;
+    }
+
+    function changeOnDisk(contents: string, version: string) {
+      previewHarness.readFiles.set("src/app.ts", { relativePath: "src/app.ts", contents, version });
+    }
+
+    it("reads the open file again when it changes on disk, and a clean editor takes the new text", async () => {
+      const watch = await openWatchedFile();
+      expect(watch.input).toEqual({ cwd: "/repo", relativePath: "src/app.ts" });
+      const reads = previewHarness.readAttempts.length;
+
+      changeOnDisk("const answer = 99;", "sha256:external");
+      watch.emit({ type: "changed", version: "sha256:external" });
+
+      await expect
+        .element(page.getByRole("textbox", { name: "Edit src/app.ts" }))
+        .toHaveValue("const answer = 99;");
+      expect(previewHarness.readAttempts).toHaveLength(reads + 1);
+      await expect
+        .element(page.getByText("File changed on disk", { exact: true }))
+        .not.toBeInTheDocument();
+    });
+
+    it("flags a conflict as soon as the file changes under unsaved edits", async () => {
+      const watch = await openWatchedFile();
+      const editor = page.getByRole("textbox", { name: "Edit src/app.ts" });
+      await editor.fill("const answer = 42;");
+
+      changeOnDisk("const answer = 99;", "sha256:external");
+      watch.emit({ type: "changed", version: "sha256:external" });
+
+      // Without a save: the edit waits for Reload or Overwrite.
+      await expect
+        .element(page.getByText("File changed on disk", { exact: true }))
+        .toBeInTheDocument();
+      await expect.element(editor).toHaveValue("const answer = 42;");
+      // Autosave stays paused past its delay, so nothing overwrites the external edit.
+      await settle(600);
+      expect(previewHarness.writeAttempts).toEqual([]);
+    });
+
+    it("does not read again for the version it holds, its own save's included", async () => {
+      const watch = await openWatchedFile();
+      const reads = previewHarness.readAttempts.length;
+      watch.emit({ type: "current", version: "sha256:opened" });
+
+      await page.getByRole("textbox", { name: "Edit src/app.ts" }).fill("const answer = 42;");
+      await vi.waitFor(() => expect(previewHarness.writeAttempts).toHaveLength(1));
+      await expect.element(page.getByLabelText("Unsaved changes")).not.toBeInTheDocument();
+      // The node reports the bytes the autosave wrote: the version that save returned.
+      watch.emit({ type: "changed", version: "sha256:saved:1" });
+      await settle(100);
+
+      expect(previewHarness.readAttempts).toHaveLength(reads);
+    });
+
+    it("reads a deleted file again, so the panel learns it is gone", async () => {
+      const watch = await openWatchedFile();
+
+      previewHarness.entries = [];
+      previewHarness.readFiles.delete("src/app.ts");
+      watch.emit({ type: "deleted" });
+
+      // The missing-file handling closes it: it is gone from the listing and had no edits.
+      await expect
+        .element(page.getByRole("textbox", { name: "Edit src/app.ts" }))
+        .not.toBeInTheDocument();
+      await vi.waitFor(() => expect(activeWatches()).toHaveLength(0));
+    });
+
+    it("watches only while the panel shows the file and the page is visible", async () => {
+      const watch = await openWatchedFile();
+
+      Object.defineProperty(document, "visibilityState", {
+        configurable: true,
+        get: () => "hidden",
+      });
+      try {
+        document.dispatchEvent(new Event("visibilitychange"));
+        await vi.waitFor(() => expect(watch.stopped).toBe(true));
+        changeOnDisk("const answer = 99;", "sha256:external");
+      } finally {
+        Reflect.deleteProperty(document, "visibilityState");
+      }
+      document.dispatchEvent(new Event("visibilitychange"));
+
+      // Visible again: a new watch starts, and its first event catches what changed meanwhile.
+      await vi.waitFor(() => expect(activeWatches()).toHaveLength(1));
+      activeWatches()[0]!.emit({ type: "current", version: "sha256:external" });
+      await expect
+        .element(page.getByRole("textbox", { name: "Edit src/app.ts" }))
+        .toHaveValue("const answer = 99;");
+
+      // The sheet keeps the panel mounted while it is closed; a closed panel watches nothing.
+      previewHarness.search = {};
+      await mounted?.rerender(
+        <AppAtomRegistryProvider>
+          <PreviewPanel mode="sheet" />
+        </AppAtomRegistryProvider>,
+      );
+      await vi.waitFor(() => expect(activeWatches()).toHaveLength(0));
+    });
+
+    it("keeps to turn refreshes on a node that does not watch files", async () => {
+      previewHarness.serverConfig = OLDER_NODE_CONFIG;
+      previewHarness.entries = [{ path: "src/app.ts", kind: "file", sizeBytes: 64 }];
+      previewHarness.readFiles.set("src/app.ts", {
+        relativePath: "src/app.ts",
+        contents: "const answer = 41;",
+      });
+
+      mounted = await renderPreviewPanel();
+      await page.getByRole("button", { name: "src/app.ts" }).click();
+      await expect
+        .element(page.getByRole("textbox", { name: "Edit src/app.ts" }))
+        .toHaveValue("const answer = 41;");
+      await settle(100);
+
+      expect(previewHarness.fileWatches).toEqual([]);
+    });
   });
 
   describe("PDF previews", () => {

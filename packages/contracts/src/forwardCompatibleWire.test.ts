@@ -21,6 +21,7 @@ import {
   WsOrchestrationSubscribeShellRpc,
   WsOrchestrationSubscribeThreadRpc,
   WsOrchestrationSubscribeThreadWindowRpc,
+  WsProjectsSubscribeFileChangesRpc,
   WsServerSubscribeLocalTaskChangesRpc,
   WsServerSubscribeNodeUpdateRpc,
   WsSubscribeAuthAccessRpc,
@@ -298,6 +299,9 @@ const strictStreams = [
   // The same progress events as the run it attaches to again.
   WsGitResumeStackedActionRpc,
   WsGitRunStackedActionRpc,
+  // Optional: an older client whose decode fails stops watching and refreshes the open file
+  // after turns, as it does on a node without the watch.
+  WsProjectsSubscribeFileChangesRpc,
   WsServerSubscribeLocalTaskChangesRpc,
   WsServerSubscribeNodeUpdateRpc,
   WsSubscribeAuthAccessRpc,

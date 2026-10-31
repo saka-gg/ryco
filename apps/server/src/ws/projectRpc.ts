@@ -1,4 +1,4 @@
-import { Effect, Option, Schema } from "effect";
+import { Effect, Option, Schema, Stream } from "effect";
 import {
   FilesystemBrowseError,
   ProjectListEntriesError,
@@ -10,12 +10,13 @@ import {
   ProjectSearchContentError,
   ProjectSearchEntriesError,
   ProjectStageFileReferenceError,
+  ProjectWatchFileError,
   ProjectWriteFileError,
   WS_METHODS,
 } from "@ryco/contracts";
 
 import { readProjectIcon } from "../project/readProjectIcon.ts";
-import { observeRpcEffect } from "../observability/RpcInstrumentation.ts";
+import { observeRpcEffect, observeRpcStream } from "../observability/RpcInstrumentation.ts";
 import { WorkspaceContentSearchCursorError } from "../workspace/Services/WorkspaceContentSearch.ts";
 import {
   WorkspaceFileConflictError,
@@ -26,8 +27,13 @@ import {
 import { WorkspacePathOutsideRootError } from "../workspace/Services/WorkspacePaths.ts";
 import { defineWsHandlers, type WsRpcContext } from "./context.ts";
 
+// The open-file watch loads with the first subscription: nothing in it is needed at boot.
+const loadWorkspaceFileWatch = Effect.promise(() => import("../workspace/workspaceFileWatch.ts"));
+
 export const makeProjectHandlers = (ctx: WsRpcContext) => {
   const { ownerEffect, workspaceEntries, workspaceContentSearch, workspaceFileSystem, open } = ctx;
+  /** Files this connection watches now; the watch module enforces its cap. */
+  const fileWatches = { active: 0 };
   /**
    * A chat folder empty-folder cleanup removed lists as empty: looking at an old chat's files
    * does not bring its folder back (`project/chatFolderRestore.ts`). Checked only on failure.
@@ -182,6 +188,32 @@ export const makeProjectHandlers = (ctx: WsRpcContext) => {
         input.cwd,
         workspaceFileSystem.readFileChunk(input),
         (props) => new ProjectReadFileChunkError(props),
+      ),
+    // Holds the workspace like a read does (until the connection closes) and carries no content.
+    [WS_METHODS.projectsSubscribeFileChanges]: (input) =>
+      observeRpcStream(
+        WS_METHODS.projectsSubscribeFileChanges,
+        ctx.ownerStream(
+          WS_METHODS.projectsSubscribeFileChanges,
+          Stream.unwrap(
+            ctx.clientWorkspaceUse.use(input.cwd, loadWorkspaceFileWatch).pipe(
+              Effect.map((module) =>
+                module.watchWorkspaceFile(
+                  { resolveTarget: workspaceFileSystem.resolveTarget, connection: fileWatches },
+                  input,
+                ),
+              ),
+              Effect.mapError(
+                (cause) =>
+                  new ProjectWatchFileError({
+                    message: cause.detail.trim() || "The file's folder cannot be watched now.",
+                    reason: "unavailable",
+                  }),
+              ),
+            ),
+          ),
+        ),
+        { "rpc.aggregate": "workspace" },
       ),
     [WS_METHODS.projectsWriteFile]: (input) =>
       observeRpcEffect(

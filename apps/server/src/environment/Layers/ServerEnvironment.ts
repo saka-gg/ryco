@@ -115,6 +115,7 @@ export const makeServerEnvironment = Effect.fn("makeServerEnvironment")(function
       projectSearchEmptyQuery: true,
       projectContentSearch: true,
       projectReadFileChunk: true,
+      projectFileWatch: true,
       cliProxyHubs: true,
       cliProxyCloudflareAccess: true,
       stagedOnlyCommit: true,

@@ -50,6 +50,7 @@ import { useSettings } from "../hooks/useSettings";
 import { useTheme } from "../hooks/useTheme";
 import { getLocalStorageItem, setLocalStorageItem } from "../hooks/useLocalStorage";
 import { useProjectListEntries, useProjectReadFile } from "~/rpc/useProjectPreview";
+import { useDocumentVisible } from "../hooks/useDocumentVisible";
 import { useEvent } from "../hooks/useEvent";
 import { useRouteWorkspaceTarget } from "../hooks/useRouteWorkspaceTarget";
 import { endWorkspaceFileDrag, startWorkspaceFileDrag } from "../workspaceFileDrag";
@@ -96,9 +97,11 @@ import {
   PREVIEW_MARKDOWN_RENDER_DEFAULT_MAX_CHARS,
   resolvePreviewImageSource,
   selectServerReadsFileChunks,
+  selectServerWatchesFiles,
 } from "./PreviewPanel.logic";
 import { PreviewImage } from "./PreviewImage";
 import { PreviewPdf } from "./PreviewPdf";
+import { useProjectFileChanges } from "./useProjectFileChanges";
 
 const NO_MARKDOWN_VIEW_MODES: ReadonlyMap<string, WorkspaceFileViewMode> = new Map();
 const subscribeNoSession = () => () => {};
@@ -507,18 +510,20 @@ export default function PreviewPanel({
           ? "chunked"
           : "outdated-node";
 
+  // The open panel shows this file through the text read (not an image or PDF preview).
+  const selectedFileReadsText = Boolean(
+    activeThread?.environmentId &&
+    activeCwd &&
+    selectedFilePath &&
+    previewSearch.preview === "1" &&
+    selectedImageSource !== "raster" &&
+    !(selectedFileKind === "pdf" && pdfPreview !== "off"),
+  );
   const selectedFileQuery = useProjectReadFile({
     environmentId: activeThread?.environmentId ?? null,
     cwd: activeCwd,
     relativePath: selectedFilePath,
-    enabled: Boolean(
-      activeThread?.environmentId &&
-      activeCwd &&
-      selectedFilePath &&
-      previewSearch.preview === "1" &&
-      selectedImageSource !== "raster" &&
-      !(selectedFileKind === "pdf" && pdfPreview !== "off"),
-    ),
+    enabled: selectedFileReadsText,
   });
   const selectedFileData =
     selectedFileQuery.data?.relativePath === selectedFilePath ? selectedFileQuery.data : null;
@@ -529,6 +534,35 @@ export default function PreviewPanel({
         ? "Failed to load file preview."
         : null;
   const refetchSelectedFile = selectedFileQuery.refetch;
+
+  // Live revalidation: on nodes that watch files, the open text file is read again as soon
+  // as it changes on disk (an agent mid-turn, a terminal, another editor, a checkout), while
+  // the panel shows it and the page is visible. The edit session then adopts the new text, or
+  // flags a conflict over unsaved edits. The turn refetch below stays, for older nodes and for
+  // a watch the node refused.
+  const nodeWatchesFiles = useEnvironmentServerConfigSelector(
+    activeEnvironmentId,
+    selectServerWatchesFiles,
+  );
+  const documentVisible = useDocumentVisible();
+  useProjectFileChanges({
+    environmentId: activeEnvironmentId,
+    cwd: activeCwd,
+    relativePath: selectedFilePath,
+    // Once the file has been read: the stream's first event then catches a change since.
+    enabled:
+      nodeWatchesFiles &&
+      documentVisible &&
+      !isPhonePresentation &&
+      selectedFileReadsText &&
+      selectedFileData !== null,
+    onChange: (event) => {
+      // The version this panel holds already, as after its own save: nothing to read.
+      if (event.type !== "deleted" && event.version === selectedFileData?.version) return;
+      // A delete reads too: the failed read reaches the missing-file handling below.
+      void selectedFileQuery.refetchFresh();
+    },
+  });
 
   useEffect(() => {
     if (!selectedFilePath || previewSearch.preview !== "1") {

@@ -77,6 +77,7 @@ export function createEnvironmentApi(rpcClient: WsRpcClient): EnvironmentApi {
       searchEntries: rpcClient.projects.searchEntries,
       searchContent: rpcClient.projects.searchContent,
       writeFile: rpcClient.projects.writeFile,
+      subscribeFileChanges: rpcClient.projects.subscribeFileChanges,
       stageFileReference: rpcClient.projects.stageFileReference,
       initializeGit: rpcClient.projects.initializeGit,
       promoteChatPreview: rpcClient.projects.promoteChatPreview,

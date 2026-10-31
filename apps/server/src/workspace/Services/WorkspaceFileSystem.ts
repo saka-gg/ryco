@@ -76,6 +76,24 @@ export class WorkspaceFileUnsupportedEditError extends Schema.TaggedError<Worksp
  */
 export interface WorkspaceFileSystemShape {
   /**
+   * Where a workspace-relative path points now: its lexical path and its real
+   * path through every link. Rejects a path that escapes the workspace root,
+   * lexically or through a link. A missing file resolves under its nearest
+   * existing folder. Every read and write below starts here.
+   */
+  readonly resolveTarget: (input: {
+    readonly cwd: string;
+    readonly relativePath: string;
+  }) => Effect.Effect<
+    {
+      readonly relativePath: string;
+      readonly absolutePath: string;
+      readonly realPath: string;
+    },
+    WorkspaceFileSystemError | WorkspacePathOutsideRootError
+  >;
+
+  /**
    * Read a file relative to the workspace root.
    *
    * Rejects paths that escape the workspace root.

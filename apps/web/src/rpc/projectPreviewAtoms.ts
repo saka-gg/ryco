@@ -179,6 +179,17 @@ export function setProjectReadFileCacheData(
   });
 }
 
+/**
+ * Read the file again now, dropping a read already in flight: that read may
+ * have started before the change on disk this one is for.
+ */
+export async function refetchProjectReadFileFresh(cacheKey: string | null): Promise<void> {
+  if (cacheKey === null) return;
+  const controller = projectPreviewRegistry.controllers.get(cacheKey);
+  if (controller) projectPreviewRegistry.cancel(controller);
+  await projectReadFileQuery.refreshAsync(cacheKey);
+}
+
 // ---------------------------------------------------------------------------
 // Test helpers
 // ---------------------------------------------------------------------------
