@@ -73,6 +73,7 @@ const LAZY_FROM_MAIN = [
   "./sshEnvironment.ts",
   "./tailscaleEndpointProvider.ts",
   "./bundledGuide.ts",
+  "./desktopCliCommand.ts",
   // Computer use: started during bootstrap, after Electron is ready.
   "./computerUse/desktopStack.ts",
   "./computerUse/runtime.ts",

@@ -237,6 +237,11 @@ contextBridge.exposeInMainWorld("desktopBridge", {
     if (bootstrap?.httpBaseUrl) cachedLocalEnvironmentBootstrap = bootstrap;
     return bootstrap;
   },
+  cliCommand: {
+    getState: () => ipcRenderer.invoke("desktop:cli-command-state"),
+    install: () => ipcRenderer.invoke("desktop:cli-command-install"),
+    uninstall: () => ipcRenderer.invoke("desktop:cli-command-uninstall"),
+  },
   quitShortcut: {
     getMode: () => ipcRenderer.invoke("desktop:quit-shortcut-get"),
     setMode: (mode) => ipcRenderer.invoke("desktop:quit-shortcut-set", mode),

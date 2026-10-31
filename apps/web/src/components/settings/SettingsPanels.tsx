@@ -13,6 +13,7 @@ import { ComposerSettings } from "./ComposerSettings";
 import { QuitShortcutSetting } from "./QuitShortcutSetting";
 import { ThreadNotificationSettings } from "./ThreadNotificationSettings";
 import { WindowCaptureSettings } from "./WindowCaptureSettings";
+import { CliCommandSettings } from "./CliCommandSettings";
 import { UsageLimitSettings } from "./UsageLimitSettings";
 import { UsagePriceSettings } from "./UsagePriceSettings";
 import { ResponseStreamingSettings } from "./ResponseStreamingSettings";
@@ -869,6 +870,8 @@ export function GeneralSettingsPanel() {
       {!isPhoneTier && editingScope !== "node" && (
         <WindowCaptureSettings scope={deviceScopeLabel} />
       )}
+
+      {!isPhoneTier && editingScope !== "node" && <CliCommandSettings scope={deviceScopeLabel} />}
 
       <SettingsSection title="About">
         {editingScope !== "node" && <AboutBrandingHeader />}

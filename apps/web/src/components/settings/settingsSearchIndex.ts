@@ -7,6 +7,7 @@ import { settingsSectionInDestination, settingsSectionReachable } from "./settin
 export type SettingsDestination = "client" | "node";
 
 export type SettingsDesktopCapability =
+  | "cliCommand"
   | "computerUse"
   | "quitShortcut"
   | "setKeepAwakeMode"
@@ -73,6 +74,14 @@ export const SETTINGS_SEARCH_INDEX: ReadonlyArray<SettingsSearchEntry> = [
     description: "Prevent accidental quits: press twice, hold, or quit immediately.",
     keywords: "ctrl cmd q exit desktop",
     desktopCapability: "quitShortcut",
+  },
+  {
+    section: "general",
+    title: "Terminal command",
+    owner: "client",
+    description: "Install the ryco command to use this app's node from any terminal.",
+    keywords: "cli command line shell path install ryco nightly",
+    desktopCapability: "cliCommand",
   },
   {
     section: "general",

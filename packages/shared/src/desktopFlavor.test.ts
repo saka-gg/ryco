@@ -22,6 +22,7 @@ describe("Ryco and Ryco Nightly identities", () => {
       "authorizationScheme",
       "appUserModelId",
       "linuxName",
+      "cliCommandName",
       "updateChannel",
       "artifactPrefix",
       "defaultBackendPort",

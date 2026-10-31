@@ -54,6 +54,8 @@ export interface RycoDesktopFlavorIdentity {
   readonly appUserModelId: string;
   /** Linux executable, `.desktop` entry and WM class. */
   readonly linuxName: string;
+  /** The terminal command the app installs from its settings (`desktopCliCommand.ts`). */
+  readonly cliCommandName: "ryco" | "ryco-nightly";
   /** electron-updater channel; the app accepts no version outside it. */
   readonly updateChannel: "latest" | "nightly";
   /**
@@ -80,6 +82,7 @@ export const RYCO_DESKTOP_FLAVOR_IDENTITIES: Readonly<
     authorizationScheme: "ryco",
     appUserModelId: "com.sak0a.ryco",
     linuxName: "ryco",
+    cliCommandName: "ryco",
     updateChannel: "latest",
     artifactPrefix: "Ryco-",
     defaultBackendPort: 7926,
@@ -95,6 +98,7 @@ export const RYCO_DESKTOP_FLAVOR_IDENTITIES: Readonly<
     authorizationScheme: "ryco-preview",
     appUserModelId: "com.sak0a.ryco.nightly",
     linuxName: "ryco-nightly",
+    cliCommandName: "ryco-nightly",
     updateChannel: "nightly",
     artifactPrefix: "Ryco-Nightly-",
     defaultBackendPort: 7936,

@@ -17,7 +17,7 @@ import * as TestClock from "effect/testing/TestClock";
 import * as TestConsole from "effect/testing/TestConsole";
 import { Command } from "effect/cli";
 
-import { cli } from "./cli.ts";
+import { cli, desktopOwnedNodeRefusal } from "./cli.ts";
 import { deriveServerPaths, ServerConfig, type ServerConfigShape } from "./config.ts";
 import { ProjectionSnapshotQuery } from "./orchestration/Services/ProjectionSnapshotQuery.ts";
 import { OrchestrationLayerLive } from "./orchestration/runtimeLayer.ts";
@@ -1921,6 +1921,38 @@ it.layer(NodeServices.layer)("cli update", (it) => {
         Effect.flip,
       );
       assert.include(String((error as Error).message), "The Ryco server is not running");
+    }),
+  );
+});
+
+it.layer(NodeServices.layer)("cli under Ryco Desktop's ryco command", (it) => {
+  it("refuses a second node for the desktop app's home, and only for it", () => {
+    const home = join(tmpdir(), "ryco-desktop-home");
+    const env = { RYCO_DESKTOP_CLI: home };
+    assert.include(
+      desktopOwnedNodeRefusal(env, home) ?? "",
+      `Ryco Desktop runs the node for ${home}.`,
+    );
+    assert.isNotNull(desktopOwnedNodeRefusal(env, `${home}/`));
+    assert.isNull(desktopOwnedNodeRefusal(env, join(tmpdir(), "another-home")));
+    assert.isNull(desktopOwnedNodeRefusal({}, home));
+    assert.isNull(desktopOwnedNodeRefusal({ RYCO_DESKTOP_CLI: " " }, home));
+  });
+
+  it.effect("still runs admin commands against the desktop app's home", () =>
+    Effect.gen(function* () {
+      const baseDir = mkdtempSync(join(tmpdir(), "ryco-cli-desktop-home-test-"));
+      const previous = process.env.RYCO_DESKTOP_CLI;
+      process.env.RYCO_DESKTOP_CLI = baseDir;
+      try {
+        const listed = yield* captureStdout(
+          runCli(["auth", "pairing", "list", "--json", "--base-dir", baseDir]),
+        );
+        assert.deepEqual(JSON.parse(listed.output), []);
+      } finally {
+        if (previous === undefined) delete process.env.RYCO_DESKTOP_CLI;
+        else process.env.RYCO_DESKTOP_CLI = previous;
+      }
     }),
   );
 });
