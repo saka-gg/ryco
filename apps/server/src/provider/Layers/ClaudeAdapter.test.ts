@@ -8104,7 +8104,7 @@ describe("ClaudeAdapterLive", () => {
         hookSpecificOutput: {
           hookEventName: "PreToolUse",
           additionalContext:
-            "The user sent you a message mid-task: Skip the docs\n\nand the tests. Address it and adjust your work accordingly.",
+            "The user sent you a message mid-task:\n\nSkip the docs\n\nand the tests\n\nAddress it and adjust your work accordingly.",
         },
       });
       const [delivered] = Array.from(yield* Fiber.join(notice));
@@ -8161,7 +8161,7 @@ describe("ClaudeAdapterLive", () => {
         attempt: 0,
       });
       const warning = yield* adapter.streamEvents.pipe(
-        Stream.filter((event) => event.type === "runtime.warning"),
+        Stream.filter((event) => event.type === "runtime.notice"),
         Stream.take(1),
         Stream.runCollect,
         Effect.forkChild,
@@ -8175,12 +8175,11 @@ describe("ClaudeAdapterLive", () => {
         uuid: "explore-completed",
       } as unknown as SDKMessage);
       const [event] = Array.from(yield* Fiber.join(warning));
-      if (event?.type === "runtime.warning") {
+      // A notice, so the chat shows the words and the undelivered text itself.
+      if (event?.type === "runtime.notice") {
         assert.include(event.payload.message, "Message not delivered");
-        assert.deepInclude(event.payload.detail as object, {
-          undeliveredMessage: "Skip the docs",
-        });
-      } else assert.fail("expected an undelivered warning");
+        assert.equal(event.payload.detail, "Skip the docs");
+      } else assert.fail("expected an undelivered notice");
       const ended = yield* adapter.messageBackgroundTask!(THREAD_ID, "explore-task", "Too late", {
         runtimeSessionId: RuntimeSessionId.make("undelivered-runtime"),
         attempt: 0,

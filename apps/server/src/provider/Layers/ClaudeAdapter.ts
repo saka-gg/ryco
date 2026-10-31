@@ -213,6 +213,7 @@ import {
   type ProviderAdapterError,
 } from "../Errors.ts";
 import { type ClaudeAdapterShape } from "../Services/ClaudeAdapter.ts";
+import { TASK_MESSAGE_PENDING_LIMIT_METHOD } from "../Errors.ts";
 import {
   CLAUDE_SUBAGENT_MESSAGE_UNDELIVERED,
   CLAUDE_SUBAGENT_PENDING_MESSAGES_MAX,
@@ -2322,12 +2323,10 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     ).pipe(Effect.andThen(runtimeEventQueueMetrics.recordEnqueued()), Effect.asVoid);
     return undelivered === null
       ? offered
-      : offered.pipe(
+      : // A notice is labelled by its message and shows the undelivered text (truncated).
+        offered.pipe(
           Effect.andThen(
-            emitRuntimeWarning(context, CLAUDE_SUBAGENT_MESSAGE_UNDELIVERED, {
-              reason: "subagent-message-undelivered",
-              undeliveredMessage: undelivered,
-            }),
+            emitRuntimeNotice(context, CLAUDE_SUBAGENT_MESSAGE_UNDELIVERED, undelivered),
           ),
         );
   };
@@ -7349,7 +7348,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     if (pending.length >= CLAUDE_SUBAGENT_PENDING_MESSAGES_MAX) {
       return yield* new ProviderAdapterRequestError({
         provider: PROVIDER,
-        method: "task/message",
+        method: TASK_MESSAGE_PENDING_LIMIT_METHOD,
         detail: "Several messages already wait for this agent's next step.",
       });
     }

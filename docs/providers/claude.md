@@ -324,7 +324,8 @@ the agent reads before it continues ("The user sent you a message mid-task: …"
 notice when the agent read it. An agent that finishes before its next tool call never reads it:
 the chat then says the message was not delivered and shows its text.
 
-Up to 5 messages can wait for one agent, each at most 8,000 characters. The box is offered only for
+Up to 5 messages can wait for one agent, each at most 8,000 characters. The hook runs on every
+tool call of a Claude session and returns at once when no message waits. The box is offered only for
 agents (not shell or monitor tasks, and not a workflow's coordinator) that the thread's current
 Claude session started.
 

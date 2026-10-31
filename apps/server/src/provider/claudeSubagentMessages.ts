@@ -17,9 +17,12 @@ import { classifyTaskAgentKind } from "@ryco/shared/taskClassification";
 /** Messages one agent may have waiting at once; a person typing more waits for the agent. */
 export const CLAUDE_SUBAGENT_PENDING_MESSAGES_MAX = 5;
 
-/** What the agent reads (Synara's wording). */
+/**
+ * What the agent reads: Synara's wording, with the message on lines of its own so a multi-line
+ * message never runs into the instruction.
+ */
 export function claudeSubagentMessageContext(message: string): string {
-  return `The user sent you a message mid-task: ${message}. Address it and adjust your work accordingly.`;
+  return `The user sent you a message mid-task:\n\n${message}\n\nAddress it and adjust your work accordingly.`;
 }
 
 export const CLAUDE_SUBAGENT_MESSAGE_UNDELIVERED =

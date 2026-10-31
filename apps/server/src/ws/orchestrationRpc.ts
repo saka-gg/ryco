@@ -57,6 +57,7 @@ import {
   isServerPerfProfileEnabled,
   recordServerPerfPayload,
 } from "../observability/PerfInstrumentation.ts";
+import { TASK_MESSAGE_PENDING_LIMIT_METHOD } from "../provider/Errors.ts";
 import { defineWsHandlers, type WsRpcContext } from "./context.ts";
 import {
   ORCHESTRATION_LEGACY_REPLAY_MAX_EVENTS,
@@ -691,11 +692,14 @@ export const makeOrchestrationHandlers = (ctx: WsRpcContext) => {
                           ? "unsupported"
                           : cause._tag === "ProviderTaskEndedError"
                             ? "task-ended"
-                            : cause._tag === "ProviderSessionNotFoundError" ||
-                                cause._tag === "ProviderAdapterSessionNotFoundError" ||
-                                cause._tag === "ProviderAdapterSessionClosedError"
-                              ? "session-not-found"
-                              : "message-failed",
+                            : cause._tag === "ProviderAdapterRequestError" &&
+                                cause.method === TASK_MESSAGE_PENDING_LIMIT_METHOD
+                              ? "too-many-pending"
+                              : cause._tag === "ProviderSessionNotFoundError" ||
+                                  cause._tag === "ProviderAdapterSessionNotFoundError" ||
+                                  cause._tag === "ProviderAdapterSessionClosedError"
+                                ? "session-not-found"
+                                : "message-failed",
                       threadId: input.threadId,
                       taskId: input.taskId,
                     }),

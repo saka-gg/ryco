@@ -4494,13 +4494,21 @@ export const MESSAGE_BACKGROUND_TASK_ERROR_MESSAGES = {
   unsupported: "This agent can't take messages.",
   "session-not-found": "This agent's session has ended.",
   "task-ended": "This agent already finished, so it can't read your message.",
-  "message-failed": "Your message could not be queued for this agent.",
+  "too-many-pending":
+    "Several messages already wait for this agent's next step. Try again after it reads them.",
+  "message-failed": "Your message could not be sent. Try again.",
 } as const;
 
 export class OrchestrationMessageBackgroundTaskError extends Schema.TaggedError<OrchestrationMessageBackgroundTaskError>()(
   "OrchestrationMessageBackgroundTaskError",
   {
-    reason: Schema.Literals(["unsupported", "session-not-found", "task-ended", "message-failed"]),
+    reason: Schema.Literals([
+      "unsupported",
+      "session-not-found",
+      "task-ended",
+      "too-many-pending",
+      "message-failed",
+    ]),
     threadId: Schema.String,
     taskId: Schema.String,
   },

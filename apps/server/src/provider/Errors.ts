@@ -95,6 +95,12 @@ export class ProviderTurnNotSteerableError extends Schema.TaggedError<ProviderTu
 }
 
 /**
+ * The `method` of a `ProviderAdapterRequestError` refusing a message because enough already wait
+ * for the agent's next step (`messageBackgroundTask`); the RPC reports it as `too-many-pending`.
+ */
+export const TASK_MESSAGE_PENDING_LIMIT_METHOD = "task/message:pending-limit";
+
+/**
  * ProviderTaskEndedError - The background task a request targets already settled (or this
  * runtime never ran it), so a message for it would never be read.
  */
