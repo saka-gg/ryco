@@ -553,6 +553,8 @@ describe("ProviderCommandReactor", () => {
       steerTurn: input?.steerTurn ?? (() => unsupported()),
       interruptTurn: interruptTurn as ProviderServiceShape["interruptTurn"],
       stopBackgroundTask: () => Effect.die(new Error("Unsupported provider call in test")) as never,
+      messageBackgroundTask: () =>
+        Effect.die(new Error("Unsupported provider call in test")) as never,
       respondToRequest: respondToRequest as ProviderServiceShape["respondToRequest"],
       respondToUserInput: respondToUserInput as ProviderServiceShape["respondToUserInput"],
       stopSession: stopSession as ProviderServiceShape["stopSession"],

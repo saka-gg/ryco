@@ -564,6 +564,9 @@ export interface WsRpcClient {
     readonly getWorkflowScript: RpcUnaryMethod<typeof ORCHESTRATION_WS_METHODS.getWorkflowScript>;
     readonly getTaskOutput: RpcUnaryMethod<typeof ORCHESTRATION_WS_METHODS.getTaskOutput>;
     readonly stopBackgroundTask: RpcUnaryMethod<typeof ORCHESTRATION_WS_METHODS.stopBackgroundTask>;
+    readonly messageBackgroundTask: RpcUnaryMethod<
+      typeof ORCHESTRATION_WS_METHODS.messageBackgroundTask
+    >;
     readonly getFullThreadDiff: RpcUnaryMethod<typeof ORCHESTRATION_WS_METHODS.getFullThreadDiff>;
     readonly searchThreadMessages: RpcUnaryMethod<
       typeof ORCHESTRATION_WS_METHODS.searchThreadMessages
@@ -1275,6 +1278,10 @@ export function createWsRpcClient(
         transport.request((client) => client[ORCHESTRATION_WS_METHODS.getTaskOutput](input)),
       stopBackgroundTask: (input) =>
         transport.request((client) => client[ORCHESTRATION_WS_METHODS.stopBackgroundTask](input)),
+      messageBackgroundTask: (input) =>
+        transport.request((client) =>
+          client[ORCHESTRATION_WS_METHODS.messageBackgroundTask](input),
+        ),
       getFullThreadDiff: (input) =>
         transport.request((client) => client[ORCHESTRATION_WS_METHODS.getFullThreadDiff](input)),
       searchThreadMessages: (input) =>

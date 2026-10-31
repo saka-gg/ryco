@@ -52,10 +52,22 @@ export function subagentStopIdentity(
   agent: RuntimeSubagent,
   currentRuntimeSessionId: string | null,
 ): SubagentStopIdentity | null {
+  return activeSubagentIdentity(agent, currentRuntimeSessionId, agent.canStop);
+}
+
+/**
+ * The identity of an active direct subagent the thread's current runtime reported, when its
+ * provider flagged it `able` to take the action (Stop, a message); null otherwise.
+ */
+export function activeSubagentIdentity(
+  agent: RuntimeSubagent,
+  currentRuntimeSessionId: string | null,
+  able: boolean,
+): SubagentStopIdentity | null {
   if (
     agent.kind !== "subagent" ||
     !isActiveSubagentStatus(agent.status) ||
-    !agent.canStop ||
+    !able ||
     agent.runtimeSessionId === null ||
     agent.runtimeSessionId !== currentRuntimeSessionId
   ) {

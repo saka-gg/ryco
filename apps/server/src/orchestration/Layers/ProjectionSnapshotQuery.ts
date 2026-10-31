@@ -2003,6 +2003,7 @@ const makeProjectionSnapshotQueryOn = Effect.fn("makeProjectionSnapshotQueryOn")
           'attempt', json_extract(payload_json, '$.attempt'),
           'isBackgrounded', json(CASE json_extract(payload_json, '$.isBackgrounded') WHEN 1 THEN 'true' WHEN 0 THEN 'false' ELSE 'null' END),
           'canStop', json(CASE json_extract(payload_json, '$.canStop') WHEN 1 THEN 'true' WHEN 0 THEN 'false' ELSE 'null' END),
+          'canMessage', json(CASE json_extract(payload_json, '$.canMessage') WHEN 1 THEN 'true' WHEN 0 THEN 'false' ELSE 'null' END),
           'status', json_extract(payload_json, '$.status'),
           'detail', substr(COALESCE(json_extract(payload_json, '$.detail'), json_extract(payload_json, '$.title')), 1, 180)
         ) AS payload,

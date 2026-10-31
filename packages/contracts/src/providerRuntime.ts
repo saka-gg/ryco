@@ -596,6 +596,11 @@ const taskAgentLinkageFields = {
   isBackgrounded: Schema.optional(Schema.Boolean),
   /** This session can stop the individual provider task. */
   canStop: Schema.optional(Schema.Boolean),
+  /**
+   * The person can send this running agent a message (`orchestration.messageBackgroundTask`),
+   * which it reads at its next step.
+   */
+  canMessage: Schema.optional(Schema.Boolean),
   /** SDK task_type (subagent/shell/monitor/local_workflow/…), repeated on
    * every row so folds can classify without the start row. */
   taskType: Schema.optional(TrimmedNonEmptyStringSchema),

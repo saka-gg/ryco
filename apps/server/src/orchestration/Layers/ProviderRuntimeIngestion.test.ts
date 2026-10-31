@@ -139,6 +139,7 @@ function createProviderServiceHarness() {
     steerTurn: () => unsupported(),
     interruptTurn: () => unsupported(),
     stopBackgroundTask: () => unsupported(),
+    messageBackgroundTask: () => unsupported(),
     respondToRequest: () => unsupported(),
     respondToUserInput: () => unsupported(),
     stopSession: () => unsupported(),

@@ -38,6 +38,7 @@ function agent(id: string, overrides: Partial<RuntimeSubagent> = {}): RuntimeSub
     runHandles: null,
     runtimeSessionId: null,
     canStop: false,
+    canMessage: false,
     recentActivity: [],
     firstSeenAt: "2026-08-10T10:00:00.000Z",
     spawnTurnId: null,

@@ -2,8 +2,14 @@ import "../index.css";
 
 import { scopeThreadRef } from "@ryco/client-runtime/scoped";
 import type { SubagentStopAction } from "@ryco/client-runtime/state/session/subagentStop";
-import { EnvironmentId, EventId, ThreadId } from "@ryco/contracts";
-import { page } from "vite-plus/test/browser";
+import type { SubagentMessageAction } from "@ryco/client-runtime/state/session/subagentMessage";
+import {
+  EnvironmentId,
+  EventId,
+  OrchestrationMessageBackgroundTaskError,
+  ThreadId,
+} from "@ryco/contracts";
+import { page, userEvent } from "vite-plus/test/browser";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import { render } from "vitest-browser-react";
 
@@ -624,5 +630,67 @@ describe("AgentsPanel", () => {
     await mounted.rerender(detail(agent, null));
     await expect.element(page.getByText("Running", { exact: true })).toBeVisible();
     expect(stopLabels()).toEqual([]);
+  });
+
+  it("sends a running agent a message from its detail, and only where it can read one", async () => {
+    const send = vi.fn<SubagentMessageAction["send"]>(() => Promise.resolve());
+    const action: SubagentMessageAction = {
+      threadRef: scopeThreadRef(EnvironmentId.make("env_agents_panel"), ThreadId.make("thread-1")),
+      runtimeSessionId: "rt-1",
+      unavailableReason: null,
+      send,
+    };
+    const agent = makeRuntimeAgent("solo", {
+      runtimeSessionId: "rt-1",
+      canMessage: true,
+      title: "Map the parser",
+    });
+    const detail = (shown: typeof agent, messageAgent: SubagentMessageAction | null) => (
+      <div className="h-[420px] w-[440px]">
+        <AgentsPanel
+          model={deriveAgentPanelModel({ agents: [shown] })}
+          selectedAgentId={shown.id}
+          messageAgent={messageAgent}
+        />
+      </div>
+    );
+    mounted = await render(detail(agent, action));
+
+    const box = page.getByLabelText("Message this agent");
+    await box.fill("  Skip the docs  ");
+    await userEvent.keyboard("{Enter}");
+    await vi.waitFor(() =>
+      expect(send).toHaveBeenCalledExactlyOnceWith(
+        { taskId: "solo", runtimeSessionId: "rt-1", attempt: 0 },
+        "Skip the docs",
+      ),
+    );
+    await expect
+      .element(page.getByText("Sent. The agent reads it at its next step."))
+      .toBeVisible();
+    await expect.element(box).toHaveValue("");
+
+    send.mockRejectedValueOnce(
+      new OrchestrationMessageBackgroundTaskError({
+        reason: "task-ended",
+        threadId: "thread-1",
+        taskId: "solo",
+      }),
+    );
+    await box.fill("One more");
+    await page.getByRole("button", { name: "Send to agent" }).click();
+    await expect
+      .element(page.getByText("This agent already finished, so it can't read your message."))
+      .toBeVisible();
+
+    // No box for an agent its provider can't reach, a settled one, or without the action.
+    await mounted.rerender(detail({ ...agent, canMessage: false }, action));
+    expect(document.querySelector("[data-agent-message-box]")).toBeNull();
+    await mounted.rerender(
+      detail({ ...agent, status: "completed", completedAt: "2026-08-10T10:00:30.000Z" }, action),
+    );
+    expect(document.querySelector("[data-agent-message-box]")).toBeNull();
+    await mounted.rerender(detail(agent, null));
+    expect(document.querySelector("[data-agent-message-box]")).toBeNull();
   });
 });

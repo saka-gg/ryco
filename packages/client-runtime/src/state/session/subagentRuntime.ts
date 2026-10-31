@@ -104,6 +104,8 @@ export interface RuntimeSubagent {
   readonly runtimeSessionId: string | null;
   /** The provider can stop this one task without ending the turn. */
   readonly canStop: boolean;
+  /** The person can send this running agent a message it reads at its next step. */
+  readonly canMessage: boolean;
   readonly recentActivity: ReadonlyArray<SubagentActivityEntry>;
   /** Earliest retained observation, used for deterministic roster order. */
   readonly firstSeenAt: string;
@@ -311,6 +313,7 @@ interface MutableAgent {
   runHandles: SubagentRunHandles | null;
   runtimeSessionId: string | null;
   canStop: boolean;
+  canMessage: boolean;
   recentActivity: ReadonlyArray<SubagentActivityEntry>;
   firstSeenAt: string;
   spawnTurnId: string | null;
@@ -372,6 +375,7 @@ function getOrCreate(
     // Filled by fillMetadata, which every caller runs on the same payload.
     runtimeSessionId: null,
     canStop: false,
+    canMessage: false,
     recentActivity: [],
     firstSeenAt: at,
     spawnTurnId: null,
@@ -429,6 +433,7 @@ function fillMetadata(agent: MutableAgent, payload: Record<string, unknown>): bo
   if (runtimeSessionId) agent.runtimeSessionId = runtimeSessionId;
   // The latest explicit flag wins; rows that omit it keep the known value.
   if (typeof payload.canStop === "boolean") agent.canStop = payload.canStop;
+  if (typeof payload.canMessage === "boolean") agent.canMessage = payload.canMessage;
   if (Array.isArray(payload.phases)) {
     const phases: SubagentWorkflowPhase[] = [];
     for (const entry of payload.phases) {
@@ -890,6 +895,7 @@ function runtimeSubagentFromTranscript(
     runHandles: null,
     runtimeSessionId: null,
     canStop: false,
+    canMessage: false,
     recentActivity: subagent.entries.slice(-RECENT_ACTIVITY_LIMIT).map((entry) => ({
       at: entry.createdAt,
       summary: bounded(entry.detail ?? entry.output ?? entry.label),

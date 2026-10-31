@@ -647,6 +647,7 @@ function taskLinkageActivityFields(payload: Record<string, unknown>): Record<str
   for (const key of [
     "isBackgrounded",
     "canStop",
+    "canMessage",
     "taskType",
     "agentId",
     "title",

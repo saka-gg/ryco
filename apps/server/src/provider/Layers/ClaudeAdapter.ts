@@ -49,6 +49,8 @@ import type { ClaudeCacheObservation, ModelSelection } from "@ryco/contracts";
  */
 import {
   type CanUseTool,
+  type HookCallback,
+  type HookJSONOutput,
   getSessionMessages,
   query,
   type Options as ClaudeQueryOptions,
@@ -205,10 +207,20 @@ import {
   ProviderAdapterSessionClosedError,
   ProviderAdapterSessionNotFoundError,
   ProviderAdapterValidationError,
+  ProviderTaskEndedError,
   ProviderTurnNotSteerableError,
+  ProviderUnsupportedError,
   type ProviderAdapterError,
 } from "../Errors.ts";
 import { type ClaudeAdapterShape } from "../Services/ClaudeAdapter.ts";
+import { TASK_MESSAGE_PENDING_LIMIT_METHOD } from "../Errors.ts";
+import {
+  CLAUDE_SUBAGENT_MESSAGE_UNDELIVERED,
+  CLAUDE_SUBAGENT_PENDING_MESSAGES_MAX,
+  claudeSubagentMessageContext,
+  isMessageableClaudeTask,
+  takeSubagentMessages,
+} from "../claudeSubagentMessages.ts";
 import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
 import { requireRuntimeSessionId, stampRuntimeEvent } from "../runtimeSession.ts";
 import { providerThreadSnapshotFromTurnIds } from "../providerThreadSnapshot.ts";
@@ -548,6 +560,11 @@ interface ClaudeSessionContext {
   readonly workflowPhasesByTaskId: Map<string, ReadonlyArray<ClaudeWorkflowPhase>>;
   /** Task ids that have started and not yet reached a terminal state. */
   readonly liveTaskIds: Set<string>;
+  /**
+   * A person's messages for running subagents, by task id, oldest first. The PreToolUse hook
+   * hands them to the agent at its next tool call (`claudeSubagentMessages.ts`).
+   */
+  readonly pendingSubagentMessages: Map<string, Array<string>>;
   /**
    * Task ids positively observed as backgrounded (membership in a
    * background_tasks_changed set, or a task_updated is_backgrounded patch).
@@ -2284,17 +2301,34 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
             : {}),
           // An emitter can deny stop for synthesized rows, never grant it.
           canStop: event.payload.canStop !== false && context.query.stopTask !== undefined,
+          canMessage:
+            context.liveTaskIds.has(event.payload.taskId) &&
+            isMessageableClaudeTask(context.taskAgents.get(event.payload.taskId)),
         },
       } as ProviderRuntimeEvent;
     }
+    // A settled task never reads what still waits for it: say so instead of dropping it.
+    const undelivered =
+      (event.type === "task.updated" || event.type === "task.completed") &&
+      !context.liveTaskIds.has(event.payload.taskId)
+        ? takeSubagentMessages(context.pendingSubagentMessages, event.payload.taskId)
+        : null;
     const safeEvent = secretRedactor.event(event);
-    return Queue.offer(
+    const offered = Queue.offer(
       runtimeEventQueue,
       stampRuntimeEvent(safeEvent, {
         providerInstanceId: boundInstanceId,
         runtimeSessionId: context.session.runtimeSessionId,
       }),
     ).pipe(Effect.andThen(runtimeEventQueueMetrics.recordEnqueued()), Effect.asVoid);
+    return undelivered === null
+      ? offered
+      : // A notice is labelled by its message and shows the undelivered text (truncated).
+        offered.pipe(
+          Effect.andThen(
+            emitRuntimeNotice(context, CLAUDE_SUBAGENT_MESSAGE_UNDELIVERED, undelivered),
+          ),
+        );
   };
 
   const emitClaudeSubagentStarted = Effect.fn("emitClaudeSubagentStarted")(function* (
@@ -2738,6 +2772,25 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
         ...(cause !== undefined ? { detail: cause } : {}),
         ...(options?.resetAt !== undefined ? { resetAt: options.resetAt } : {}),
       },
+      providerRefs: nativeProviderRefs(context),
+    });
+  });
+
+  const emitRuntimeNotice = Effect.fn("emitRuntimeNotice")(function* (
+    context: ClaudeSessionContext,
+    message: string,
+    detail?: string,
+  ) {
+    const turnState = context.turnState;
+    const stamp = yield* makeEventStamp();
+    yield* offerRuntimeEventForContext(context, {
+      type: "runtime.notice",
+      eventId: stamp.eventId,
+      provider: PROVIDER,
+      createdAt: stamp.createdAt,
+      threadId: context.session.threadId,
+      ...(turnState ? { turnId: asCanonicalTurnId(turnState.turnId) } : {}),
+      payload: { message, ...(detail ? { detail } : {}) },
       providerRefs: nativeProviderRefs(context),
     });
   });
@@ -6289,6 +6342,35 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     const canUseTool: CanUseTool = (toolName, toolInput, callbackOptions) =>
       runPromise(canUseToolEffect(toolName, toolInput, callbackOptions));
 
+    const pendingSubagentMessages = new Map<string, Array<string>>();
+    // The only SDK channel into a running subagent: a PreToolUse hook's input carries the
+    // calling agent's `agent_id` (its task id), and its additionalContext reaches that agent.
+    // It runs on every tool call, so the path without a waiting message stays trivial.
+    const subagentMessageHook: HookCallback = async (hookInput) => {
+      const agentId = "agent_id" in hookInput ? hookInput.agent_id : undefined;
+      if (pendingSubagentMessages.size === 0 || typeof agentId !== "string") return {};
+      const message = takeSubagentMessages(pendingSubagentMessages, agentId);
+      if (message === null) return {};
+      await runPromise(
+        Effect.gen(function* () {
+          const context = yield* Ref.get(contextRef);
+          if (!context) return;
+          const agent = context.taskAgents.get(agentId);
+          yield* emitRuntimeNotice(
+            context,
+            `${agent?.description ?? "The agent"} read your message.`,
+            message,
+          );
+        }),
+      ).catch(() => undefined);
+      return {
+        hookSpecificOutput: {
+          hookEventName: "PreToolUse",
+          additionalContext: claudeSubagentMessageContext(message),
+        },
+      } satisfies HookJSONOutput;
+    };
+
     const claudeBinaryPath = claudeSettings.binaryPath;
     // Claude Code forces thinking display to "omitted" in SDK sessions unless
     // the display is set explicitly on the command line. Ryco renders the
@@ -6417,6 +6499,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       ...(newSessionId ? { sessionId: newSessionId } : {}),
       includePartialMessages: true,
       canUseTool,
+      hooks: { PreToolUse: [{ hooks: [subagentMessageHook] }] },
       ...(Object.keys(mcpServers).length > 0 ? { mcpServers } : {}),
       env: claudeEnvironment,
       ...(input.cwd ? { additionalDirectories: [input.cwd] } : {}),
@@ -6582,6 +6665,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       rejectedRateLimitWindows: new Map(),
       workflowPhasesByTaskId: new Map(),
       liveTaskIds: new Set(),
+      pendingSubagentMessages,
       backgroundedTaskIds: new Set(),
       turnState: undefined,
       lastKnownContextWindow: undefined,
@@ -7242,6 +7326,35 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     }
   });
 
+  // Queues a person's message for one running subagent; the PreToolUse hook hands it over at
+  // the agent's next tool call, and a task that settles first reports it undelivered.
+  const messageBackgroundTask: NonNullable<ClaudeAdapterShape["messageBackgroundTask"]> = Effect.fn(
+    "messageBackgroundTask",
+  )(function* (threadId, taskId, text, expected) {
+    const context = yield* requireSession(threadId);
+    const agent = context.taskAgents.get(taskId);
+    if (
+      context.stopped ||
+      expected.runtimeSessionId !== context.session.runtimeSessionId ||
+      expected.attempt !== (agent?.backgroundAttempt ?? 0) ||
+      !context.liveTaskIds.has(taskId)
+    ) {
+      return yield* new ProviderTaskEndedError({ provider: PROVIDER, threadId, taskId });
+    }
+    if (!isMessageableClaudeTask(agent)) {
+      return yield* new ProviderUnsupportedError({ provider: PROVIDER });
+    }
+    const pending = context.pendingSubagentMessages.get(taskId) ?? [];
+    if (pending.length >= CLAUDE_SUBAGENT_PENDING_MESSAGES_MAX) {
+      return yield* new ProviderAdapterRequestError({
+        provider: PROVIDER,
+        method: TASK_MESSAGE_PENDING_LIMIT_METHOD,
+        detail: "Several messages already wait for this agent's next step.",
+      });
+    }
+    context.pendingSubagentMessages.set(taskId, [...pending, text]);
+  });
+
   const readThread: ClaudeAdapterShape["readThread"] = Effect.fn("readThread")(
     function* (threadId) {
       const context = yield* requireSession(threadId);
@@ -7521,6 +7634,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
     steerTurn,
     interruptTurn,
     stopBackgroundTask,
+    messageBackgroundTask,
     readThread,
     rollbackThread,
     respondToRequest,

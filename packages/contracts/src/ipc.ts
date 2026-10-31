@@ -260,6 +260,8 @@ import type {
   OrchestrationGetWorkflowScriptInput,
   OrchestrationGetWorkflowScriptResult,
   OrchestrationStopBackgroundTaskInput,
+  OrchestrationMessageBackgroundTaskInput,
+  OrchestrationMessageBackgroundTaskResult,
   OrchestrationStopBackgroundTaskResult,
   OrchestrationReplayEventsInput,
   OrchestrationReplayEventsPageInput,
@@ -1650,6 +1652,10 @@ export interface EnvironmentApi {
     stopBackgroundTask?: (
       input: OrchestrationStopBackgroundTaskInput,
     ) => Promise<OrchestrationStopBackgroundTaskResult>;
+    /** Optional so clients can feature-detect against older environments. */
+    messageBackgroundTask?: (
+      input: OrchestrationMessageBackgroundTaskInput,
+    ) => Promise<OrchestrationMessageBackgroundTaskResult>;
     getTurnDiff: (input: OrchestrationGetTurnDiffInput) => Promise<OrchestrationGetTurnDiffResult>;
     getFullThreadDiff: (
       input: OrchestrationGetFullThreadDiffInput,

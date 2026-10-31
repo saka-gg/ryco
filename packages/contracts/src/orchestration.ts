@@ -56,6 +56,7 @@ export const ORCHESTRATION_WS_METHODS = {
   getWorkflowScript: "orchestration.getWorkflowScript",
   getTaskOutput: "orchestration.getTaskOutput",
   stopBackgroundTask: "orchestration.stopBackgroundTask",
+  messageBackgroundTask: "orchestration.messageBackgroundTask",
   getTurnDiff: "orchestration.getTurnDiff",
   getFullThreadDiff: "orchestration.getFullThreadDiff",
   searchThreadMessages: "orchestration.searchThreadMessages",
@@ -4467,6 +4468,56 @@ export class OrchestrationStopBackgroundTaskError extends Schema.TaggedError<Orc
   }
 }
 
+/** The longest message a person can send a running agent. */
+export const BACKGROUND_TASK_MESSAGE_MAX_CHARS = 8_000;
+
+/**
+ * A person's message to one running agent (a Claude subagent today). The agent reads it at its
+ * next step; it never interrupts the agent or the turn. Refused once the task's runtime or attempt
+ * moved on.
+ */
+export const OrchestrationMessageBackgroundTaskInput = Schema.Struct({
+  expected: BackgroundTaskStopIdentity,
+  threadId: ThreadId,
+  /** Provider-runtime task id from the task.* linkage fields. */
+  taskId: TrimmedNonEmptyString,
+  text: TrimmedNonEmptyString.check(Schema.isMaxLength(BACKGROUND_TASK_MESSAGE_MAX_CHARS)),
+});
+export type OrchestrationMessageBackgroundTaskInput =
+  typeof OrchestrationMessageBackgroundTaskInput.Type;
+
+export const OrchestrationMessageBackgroundTaskResult = Schema.Struct({});
+export type OrchestrationMessageBackgroundTaskResult =
+  typeof OrchestrationMessageBackgroundTaskResult.Type;
+
+export const MESSAGE_BACKGROUND_TASK_ERROR_MESSAGES = {
+  unsupported: "This agent can't take messages.",
+  "session-not-found": "This agent's session has ended.",
+  "task-ended": "This agent already finished, so it can't read your message.",
+  "too-many-pending":
+    "Several messages already wait for this agent's next step. Try again after it reads them.",
+  "message-failed": "Your message could not be sent. Try again.",
+} as const;
+
+export class OrchestrationMessageBackgroundTaskError extends Schema.TaggedError<OrchestrationMessageBackgroundTaskError>()(
+  "OrchestrationMessageBackgroundTaskError",
+  {
+    reason: Schema.Literals([
+      "unsupported",
+      "session-not-found",
+      "task-ended",
+      "too-many-pending",
+      "message-failed",
+    ]),
+    threadId: Schema.String,
+    taskId: Schema.String,
+  },
+) {
+  override get message(): string {
+    return MESSAGE_BACKGROUND_TASK_ERROR_MESSAGES[this.reason];
+  }
+}
+
 export const OrchestrationRpcSchemas = {
   dispatchCommand: {
     input: ClientOrchestrationCommand,
@@ -4483,6 +4534,10 @@ export const OrchestrationRpcSchemas = {
   stopBackgroundTask: {
     input: OrchestrationStopBackgroundTaskInput,
     output: OrchestrationStopBackgroundTaskResult,
+  },
+  messageBackgroundTask: {
+    input: OrchestrationMessageBackgroundTaskInput,
+    output: OrchestrationMessageBackgroundTaskResult,
   },
   getTurnDiff: {
     input: OrchestrationGetTurnDiffInput,

@@ -30,6 +30,7 @@ import {
   ProviderSessionStartInput,
   ProviderSteerTurnInput,
   ProviderStopBackgroundTaskInput,
+  ProviderMessageBackgroundTaskInput,
   ProviderStopSessionInput,
   RuntimeMode,
   RuntimeSessionId,
@@ -84,6 +85,7 @@ import {
   ProviderOperationTimeoutError,
   ProviderOperationUnsupportedError,
   ProviderSessionNotFoundError,
+  ProviderTaskEndedError,
   ProviderTurnNotSteerableError,
   ProviderUnsupportedError,
   ProviderValidationError,
@@ -2076,6 +2078,46 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     });
   });
 
+  const messageBackgroundTask: ProviderServiceShape["messageBackgroundTask"] = Effect.fn(
+    "messageBackgroundTask",
+  )(function* (rawInput) {
+    const input = yield* decodeInputOrValidationError({
+      operation: "ProviderService.messageBackgroundTask",
+      schema: ProviderMessageBackgroundTaskInput,
+      payload: rawInput,
+    });
+    // No recovery, as for a stop: a running agent lives only in its live session.
+    const routed = yield* resolveRoutableSession({
+      threadId: input.threadId,
+      operation: "ProviderService.messageBackgroundTask",
+      allowRecovery: false,
+    });
+    yield* Effect.annotateCurrentSpan({
+      "provider.operation": "message-background-task",
+      "provider.kind": routed.adapter.provider,
+      "provider.thread_id": input.threadId,
+      "provider.task_id": input.taskId,
+    });
+    if (!routed.isActive) {
+      return yield* new ProviderSessionNotFoundError({ threadId: input.threadId });
+    }
+    if (input.expected.runtimeSessionId !== routed.session?.runtimeSessionId) {
+      return yield* new ProviderTaskEndedError({
+        provider: routed.adapter.provider,
+        threadId: input.threadId,
+        taskId: input.taskId,
+      });
+    }
+    const message = routed.adapter.messageBackgroundTask;
+    if (message === undefined) {
+      return yield* new ProviderUnsupportedError({ provider: routed.adapter.provider });
+    }
+    yield* message(routed.threadId, input.taskId, input.text, input.expected);
+    yield* analytics.record("provider.background_task.messaged", {
+      provider: routed.adapter.provider,
+    });
+  });
+
   const respondToRequest: ProviderServiceShape["respondToRequest"] = Effect.fn("respondToRequest")(
     function* (rawInput) {
       const input = yield* decodeInputOrValidationError({
@@ -2612,6 +2654,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     steerTurn,
     interruptTurn,
     stopBackgroundTask,
+    messageBackgroundTask,
     respondToRequest,
     respondToUserInput,
     stopSession,

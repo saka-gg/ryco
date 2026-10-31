@@ -20,6 +20,7 @@
  * script sections and the agent detail view.
  */
 import type { SubagentStopAction } from "@ryco/client-runtime/state/session/subagentStop";
+import type { SubagentMessageAction } from "@ryco/client-runtime/state/session/subagentMessage";
 import type { EnvironmentId, ThreadId } from "@ryco/contracts";
 import { ArrowLeftIcon, BotIcon, BracesIcon, ChevronRightIcon, XIcon } from "lucide-react";
 import {
@@ -53,6 +54,7 @@ import {
 import { cn } from "~/lib/utils";
 import { AgentActivityTimeline } from "./AgentActivityTimeline";
 import { AgentStopButton, makeAgentStopDecorator } from "./agents/AgentStopButton";
+import { AgentMessageBox } from "./agents/AgentMessageBox";
 import {
   AgentElapsed,
   AgentLabel,
@@ -460,11 +462,13 @@ function AgentDetailView({
   selected,
   transcript,
   stopAgent,
+  messageAgent,
   onBack,
 }: {
   selected: RuntimeSubagent;
   transcript: ThreadSubagentView | undefined;
   stopAgent: SubagentStopAction | null;
+  messageAgent: SubagentMessageAction | null;
   onBack: () => void;
 }) {
   const { label, role } = useAgentRowIdentity(selected);
@@ -537,6 +541,7 @@ function AgentDetailView({
           </div>
         ) : null}
       </ScrollArea>
+      {messageAgent ? <AgentMessageBox agent={selected} action={messageAgent} /> : null}
     </div>
   );
 }
@@ -559,6 +564,7 @@ export function AgentsPanel({
   focusWorkflowId = null,
   onFocusWorkflowHandled,
   stopAgent = null,
+  messageAgent = null,
 }: {
   subagents?: ReadonlyArray<ThreadSubagentView>;
   selectedAgentId?: string | null;
@@ -576,6 +582,8 @@ export function AgentsPanel({
   onFocusWorkflowHandled?: () => void;
   /** Stop for the thread's native agents; without it rows and details offer none. */
   stopAgent?: SubagentStopAction | null;
+  /** Messages for the thread's running agents; without it details offer no message box. */
+  messageAgent?: SubagentMessageAction | null;
 }) {
   const [localSelection, setLocalSelection] = useState<string | null>(null);
   useEffect(() => setLocalSelection(null), [threadId]);
@@ -623,6 +631,7 @@ export function AgentsPanel({
             canonicalSubagentIdentityKey(agent.key) === canonicalSubagentIdentityKey(selected.id),
         )}
         stopAgent={stopAgent}
+        messageAgent={messageAgent}
         onBack={() => {
           setLocalSelection(null);
           onBack?.();
