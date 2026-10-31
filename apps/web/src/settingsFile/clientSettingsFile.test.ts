@@ -82,7 +82,7 @@ describe("the client settings file", () => {
       new Date("2026-10-31T08:00:00Z"),
     );
     expect(Object.keys(file.client).toSorted()).toEqual([...CLIENT_SETTINGS_FILE_KEYS].toSorted());
-    expect(Object.keys(file.client)).toHaveLength(20);
+    expect(Object.keys(file.client)).toHaveLength(21);
     for (const key of [
       "localOnboardingCompletedEnvironmentIds",
       "dismissedProviderUpdateNotificationKeys",
