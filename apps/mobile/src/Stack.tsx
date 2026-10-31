@@ -313,12 +313,14 @@ function RootStackLayout(props: {
   useThreadOutboxDrain();
   // New tasks written while their machine was away start once it is live.
   useNewTaskOutboxDrain();
-  // Full pathname (sheets included) for keyboard-command scoping.
+  // Full pathname (sheets included) and the screen beneath any sheets, for
+  // keyboard-command scoping.
   const path = getPathFromState(props.state, navigationPathConfig);
   const pathname = path.startsWith("/") ? path : `/${path}`;
+  const workspacePathname = workspacePathFromState(props.state);
 
   return (
-    <HardwareKeyboardCommandProvider pathname={pathname}>
+    <HardwareKeyboardCommandProvider pathname={pathname} workspacePathname={workspacePathname}>
       <ThreadWorkspaceLayout>{props.children}</ThreadWorkspaceLayout>
     </HardwareKeyboardCommandProvider>
   );

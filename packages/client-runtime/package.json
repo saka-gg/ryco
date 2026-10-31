@@ -10,6 +10,10 @@
       "types": "./src/state/comparison/index.ts",
       "import": "./src/state/comparison/index.ts"
     },
+    "./commandPalette/search": {
+      "types": "./src/commandPalette/search.ts",
+      "import": "./src/commandPalette/search.ts"
+    },
     "./scoped": {
       "types": "./src/scoped.ts",
       "import": "./src/scoped.ts"

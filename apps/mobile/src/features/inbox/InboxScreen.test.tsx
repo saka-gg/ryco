@@ -1,6 +1,6 @@
-import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import type { ReactElement } from "react";
-import type { InboxThreadRow } from "./inboxModel";
+import type { InboxSection, InboxThreadRow } from "./inboxModel";
 
 const rpc = vi.hoisted(() => ({
   dispatch: vi.fn(),
@@ -8,10 +8,17 @@ const rpc = vi.hoisted(() => ({
   alert: vi.fn(),
   customSnooze: vi.fn(),
 }));
+// Effects run as the component renders; their cleanups run after each test.
+const effectCleanups = vi.hoisted((): Array<() => void> => []);
 vi.mock("react", async (original) => ({
   ...(await original<typeof import("react")>()),
   useCallback: <T,>(callback: T) => callback,
+  useEffect: (effect: () => (() => void) | void) => {
+    const cleanup = effect();
+    if (cleanup) effectCleanups.push(cleanup);
+  },
   useMemo: <T,>(factory: () => T) => factory(),
+  useRef: <T,>(current: T) => ({ current }),
   useState: <T,>(value: T) => [value, vi.fn()],
 }));
 vi.mock("react-native", () => ({
@@ -42,6 +49,7 @@ vi.mock("../home/WorkspaceConnectionStatus", () => ({
   WorkspaceConnectionStatus: "WorkspaceConnectionStatus",
 }));
 
+import { dispatchHardwareKeyboardCommand } from "../keyboard/hardwareKeyboardCommands";
 import { InboxScreen, InboxThreadMenuRow } from "./InboxScreen";
 
 /** The function a `memo` wraps, called directly with the hooks above stubbed. */
@@ -75,6 +83,10 @@ function menu(overrides: Partial<InboxThreadRow> = {}): MenuProps {
   expect(menuRow.type).toBe(InboxThreadMenuRow);
   return (render(InboxThreadMenuRow, menuRow.props) as ReactElement<MenuProps>).props;
 }
+
+afterEach(() => {
+  for (const cleanup of effectCleanups.splice(0)) cleanup();
+});
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -155,5 +167,42 @@ describe("inbox snooze menu", () => {
     menu({ canSnooze: false }).onPressAction({ nativeEvent: { event: "snooze-custom" } });
     expect(rpc.customSnooze).toHaveBeenCalledTimes(1);
     expect(rpc.dispatch).not.toHaveBeenCalled();
+  });
+});
+
+describe("inbox thread jumps", () => {
+  const row = (key: string) => ({ key, environmentId: "node", threadId: key }) as InboxThreadRow;
+  const sections: InboxSection[] = [
+    { key: "active", title: "Active", rows: [row("first"), row("second")] },
+    { key: "settled", title: "Settled", rows: [row("settled")] },
+  ];
+
+  it("opens the thread row at a jump's number, as the list shows it", () => {
+    const onOpenThread = vi.fn();
+    render(InboxScreen, {
+      sections,
+      emptyState: null,
+      nowMs: Date.UTC(2026, 9, 12, 9),
+      onOpenThread,
+      onEmptyAction: vi.fn(),
+    });
+
+    expect(dispatchHardwareKeyboardCommand("thread.jump.2")).toBe(true);
+    expect(onOpenThread).toHaveBeenCalledExactlyOnceWith(sections[0]!.rows[1]);
+    // The settled shelf starts collapsed, so its row has no number.
+    dispatchHardwareKeyboardCommand("thread.jump.3");
+    expect(onOpenThread).toHaveBeenCalledTimes(1);
+  });
+
+  it("stops handling jumps once the list is gone", () => {
+    render(InboxScreen, {
+      sections,
+      emptyState: null,
+      nowMs: Date.UTC(2026, 9, 12, 9),
+      onOpenThread: vi.fn(),
+      onEmptyAction: vi.fn(),
+    });
+    for (const cleanup of effectCleanups.splice(0)) cleanup();
+    expect(dispatchHardwareKeyboardCommand("thread.jump.1")).toBe(false);
   });
 });

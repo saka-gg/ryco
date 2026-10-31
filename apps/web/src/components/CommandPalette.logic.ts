@@ -4,6 +4,15 @@ import {
   type FilesystemBrowseEntry,
   type OrchestrationThreadMessageSearchResult,
 } from "@ryco/contracts";
+import {
+  buildCommandPaletteRootGroups,
+  buildCommandPaletteRows as buildSharedCommandPaletteRows,
+  COMMAND_PALETTE_RECENT_THREAD_LIMIT,
+  filterCommandPaletteGroups as filterSharedCommandPaletteGroups,
+  findHighlightedCommandPaletteItem as findSharedHighlightedCommandPaletteItem,
+  type CommandPaletteRow as SharedCommandPaletteRow,
+  type CommandPaletteRows as SharedCommandPaletteRows,
+} from "@ryco/client-runtime/commandPalette/search";
 import type { ThreadLifecycleAction } from "@ryco/client-runtime/state/threads";
 import type { SidebarThreadSortOrder } from "@ryco/contracts/settings";
 import { type ReactNode } from "react";
@@ -14,7 +23,7 @@ import { formatRelativeTimeLabel } from "../timestampFormat";
 import { type Project, type SidebarThreadSummary, type Thread } from "../types";
 import type { SettingsSearchEntry } from "./settings/settingsSearchIndex";
 
-export const RECENT_THREAD_LIMIT = 12;
+export const RECENT_THREAD_LIMIT = COMMAND_PALETTE_RECENT_THREAD_LIMIT;
 /** Settings results show only while typing, under Threads, at most this many. */
 export const SETTINGS_SEARCH_RESULT_LIMIT = 8;
 export const ITEM_ICON_CLASS = "size-4 text-muted-foreground/80";
@@ -125,10 +134,6 @@ export function filterBrowseEntries(input: {
   return { filteredEntries, highlightedEntry, exactEntry };
 }
 
-export function normalizeSearchText(value: string): string {
-  return value.trim().toLowerCase().replace(/\s+/g, " ");
-}
-
 export function buildProjectActionItems(input: {
   projects: ReadonlyArray<Project>;
   valuePrefix: string;
@@ -220,60 +225,6 @@ export function buildThreadActionItems<TThread extends BuildThreadActionItemsThr
       },
     );
   });
-}
-
-function rankSearchFieldMatch(field: string, normalizedQuery: string): number {
-  const normalizedField = normalizeSearchText(field);
-  if (normalizedField.length === 0 || !normalizedField.includes(normalizedQuery)) {
-    return Number.NEGATIVE_INFINITY;
-  }
-  if (normalizedField === normalizedQuery) {
-    return 3;
-  }
-  if (normalizedField.startsWith(normalizedQuery)) {
-    return 2;
-  }
-  return 1;
-}
-
-function rankCommandPaletteItemMatch(
-  item: CommandPaletteActionItem | CommandPaletteSubmenuItem,
-  normalizedQuery: string,
-): number {
-  const terms = item.searchTerms.filter((term) => term.length > 0);
-  if (terms.length === 0) {
-    return 0;
-  }
-
-  for (const [index, field] of terms.entries()) {
-    const fieldRank = rankSearchFieldMatch(field, normalizedQuery);
-    if (fieldRank !== Number.NEGATIVE_INFINITY) {
-      return 1_000 - index * 100 + fieldRank;
-    }
-  }
-
-  return 0;
-}
-
-const ID_FRAGMENT_MIN_LENGTH = 6;
-/** Below every search term match, including one that spans two terms (rank 0). */
-const ID_ONLY_MATCH_RANK = -1;
-
-/**
- * Matches the whole ID, or a fragment of at least six characters that contains
- * a digit. Thread IDs come in several shapes (UUIDs, `thread-…`, `fork-…`,
- * `import-…`), so the digit rule, not a format, keeps words like "face",
- * "decade" or "thread" from listing every thread.
- */
-function createIdSearchMatcher(normalizedQuery: string): (id: string) => boolean {
-  const fragmentQuery =
-    normalizedQuery.length >= ID_FRAGMENT_MIN_LENGTH && /\d/.test(normalizedQuery);
-  return (id) => {
-    const normalizedId = id.toLowerCase();
-    return (
-      normalizedId === normalizedQuery || (fragmentQuery && normalizedId.includes(normalizedQuery))
-    );
-  };
 }
 
 export type CommandPaletteMessageSearchResult = OrchestrationThreadMessageSearchResult & {
@@ -481,6 +432,7 @@ export function buildCurrentThreadLifecycleActions(input: {
   return { items, snoozeUntil };
 }
 
+/** The palette's search, shared with the mobile palette; see `filterCommandPaletteGroups` there. */
 export function filterCommandPaletteGroups(input: {
   activeGroups: ReadonlyArray<CommandPaletteGroup>;
   query: string;
@@ -490,111 +442,31 @@ export function filterCommandPaletteGroups(input: {
   settingsSearchItems?: ReadonlyArray<CommandPaletteActionItem>;
   messageSearchItems?: ReadonlyArray<CommandPaletteActionItem>;
 }): CommandPaletteGroup[] {
-  const isActionsFilter = input.query.startsWith(">");
-  const searchQuery = isActionsFilter ? input.query.slice(1) : input.query;
-  const normalizedQuery = normalizeSearchText(searchQuery);
-
-  if (normalizedQuery.length === 0) {
-    if (isActionsFilter) {
-      return input.activeGroups.filter((group) => group.value === "actions");
-    }
-    return [...input.activeGroups];
-  }
-
-  let baseGroups = [...input.activeGroups];
-  if (isActionsFilter) {
-    baseGroups = baseGroups.filter((group) => group.value === "actions");
-  } else if (!input.isInSubmenu) {
-    baseGroups = baseGroups.filter((group) => group.value !== "recent-threads");
-  }
-
-  const searchableGroups = [...baseGroups];
-  if (!input.isInSubmenu && !isActionsFilter) {
-    if (input.projectSearchItems.length > 0) {
-      searchableGroups.push({
-        value: "projects-search",
-        label: "Projects",
-        items: input.projectSearchItems,
-      });
-    }
-    if (input.threadSearchItems.length > 0) {
-      searchableGroups.push({
-        value: "threads-search",
-        label: "Threads",
-        items: input.threadSearchItems,
-      });
-    }
-    if (input.settingsSearchItems && input.settingsSearchItems.length > 0) {
-      searchableGroups.push({
+  return filterSharedCommandPaletteGroups({
+    activeGroups: input.activeGroups,
+    query: input.query,
+    isInSubmenu: input.isInSubmenu,
+    searchGroups: [
+      { value: "projects-search", label: "Projects", items: input.projectSearchItems },
+      { value: "threads-search", label: "Threads", items: input.threadSearchItems },
+      {
         value: "settings-search",
         label: "Settings",
-        items: input.settingsSearchItems,
-      });
-    }
-    if (input.messageSearchItems && input.messageSearchItems.length > 0) {
-      searchableGroups.push({
-        value: "messages-search",
-        label: "Messages",
-        items: input.messageSearchItems,
-      });
-    }
-  }
-
-  const matchesId = createIdSearchMatcher(normalizedQuery);
-  return searchableGroups.flatMap((group) => {
-    const items = group.items
-      .map((item, index) => {
-        const haystack = normalizeSearchText(item.searchTerms.join(" "));
-        if (!haystack.includes(normalizedQuery)) {
-          return item.idSearchTerms?.some(matchesId)
-            ? { item, index, rank: ID_ONLY_MATCH_RANK }
-            : null;
-        }
-
-        return {
-          item,
-          index,
-          rank: rankCommandPaletteItemMatch(item, normalizedQuery),
-        };
-      })
-      .filter(
-        (entry): entry is { item: (typeof group.items)[number]; index: number; rank: number } =>
-          entry !== null,
-      )
-      .toSorted((left, right) => right.rank - left.rank || left.index - right.index)
-      .slice(0, group.value === "settings-search" ? SETTINGS_SEARCH_RESULT_LIMIT : undefined)
-      .map((entry) => entry.item);
-
-    if (items.length === 0) {
-      return [];
-    }
-
-    return [{ value: group.value, label: group.label, items }];
+        items: input.settingsSearchItems ?? [],
+        limit: SETTINGS_SEARCH_RESULT_LIMIT,
+      },
+      { value: "messages-search", label: "Messages", items: input.messageSearchItems ?? [] },
+    ],
   });
 }
 
-export type CommandPaletteRow =
-  | {
-      readonly kind: "label";
-      readonly key: string;
-      readonly label: string;
-      readonly first: boolean;
-    }
-  | {
-      readonly kind: "item";
-      readonly key: string;
-      readonly item: CommandPaletteActionItem | CommandPaletteSubmenuItem;
-      /** Position among enabled items, or null for disabled rows the keyboard skips. */
-      readonly itemIndex: number | null;
-    };
+export type CommandPaletteRow = SharedCommandPaletteRow<
+  CommandPaletteActionItem | CommandPaletteSubmenuItem
+>;
 
-export interface CommandPaletteRows {
-  readonly rows: ReadonlyArray<CommandPaletteRow>;
-  /** The highlightable item order the Command root navigates (its `items`). */
-  readonly itemValues: ReadonlyArray<string>;
-  /** Maps a highlighted item's index back to its row, for scrolling it into view. */
-  readonly rowIndexByItemIndex: ReadonlyArray<number>;
-}
+export type CommandPaletteRows = SharedCommandPaletteRows<
+  CommandPaletteActionItem | CommandPaletteSubmenuItem
+>;
 
 /**
  * Flattens groups into the rows a virtualized list renders: each group's label,
@@ -604,28 +476,7 @@ export interface CommandPaletteRows {
 export function buildCommandPaletteRows(
   groups: ReadonlyArray<CommandPaletteGroup>,
 ): CommandPaletteRows {
-  const rows: CommandPaletteRow[] = [];
-  const itemValues: string[] = [];
-  const rowIndexByItemIndex: number[] = [];
-  for (const group of groups) {
-    if (group.label) {
-      rows.push({
-        kind: "label",
-        key: `group:${group.value}`,
-        label: group.label,
-        first: rows.length === 0,
-      });
-    }
-    for (const item of group.items) {
-      const itemIndex = item.disabled ? null : itemValues.length;
-      if (itemIndex !== null) {
-        itemValues.push(item.value);
-        rowIndexByItemIndex.push(rows.length);
-      }
-      rows.push({ kind: "item", key: `${group.value}:${item.value}`, item, itemIndex });
-    }
-  }
-  return { rows, itemValues, rowIndexByItemIndex };
+  return buildSharedCommandPaletteRows(groups);
 }
 
 /** The enabled item Enter should run for a highlight, whether or not its row is mounted. */
@@ -633,13 +484,7 @@ export function findHighlightedCommandPaletteItem(
   groups: ReadonlyArray<CommandPaletteGroup>,
   highlightedItemValue: string | null,
 ): CommandPaletteActionItem | CommandPaletteSubmenuItem | null {
-  if (highlightedItemValue === null) return null;
-  for (const group of groups) {
-    for (const item of group.items) {
-      if (item.value === highlightedItemValue && !item.disabled) return item;
-    }
-  }
-  return null;
+  return findSharedHighlightedCommandPaletteItem(groups, highlightedItemValue);
 }
 
 export function buildBrowseGroups(input: {
@@ -707,18 +552,7 @@ export function buildRootGroups(input: {
   actionItems: ReadonlyArray<CommandPaletteActionItem | CommandPaletteSubmenuItem>;
   recentThreadItems: ReadonlyArray<CommandPaletteActionItem>;
 }): CommandPaletteGroup[] {
-  const groups: CommandPaletteGroup[] = [];
-  if (input.actionItems.length > 0) {
-    groups.push({ value: "actions", label: "Actions", items: input.actionItems });
-  }
-  if (input.recentThreadItems.length > 0) {
-    groups.push({
-      value: "recent-threads",
-      label: "Recent Threads",
-      items: input.recentThreadItems,
-    });
-  }
-  return groups;
+  return buildCommandPaletteRootGroups<CommandPaletteActionItem | CommandPaletteSubmenuItem>(input);
 }
 
 export function getCommandPaletteInputPlaceholder(mode: CommandPaletteMode): string {

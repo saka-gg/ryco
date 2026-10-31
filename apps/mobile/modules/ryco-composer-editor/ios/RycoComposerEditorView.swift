@@ -64,9 +64,14 @@ private final class ComposerTextView: UITextView {
   var onPasteImages: (([String]) -> Void)?
   var onAttributedMutation: (() -> Void)?
   var onSubmit: (() -> Void)?
+  /// Return sends and Shift-Return starts a new line on a hardware keyboard.
+  /// Set only where the composer can send; Command-Return always sends.
+  var submitsOnReturn = false
 
   override var keyCommands: [UIKeyCommand]? {
     var commands = super.keyCommands ?? []
+    // Return belongs to the input method while it is composing (marked text).
+    guard isEditable, markedTextRange == nil else { return commands }
     let submit = UIKeyCommand(
       input: "\r",
       modifierFlags: .command,
@@ -75,11 +80,36 @@ private final class ComposerTextView: UITextView {
     submit.discoverabilityTitle = "Send Message"
     submit.wantsPriorityOverSystemBehavior = true
     commands.append(submit)
+    if submitsOnReturn {
+      let submitOnReturn = UIKeyCommand(
+        input: "\r",
+        modifierFlags: [],
+        action: #selector(submitMessage(_:))
+      )
+      submitOnReturn.discoverabilityTitle = "Send Message"
+      submitOnReturn.wantsPriorityOverSystemBehavior = true
+      commands.append(submitOnReturn)
+
+      let newline = UIKeyCommand(
+        input: "\r",
+        modifierFlags: .shift,
+        action: #selector(insertNewline(_:))
+      )
+      newline.discoverabilityTitle = "New Line"
+      newline.wantsPriorityOverSystemBehavior = true
+      commands.append(newline)
+    }
     return commands
   }
 
   @objc private func submitMessage(_ sender: UIKeyCommand) {
+    guard isEditable, markedTextRange == nil else { return }
     onSubmit?()
+  }
+
+  @objc private func insertNewline(_ sender: UIKeyCommand) {
+    guard isEditable, markedTextRange == nil else { return }
+    insertText("\n")
   }
 
   override func canPerformAction(_ action: Selector, withSender sender: Any?) -> Bool {
@@ -460,6 +490,10 @@ public final class RycoComposerEditorView: ExpoView, UITextViewDelegate {
 
   func setAutoCorrect(_ autoCorrect: Bool) {
     textView.autocorrectionType = autoCorrect ? .yes : .no
+  }
+
+  func setSubmitsOnReturn(_ submitsOnReturn: Bool) {
+    textView.submitsOnReturn = submitsOnReturn
   }
 
   func setSpellCheck(_ spellCheck: Bool) {
