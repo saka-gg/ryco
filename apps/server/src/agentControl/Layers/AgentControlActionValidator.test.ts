@@ -2047,3 +2047,50 @@ describe("pull request watches", () => {
     }),
   );
 });
+
+it.effect("refuses tasks past the person's delegation limits, with the batch's size", () =>
+  Effect.gen(function* () {
+    const snapshot = yield* Ref.make(makeSnapshot());
+    const providers = yield* Ref.make<ReadonlyArray<typeof provider>>([provider]);
+    const asked: Array<{ readonly callerThreadId: ThreadId; readonly newTasks: number }> = [];
+    let refusal: string | null = null;
+    const validator = makeAgentControlActionValidatorFromDeps({
+      projections: {
+        getShellSnapshot: () => Ref.get(snapshot),
+      } as unknown as ProjectionSnapshotQueryShape,
+      getProviders: Ref.get(providers),
+      listRefs: () => Effect.die("unused"),
+      delegationLimitRefusal: (input) => {
+        asked.push(input);
+        return Effect.succeed(refusal);
+      },
+    });
+    const entry = {
+      projectId,
+      title: "Split the work",
+      prompt: "Split the work",
+      modelSelection: { instanceId: providerInstanceId, model: "gpt-5.6", options: [] },
+      runtimeMode: "approval-required" as const,
+      envMode: "worktree" as const,
+    };
+    const plan = { kind: "createThreads" as const, entries: [entry, entry, entry] };
+
+    const principal = yield* validator.validateSubmission({ session, authority, plan });
+    yield* validator.revalidateExecution(approvedProposal(principal, plan));
+    // Submission counts the whole batch; revalidation runs before each create of an executing
+    // batch, whose earlier tasks already count, so it asks with none (the decider counts each).
+    assert.deepStrictEqual(asked, [
+      { callerThreadId, newTasks: 3 },
+      { callerThreadId, newTasks: 0 },
+    ]);
+
+    refusal = "Delegation limit: this chat may not delegate.";
+    const refused = yield* Effect.flip(validator.validateSubmission({ session, authority, plan }));
+    assert.strictEqual(refused.reason, "delegation-limit");
+    assert.strictEqual(refused.detail, refusal);
+    const stale = yield* Effect.flip(
+      validator.revalidateExecution(approvedProposal(principal, plan)),
+    );
+    assert.strictEqual(stale.reason, "delegation-limit");
+  }),
+);

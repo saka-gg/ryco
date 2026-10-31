@@ -1,3 +1,4 @@
+import { NO_DELEGATION_LIMITS } from "../../orchestration/delegationLimits.ts";
 import {
   AGENT_CONTROL_ACTION_CAPABILITIES,
   AGENT_CONTROL_CAPABILITIES,
@@ -167,6 +168,7 @@ async function harness(options: HarnessOptions = {}) {
 
   const policy: AgentControlPolicyShape = {
     isEnabled: Effect.succeed(options.enabled ?? true),
+    delegationLimits: Effect.succeed(NO_DELEGATION_LIMITS),
     requireEnabled: () => Effect.void,
     requiredCapabilityForAction: (kind) => AGENT_CONTROL_ACTION_CAPABILITIES[kind],
     authorize: (input) =>

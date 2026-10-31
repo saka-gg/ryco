@@ -1,4 +1,5 @@
 import { afterEach, expect, it, vi } from "vitest";
+import { NO_DELEGATION_LIMITS } from "../../orchestration/delegationLimits.ts";
 import { Effect, Option } from "effect";
 import {
   AGENT_CONTROL_CAPABILITIES,
@@ -66,6 +67,7 @@ function fixture(
     stateDir: "/tmp/ryco-computer-beta-test",
     policy: {
       isEnabled: Effect.succeed(true),
+      delegationLimits: Effect.succeed(NO_DELEGATION_LIMITS),
       requireEnabled: () => Effect.void,
       requiredCapabilityForAction: () => AGENT_CONTROL_CAPABILITIES.controlComputer,
       authorize: () => Effect.void,

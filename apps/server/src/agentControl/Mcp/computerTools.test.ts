@@ -1,4 +1,5 @@
 import * as fs from "node:fs";
+import { NO_DELEGATION_LIMITS } from "../../orchestration/delegationLimits.ts";
 import * as os from "node:os";
 import * as path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -60,6 +61,7 @@ function fixture(current = Option.some(authority)) {
     config: { url: "http://127.0.0.1:12345/control", token: "a".repeat(43) },
     policy: {
       isEnabled: Effect.succeed(true),
+      delegationLimits: Effect.succeed(NO_DELEGATION_LIMITS),
       requireEnabled: () => Effect.void,
       requiredCapabilityForAction: () => AGENT_CONTROL_CAPABILITIES.read,
       authorize,
@@ -187,6 +189,7 @@ describe("upload", () => {
       },
       policy: {
         isEnabled: Effect.succeed(true),
+        delegationLimits: Effect.succeed(NO_DELEGATION_LIMITS),
         requireEnabled: () => Effect.void,
         requiredCapabilityForAction: () => AGENT_CONTROL_CAPABILITIES.read,
         authorize: () => Effect.void,

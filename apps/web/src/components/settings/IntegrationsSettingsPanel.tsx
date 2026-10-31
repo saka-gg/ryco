@@ -14,6 +14,7 @@ import { Button } from "../ui/button";
 import { Switch } from "../ui/switch";
 import { AgentControlMcpInstallations } from "./AgentControlMcpInstallations";
 import { ExternalIntegrationsSettings } from "./IntegrationsSettings";
+import { SettingsSelect, type SettingsSelectOption } from "./SettingsSelect";
 import {
   SettingsBlock,
   SettingsCard,
@@ -78,7 +79,8 @@ function ComputerUseSection() {
 }
 
 function NodeIntegrationsSettingsPanel() {
-  const enabled = useSettings((settings) => settings.agentControl.enabled);
+  const agentControl = useSettings((settings) => settings.agentControl);
+  const enabled = agentControl.enabled;
   const { updateSettings } = useUpdateSettings();
   const target = useSettingsTarget();
   const settingsCapability = useHostedRpcCapability(
@@ -111,7 +113,7 @@ function NodeIntegrationsSettingsPanel() {
               checked={enabled}
               disabled={!settingsCapability.allowed}
               onCheckedChange={(checked) =>
-                updateSettings({ agentControl: { enabled: Boolean(checked) } })
+                updateSettings({ agentControl: { ...agentControl, enabled: Boolean(checked) } })
               }
               aria-label="Enable Agent Control"
             />
@@ -120,6 +122,10 @@ function NodeIntegrationsSettingsPanel() {
       </SettingsSection>
       {enabled ? (
         <>
+          <DelegationLimitsSection
+            disabled={!settingsCapability.allowed}
+            disabledReason={settingsReason}
+          />
           <AgentControlMcpInstallations />
           <SettingsCard>
             <SettingsRow
@@ -156,5 +162,83 @@ function NodeIntegrationsSettingsPanel() {
         </>
       ) : null}
     </>
+  );
+}
+
+const NO_LIMIT = "none";
+const DEPTH_OPTIONS: ReadonlyArray<SettingsSelectOption<string>> = [
+  { value: NO_LIMIT, label: "No limit" },
+  { value: "1", label: "1 level: tasks can't delegate" },
+  { value: "2", label: "2 levels" },
+  { value: "3", label: "3 levels" },
+  { value: "5", label: "5 levels" },
+];
+const TASK_OPTIONS: ReadonlyArray<SettingsSelectOption<string>> = [
+  { value: NO_LIMIT, label: "No limit" },
+  ...[10, 25, 50, 100, 250].map((count) => ({ value: String(count), label: `${count} tasks` })),
+];
+
+const limitValue = (limit: number | null) => (limit === null ? NO_LIMIT : String(limit));
+const parseLimit = (value: string) => (value === NO_LIMIT ? null : Number.parseInt(value, 10));
+/** A saved limit the list doesn't offer (set elsewhere) stays selectable as itself. */
+const withCurrent = (
+  options: ReadonlyArray<SettingsSelectOption<string>>,
+  limit: number | null,
+  label: (limit: number) => string,
+) =>
+  limit === null || options.some((option) => option.value === String(limit))
+    ? options
+    : [...options, { value: String(limit), label: label(limit) }];
+
+/** The person's opt-in limits on agents delegating to agents (`ryco_create_threads`). */
+function DelegationLimitsSection({
+  disabled,
+  disabledReason,
+}: {
+  disabled: boolean;
+  disabledReason: string | null | undefined;
+}) {
+  const agentControl = useSettings((settings) => settings.agentControl);
+  const limits = agentControl.delegation;
+  const { updateSettings } = useUpdateSettings();
+  const setLimits = (next: Partial<typeof limits>) =>
+    updateSettings({ agentControl: { ...agentControl, delegation: { ...limits, ...next } } });
+  const status =
+    disabled && disabledReason ? (
+      <span className="text-destructive-foreground">{disabledReason}</span>
+    ) : undefined;
+  return (
+    <SettingsSection
+      title="Delegation limits"
+      description="Stop agents from delegating without end. A chat you start can hand work to tasks, and tasks can hand work on in turn. These limits apply to new requests; tasks already created keep running."
+    >
+      <SettingsRow
+        title="How deep tasks can go"
+        description="Levels of tasks below the chat that started them. A task at the last level gets no delegation tools."
+        status={status}
+        control={
+          <SettingsSelect
+            value={limitValue(limits.maxDepth)}
+            disabled={disabled}
+            ariaLabel="How deep tasks can go"
+            options={withCurrent(DEPTH_OPTIONS, limits.maxDepth, (limit) => `${limit} levels`)}
+            onValueChange={(value) => setLimits({ maxDepth: parseLimit(value) })}
+          />
+        }
+      />
+      <SettingsRow
+        title="Tasks per chat"
+        description="How many tasks one chat and everything it delegated may create in all, finished and archived ones included."
+        control={
+          <SettingsSelect
+            value={limitValue(limits.maxTasksPerTree)}
+            disabled={disabled}
+            ariaLabel="Tasks per chat"
+            options={withCurrent(TASK_OPTIONS, limits.maxTasksPerTree, (limit) => `${limit} tasks`)}
+            onValueChange={(value) => setLimits({ maxTasksPerTree: parseLimit(value) })}
+          />
+        }
+      />
+    </SettingsSection>
   );
 }

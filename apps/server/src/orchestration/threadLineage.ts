@@ -3,7 +3,9 @@
  *
  * Lineage is provenance only: it records which thread a thread was created from
  * (delegated on behalf of, or forked from). It grants nothing and must never be
- * read by Agent Control policy, validation, approvals or return delivery.
+ * read to grant authority, approve anything or deliver returns. The one reader in
+ * Agent Control is the person's opt-in delegation limits (`delegationLimits.ts`),
+ * which only refuse.
  *
  * Pure functions, no Effect services.
  */

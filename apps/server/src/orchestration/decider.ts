@@ -55,6 +55,7 @@ import {
 import { OrchestrationCommandInvariantError } from "./Errors.ts";
 import {
   findProjectById,
+  findThreadById,
   isThreadLive,
   isThreadPristine,
   isThreadTrashed,
@@ -101,6 +102,11 @@ import {
   serverWakeSource,
 } from "./serverWake.ts";
 import { threadReferencesPayload } from "./threadReferences.ts";
+import {
+  delegationLimitRefusal,
+  delegationPosition,
+  delegationTreeTaskCount,
+} from "./delegationLimits.ts";
 import { restartContinuationTargetBlocker } from "./restartContinuationPolicy.ts";
 import {
   SUPERSEDED_RUNTIME_SESSION_SET_DETAIL,
@@ -898,7 +904,7 @@ const decideCommand = Effect.fn("decideOrchestrationCommand.command")(function* 
     }
 
     case "thread.delegated.create": {
-      const { type: _type, parentThreadId, ...fields } = command;
+      const { type: _type, parentThreadId, delegationLimits, ...fields } = command;
       if (parentThreadId === fields.threadId) {
         return yield* new OrchestrationCommandInvariantError({
           commandType: command.type,
@@ -933,6 +939,21 @@ const decideCommand = Effect.fn("decideOrchestrationCommand.command")(function* 
           commandType: command.type,
           detail: resolved.detail,
         });
+      }
+      if (delegationLimits !== undefined) {
+        const refusal = delegationLimitRefusal({
+          limits: delegationLimits,
+          callerDepth: delegationPosition(parent, (threadId) => findThreadById(readModel, threadId))
+            .depth,
+          treeTasks: delegationTreeTaskCount(readModel.threads, resolved.lineage.rootThreadId),
+          newTasks: 1,
+        });
+        if (refusal !== null) {
+          return yield* new OrchestrationCommandInvariantError({
+            commandType: command.type,
+            detail: refusal,
+          });
+        }
       }
       return yield* decideThreadCreated({
         readModel,

@@ -174,6 +174,7 @@ export class AgentControlPlanValidationError extends Schema.TaggedError<AgentCon
       "task-unavailable",
       "task-stale",
       "delegated-return-pending",
+      "delegation-limit",
     ]),
     detail: Schema.String,
   },

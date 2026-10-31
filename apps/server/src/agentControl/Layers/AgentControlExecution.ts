@@ -7,6 +7,7 @@ import { AGENT_CONTROL_MESSAGE_ID_PREFIX, DEFAULT_SERVER_SETTINGS } from "@ryco/
 import { buildGeneratedWorktreeBranchName } from "@ryco/shared/git";
 import { setupProjectScript } from "@ryco/shared/projectScripts";
 import { ServerSettingsService } from "../../serverSettings.ts";
+import { hasDelegationLimits } from "../../orchestration/delegationLimits.ts";
 import { existsSync } from "node:fs";
 import path from "node:path";
 
@@ -1255,6 +1256,11 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
                     type: "thread.delegated.create",
                     ...createFields,
                     parentThreadId: delegatedParentThreadId,
+                    // Checked again by the decider, which serializes every create, so concurrent
+                    // requests cannot overshoot a budget the validator saw room in.
+                    ...(hasDelegationLimits(worktreeSettings.agentControl.delegation)
+                      ? { delegationLimits: worktreeSettings.agentControl.delegation }
+                      : {}),
                   },
               (state) => ({
                 ...state,

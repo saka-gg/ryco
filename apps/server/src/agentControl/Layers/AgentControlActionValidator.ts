@@ -50,6 +50,13 @@ import {
 import { assertSafeAgentControlDeviceUrl, isAgentControlDevicePlan } from "../deviceControl.ts";
 import { resolveThreadArtifacts } from "../artifactHandoff.ts";
 import { LocalTaskService, type LocalTaskServiceShape } from "../../tasks/LocalTaskService.ts";
+import * as SqlClient from "effect/sql/SqlClient";
+import { ServerSettingsService } from "../../serverSettings.ts";
+import {
+  delegationLimitRefusal,
+  hasDelegationLimits,
+} from "../../orchestration/delegationLimits.ts";
+import { readDelegationTree } from "../../persistence/delegationTreeQueries.ts";
 import {
   CompletionReturnRepository,
   isPendingCompletionReturn,
@@ -588,6 +595,14 @@ export const makeAgentControlActionValidatorFromDeps = (deps: {
   readonly delegatedReturnPending?: (
     threadId: ThreadId,
   ) => Effect.Effect<boolean, AgentControlPlanValidationError>;
+  /**
+   * Why the person's delegation limits refuse `newTasks` more tasks from this chat, or null.
+   * Absent: no limits apply.
+   */
+  readonly delegationLimitRefusal?: (input: {
+    readonly callerThreadId: ThreadId;
+    readonly newTasks: number;
+  }) => Effect.Effect<string | null, AgentControlPlanValidationError>;
 }): AgentControlActionValidatorShape => {
   const validateAutomation = <A, E>(effect: Effect.Effect<A, E>) =>
     effect.pipe(
@@ -742,6 +757,27 @@ export const makeAgentControlActionValidatorFromDeps = (deps: {
           { discard: true },
         );
 
+  /**
+   * The opt-in delegation limits: a provider thread's createThreads plan creates delegated tasks.
+   * `newTasks` is the batch at submission. Revalidation runs before each create of an executing
+   * batch, whose earlier tasks already count, so it passes 0 (depth, and a tree already over its
+   * budget); the decider checks each create against the budget.
+   */
+  const refuseOverDelegationLimits = (
+    plan: AgentControlActionPlan,
+    callerThreadId: ThreadId,
+    newTasks: number,
+  ) =>
+    plan.kind !== "createThreads" || deps.delegationLimitRefusal === undefined
+      ? Effect.void
+      : deps
+          .delegationLimitRefusal({ callerThreadId, newTasks })
+          .pipe(
+            Effect.flatMap((refusal) =>
+              refusal === null ? Effect.void : fail("delegation-limit", refusal),
+            ),
+          );
+
   const validateSubmission: AgentControlActionValidatorShape["validateSubmission"] = (input) =>
     Effect.gen(function* () {
       const { snapshot, providers } = yield* loadState([
@@ -861,6 +897,11 @@ export const makeAgentControlActionValidatorFromDeps = (deps: {
         yield* validateLocalTaskStarts(input.plan);
         yield* validateHandoffArtifacts(input.plan, caller.id);
         yield* refuseAwaitedDelegation(input.plan, caller.id);
+        yield* refuseOverDelegationLimits(
+          input.plan,
+          caller.id,
+          input.plan.kind === "createThreads" ? input.plan.entries.length : 0,
+        );
       }
 
       const targetSnapshots: Array<
@@ -1175,6 +1216,7 @@ export const makeAgentControlActionValidatorFromDeps = (deps: {
         yield* validateLocalTaskStarts(proposal.plan);
         yield* validateHandoffArtifacts(proposal.plan, principal.threadId);
         yield* refuseAwaitedDelegation(proposal.plan, principal.threadId);
+        yield* refuseOverDelegationLimits(proposal.plan, principal.threadId, 0);
       } else if (proposal.plan.kind === "pullRequestWatch") {
         return yield* fail(
           "privilege-escalation",
@@ -1468,6 +1510,8 @@ const makeAgentControlActionValidator = Effect.gen(function* () {
   const deviceService = yield* Effect.serviceOption(DeviceService);
   const localTasks = yield* Effect.serviceOption(LocalTaskService);
   const completionReturns = yield* Effect.serviceOption(CompletionReturnRepository);
+  const settings = yield* Effect.serviceOption(ServerSettingsService);
+  const sql = yield* Effect.serviceOption(SqlClient.SqlClient);
   return makeAgentControlActionValidatorFromDeps({
     projections,
     getProviders: providerRegistry.getProviders,
@@ -1495,6 +1539,36 @@ const makeAgentControlActionValidator = Effect.gen(function* () {
       : {}),
     ...(Option.isSome(externalIntegrations)
       ? { revalidateExternal: externalIntegrations.value.revalidate }
+      : {}),
+    ...(Option.isSome(settings) && Option.isSome(sql)
+      ? {
+          delegationLimitRefusal: (input: {
+            readonly callerThreadId: ThreadId;
+            readonly newTasks: number;
+          }) =>
+            Effect.gen(function* () {
+              const limits = (yield* settings.value.getSettings).agentControl.delegation;
+              if (!hasDelegationLimits(limits)) return null;
+              const tree = yield* readDelegationTree(sql.value, input.callerThreadId);
+              if (tree === null)
+                return "Delegation limit: this chat's place in its tree is unknown.";
+              return delegationLimitRefusal({
+                limits,
+                callerDepth: tree.depth,
+                treeTasks: tree.treeTasks,
+                newTasks: input.newTasks,
+              });
+            }).pipe(
+              // Fails closed: unreadable limits or lineage never let a request through.
+              Effect.mapError(
+                () =>
+                  new AgentControlPlanValidationError({
+                    reason: "thread-unavailable",
+                    detail: "Could not check the delegation limits. Try again.",
+                  }),
+              ),
+            ),
+        }
       : {}),
   });
 });

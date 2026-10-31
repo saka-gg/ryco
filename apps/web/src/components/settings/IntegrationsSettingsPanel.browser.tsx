@@ -8,6 +8,7 @@ import { render } from "vitest-browser-react";
 
 const harness = vi.hoisted(() => ({
   enabled: false,
+  delegation: { maxDepth: null as number | null, maxTasksPerTree: null as number | null },
   hosted: false,
   updateSettings: vi.fn(),
   settingsAllowed: true,
@@ -24,8 +25,11 @@ vi.mock("../../env", async (importOriginal) => ({
 
 vi.mock("../../hooks/useSettings", () => ({
   getClientSettings: () => ({}),
-  useSettings: <T,>(selector: (settings: { agentControl: { enabled: boolean } }) => T): T =>
-    selector({ agentControl: { enabled: harness.enabled } }),
+  useSettings: <T,>(
+    selector: (settings: {
+      agentControl: { enabled: boolean; delegation: typeof harness.delegation };
+    }) => T,
+  ): T => selector({ agentControl: { enabled: harness.enabled, delegation: harness.delegation } }),
   useUpdateSettings: () => ({ updateSettings: harness.updateSettings }),
 }));
 
@@ -102,6 +106,7 @@ describe("IntegrationsSettingsPanel", () => {
   beforeEach(() => {
     delete window.desktopBridge;
     harness.enabled = false;
+    harness.delegation = { maxDepth: null, maxTasksPerTree: null };
     harness.hosted = false;
     harness.settingsAllowed = true;
     harness.settingsReason = null;
@@ -194,7 +199,9 @@ describe("IntegrationsSettingsPanel", () => {
 
     await toggle.click();
 
-    expect(harness.updateSettings).toHaveBeenCalledWith({ agentControl: { enabled: true } });
+    expect(harness.updateSettings).toHaveBeenCalledWith({
+      agentControl: { enabled: true, delegation: { maxDepth: null, maxTasksPerTree: null } },
+    });
   });
 
   it("keeps the toggle disabled when Settings writes are unavailable", async () => {
@@ -215,5 +222,28 @@ describe("IntegrationsSettingsPanel", () => {
     await expect
       .element(page.getByText(/Ryco sessions receive the tools automatically/))
       .toBeVisible();
+  });
+
+  it("sets the delegation limits once Agent Control is on, keeping the other limit", async () => {
+    harness.enabled = true;
+    harness.delegation = { maxDepth: null, maxTasksPerTree: 50 };
+    render(<IntegrationsSettingsPanel />);
+
+    await page.getByLabelText("How deep tasks can go").click();
+    await page.getByRole("option", { name: "1 level: tasks can't delegate" }).click();
+    expect(harness.updateSettings).toHaveBeenCalledWith({
+      agentControl: { enabled: true, delegation: { maxDepth: 1, maxTasksPerTree: 50 } },
+    });
+
+    await page.getByLabelText("Tasks per chat").click();
+    await page.getByRole("option", { name: "250 tasks" }).click();
+    expect(harness.updateSettings).toHaveBeenLastCalledWith({
+      agentControl: { enabled: true, delegation: { maxDepth: null, maxTasksPerTree: 250 } },
+    });
+  });
+
+  it("hides the delegation limits while Agent Control is off", async () => {
+    render(<IntegrationsSettingsPanel />);
+    await expect.element(page.getByText("Delegation limits")).not.toBeInTheDocument();
   });
 });
