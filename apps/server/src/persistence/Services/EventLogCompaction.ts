@@ -10,6 +10,8 @@
  */
 import { Context, Schema } from "effect";
 import type { Effect } from "effect";
+import type * as SqlClient from "effect/sql/SqlClient";
+import type { SqlError } from "effect/sql/SqlError";
 
 import type { PersistenceSqlError } from "../Errors.ts";
 
@@ -37,6 +39,55 @@ export interface EventLogCompactionReceiptOptions {
   readonly deleteBatch: number;
   /** Receipts examined per pass at most. */
   readonly maxScanRows: number;
+}
+
+/**
+ * Event-log retention (`Layers/EventLogRetention.ts`): removes events no reader needs any more
+ * and raises the replay floors of their streams. Null disables it.
+ */
+export interface EventLogRetentionOptions {
+  /** A permanently deleted thread's events go this long after its deletion. */
+  readonly deletedThreadSettleMs: number;
+  /** A live thread's events older than this go (outside its latest turn and the anchors). */
+  readonly windowMs: number;
+  /** Events removed per transaction. */
+  readonly deleteBatch: number;
+  /** Events removed per pass at most (the pass's time budget applies too). */
+  readonly maxEventsPerPass: number;
+}
+
+/**
+ * One thread's Statistics contribution, as Statistics computes it (`readStatisticsThreadPartial`),
+ * read on the connection given. Retention stores it before it removes a deleted thread's events;
+ * without it, deleted threads keep their events. Injected by the boot-side layer so the lazily
+ * loaded pass never imports Statistics (a shared boot module imported from a lazy chunk splits
+ * the boot chunk).
+ */
+export type ThreadUsageReader = (
+  sql: SqlClient.SqlClient,
+  threadId: string,
+) => Effect.Effect<unknown, SqlError | Schema.SchemaError>;
+
+/**
+ * The usage reader the server's compaction layer hands to retention. Provided next to Statistics
+ * (`statisticsRows.ts`) rather than imported by the layer, which `ryco doctor` also loads.
+ */
+export class EventLogCompactionUsageReader extends Context.Service<
+  EventLogCompactionUsageReader,
+  { readonly readThreadUsage: ThreadUsageReader }
+>()("ryco/persistence/Services/EventLogCompactionUsageReader") {}
+
+export interface RetentionPassResult {
+  /** Deleted threads whose events were removed (fully or in part) this pass. */
+  readonly deletedThreads: number;
+  /** Live threads whose old events were removed this pass. */
+  readonly trimmedThreads: number;
+  readonly deletedEvents: number;
+  readonly deletedBytes: number;
+  /** Usage rollups written (one per deleted thread incarnation). */
+  readonly rollups: number;
+  /** A budget stopped the pass with candidates left. */
+  readonly backlog: boolean;
 }
 
 export interface CompactionProgress {
@@ -76,6 +127,8 @@ export interface EventLogCompactionPassOptions {
   /** Keys whose newest version is remembered across windows (LRU); eviction only deletes less. */
   readonly carryCapacity: number;
   readonly receipts: EventLogCompactionReceiptOptions | null;
+  /** Absent or null: no retention (tests and callers that only compact). */
+  readonly retention?: EventLogRetentionOptions | null;
   readonly mode: EventLogCompactionMode;
   /**
    * Start at sequence 0 instead of the stored cursor. An offline pass uses it to remove what
@@ -110,6 +163,8 @@ export const CompactionLastPass = Schema.Struct({
   backlogSequences: NonNegativeNumber,
   /** Old receipts may still be waiting (a restart resumes the catch-up cadence for them too). */
   receiptBacklog: Schema.Boolean,
+  /** Retention stopped at a budget with candidates left (absent: retention did not run). */
+  retentionBacklog: Schema.optionalKey(Schema.Boolean),
 });
 export type CompactionLastPass = typeof CompactionLastPass.Type;
 
@@ -160,6 +215,8 @@ export interface CompactionPassResult {
    * event phase stopped at one before the walk began. False when receipts are disabled.
    */
   readonly receiptBacklog: boolean;
+  /** Null when retention did not run (disabled, or the event phase stopped at a budget). */
+  readonly retention: RetentionPassResult | null;
   readonly durationMs: number;
   /** Time spent in statements on the main connection (and selection when it ran there). */
   readonly mainThreadMs: number;

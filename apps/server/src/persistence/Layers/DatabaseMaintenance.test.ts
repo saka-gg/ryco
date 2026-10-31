@@ -57,6 +57,7 @@ const passResult = (
   scannedReceipts: 0,
   deletedReceipts: 0,
   receiptBacklog,
+  retention: null,
   durationMs: 5,
   mainThreadMs: 2,
   maxBatchMs: 1,

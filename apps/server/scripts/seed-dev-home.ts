@@ -127,6 +127,8 @@ export const SEED_TABLE_POLICY: Readonly<Record<string, SeedTablePolicy>> = {
   lifecycle_markers: "keep",
   projection_state: "keep",
   statistics_partials_state: "keep",
+  // Retention floors: a seeded copy keeps the holes its events have.
+  orchestration_stream_floors: "keep",
 
   projection_threads: "by-thread",
   projection_thread_messages: "by-thread",
@@ -138,6 +140,7 @@ export const SEED_TABLE_POLICY: Readonly<Record<string, SeedTablePolicy>> = {
   projection_thread_sessions: "by-thread",
   checkpoint_diff_blobs: "by-thread",
   statistics_thread_partials: "by-thread",
+  statistics_usage_rollups: "by-thread",
   provider_context_handoffs: "by-thread",
 
   projection_projects: "by-project",

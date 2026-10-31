@@ -37,6 +37,10 @@ export const FLAVOR_IMPORT_TABLE_POLICY = {
   projection_state: "keep",
   statistics_partials_state: "keep",
   statistics_thread_partials: "keep",
+  // Event-log retention: the usage of deleted threads whose events are gone, and the floors that
+  // guard the holes the copied log has.
+  statistics_usage_rollups: "keep",
+  orchestration_stream_floors: "keep",
 
   // The event log and the chats projected from it.
   orchestration_events: "keep",

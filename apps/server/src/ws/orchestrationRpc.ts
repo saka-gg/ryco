@@ -246,9 +246,26 @@ export const makeOrchestrationHandlers = (ctx: WsRpcContext) => {
     enrichOrchestrationEvents,
     makeReplayableShellStream,
     makeReplayableThreadStream,
+    readLogReplayFloor,
     recordThreadSnapshotDurationMs,
     reconcileAllWorktrees,
   } = ctx;
+
+  // The legacy replay RPCs read from any cursor: one below the retention floor would get a
+  // replay with a gap (`EventLogRetention`), so it fails instead. Checked after the read, as the
+  // subscriptions do, so a pass that ran meanwhile is caught too.
+  const refuseBelowLogFloor = (fromSequenceExclusive: number) =>
+    readLogReplayFloor.pipe(
+      Effect.flatMap((floor) =>
+        fromSequenceExclusive < floor
+          ? Effect.fail(
+              new Error(
+                `events after sequence ${fromSequenceExclusive} were removed; load a snapshot`,
+              ),
+            )
+          : Effect.void,
+      ),
+    );
 
   // This connection's thread subscriptions, so a view that attaches to a
   // subscription a prewarm opened can turn its history recovery on (and off
@@ -798,6 +815,7 @@ export const makeOrchestrationHandlers = (ctx: WsRpcContext) => {
           ),
         ).pipe(
           Effect.map((events) => Array.from(events)),
+          Effect.tap(() => refuseBelowLogFloor(input.fromSequenceExclusive)),
           Effect.flatMap(enrichOrchestrationEvents),
           Effect.mapError(
             (cause) =>
@@ -824,6 +842,7 @@ export const makeOrchestrationHandlers = (ctx: WsRpcContext) => {
             }),
           )
           .pipe(
+            Effect.tap(() => refuseBelowLogFloor(input.fromSequenceExclusive)),
             Effect.flatMap((page) =>
               enrichOrchestrationEvents(page.events).pipe(
                 Effect.map((events) => ({
