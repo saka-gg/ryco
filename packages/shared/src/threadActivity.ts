@@ -5,6 +5,10 @@ import {
   type OrchestrationThreadActivity,
 } from "@ryco/contracts/orchestration";
 import { THREAD_FORKED_ACTIVITY_KIND } from "@ryco/contracts/thread-fork";
+import {
+  SECRET_REQUESTED_ACTIVITY_KIND,
+  SECRET_RESOLVED_ACTIVITY_KIND,
+} from "@ryco/contracts/secret-request";
 import * as Schema from "effect/Schema";
 import { backgroundWorkCheckpoint, BACKGROUND_WORK_CHECKPOINT } from "./backgroundWork.ts";
 import { isForkBaseItemId } from "./threadFork.ts";
@@ -77,7 +81,11 @@ export function isThreadActivityMilestone(
   return (
     isContextCompactionActivity(activity) ||
     isTerminalContextHandoffActivity(activity) ||
-    isThreadForkedActivity(activity)
+    isThreadForkedActivity(activity) ||
+    // Rare, small and long-lived (a request waits up to a day): the cap never drops a pending
+    // secret request's card or the answer that closed it.
+    activity.kind === SECRET_REQUESTED_ACTIVITY_KIND ||
+    activity.kind === SECRET_RESOLVED_ACTIVITY_KIND
   );
 }
 
@@ -134,7 +142,7 @@ function openOptionalQuestionActivityIds(
 
 /**
  * The activity kinds `derivePendingThreadRequests` reads: they open, resolve or clear a pending
- * approval or user-input request.
+ * approval, user-input or secret request.
  */
 export const PENDING_REQUEST_ACTIVITY_KINDS = [
   "approval.requested",
@@ -143,6 +151,8 @@ export const PENDING_REQUEST_ACTIVITY_KINDS = [
   "user-input.requested",
   "user-input.resolved",
   "provider.user-input.respond.failed",
+  SECRET_REQUESTED_ACTIVITY_KIND,
+  SECRET_RESOLVED_ACTIVITY_KIND,
 ] as const;
 
 interface PendingThreadRequestActivity {
@@ -205,17 +215,24 @@ function comparePendingRequestActivities(
   return (left.id ?? left.activityId ?? "").localeCompare(right.id ?? right.activityId ?? "");
 }
 
+/**
+ * The requests still waiting, by kind. A `secret` request (`ryco_request_secret`) is answered on
+ * the node, not through a provider callback, so it outlives its turn and a restart; it ends only
+ * with its `secret.resolved` activity (answered, declined or expired).
+ */
 export function derivePendingThreadRequests(
   activities: ReadonlyArray<PendingThreadRequestActivity>,
 ): ReadonlyArray<{
   readonly requestId: string;
-  readonly kind: "approval" | "user-input";
+  readonly kind: "approval" | "user-input" | "secret";
   readonly nonBlocking?: boolean;
   readonly turnId: string | null;
 }> {
   const approvalIds = new Map<string, string | null>();
   const userInputIds = new Map<string, string | null>();
   const optionalIds = new Set<string>();
+  const secretIds = new Map<string, string | null>();
+  const resolvedSecretIds = new Set<string>();
 
   for (const activity of activities.toSorted(comparePendingRequestActivities)) {
     const requestId = activityRequestId(activity.payload);
@@ -242,6 +259,14 @@ export function derivePendingThreadRequests(
       isStaleRequestFailure(activityFailureDetail(activity.payload), "user-input")
     ) {
       userInputIds.delete(requestId);
+    } else if (activity.kind === SECRET_REQUESTED_ACTIVITY_KIND) {
+      // Answered once: a repeated request with an answered id stays answered.
+      if (!resolvedSecretIds.has(requestId) && !secretIds.has(requestId)) {
+        secretIds.set(requestId, activity.turnId ?? null);
+      }
+    } else if (activity.kind === SECRET_RESOLVED_ACTIVITY_KIND) {
+      secretIds.delete(requestId);
+      resolvedSecretIds.add(requestId);
     }
   }
 
@@ -257,7 +282,28 @@ export function derivePendingThreadRequests(
       kind: "user-input" as const,
       ...(optionalIds.has(requestId) ? { nonBlocking: true } : {}),
     })),
+    ...Array.from(secretIds, ([requestId, turnId]) => ({
+      requestId,
+      turnId,
+      kind: "secret" as const,
+    })),
   ];
+}
+
+type PendingThreadRequest = ReturnType<typeof derivePendingThreadRequests>[number];
+
+/**
+ * The pending requests a provider callback answers (approvals and questions). A turn's end, a
+ * superseding turn or a restart invalidates them; a secret request is the node's own and outlives
+ * all three, so it is left out here.
+ */
+export function derivePendingProviderCallbackRequests(
+  activities: ReadonlyArray<PendingThreadRequestActivity>,
+): ReadonlyArray<PendingThreadRequest & { readonly kind: "approval" | "user-input" }> {
+  return derivePendingThreadRequests(activities).filter(
+    (request): request is PendingThreadRequest & { readonly kind: "approval" | "user-input" } =>
+      request.kind !== "secret",
+  );
 }
 
 export function derivePendingThreadRequestState(
@@ -265,8 +311,11 @@ export function derivePendingThreadRequestState(
 ): PendingThreadRequestState {
   const requests = derivePendingThreadRequests(activities);
   const pendingApprovalCount = requests.filter((request) => request.kind === "approval").length;
+  // A pending secret request waits on the user like a blocking question: it holds settlement,
+  // queued wakes and restart continuation the same way.
   const pendingUserInputCount = requests.filter(
-    (request) => request.kind === "user-input" && !request.nonBlocking,
+    (request) =>
+      (request.kind === "user-input" && !request.nonBlocking) || request.kind === "secret",
   ).length;
   return {
     pendingApprovalCount,
@@ -286,7 +335,9 @@ export function pendingRequestActivityInOrchestrationOrder(
   return activity.kind.startsWith("approval.") ||
     activity.kind === "provider.approval.respond.failed" ||
     activity.kind.startsWith("user-input.") ||
-    activity.kind === "provider.user-input.respond.failed"
+    activity.kind === "provider.user-input.respond.failed" ||
+    activity.kind === SECRET_REQUESTED_ACTIVITY_KIND ||
+    activity.kind === SECRET_RESOLVED_ACTIVITY_KIND
     ? { ...activity, sequence }
     : activity;
 }

@@ -17,6 +17,8 @@
  */
 import {
   CHECKPOINT_REVERT_ACTIVITY_KIND,
+  SECRET_REQUESTED_ACTIVITY_KIND,
+  SECRET_RESOLVED_ACTIVITY_KIND,
   THREAD_FORKED_ACTIVITY_KIND,
   type OrchestrationCheckpointSummary,
   type OrchestrationMessage,
@@ -32,7 +34,9 @@ export const COMMAND_MODEL_OMITTED_PLAN_MARKDOWN = "(not loaded in the command r
  * - context handoffs and fork records (`hasActionableContextHandoff`,
  *   `forkContextHandoffPending`); both are also activity-cap milestones;
  * - turn starts that ended before dispatch (`hasActionableContextHandoff`);
- * - the checkpoint revert journal (`isCheckpointRevertPending`, the decider's turn-start guard).
+ * - the checkpoint revert journal (`isCheckpointRevertPending`, the decider's turn-start guard);
+ * - secret requests (`derivePendingThreadRequests`, settlement, restart continuation, and the
+ *   node's answer and expiry in `secretRequests/secretRequests.ts`).
  *
  * Hydration reads them through `idx_projection_thread_activities_kind_order` (migration 085;
  * plan-guarded). Adding a reader of another kind means adding the kind here.
@@ -51,6 +55,8 @@ export const COMMAND_READ_MODEL_ACTIVITY_KINDS = [
   "provider.turn.start.failed",
   "provider.turn.start.cancelled",
   CHECKPOINT_REVERT_ACTIVITY_KIND,
+  SECRET_REQUESTED_ACTIVITY_KIND,
+  SECRET_RESOLVED_ACTIVITY_KIND,
 ] as const;
 
 const COMMAND_READ_MODEL_ACTIVITY_KIND_SET: ReadonlySet<string> = new Set(

@@ -445,6 +445,10 @@
       "types": "./src/threadSettlement.ts",
       "import": "./src/threadSettlement.ts"
     },
+    "./secretRequests": {
+      "types": "./src/secretRequests.ts",
+      "import": "./src/secretRequests.ts"
+    },
     "./worktreePullRequests": {
       "types": "./src/worktreePullRequests.ts",
       "import": "./src/worktreePullRequests.ts"

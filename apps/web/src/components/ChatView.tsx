@@ -101,6 +101,7 @@ import {
   DEFAULT_PROVIDER_INTERACTION_MODE,
   ORCHESTRATION_WS_METHODS,
   PROVIDER_SEND_TURN_MAX_INPUT_CHARS,
+  SECRET_REQUESTED_ACTIVITY_KIND,
   WS_METHODS,
 } from "@ryco/contracts";
 import {
@@ -381,6 +382,7 @@ import {
 import type { OverviewPanelControlsInput } from "./chat/ChatOverviewPanel";
 import {
   LazyAgentControlApprovals,
+  LazySecretRequestCards,
   LazyChatOverviewPanel,
   LazyComputerBetaPreview,
   LazyContextHandoffInspectionPanel,
@@ -7047,6 +7049,18 @@ export default function ChatView(props: ChatViewProps) {
       },
     },
   );
+  // An agent's secret requests: a private card per request, loaded only for threads that asked,
+  // and off the frozen phone tier (apps/mobile owns the native card).
+  const showSecretRequests =
+    presentationTier !== "phone" &&
+    threadActivities.some((activity) => activity.kind === SECRET_REQUESTED_ACTIVITY_KIND);
+  const secretRequestCardsReady = useLazyComponentReady(
+    LazySecretRequestCards,
+    showSecretRequests,
+    {
+      onLoadError: (error, retry) => notifySurfaceLoadFailure("secret requests", error, retry),
+    },
+  );
   // Agent Control approvals stay off the frozen phone tier (apps/mobile owns
   // the native surface).
   const agentControlApprovalsReady = useLazyComponentReady(
@@ -7672,6 +7686,18 @@ export default function ChatView(props: ChatViewProps) {
                     />
                   ))
                 : null}
+              {showSecretRequests && secretRequestCardsReady && activeThread ? (
+                <LazySecretRequestCards
+                  environmentId={environmentId}
+                  threadId={activeThread.id}
+                  activities={threadActivities}
+                  disabledReason={
+                    activeEnvironmentUnavailable || sideChatConnection.phase !== "connected"
+                      ? (mutationUnavailableReason ?? "Connect to the node to answer.")
+                      : null
+                  }
+                />
+              ) : null}
               <ComposerBannerStack className="relative z-0" items={composerBannerStackItems} />
               {/* External integrations' Agent Control approvals: this thread's
                   own live in the composer's delegation dock. Both stay off the

@@ -132,6 +132,7 @@ export const makeServerEnvironment = Effect.fn("makeServerEnvironment")(function
       projectFileWatch: true,
       threadLocalServers: readsThreadServers,
       threadLocalServerStop: readsThreadServers,
+      secretRequests: true,
       cliProxyHubs: true,
       cliProxyCloudflareAccess: true,
       stagedOnlyCommit: true,

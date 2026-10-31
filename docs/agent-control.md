@@ -110,6 +110,8 @@ called. This matters for clients such as Codex that cache the initial MCP catalo
 - `ryco_watch_command`, `ryco_unwatch_command`, `ryco_list_command_watches`: have Ryco run a shell
   command for the caller's own chat on an interval and wake it only when the output changes (see
   [Command watches](#command-watches)).
+- `ryco_request_secret`: ask the user for a secret (an API key, a token) on a private card
+  instead of in the chat (see [Secret requests](#secret-requests)).
 - `ryco_html_preview`, `ryco_html_render`: check a self-contained HTML page in Ryco's headless
   browser, then show it inline above the reply as a sandboxed page that follows the user's theme,
   with a card at the end of the reply (see [HTML renders](./user/html-renders.md)). Both need the
@@ -274,6 +276,35 @@ only when its output changes (see [Command watch](./command-watch.md) for the ru
   day. While Agent Control is off, no run starts and no wake is sent.
 - **Visibility.** The command is visible to anyone who may replay the chat's events, as the
   agent's own tool call already is: keep secrets out of it.
+
+## Secret requests
+
+An agent that needs a secret calls `ryco_request_secret` with an environment variable name
+(`key`, `^[A-Z_][A-Z0-9_]{0,127}$`), a one-line `purpose` and a dotenv `file` relative to its own
+thread's checkout (default `.env`). The user answers on a private card (web desktop and the native
+app, not the frozen web phone tier), and the node writes `KEY='value'` into that file
+([Secret requests](./user/secret-requests.md) has the user's side).
+
+- **Grant and authority.** The `secrets.request` grant, issued to private provider sessions like
+  the others, and exact active-turn authority. Never on the standalone endpoint. The card is shown
+  in, and the file written to, the caller's own thread and checkout: there is no `threadId`.
+- **Checked when asked.** The file must be a plain relative dotenv path (`.env`, `.env.*`,
+  `name.env`, `.dev.vars`) with no `..`, link or `.git` segment, inside the checkout, and Git must
+  ignore it and not track it (`git check-ignore`). A bad file fails at once and opens no card. A
+  thread holds at most 5 unanswered requests.
+- **Waiting.** The call waits up to `waitMs` (default 30 s, at most 45 s) and answers `pending`,
+  `provided`, `declined` or `expired`, with the key and file, never the value. Calling again with
+  the same `requestId` (and the same key and file) waits on the same card; a `requestId` reused for
+  another key or file is refused. While pending, the agent may end its turn instead.
+- **Recorded.** The thread records only `secret.requested` (key, purpose, file, expiry) and one
+  `secret.resolved` (status) activity. A pending request counts as pending user input: it holds
+  settlement, queued wakes and restart continuation, survives a turn's end and a restart, and
+  expires after 24 hours (the node records the expiry, also after a restart).
+- **The answer.** `secrets.answerRequest` is owner-only and never replayed. The node checks the
+  file again, writes it atomically with mode 0600 (other lines kept, the key's old assignment
+  replaced), and only then records `provided`. Refusals carry a fixed reason, never the value.
+- **Instructions.** Agents are told never to ask for secrets in chat, and to load a provided key
+  from the environment without printing it or reading the file to see it.
 
 ## Tasks
 

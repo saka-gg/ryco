@@ -240,6 +240,7 @@ it.effect("grants HTML renders to full provider leases but not to computer-only 
     assert.include(full, AGENT_CONTROL_CAPABILITIES.watchPullRequests);
     // And the command watch tools, for news that is not a pull request.
     assert.include(full, AGENT_CONTROL_CAPABILITIES.watchCommands);
+    assert.include(full, AGENT_CONTROL_CAPABILITIES.requestSecrets);
     assert.deepStrictEqual(computerOnly, [AGENT_CONTROL_CAPABILITIES.controlComputer]);
   }),
 );

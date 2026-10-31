@@ -133,6 +133,11 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
   /** `threads.stopLocalServer` for those servers; absent on older servers and false on Windows. */
   threadLocalServerStop: Schema.optionalKey(Schema.Boolean),
   /**
+   * `secrets.answerRequest`: the node writes an agent's requested secret into a dotenv file of the
+   * thread's checkout. Absent on older servers, whose agents cannot ask for one.
+   */
+  secretRequests: Schema.optionalKey(Schema.Boolean),
+  /**
    * CLIProxyAPI hub settings and reads (`server.readCliProxyHubs` / `server.testCliProxyHub`);
    * absent on older servers, which drop `cliProxyHubs` from settings patches.
    */

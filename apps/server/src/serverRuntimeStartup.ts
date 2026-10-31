@@ -4,7 +4,10 @@ import {
   callbackRepositories,
   pendingCallbackInvalidation,
 } from "./orchestration/approvalResponses.ts";
-import { derivePendingThreadRequests } from "@ryco/shared/threadActivity";
+import {
+  derivePendingProviderCallbackRequests,
+  derivePendingThreadRequests,
+} from "@ryco/shared/threadActivity";
 import {
   TURN_FINALIZATION_REASON,
   fallbackReleasedTurnState,
@@ -75,6 +78,7 @@ import { RepositoryIdentityResolver } from "./project/Services/RepositoryIdentit
 import { Keybindings } from "./keybindings.ts";
 import { Open } from "./open.ts";
 import { currentCommandReadModel } from "./orchestration/currentCommandReadModel.ts";
+import { findThreadInArray } from "./orchestration/threadIndex.ts";
 import { ContextHandoffService } from "./orchestration/contextHandoff/ContextHandoffService.ts";
 import { OrchestrationEngineService } from "./orchestration/Services/OrchestrationEngine.ts";
 import { ProjectionSnapshotQuery } from "./orchestration/Services/ProjectionSnapshotQuery.ts";
@@ -719,6 +723,37 @@ const repairHandoffDigestFailures = Effect.fn("repairHandoffDigestFailures")(fun
 });
 
 /**
+ * Secret requests (`ryco_request_secret`) outlive a restart, but their expiry timers do not: set
+ * them again. Their module loads only when a request is pending.
+ */
+const rescheduleSecretRequestExpiries = (
+  snapshot: OrchestrationReadModel,
+  engine: typeof OrchestrationEngineService.Service,
+  projections: typeof ProjectionSnapshotQuery.Service,
+) =>
+  snapshot.threads.some(
+    (thread) =>
+      thread.deletedAt === null &&
+      derivePendingThreadRequests(thread.activities).some((request) => request.kind === "secret"),
+  )
+    ? Effect.promise(() => import("./secretRequests/secretRequests.ts")).pipe(
+        Effect.flatMap((module) =>
+          module.scheduleSecretRequestExpiries(
+            { engine, projections, findThreadInArray },
+            snapshot.threads,
+          ),
+        ),
+        Effect.catchCause((cause) =>
+          Cause.hasInterrupts(cause)
+            ? Effect.failCause(cause)
+            : Effect.logWarning("failed to schedule secret request expiries", {
+                cause: Cause.pretty(cause),
+              }),
+        ),
+      )
+    : Effect.void;
+
+/**
  * Settle projected provider sessions whose native process did not survive this
  * server process, and put back to rest the ones a handoff left in the digest
  * error. This runs after the provider/orchestration roots subscribe, but before
@@ -736,6 +771,7 @@ export const reconcileOrphanedProviderSessions = Effect.gen(function* () {
   // command read model in memory; hydrating it from SQL again cost a full read per boot.
   const snapshot = yield* currentCommandReadModel(orchestrationEngine, projectionSnapshotQuery);
   yield* settleStaleProjectedTurns(snapshot);
+  yield* rescheduleSecretRequestExpiries(snapshot, orchestrationEngine, projectionSnapshotQuery);
 
   const liveSessionsExit = yield* Effect.exit(providerService.listSessions());
   if (Exit.isFailure(liveSessionsExit)) {
@@ -758,7 +794,7 @@ export const reconcileOrphanedProviderSessions = Effect.gen(function* () {
   // inbox summary, conversation and settlement policy all recover together.
   for (const thread of snapshot.threads) {
     if (thread.deletedAt !== null) continue;
-    for (const request of derivePendingThreadRequests(thread.activities)) {
+    for (const request of derivePendingProviderCallbackRequests(thread.activities)) {
       const payload = yield* pendingCallbackInvalidation({
         threadId: thread.id,
         ...request,

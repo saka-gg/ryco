@@ -523,6 +523,22 @@ describe("server boot import boundaries", () => {
     expect(monitor.filter((file) => reachable.includes(file))).toEqual(monitor);
   });
 
+  it("loads secret requests (tool, answer, dotenv writer) on first use, never at boot", () => {
+    // `ryco_request_secret` loads through `withLazyAgentControlTools`, the owner's answer and the
+    // restart's expiry timers through import(); the boot path keeps only the activity kinds.
+    const secretRequests = [
+      "apps/server/src/agentControl/Mcp/secretRequestTools.ts",
+      "apps/server/src/secretRequests/secretRequests.ts",
+      "apps/server/src/secretRequests/dotenvSink.ts",
+      "packages/shared/src/secretRequests.ts",
+    ];
+    const boot = staticGraph("src/cliMain.ts").files;
+    expect(secretRequests.filter((file) => boot.includes(file))).toEqual([]);
+    expect(boot).toContain("apps/server/src/ws/secretRequestRpc.ts");
+    const reachable = staticGraph("src/cliMain.ts", { dynamic: true }).files;
+    expect(secretRequests.filter((file) => reachable.includes(file))).toEqual(secretRequests);
+  });
+
   it("loads the agents' usage limits read and its limit presentation on the first call", () => {
     const usageLimits = [
       "apps/server/src/agentControl/Mcp/usageLimits.ts",

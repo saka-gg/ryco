@@ -22,6 +22,10 @@
       "types": "./src/knownEnvironment.ts",
       "import": "./src/knownEnvironment.ts"
     },
+    "./secretRequests": {
+      "types": "./src/secretRequests.ts",
+      "import": "./src/secretRequests.ts"
+    },
     "./sourceControlDiscoveryState": {
       "types": "./src/sourceControlDiscoveryState.ts",
       "import": "./src/sourceControlDiscoveryState.ts"
