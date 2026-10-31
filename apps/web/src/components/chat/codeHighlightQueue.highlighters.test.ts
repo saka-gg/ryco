@@ -77,3 +77,33 @@ describe.each(["highlights", "shiki-js"] as const)("sliced highlighting with %s"
     await expectSlicedMatchesWhole(type, code);
   });
 });
+
+describe("ANSI code blocks", () => {
+  const code =
+    "\u001b[31mred\u001b[0m and \u001b[1;32mbold green\u001b[0m\n\u001b]0;title\u0007plain";
+
+  it.each(["highlights", "shiki-js"] as const)(
+    "never shows raw escape sequences with %s",
+    async (type) => {
+      mainThread.highlighter = type;
+      const themeName = resolveDiffThemeName("dark");
+      const onReady = vi.fn();
+      requestCodeHighlight(
+        {
+          key: createHighlightCacheKey(code, "ansi", themeName),
+          code,
+          language: "ansi",
+          themeName,
+        },
+        onReady,
+      );
+      await vi.waitFor(() => expect(onReady).toHaveBeenCalledTimes(1), { timeout: 10_000 });
+      const html = onReady.mock.calls[0]![0] as string;
+      expect(html).not.toContain("\u001b");
+      expect(html).toContain("red");
+      expect(html).toContain("bold green");
+      expect(html).not.toContain("title");
+      disposeHighlighter();
+    },
+  );
+});

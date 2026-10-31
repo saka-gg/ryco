@@ -173,9 +173,22 @@ function highlightOptions(job: CodeHighlightJob, language: string) {
   };
 }
 
+/** ANSI escape sequences: CSI (colors, cursor), OSC (titles, links) and two-character escapes. */
+const ANSI_ESCAPE = /\u001b(?:\[[0-?]*[ -/]*[@-~]|\][^\u0007\u001b]*(?:\u0007|\u001b\\)|[@-_])/gu;
+
+/** `code` without its ANSI escape sequences. */
+export function stripAnsiEscapes(code: string): string {
+  return code.replace(ANSI_ESCAPE, "");
+}
+
 function highlight(highlighter: DiffsHighlighter, job: CodeHighlightJob): string | null {
   try {
-    return highlighter.codeToHtml(job.code, highlightOptions(job, job.language));
+    const html = highlighter.codeToHtml(job.code, highlightOptions(job, job.language));
+    // Shiki colors ANSI; Highlights has no ANSI language and would show the raw escapes, so the
+    // output keeps the text without them.
+    return job.language === "ansi" && html.includes("\u001b")
+      ? highlighter.codeToHtml(stripAnsiEscapes(job.code), highlightOptions(job, "text"))
+      : html;
   } catch (error) {
     console.warn(
       `Code highlighting failed for language "${job.language}", falling back to plain text.`,
