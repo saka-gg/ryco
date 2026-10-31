@@ -19,7 +19,9 @@ installation and service it can restart. `ryco update --check` only shows where 
 
 `--channel nightly` (or `latest`) moves a CLI node to another npm dist-tag. The node checks that
 channel's newest release and refuses one that is not newer than what it runs: a channel switch
-never downgrades, and a node on a nightly moves back to stable with the next stable release. The
+never downgrades. A node keeps following the channel of the release it runs, so a node on a
+nightly moves back to stable with `--channel latest` once a stable release newer than its nightly
+is out. The
 desktop app follows its own channel instead (Ryco and Ryco Nightly are separate apps).
 
 ## What an update does

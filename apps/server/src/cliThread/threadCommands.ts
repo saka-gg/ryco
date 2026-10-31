@@ -172,6 +172,13 @@ export interface ThreadCliTranscript {
 export const localThreadTarget = <EA, RA>(input: {
   readonly local: ThreadCliLocal<EA, RA>;
   readonly timeout: Duration.Duration | null;
+  /**
+   * The session's lifetime when the default does not fit. `ryco update` keeps it short: after
+   * the node migrated its database, this older CLI cannot open it to revoke the session.
+   */
+  readonly sessionTtl?: Duration.Duration;
+  /** The session's label in the node's session list. */
+  readonly sessionLabel?: string;
 }): Effect.Effect<ThreadCliTarget, ThreadCliError | AuthControlPlaneError | EA, RA | Scope.Scope> =>
   Effect.gen(function* () {
     const readOrigin = Effect.flatMap(input.local.readOrigin, (origin) =>
@@ -185,11 +192,14 @@ export const localThreadTarget = <EA, RA>(input: {
         return yield* run(yield* AuthControlPlane);
       }).pipe(Effect.provide(input.local.authControlPlane));
     const ttl =
-      input.timeout === null
+      input.sessionTtl ??
+      (input.timeout === null
         ? LOCAL_SESSION_TTL
-        : Duration.max(LOCAL_SESSION_TTL, Duration.sum(input.timeout, Duration.minutes(10)));
+        : Duration.max(LOCAL_SESSION_TTL, Duration.sum(input.timeout, Duration.minutes(10))));
     const issued = yield* Effect.acquireRelease(
-      withAuth((auth) => auth.issueSession({ role: "owner", label: "ryco thread cli", ttl })),
+      withAuth((auth) =>
+        auth.issueSession({ role: "owner", label: input.sessionLabel ?? "ryco thread cli", ttl }),
+      ),
       (session) =>
         withAuth((auth) => auth.revokeSession(session.sessionId)).pipe(
           Effect.ignore({ log: true }),

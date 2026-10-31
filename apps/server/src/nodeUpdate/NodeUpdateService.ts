@@ -602,7 +602,7 @@ export const makeNodeUpdateService = Effect.fn("makeNodeUpdateService")(function
             return yield* refuse(
               otherChannel === null
                 ? `This node already runs ${before.currentVersion}.`
-                : `The newest ${otherChannel} release, ${latest}, is not newer than ${before.currentVersion}. A channel switch never downgrades: the node moves with that channel's next release.`,
+                : `The newest ${otherChannel} release, ${latest}, is not newer than ${before.currentVersion}. A channel switch never downgrades: switch again after that channel's next release.`,
             );
           }
           const startedAt = yield* nowIso;

@@ -5,12 +5,12 @@ import {
   WS_METHODS,
 } from "@ryco/contracts";
 import { assert, describe, it } from "@effect/vitest";
-import { Effect, Layer, Stream } from "effect";
+import { Duration, Effect, Layer, Stream } from "effect";
 import * as TestConsole from "effect/testing/TestConsole";
 
 import { CliRemoteError, type CliRemoteRpcClient } from "../cliRemote/remotes.ts";
 import type { ThreadCliTarget } from "../cliThread/threadCommands.ts";
-import { runUpdateCli, type UpdateCliOptions } from "./updateCommand.ts";
+import { runUpdateCheck, runUpdateCli, type UpdateCliOptions } from "./updateCommand.ts";
 
 const idleRun: NodeUpdateRun = {
   status: "idle",
@@ -58,6 +58,8 @@ const running = (status: NodeUpdateRun["status"], extra: Partial<NodeUpdateRun> 
 const fakeNode = (input: {
   readonly before: NodeUpdateState;
   readonly after?: NodeUpdateState;
+  /** The socket drops right after the node took the request. */
+  readonly dropAfterUpdate?: boolean;
 }) => {
   const updates: Array<NodeUpdateInput> = [];
   let connections = 0;
@@ -69,14 +71,22 @@ const fakeNode = (input: {
         Effect.sync(() => {
           updates.push(request);
           return running("preparing");
-        }),
+        }).pipe(
+          Effect.andThen(
+            input.dropAfterUpdate === true
+              ? Effect.fail(new CliRemoteError({ message: "socket closed" }))
+              : Effect.succeed(running("preparing")),
+          ),
+        ),
       [WS_METHODS.serverSubscribeNodeUpdate]: () =>
-        ++subscriptions === 1
-          ? Stream.concat(
-              Stream.make(running("preparing"), running("verifying"), running("restarting")),
-              Stream.fail(new CliRemoteError({ message: "socket closed" })),
-            )
-          : Stream.make(input.after ?? input.before),
+        updates.length === 0
+          ? Stream.make(input.before)
+          : ++subscriptions === 1
+            ? Stream.concat(
+                Stream.make(running("preparing"), running("verifying"), running("restarting")),
+                Stream.fail(new CliRemoteError({ message: "socket closed" })),
+              )
+            : Stream.make(input.after ?? input.before),
     }) as unknown as CliRemoteRpcClient;
   const target: ThreadCliTarget = {
     connect: Effect.sync(() => {
@@ -93,7 +103,7 @@ const options = (
   overrides: Partial<UpdateCliOptions> = {},
 ): UpdateCliOptions => ({
   target,
-  nodeLabel: "This node",
+  nodeLabel: "this node",
   channel: null,
   yes: true,
   json: false,
@@ -124,11 +134,11 @@ describe("ryco update", () => {
       assert.isTrue(result._tag === "Success");
       assert.deepEqual(node.updates, [{ targetVersion: "0.1.37", requestId: "cli-1" }]);
       assert.deepEqual(lines, [
-        "Updating This node: 0.1.36 -> 0.1.37",
+        "Updating this node: 0.1.36 -> 0.1.37",
         "Installing 0.1.37…",
         "Checking the new release against a copy of the database…",
         "Restarting the node…",
-        "Updated This node to 0.1.37.",
+        "Updated this node to 0.1.37.",
       ]);
       // It reconnected after the restart dropped the socket.
       assert.isAbove(node.connections(), 3);
@@ -173,7 +183,7 @@ describe("ryco update", () => {
     }),
   );
 
-  it.live("moves to another channel through the node, which still refuses a downgrade", () =>
+  it.live("moves to another channel through the node", () =>
     Effect.gen(function* () {
       const nightly = "0.1.37-nightly.20261101.4";
       const node = fakeNode({
@@ -203,7 +213,10 @@ describe("ryco update", () => {
       const upToDate = yield* withConsole(runUpdateCli(options(current.target)));
       assert.isTrue(upToDate.result._tag === "Success");
       assert.deepEqual(current.updates, []);
-      assert.include(upToDate.lines.join("\n"), "the newest latest release");
+      assert.include(
+        upToDate.lines.join("\n"),
+        "This node runs 0.1.36, the newest stable release.",
+      );
 
       const manual = fakeNode({
         before: state({
@@ -216,6 +229,94 @@ describe("ryco update", () => {
       assert.isTrue(refused.result._tag === "Failure");
       assert.include(String(refused.result), "npm install -g ryco-cli@latest");
       assert.deepEqual(manual.updates, []);
+    }),
+  );
+
+  it.live("asks the node once, and follows the run when the socket drops after the request", () =>
+    Effect.gen(function* () {
+      const node = fakeNode({
+        before: state(),
+        after: { ...running("succeeded"), currentVersion: "0.1.37" },
+        dropAfterUpdate: true,
+      });
+      const { result } = yield* withConsole(runUpdateCli(options(node.target)));
+      assert.isTrue(result._tag === "Success");
+      // Never sent twice: the node may already be running it.
+      assert.equal(node.updates.length, 1);
+    }),
+  );
+
+  it.live("stops following when someone postpones the desktop app's relaunch", () =>
+    Effect.gen(function* () {
+      const node = fakeNode({ before: state(), after: running("postponed") });
+      const { result } = yield* withConsole(
+        runUpdateCli(options(node.target, { followTimeout: Duration.seconds(20) })),
+      );
+      assert.isTrue(result._tag === "Failure");
+      assert.include(String(result), "postponed the restart");
+    }),
+  );
+
+  it.live("refuses a channel switch that would go back, before asking", () =>
+    Effect.gen(function* () {
+      const node = fakeNode({
+        before: state({
+          currentVersion: "0.1.37-nightly.20261101.4",
+          channel: "nightly",
+          latestVersion: "0.1.37-nightly.20261101.4",
+          availability: "current",
+        }),
+      });
+      const asked: Array<string> = [];
+      const { result } = yield* withConsole(
+        runUpdateCli(
+          options(node.target, {
+            channel: "latest",
+            yes: false,
+            interactive: true,
+            confirm: (message) => Effect.sync(() => (asked.push(message), true)),
+            fetchLatestOnChannel: () => Effect.succeed("0.1.36"),
+          }),
+        ),
+      );
+      assert.isTrue(result._tag === "Failure");
+      assert.include(String(result), "never goes back to an older release");
+      assert.deepEqual(asked, []);
+      assert.deepEqual(node.updates, []);
+    }),
+  );
+
+  it.live("checks where a node stands with viewer access and without the registry", () =>
+    Effect.gen(function* () {
+      const node = fakeNode({
+        before: state({
+          run: {
+            ...idleRun,
+            status: "succeeded",
+            targetVersion: "0.1.36",
+            finishedAt: "2026-10-30T10:00:00.000Z",
+          },
+        }),
+      });
+      const { result, lines } = yield* withConsole(
+        runUpdateCheck({
+          target: node.target,
+          nodeLabel: "this node",
+          json: false,
+          channel: "nightly",
+          fetchLatestOnChannel: () => Effect.succeed("0.1.37-nightly.20261101.4"),
+        }),
+      );
+      assert.isTrue(result._tag === "Success");
+      assert.deepEqual(lines, [
+        [
+          "This node runs 0.1.36 (stable).",
+          "Newest stable release: 0.1.37.",
+          "Newest nightly release: 0.1.37-nightly.20261101.4.",
+          "Last update, to 0.1.36 (2026-10-30T10:00:00.000Z): succeeded.",
+        ].join("\n"),
+      ]);
+      assert.deepEqual(node.updates, []);
     }),
   );
 });

@@ -4186,10 +4186,20 @@ const updateCommand = Command.make("update", {
             : yield* threadCli.localThreadTarget({
                 local: yield* localNodeAccess(flags, logLevel, fileSystem),
                 timeout: null,
+                // The follow ends within 10 minutes; a session this older CLI cannot revoke
+                // after the node migrated its database expires soon after.
+                sessionTtl: Duration.minutes(30),
+                sessionLabel: "ryco update",
               });
-          const nodeLabel = Option.isSome(flags.remote) ? `"${flags.remote.value}"` : "This node";
+          const nodeLabel = Option.isSome(flags.remote) ? `"${flags.remote.value}"` : "this node";
           if (flags.check) {
-            return yield* updateCli.runUpdateCheck({ target, nodeLabel, json: flags.json });
+            return yield* updateCli.runUpdateCheck({
+              target,
+              nodeLabel,
+              json: flags.json,
+              channel: Option.getOrNull(flags.channel),
+              fetchLatestOnChannel: updateCli.fetchLatestRycoRelease,
+            });
           }
           yield* updateCli.runUpdateCli({
             target,
