@@ -9,6 +9,8 @@ import {
   ProjectId,
   type EffectiveProjectPreferences,
 } from "@ryco/contracts";
+import { PROJECT_PREFERENCE_VALUE_KEYS } from "@ryco/contracts/settings";
+import { PROJECT_PREFERENCE_FIELDS } from "@ryco/shared/projectPreferences";
 import { applyServerSettingsPatch } from "@ryco/shared/serverSettings";
 import { describe, expect, it, vi } from "vite-plus/test";
 
@@ -21,6 +23,7 @@ import {
   type TestNode,
 } from "./newTaskDefaults.testSupport";
 
+import { listModelPickerEntries } from "../threads/modelPickerModel";
 import {
   buildNewTaskDefaultRows,
   buildNewTaskDefaultsView,
@@ -28,7 +31,6 @@ import {
   initialModelOptionPatch,
   initialModelPicker,
   initialModelPickPatch,
-  NEW_TASK_DEFAULTS_READ_ONLY,
   newTaskDefaultsApplyChoices,
   newTaskDefaultsScopes,
   resolveNewTaskDefaultsScope,
@@ -36,6 +38,7 @@ import {
   type NewTaskDefaultsController,
   type NewTaskDefaultsInput,
 } from "./nodeNewTaskDefaultsModel";
+import { NODE_SETTINGS_OWNER_ONLY } from "./nodeSettingsTargets";
 
 const PROJECT = ProjectId.make("project-1");
 const OTHER_PROJECT = ProjectId.make("project-2");
@@ -66,12 +69,12 @@ async function opened(
   return controller;
 }
 
-function rowsOf(controller: NewTaskDefaultsController, editable = true) {
+function rowsOf(controller: NewTaskDefaultsController, readOnly: string | null = null) {
   return buildNewTaskDefaultsView({
     state: controller.getSnapshot(),
     label: "Studio",
     config: config(),
-    editable,
+    readOnly,
   });
 }
 
@@ -182,6 +185,24 @@ describe("new-task default rows", () => {
     });
     expect(worktreeSubmodulesRow(null, null).value).toBe("Connect a machine");
   });
+
+  it("offers at most two choices per select row: an Android alert shows three buttons with Cancel", () => {
+    // The panel lists a select row's choices as alert buttons. A third choice would be cut off
+    // on Android, so a setting that grows one needs a list here first.
+    for (const key of PROJECT_PREFERENCE_VALUE_KEYS) {
+      const field = PROJECT_PREFERENCE_FIELDS[key];
+      if (field.kind === "select") expect(field.options.length, key).toBeLessThanOrEqual(2);
+    }
+    for (const projectId of [null, PROJECT]) {
+      const rows = buildNewTaskDefaultRows({
+        effective: effectiveFor(DEFAULT_SERVER_SETTINGS, projectId ?? undefined),
+        projectId,
+        config: config(),
+      });
+      for (const row of rows)
+        if (row.kind === "select") expect(row.choices.length, row.key).toBeLessThanOrEqual(2);
+    }
+  });
 });
 
 describe("new-task default scopes", () => {
@@ -197,7 +218,8 @@ describe("new-task default scopes", () => {
       { projectId: OTHER_PROJECT, label: "Site" },
     ]);
     expect(resolveNewTaskDefaultsScope(OTHER_PROJECT, scopes)).toBe(OTHER_PROJECT);
-    // A removed project's edits never go anywhere else: the panel shows the node's defaults.
+    // A removed project's chip falls back to the node's defaults. An edit still open for that
+    // project is dropped by the controller, never written there (see "drops an edit …" below).
     expect(resolveNewTaskDefaultsScope(ProjectId.make("gone"), scopes)).toBeNull();
   });
 });
@@ -217,14 +239,30 @@ describe("the initial model sheet", () => {
       },
     });
     expect(initialModelPickPatch(picker, `${CODEX}:gpt-builtin`)).toBeNull();
-    expect(initialModelOptionPatch(picker, selection, "reasoningEffort", "low")).toEqual({
+    expect(initialModelOptionPatch(config(), selection, "reasoningEffort", "low")).toEqual({
       initialModelSelection: {
         instanceId: CODEX,
         model: "gpt-builtin",
         options: [{ id: "reasoningEffort", value: "low" }],
       },
     });
-    expect(initialModelOptionPatch(picker, selection, "agent", "build")).toBeNull();
+    expect(initialModelOptionPatch(config(), selection, "agent", "build")).toBeNull();
+  });
+
+  it("applies a trait while a search hides the selected model", () => {
+    const selection = { instanceId: CODEX, model: "gpt-builtin" };
+    const searching = initialModelPicker({ config: config(), selection, query: "fast" });
+    // The rail still shows the selected model's traits; the list shows only the match.
+    expect(searching.options.map((option) => option.id)).toEqual(["reasoningEffort"]);
+    expect(listModelPickerEntries(searching).some((entry) => entry.selected)).toBe(false);
+
+    expect(initialModelOptionPatch(config(), selection, "reasoningEffort", "low")).toEqual({
+      initialModelSelection: {
+        instanceId: CODEX,
+        model: "gpt-builtin",
+        options: [{ id: "reasoningEffort", value: "low" }],
+      },
+    });
   });
 });
 
@@ -235,7 +273,7 @@ describe("the new-task defaults controller", () => {
     const effective = controller.getSnapshot().effective!;
     const model = { instanceId: CODEX, model: "gpt-fast" };
 
-    await controller.save({ initialModelSelection: model });
+    await controller.save(PROJECT, { initialModelSelection: model });
 
     expect(node.writes).toEqual([
       projectPreferencesWritePatch({
@@ -260,7 +298,7 @@ describe("the new-task defaults controller", () => {
     const controller = await opened(node);
     const model = { instanceId: CODEX, model: "gpt-fast" };
 
-    await controller.save({ initialModelSelection: model });
+    await controller.save(null, { initialModelSelection: model });
 
     expect(node.writes).toEqual([
       { initialModelSelection: model, expectedNodePreferences: { initialModelSelection: null } },
@@ -274,7 +312,7 @@ describe("the new-task defaults controller", () => {
     // Another device switches the node to worktrees after this panel read it.
     node.changeElsewhere({ defaultThreadEnvMode: "worktree" });
 
-    await controller.save({ defaultThreadEnvMode: "worktree" });
+    await controller.save(null, { defaultThreadEnvMode: "worktree" });
 
     const view = rowsOf(controller);
     expect(view.error).toBe("Studio: Node preferences changed elsewhere. Reload before saving.");
@@ -294,10 +332,10 @@ describe("the new-task defaults controller", () => {
         }),
     );
 
-    const first = controller.save({ defaultThreadEnvMode: "worktree" });
+    const first = controller.save(null, { defaultThreadEnvMode: "worktree" });
     await settle();
     expect(rowsOf(controller).canEdit).toBe(false);
-    await controller.save({ runSetupScript: false });
+    await controller.save(null, { runSetupScript: false });
     expect(node.writes).toHaveLength(1);
     answer?.();
     await first;
@@ -311,6 +349,83 @@ describe("the new-task defaults controller", () => {
     expect(rowsOf(controller).rows.find((row) => row.key === "defaultThreadEnvMode")?.value).toBe(
       "New worktree",
     );
+  });
+
+  it("keeps saving until the newest read lands when a settings push restarts the read-back", async () => {
+    const node = fakeNode();
+    const controller = await opened(node);
+    let answerReadBack: (() => void) | undefined;
+    let answerPush: (() => void) | undefined;
+    node.answerNextRead(
+      (projectId) =>
+        new Promise((resolve) => {
+          answerReadBack = () => resolve(effectiveFor(node.settings, projectId));
+        }),
+    );
+    node.answerNextRead(
+      (projectId) =>
+        new Promise((resolve) => {
+          answerPush = () => resolve(effectiveFor(node.settings, projectId));
+        }),
+    );
+
+    const first = controller.save(null, { defaultThreadEnvMode: "worktree" });
+    await settle();
+    // The write's own settings push reads the node again, dropping the read-back.
+    controller.setInput(input(node));
+    await settle();
+    expect(node.reads).toHaveLength(3);
+    answerReadBack?.();
+    await settle();
+
+    // The values on screen are still the ones from before the write: no edit compares with them.
+    expect(controller.getSnapshot().saving).toBe(true);
+    expect(rowsOf(controller).canEdit).toBe(false);
+    expect(rowsOf(controller).rows.find((row) => row.key === "defaultThreadEnvMode")?.value).toBe(
+      "Local",
+    );
+    answerPush?.();
+    await first;
+
+    expect(controller.getSnapshot().saving).toBe(false);
+    expect(rowsOf(controller).rows.find((row) => row.key === "defaultThreadEnvMode")?.value).toBe(
+      "New worktree",
+    );
+    // The next edit compares with the node's current value, so the node takes it.
+    await controller.save(null, { defaultThreadEnvMode: "local" });
+    expect(controller.getSnapshot().error).toBeNull();
+    expect(node.settings.defaultThreadEnvMode).toBe("local");
+  });
+
+  it("drops an edit for a project that went while its dialog was open, never writing it to the node", async () => {
+    const node = fakeNode();
+    const controller = await opened(node, { projectId: PROJECT });
+    const mode = buildNewTaskDefaultRows({
+      effective: controller.getSnapshot().effective,
+      projectId: PROJECT,
+      config: config(),
+    }).find((row) => row.key === "defaultThreadEnvMode");
+    if (mode?.kind !== "select") throw new Error("expected the New threads row");
+    // The dialog holds the project's choice. The project is removed meanwhile, so the panel
+    // falls back to the node's defaults.
+    const choice = mode.choices.find((candidate) => !candidate.selected)!;
+    controller.setInput(input(node, { projectId: null }));
+    await settle();
+
+    await controller.save(PROJECT, choice.patch);
+    await controller.saveText(PROJECT, "worktreeBranchPrefix", "team");
+
+    expect(node.writes).toEqual([]);
+    expect(node.settings.defaultThreadEnvMode).toBe("local");
+    expect(rowsOf(controller).error).toBe("Project no longer exists.");
+    // The node's own rows still take their own edits.
+    await controller.save(null, choice.patch);
+    expect(node.writes).toEqual([
+      {
+        defaultThreadEnvMode: "worktree",
+        expectedNodePreferences: { defaultThreadEnvMode: "local" },
+      },
+    ]);
   });
 
   it("drops an answer for a scope the panel has left", async () => {
@@ -351,7 +466,7 @@ describe("the new-task defaults controller", () => {
     const view = rowsOf(controller);
     expect(view.rows).toEqual([]);
     expect(view.notice).toBe("Could not load Studio's defaults. Reconnect and try again.");
-    await controller.save({ runSetupScript: false });
+    await controller.save(null, { runSetupScript: false });
     expect(node.writes).toEqual([]);
   });
 
@@ -368,12 +483,12 @@ describe("the new-task defaults controller", () => {
     const node = fakeNode();
     const controller = await opened(node, { editable: false });
 
-    const view = rowsOf(controller, false);
+    const view = rowsOf(controller, NODE_SETTINGS_OWNER_ONLY);
     expect(view.rows.map((row) => row.title)).toContain("New threads");
     expect(view.canEdit).toBe(false);
-    expect(view.notice).toBe(NEW_TASK_DEFAULTS_READ_ONLY);
-    await controller.save({ defaultThreadEnvMode: "worktree" });
-    await controller.saveText("worktreeBranchPrefix", "team");
+    expect(view.notice).toBe(NODE_SETTINGS_OWNER_ONLY);
+    await controller.save(null, { defaultThreadEnvMode: "worktree" });
+    await controller.saveText(null, "worktreeBranchPrefix", "team");
     expect(node.writes).toEqual([]);
   });
 
@@ -381,13 +496,13 @@ describe("the new-task defaults controller", () => {
     const node = fakeNode();
     const controller = await opened(node);
 
-    await controller.saveText("worktreeBranchPrefix", "team/");
+    await controller.saveText(null, "worktreeBranchPrefix", "team/");
     expect(node.writes).toEqual([]);
     expect(controller.getSnapshot().error).toBe(
       "Use a valid Git namespace of up to 128 characters without a trailing slash.",
     );
 
-    await controller.saveText("worktreeBranchPrefix", "  team/tasks ");
+    await controller.saveText(null, "worktreeBranchPrefix", "  team/tasks ");
     expect(node.writes).toEqual([
       {
         worktreeBranchPrefix: "team/tasks",
@@ -398,7 +513,7 @@ describe("the new-task defaults controller", () => {
     ]);
     expect(controller.getSnapshot().error).toBeNull();
     // An unchanged value is no write.
-    await controller.saveText("worktreeBranchPrefix", "team/tasks");
+    await controller.saveText(null, "worktreeBranchPrefix", "team/tasks");
     expect(node.writes).toHaveLength(1);
   });
 
@@ -460,6 +575,37 @@ describe("the new-task defaults controller", () => {
     expect(
       newTaskDefaultsApplyChoices(rowsOf(controller).rows, targets).map((choice) => choice.key),
     ).not.toContain("initialModelSelection");
+  });
+
+  it("applies to every node only once the node's newest read landed, as the web does", async () => {
+    const studio = fakeNode();
+    const laptop = fakeNode(
+      applyServerSettingsPatch(DEFAULT_SERVER_SETTINGS, { defaultThreadEnvMode: "worktree" }),
+    );
+    const targets: NodeSettingsTarget[] = [studio, laptop].map((node, index) => ({
+      environmentId: EnvironmentId.make(`node-${index}`),
+      label: index === 0 ? "Studio" : "Laptop",
+      config: config(node.settings),
+      connected: true,
+      canWrite: true,
+      write: node.write,
+    }));
+    const controller = await opened(studio);
+    // Another device switches Studio to worktrees; its push reads Studio again, and until that
+    // read lands the panel still shows "Local".
+    studio.changeElsewhere({ defaultThreadEnvMode: "worktree" });
+    studio.answerNextRead(() => new Promise(() => undefined));
+    controller.setInput(input(studio));
+    expect(controller.getSnapshot().phase).toBe("loading");
+    expect(rowsOf(controller)).toMatchObject({ canEdit: true, canApply: false });
+
+    await controller.applyToAllNodes("defaultThreadEnvMode", targets);
+
+    // Laptop compares its own value, so "Local" copied from the stale read would have landed.
+    expect(laptop.writes).toEqual([]);
+    expect(studio.writes).toEqual([]);
+    expect(laptop.settings.defaultThreadEnvMode).toBe("worktree");
+    expect(controller.getSnapshot().applyStatus).toBeNull();
   });
 
   it("never sends a project override to other nodes", async () => {

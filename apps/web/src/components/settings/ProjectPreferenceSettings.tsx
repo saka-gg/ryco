@@ -24,6 +24,7 @@ import {
 import type { ServerSettings } from "@ryco/contracts/settings";
 import {
   PROJECT_PREFERENCE_FIELDS,
+  PROJECT_PREFERENCE_PROJECT_GONE,
   projectPreferenceSourceLabel,
   projectPreferenceValueLabel,
   readProjectPreferenceText,
@@ -106,7 +107,7 @@ function ProjectPreferenceEditor(props: {
     setEffective(null);
     setError(null);
     if (projectMissing) {
-      setError("Project no longer exists.");
+      setError(PROJECT_PREFERENCE_PROJECT_GONE);
       return;
     }
     if (!config || props.disabled) return;

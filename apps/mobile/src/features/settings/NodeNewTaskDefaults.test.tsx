@@ -204,6 +204,32 @@ describe("the New tasks panel", () => {
     expect(elements(tree, "ModelPickerSheet")[0]!.props.visible).toBe(false);
   });
 
+  it("applies a trait from the sheet while a search hides the selected model", async () => {
+    const node = testNode();
+    addNode({ node });
+    let tree: ReactNode = await settled();
+    (row(tree, "Provider and model")!.onPress as () => void)();
+    tree = render();
+    (elements(tree, "ModelPickerSheet")[0]!.props.onChangeQuery as (query: string) => void)("fast");
+    tree = render();
+    const sheet = elements(tree, "ModelPickerSheet")[0]!.props;
+    expect(sheet.query).toBe("fast");
+
+    (sheet.onSelectOption as (id: string, value: string) => void)("reasoningEffort", "low");
+    await settled();
+
+    expect(node.writes).toEqual([
+      {
+        initialModelSelection: {
+          instanceId: TEST_PROVIDER,
+          model: "gpt-builtin",
+          options: [{ id: "reasoningEffort", value: "low" }],
+        },
+        expectedNodePreferences: { initialModelSelection: null },
+      },
+    ]);
+  });
+
   it("shows a refused write as '<node>: <message>' and the node's values read again", async () => {
     const node = testNode();
     addNode({ node });
@@ -279,7 +305,9 @@ describe("the New tasks panel", () => {
 
     expect(node.reads).toEqual([]);
     expect(row(tree, "Provider and model")).toBeUndefined();
-    expect(textOf(tree)).toContain("Connect as the node owner to change this.");
+    // Its owner is asked to reconnect, not to become the owner.
+    expect(textOf(tree)).toContain("Reconnect to change this.");
+    expect(textOf(tree)).not.toContain("Connect as the node owner");
     expect(row(tree, "Worktree submodules")).toMatchObject({ value: "Recursive" });
   });
 });

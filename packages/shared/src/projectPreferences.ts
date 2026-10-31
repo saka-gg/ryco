@@ -145,3 +145,6 @@ export function projectPreferenceSourceLabel(
   if (source === "builtin") return "Ryco default";
   return scope.nodeNoun === "device" ? "Device default" : "Node default";
 }
+
+/** Why an edit made for a project went nowhere: the project was removed meanwhile. */
+export const PROJECT_PREFERENCE_PROJECT_GONE = "Project no longer exists.";

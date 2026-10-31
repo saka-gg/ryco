@@ -26,7 +26,12 @@ import {
   type NewTaskDefaultRow,
   type NewTaskDefaultsController,
 } from "./nodeNewTaskDefaultsModel";
-import { buildNodeSettingsTargets, canChangeNodeSettings } from "./nodeSettingsTargets";
+import {
+  canChangeNodeSettings,
+  homeNodeSettingsTargets,
+  nodeConnected,
+  nodeSettingsReadOnlyReason,
+} from "./nodeSettingsTargets";
 
 const APPLY_DETAIL =
   "Writes one of this node's defaults to every connected node you own. Offline nodes keep their value. The model stays per node.";
@@ -41,21 +46,7 @@ export function NodeNewTaskDefaults() {
   // Every known node, for "Apply to all connected nodes": each writes through its own
   // connection and compares its own values.
   const targets = useMemo(
-    () =>
-      buildNodeSettingsTargets({
-        environmentIds: nodes.map((node) => node.environmentId),
-        configs,
-        labelOf: (environmentId) =>
-          nodes.find((node) => node.environmentId === environmentId)?.label ?? environmentId,
-        isOwner: (environmentId) => {
-          const node = nodes.find((candidate) => candidate.environmentId === environmentId);
-          return node !== undefined && canChangeNodeSettings(node);
-        },
-        isConnected: (environmentId) =>
-          nodes.find((node) => node.environmentId === environmentId)?.connectionState ===
-          "connected",
-        write: updateEnvironmentServerSettings,
-      }),
+    () => homeNodeSettingsTargets({ nodes, configs, write: updateEnvironmentServerSettings }),
     [configs, nodes],
   );
   return (
@@ -67,8 +58,9 @@ export function NodeNewTaskDefaults() {
           label={node.label}
           config={configs.get(node.environmentId) ?? null}
           // A viewer reads the defaults too; only the owner changes them.
-          readable={node.connectionState === "connected" || node.connectionState === "read-only"}
+          readable={nodeConnected(node)}
           editable={canChangeNodeSettings(node)}
+          readOnly={nodeSettingsReadOnlyReason(node)}
           targets={targets}
         />
       ))}
@@ -82,6 +74,8 @@ function NodeNewTaskDefaultsPanel(props: {
   readonly config: ServerConfig | null;
   readonly readable: boolean;
   readonly editable: boolean;
+  /** Why the rows take no edit from this device, or null when they may. */
+  readonly readOnly: string | null;
   readonly targets: ReadonlyArray<NodeSettingsTarget>;
 }) {
   const { environmentId, label, config, editable } = props;
@@ -108,8 +102,12 @@ function NodeNewTaskDefaultsPanel(props: {
     controller.getSnapshot,
     controller.getSnapshot,
   );
-  const view = buildNewTaskDefaultsView({ state, label, config, editable });
-  const [pickerOpen, setPickerOpen] = useState(false);
+  const view = buildNewTaskDefaultsView({ state, label, config, readOnly: props.readOnly });
+  // The scope the sheet was opened for, which its picks are written to: a re-render after that
+  // project is gone must not send them to the node's defaults.
+  const [pickerScope, setPickerScope] = useState<{ readonly projectId: ProjectId | null } | null>(
+    null,
+  );
   const [query, setQuery] = useState("");
   const [applyOpen, setApplyOpen] = useState(false);
 
@@ -126,7 +124,7 @@ function NodeNewTaskDefaultsPanel(props: {
       ? newTaskDefaultsApplyChoices(view.rows, props.targets)
       : [];
   const closePicker = () => {
-    setPickerOpen(false);
+    setPickerScope(null);
     setQuery("");
   };
 
@@ -168,11 +166,11 @@ function NodeNewTaskDefaultsPanel(props: {
           key={row.key}
           row={row}
           first={!leading && index === 0}
-          scopeKey={state.projectId ?? "node"}
+          projectId={state.projectId}
           editable={editable}
           canEdit={view.canEdit}
           controller={controller}
-          onOpenModel={() => setPickerOpen(true)}
+          onOpenModel={() => setPickerScope({ projectId: state.projectId })}
         />
       ))}
       <SettingsRow
@@ -186,7 +184,7 @@ function NodeNewTaskDefaultsPanel(props: {
           label="Apply to all connected nodes"
           value={state.applying ? "Applying…" : undefined}
           detail={view.applyStatus ?? APPLY_DETAIL}
-          disabled={!view.canEdit || applyChoices.length === 0}
+          disabled={!view.canApply || applyChoices.length === 0}
           onPress={() => setApplyOpen((open) => !open)}
         />
       ) : null}
@@ -196,7 +194,7 @@ function NodeNewTaskDefaultsPanel(props: {
               key={`apply:${choice.key}`}
               label={`Apply ${choice.title.toLowerCase()}: ${choice.value}`}
               detail={choice.detail}
-              disabled={!view.canEdit}
+              disabled={!view.canApply}
               onPress={() => {
                 setApplyOpen(false);
                 void controller.applyToAllNodes(choice.key, props.targets);
@@ -217,19 +215,20 @@ function NodeNewTaskDefaultsPanel(props: {
       ) : null}
       {picker && modelRow ? (
         <ModelPickerSheet
-          visible={pickerOpen}
+          visible={pickerScope !== null}
           model={picker}
           query={query}
           onChangeQuery={setQuery}
           onClose={closePicker}
           onSelect={(key) => {
             const patch = initialModelPickPatch(picker, key);
+            const target = pickerScope?.projectId ?? null;
             closePicker();
-            if (patch) void controller.save(patch);
+            if (patch) void controller.save(target, patch);
           }}
           onSelectOption={(optionId, value) => {
-            const patch = initialModelOptionPatch(picker, modelRow.selection, optionId, value);
-            if (patch) void controller.save(patch);
+            const patch = initialModelOptionPatch(config, modelRow.selection, optionId, value);
+            if (patch) void controller.save(pickerScope?.projectId ?? null, patch);
           }}
         />
       ) : null}
@@ -240,8 +239,11 @@ function NodeNewTaskDefaultsPanel(props: {
 function NewTaskDefaultRowView(props: {
   readonly row: NewTaskDefaultRow;
   readonly first: boolean;
-  /** Changes with the scope, so a text field shows the scope's own value again. */
-  readonly scopeKey: string;
+  /**
+   * The scope the row was built for (null: the node's defaults). Its edits name it, so one still
+   * open when that project goes is dropped; a text field shows a new scope's own value again.
+   */
+  readonly projectId: ProjectId | null;
   /** This device may change the node's settings at all. */
   readonly editable: boolean;
   /** It may right now: the node answered and nothing of this panel is being written. */
@@ -249,14 +251,14 @@ function NewTaskDefaultRowView(props: {
   readonly controller: NewTaskDefaultsController;
   readonly onOpenModel: () => void;
 }) {
-  const { row, controller } = props;
+  const { row, controller, projectId } = props;
   let control: ReactNode;
   if (row.kind === "text" && props.editable) {
     control = (
       <View className={`px-5 py-3.5 ${props.first ? "" : "border-t border-border-subtle"}`}>
         <Text className="font-sans text-[17px] text-foreground">{row.title}</Text>
         <AppTextInput
-          key={`${props.scopeKey}:${row.text}`}
+          key={`${projectId ?? "node"}:${row.text}`}
           accessibilityLabel={row.accessibilityLabel}
           defaultValue={row.text}
           placeholder={row.placeholder}
@@ -265,7 +267,7 @@ function NewTaskDefaultRowView(props: {
           autoCorrect={false}
           returnKeyType="done"
           onEndEditing={(event) => {
-            void controller.saveText(row.key, event.nativeEvent.text);
+            void controller.saveText(projectId, row.key, event.nativeEvent.text);
           }}
           className="mt-2"
         />
@@ -283,7 +285,7 @@ function NewTaskDefaultRowView(props: {
                 ...row.choices.map((choice) => ({
                   text: choice.selected ? `${choice.label} ✓` : choice.label,
                   onPress: () => {
-                    if (!choice.selected) void controller.save(choice.patch);
+                    if (!choice.selected) void controller.save(projectId, choice.patch);
                   },
                 })),
                 { text: "Cancel", style: "cancel" as const },
@@ -308,7 +310,7 @@ function NewTaskDefaultRowView(props: {
           label={row.reset.label}
           disabled={!props.canEdit}
           onPress={() => {
-            if (row.reset) void controller.save(row.reset.patch);
+            if (row.reset) void controller.save(projectId, row.reset.patch);
           }}
         />
       ) : null}
