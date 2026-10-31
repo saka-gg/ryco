@@ -75,6 +75,12 @@ export function selectStatisticsTokenActivities(sql: SqlClient.SqlClient, scope:
     WHERE event_type = 'thread.activity-appended'
       AND json_extract(payload_json, '$.activity.kind') = 'context-window.updated'
       ${scope === null ? sql`` : sql`AND stream_id IN (SELECT value FROM json_each(${scope}))`}
+      -- Samples of a deleted incarnation that retention rolled up are counted by the rollup,
+      -- also while a removal that was cut short leaves some of them in the log.
+      AND orchestration_events.sequence > COALESCE((
+        SELECT MAX(r.deleted_sequence) FROM statistics_usage_rollups r
+        WHERE r.thread_id = orchestration_events.stream_id
+      ), 0)
       AND NOT ${inheritedItemIdSql(
         sql,
         sql.literal("json_extract(payload_json, '$.activity.id')"),

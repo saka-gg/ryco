@@ -178,6 +178,12 @@ const liveThreadFilter = (sql: SqlClient.SqlClient, cutoffIso: string) => sql`
   )
 `;
 
+/** One thread that fails (a row Statistics cannot decode, a SQL error) never stops the pass. */
+const skipThread = (threadId: string, error: unknown) =>
+  Effect.logWarning("event log retention skipped a thread", { threadId, error }).pipe(
+    Effect.as(false),
+  );
+
 export const runRetentionPass = (input: RetentionPassInput) =>
   Effect.gen(function* () {
     const sql = yield* SqlClient.SqlClient;
@@ -211,6 +217,7 @@ export const runRetentionPass = (input: RetentionPassInput) =>
       bound: Upper,
       filter: ReturnType<typeof liveThreadFilter> | null,
       before: Effect.Effect<void, SqlError | Schema.SchemaError> | null,
+      stillValid: Effect.Effect<boolean, SqlError> | null = null,
     ) =>
       Effect.gen(function* () {
         const matching = sql`
@@ -239,6 +246,9 @@ export const runRetentionPass = (input: RetentionPassInput) =>
           const removed = yield* sql.withTransaction(
             Effect.gen(function* () {
               startedAt = performance.now();
+              // Re-checked in every transaction: the selection ran before it, and the thread may
+              // have changed since (a deleted id created again).
+              if (stillValid !== null && !(yield* stillValid)) return null;
               if (first && before !== null) yield* before;
               // The floors rise before the rows go, in the same transaction.
               yield* raiseFloor(sql, "thread", threadId, bound.sequence, nowIso);
@@ -258,6 +268,7 @@ export const runRetentionPass = (input: RetentionPassInput) =>
           );
           first = false;
           const elapsedMs = performance.now() - startedAt;
+          if (removed === null) return removedAny;
           for (const row of removed) deletedBytes += Number(row.bytes ?? 0);
           deletedEvents += removed.length;
           if (removed.length > 0) removedAny = true;
@@ -267,8 +278,15 @@ export const runRetentionPass = (input: RetentionPassInput) =>
       });
 
     // ── 1. Permanently deleted threads ─────────────────────────────────────
-    const deleted = yield* sql<{ readonly threadId: string; readonly head: number }>`
-      SELECT t.thread_id AS "threadId", h.sequence AS "head"
+    // A thread whose newest event is its deletion, and one whose rollup exists but whose
+    // removal a budget or an error stopped (also when its id was created again since: every
+    // event below the deletion a rollup was taken at belongs to the rolled-up incarnation).
+    const deleted = yield* sql<{
+      readonly threadId: string;
+      readonly head: number;
+      readonly rolled: number;
+    }>`
+      SELECT t.thread_id AS "threadId", h.sequence AS "head", 0 AS "rolled"
       FROM projection_threads t
       JOIN orchestration_events h ON h.sequence = (
         SELECT MAX(e.sequence) FROM orchestration_events e
@@ -282,16 +300,29 @@ export const runRetentionPass = (input: RetentionPassInput) =>
           WHERE o.aggregate_kind = 'thread' AND o.stream_id = t.thread_id
             AND o.sequence < h.sequence AND o.sequence <= ${upper}
         )
-      ORDER BY h.sequence
+      UNION
+      SELECT r.thread_id AS "threadId", MAX(r.deleted_sequence) AS "head", 1 AS "rolled"
+      FROM statistics_usage_rollups r
+      WHERE EXISTS (
+        SELECT 1 FROM orchestration_events o
+        WHERE o.aggregate_kind = 'thread' AND o.stream_id = r.thread_id
+          AND o.sequence < r.deleted_sequence AND o.sequence <= ${upper}
+      )
+      GROUP BY r.thread_id
+      ORDER BY "head"
     `;
     const readThreadUsage = input.readThreadUsage;
+    const seen = new Set<string>();
     for (const candidate of readThreadUsage === undefined ? [] : deleted) {
       if (overBudget()) {
         backlog = true;
         break;
       }
-      if (yield* threadIsHeld(sql, candidate.threadId)) continue;
+      // Both selections can name a thread; the first (lowest head) wins this pass.
+      if (seen.has(candidate.threadId)) continue;
+      seen.add(candidate.threadId);
       const head = Number(candidate.head);
+      const rolled = Number(candidate.rolled) === 1;
       const rollup: Effect.Effect<void, SqlError | Schema.SchemaError> = Effect.gen(function* () {
         const [existing] = yield* sql<{ readonly found: number }>`
           SELECT 1 AS found FROM statistics_usage_rollups
@@ -307,12 +338,25 @@ export const runRetentionPass = (input: RetentionPassInput) =>
         `;
         rollups += 1;
       });
-      const removed = yield* removeStreamEvents(
-        candidate.threadId,
-        { sequence: Math.min(head - 1, upper) },
-        null,
-        rollup,
-      );
+      // Before the rollup exists, the deletion must still be the stream's newest event.
+      const stillDeleted = sql<{ readonly ok: number }>`
+        SELECT (
+          (SELECT MAX(sequence) FROM orchestration_events
+            WHERE aggregate_kind = 'thread' AND stream_id = ${candidate.threadId}) = ${head}
+          AND (SELECT event_type FROM orchestration_events WHERE sequence = ${head})
+            = 'thread.deleted'
+        ) AS ok
+      `.pipe(Effect.map((rows) => Number(rows[0]?.ok ?? 0) === 1));
+      const removed = yield* Effect.gen(function* () {
+        if (yield* threadIsHeld(sql, candidate.threadId)) return false;
+        return yield* removeStreamEvents(
+          candidate.threadId,
+          { sequence: Math.min(head - 1, upper) },
+          null,
+          rolled ? null : rollup,
+          rolled ? null : stillDeleted,
+        );
+      }).pipe(Effect.catch((error) => skipThread(candidate.threadId, error)));
       if (removed) deletedThreads += 1;
     }
 
@@ -326,48 +370,56 @@ export const runRetentionPass = (input: RetentionPassInput) =>
         yield* lastSequenceBefore(sql, windowCutoffIso, Number(headRow?.head ?? 0)),
       );
       if (windowUpper > 0) {
+        // Each thread's bound: before its latest turn, within the window. A thread whose floor
+        // already reaches its bound has nothing left to remove until a new turn starts.
         const live = yield* sql<{
           readonly threadId: string;
-          readonly latestTurnStart: number | null;
+          readonly bound: number;
         }>`
-          SELECT
-            t.thread_id AS "threadId",
-            (
-              SELECT e.sequence FROM orchestration_events e
-              WHERE e.aggregate_kind = 'thread' AND e.stream_id = t.thread_id
-                AND e.event_type = 'thread.turn-start-requested'
-              ORDER BY e.sequence DESC LIMIT 1
-            ) AS "latestTurnStart"
-          FROM projection_threads t
-          WHERE (t.deleted_at IS NULL OR t.trashed_at IS NOT NULL)
+          WITH live AS (
+            SELECT
+              t.thread_id AS thread_id,
+              MIN(
+                ${windowUpper},
+                (
+                  SELECT e.sequence FROM orchestration_events e
+                  WHERE e.aggregate_kind = 'thread' AND e.stream_id = t.thread_id
+                    AND e.event_type = 'thread.turn-start-requested'
+                  ORDER BY e.sequence DESC LIMIT 1
+                ) - 1
+              ) AS bound,
+              COALESCE((
+                SELECT f.floor_sequence FROM orchestration_stream_floors f
+                WHERE f.aggregate_kind = 'thread' AND f.stream_id = t.thread_id
+              ), 0) AS floor
+            FROM projection_threads t
+            WHERE t.deleted_at IS NULL OR t.trashed_at IS NOT NULL
+          )
+          SELECT thread_id AS "threadId", bound
+          FROM live
+          WHERE bound IS NOT NULL AND bound > floor
             AND EXISTS (
               SELECT 1 FROM orchestration_events o
-              WHERE o.aggregate_kind = 'thread' AND o.stream_id = t.thread_id
-                AND o.sequence > COALESCE((
-                  SELECT f.floor_sequence FROM orchestration_stream_floors f
-                  WHERE f.aggregate_kind = 'thread' AND f.stream_id = t.thread_id
-                ), 0)
-                AND o.sequence <= ${windowUpper}
+              WHERE o.aggregate_kind = 'thread' AND o.stream_id = live.thread_id
+                AND o.sequence > live.floor AND o.sequence <= live.bound
                 ${liveThreadFilter(sql, windowCutoffIso)}
             )
+          ORDER BY bound
         `;
         for (const candidate of live) {
           if (overBudget()) {
             backlog = true;
             break;
           }
-          // A thread without a turn start keeps everything: its newest event bounds nothing here,
-          // and such threads are small.
-          if (candidate.latestTurnStart === null) continue;
-          const bound = Math.min(windowUpper, Number(candidate.latestTurnStart) - 1);
-          if (bound <= 0) continue;
-          if (yield* threadIsHeld(sql, candidate.threadId)) continue;
-          const removed = yield* removeStreamEvents(
-            candidate.threadId,
-            { sequence: bound },
-            liveThreadFilter(sql, windowCutoffIso),
-            null,
-          );
+          const removed = yield* Effect.gen(function* () {
+            if (yield* threadIsHeld(sql, candidate.threadId)) return false;
+            return yield* removeStreamEvents(
+              candidate.threadId,
+              { sequence: Number(candidate.bound) },
+              liveThreadFilter(sql, windowCutoffIso),
+              null,
+            );
+          }).pipe(Effect.catch((error) => skipThread(candidate.threadId, error)));
           if (removed) trimmedThreads += 1;
         }
       }

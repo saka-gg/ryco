@@ -11,6 +11,7 @@ import {
 import { OrchestrationEventStore } from "../Services/OrchestrationEventStore.ts";
 import { readStatisticsThreadPartial } from "../../statistics/statisticsRows.ts";
 import { makeEventLogCompaction, makeEventLogCompactionWith } from "./EventLogCompaction.ts";
+import { runRetentionPass } from "./EventLogRetention.ts";
 import { ONLINE_COMPACTION_PASS_OPTIONS } from "./EventLogCompactionDeferred.ts";
 import { OrchestrationEventStoreLive } from "./OrchestrationEventStore.ts";
 import { SqlitePersistenceMemory } from "./Sqlite.ts";
@@ -54,7 +55,8 @@ const insertEvent = (
         actor_kind, payload_json, metadata_json
       ) VALUES (
         ${`evt-retention-${serial}`}, 'thread', ${input.threadId},
-        (SELECT COUNT(*) FROM orchestration_events WHERE stream_id = ${input.threadId}),
+        (SELECT COALESCE(MAX(stream_version) + 1, 0) FROM orchestration_events
+          WHERE aggregate_kind = 'thread' AND stream_id = ${input.threadId}),
         ${input.type}, ${input.occurredAt}, 'system',
         ${JSON.stringify(input.payload ?? { threadId: input.threadId })}, '{}'
       )
@@ -63,7 +65,12 @@ const insertEvent = (
     return Number(row!.sequence);
   });
 
-const usageEvent = (sql: SqlClient.SqlClient, threadId: string, occurredAt: string) =>
+const usageEvent = (
+  sql: SqlClient.SqlClient,
+  threadId: string,
+  occurredAt: string,
+  turnId = "turn-1",
+) =>
   insertEvent(sql, {
     threadId,
     type: "thread.activity-appended",
@@ -72,7 +79,7 @@ const usageEvent = (sql: SqlClient.SqlClient, threadId: string, occurredAt: stri
       threadId,
       activity: {
         id: `usage-${serial}`,
-        turnId: "turn-1",
+        turnId,
         kind: "context-window.updated",
         createdAt: occurredAt,
         payload: { lastInputTokens: 10, lastOutputTokens: 5, lastUsedTokens: 15 },
@@ -455,6 +462,111 @@ describe("EventLogRetention", () => {
       );
       assert.isBelow(other, deletion);
     }),
+  );
+
+  retentionTest("leaves idle threads alone once their old history is gone", () =>
+    Effect.gen(function* () {
+      const sql = yield* SqlClient.SqlClient;
+      for (const thread of ["thread-idle-a", "thread-idle-b"]) {
+        yield* insertThread(sql, thread);
+        yield* insertEvent(sql, { threadId: thread, type: "thread.created", occurredAt: iso(60) });
+        yield* insertEvent(sql, {
+          threadId: thread,
+          type: "thread.turn-start-requested",
+          occurredAt: iso(60),
+        });
+        yield* insertEvent(sql, {
+          threadId: thread,
+          type: "thread.message-sent",
+          occurredAt: iso(60),
+        });
+        // The latest turn is old too, and stays whole.
+        yield* insertEvent(sql, {
+          threadId: thread,
+          type: "thread.turn-start-requested",
+          occurredAt: iso(50),
+        });
+        yield* insertEvent(sql, {
+          threadId: thread,
+          type: "thread.message-sent",
+          occurredAt: iso(50),
+        });
+      }
+      yield* markProjected(sql);
+      const passWithCount = Effect.gen(function* () {
+        let transactions = 0;
+        const result = yield* runRetentionPass({
+          options: PASS.retention!,
+          mode: "delete",
+          nowMs: NOW_MS,
+          compactedThroughSequence: Number.MAX_SAFE_INTEGER,
+          overTime: () => false,
+          afterBatch: () =>
+            Effect.sync(() => {
+              transactions += 1;
+            }),
+          readThreadUsage: readStatisticsThreadPartial,
+        });
+        return { result, transactions };
+      });
+
+      const first = yield* passWithCount;
+      assert.equal(first.result.trimmedThreads, 2);
+      assert.equal(first.result.deletedEvents, 4);
+      const second = yield* passWithCount;
+      assert.equal(second.transactions, 0, "no candidate, no transaction");
+      assert.equal(second.result.deletedEvents, 0);
+    }),
+  );
+
+  retentionTest(
+    "finishes a cut-short removal after the id was created again, counting its usage once",
+    () =>
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        const compaction = yield* EventLogCompaction;
+        const thread = "thread-reused";
+        yield* insertThread(sql, thread, { deletedAt: iso(10) });
+        yield* insertEvent(sql, { threadId: thread, type: "thread.created", occurredAt: iso(40) });
+        // One turn per sample: Statistics counts each turn's last sample.
+        for (let turn = 0; turn < 6; turn += 1)
+          yield* usageEvent(sql, thread, iso(39), `old-${turn}`);
+        const deletion = yield* insertEvent(sql, {
+          threadId: thread,
+          type: "thread.deleted",
+          occurredAt: iso(10),
+        });
+        yield* markProjected(sql);
+        const rolledUp = yield* readStatisticsThreadPartial(sql, thread);
+
+        // The budget stops the removal after the rollup and three events.
+        const cut = yield* compaction.runPass({
+          ...PASS,
+          retention: { ...PASS.retention!, maxEventsPerPass: 3 },
+        });
+        assert.equal(cut.retention?.rollups, 1);
+        assert.equal(cut.retention?.deletedEvents, 3);
+        assert.isTrue(cut.retention?.backlog);
+
+        // Created again, with new usage: its old samples are the rollup's, never counted again.
+        yield* sql`UPDATE projection_threads SET deleted_at = NULL WHERE thread_id = ${thread}`;
+        yield* insertEvent(sql, { threadId: thread, type: "thread.created", occurredAt: iso(1) });
+        yield* usageEvent(sql, thread, iso(1), "new-turn");
+        const live = yield* readStatisticsThreadPartial(sql, thread);
+        const tokens = (partial: { buckets: ReadonlyArray<{ totalTokens: number }> }) =>
+          partial.buckets.reduce((sum, bucket) => sum + bucket.totalTokens, 0);
+        assert.equal(tokens(rolledUp), 90);
+        assert.equal(tokens(live), 15);
+
+        // The next pass removes what is left below the deletion.
+        const next = yield* compaction.runPass(PASS);
+        assert.equal(next.retention?.deletedEvents, 4);
+        assert.deepEqual(
+          (yield* remaining(sql, thread)).map((row) => row.type),
+          ["thread.deleted", "thread.created", "thread.activity-appended"],
+        );
+        assert.isAbove((yield* remaining(sql, thread))[0]!.sequence, deletion - 1);
+      }),
   );
 
   it("is checked against every projector: a new one must seed from projections", () => {
