@@ -11,17 +11,17 @@ import { truncateUnicodeSafe } from "./String.ts";
 // C0 and C1 controls, line and paragraph separators, and bidirectional overrides,
 // isolates and marks (which can make text read differently from what it is).
 const UNSAFE_CHARACTERS =
-  // eslint-disable-next-line no-control-regex
+  // eslint-disable-next-line no-control-regex -- C0 and C1 controls are what it replaces
   /[\u0000-\u001f\u007f-\u009f\u061c\u200e\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069]/gu;
 // The same, but keeping tabs and line feeds (a multi-line block).
 const UNSAFE_BLOCK_CHARACTERS =
-  // eslint-disable-next-line no-control-regex
+  // eslint-disable-next-line no-control-regex -- C0 and C1 controls are what it replaces
   /[\u0000-\u0008\u000b-\u001f\u007f-\u009f\u061c\u200e\u200f\u2028\u2029\u202a-\u202e\u2066-\u2069]/gu;
 // Zero-width characters, invisible operators, the byte order mark and Unicode tags:
 // text the chat shows as nothing at all but a model can still read.
 const INVISIBLE_CHARACTERS = /[\u200b-\u200d\u2060-\u2064\ufeff\u{e0000}-\u{e007f}]/gu;
 // Terminal escape sequences (colours, cursor moves, titles and links): CSI and OSC.
-// eslint-disable-next-line no-control-regex
+// eslint-disable-next-line no-control-regex -- terminal escapes start with ESC, which it removes
 const TERMINAL_ESCAPES = /\u001b\[[0-?]*[ -/]*[@-~]|\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)?/gu;
 
 /**
