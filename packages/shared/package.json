@@ -505,6 +505,10 @@
       "types": "./src/userInputExchange.ts",
       "import": "./src/userInputExchange.ts"
     },
+    "./optionalQuestionAnswer": {
+      "types": "./src/optionalQuestionAnswer.ts",
+      "import": "./src/optionalQuestionAnswer.ts"
+    },
     "./computerFrame": {
       "types": "./src/computerFrame.ts",
       "import": "./src/computerFrame.ts"

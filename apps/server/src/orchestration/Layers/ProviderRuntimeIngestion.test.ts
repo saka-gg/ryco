@@ -3,7 +3,10 @@ import {
   makeCompletionReturnRepository,
 } from "../../persistence/Layers/AgentControlCompletionReturns.ts";
 import { completionFixture } from "../../agentControl/completionReturnTestSupport.ts";
-import { derivePendingThreadRequestState } from "@ryco/shared/threadActivity";
+import {
+  derivePendingThreadRequests,
+  derivePendingThreadRequestState,
+} from "@ryco/shared/threadActivity";
 import fs from "node:fs";
 import * as SqlClient from "effect/sql/SqlClient";
 import os from "node:os";
@@ -4572,7 +4575,7 @@ describe("ProviderRuntimeIngestion", () => {
     expect(message?.streaming).toBe(false);
   });
 
-  it("keeps optional questions out of turn completion and expires them at the authoritative end", async () => {
+  it("keeps optional questions out of turn completion and open after their turn ends", async () => {
     const harness = await createHarness({ callbackRuntime: true });
     const base = {
       provider: ProviderDriverKind.make("codex"),
@@ -4622,19 +4625,23 @@ describe("ProviderRuntimeIngestion", () => {
       eventId: asEventId("optional-end"),
       payload: { state: "completed" },
     });
-    const completed = await waitForThread(harness.readModel, (thread) =>
-      thread.activities.some((activity) => activity.kind === "provider.user-input.respond.failed"),
+    const completed = await waitForThread(
+      harness.readModel,
+      (thread) =>
+        thread.session?.activeTurnId === null &&
+        thread.messages.some(
+          (message) => message.text === "Still working independently" && !message.streaming,
+        ),
     );
+    // Its answer can still come: it then starts the next turn. Nothing clears it.
     expect(
-      completed.messages.some(
-        (message) => message.text === "Still working independently" && !message.streaming,
-      ),
-    ).toBe(true);
-    expect(
-      completed.activities.find(
+      completed.activities.some(
         (activity) => activity.kind === "provider.user-input.respond.failed",
-      )?.payload,
-    ).toMatchObject({ responseState: "invalidated" });
+      ),
+    ).toBe(false);
+    expect(
+      derivePendingThreadRequests(completed.activities).map((request) => request.requestId),
+    ).toEqual(["optional:request"]);
   });
 
   it("flushes and completes buffered assistant text when user input is requested", async () => {

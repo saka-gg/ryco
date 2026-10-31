@@ -4294,6 +4294,7 @@ const makeProjectionSnapshotQueryOn = Effect.fn("makeProjectionSnapshotQueryOn")
 
   const getThreadWindow: ProjectionSnapshotQueryShape["getThreadWindow"] = (input) =>
     Effect.gen(function* () {
+      const openQuestions = yield* Effect.promise(() => import("../optionalQuestionAnswers.ts"));
       const limits = {
         messages: Math.min(input.limits.messages, 200),
         proposedPlans: Math.min(input.limits.proposedPlans, 50),
@@ -4311,6 +4312,7 @@ const makeProjectionSnapshotQueryOn = Effect.fn("makeProjectionSnapshotQueryOn")
         sessionRow,
         stateRows,
         followUpQueues,
+        openQuestionRows,
       ] = yield* sql
         .withTransaction(
           // Issued together: on the read worker every statement is a round trip,
@@ -4402,6 +4404,13 @@ const makeProjectionSnapshotQueryOn = Effect.fn("makeProjectionSnapshotQueryOn")
                 ),
               ),
               readFollowUpQueues("ProjectionSnapshotQuery.getThreadWindow", input.threadId),
+              openQuestions
+                .readOpenOptionalQuestions(sql, input.threadId)
+                .pipe(
+                  Effect.mapError(
+                    toPersistenceSqlError("ProjectionSnapshotQuery.getThreadWindow:openQuestions"),
+                  ),
+                ),
             ],
             { concurrency: "unbounded" },
           ),
@@ -4475,9 +4484,13 @@ const makeProjectionSnapshotQueryOn = Effect.fn("makeProjectionSnapshotQueryOn")
         thread,
         projects: project ? [{ id: project.projectId, workspaceRoot: project.workspaceRoot }] : [],
       });
+      // Open optional questions the window does not hold ride along, however old.
+      const withQuestions = openQuestions.withOpenOptionalQuestions(thread, openQuestionRows);
       return {
         snapshotSequence: computeSnapshotSequence(stateRows),
-        thread: checkpoint ? { ...thread, activities: [...thread.activities, checkpoint] } : thread,
+        thread: checkpoint
+          ? { ...withQuestions, activities: [...withQuestions.activities, checkpoint] }
+          : withQuestions,
         ...(workspaceCwd ? { workspaceCwd } : {}),
         history: {
           messages: createdAtHistoryPageInfo({

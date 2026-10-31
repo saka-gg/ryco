@@ -2305,6 +2305,19 @@ export const FollowUpQueueDispatch = Schema.Struct({
 });
 export type FollowUpQueueDispatch = typeof FollowUpQueueDispatch.Type;
 
+/**
+ * A `thread.turn.start` whose message answers a Codex optional question after the question's
+ * turn ended. The node records the question answered in the same commit as the message, so the
+ * card leaves every client and a second answer is refused. While the question's turn still runs,
+ * clients answer with `thread.user-input.respond` instead, which steers that turn.
+ */
+export const OptionalQuestionTurnAnswer = Schema.Struct({
+  requestId: ApprovalRequestId,
+  userInputIdentity: ApprovalResponseIdentity,
+  answers: ProviderUserInputAnswers,
+});
+export type OptionalQuestionTurnAnswer = typeof OptionalQuestionTurnAnswer.Type;
+
 export const ThreadTurnStartCommand = Schema.Struct({
   claudeResumeGuard: Schema.optional(ClaudeResumeGuard),
   restartContinuationGuard: Schema.optional(RestartContinuationGuard),
@@ -2335,6 +2348,7 @@ export const ThreadTurnStartCommand = Schema.Struct({
   sourceProposedPlan: Schema.optional(SourceProposedPlanReference),
   sourceControlContexts: Schema.optional(Schema.Array(ComposerSourceControlContext)),
   threadReferences: Schema.optional(ThreadReferences),
+  optionalAnswer: Schema.optional(OptionalQuestionTurnAnswer),
   keepBackgroundWork: KeepBackgroundWork,
   stopBackgroundWork: StopBackgroundWork,
   origin: Schema.optional(TurnOrigin),
@@ -2369,6 +2383,7 @@ export const ClientThreadTurnStartCommand = Schema.Struct({
   sourceProposedPlan: Schema.optional(SourceProposedPlanReference),
   sourceControlContexts: Schema.optional(Schema.Array(ComposerSourceControlContext)),
   threadReferences: Schema.optional(ThreadReferences),
+  optionalAnswer: Schema.optional(OptionalQuestionTurnAnswer),
   keepBackgroundWork: KeepBackgroundWork,
   stopBackgroundWork: StopBackgroundWork,
   createdAt: IsoDateTime,

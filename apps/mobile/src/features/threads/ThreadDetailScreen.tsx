@@ -74,6 +74,7 @@ import {
   selectFilesRevertSupported,
   subscribeCheckpointReverts,
   type PendingApproval,
+  type PendingUserInput,
   type TimelineEntry,
 } from "@ryco/client-runtime/state/session";
 import {
@@ -238,6 +239,10 @@ import {
 import { executeSendTurn } from "./executeSendTurn";
 import { PendingApprovalCard } from "./PendingApprovalCard";
 import { PendingUserInputCard } from "./PendingUserInputCard";
+import {
+  resolveOptionalAnswerRoute,
+  sendOptionalAnswerAsMessage,
+} from "@ryco/client-runtime/state/user-input";
 import { sendThreadTurn } from "./sendThreadTurn";
 import { runUndoFileChanges } from "./undoFileChanges";
 import {
@@ -1058,6 +1063,40 @@ export function ThreadDetailScreen(props: {
     if (!instanceId) return null;
     return providers.find((provider) => provider.instanceId === instanceId)?.driver ?? null;
   }, [providers, selectedModelSelection?.instanceId]);
+  // An optional question answered after its turn ended: a new message on the thread's own model
+  // and modes, through the shared send engine, which starts the next turn.
+  const sendOptionalAnswer = useCallback(
+    async (userInput: PendingUserInput, answers: Record<string, string | string[]>) => {
+      const current = selectThreadByRef(
+        useStore.getState(),
+        scopeThreadRef(environmentId, threadId),
+      );
+      if (!current) throw new Error("Thread is not loaded yet.");
+      await sendOptionalAnswerAsMessage({
+        api: ensureEnvironmentApi(environmentId),
+        threadId,
+        userInput,
+        answers,
+        attachments: [],
+        thread: {
+          title: current.title,
+          modelSelection: current.modelSelection,
+          runtimeMode: current.runtimeMode,
+          interactionMode: current.interactionMode,
+          tokenMode: current.tokenMode ?? DEFAULT_AGENT_TOKEN_MODE,
+        },
+        providerDriver: current.session?.provider ?? null,
+        assertMutationReady: captureReviewedSendReadiness(
+          environmentId,
+          () => createMobileConnectionRegistry().driver.supervisor.read(environmentId),
+          "The connection changed. Reconnect and send the answer again; your draft is kept.",
+        ),
+        newCommandId,
+        newMessageId,
+      });
+    },
+    [environmentId, threadId],
+  );
 
   useEffect(() => {
     setStagedModelSelection(null);
@@ -2682,6 +2721,8 @@ export function ThreadDetailScreen(props: {
               environmentId={environmentId}
               threadId={threadId}
               userInput={userInput}
+              route={resolveOptionalAnswerRoute({ userInput, session: thread?.session })}
+              onSendAsMessage={sendOptionalAnswer}
               disabled={cachedView.promptsDisabled}
             />
           ))}

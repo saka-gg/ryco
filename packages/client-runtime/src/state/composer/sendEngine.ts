@@ -9,6 +9,7 @@ import type {
   ComputerTurnIntent,
   ModelSwitchBlockedByBackgroundWork,
   LocalTaskDelegateInput,
+  OptionalQuestionTurnAnswer,
   UsageLimitResumeGuard,
 } from "@ryco/contracts";
 import { rejectRetiredProjectMemory } from "@ryco/shared/retiredFeatures";
@@ -438,6 +439,11 @@ export interface CommitSendTurnDispatchInput {
   readonly localTask?: {
     readonly delegate: (command: LocalTaskDelegateInput["command"]) => Promise<void>;
   };
+  /**
+   * The message answers a Codex optional question whose turn ended: the node records the
+   * question answered with it, or refuses the send when it already was.
+   */
+  readonly optionalAnswer?: OptionalQuestionTurnAnswer;
 }
 
 /**
@@ -544,6 +550,7 @@ export interface TurnStartCommandInput {
   readonly usageLimitResumeGuard?: UsageLimitResumeGuard | undefined;
   /** A turn start sent again past background work (see `startTurnPastBackgroundWork`). */
   readonly retryPastBackgroundWork?: { readonly createdAt: string } | undefined;
+  readonly optionalAnswer?: OptionalQuestionTurnAnswer | undefined;
   readonly createdAt: string;
 }
 
@@ -579,6 +586,7 @@ export function buildTurnStartCommand(
     ...(input.bootstrap ? { bootstrap: input.bootstrap } : {}),
     ...(sourceControlContexts.length > 0 ? { sourceControlContexts } : {}),
     ...(threadReferences.length > 0 ? { threadReferences } : {}),
+    ...(input.optionalAnswer ? { optionalAnswer: input.optionalAnswer } : {}),
     // Every caller handles the node's refusal (the choice, a held queue message, or a failed
     // send that keeps the draft), so each turn start asks for it until the user chose to stop.
     ...(input.retryPastBackgroundWork
@@ -614,6 +622,7 @@ function dispatchTurnStart(
     claudeResumeGuard,
     usageLimitResumeGuard: input.usageLimitResumeGuard,
     retryPastBackgroundWork,
+    optionalAnswer: input.optionalAnswer,
     createdAt: input.createdAt,
   });
   return input.localTask

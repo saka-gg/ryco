@@ -539,6 +539,30 @@ const makeOrchestrationEngine = Effect.fnUntraced(function* (
                     session: findThreadInArray(commandReadModel.threads, command.threadId)?.session,
                   });
                 }
+                // The message answers an optional question whose turn ended: the question is
+                // claimed here, in the commit's transaction, so a second answer is refused.
+                const turnStart =
+                  envelope.command.type === "thread.turn.start" ? envelope.command : undefined;
+                const answer = turnStart?.optionalAnswer;
+                if (turnStart && answer) {
+                  const row = yield* questions.getByRequestId({
+                    threadId: turnStart.threadId,
+                    requestId: answer.requestId,
+                  });
+                  const blocker = (yield* Effect.promise(
+                    () => import("../optionalQuestionAnswers.ts"),
+                  )).optionalAnswerClaimBlocker(
+                    Option.getOrUndefined(row),
+                    turnStart.threadId,
+                    answer,
+                  );
+                  if (blocker !== null) {
+                    return yield* new OrchestrationCommandInvariantError({
+                      commandType: turnStart.type,
+                      detail: blocker,
+                    });
+                  }
+                }
                 const committedEvents: OrchestrationEvent[] = [];
                 const postCommitEffects: Array<Effect.Effect<void>> = [];
                 let nextCommandReadModel = commandReadModel;

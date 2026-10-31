@@ -2388,6 +2388,23 @@ const decideCommand = Effect.fn("decideOrchestrationCommand.command")(function* 
         ...modeEvents,
         ...(unsettledEvent === null ? turnEvents : [unsettledEvent, ...turnEvents]),
         ...(autoResumedActivity === null ? [] : [autoResumedActivity]),
+        // An answer to an optional question whose turn ended: the engine claims the question in
+        // this commit's transaction, and this settles it with the message that carries it.
+        ...(command.optionalAnswer === undefined
+          ? []
+          : [
+              (yield* Effect.promise(
+                () => import("./optionalQuestionAnswers.ts"),
+              )).optionalAnswerResolvedEvent(
+                withEventBase({
+                  aggregateKind: "thread",
+                  aggregateId: command.threadId,
+                  occurredAt: command.createdAt,
+                  commandId: command.commandId,
+                }),
+                { ...command, optionalAnswer: command.optionalAnswer },
+              ),
+            ]),
       ];
     }
 

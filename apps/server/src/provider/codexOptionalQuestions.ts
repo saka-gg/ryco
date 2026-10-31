@@ -3,6 +3,7 @@ import {
   type ProviderUserInputAnswers,
   type UserInputQuestion,
 } from "@ryco/contracts";
+import { formatOptionalQuestionAnswer } from "@ryco/shared/optionalQuestionAnswer";
 
 /** Native request_user_input_async emits a completed agentMessage, not an RPC
  * request. Enable only on explicit structured payloads, never on timeouts. */
@@ -126,19 +127,5 @@ export function formatCodexOptionalAnswer(
   answers: ProviderUserInputAnswers,
 ): string | undefined {
   // Empty answer map is an explicit local dismissal, never an approval decision.
-  if (Object.keys(answers).length === 0) return undefined;
-  if (Object.keys(answers).length !== question.questions.length)
-    throw new Error("Answer every optional question before submitting.");
-  const lines = question.questions.map((entry) => {
-    const answer = answers[entry.id];
-    const values = typeof answer === "string" ? [answer] : answer;
-    if (
-      !Array.isArray(values) ||
-      values.length === 0 ||
-      values.some((value) => typeof value !== "string" || !value.trim())
-    )
-      throw new Error("Answer every optional question before submitting.");
-    return `${entry.question}\nAnswer: ${values.join("; ")}`;
-  });
-  return `Reply to your optional questions (item ${question.itemId}, turn ${question.turnId}):\n\n${lines.join("\n\n")}`;
+  return formatOptionalQuestionAnswer(question, answers);
 }

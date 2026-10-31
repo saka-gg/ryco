@@ -2,6 +2,15 @@ import { useAppKeybindings } from "../appKeybindings";
 import { notifyWorktreeSubmoduleSetup } from "./worktrees/worktreeCreationNotifications";
 import { closeThreadTerminal } from "../terminalClose";
 import { OptionalQuestionCard } from "./chat/OptionalQuestionCard";
+import {
+  composerOptionalQuestionUploads,
+  sendOptionalAnswerFromWeb,
+} from "./chat/optionalQuestionAnswer";
+import {
+  questionDraftKey,
+  resolveOptionalAnswerRoute,
+} from "@ryco/client-runtime/state/user-input";
+import type { PendingUserInput } from "@ryco/client-runtime/state/session";
 import { ResumeFallbackHandoffIcon } from "./chat/ContextHandoffMarkerRow";
 import { readPrimaryEnvironmentTarget } from "../environments/primary/target";
 import { parseComputerInvocation } from "@ryco/shared/computerInvocation";
@@ -37,6 +46,7 @@ import {
   type ApprovalRedirectRefusal,
   type ApprovalSightings,
   type SubscribedClaudeReviewState,
+  type SendTurnDispatchAttachment,
   describeNativeCompactionBlocker,
   nativeCompactionAdvertised,
   nativeCompactionBlockerForSession,
@@ -4649,6 +4659,42 @@ export default function ChatView(props: ChatViewProps) {
   const settleRevertChoice = revertChoice.settle;
   useEffect(() => () => settleRevertChoice(null), [routeThreadKey, settleRevertChoice]);
   const fileUploadMaxBytes = useEnvironmentFileUploadCapability(environmentId);
+  // An optional question answered after its turn: its files take the composer's upload path.
+  const optionalQuestionUploads = useMemo(
+    () =>
+      fileUploadMaxBytes !== null &&
+      activeThreadId !== null &&
+      getEnvironmentHttpBaseUrl(environmentId) !== null
+        ? composerOptionalQuestionUploads({
+            environmentId,
+            threadId: activeThreadId,
+            maxBytes: fileUploadMaxBytes,
+          })
+        : null,
+    [activeThreadId, environmentId, fileUploadMaxBytes],
+  );
+  // Refused while the node cannot take it now; the card keeps the draft and says so.
+  const onSendOptionalAnswerAsMessage = useCallback(
+    async (
+      input: PendingUserInput,
+      answers: Record<string, string | string[]>,
+      attachments: readonly SendTurnDispatchAttachment[],
+    ) => {
+      if (mutationUnavailableReason !== null) {
+        notifyMutationUnavailable(mutationUnavailableReason);
+        throw new Error(mutationUnavailableReason);
+      }
+      if (!serverThread) throw new Error("This thread is not loaded.");
+      await sendOptionalAnswerFromWeb({
+        environmentId,
+        thread: serverThread,
+        userInput: input,
+        answers,
+        attachments,
+      });
+    },
+    [environmentId, mutationUnavailableReason, notifyMutationUnavailable, serverThread],
+  );
 
   /** What every revert checks first; null when it may not run now. */
   const resolveRevertPreconditions = useCallback(() => {
@@ -7589,11 +7635,21 @@ export default function ChatView(props: ChatViewProps) {
                   />
                 </div>
               ) : null}
-              {presentationTier !== "phone"
+              {presentationTier !== "phone" && activeThread
                 ? optionalUserInputs.map((input) => (
                     <OptionalQuestionCard
                       key={input.userInputIdentity?.requestEventId ?? input.requestId}
                       input={input}
+                      draftKey={questionDraftKey({
+                        environmentId,
+                        threadId: activeThread.id,
+                        requestId: input.requestId,
+                        userInputIdentity: input.userInputIdentity,
+                      })}
+                      route={resolveOptionalAnswerRoute({
+                        userInput: input,
+                        session: activeThread.session,
+                      })}
                       disabled={
                         !dispatchCapability.allowed ||
                         activeEnvironmentUnavailable ||
@@ -7601,6 +7657,8 @@ export default function ChatView(props: ChatViewProps) {
                       }
                       disabledReason={mutationUnavailableReason}
                       onRespond={onRespondToUserInput}
+                      onSendAsMessage={onSendOptionalAnswerAsMessage}
+                      uploads={optionalQuestionUploads}
                     />
                   ))
                 : null}
