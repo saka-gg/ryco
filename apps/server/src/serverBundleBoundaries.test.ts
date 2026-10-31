@@ -503,6 +503,10 @@ describe.skipIf(!hasCurrentBuild)("built server bundle", () => {
       expect(source).not.toMatch(/^\/\/#region \.\.\/\.\.\/packages\/shared\/src\/qrCode\.ts$/mu);
       expect(source).not.toMatch(/^\/\/#region src\/hubConnector\/HubIdentityRuntime\.ts$/mu);
       expect(source).not.toMatch(/^\/\/#region src\/sourceControl\/GitHubCli\.ts$/mu);
+      // Loaded when a Forgejo pull request is first opened, listed or changed.
+      expect(source).not.toMatch(
+        /^\/\/#region src\/sourceControl\/ForgejoPullRequestPageApi\.ts$/mu,
+      );
       // Loaded when the external Agent Control integration first starts.
       expect(source).not.toMatch(/^\/\/#region src\/agentControl\/ExternalMcp\/tools\.ts$/mu);
       expect(source).not.toMatch(/^\/\/#region src\/agentControl\/ExternalMcp\/listener\.ts$/mu);

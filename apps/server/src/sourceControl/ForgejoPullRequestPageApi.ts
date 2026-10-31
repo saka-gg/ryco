@@ -24,6 +24,7 @@ import {
   hasCommentMutationMarker,
 } from "./gitHubCommentMutationMarker.ts";
 import { ForgejoApiError, forgejoStaleHeadError } from "./forgejoApiError.ts";
+import { forgejoPullRequestIndex } from "./forgejoPullRequests.ts";
 import type { SourceControlProviderContext } from "./SourceControlProvider.ts";
 import { indexForgejoDiffLines, type ForgejoDiffLineIndex } from "./forgejoDiffLines.ts";
 import { ForgejoCommentSchema, ForgejoLabelSchema, ForgejoUserSchema } from "./forgejoIssues.ts";
@@ -152,13 +153,6 @@ export interface ForgejoPageHttp<Repository extends ForgejoPageRepository> {
 export interface ForgejoPullRequestInput {
   readonly cwd: string;
   readonly reference: string;
-}
-
-/** The pull request number in a reference (`42`, `#42`, or a pull request URL). */
-export function forgejoPullRequestIndex(reference: string): string {
-  const trimmed = reference.trim().replace(/^#/, "");
-  const urlMatch = /(?:pulls?|pull-requests?|pullrequests?|pr)\/(\d+)(?:\D.*)?$/iu.exec(trimmed);
-  return urlMatch?.[1] ?? trimmed;
 }
 
 /** Ceiling for one commit's diff; larger diffs fail clearly instead of truncating mid-hunk. */
@@ -1728,3 +1722,5 @@ export function makeForgejoPullRequestPageApi<Repository extends ForgejoPageRepo
 }
 
 export type ForgejoPullRequestPageApi = ReturnType<typeof makeForgejoPullRequestPageApi>;
+
+export { forgejoPullRequestIndex };
