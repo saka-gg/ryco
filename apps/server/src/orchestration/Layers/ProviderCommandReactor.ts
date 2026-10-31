@@ -1692,7 +1692,7 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
         ),
       );
       if (Option.isNone(settings)) return;
-      const { textGenerationModelSelection, worktreeBranchChangeTypes } = settings.value;
+      const { textGenerationModelSelection } = settings.value;
       // A signed-out or failing provider would only retry its errors in the
       // background: generation moves to a ready provider, or is skipped.
       const modelSelection = Option.isSome(providerRegistry)
@@ -1709,10 +1709,13 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
         return;
       }
       // The temporary branch was named with the project's effective prefix.
-      const worktreeBranchPrefix = resolveProjectPreferences({
+      const effective = resolveProjectPreferences({
         settings: settings.value,
         ...(input.project !== undefined ? { project: input.project } : {}),
-      }).worktreeBranchPrefix.value;
+      });
+      const worktreeBranchPrefix = effective.worktreeBranchPrefix.value;
+      const worktreeBranchChangeTypes =
+        effective.worktreeBranchChangeTypes?.value ?? settings.value.worktreeBranchChangeTypes;
       const wantsTitle = canReplaceThreadTitle(thread.title, input.titleSeed);
       const oldBranch = thread.branch;
       const worktreePath = thread.worktreePath;

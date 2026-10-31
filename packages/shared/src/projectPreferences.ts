@@ -12,6 +12,11 @@ interface ProjectPreferenceFieldCopy {
   readonly controlLabel: string;
   /** How a reset action names the setting, e.g. "Use device default for worktree setup". */
   readonly resetLabel: string;
+  /**
+   * The node default keeps the row it had before project overrides existed, which older nodes
+   * still answer, so the list of node defaults skips it. A project overrides it in its own list.
+   */
+  readonly nodeDefaultRow?: "separate";
 }
 
 /** A choice among fixed values; a boolean shows as two named choices. */
@@ -72,6 +77,31 @@ export const PROJECT_PREFERENCE_FIELDS: {
     options: [
       { value: true, label: "Run setup" },
       { value: false, label: "Skip setup" },
+    ],
+  },
+  worktreeBranchChangeTypes: {
+    kind: "select",
+    title: "Generated branch names",
+    description:
+      "Whether generated worktree branches start with the kind of change, such as fix/ or feat/, or with the branch prefix.",
+    controlLabel: "Generated branch names",
+    resetLabel: "generated branch names",
+    nodeDefaultRow: "separate",
+    options: [
+      { value: true, label: "By change type" },
+      { value: false, label: "By prefix" },
+    ],
+  },
+  pullRequestTemplates: {
+    kind: "select",
+    title: "Pull request template",
+    description: "Whether generated pull request descriptions follow the repository's template.",
+    controlLabel: "Pull request template",
+    resetLabel: "pull request template",
+    nodeDefaultRow: "separate",
+    options: [
+      { value: true, label: "Follow template" },
+      { value: false, label: "No template" },
     ],
   },
 };

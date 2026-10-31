@@ -21,6 +21,8 @@ const harness = vi.hoisted(() => ({
   canManage: true,
   canMutate: true,
   projects: [{ id: "p", name: "Fixture project", environmentId: "fixture-node" }],
+  /** Whether the node reports the overrides added since effective preferences existed. */
+  reportsAddedKeys: false,
   read: vi.fn(),
   update: vi.fn(),
   local: vi.fn(),
@@ -71,6 +73,7 @@ beforeEach(() => {
   harness.connected = true;
   harness.canManage = true;
   harness.canMutate = true;
+  harness.reportsAddedKeys = false;
   harness.projects = [{ id: "p", name: "Fixture project", environmentId: "fixture-node" }];
   harness.config = {
     environment: {
@@ -100,6 +103,15 @@ beforeEach(() => {
         value: overrides.runSetupScript ?? true,
         source: overrides.runSetupScript === undefined ? "node" : "project",
       },
+      ...(harness.reportsAddedKeys
+        ? {
+            worktreeBranchChangeTypes: {
+              value: overrides.worktreeBranchChangeTypes ?? true,
+              source: overrides.worktreeBranchChangeTypes === undefined ? "node" : "project",
+            },
+            pullRequestTemplates: { value: true, source: "node" },
+          }
+        : {}),
       overrides,
     } as EffectiveProjectPreferences;
   });
@@ -149,6 +161,70 @@ describe("project inheritance controls", () => {
         },
       ]);
     expect(harness.local).not.toHaveBeenCalled();
+  });
+  it("lets a project override generated branch names and pull request templates", async () => {
+    harness.reportsAddedKeys = true;
+    await render(
+      <SettingsCard>
+        <ProjectPreferenceSettings projectId="p" projects={FIXTURE_PROJECT_CHOICES} />
+      </SettingsCard>,
+    );
+    await expect
+      .element(page.getByRole("combobox", { name: "Pull request template" }))
+      .toBeEnabled();
+    await page.getByRole("combobox", { name: "Generated branch names" }).click();
+    await page.getByRole("option", { name: "By prefix" }).click();
+    await expect
+      .poll(() => harness.update.mock.calls)
+      .toEqual([
+        [
+          "fixture-node",
+          {
+            projectPreferences: { p: { worktreeBranchChangeTypes: false } },
+            expectedProjectPreferences: { p: { worktreeBranchChangeTypes: null } },
+          },
+        ],
+      ]);
+    await page
+      .getByRole("button", { name: "Use device default for generated branch names" })
+      .click();
+    await expect
+      .poll(() => harness.update.mock.calls[1])
+      .toEqual([
+        "fixture-node",
+        {
+          projectPreferences: { p: { worktreeBranchChangeTypes: null } },
+          expectedProjectPreferences: { p: { worktreeBranchChangeTypes: false } },
+        },
+      ]);
+  });
+  it("waits for the node's reply before it shows the overrides added since", async () => {
+    harness.read.mockImplementation(() => new Promise(() => {}));
+    await render(
+      <SettingsCard>
+        <ProjectPreferenceSettings projectId="p" projects={FIXTURE_PROJECT_CHOICES} />
+      </SettingsCard>,
+    );
+    await expect.element(page.getByRole("combobox", { name: "Worktree setup" })).toBeVisible();
+    expect(page.getByRole("combobox", { name: "Generated branch names" }).elements()).toEqual([]);
+    expect(page.getByRole("combobox", { name: "Pull request template" }).elements()).toEqual([]);
+  });
+  it("hides the added overrides for an older node, and their node defaults keep their own rows", async () => {
+    const older = await render(
+      <SettingsCard>
+        <ProjectPreferenceSettings projectId="p" projects={FIXTURE_PROJECT_CHOICES} />
+      </SettingsCard>,
+    );
+    await expect.element(page.getByRole("combobox", { name: "Worktree setup" })).toBeEnabled();
+    expect(page.getByRole("combobox", { name: "Generated branch names" }).elements()).toEqual([]);
+    expect(page.getByRole("combobox", { name: "Pull request template" }).elements()).toEqual([]);
+    await older.unmount();
+
+    harness.reportsAddedKeys = true;
+    await render(<ProjectDefaultsSection />);
+    await expect.element(page.getByRole("combobox", { name: "Default thread mode" })).toBeEnabled();
+    expect(page.getByRole("combobox", { name: "Generated branch names" }).elements()).toEqual([]);
+    expect(page.getByRole("combobox", { name: "Pull request template" }).elements()).toEqual([]);
   });
   it("guards a node default with the value the editor showed", async () => {
     await render(<ProjectDefaultsSection />);

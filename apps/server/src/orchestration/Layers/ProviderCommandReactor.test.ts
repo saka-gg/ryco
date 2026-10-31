@@ -252,6 +252,7 @@ describe("ProviderCommandReactor", () => {
     readonly worktreeBranchPrefix?: string;
     readonly worktreeBranchChangeTypes?: boolean;
     readonly projectWorktreeBranchPrefix?: string;
+    readonly projectWorktreeBranchChangeTypes?: boolean;
     readonly setThreadGoal?: NonNullable<ProviderServiceShape["setThreadGoal"]>;
     readonly getThreadGoal?: NonNullable<ProviderServiceShape["getThreadGoal"]>;
     readonly clearThreadGoal?: NonNullable<ProviderServiceShape["clearThreadGoal"]>;
@@ -745,10 +746,18 @@ describe("ProviderCommandReactor", () => {
           ...(input?.worktreeBranchChangeTypes !== undefined
             ? { worktreeBranchChangeTypes: input.worktreeBranchChangeTypes }
             : {}),
-          ...(input?.projectWorktreeBranchPrefix !== undefined
+          ...(input?.projectWorktreeBranchPrefix !== undefined ||
+          input?.projectWorktreeBranchChangeTypes !== undefined
             ? {
                 projectPreferences: {
-                  "project-1": { worktreeBranchPrefix: input.projectWorktreeBranchPrefix },
+                  "project-1": {
+                    ...(input.projectWorktreeBranchPrefix !== undefined
+                      ? { worktreeBranchPrefix: input.projectWorktreeBranchPrefix }
+                      : {}),
+                    ...(input.projectWorktreeBranchChangeTypes !== undefined
+                      ? { worktreeBranchChangeTypes: input.projectWorktreeBranchChangeTypes }
+                      : {}),
+                  },
                 },
               }
             : {}),
@@ -2334,7 +2343,25 @@ describe("ProviderCommandReactor", () => {
       generated: "reconnect backoff",
       expected: "team/reconnect-backoff",
     },
+    {
+      name: "keeps the prefix for a project that turns change types off",
+      harnessInput: { worktreeBranchChangeTypes: true, projectWorktreeBranchChangeTypes: false },
+      temporaryBranch: "ryco/1234abcd",
+      generated: "reconnect backoff",
+      expected: "ryco/reconnect-backoff",
+    },
+    {
+      name: "names by change type for a project that turns them on",
+      harnessInput: { worktreeBranchChangeTypes: false, projectWorktreeBranchChangeTypes: true },
+      temporaryBranch: "ryco/1234abcd",
+      generated: "fix/Reconnect Backoff",
+      expected: "fix/reconnect-backoff",
+    },
   ])("$name", async ({ harnessInput, temporaryBranch, generated, expected }) => {
+    const byChangeType =
+      "projectWorktreeBranchChangeTypes" in harnessInput
+        ? harnessInput.projectWorktreeBranchChangeTypes
+        : harnessInput.worktreeBranchChangeTypes;
     const harness = await createHarness(harnessInput);
     harness.listLocalBranchNames.mockReturnValue(Effect.succeed([temporaryBranch]));
     const now = new Date().toISOString();
@@ -2368,9 +2395,9 @@ describe("ProviderCommandReactor", () => {
 
     await waitFor(() => harness.renameBranch.mock.calls.length === 1);
     expect(harness.generateBranchName.mock.calls[0]?.[0]).toMatchObject(
-      harnessInput.worktreeBranchChangeTypes ? { branchChangeTypes: true } : {},
+      byChangeType ? { branchChangeTypes: true } : {},
     );
-    if (!harnessInput.worktreeBranchChangeTypes) {
+    if (!byChangeType) {
       expect(harness.generateBranchName.mock.calls[0]?.[0]).not.toHaveProperty("branchChangeTypes");
     }
     expect(harness.renameBranch.mock.calls[0]?.[0]).toMatchObject({

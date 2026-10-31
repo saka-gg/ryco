@@ -54,6 +54,14 @@ function effectiveFor(
       value: overrides.runSetupScript ?? settings.runSetupScript,
       source: overrides.runSetupScript === undefined ? "node" : "project",
     },
+    worktreeBranchChangeTypes: {
+      value: overrides.worktreeBranchChangeTypes ?? settings.worktreeBranchChangeTypes,
+      source: overrides.worktreeBranchChangeTypes === undefined ? "node" : "project",
+    },
+    pullRequestTemplates: {
+      value: overrides.pullRequestTemplates ?? settings.pullRequestTemplates,
+      source: overrides.pullRequestTemplates === undefined ? "node" : "project",
+    },
     worktreeRoot: { value: "", source: "builtin" },
   };
 }
@@ -234,5 +242,14 @@ describe("project preference resets", () => {
     expect(projectPreferenceSupported(older as EffectiveProjectPreferences, "runSetupScript")).toBe(
       false,
     );
+    // A node from before the change-type and template overrides omits them.
+    const {
+      worktreeBranchChangeTypes: _types,
+      pullRequestTemplates: _templates,
+      ...before
+    } = effective;
+    expect(projectPreferenceSupported(before, "worktreeBranchChangeTypes")).toBe(false);
+    expect(projectPreferenceSupported(before, "pullRequestTemplates")).toBe(false);
+    expect(projectPreferenceSupported(before, "runSetupScript")).toBe(true);
   });
 });

@@ -75,11 +75,33 @@ function inheritNodeSettings(
     {};
   for (const key of PROJECT_PREFERENCE_VALUE_KEYS) {
     inherited[key] = {
-      value: overrides?.[key] ?? settings[key],
+      value: inheritedValue(settings, overrides, key),
       source: overrides?.[key] !== undefined ? "project" : "node",
     };
   }
   return inherited as InheritedPreferences;
+}
+
+/**
+ * One registry key's effective value, for a consumer that has only the project's id (or none,
+ * which gives the node setting).
+ */
+export function resolveProjectPreferenceValue<K extends ProjectPreferenceValueKey>(
+  settings: ServerSettings,
+  projectId: string | null | undefined,
+  key: K,
+): ServerSettings[K] {
+  const overrides = projectId ? settings.projectPreferences[projectId as ProjectId] : undefined;
+  return inheritedValue(settings, overrides, key);
+}
+
+/** A project override wins; otherwise the node setting of the same name applies. */
+function inheritedValue<K extends ProjectPreferenceValueKey>(
+  settings: ServerSettings,
+  overrides: ProjectPreferences | undefined,
+  key: K,
+): ServerSettings[K] {
+  return (overrides?.[key] ?? settings[key]) as ServerSettings[K];
 }
 
 /** Omitted creation choices inherit; explicit choices (including false/empty) win. */

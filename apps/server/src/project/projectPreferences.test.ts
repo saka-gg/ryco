@@ -13,6 +13,7 @@ import { describe, expect, it } from "vitest";
 import { applyServerSettingsPatch } from "@ryco/shared/serverSettings";
 import {
   resolveProjectPreferences,
+  resolveProjectPreferenceValue,
   resolveThreadCreationPreferences,
 } from "./projectPreferences.ts";
 
@@ -151,9 +152,27 @@ const INHERITANCE: {
   defaultThreadEnvMode: { node: "worktree", project: "local" },
   worktreeBranchPrefix: { node: "team/tasks", project: "" },
   runSetupScript: { node: false, project: true },
+  worktreeBranchChangeTypes: { node: false, project: true },
+  pullRequestTemplates: { node: false, project: true },
 };
 
 describe("registry inheritance", () => {
+  it.each(PROJECT_PREFERENCE_VALUE_KEYS)(
+    "gives %s by project id alone, as the full resolver does",
+    (key) => {
+      const sample = INHERITANCE[key];
+      const settings = applyServerSettingsPatch(DEFAULT_SERVER_SETTINGS, {
+        [key]: sample.node,
+        projectPreferences: { p: { [key]: sample.project } },
+      });
+      expect(resolveProjectPreferenceValue(settings, "p", key)).toEqual(sample.project);
+      expect(resolveProjectPreferenceValue(settings, "other", key)).toEqual(sample.node);
+      expect(resolveProjectPreferenceValue(settings, null, key)).toEqual(sample.node);
+      expect(resolveProjectPreferenceValue(settings, "p", key)).toEqual(
+        resolveProjectPreferences({ settings, project })[key]?.value,
+      );
+    },
+  );
   it.each(PROJECT_PREFERENCE_VALUE_KEYS)("resolves %s from the project, else the node", (key) => {
     const sample = INHERITANCE[key];
     const other = { ...project, id: ProjectId.make("other") };

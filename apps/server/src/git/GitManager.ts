@@ -57,7 +57,10 @@ import type { TextGenerationPolicy } from "../textGeneration/TextGenerationPolic
 import type { ChangeRequestTemplates } from "../sourceControl/changeRequestTemplates.ts";
 import { ProjectSetupScriptRunner } from "../project/Services/ProjectSetupScriptRunner.ts";
 import { ProjectionSnapshotQuery } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
-import { resolveProjectPreferences } from "../project/projectPreferences.ts";
+import {
+  resolveProjectPreferences,
+  resolveProjectPreferenceValue,
+} from "../project/projectPreferences.ts";
 import { extractBranchNameFromRemoteRef } from "./remoteRefs.ts";
 import { ServerSettingsService } from "../serverSettings.ts";
 import type { GitManagerServiceError } from "@ryco/contracts";
@@ -597,8 +600,11 @@ interface GitWriting {
    * first use and at most once per action, so only generated text pays for its reads.
    */
   readonly policy: Effect.Effect<TextGenerationPolicy | undefined>;
-  /** Generated pull request descriptions follow the repository's template. */
-  readonly pullRequestTemplates: boolean;
+  /**
+   * Generated pull request descriptions follow the repository's template: the checkout's project
+   * may override the node setting. Resolved when the pull request step runs.
+   */
+  readonly pullRequestTemplates: Effect.Effect<boolean>;
 }
 
 /**
@@ -1960,18 +1966,22 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* (
             const [rangeContext, policy] = yield* Effect.all(
               [
                 gitCore.readRangeContext(cwd, baseBranch, { remoteName }),
-                writing.pullRequestTemplates
-                  ? withChangeRequestTemplates(
-                      (templates) =>
-                        templates.withTemplate(writing.policy, {
-                          cwd,
-                          host: provider,
-                          baseBranch,
-                          remoteName,
-                        }),
-                      writing.policy,
-                    )
-                  : writing.policy,
+                writing.pullRequestTemplates.pipe(
+                  Effect.flatMap((followTemplate) =>
+                    followTemplate
+                      ? withChangeRequestTemplates(
+                          (templates) =>
+                            templates.withTemplate(writing.policy, {
+                              cwd,
+                              host: provider,
+                              baseBranch,
+                              remoteName,
+                            }),
+                          writing.policy,
+                        )
+                      : writing.policy,
+                  ),
+                ),
               ],
               { concurrency: 2 },
             );
@@ -2627,12 +2637,21 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* (
             gitManagerError("runStackedAction", "Failed to get server settings.", cause),
           ),
         );
+        // The checkout's project, looked up at most once per action: the writing policy and the
+        // pull request template setting both read it.
+        const checkoutProjectId = yield* Effect.cached(
+          options?.checkoutProjectId ?? Effect.succeed(null),
+        );
         const writing: GitWriting = {
           modelSelection: settings.textGenerationModelSelection,
           policy: yield* Effect.cached(
-            resolveWritingPolicy(input.cwd, settings, options?.checkoutProjectId),
+            resolveWritingPolicy(input.cwd, settings, checkoutProjectId),
           ),
-          pullRequestTemplates: settings.pullRequestTemplates,
+          pullRequestTemplates: checkoutProjectId.pipe(
+            Effect.map((projectId) =>
+              resolveProjectPreferenceValue(settings, projectId, "pullRequestTemplates"),
+            ),
+          ),
         };
 
         if (input.featureBranch) {

@@ -27,9 +27,16 @@ Appearance and notifications remain client-owned.
 
 `initialModelSelection` (nullable) and `runSetupScript` are node defaults.
 `projectPreferences` is a map keyed by project ID with a bounded allowlist:
-`initialModelSelection`, `defaultThreadEnvMode`, `worktreeBranchPrefix`, and
-`runSetupScript`. Node `defaultThreadEnvMode` and `worktreeBranchPrefix` retain
-their existing keys. `worktreeRoot` / `projectWorktreeRoots` retain their existing
+`initialModelSelection`, `defaultThreadEnvMode`, `worktreeBranchPrefix`,
+`runSetupScript`, `worktreeBranchChangeTypes` (generated worktree branches start
+with `fix/`, `feat/` and so on instead of the prefix) and `pullRequestTemplates`
+(generated pull request descriptions follow the repository's template). Node
+`defaultThreadEnvMode` and `worktreeBranchPrefix` retain their existing keys.
+The node defaults of the last two keep their own rows (General → branch naming,
+Source control → Pull request templates), because older nodes answer only those;
+a project overrides them on its own page. The project override of
+`pullRequestTemplates` applies to generated descriptions; the create dialog's
+template list still follows the node setting. `worktreeRoot` / `projectWorktreeRoots` retain their existing
 path validation and persistence. No repository configuration is read for these
 general preferences.
 

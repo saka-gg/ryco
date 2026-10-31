@@ -714,7 +714,10 @@ const REPORTED_PROJECT_PREFERENCE_VALUES = {
  * Overrides added since: an older node's effective preferences omit them, so they are optional
  * in {@link EffectiveProjectPreferences} and a client hides their rows. New keys go here.
  */
-const ADDED_PROJECT_PREFERENCE_VALUES = {};
+const ADDED_PROJECT_PREFERENCE_VALUES = {
+  worktreeBranchChangeTypes: Schema.Boolean,
+  pullRequestTemplates: Schema.Boolean,
+};
 /**
  * The whole opt-in for project overrides. Each key is the node setting of the same name, with
  * its plain value schema; a project may set it for itself and otherwise inherits the node's
@@ -731,6 +734,13 @@ export const PROJECT_PREFERENCE_VALUES = Schema.Struct({
 export type ProjectPreferenceValueKey = keyof typeof PROJECT_PREFERENCE_VALUES.fields;
 export const PROJECT_PREFERENCE_VALUE_KEYS = Object.keys(
   PROJECT_PREFERENCE_VALUES.fields,
+) as ReadonlyArray<ProjectPreferenceValueKey>;
+/**
+ * The overrides an older node's effective preferences omit: a client shows their rows only once
+ * a node's reply has them.
+ */
+export const PROJECT_PREFERENCE_ADDED_KEYS = Object.keys(
+  ADDED_PROJECT_PREFERENCE_VALUES,
 ) as ReadonlyArray<ProjectPreferenceValueKey>;
 /**
  * Every project preference. The initial model is the one special key: null masks a model saved
