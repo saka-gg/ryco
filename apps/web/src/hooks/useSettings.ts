@@ -105,7 +105,13 @@ export async function persistClientSettingsUpdate(patch: Partial<ClientSettings>
   try {
     await ensureLocalApi().persistence.setClientSettings(next);
   } catch (error) {
-    replaceClientSettingsSnapshot(previous);
+    // Only the keys this write set, and only where nothing changed them meanwhile.
+    const latest = getClientSettingsSnapshot();
+    const restored = { ...latest };
+    for (const key of Object.keys(patch) as Array<keyof ClientSettings>) {
+      if (latest[key] === next[key]) Object.assign(restored, { [key]: previous[key] });
+    }
+    replaceClientSettingsSnapshot(restored);
     throw error;
   }
 }

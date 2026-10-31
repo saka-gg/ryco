@@ -32,7 +32,11 @@ const options = {
 };
 
 /** Writers over a state object, recording what they did. */
-function fakeWriters(state: { current: ClientSettingsFileState }, failSave = false) {
+function fakeWriters(
+  state: { current: ClientSettingsFileState },
+  failSave = false,
+  failOn: string | null = null,
+) {
   const calls: string[] = [];
   const writers: ClientSettingsImportWriters = {
     addTheme: (theme) => {
@@ -54,6 +58,7 @@ function fakeWriters(state: { current: ClientSettingsFileState }, failSave = fal
       };
     },
     setColorMode: (mode) => {
+      if (failOn === "mode") throw new Error("storage full");
       calls.push(`mode ${mode}`);
       state.current = { ...state.current, colorMode: mode };
     },
@@ -172,6 +177,79 @@ describe("the client settings file", () => {
         options,
       ).addThemes,
     ).toEqual([]);
+  });
+
+  it("never takes a built-in theme's id, nor an id it already gave out", () => {
+    const plan = planClientSettingsImport(
+      {
+        format: "ryco-client-settings",
+        version: 1,
+        theme: { mode: "system", active: "nord" },
+        customThemes: [
+          { id: "nord", name: "My Nord", builtIn: false },
+          { id: "a", name: "A", builtIn: false },
+          { id: "a-copy", name: "A copy", builtIn: false },
+          { id: "a", name: "A again", builtIn: false },
+        ],
+      },
+      { ...defaults, customThemes: [{ id: "a", name: "Local A", builtIn: false }] },
+      options,
+    );
+    const ids = plan.addThemes.map((theme) => theme.id);
+    expect(ids).toEqual(["nord-copy", "a-copy", "a-copy-copy", "a-copy-2"]);
+    expect(new Set(ids).size).toBe(ids.length);
+    // The file's "nord" is its own theme, so the pick follows it, not the built-in one.
+    expect(plan.activeThemeId).toBe("nord-copy");
+  });
+
+  it("keeps only a theme file's own fields, and reads at most 100 themes", () => {
+    const plan = planClientSettingsImport(
+      {
+        format: "ryco-client-settings",
+        version: 1,
+        customThemes: [
+          { id: "custom-x", name: "X", builtIn: 0, extra: "kept?", light: { primary: "red" } },
+          ...Array.from({ length: 120 }, (_, index) => ({
+            id: `custom-t${index}`,
+            name: `T${index}`,
+            builtIn: false,
+          })),
+        ],
+      },
+      defaults,
+      options,
+    );
+    expect(plan.addThemes[0]).toEqual({
+      id: "custom-x",
+      name: "X",
+      builtIn: false,
+      light: { primary: "red" },
+    });
+    expect(plan.addThemes).toHaveLength(100);
+    expect(plan.warnings).toContain("customThemes: only the first 100 themes were read");
+  });
+
+  it("undoes exactly what it wrote when a local write throws", async () => {
+    const plan = planClientSettingsImport(
+      {
+        format: "ryco-client-settings",
+        version: 1,
+        client: { chatWidth: "full" },
+        appearance: { fontSizeBase: "15px" },
+        theme: { mode: "dark", active: "custom-sunset" },
+        customThemes: [sunset],
+      },
+      defaults,
+      options,
+    );
+    const state = { current: defaults };
+    const { calls, writers } = fakeWriters(state, false, "mode");
+    await expect(applyClientSettingsImport(plan, defaults, writers)).rejects.toThrow(
+      "storage full",
+    );
+    expect(state.current).toEqual(defaults);
+    expect(calls).not.toContain("save client");
+    expect(calls.slice(-2)).toEqual(["appearance fontSizeBase", "remove custom-sunset"]);
   });
 
   it("undoes every local write when the client settings cannot be saved", async () => {

@@ -23,6 +23,8 @@ export const CLIENT_SETTINGS_FILE_FORMAT = "ryco-client-settings";
 export const CLIENT_SETTINGS_FILE_VERSION = 1;
 /** Checked before a file is read. */
 export const MAX_CLIENT_SETTINGS_FILE_BYTES = 1024 * 1024;
+/** At most this many custom themes are read from one file; each is saved with the whole list. */
+export const MAX_IMPORTED_THEMES = 100;
 
 /**
  * Which client settings travel. Every key must be placed: a key added to `ClientSettingsSchema`
@@ -185,20 +187,49 @@ export function planClientSettingsImport(
     changes.push(`${key}: ${show(current.appearance[appearanceKey])} -> ${show(raw)}`);
   }
 
-  const knownIds = new Set(current.customThemes.map((theme) => theme.id));
-  const renamedIds = new Map<string, string>();
+  // An id is taken by any theme here (built-in or saved) and by every id this import gave out.
+  const givenIds = new Set<string>();
+  const taken = (id: string) =>
+    givenIds.has(id) ||
+    options.themeExists(id) ||
+    current.customThemes.some((theme) => theme.id === id);
+  const freeId = (imported: ThemeDefinition) => {
+    const base = options.newThemeId(imported);
+    if (!taken(base)) return base;
+    let attempt = 2;
+    while (taken(`${base}-${attempt}`)) attempt += 1;
+    return `${base}-${attempt}`;
+  };
+  // The file's id of each theme to the id it got here: the first theme with that id decides.
+  const importedIds = new Map<string, string>();
   const addThemes: ThemeDefinition[] = [];
-  for (const raw of Array.isArray(value.customThemes) ? value.customThemes : []) {
+  const rawThemes = Array.isArray(value.customThemes) ? value.customThemes : [];
+  if (rawThemes.length > MAX_IMPORTED_THEMES) {
+    warnings.push(`customThemes: only the first ${MAX_IMPORTED_THEMES} themes were read`);
+  }
+  for (const raw of rawThemes.slice(0, MAX_IMPORTED_THEMES)) {
     if (!isValidTheme(raw) || raw.builtIn) {
       warnings.push("customThemes: an invalid theme was left out");
       continue;
     }
+    // Only a theme file's own fields, as `parseTheme` reads them.
+    const imported: ThemeDefinition = {
+      id: raw.id,
+      name: raw.name,
+      builtIn: false,
+      ...(raw.description ? { description: raw.description } : {}),
+      ...(raw.light ? { light: { ...raw.light } } : {}),
+      ...(raw.dark ? { dark: { ...raw.dark } } : {}),
+    };
     const existing = current.customThemes.find((theme) => theme.id === raw.id);
-    if (existing !== undefined && JSON.stringify(existing) === JSON.stringify(raw)) continue;
-    const id = existing === undefined && !knownIds.has(raw.id) ? raw.id : options.newThemeId(raw);
-    if (id !== raw.id) renamedIds.set(raw.id, id);
-    knownIds.add(id);
-    addThemes.push({ ...raw, id });
+    if (existing !== undefined && JSON.stringify(existing) === JSON.stringify(imported)) {
+      if (!importedIds.has(raw.id)) importedIds.set(raw.id, raw.id);
+      continue;
+    }
+    const id = taken(raw.id) ? freeId(imported) : raw.id;
+    if (!importedIds.has(raw.id)) importedIds.set(raw.id, id);
+    givenIds.add(id);
+    addThemes.push({ ...imported, id });
     changes.push(`custom theme: ${raw.name}${id === raw.id ? "" : " (as a copy)"}`);
   }
 
@@ -216,8 +247,8 @@ export function planClientSettingsImport(
   }
   let activeThemeId: string | null = null;
   if (typeof theme.active === "string") {
-    const wanted = renamedIds.get(theme.active) ?? theme.active;
-    if (!options.themeExists(wanted) && !knownIds.has(wanted)) {
+    const wanted = importedIds.get(theme.active) ?? theme.active;
+    if (!options.themeExists(wanted) && !givenIds.has(wanted)) {
       warnings.push(`theme.active: no theme ${show(theme.active)} here, kept the current one`);
     } else if (wanted !== current.activeThemeId) {
       activeThemeId = wanted;
@@ -248,33 +279,45 @@ export interface ClientSettingsImportWriters {
 }
 
 /**
- * Writes a plan: themes, appearance, mode and theme, then client settings last. When the client
- * settings cannot be saved, every local value it wrote goes back to what it was, so a failed
- * import leaves nothing half done.
+ * Writes a plan: themes, appearance, mode and theme, then client settings last. When any write
+ * fails (a full storage throws, the client settings may not save), exactly the writes made so far
+ * are undone, newest first, so a failed import leaves nothing half done.
  */
 export async function applyClientSettingsImport(
   plan: ClientSettingsImportPlan,
   current: ClientSettingsFileState,
   writers: ClientSettingsImportWriters,
 ): Promise<void> {
-  for (const theme of plan.addThemes) writers.addTheme(theme);
-  for (const [key, value] of Object.entries(plan.appearance)) {
-    writers.setAppearance(key as AppearancePreferenceKey, value);
-  }
-  if (plan.colorMode !== null) writers.setColorMode(plan.colorMode);
-  if (plan.activeThemeId !== null) writers.setActiveTheme(plan.activeThemeId);
-  if (Object.keys(plan.client).length === 0) return;
+  const undo: Array<() => void> = [];
+  const existingIds = new Set(current.customThemes.map((theme) => theme.id));
   try {
-    await writers.saveClientSettings(plan.client);
-  } catch (error) {
-    if (plan.activeThemeId !== null) writers.setActiveTheme(current.activeThemeId);
-    if (plan.colorMode !== null) writers.setColorMode(current.colorMode);
-    for (const key of Object.keys(plan.appearance) as AppearancePreferenceKey[]) {
-      writers.setAppearance(key, current.appearance[key]);
-    }
-    const existingIds = new Set(current.customThemes.map((theme) => theme.id));
     for (const theme of plan.addThemes) {
-      if (!existingIds.has(theme.id)) writers.removeTheme(theme.id);
+      // Never removes a theme that was there before the import.
+      if (existingIds.has(theme.id)) continue;
+      writers.addTheme(theme);
+      undo.push(() => writers.removeTheme(theme.id));
+    }
+    for (const [key, value] of Object.entries(plan.appearance)) {
+      const appearanceKey = key as AppearancePreferenceKey;
+      writers.setAppearance(appearanceKey, value);
+      undo.push(() => writers.setAppearance(appearanceKey, current.appearance[appearanceKey]));
+    }
+    if (plan.colorMode !== null) {
+      writers.setColorMode(plan.colorMode);
+      undo.push(() => writers.setColorMode(current.colorMode));
+    }
+    if (plan.activeThemeId !== null) {
+      writers.setActiveTheme(plan.activeThemeId);
+      undo.push(() => writers.setActiveTheme(current.activeThemeId));
+    }
+    if (Object.keys(plan.client).length > 0) await writers.saveClientSettings(plan.client);
+  } catch (error) {
+    for (const step of undo.toReversed()) {
+      try {
+        step();
+      } catch {
+        // One failed undo must not keep the others from running.
+      }
     }
     throw error;
   }
