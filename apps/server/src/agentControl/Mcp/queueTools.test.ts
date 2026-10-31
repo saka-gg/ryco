@@ -183,7 +183,11 @@ describe("ryco_queue_* tools", () => {
         queuedBy: "thread-caller",
       });
       // A fresh command id per call: a refusal the node remembers never blocks a later edit.
-      assert.notInclude(String(command.commandId), ":2");
+      // (Never derived from the revision: it ends in a random UUID.)
+      assert.match(
+        String(command.commandId),
+        /^agent-control:queue-edit:thread-caller:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+      );
       for (const messageId of ["other-agent", "person", "old-agent", "steering-mine"]) {
         const refused = yield* h.call(AGENT_CONTROL_QUEUE_MCP_TOOLS.queueEdit, {
           threadId,
