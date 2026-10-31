@@ -282,15 +282,54 @@ function heldDraft(
   replaces: ReadonlyArray<string> = [],
 ): FollowUpQueueEventDraft | null {
   const merged = replacedHold(hold, input, replaces, occurredAt);
-  if (queueHoldsEqual(merged, hold)) return null;
+  return queueHoldsEqual(merged, hold) ? null : heldEventDraft(threadId, merged, occurredAt);
+}
+
+/** The queue's hold after each of `inputs`, in one event, or null when it already covers them. */
+function heldDraftOf(
+  threadId: ThreadId,
+  hold: FollowUpQueueHold | null,
+  inputs: ReadonlyArray<FollowUpQueueHoldInput>,
+  occurredAt: string,
+): FollowUpQueueEventDraft | null {
+  const merged = inputs.reduce<FollowUpQueueHold | null>(
+    (current, input) => mergeQueueHold(current, input, occurredAt),
+    hold,
+  );
+  return merged === null || queueHoldsEqual(merged, hold)
+    ? null
+    : heldEventDraft(threadId, merged, occurredAt);
+}
+
+function heldEventDraft(
+  threadId: ThreadId,
+  hold: FollowUpQueueHold,
+  occurredAt: string,
+): FollowUpQueueEventDraft {
   return {
     type: "thread.queue-held",
-    payload: {
-      threadId,
-      hold: { ...merged, causeKeys: [...merged.causeKeys] },
-      updatedAt: occurredAt,
-    },
+    payload: { threadId, hold: { ...hold, causeKeys: [...hold.causeKeys] }, updatedAt: occurredAt },
   };
+}
+
+/**
+ * The hold a Stop of `holdIfTurnInterrupted` records, when that turn is the thread's latest and
+ * ended interrupted (`thread.queue.add`): the Stop held nothing while the queue was empty.
+ */
+function interruptedTurnHold(
+  thread: Thread,
+  command: ThreadQueueAddCommand,
+): FollowUpQueueHoldInput | undefined {
+  const turnId = command.holdIfTurnInterrupted;
+  if (
+    turnId === undefined ||
+    thread.latestTurn?.turnId !== turnId ||
+    thread.latestTurn.state !== "interrupted"
+  ) {
+    return undefined;
+  }
+  const stop = createInterruptQueueHold(turnId, command.createdAt);
+  return { reason: stop.reason, causeKeys: stop.causeKeys, detail: stop.detail };
 }
 
 /** Releases `causeKeys` of the hold: a smaller hold, its end, or nothing when none matched. */
@@ -506,10 +545,15 @@ function decideQueueCommand(
             command.position === "head" ? (queue.entries[0]?.messageId ?? null) : null,
         },
       };
-      const held =
-        command.hold === undefined
-          ? null
-          : heldDraft(thread.id, queue.hold, command.hold, command.createdAt);
+      // The hold the add carries, and a Stop of the caller's turn its own read could not see.
+      const held = heldDraftOf(
+        thread.id,
+        queue.hold,
+        [command.hold, interruptedTurnHold(thread, command)].filter(
+          (hold): hold is FollowUpQueueHoldInput => hold !== undefined,
+        ),
+        command.createdAt,
+      );
       return held === null ? record(added) : record(added, held);
     }
 
