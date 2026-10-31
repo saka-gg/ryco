@@ -30,7 +30,18 @@ Desktop pages and sign-in children run sandboxed without Node integration, a Ryc
 
 External browser profile/cookie import and password management are deferred; this feature neither reads installed browser credentials nor imports conversations or cookies.
 
-On web, the browser provides a sandboxed iframe preview and an external-open link. Sites may reject framing, and the sandbox can restrict login/storage-dependent features. Desktop discovery and agent control are unavailable through that fallback. Remote localhost addresses need an explicitly reachable or forwarded URL; no remote-browser streaming is introduced. The frozen phone web surface is unchanged. Locked use remains a future feature.
+On web, the browser provides a sandboxed iframe preview and an external-open link. Sites may reject framing, and the sandbox can restrict login/storage-dependent features. Desktop discovery and agent control are unavailable through that fallback. Remote localhost addresses need an explicitly reachable or forwarded URL, or node browser tabs (below), which the Browser panel does not show yet. The frozen phone web surface is unchanged. Locked use remains a future feature.
+
+## Node browser tabs
+
+A node can also run browser tabs itself and stream them to its clients, so `localhost` means the node, not the device you are using. The node advertises them as `nodeBrowser` in its server config. This release adds the node side and the client runtime's frame source; the Browser panel will use them in a later release.
+
+- **Who can use them:** operator sessions only, as for terminals: the owner's own direct sessions and Hub sessions with the operator or owner role. Paired direct clients and Hub viewers get nothing, not even the tab list. The frame socket checks the role itself and closes with code 4403 for anyone else.
+- **The browser:** the same pinned Chrome for Testing headless shell HTML previews use, installed on first use. It is driven over `--remote-debugging-pipe`, never a debugging port. Its profile is `<stateDir>/node-browser/profile` (mode 0700), one profile for the whole node, so tabs share site logins. Chrome's sandbox stays on; only `RYCO_HTML_PREVIEW_NO_SANDBOX=1` turns it off, and a node running as root without it offers no tabs. Set `RYCO_NODE_BROWSER_DISABLED=1` to turn node tabs off.
+- **What pages may do:** tabs open only `http`, `https` and `about:blank` addresses without embedded credentials. `file:`, `javascript:`, `data:`, `chrome:`, `devtools:` and `view-source:` are refused, and a page that still reaches another scheme is sent back to `about:blank`. Downloads are denied, popups are blocked and file pickers never open. Addresses with credentials or `data:` payloads are never shown to clients. The node's own network, loopback included, is reachable: that is the point, and operators can reach it from a terminal anyway. This includes cloud metadata addresses on cloud hosts.
+- **Limits:** 12 tabs, of which 6 run at once (opening another suspends the least recently used tab nobody watches), 4 viewers per tab and 8 streams in all. A tab nobody watched for 10 minutes is suspended: its page closes and its address and title stay, and it reloads when it is next opened. The browser exits 2 minutes after its last running tab. If it exits three times within a minute, node tabs pause for 5 minutes. A crashed page shows as crashed until it is reloaded.
+- **Streaming:** each viewer opens `/ws/node-browser-frames` with its socket token and gets JPEG frames (quality 70 by default) in a small envelope that carries the page's CSS size. It acknowledges every frame; the node sends the next one only after that, and keeps only the newest frame waiting, so a slow link shows fewer frames, never old ones. A connection more than 8 MiB behind is dropped. While the viewer scrolls the stream drops to half size and quality 50, and a sharp still follows once it settles. Frames are never compressed again, never cached and never stored. Hub (relay) clients have no frame socket.
+- **Commands and input:** opening, navigating, history, reload, stop, resizing, page dialogs and input go through operator RPCs (`nodeBrowser.command`, `nodeBrowser.input`). Input is at most 64 events per call and 10,000 characters of text, applied in order per tab; keys and buttons still held 10 seconds after the last input are released. While a page dialog is open the page takes no input until the dialog is answered. `nodeBrowser.read` lists the tabs or returns a JPEG still that fits the size asked for; `nodeBrowser.subscribe` streams the tab list and whether the browser can run.
 
 ## Point at page elements
 
@@ -59,6 +70,8 @@ bun run --cwd apps/desktop test src/browser src/computerUse
 bun run --cwd packages/shared test src/browserElementReference.test.ts
 bun run --cwd packages/client-runtime test src/state/composer
 bun run --cwd apps/web test src/browser/browserState.test.ts
+bun run --cwd apps/server test src/nodeBrowser src/htmlRender
+bun run --cwd packages/client-runtime test src/connection/nodeBrowserFrameSource.test.ts
 bun run --cwd apps/web test:browser src/browser/BrowserPanel.browser.tsx src/browser/browserElementPickScript.browser.tsx src/components/ChatView.BrowserElements.browser.tsx
 bun run --cwd apps/mobile test src/features/threads/ThreadMessage.test.tsx
 node apps/desktop/scripts/computer-use-smoke.mjs signin
@@ -68,6 +81,8 @@ node apps/desktop/scripts/computer-use-smoke.mjs browser
 node apps/desktop/scripts/computer-use-smoke.mjs integration
 node apps/desktop/scripts/computer-use-smoke.mjs tab-budget
 ```
+
+The node browser suite drives a scripted Chrome; with `RYCO_TEST_HEADLESS_SHELL` set to a chrome-headless-shell (for example the one Ryco installed under `<baseDir>/tools/chrome-headless-shell`) it also loads a local page in the real browser, streams it and checks a still's size.
 
 The project smoke uses disposable local pages and browser profiles to exercise docking, agent input, resize, stale-surface cleanup, popout/redock, guest isolation and shell reload. Its macOS window capture requires Screen Recording permission and captures only its own fixture window.
 

@@ -7,6 +7,7 @@ import {
   ORCHESTRATION_WS_METHODS,
   WS_METHODS,
 } from "@ryco/contracts";
+import { NODE_BROWSER_WS_METHODS } from "@ryco/contracts/node-browser";
 import {
   hostedRoleAllows,
   RPC_ACCESS_POLICY,
@@ -16,6 +17,17 @@ import {
 } from "./rpcAccessPolicy.ts";
 
 describe("shared RPC access policy", () => {
+  it("keeps node browser tabs to operators, reads included, and never replays their input", () => {
+    for (const method of Object.values(NODE_BROWSER_WS_METHODS)) {
+      expect(rpcAccessFor(method)).toBe("operator");
+      expect(hostedRoleAllows("viewer", method)).toBe(false);
+      expect(hostedRoleAllows("operator", method)).toBe(true);
+      expect(hostedRoleAllows("owner", method)).toBe(true);
+    }
+    expect(rpcDeliveryEffectFor(NODE_BROWSER_WS_METHODS.input)).toBe("mutation");
+    expect(rpcDeliveryEffectFor(NODE_BROWSER_WS_METHODS.command)).toBe("mutation");
+    expect(rpcDeliveryEffectFor(NODE_BROWSER_WS_METHODS.read)).toBe("read");
+  });
   it("requires current owner authority to inspect and redeem reset credits", () => {
     for (const method of [
       WS_METHODS.serverReadCodexResetCredits,
@@ -50,6 +62,7 @@ describe("shared RPC access policy", () => {
         ...Object.values(ORCHESTRATION_WS_METHODS),
         ...Object.values(CONTEXT_HANDOFF_WS_METHODS),
         ...Object.values(DEVICE_WS_METHODS),
+        ...Object.values(NODE_BROWSER_WS_METHODS),
         ...Object.values(AGENT_CONTROL_WS_METHODS),
       ]),
     );

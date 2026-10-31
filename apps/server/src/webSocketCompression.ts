@@ -28,7 +28,9 @@
  * backends drop the extension offer from direct loopback peers (a local proxy
  * relaying a remote client keeps it). Other servers keep it for loopback too:
  * SSH port forwards arrive from there without forwarding headers. The device
- * frame socket never negotiates it, in any mode: H.264 is already compressed.
+ * and node browser frame sockets never negotiate it, in any mode: H.264 and
+ * JPEG are already compressed, and without deflate every unsent byte stays in
+ * the socket buffer the node browser bounds.
  *
  * @module webSocketCompression
  */
@@ -36,6 +38,7 @@ import type * as Http from "node:http";
 import { isIP } from "node:net";
 
 import { DEVICE_FRAME_WS_PATH } from "@ryco/shared/deviceFrame";
+import { NODE_BROWSER_FRAME_WS_PATH } from "@ryco/shared/nodeBrowserFrame";
 
 export const WEBSOCKET_PER_MESSAGE_DEFLATE = {
   threshold: 512,
@@ -70,7 +73,10 @@ export function isDirectLoopbackUpgrade(request: Http.IncomingMessage): boolean 
 }
 
 /** Upgrade paths whose payloads are already compressed, so deflate only costs CPU. */
-const UNCOMPRESSED_WEBSOCKET_PATHS: ReadonlySet<string> = new Set([DEVICE_FRAME_WS_PATH]);
+const UNCOMPRESSED_WEBSOCKET_PATHS: ReadonlySet<string> = new Set([
+  DEVICE_FRAME_WS_PATH,
+  NODE_BROWSER_FRAME_WS_PATH,
+]);
 
 function upgradePathname(request: Http.IncomingMessage): string | null {
   try {
@@ -81,7 +87,7 @@ function upgradePathname(request: Http.IncomingMessage): string | null {
 }
 
 /**
- * Whether an upgrade must run uncompressed: the device frame socket always,
+ * Whether an upgrade must run uncompressed: the frame sockets always,
  * and direct loopback peers when `skipDirectLoopback` is set.
  */
 export function shouldSkipWebSocketCompression(

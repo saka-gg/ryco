@@ -64,6 +64,8 @@ import { ContextHandoffInspectionLive } from "./orchestration/Layers/ContextHand
 import { DeviceServiceLive } from "./device/Layers/DeviceService.ts";
 import { DeviceThreadLifecycleLive } from "./device/Layers/DeviceThreadLifecycle.ts";
 import { deviceFrameRouteLayer } from "./device/deviceFrameRoute.ts";
+import { nodeBrowserFrameRouteLayer } from "./nodeBrowser/nodeBrowserRoute.ts";
+import { NodeBrowserLive } from "./nodeBrowser/NodeBrowser.ts";
 import {
   HubConnectorDeferredLive,
   startHubConnectorAfterServe,
@@ -175,6 +177,7 @@ import { AgentControlAutomationRepositoryLive } from "./persistence/Layers/Agent
 import { AgentControlMcpInstallationRepositoryLive } from "./persistence/Layers/AgentControlMcpInstallation.ts";
 import { AgentControlMcpServerLive } from "./agentControl/Layers/AgentControlMcpServer.ts";
 import { HtmlRenderLive } from "./htmlRender/HtmlRenderLive.ts";
+import { PreviewBrowserLive } from "./htmlRender/PreviewBrowser.ts";
 import { AgentControlOperationStoreLive } from "./agentControl/Layers/AgentControlOperationStore.ts";
 import { AgentControlPolicyLive } from "./agentControl/Layers/AgentControlPolicy.ts";
 import { AgentControlProposalEventsLive } from "./agentControl/Layers/AgentControlProposalEvents.ts";
@@ -666,6 +669,9 @@ const RuntimeServicesLive = Layer.mergeAll(
   NodeUpdateServiceLive,
   // Provider sign-in flows: shared by every owner connection, ended with the server.
   ProviderSignInLive,
+  // Node browser tabs: one browser for every connection and frame socket, ended with the
+  // server. The pinned browser's install is the same one HTML previews use (one memoized layer).
+  NodeBrowserLive.pipe(Layer.provide(PreviewBrowserLive)),
   ContextHandoffInspectionLive,
   AgentControlMcpServerLive.pipe(
     // HTML render tools exist only on the private listener; the external
@@ -785,6 +791,7 @@ export const makeRoutesLayer = Layer.mergeAll(
   websocketRpcRouteLayer,
   deviceWebsocketRpcRouteLayer,
   deviceFrameRouteLayer,
+  nodeBrowserFrameRouteLayer,
   hubConnectorRoutesLayer,
   desktopLocalIntroductionRoutesLayer,
   desktopNativeNodeClaimRoutesLayer,

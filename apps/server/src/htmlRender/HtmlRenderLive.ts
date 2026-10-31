@@ -33,6 +33,7 @@ import type { Duration } from "effect";
 import { ChildProcessSpawner } from "effect/process";
 
 import {
+  HTML_RENDER_CAPTURE_TIMEOUT,
   HTML_RENDER_WITHOUT_PREVIEW,
   HtmlPreviewError,
   HtmlRender,
@@ -42,7 +43,7 @@ import {
   type HtmlRenderMeasurement,
   type HtmlRenderPrepareInput,
 } from "./HtmlRender.ts";
-import * as HeadlessChrome from "./headlessChrome.ts";
+import type * as HeadlessChromeModule from "./headlessChrome.ts";
 import { inlineLocalImages } from "./localImages.ts";
 import { PreviewBrowser, PreviewBrowserLive, type PreviewBrowserError } from "./PreviewBrowser.ts";
 import { encodeHtmlRenderThumbnail, HTML_RENDER_THUMBNAIL_CAPTURE_HEIGHT } from "./thumbnails.ts";
@@ -66,8 +67,10 @@ const BROWSER_SLOT_WAIT = "8 seconds";
 export const HTML_PREVIEW_NO_SANDBOX_ENV = "RYCO_HTML_PREVIEW_NO_SANDBOX";
 
 const WITHOUT_PREVIEW = HTML_RENDER_WITHOUT_PREVIEW;
+// The browser launcher loads with the first preview or measurement; most boots render no HTML.
+const loadHeadlessChrome = Effect.promise(() => import("./headlessChrome.ts"));
 
-const themeFor = (appearance: ThemeAppearance): HeadlessChrome.HtmlPageTheme => ({
+const themeFor = (appearance: ThemeAppearance): HeadlessChromeModule.HtmlPageTheme => ({
   urlFragment: htmlRenderThemeFragment(
     defaultHtmlRenderTheme(appearance, HTML_RENDER_MEASURE_FONTS),
   ),
@@ -121,7 +124,7 @@ const lastLine = (output: string) =>
  * A browser failure, told to the agent. A browser that dies at startup gets
  * the host setup it needs instead of its raw output.
  */
-export const previewErrorFromBrowser = (error: HeadlessChrome.HtmlRenderBrowserError) => {
+export const previewErrorFromBrowser = (error: HeadlessChromeModule.HtmlRenderBrowserError) => {
   const output = error.output;
   const preview = (reason: string, retryable = false) =>
     new HtmlPreviewError({ reason, retryable, cause: error });
@@ -154,7 +157,7 @@ export const previewErrorFromBrowser = (error: HeadlessChrome.HtmlRenderBrowserE
   }
   if (error.reason.startsWith("the page did not finish loading")) {
     return preview(
-      `The page did not finish loading in the preview browser within ${HeadlessChrome.CAPTURE_TIMEOUT}. Check for scripts that never finish or resources that never load, then call ryco_html_preview again.`,
+      `The page did not finish loading in the preview browser within ${HTML_RENDER_CAPTURE_TIMEOUT}. Check for scripts that never finish or resources that never load, then call ryco_html_preview again.`,
     );
   }
   if (error.reason === "the browser could not be started") {
@@ -246,6 +249,7 @@ export const makeHtmlRender = Effect.fn("HtmlRender.make")(function* (
       if (sandboxUnavailable) return;
       const executable = yield* previewBrowser.installed;
       if (Option.isNone(executable)) return;
+      const HeadlessChrome = yield* loadHeadlessChrome;
       yield* withBrowserSlot(
         HeadlessChrome.measureHtmlPage({
           executable: executable.value,
@@ -327,6 +331,7 @@ export const makeHtmlRender = Effect.fn("HtmlRender.make")(function* (
     const executable = yield* previewBrowser.executable.pipe(
       Effect.mapError(previewErrorFromInstall),
     );
+    const HeadlessChrome = yield* loadHeadlessChrome;
     const screenshot = yield* withBrowserSlot(
       HeadlessChrome.captureHtmlScreenshot({
         executable,

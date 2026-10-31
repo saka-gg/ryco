@@ -9,22 +9,10 @@
  * @module headlessChrome
  */
 import type { ThemeAppearance } from "@ryco/shared/themePalettes";
-import {
-  Deferred,
-  Effect,
-  Exit,
-  Fiber,
-  FileSystem,
-  Option,
-  Path,
-  Queue,
-  Schema,
-  Stream,
-} from "effect";
-import { ChildProcess, ChildProcessSpawner } from "effect/process";
+import { Deferred, Effect, Exit, FileSystem, Option, Path, Schema } from "effect";
 
-import { makeCdpFrameReader } from "./cdpFrameReader.ts";
-import type { HtmlRenderConsoleMessage } from "./HtmlRender.ts";
+import { type CdpEvent, type CdpPipeBrowser, launchCdpPipeBrowser } from "./cdpPipeBrowser.ts";
+import { HTML_RENDER_CAPTURE_TIMEOUT, type HtmlRenderConsoleMessage } from "./HtmlRender.ts";
 import { publicProxy } from "./publicProxy.ts";
 
 export class HtmlRenderBrowserError extends Schema.TaggedError<HtmlRenderBrowserError>()(
@@ -58,7 +46,7 @@ const MAX_CDP_REPLY_CHARS = 48 * 1024 * 1024;
 const MAX_CDP_EVENT_CHARS = 1024 * 1024;
 const VIEWPORT_HEIGHT = 800;
 const MAX_CAPTURE_HEIGHT = 4_000;
-export const CAPTURE_TIMEOUT = "20 seconds";
+export const CAPTURE_TIMEOUT = HTML_RENDER_CAPTURE_TIMEOUT;
 // Pages load from this made-up web origin, never from a file. Chrome refuses
 // local files to every web page, frame, worker, and popup, so a page cannot
 // read files the agent's provider withholds; local images reach it already
@@ -84,18 +72,6 @@ const textEncoder = new TextEncoder();
 const pageBody = (html: string) =>
   Buffer.from(Buffer.from(html, "utf8").toString("base64"), "latin1");
 
-const CdpMessage = Schema.fromJsonString(
-  Schema.Struct({
-    id: Schema.optional(Schema.Number),
-    method: Schema.optional(Schema.String),
-    sessionId: Schema.optional(Schema.String),
-    params: Schema.optional(Schema.Unknown),
-    result: Schema.optional(Schema.Unknown),
-    error: Schema.optional(Schema.Struct({ message: Schema.String })),
-  }),
-);
-const decodeCdpMessage = Schema.decodeUnknownOption(CdpMessage);
-const encodeCdpCommand = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 const RemoteObject = Schema.Struct({
   type: Schema.String,
   value: Schema.optional(Schema.Unknown),
@@ -417,77 +393,19 @@ export const browserArguments = (input: {
 ];
 
 /**
- * Starts the headless shell for the life of the scope, speaking CDP over
- * `--remote-debugging-pipe` (fd 3 in, fd 4 out, NUL-delimited JSON). Scope
- * close kills the process group. Each page is its own target, so pages load
- * in parallel.
+ * Starts the headless shell for the life of the scope (`cdpPipeBrowser.ts`),
+ * with all of its traffic through `publicProxy`. Each page is its own target,
+ * so pages load in parallel.
  */
 const launchBrowser = Effect.fnUntraced(function* (
   input: BrowserLaunchInput & { readonly profileDirectory: string },
 ) {
-  const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const proxyPort = yield* publicProxy.pipe(
     Effect.mapError(
       (cause) => new HtmlRenderBrowserError({ reason: "the preview proxy could not start", cause }),
     ),
   );
-  const outgoing = yield* Queue.unbounded<Uint8Array>();
-  const child = yield* spawner
-    .spawn(
-      ChildProcess.make(
-        input.executable,
-        browserArguments({
-          noSandbox: input.noSandbox,
-          proxyPort,
-          profileDirectory: input.profileDirectory,
-        }),
-        {
-          stdin: "ignore",
-          stdout: "ignore",
-          stderr: "pipe",
-          forceKillAfter: "2 seconds",
-          additionalFds: {
-            fd3: { type: "input", stream: Stream.fromQueue(outgoing) },
-            fd4: { type: "output" },
-          },
-        },
-      ),
-    )
-    .pipe(
-      Effect.mapError(
-        (cause) =>
-          new HtmlRenderBrowserError({ reason: "the browser could not be started", cause }),
-      ),
-    );
-
-  let stderrTail = "";
-  const stderrReader = yield* child.stderr.pipe(
-    Stream.decodeText(),
-    Stream.runForEach((text) =>
-      Effect.sync(() => {
-        stderrTail = (stderrTail + text).slice(-4_096);
-      }),
-    ),
-    Effect.ignore,
-    Effect.forkScoped,
-  );
-
-  const pending = new Map<
-    number,
-    { readonly method: string; readonly reply: Deferred.Deferred<unknown, BrowserFailure> }
-  >();
   const pages = new Map<string, PageEvents>();
-  let disconnected: BrowserFailure | undefined;
-  let nextId = 0;
-
-  // A command whose reply nobody awaits; `receive` drops replies without a waiter.
-  const post = (method: string, params: Record<string, unknown>, sessionId?: string) =>
-    Queue.offer(
-      outgoing,
-      textEncoder.encode(
-        `${encodeCdpCommand({ id: ++nextId, method, params, ...(sessionId ? { sessionId } : {}) })}\0`,
-      ),
-    ).pipe(Effect.asVoid);
 
   // Chrome ends every message for a page with that page's session.
   const pageOf = (tail: string) => {
@@ -496,31 +414,18 @@ const launchBrowser = Effect.fnUntraced(function* (
     return page && sessionId !== undefined ? { page, sessionId } : undefined;
   };
 
-  // Serves the page. Its body is shared bytes between two small JSON halves,
-  // queued together, so loading a page of up to 25 MiB at several widths never
-  // copies it on this side.
-  const fulfillPage = (sessionId: string, requestId: string, body: Uint8Array) =>
-    Queue.offerAll(outgoing, [
-      textEncoder.encode(
-        `{"id":${++nextId},"sessionId":${JSON.stringify(sessionId)},"method":"Fetch.fulfillRequest","params":{"requestId":${JSON.stringify(requestId)},"responseCode":200,"responseHeaders":[{"name":"Content-Type","value":"text/html; charset=utf-8"},{"name":"Cache-Control","value":"no-store"}],"body":"`,
-      ),
-      body,
-      textEncoder.encode('"}}\0'),
-    ]).pipe(Effect.asVoid);
+  // Console output past the cap is only counted, never parsed.
+  const skipEvent = (raw: string) => {
+    const reported = consoleEventReported(raw.slice(0, 128));
+    if (reported === undefined) return false;
+    const page = pageOf(raw.slice(-128))?.page;
+    if (!page || page.consoleMessages.length < MAX_CONSOLE_MESSAGES) return false;
+    if (reported) page.omittedConsoleMessages += 1;
+    return true;
+  };
 
-  /** A message past its limit, known only by its start and end. */
-  const receiveOversized = (head: string, tail: string) => {
-    const id = /^\{"id":(\d+)/.exec(head)?.[1];
-    if (id !== undefined) {
-      const waiter = pending.get(Number(id));
-      pending.delete(Number(id));
-      return waiter
-        ? Deferred.fail(
-            waiter.reply,
-            new HtmlRenderBrowserError({ reason: `${waiter.method} replied with too much data` }),
-          )
-        : Effect.void;
-    }
+  /** An event past its limit, known only by its start and end. */
+  const receiveOversized = (head: string, tail: string): Effect.Effect<void> => {
     const target = pageOf(tail);
     if (!target) return Effect.void;
     if (consoleEventReported(head)) {
@@ -533,38 +438,29 @@ const launchBrowser = Effect.fnUntraced(function* (
     )?.[1];
     return requestId === undefined
       ? Effect.void
-      : post("Fetch.failRequest", { requestId, errorReason: "Aborted" }, target.sessionId);
+      : browser.post("Fetch.failRequest", { requestId, errorReason: "Aborted" }, target.sessionId);
   };
 
-  const receive = (raw: string) => {
-    // Console output past the cap is only counted, never parsed.
-    const reported = consoleEventReported(raw.slice(0, 128));
-    if (reported !== undefined) {
-      const page = pageOf(raw.slice(-128))?.page;
-      if (page && page.consoleMessages.length >= MAX_CONSOLE_MESSAGES) {
-        if (reported) page.omittedConsoleMessages += 1;
-        return Effect.void;
-      }
-    }
-    const message = Option.getOrUndefined(decodeCdpMessage(raw));
-    if (message?.id !== undefined) {
-      const waiter = pending.get(message.id);
-      pending.delete(message.id);
-      if (!waiter) return Effect.void;
-      return message.error
-        ? Deferred.fail(
-            waiter.reply,
-            new HtmlRenderBrowserError({
-              reason: `${waiter.method} failed`,
-              cause: message.error.message,
-            }),
-          )
-        : Deferred.succeed(waiter.reply, message.result);
-    }
-    const sessionId = message?.sessionId;
+  // Serves the page. Its body is shared bytes between two small JSON halves,
+  // queued together, so loading a page of up to 25 MiB at several widths never
+  // copies it on this side.
+  const fulfillPage = (
+    sessionId: string,
+    requestId: string,
+    body: Uint8Array,
+  ): Effect.Effect<void> =>
+    browser.postParts((id: number) => [
+      textEncoder.encode(
+        `{"id":${id},"sessionId":${JSON.stringify(sessionId)},"method":"Fetch.fulfillRequest","params":{"requestId":${JSON.stringify(requestId)},"responseCode":200,"responseHeaders":[{"name":"Content-Type","value":"text/html; charset=utf-8"},{"name":"Cache-Control","value":"no-store"}],"body":"`,
+      ),
+      body,
+      textEncoder.encode('"}}\0'),
+    ]);
+
+  const receive = ({ method, sessionId, params }: CdpEvent): Effect.Effect<void> => {
     const page = sessionId === undefined ? undefined : pages.get(sessionId);
-    if (sessionId === undefined || !page || !message?.method) return Effect.void;
-    switch (message.method) {
+    if (sessionId === undefined || !page) return Effect.void;
+    switch (method) {
       case "Page.loadEventFired":
         return page.loaded ? Deferred.succeed(page.loaded, undefined) : Effect.void;
       // A load the page stops itself, such as with window.stop(), ends without
@@ -573,11 +469,11 @@ const launchBrowser = Effect.fnUntraced(function* (
       case "Page.frameStoppedLoading":
         return page.loaded &&
           page.committed &&
-          Option.getOrUndefined(decodeFrameEvent(message.params))?.frameId === page.mainFrameId
+          Option.getOrUndefined(decodeFrameEvent(params))?.frameId === page.mainFrameId
           ? Deferred.succeed(page.loaded, undefined)
           : Effect.void;
       case "Page.frameNavigated": {
-        const frame = Option.getOrUndefined(decodeFrameNavigated(message.params))?.frame;
+        const frame = Option.getOrUndefined(decodeFrameNavigated(params))?.frame;
         if (!frame || frame.id !== page.mainFrameId) return Effect.void;
         if (frame.url.split("#", 1)[0] === PAGE_URL) {
           page.committed = true;
@@ -588,15 +484,15 @@ const launchBrowser = Effect.fnUntraced(function* (
         return page.loaded ? Deferred.fail(page.loaded, leftPage(page.leftFor)) : Effect.void;
       }
       case "Runtime.bindingCalled": {
-        const call = Option.getOrUndefined(decodeBindingCalled(message.params));
+        const call = Option.getOrUndefined(decodeBindingCalled(params));
         if (call?.name === NAVIGATION_BINDING) recordNavigation(page, call.payload);
         return Effect.void;
       }
       // alert(), confirm(), prompt(), and beforeunload would otherwise stall the page until timeout.
       case "Page.javascriptDialogOpening":
-        return post("Page.handleJavaScriptDialog", { accept: false }, sessionId);
+        return browser.post("Page.handleJavaScriptDialog", { accept: false }, sessionId);
       case "Fetch.requestPaused": {
-        const paused = Option.getOrUndefined(decodeRequestPaused(message.params));
+        const paused = Option.getOrUndefined(decodeRequestPaused(params));
         if (!paused) return Effect.void;
         const action = pausedRequestAction({
           url: paused.request.url,
@@ -611,8 +507,8 @@ const launchBrowser = Effect.fnUntraced(function* (
         if (action === "abort") recordNavigation(page, paused.request.url);
         if (action === "continue") recordPlainHttpLoad(page, paused.request.url);
         return action === "continue"
-          ? post("Fetch.continueRequest", { requestId: paused.requestId }, sessionId)
-          : post(
+          ? browser.post("Fetch.continueRequest", { requestId: paused.requestId }, sessionId)
+          : browser.post(
               "Fetch.failRequest",
               {
                 requestId: paused.requestId,
@@ -622,77 +518,31 @@ const launchBrowser = Effect.fnUntraced(function* (
             );
       }
     }
-    const consoleMessage = consoleMessageFromEvent(message.method, message.params);
+    const consoleMessage = consoleMessageFromEvent(method, params);
     if (consoleMessage) pushConsoleMessage(page, consoleMessage);
     return Effect.void;
   };
 
-  // The pipe closes when the browser exits. A startup abort, such as a missing
-  // sandbox or shared library, says why on stderr, which may still be
-  // draining, so give it a moment.
-  const disconnect = Effect.gen(function* () {
-    yield* Fiber.await(stderrReader).pipe(Effect.timeout("1 second"), Effect.ignore);
-    const error = new HtmlRenderBrowserError({
-      reason: "the browser exited unexpectedly",
-      output: stderrTail,
-    });
-    disconnected = error;
-    const waiters = [...pending.values()];
-    pending.clear();
-    yield* Effect.forEach(waiters, ({ reply }) => Deferred.fail(reply, error), { discard: true });
-    yield* Effect.forEach(
-      pages.values(),
-      (page) => (page.loaded ? Deferred.fail(page.loaded, error) : Effect.void),
-      { discard: true },
-    );
-  });
-
-  // Decoded text chunks may split a message anywhere, and a screenshot reply spans many.
-  const frames = makeCdpFrameReader({
-    maxReplyChars: MAX_CDP_REPLY_CHARS,
-    maxEventChars: MAX_CDP_EVENT_CHARS,
-  });
-  yield* child.getOutputFd(4).pipe(
-    Stream.decodeText(),
-    Stream.runForEach((text) =>
+  const browser: CdpPipeBrowser<HtmlRenderBrowserError> = yield* launchCdpPipeBrowser({
+    executable: input.executable,
+    args: browserArguments({
+      noSandbox: input.noSandbox,
+      proxyPort,
+      profileDirectory: input.profileDirectory,
+    }),
+    limits: { maxReplyChars: MAX_CDP_REPLY_CHARS, maxEventChars: MAX_CDP_EVENT_CHARS },
+    failure: (failure) => new HtmlRenderBrowserError(failure),
+    skipEvent,
+    onEvent: receive,
+    onOversizedEvent: receiveOversized,
+    onExit: (error) =>
       Effect.forEach(
-        frames.push(text),
-        (frame) =>
-          frame._tag === "Message" ? receive(frame.text) : receiveOversized(frame.head, frame.tail),
+        pages.values(),
+        (page) => (page.loaded ? Deferred.fail(page.loaded, error) : Effect.void),
         { discard: true },
       ),
-    ),
-    Effect.ignore,
-    // Interruption means the scope is closing on purpose; only an exit disconnects.
-    Effect.andThen(disconnect),
-    Effect.forkScoped,
-  );
-
-  const send = <A>(
-    method: string,
-    params: Record<string, unknown>,
-    result: Schema.Decoder<A>,
-    sessionId?: string,
-  ) =>
-    Effect.gen(function* () {
-      if (disconnected) return yield* disconnected;
-      const id = ++nextId;
-      const reply = yield* Deferred.make<unknown, BrowserFailure>();
-      pending.set(id, { method, reply });
-      const message = encodeCdpCommand({ id, method, params, ...(sessionId ? { sessionId } : {}) });
-      yield* Queue.offer(outgoing, textEncoder.encode(`${message}\0`));
-      return yield* Deferred.await(reply).pipe(
-        Effect.flatMap(Schema.decodeUnknownEffect(result)),
-        Effect.mapError((error) =>
-          error._tag === "HtmlRenderBrowserError"
-            ? error
-            : new HtmlRenderBrowserError({
-                reason: `${method} returned an unexpected result`,
-                cause: error,
-              }),
-        ),
-      );
-    });
+  });
+  const { send, post } = browser;
 
   // Pages never download anything to this machine.
   yield* send("Browser.setDownloadBehavior", { behavior: "deny" }, Ignored);

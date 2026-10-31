@@ -5,6 +5,7 @@ import * as NodeSocket from "@effect/platform-node/NodeSocket";
 import { describe, expect, it } from "vite-plus/test";
 
 import { DEVICE_FRAME_WS_PATH } from "@ryco/shared/deviceFrame";
+import { NODE_BROWSER_FRAME_WS_PATH } from "@ryco/shared/nodeBrowserFrame";
 
 import {
   installWebSocketCompressionPolicy,
@@ -176,5 +177,13 @@ describe("WebSocket compression policy", () => {
     expect(
       await negotiatedExtensions(false, { "x-forwarded-for": "100.101.102.103" }, "/ws/device"),
     ).toContain("permessage-deflate");
+  });
+
+  it("never negotiates permessage-deflate for node browser frames, in any mode", async () => {
+    const frames = `${NODE_BROWSER_FRAME_WS_PATH}?tab=tab-1&maxWidth=1600`;
+    expect(await negotiatedExtensions(false, {}, frames)).toBe("");
+    expect(await negotiatedExtensions(true, { "x-forwarded-for": "100.101.102.103" }, frames)).toBe(
+      "",
+    );
   });
 });

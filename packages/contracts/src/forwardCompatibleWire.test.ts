@@ -16,6 +16,7 @@ import {
   WsGitRunStackedActionRpc,
   WsHostedRpcGroup,
   WsProviderSignInSubscribeRpc,
+  WsNodeBrowserSubscribeRpc,
   WsOrchestrationReplayEventsPageRpc,
   WsOrchestrationReplayEventsRpc,
   WsOrchestrationSubscribeShellRpc,
@@ -32,6 +33,7 @@ import {
   WsSubscribeVcsStatusRpc,
   WsSubscribeWorktreeSetupRpc,
 } from "./rpc.ts";
+import { NodeBrowserEvent, NodeBrowserWireEvent } from "./nodeBrowser.ts";
 import { ProviderSignInEvent, ProviderSignInWireEvent } from "./providerSignIn.ts";
 import { ServerConfigStreamEvent, ServerConfigStreamWireEvent } from "./server.ts";
 import { TerminalEvent, TerminalWireEvent } from "./terminal.ts";
@@ -190,6 +192,21 @@ const cases: ReadonlyArray<WireUnionCase> = [
     known: [{ ...terminal, type: "output", data: "ls\n" }],
     broken: [{ ...terminal, type: "output", data: 42 }],
     unknown: [{ wire: { ...terminal, type: "bell" }, decoded: placeholder("type", "bell") }],
+  },
+  {
+    name: "node browser events",
+    schema: NodeBrowserWireEvent,
+    strict: { schema: NodeBrowserEvent, rejects: { type: "popup", tabId: "tab-1" } },
+    rpc: WsNodeBrowserSubscribeRpc,
+    known: [
+      { type: "tabs", tabs: [] },
+      { type: "availability", capability: { available: false, reason: "installing" } },
+    ],
+    broken: [
+      { type: "tabs", tabs: "none" },
+      { type: "availability", capability: { available: "yes" } },
+    ],
+    unknown: [{ wire: { type: "popup", tabId: "tab-1" }, decoded: placeholder("type", "popup") }],
   },
   {
     name: "provider sign-in events",
