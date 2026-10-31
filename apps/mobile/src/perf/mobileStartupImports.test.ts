@@ -339,6 +339,19 @@ describe("mobile launch graph boundaries", () => {
     ).toEqual([]);
   });
 
+  it("loads the widgets runtime only once the app is idle", () => {
+    const reachable = [...staticGraph(LAUNCH_ENTRY).keys()].map(display);
+    expect(reachable).toContain("apps/mobile/src/widgets/WidgetsBridge.tsx");
+    // The walker follows the bridge's own imports, so an empty result is not a blind spot.
+    expect(reachable).toContain("apps/mobile/src/navigation/idlePrewarm.ts");
+    expect(chainsTo(LAUNCH_ENTRY, [/^apps\/mobile\/src\/widgets\/(?!WidgetsBridge)/u])).toEqual([]);
+    expect(
+      chainsTo("src/widgets/mobileWidgetsRuntime.ts", [
+        /^apps\/mobile\/src\/widgets\/widgetsRuntime\.ts$/u,
+      ]),
+    ).not.toEqual([]);
+  });
+
   it("checks the push key at every launch without loading push alerts", () => {
     // ThreadAlertsBridge imports the install check lazily, on every launch; the
     // check itself must stay a keychain call and a storage read.
