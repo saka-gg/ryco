@@ -315,6 +315,19 @@ so and Stop is offered again.
 Stop is only offered for agents the thread's current Claude session started. Workflows and their
 agents have no Stop of their own, and neither do other providers' agents.
 
+## Messaging a Running Subagent
+
+Open a running subagent in the Agents panel and type in the box under its activity to send it a
+message without stopping it or the turn. Claude Code has no way to hand a running subagent a new
+message directly, so Ryco keeps it and gives it to the agent at its next tool call, as context
+the agent reads before it continues ("The user sent you a message mid-task: …"). The chat shows a
+notice when the agent read it. An agent that finishes before its next tool call never reads it:
+the chat then says the message was not delivered and shows its text.
+
+Up to 5 messages can wait for one agent, each at most 8,000 characters. The box is offered only for
+agents (not shell or monitor tasks, and not a workflow's coordinator) that the thread's current
+Claude session started.
+
 ## Auto Mode
 
 Ryco starts a Claude session in Auto mode only when this provider's Claude Code can run the

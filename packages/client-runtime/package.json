@@ -206,6 +206,10 @@
       "types": "./src/state/session/index.ts",
       "import": "./src/state/session/index.ts"
     },
+    "./state/session/subagentMessage": {
+      "types": "./src/state/session/subagentMessage.ts",
+      "import": "./src/state/session/subagentMessage.ts"
+    },
     "./state/session/subagentStop": {
       "types": "./src/state/session/subagentStop.ts",
       "import": "./src/state/session/subagentStop.ts"

@@ -95,6 +95,23 @@ export class ProviderTurnNotSteerableError extends Schema.TaggedError<ProviderTu
 }
 
 /**
+ * ProviderTaskEndedError - The background task a request targets already settled (or this
+ * runtime never ran it), so a message for it would never be read.
+ */
+export class ProviderTaskEndedError extends Schema.TaggedError<ProviderTaskEndedError>()(
+  "ProviderTaskEndedError",
+  {
+    provider: Schema.String,
+    threadId: Schema.String,
+    taskId: Schema.String,
+  },
+) {
+  override get message(): string {
+    return `Task ${this.taskId} already finished.`;
+  }
+}
+
+/**
  * ProviderAdapterProcessError - Provider process lifecycle failure.
  */
 export class ProviderAdapterProcessError extends Schema.TaggedError<ProviderAdapterProcessError>()(

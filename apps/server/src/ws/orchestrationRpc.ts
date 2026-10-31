@@ -14,6 +14,7 @@ import {
   OrchestrationGetWorkflowScriptError,
   OrchestrationReplayEventsError,
   OrchestrationStopBackgroundTaskError,
+  OrchestrationMessageBackgroundTaskError,
   ORCHESTRATION_WS_METHODS,
   WS_METHODS,
   type OrchestrationGetThreadHistoryPageInput,
@@ -650,6 +651,56 @@ export const makeOrchestrationHandlers = (ctx: WsRpcContext) => {
                       }),
                   ),
                 ),
+          }).pipe(Effect.as({})),
+        ),
+        { "rpc.aggregate": "orchestration" },
+      ),
+    [ORCHESTRATION_WS_METHODS.messageBackgroundTask]: (input) =>
+      observeRpcEffect(
+        ORCHESTRATION_WS_METHODS.messageBackgroundTask,
+        ownerEffect(
+          ORCHESTRATION_WS_METHODS.messageBackgroundTask,
+          Option.match(providerService, {
+            onNone: () =>
+              Effect.logError("messageBackgroundTask has no ProviderService in context").pipe(
+                Effect.andThen(
+                  Effect.fail(
+                    new OrchestrationMessageBackgroundTaskError({
+                      reason: "message-failed",
+                      threadId: input.threadId,
+                      taskId: input.taskId,
+                    }),
+                  ),
+                ),
+              ),
+            onSome: (service) =>
+              service.messageBackgroundTask(input).pipe(
+                Effect.tapError((cause) =>
+                  Effect.logWarning("messageBackgroundTask failed", {
+                    threadId: input.threadId,
+                    taskId: input.taskId,
+                    cause,
+                  }),
+                ),
+                // The raw cause stays in server logs; the wire error carries only the reason.
+                Effect.mapError(
+                  (cause) =>
+                    new OrchestrationMessageBackgroundTaskError({
+                      reason:
+                        cause._tag === "ProviderUnsupportedError"
+                          ? "unsupported"
+                          : cause._tag === "ProviderTaskEndedError"
+                            ? "task-ended"
+                            : cause._tag === "ProviderSessionNotFoundError" ||
+                                cause._tag === "ProviderAdapterSessionNotFoundError" ||
+                                cause._tag === "ProviderAdapterSessionClosedError"
+                              ? "session-not-found"
+                              : "message-failed",
+                      threadId: input.threadId,
+                      taskId: input.taskId,
+                    }),
+                ),
+              ),
           }).pipe(Effect.as({})),
         ),
         { "rpc.aggregate": "orchestration" },

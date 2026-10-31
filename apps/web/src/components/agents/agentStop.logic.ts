@@ -28,13 +28,17 @@ export function isEnvironmentReachable(input: {
   );
 }
 
-/** Why the hosted connection refuses a stop right now, or null when it takes one. */
+/**
+ * Why the hosted connection refuses a stop (or, with its own copy, another agent action) right
+ * now, or null when it takes one.
+ */
 export function subagentStopRefusal(
   capability: HostedRpcCapability,
   nodeLabel: string | null,
+  refusedReason: string = CONNECTION_REFUSES_REASON,
 ): string | null {
   if (capability.allowed) return null;
-  return hostedCapabilityCopy(capability, nodeLabel) ?? CONNECTION_REFUSES_REASON;
+  return hostedCapabilityCopy(capability, nodeLabel) ?? refusedReason;
 }
 
 /**
@@ -46,11 +50,13 @@ export function resolveSubagentStopAvailability(input: {
   readonly capability: HostedRpcCapability;
   readonly nodeLabel: string | null;
   readonly reachable: boolean;
+  /** What a refusing connection says when it gives no reason; Stop's copy by default. */
+  readonly refusedReason?: string;
 }): "hidden" | { readonly unavailableReason: string | null } {
   if (input.capability.kind === "role") return "hidden";
   return {
     unavailableReason:
-      subagentStopRefusal(input.capability, input.nodeLabel) ??
+      subagentStopRefusal(input.capability, input.nodeLabel, input.refusedReason) ??
       (input.reachable ? null : NOT_CONNECTED_REASON),
   };
 }

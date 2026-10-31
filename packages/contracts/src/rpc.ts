@@ -272,6 +272,7 @@ import {
   OrchestrationGetTaskOutputError,
   OrchestrationGetWorkflowScriptError,
   OrchestrationStopBackgroundTaskError,
+  OrchestrationMessageBackgroundTaskError,
   OrchestrationGetFullThreadDiffError,
   OrchestrationGetFullThreadDiffInput,
   OrchestrationGetSnapshotError,
@@ -2310,6 +2311,15 @@ export const WsOrchestrationStopBackgroundTaskRpc = Rpc.make(
   },
 );
 
+export const WsOrchestrationMessageBackgroundTaskRpc = Rpc.make(
+  ORCHESTRATION_WS_METHODS.messageBackgroundTask,
+  {
+    payload: OrchestrationRpcSchemas.messageBackgroundTask.input,
+    success: OrchestrationRpcSchemas.messageBackgroundTask.output,
+    error: Schema.Union([OrchestrationMessageBackgroundTaskError, AuthRpcError]),
+  },
+);
+
 export const WsOrchestrationGetTurnDiffRpc = Rpc.make(ORCHESTRATION_WS_METHODS.getTurnDiff, {
   payload: OrchestrationGetTurnDiffInput,
   success: OrchestrationRpcSchemas.getTurnDiff.output,
@@ -2878,6 +2888,7 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   | typeof WsOrchestrationGetWorkflowScriptRpc
   | typeof WsOrchestrationGetTaskOutputRpc
   | typeof WsOrchestrationStopBackgroundTaskRpc
+  | typeof WsOrchestrationMessageBackgroundTaskRpc
   | typeof WsOrchestrationGetTurnDiffRpc
   | typeof WsOrchestrationGetFullThreadDiffRpc
   | typeof WsOrchestrationSearchThreadMessagesRpc
@@ -3116,6 +3127,7 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   WsOrchestrationGetWorkflowScriptRpc,
   WsOrchestrationGetTaskOutputRpc,
   WsOrchestrationStopBackgroundTaskRpc,
+  WsOrchestrationMessageBackgroundTaskRpc,
   WsOrchestrationGetTurnDiffRpc,
   WsOrchestrationGetFullThreadDiffRpc,
   WsOrchestrationSearchThreadMessagesRpc,

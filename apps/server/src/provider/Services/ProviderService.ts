@@ -25,6 +25,7 @@ import type {
   ProviderSteerTurnInput,
   RuntimeSessionId,
   ProviderStopBackgroundTaskInput,
+  ProviderMessageBackgroundTaskInput,
   ProviderStopSessionInput,
   ThreadId,
   TurnId,
@@ -35,7 +36,7 @@ import { Context } from "effect";
 import type { Effect, Option, Stream } from "effect";
 
 import type { HeldStoragePathUseLease } from "../../storage/lifecycle.ts";
-import type { ProviderServiceError } from "../Errors.ts";
+import type { ProviderServiceError, ProviderTaskEndedError } from "../Errors.ts";
 import type { ProviderAdapterCapabilities, ProviderThreadHistory } from "./ProviderAdapter.ts";
 import type { ProviderInstanceRoutingInfo } from "./ProviderAdapterRegistry.ts";
 import type { ProviderRuntimeBinding } from "./ProviderSessionDirectory.ts";
@@ -222,6 +223,15 @@ export interface ProviderServiceShape {
   readonly stopBackgroundTask: (
     input: ProviderStopBackgroundTaskInput,
   ) => Effect.Effect<void, ProviderServiceError>;
+
+  /**
+   * Queue a person's message for one running agent (it reads it at its next step). Fails with
+   * ProviderUnsupportedError when the routed adapter has no channel into running agents, and
+   * with ProviderTaskEndedError once the task settled.
+   */
+  readonly messageBackgroundTask: (
+    input: ProviderMessageBackgroundTaskInput,
+  ) => Effect.Effect<void, ProviderServiceError | ProviderTaskEndedError>;
 
   /**
    * Respond to a provider approval request.

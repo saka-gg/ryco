@@ -7,21 +7,11 @@ import { ORCHESTRATION_WS_METHODS, type ScopedThreadRef } from "@ryco/contracts"
 import { useMemo } from "react";
 
 import { readEnvironmentApi } from "~/environmentApi";
-import { usePrimaryEnvironmentId } from "~/environments/primary";
-import {
-  useSavedEnvironmentRegistryStore,
-  useSavedEnvironmentRuntimeStore,
-} from "~/environments/runtime";
-import { readHostedRpcCapability, useHostedRpcCapability } from "~/hostedHub/capabilities";
+import { readHostedRpcCapability } from "~/hostedHub/capabilities";
 import { useHostedHubStore } from "~/hostedHub/state";
 import { hostedSwitchTargetLabel } from "~/hostedHub/switchTarget";
-import { useWsConnectionStatusForEnvironment } from "~/rpc/wsConnectionState";
-import { selectEnvironmentState, useStore } from "~/store";
-import {
-  isEnvironmentReachable,
-  resolveSubagentStopAvailability,
-  subagentStopRefusal,
-} from "./agentStop.logic";
+import { subagentStopRefusal } from "./agentStop.logic";
+import { useSubagentActionAvailability } from "./useSubagentActionAvailability";
 
 const STOP_METHOD = ORCHESTRATION_WS_METHODS.stopBackgroundTask;
 
@@ -40,32 +30,10 @@ export function useSubagentStopAction(
 ): SubagentStopAction | null {
   const environmentId = threadRef?.environmentId ?? null;
   const threadId = threadRef?.threadId ?? null;
-  const capability = useHostedRpcCapability(STOP_METHOD, environmentId);
-  const nodeLabel = useHostedHubStore((state) => hostedSwitchTargetLabel(state, environmentId));
-  const wsPhase = useWsConnectionStatusForEnvironment(environmentId).phase;
-  const primaryEnvironmentId = usePrimaryEnvironmentId();
-  const savedEnvironment = useSavedEnvironmentRegistryStore(
-    (state) =>
-      environmentId !== null &&
-      environmentId !== primaryEnvironmentId &&
-      state.byId[environmentId] !== undefined,
+  const { hidden, unavailableReason, runtimeSessionId } = useSubagentActionAvailability(
+    threadRef,
+    STOP_METHOD,
   );
-  const savedConnectionState = useSavedEnvironmentRuntimeStore((state) =>
-    environmentId === null ? null : (state.byId[environmentId]?.connectionState ?? null),
-  );
-  const runtimeSessionId = useStore((state) =>
-    environmentId === null || threadId === null
-      ? null
-      : (selectEnvironmentState(state, environmentId).threadSessionById[threadId]
-          ?.runtimeSessionId ?? null),
-  );
-  const availability = resolveSubagentStopAvailability({
-    capability,
-    nodeLabel,
-    reachable: isEnvironmentReachable({ savedEnvironment, savedConnectionState, wsPhase }),
-  });
-  const hidden = availability === "hidden";
-  const unavailableReason = hidden ? null : availability.unavailableReason;
 
   return useMemo<SubagentStopAction | null>(() => {
     if (environmentId === null || threadId === null || hidden) return null;

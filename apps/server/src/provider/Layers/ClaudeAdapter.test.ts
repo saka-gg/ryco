@@ -8015,6 +8015,183 @@ describe("ClaudeAdapterLive", () => {
       );
     },
   );
+  it.effect("hands a person's message to a running subagent at its next tool call", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const started = yield* adapter.streamEvents.pipe(
+        Stream.filter((event) => event.type === "task.started"),
+        Stream.take(2),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+      yield* adapter.startSession({
+        runtimeSessionId: RuntimeSessionId.make("message-runtime"),
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({ threadId: THREAD_ID, input: "Explore the repo", attachments: [] });
+      harness.query.emit({
+        type: "system",
+        subtype: "task_started",
+        task_id: "explore-task",
+        description: "Map the repo",
+        task_type: "local_agent",
+        subagent_type: "Explore",
+        tool_use_id: "toolu_explore",
+        session_id: "sdk",
+        uuid: "explore-started",
+      } as unknown as SDKMessage);
+      harness.query.emit({
+        type: "system",
+        subtype: "task_started",
+        task_id: "watch-task",
+        description: "Watch the build",
+        task_type: "local_bash",
+        is_backgrounded: true,
+        session_id: "sdk",
+        uuid: "watch-started",
+      } as unknown as SDKMessage);
+      const startedEvents = Array.from(yield* Fiber.join(started));
+      const canMessage = new Map(
+        startedEvents.flatMap((event) =>
+          event.type === "task.started" ? [[event.payload.taskId, event.payload.canMessage]] : [],
+        ),
+      );
+      // Only an agent can read a message; a shell task has no one to read it.
+      assert.isTrue(canMessage.get("explore-task" as never));
+      assert.isFalse(canMessage.get("watch-task" as never));
+
+      const expected = { runtimeSessionId: RuntimeSessionId.make("message-runtime"), attempt: 0 };
+      const refused = yield* adapter.messageBackgroundTask!(
+        THREAD_ID,
+        "watch-task",
+        "hello",
+        expected,
+      ).pipe(Effect.flip);
+      assert.equal(refused._tag, "ProviderUnsupportedError");
+      const stale = yield* adapter.messageBackgroundTask!(THREAD_ID, "explore-task", "hello", {
+        runtimeSessionId: RuntimeSessionId.make("earlier-runtime"),
+        attempt: 0,
+      }).pipe(Effect.flip);
+      assert.equal(stale._tag, "ProviderTaskEndedError");
+
+      yield* adapter.messageBackgroundTask!(THREAD_ID, "explore-task", "Skip the docs", expected);
+      yield* adapter.messageBackgroundTask!(THREAD_ID, "explore-task", "and the tests", expected);
+      const hook = harness.getLastCreateQueryInput()?.options.hooks?.PreToolUse?.[0]?.hooks[0];
+      assert.isDefined(hook);
+      const signal = new AbortController().signal;
+      // The main agent's own tool calls carry no agent_id and read nothing.
+      assert.deepEqual(
+        yield* Effect.promise(() =>
+          hook!({ hook_event_name: "PreToolUse" } as never, "toolu_main", { signal }),
+        ),
+        {},
+      );
+      const notice = yield* adapter.streamEvents.pipe(
+        Stream.filter((event) => event.type === "runtime.notice"),
+        Stream.take(1),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+      const output = yield* Effect.promise(() =>
+        hook!({ hook_event_name: "PreToolUse", agent_id: "explore-task" } as never, "toolu_sub", {
+          signal,
+        }),
+      );
+      assert.deepEqual(output, {
+        hookSpecificOutput: {
+          hookEventName: "PreToolUse",
+          additionalContext:
+            "The user sent you a message mid-task: Skip the docs\n\nand the tests. Address it and adjust your work accordingly.",
+        },
+      });
+      const [delivered] = Array.from(yield* Fiber.join(notice));
+      if (delivered?.type === "runtime.notice") {
+        assert.equal(delivered.payload.message, "Map the repo read your message.");
+      } else assert.fail("expected a delivery notice");
+      // Delivered once: the agent's next tool call reads nothing.
+      assert.deepEqual(
+        yield* Effect.promise(() =>
+          hook!(
+            { hook_event_name: "PreToolUse", agent_id: "explore-task" } as never,
+            "toolu_sub_2",
+            { signal },
+          ),
+        ),
+        {},
+      );
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
+  it.effect("says a message was not delivered when its subagent finishes first", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      const started = yield* adapter.streamEvents.pipe(
+        Stream.filter((event) => event.type === "task.started"),
+        Stream.take(1),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+      yield* adapter.startSession({
+        runtimeSessionId: RuntimeSessionId.make("undelivered-runtime"),
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        runtimeMode: "full-access",
+      });
+      yield* adapter.sendTurn({ threadId: THREAD_ID, input: "Explore the repo", attachments: [] });
+      harness.query.emit({
+        type: "system",
+        subtype: "task_started",
+        task_id: "explore-task",
+        description: "Map the repo",
+        task_type: "local_agent",
+        tool_use_id: "toolu_explore",
+        session_id: "sdk",
+        uuid: "explore-started",
+      } as unknown as SDKMessage);
+      yield* Fiber.join(started);
+      yield* adapter.messageBackgroundTask!(THREAD_ID, "explore-task", "Skip the docs", {
+        runtimeSessionId: RuntimeSessionId.make("undelivered-runtime"),
+        attempt: 0,
+      });
+      const warning = yield* adapter.streamEvents.pipe(
+        Stream.filter((event) => event.type === "runtime.warning"),
+        Stream.take(1),
+        Stream.runCollect,
+        Effect.forkChild,
+      );
+      harness.query.emit({
+        type: "system",
+        subtype: "task_notification",
+        task_id: "explore-task",
+        status: "completed",
+        session_id: "sdk",
+        uuid: "explore-completed",
+      } as unknown as SDKMessage);
+      const [event] = Array.from(yield* Fiber.join(warning));
+      if (event?.type === "runtime.warning") {
+        assert.include(event.payload.message, "Message not delivered");
+        assert.deepInclude(event.payload.detail as object, {
+          undeliveredMessage: "Skip the docs",
+        });
+      } else assert.fail("expected an undelivered warning");
+      const ended = yield* adapter.messageBackgroundTask!(THREAD_ID, "explore-task", "Too late", {
+        runtimeSessionId: RuntimeSessionId.make("undelivered-runtime"),
+        attempt: 0,
+      }).pipe(Effect.flip);
+      assert.equal(ended._tag, "ProviderTaskEndedError");
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
   it.effect("stops one subagent while the turn that launched it keeps running", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {

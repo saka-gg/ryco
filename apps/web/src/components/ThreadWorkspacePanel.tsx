@@ -79,6 +79,7 @@ import {
 } from "../threadWorkspaceViewModel";
 import { AgentsPanel } from "./AgentsPanel";
 import { useSubagentStopAction } from "./agents/useSubagentStopAction";
+import { useSubagentMessageAction } from "./agents/useSubagentMessageAction";
 import { ArtifactsPanel } from "./artifacts/ArtifactsPanel";
 import { HtmlRenderPanel } from "./chat/HtmlRenderPanel";
 import { usePaneFocus } from "./chat/PaneFocus";
@@ -479,12 +480,14 @@ function WorkspaceAgentsPanel({
   threadRef: ScopedThreadRef | null;
 }) {
   const stopAgent = useSubagentStopAction(threadRef);
+  const messageAgent = useSubagentMessageAction(threadRef);
   return (
     <AgentsPanel
       {...props}
       environmentId={threadRef?.environmentId ?? null}
       threadId={threadRef?.threadId ?? null}
       stopAgent={stopAgent}
+      messageAgent={messageAgent}
     />
   );
 }

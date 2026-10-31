@@ -27,6 +27,7 @@ import type {
   MessageId,
 } from "@ryco/contracts";
 import type { Effect } from "effect";
+import type { ProviderTaskEndedError, ProviderUnsupportedError } from "../Errors.ts";
 import type { Stream } from "effect";
 
 export type ProviderSessionModelSwitchMode = "in-session" | "unsupported";
@@ -172,6 +173,18 @@ export interface ProviderAdapterShape<TError> {
     taskId: string,
     expected?: BackgroundTaskStopIdentity,
   ) => Effect.Effect<void, TError>;
+
+  /**
+   * Queue a person's message for one running agent, which reads it at its next step without
+   * the agent or the turn being interrupted. Optional: only providers with a channel into a
+   * running agent implement it. Fails with ProviderTaskEndedError once the task settled.
+   */
+  readonly messageBackgroundTask?: (
+    threadId: ThreadId,
+    taskId: string,
+    text: string,
+    expected: BackgroundTaskStopIdentity,
+  ) => Effect.Effect<void, TError | ProviderTaskEndedError | ProviderUnsupportedError>;
 
   /**
    * Respond to an interactive approval request.
