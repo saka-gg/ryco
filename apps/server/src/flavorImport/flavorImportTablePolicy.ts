@@ -110,7 +110,9 @@ export const FLAVOR_IMPORT_TABLE_POLICY = {
   agent_control_external_tasks: "clear",
   agent_control_external_audit: "clear",
 
-  // Wakes chats on forge news, and sends queued follow-ups: Ryco does both for its own chats.
+  // Wakes chats on forge news or a watched command's output, and sends queued follow-ups: Ryco
+  // does all three for its own chats, and a copied command watch would run its command again.
+  projection_thread_command_watches: "clear",
   projection_thread_pull_request_watches: "clear",
   projection_thread_queue_entries: "clear",
   projection_thread_queue_holds: "clear",
