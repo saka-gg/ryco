@@ -409,6 +409,26 @@ describe("Fork from here → Another machine (full app)", () => {
     }
   });
 
+  it("keeps a side chat's continuation on this machine, where its draft goes", async () => {
+    setGitStatusForTests(null);
+    setGitStatusForCwdForTests(SOURCE_CWD, PUSHED_STATUS);
+    const { mounted } = await mountTwoMachines({ answer: () => FORK_RESULT });
+    try {
+      openForkThreadDialog({
+        sourceThreadRef: scopeThreadRef(SOURCE, SOURCE_THREAD),
+        sourceMessageId: REPLY_1,
+        sourceTurnId: TURN_1,
+        boundaryText: "Split the session check first.",
+        checkpointAvailable: false,
+        draftSeed: { text: "Try the cache first.", note: "Your message goes into the new thread." },
+      });
+      await expect.element(page.getByTestId("fork-thread-draft-seed")).toBeVisible();
+      expect(document.querySelector('[data-testid="fork-thread-machine-other"]')).toBeNull();
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
   it("keeps sending to the picked machine when it drops off the list mid-send", async () => {
     setGitStatusForTests(null);
     setGitStatusForCwdForTests(SOURCE_CWD, PUSHED_STATUS);
