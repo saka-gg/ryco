@@ -1,6 +1,7 @@
 import { saveThreadExport } from "./threadExportSave.ts";
 import { createQuitShortcutGuard } from "./quitShortcut.ts";
 import type { DesktopCliCommandEnvironment } from "./desktopCliCommand.ts";
+import type { NightlyHandoffEnvironment } from "./nightlyHandoff.ts";
 import { buildEditMenu, PASTE_AS_TEXT_CHANNEL, resolvePasteAsTextTarget } from "./editMenu.ts";
 import { navigateWindow, swipeNavigation } from "./desktopNavigationCommands.ts";
 import { createQuitCleanupHandler } from "./quitCleanup.ts";
@@ -4208,6 +4209,32 @@ function registerIpcHandlers(): void {
       return cli.readDesktopCliCommandState(environment);
     });
   }
+  const nightlyHandoffSender = (event: Electron.IpcMainInvokeEvent) => {
+    const owner = BrowserWindow.fromWebContents(event.sender);
+    if (!owner || event.senderFrame !== event.sender.mainFrame)
+      throw new Error("Invalid Ryco Nightly sender.");
+  };
+  ipcMain.removeHandler("desktop:nightly-state");
+  ipcMain.handle("desktop:nightly-state", async (event) => {
+    nightlyHandoffSender(event);
+    const handoff = await import("./nightlyHandoff.ts");
+    return handoff.readNightlyState(nightlyHandoffEnvironment());
+  });
+  ipcMain.removeHandler("desktop:nightly-open");
+  ipcMain.handle("desktop:nightly-open", async (event, input: unknown) => {
+    nightlyHandoffSender(event);
+    const copyData =
+      typeof input === "object" && input !== null && (input as { copyData?: unknown }).copyData;
+    if (typeof copyData !== "boolean") throw new Error("Invalid Ryco Nightly request.");
+    const handoff = await import("./nightlyHandoff.ts");
+    await handoff.openNightly(nightlyHandoffEnvironment(), { copyData });
+  });
+  ipcMain.removeHandler("desktop:nightly-switch-back");
+  ipcMain.handle("desktop:nightly-switch-back", async (event) => {
+    nightlyHandoffSender(event);
+    const handoff = await import("./nightlyHandoff.ts");
+    await handoff.switchBackToRyco(nightlyHandoffEnvironment());
+  });
   ipcMain.removeHandler("desktop:quit-shortcut-get");
   ipcMain.handle("desktop:quit-shortcut-get", () => desktopSettings.quitShortcutMode);
   ipcMain.removeHandler("desktop:quit-shortcut-set");
@@ -5764,6 +5791,26 @@ function refreshDesktopCliLauncher(): void {
         `ryco command launcher refresh failed message=${sanitizeLogValue(formatErrorMessage(error))}`,
       );
     });
+}
+
+/** What Ryco and Ryco Nightly read to find and open each other (`nightlyHandoff.ts`). */
+function nightlyHandoffEnvironment(): NightlyHandoffEnvironment {
+  return {
+    platform: process.platform,
+    flavor: DESKTOP_FLAVOR,
+    homeDirectory: OS.homedir(),
+    rycoHome: BACKEND_BASE_DIR,
+    nightlyHome:
+      DESKTOP_FLAVOR === "nightly"
+        ? BACKEND_BASE_DIR
+        : resolveDesktopPaths({
+            configuredBaseDir: configuredDesktopBaseDir("nightly"),
+            isDevelopment: false,
+            flavor: "nightly",
+          }).backendBaseDir,
+    executable: process.execPath,
+    env: process.env,
+  };
 }
 
 function configureDeferredDesktopIntegration(): void {

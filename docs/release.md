@@ -80,6 +80,15 @@ downgrades a binary over a database a newer one migrated.
 
 ### Copying Ryco's data into Ryco Nightly
 
+In the app: **Settings → General → About → Ryco Nightly**. On Ryco (macOS) it finds Ryco Nightly in
+`/Applications` or `~/Applications` (only a bundle whose `Info.plist` names
+`com.laurinfrank.ryco.nightly`), and offers **Open Ryco Nightly** and **Copy my data and open**
+(refused while Nightly's node runs, after a confirmation). Ryco starts Nightly by its executable
+with none of Ryco's `RYCO_*` variables but `RYCO_NIGHTLY_HOME`, plus `RYCO_STABLE_HOME` and
+`RYCO_STABLE_EXECUTABLE`. Without Ryco Nightly installed, **Get Ryco Nightly** opens the releases
+page; installing it from inside the app is a later step. On Ryco Nightly, **Switch back to Ryco**
+opens Ryco and copies nothing back, and the row says how the last copy went.
+
 Ryco can ask Ryco Nightly for a copy of its data. Ryco writes `import-requested.json` into
 Nightly's home; Nightly's backend takes the copy on its next start, before it opens its database,
 and reports the outcome in `import-result.json` beside it (`packages/shared/src/flavorImport.ts`,

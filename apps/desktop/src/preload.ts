@@ -242,6 +242,11 @@ contextBridge.exposeInMainWorld("desktopBridge", {
     install: () => ipcRenderer.invoke("desktop:cli-command-install"),
     uninstall: () => ipcRenderer.invoke("desktop:cli-command-uninstall"),
   },
+  nightly: {
+    getState: () => ipcRenderer.invoke("desktop:nightly-state"),
+    open: (input) => ipcRenderer.invoke("desktop:nightly-open", input),
+    switchBack: () => ipcRenderer.invoke("desktop:nightly-switch-back"),
+  },
   quitShortcut: {
     getMode: () => ipcRenderer.invoke("desktop:quit-shortcut-get"),
     setMode: (mode) => ipcRenderer.invoke("desktop:quit-shortcut-set", mode),
