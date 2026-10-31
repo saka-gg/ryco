@@ -10,9 +10,9 @@ import {
 
 // Ryco public mobile scaffold (B1). The upstream hosted-auth vendor plane and
 // managed-cloud plane, its EAS project/owner, upstream bundle IDs/schemes, brand
-// assets, the default telemetry endpoint, widgets, share extension, quick
-// actions, and the camera-showcase rig are all stripped per the design spec's
-// strip list. Direct-node bearer pairing is one auth plane; the hosted plane
+// assets, the default telemetry endpoint, share extension, quick actions, and
+// the camera-showcase rig are all stripped per the design spec's strip list.
+// Widgets came back as Ryco's own Swift extension (plugins/withIosWidgetExtension.cjs). Direct-node bearer pairing is one auth plane; the hosted plane
 // uses a system-browser public-client handoff and defaults to Ryco Cloud.
 const repoEnv = loadMobileEnv();
 Object.assign(process.env, repoEnv);
@@ -314,11 +314,15 @@ const config: ExpoConfig = {
     ],
     "./plugins/withIosCocoaPodsUuidCache.cjs",
     "./plugins/withIosSceneLifecycle.cjs",
-    // Personal Team builds strip APNs and cannot sign the extension or its
-    // keychain group, so background push alerts are off there.
+    // Personal Team builds strip APNs and cannot sign an extension, its
+    // keychain group or an App Group, so background push alerts and widgets
+    // are off there.
     ...(isIosPersonalTeamBuild
       ? ["./plugins/withIosPersonalTeamCapabilities.cjs"]
-      : ["./plugins/withIosNotificationServiceExtension.cjs"]),
+      : [
+          "./plugins/withIosNotificationServiceExtension.cjs",
+          "./plugins/withIosWidgetExtension.cjs",
+        ]),
     "./plugins/withAndroidCleartextTraffic.cjs",
     "./plugins/withAndroidSecureStoreBackupExclusion.cjs",
     "./plugins/withAndroidGradleHeap.cjs",
