@@ -4,7 +4,10 @@ import { useSideChatStore } from "../sideChatStore";
 import { LazyBrowserPanel } from "../browser/LazyBrowserPanel";
 import { useNavigate, useParams, useSearch } from "@tanstack/react-router";
 import { scopedThreadKey, scopeProjectRef, scopeThreadRef } from "@ryco/client-runtime/scoped";
-import type { ThreadPageArtifact } from "@ryco/client-runtime/state/session";
+import {
+  canHtmlRenderSendFromMessage,
+  type ThreadPageArtifact,
+} from "@ryco/client-runtime/state/session";
 import { type MessageId, type ScopedThreadRef, type ThreadId } from "@ryco/contracts";
 import { projectScriptCwd } from "@ryco/shared/projectScripts";
 import {
@@ -1114,6 +1117,16 @@ export default function ThreadWorkspacePanel(props: {
     renderKey,
     lookUp: activeMode === "render" && !isPhoneSurface,
   });
+  // Only a page the thread's own agent published, on a message the thread has
+  // loaded, may send the reader's answers.
+  const renderMessageId = renderKey ? parseWorkspaceRenderKey(renderKey)?.messageId : undefined;
+  const threadMessages = activeThread?.messages;
+  const renderCanSendMessages = useMemo(() => {
+    const message = renderMessageId
+      ? threadMessages?.find((candidate) => candidate.id === renderMessageId)
+      : undefined;
+    return message !== undefined && canHtmlRenderSendFromMessage(message);
+  }, [renderMessageId, threadMessages]);
   const renderTitle =
     renderKey && parseWorkspaceRenderKey(renderKey)
       ? workspaceRender.status === "found"
@@ -1678,6 +1691,7 @@ export default function ThreadWorkspacePanel(props: {
               threadId={workspaceThreadRef ? (workspaceThreadRef.threadId as ThreadId) : null}
               renderKey={renderKey}
               resolution={workspaceRender}
+              canSendMessages={renderCanSendMessages}
             />
           ) : activeMode === "agent" ? (
             <AgentThreadPanel subagent={activeAgent} agentKey={agentKey} />

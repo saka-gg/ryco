@@ -1,3 +1,4 @@
+import { createHtmlRenderMessageGate } from "@ryco/client-runtime/state/session";
 import {
   htmlRenderResult,
   htmlRenderThemeMessage,
@@ -5,10 +6,11 @@ import {
   isHtmlRenderEscape,
   readHtmlRenderContentHeight,
   readHtmlRenderLinkRequest,
+  readHtmlRenderMessageRequest,
   readHtmlRenderPointerInside,
   type HtmlRenderTheme,
 } from "@ryco/shared/htmlRender";
-import { memo, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { memo, useEffect, useEffectEvent, useLayoutEffect, useRef, useState } from "react";
 
 import { cn } from "~/lib/utils";
 import { useHtmlRenderTheme } from "~/themes/htmlRenderTheme";
@@ -39,6 +41,14 @@ export const HtmlRenderDocument = memo(function HtmlRenderDocument(props: {
   readonly onPointerInside?: (inside: boolean) => void;
   /** The reader pressed Escape inside the page; its keys never reach the app. */
   readonly onEscape?: () => void;
+  /**
+   * Where the page's `ryco.send` goes once its request passed this frame's
+   * checks: the confirmation, then the thread's queue. Absent where the page
+   * may not send (a page handed over from another thread, the phone tier);
+   * whether it is present must not change while the frame lives, since the
+   * frame name tells the page.
+   */
+  readonly onSendMessage?: ((text: string) => Promise<void>) | undefined;
 }) {
   const theme = useHtmlRenderTheme();
   const frameRef = useRef<HTMLIFrameElement>(null);
@@ -46,7 +56,7 @@ export const HtmlRenderDocument = memo(function HtmlRenderDocument(props: {
   // for the frame's lifetime; later themes arrive as messages.
   const [initial] = useState(() => ({
     html: props.html,
-    name: htmlRenderThemeWindowName(theme),
+    name: htmlRenderThemeWindowName(theme, { sendMessages: props.onSendMessage !== undefined }),
   }));
   const [loaded, setLoaded] = useState(false);
 
@@ -77,6 +87,43 @@ export const HtmlRenderDocument = memo(function HtmlRenderDocument(props: {
     };
     window.addEventListener("message", openLink);
     return () => window.removeEventListener("message", openLink);
+  }, []);
+
+  // A page's `ryco.send`. Only this frame's own window is heard, and only
+  // while the reader is using it: the frame has focus in a focused, visible
+  // app and the app holds the user activation their click or key press in the
+  // page gave it, so a page cannot send on load, on a timer, or while the
+  // reader is elsewhere. The gate allows one request at a time and one a
+  // second; the reader still confirms each one. The listener outlives prop
+  // changes, so a re-render cannot reset the limit.
+  const readSendMessage = useEffectEvent(() => props.onSendMessage);
+  useEffect(() => {
+    const gate = createHtmlRenderMessageGate({
+      available: () => readSendMessage() !== undefined,
+      takeGesture: () => {
+        const frame = frameRef.current;
+        return (
+          frame !== null &&
+          document.activeElement === frame &&
+          document.hasFocus() &&
+          document.visibilityState === "visible" &&
+          navigator.userActivation?.isActive === true
+        );
+      },
+      deliver: (text) => {
+        const send = readSendMessage();
+        return send === undefined ? Promise.reject(new Error()) : send(text);
+      },
+      reply: (message) => frameRef.current?.contentWindow?.postMessage(message, "*"),
+    });
+    const sendMessage = (event: MessageEvent) => {
+      const frame = frameRef.current;
+      if (frame === null || event.source === null || event.source !== frame.contentWindow) return;
+      const request = readHtmlRenderMessageRequest(event.data);
+      if (request !== undefined) gate(request);
+    };
+    window.addEventListener("message", sendMessage);
+    return () => window.removeEventListener("message", sendMessage);
   }, []);
 
   const { onContentHeight } = props;

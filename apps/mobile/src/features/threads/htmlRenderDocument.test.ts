@@ -23,12 +23,16 @@ import {
 
 const theme = defaultHtmlRenderTheme("dark");
 
-function build(html: string, overrides: { title?: string; zoomable?: boolean } = {}) {
+function build(
+  html: string,
+  overrides: { title?: string; zoomable?: boolean; sendMessages?: boolean } = {},
+) {
   return buildHtmlRenderDocument({
     html,
     title: overrides.title ?? "Bundle size",
     theme,
     zoomable: overrides.zoomable ?? false,
+    ...(overrides.sendMessages === undefined ? {} : { sendMessages: overrides.sendMessages }),
   });
 }
 
@@ -78,6 +82,15 @@ describe("buildHtmlRenderDocument", () => {
     expect(titled.split("<script>")).toHaveLength(2);
   });
 
+  it("tells the page it may send only when the view takes its messages", () => {
+    expect(document).not.toContain(
+      escapeHtmlAttributeValue(htmlRenderThemeWindowName(theme, { sendMessages: true })),
+    );
+    expect(build("<p>x</p>", { sendMessages: true })).toContain(
+      ` name="${escapeHtmlAttributeValue(htmlRenderThemeWindowName(theme, { sendMessages: true }))}"`,
+    );
+  });
+
   it("applies the render document policy, which a srcdoc frame inherits", () => {
     expect(document).toContain(
       `<meta http-equiv="Content-Security-Policy" content="${escapeHtmlAttributeValue(HTML_RENDER_DOCUMENT_CSP)}">`,
@@ -95,10 +108,12 @@ describe("buildHtmlRenderDocument", () => {
     expect(light).toContain('<meta name="color-scheme" content="light">');
   });
 
-  it("relays only the frame's size reports and link requests to native", () => {
+  it("relays only the frame's size reports, link requests and message requests to native", () => {
     expect(document).toContain("window.__rycoPost=function(m)");
     expect(document).toContain("e.source!==w");
-    expect(document).toContain('"ui/notifications/size-changed":1,"ui/open-link":1');
+    expect(document).toContain(
+      '"ui/notifications/size-changed":1,"ui/open-link":1,"ui/message":1};',
+    );
   });
 
   it("lets only the full-screen page zoom", () => {
@@ -162,6 +177,13 @@ describe("parseHtmlRenderBridgeMessage", () => {
     JSON.stringify({ jsonrpc: "2.0", method: "ui/notifications/size-changed", params });
   const link = (id: unknown, url: unknown) =>
     JSON.stringify({ jsonrpc: "2.0", id, method: "ui/open-link", params: { url } });
+  const message = (text: string) =>
+    JSON.stringify({
+      jsonrpc: "2.0",
+      id: "ryco-message-1",
+      method: "ui/message",
+      params: { role: "user", content: [{ type: "text", text }] },
+    });
 
   it.each([
     ["a size report", size({ height: 412.2 }), { kind: "content-height", height: 413 }],
@@ -174,6 +196,24 @@ describe("parseHtmlRenderBridgeMessage", () => {
       "a numeric request id",
       link(7, "http://example.test"),
       { kind: "open-link", id: 7, url: "http://example.test" },
+    ],
+    [
+      "a message request",
+      message("Option B"),
+      { kind: "message", request: { id: "ryco-message-1", text: "Option B" } },
+    ],
+    [
+      "a message request at the length cap, escaped",
+      message('"'.repeat(4_000)),
+      { kind: "message", request: { id: "ryco-message-1", text: '"'.repeat(4_000) } },
+    ],
+    [
+      "a message request the page may not send, with its reason",
+      message("/compact"),
+      {
+        kind: "message",
+        request: { id: "ryco-message-1", refusal: "A page cannot send a slash command." },
+      },
     ],
   ])("accepts %s", (_name, data, expected) => {
     expect(parseHtmlRenderBridgeMessage(data)).toEqual(expected);

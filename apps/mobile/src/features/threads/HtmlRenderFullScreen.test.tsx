@@ -20,6 +20,7 @@ const hoisted = vi.hoisted(() => ({
   sourceInputs: [] as unknown[],
   share: vi.fn(async (_input: { html: string; title: string }) => undefined),
   alert: vi.fn(),
+  sendMessage: vi.fn(async (_text: string) => undefined),
 }));
 
 vi.mock("react", async (importOriginal) => {
@@ -80,6 +81,10 @@ vi.mock("./HtmlRenderWebView", () => ({
 vi.mock("./htmlRenderShare", () => ({
   HTML_RENDER_SHARE_SUPPORTED: true,
   shareHtmlRender: hoisted.share,
+}));
+vi.mock("./useHtmlRenderMessageSend", () => ({
+  useHtmlRenderMessageSend: (input: { readonly enabled: boolean }) =>
+    input.enabled ? hoisted.sendMessage : undefined,
 }));
 vi.mock("./useHtmlRenderSource", () => ({
   useHtmlRenderSource: (input: unknown) => {
@@ -258,6 +263,20 @@ describe("HtmlRenderFullScreen", () => {
       variant: "fullScreen",
     });
     expect(hoisted.sourceInputs).toEqual([]);
+  });
+
+  it("lets only a page its thread's agent published send from full screen", () => {
+    const frameOf = (input: HtmlRenderFullScreenRequest) =>
+      collect(openFullScreen(input)(), (element) => element.type === "HtmlRenderWebView")[0]
+        ?.props as { onSendMessage?: unknown };
+    expect(frameOf(request({ html: page, canSendMessages: true })).onSendMessage).toBe(
+      hoisted.sendMessage,
+    );
+    hoisted.runtime.slots = [];
+    expect(frameOf(request({ html: page })).onSendMessage).toBeUndefined();
+    hoisted.runtime.slots = [];
+    hoisted.source = { status: "ready", html: page };
+    expect(frameOf(request({ canSendMessages: true })).onSendMessage).toBe(hoisted.sendMessage);
   });
 
   it("reads a page it was not handed, however large", () => {

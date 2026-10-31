@@ -18,6 +18,7 @@ import {
 } from "./HtmlRenderWebView";
 import { HTML_RENDER_SHARE_SUPPORTED, shareHtmlRender } from "./htmlRenderShare";
 import { buildHtmlRenderSourceLines } from "./htmlRenderSourceLines";
+import { useHtmlRenderMessageSend } from "./useHtmlRenderMessageSend";
 import { useHtmlRenderSource, type HtmlRenderSource } from "./useHtmlRenderSource";
 
 /** Pages have no horizontal padding of their own, so full screen adds the feed's gutter. */
@@ -32,6 +33,8 @@ export interface HtmlRenderFullScreenRequest {
   readonly title: string;
   /** The page, when the caller already holds it (the inline frame it opens from). */
   readonly html?: string;
+  /** The page may send the reader's answers to its thread (see `ThreadHtmlRender`). */
+  readonly canSendMessages?: boolean;
 }
 
 type OpenHtmlRenderFullScreen = (request: HtmlRenderFullScreenRequest) => void;
@@ -110,6 +113,7 @@ function HtmlRenderFullScreenView(props: {
   readonly title: string;
   readonly source: HtmlRenderSource;
   readonly onClose: () => void;
+  readonly onSendMessage?: ((text: string) => Promise<void>) | undefined;
 }) {
   const { source, title } = props;
   const theme = useMobileHtmlRenderTheme();
@@ -206,6 +210,7 @@ function HtmlRenderFullScreenView(props: {
                 title={title}
                 variant="fullScreen"
                 onFailure={() => setPageFailed(true)}
+                onSendMessage={props.onSendMessage}
               />
             )
           ) : source.status === "failed" ? (
@@ -245,6 +250,7 @@ function HtmlRenderFullScreenView(props: {
 function HtmlRenderFullScreenReader(props: {
   readonly request: HtmlRenderFullScreenRequest;
   readonly onClose: () => void;
+  readonly onSendMessage: ((text: string) => Promise<void>) | undefined;
 }) {
   const { request } = props;
   const source = useHtmlRenderSource({
@@ -255,7 +261,14 @@ function HtmlRenderFullScreenReader(props: {
     sizeBytes: request.attachment.sizeBytes,
     requested: true,
   });
-  return <HtmlRenderFullScreenView title={request.title} source={source} onClose={props.onClose} />;
+  return (
+    <HtmlRenderFullScreenView
+      title={request.title}
+      source={source}
+      onClose={props.onClose}
+      onSendMessage={props.onSendMessage}
+    />
+  );
 }
 
 function HtmlRenderFullScreen(props: {
@@ -263,13 +276,24 @@ function HtmlRenderFullScreen(props: {
   readonly onClose: () => void;
 }) {
   const { request } = props;
+  const onSendMessage = useHtmlRenderMessageSend({
+    environmentId: request.environmentId,
+    threadId: request.threadId,
+    title: request.title,
+    enabled: request.canSendMessages === true,
+  });
   return request.html === undefined ? (
-    <HtmlRenderFullScreenReader request={request} onClose={props.onClose} />
+    <HtmlRenderFullScreenReader
+      request={request}
+      onClose={props.onClose}
+      onSendMessage={onSendMessage}
+    />
   ) : (
     <HtmlRenderFullScreenView
       title={request.title}
       source={{ status: "ready", html: request.html }}
       onClose={props.onClose}
+      onSendMessage={onSendMessage}
     />
   );
 }

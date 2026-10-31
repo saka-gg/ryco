@@ -114,7 +114,9 @@ called. This matters for clients such as Codex that cache the initial MCP catalo
   browser, then show it inline above the reply as a sandboxed page that follows the user's theme,
   with a card at the end of the reply (see [HTML renders](./user/html-renders.md)). Both need the
   `html.render` grant and exact active-turn authority; a render counts toward the turn's attachment
-  budget. Its result, like `ryco_attach_file`'s, names the stored artifact's id.
+  budget. Its result, like `ryco_attach_file`'s, names the stored artifact's id. A published page
+  can call `ryco.send(text)` to send the reader's answer to its thread once they confirm it (see
+  [Answering from a page](./user/html-renders.md#answering-from-a-page)).
 
 Mutation calls return a durable receipt. Reuse `requestId` when retrying the same action, then use
 `ryco_wait_for_control_request` with `waitFor: "terminal"` to get dispatch results and created thread

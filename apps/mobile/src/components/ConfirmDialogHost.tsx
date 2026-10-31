@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
-import { Alert, Modal, Platform, Pressable, View } from "react-native";
+import { Alert, Modal, Platform, Pressable, ScrollView, View } from "react-native";
 
 import { useThemeColor } from "../lib/useThemeColor";
 import { cn } from "../lib/cn";
@@ -105,9 +105,10 @@ export function ConfirmDialogHost() {
           <View className="w-full rounded-[24px] bg-card px-6 pb-4 pt-5">
             <AppText className="text-lg font-ryco-medium">{request.title}</AppText>
             {request.message === undefined ? null : (
-              <AppText className="mt-2 text-sm text-foreground-secondary">
-                {request.message}
-              </AppText>
+              // A long message (a page's answer to send) scrolls, so the buttons stay on screen.
+              <ScrollView className="mt-2" style={{ maxHeight: 320 }}>
+                <AppText className="text-sm text-foreground-secondary">{request.message}</AppText>
+              </ScrollView>
             )}
             <View className="mt-5 flex-row flex-wrap justify-end gap-1">
               <View className="overflow-hidden rounded-full">

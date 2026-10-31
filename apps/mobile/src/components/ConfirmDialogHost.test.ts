@@ -7,6 +7,7 @@ vi.mock("react-native", () => ({
   Modal: "Modal",
   Platform: { OS: "ios" },
   Pressable: "Pressable",
+  ScrollView: "ScrollView",
   View: "View",
 }));
 vi.mock("../lib/useThemeColor", () => ({ useThemeColor: () => "#000000" }));

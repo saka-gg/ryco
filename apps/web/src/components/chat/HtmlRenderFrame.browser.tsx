@@ -1,5 +1,6 @@
 import "../../index.css";
 import { EnvironmentId, MessageId, ThreadId } from "@ryco/contracts";
+import { scopedThreadKey, scopeThreadRef } from "@ryco/client-runtime/scoped";
 import { wsConnectionOpenedCountAtom } from "@ryco/client-runtime/rpc";
 import { injectHtmlRenderBootstrap, type HtmlRenderMetadata } from "@ryco/shared/htmlRender";
 import { afterEach, beforeEach, expect, it, vi } from "vite-plus/test";
@@ -23,6 +24,8 @@ import { AppAtomRegistryProvider, appAtomRegistry } from "../../rpc/atomRegistry
 import { readHtmlRenderTheme } from "../../themes/htmlRenderTheme";
 import { THEME_STYLE_ELEMENT_ID } from "../../themes/registry";
 import { HtmlRenderFrame } from "./HtmlRenderFrame";
+import { useHtmlRenderMessages } from "./HtmlRenderMessageConfirmation";
+import { __resetHtmlRenderMessagesForTests } from "./htmlRenderMessages";
 import { __resetHtmlRenderSourceCacheForTests } from "./useHtmlRenderSource";
 
 const environmentId = EnvironmentId.make("env");
@@ -77,7 +80,11 @@ const withAtoms = (node: ReactNode) => <AppAtomRegistryProvider>{node}</AppAtomR
 function renderFrame(
   bytes: Uint8Array,
   htmlRender: HtmlRenderMetadata = { title: "Chart", height: 1000 },
-  options: { sizeBytes?: number; wrap?: (node: ReactNode) => ReactNode } = {},
+  options: {
+    sizeBytes?: number;
+    wrap?: (node: ReactNode) => ReactNode;
+    canSendMessages?: boolean;
+  } = {},
 ) {
   const frame = (
     <div style={{ width: 600 }}>
@@ -94,6 +101,7 @@ function renderFrame(
           htmlRender,
         }}
         htmlRender={htmlRender}
+        canSendMessages={options.canSendMessages === true}
       />
     </div>
   );
@@ -129,6 +137,7 @@ beforeEach(async () => {
 
 afterEach(() => {
   vi.restoreAllMocks();
+  __resetHtmlRenderMessagesForTests();
   readChunk.mockReset();
   __resetHtmlRenderSourceCacheForTests();
   document.documentElement.classList.remove("dark");
@@ -652,4 +661,270 @@ it("keeps loading a large page the reader asked for when its row remounts", asyn
   await vi.waitFor(() => expect(frameElement()).toBeTruthy(), { timeout: 10_000 });
   expect(readsFromStart()).toBe(2);
   await second.unmount();
+});
+
+const threadKey = scopedThreadKey(scopeThreadRef(environmentId, threadId));
+
+/** The thread's open view, as ChatView registers it: how it takes a page's message. */
+function ThreadMessages(props: { readonly send: (text: string) => Promise<void> }) {
+  return <>{useHtmlRenderMessages(threadKey, props.send)}</>;
+}
+
+/**
+ * A page whose one large button sends `text` with `ryco.send` and reports how
+ * it settled. Told `{ ask: id }`, it posts a bare `ui/message` of its own,
+ * with no click behind it, and reports the app's answer. With `retryWith`, a
+ * failed send is followed at once by a send of that text.
+ */
+function sendingPage(text: string, options: { readonly retryWith?: string } = {}) {
+  const retry =
+    options.retryWith === undefined
+      ? ""
+      : `if(t===${JSON.stringify(text)})send(${JSON.stringify(options.retryWith)});`;
+  return pageBytes(
+    `<button id="answer" style="display:block;width:100%;height:300px">Answer</button><script>function send(t){ryco.send(t).then(function(){parent.postMessage({sent:t},"*")},function(e){parent.postMessage({failed:t,reason:e.message},"*");${retry}})}document.getElementById("answer").addEventListener("click",function(){send(${JSON.stringify(text)})});window.addEventListener("message",function(e){var d=e.data;if(d&&d.ask)parent.postMessage({jsonrpc:"2.0",id:d.ask,method:"ui/message",params:{role:"user",content:[{type:"text",text:"Forged"}]}},"*");if(d&&d.error&&typeof d.id==="string"&&d.id.indexOf("raw-")===0)parent.postMessage({refused:d.id,reason:d.error.message},"*")})</script>`,
+  );
+}
+
+const confirmation = () => page.getByRole("alertdialog");
+const sendInConfirmation = () => confirmation().getByRole("button", { name: "Send", exact: true });
+
+it("sends the reader's answer to the thread only once they confirm its exact text in the app", async () => {
+  const send = vi.fn(async (_text: string) => undefined);
+  const bytes = sendingPage("Option B\nwith notes");
+  serve(bytes);
+  const page$ = collectPageMessages();
+  const screen = await renderFrame(
+    bytes,
+    { title: "Pick a plan", height: 300 },
+    {
+      canSendMessages: true,
+      wrap: (node) => (
+        <>
+          <ThreadMessages send={send} />
+          {node}
+        </>
+      ),
+    },
+  );
+  await vi.waitFor(() => expect(frameElement()?.className).toContain("opacity-100"));
+  // The frame name tells the page it may ask.
+  expect(JSON.parse(frameElement().name.slice("ryco-theme:".length)).send).toBe(true);
+
+  await userEvent.click(frameElement());
+  await expect.element(confirmation()).toBeVisible();
+  await expect.element(confirmation().getByText("Send this message?")).toBeVisible();
+  await expect.element(confirmation().getByText(/Pick a plan/)).toBeVisible();
+  expect(
+    confirmation().element().querySelector("[data-html-render-message-text]")?.textContent,
+  ).toBe("Option B\nwith notes");
+  // Send waits a moment, so a quick second click in the page cannot land on
+  // it, and Cancel has the focus.
+  const sendButton = sendInConfirmation().element() as HTMLButtonElement;
+  expect(sendButton.disabled).toBe(true);
+  await vi.waitFor(() => expect(document.activeElement?.textContent).toBe("Cancel"));
+  expect(sendButton.disabled).toBe(true);
+  expect(send).not.toHaveBeenCalled();
+  await vi.waitFor(() => expect(sendButton.disabled).toBe(false), { timeout: 3_000 });
+
+  await sendInConfirmation().click();
+  await vi.waitFor(() => expect(page$.messages).toContainEqual({ sent: "Option B\nwith notes" }));
+  expect(send).toHaveBeenCalledExactlyOnceWith("Option B\nwith notes");
+  await expect.element(confirmation()).not.toBeInTheDocument();
+  page$.stop();
+  await screen.unmount();
+});
+
+it("sends nothing when the reader cancels, and tells the page", async () => {
+  const send = vi.fn(async (_text: string) => undefined);
+  const bytes = sendingPage("Option C");
+  serve(bytes);
+  const page$ = collectPageMessages();
+  // Two views of the thread (a pane leaving as another shows it): only the
+  // one that takes its messages now asks.
+  const screen = await renderFrame(
+    bytes,
+    { title: "Pick a plan", height: 300 },
+    {
+      canSendMessages: true,
+      wrap: (node) => (
+        <>
+          <ThreadMessages send={send} />
+          <ThreadMessages send={send} />
+          {node}
+        </>
+      ),
+    },
+  );
+  await vi.waitFor(() => expect(frameElement()?.className).toContain("opacity-100"));
+  await userEvent.click(frameElement());
+  await expect.element(confirmation()).toBeVisible();
+  expect(document.querySelectorAll("[data-html-render-message-confirmation]")).toHaveLength(1);
+  await confirmation().getByRole("button", { name: "Cancel" }).click();
+  await vi.waitFor(() =>
+    expect(page$.messages).toContainEqual({
+      failed: "Option C",
+      reason: "You cancelled the message.",
+    }),
+  );
+  await expect.element(confirmation()).not.toBeInTheDocument();
+  expect(send).not.toHaveBeenCalled();
+  page$.stop();
+  await screen.unmount();
+});
+
+it("asks the reader only for a focused page they just used, never for another window", async () => {
+  const send = vi.fn(async (_text: string) => undefined);
+  const bytes = sendingPage("Option D");
+  serve(bytes);
+  const page$ = collectPageMessages();
+  const screen = await renderFrame(
+    bytes,
+    { title: "Pick a plan", height: 300 },
+    {
+      canSendMessages: true,
+      wrap: (node) => (
+        <>
+          <ThreadMessages send={send} />
+          {node}
+          <button type="button">Elsewhere</button>
+        </>
+      ),
+    },
+  );
+  await vi.waitFor(() => expect(frameElement()?.className).toContain("opacity-100"));
+  const gesture = "Messages send only from a click, key press or tap in the page.";
+  /** Has the page post a bare request of its own and waits for the app's answer. */
+  const pageAsks = async (id: string) => {
+    frameElement().contentWindow!.postMessage({ ask: id }, "*");
+    await vi.waitFor(() => expect(page$.messages).toContainEqual({ refused: id, reason: gesture }));
+  };
+  // Another window's request gets no answer and asks nobody.
+  const answers: unknown[] = [];
+  const listenForAnswers = (event: MessageEvent) => {
+    if (event.source === window && (event.data as { error?: unknown })?.error) {
+      answers.push(event.data);
+    }
+  };
+  window.addEventListener("message", listenForAnswers);
+  window.postMessage(
+    {
+      jsonrpc: "2.0",
+      id: "raw-other",
+      method: "ui/message",
+      params: { role: "user", content: [{ type: "text", text: "Forged" }] },
+    },
+    "*",
+  );
+
+  await vi.waitFor(() => expect(navigator.userActivation.isActive).toBe(false), {
+    timeout: 10_000,
+  });
+  await pageAsks("raw-unfocused");
+  // Focus alone is not enough: a script can focus the frame without the reader.
+  frameElement().focus();
+  expect(document.activeElement).toBe(frameElement());
+  await pageAsks("raw-focused");
+  // Nor is a reader who just used the app somewhere other than this page.
+  await userEvent.click(page.getByRole("button", { name: "Elsewhere" }));
+  expect(navigator.userActivation.isActive).toBe(true);
+  await pageAsks("raw-elsewhere");
+  window.removeEventListener("message", listenForAnswers);
+  expect(answers).toEqual([]);
+  expect(document.querySelector("[data-html-render-message-confirmation]")).toBeNull();
+  expect(send).not.toHaveBeenCalled();
+
+  // The reader's own click in the page asks them.
+  await userEvent.click(frameElement());
+  await expect.element(confirmation()).toBeVisible();
+  page$.stop();
+  await screen.unmount();
+});
+
+it("refuses a second request within a second", async () => {
+  // No thread view takes messages here, so the first request fails at once;
+  // the page asks again right away, within the same click.
+  const bytes = sendingPage("First", { retryWith: "Second" });
+  serve(bytes);
+  const page$ = collectPageMessages();
+  const screen = await renderFrame(
+    bytes,
+    { title: "Pick a plan", height: 300 },
+    { canSendMessages: true },
+  );
+  await vi.waitFor(() => expect(frameElement()?.className).toContain("opacity-100"));
+  await userEvent.click(frameElement());
+  await vi.waitFor(() =>
+    expect(page$.messages).toContainEqual({
+      failed: "Second",
+      reason: "Send at most one message per second.",
+    }),
+  );
+  expect(page$.messages).toContainEqual({
+    failed: "First",
+    reason: "Open this page's thread to send its message.",
+  });
+  page$.stop();
+  await screen.unmount();
+});
+
+it("never lets a page send where it may not, a page handed over or the phone tier", async () => {
+  const send = vi.fn(async (_text: string) => undefined);
+  const bytes = sendingPage("Option E");
+  serve(bytes);
+  const page$ = collectPageMessages();
+  // Not a page this thread's agent published (canSendMessages is off).
+  const screen = await renderFrame(
+    bytes,
+    { title: "Pick a plan", height: 300 },
+    {
+      wrap: (node) => (
+        <>
+          <ThreadMessages send={send} />
+          {node}
+        </>
+      ),
+    },
+  );
+  await vi.waitFor(() => expect(frameElement()?.className).toContain("opacity-100"));
+  expect(JSON.parse(frameElement().name.slice("ryco-theme:".length)).send).toBeUndefined();
+  await userEvent.click(frameElement());
+  const unavailable = "Sending messages is not available here.";
+  // The page's ryco.send says so itself...
+  await vi.waitFor(() =>
+    expect(page$.messages).toContainEqual({ failed: "Option E", reason: unavailable }),
+  );
+  // ...and a bare request it posts right after the reader's click is refused.
+  frameElement().contentWindow!.postMessage({ ask: "raw-handed-over" }, "*");
+  await vi.waitFor(() =>
+    expect(page$.messages).toContainEqual({ refused: "raw-handed-over", reason: unavailable }),
+  );
+  await screen.unmount();
+
+  await page.viewport(390, 844);
+  const stop = syncDocumentPresentationTier();
+  try {
+    await vi.waitFor(() => expect(getPresentationTier()).toBe("phone"));
+    const phone = await renderFrame(
+      bytes,
+      { title: "Pick a plan", height: 300 },
+      {
+        canSendMessages: true,
+        wrap: (node) => (
+          <>
+            <ThreadMessages send={send} />
+            {node}
+          </>
+        ),
+      },
+    );
+    await vi.waitFor(() => expect(frameElement()?.className).toContain("opacity-100"));
+    expect(JSON.parse(frameElement().name.slice("ryco-theme:".length)).send).toBeUndefined();
+    await phone.unmount();
+  } finally {
+    stop();
+  }
+  expect(document.querySelector("[data-html-render-message-confirmation]")).toBeNull();
+  expect(send).not.toHaveBeenCalled();
+  page$.stop();
 });

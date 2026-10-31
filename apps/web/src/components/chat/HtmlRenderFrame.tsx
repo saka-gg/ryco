@@ -15,6 +15,7 @@ import { Button } from "../ui/button";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
 import { useHtmlRenderOpener } from "./HtmlRenderDialog";
 import { HtmlRenderDocument } from "./HtmlRenderDocument";
+import { useHtmlRenderMessageSend } from "./htmlRenderMessages";
 import { HtmlRenderSourceStatus } from "./HtmlRenderView";
 import { useHtmlRenderSource } from "./useHtmlRenderSource";
 
@@ -37,6 +38,12 @@ export const HtmlRenderFrame = memo(function HtmlRenderFrame(props: {
   readonly messageId: MessageId | undefined;
   readonly attachment: ChatFileAttachment;
   readonly htmlRender: HtmlRenderMetadata;
+  /**
+   * The page may send the reader's answers to this thread
+   * (`canHtmlRenderSendFromMessage`): its own agent published it. Off by
+   * default, so a surface that shows other pages never lets them send.
+   */
+  readonly canSendMessages?: boolean;
 }) {
   const { attachment, htmlRender } = props;
   const { title } = htmlRender;
@@ -87,6 +94,13 @@ export const HtmlRenderFrame = memo(function HtmlRenderFrame(props: {
   // The frozen phone tier gets no expand affordance; where the turn replied,
   // the reply's page card still opens the page full size.
   const canExpand = usePresentationTier() !== "phone";
+  const canSendMessages = props.canSendMessages === true;
+  const onSendMessage = useHtmlRenderMessageSend({
+    environmentId: props.environmentId,
+    threadId: props.threadId,
+    title,
+    enabled: canSendMessages,
+  });
   const { open, dialog } = useHtmlRenderOpener();
   const html = source.html;
 
@@ -112,6 +126,7 @@ export const HtmlRenderFrame = memo(function HtmlRenderFrame(props: {
             className="block size-full"
             onContentHeight={onContentHeight}
             onPointerInside={setPointerInside}
+            onSendMessage={onSendMessage}
           />
           {canExpand && (
             <div
@@ -137,6 +152,7 @@ export const HtmlRenderFrame = memo(function HtmlRenderFrame(props: {
                             messageId: props.messageId,
                             attachment,
                             htmlRender,
+                            canSendMessages,
                           },
                           origin: () => boxRef.current,
                         })

@@ -110,6 +110,8 @@ export const MessageAttachments = memo(function MessageAttachments(
     attachments: ReadonlyArray<ChatAttachment>;
     onImageExpand: (preview: ExpandedImagePreview) => void;
     variant?: "user" | "assistant";
+    /** Its pages may send the reader's answers to the thread (see `HtmlRenderFrame`). */
+    rendersCanSendMessages?: boolean;
   },
 ) {
   // An HTML render shows as its page wherever it turns up (beside text, in an
@@ -152,6 +154,7 @@ export const MessageAttachments = memo(function MessageAttachments(
               messageId={props.messageId}
               attachment={attachment}
               htmlRender={htmlRender}
+              canSendMessages={props.rendersCanSendMessages === true}
             />
           ))}
         </div>

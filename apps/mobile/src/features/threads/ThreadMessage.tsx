@@ -12,6 +12,7 @@ import {
   type ParsedTerminalContextEntry,
 } from "@ryco/client-runtime/state/composer";
 import {
+  canHtmlRenderSendFromMessage,
   EDIT_FROM_HERE_COPY,
   UNDO_FILE_CHANGES_COPY,
   readHtmlRenderAttachment,
@@ -438,6 +439,7 @@ export function ThreadMessage(props: {
                 messageId={props.message.id}
                 attachment={attachment}
                 htmlRender={htmlRender}
+                canSendMessages={canHtmlRenderSendFromMessage(props.message)}
               />
             ))}
           </View>

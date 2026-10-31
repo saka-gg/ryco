@@ -16,10 +16,12 @@
 //      access) and refuses every top-frame load except the wrapper's own
 //      `about:` load, so nothing the page does can leave the app's control.
 //   3. Everything the page says over the bridge is untrusted. The relay below
-//      forwards only the two message shapes the client acts on, and the client
-//      validates them again: a sandboxed frame can post to native directly on
-//      both platforms (iOS registers the message handler in every frame,
-//      Android's listener matches every origin).
+//      forwards only the message shapes the client acts on (size reports, link
+//      requests, and `ryco.send`'s message requests), and the client validates
+//      them again: a sandboxed frame can post to native directly on both
+//      platforms (iOS registers the message handler in every frame, Android's
+//      listener matches every origin). A message request also needs the
+//      reader's tap and their confirmation (`htmlRenderMessage.ts`).
 //
 // The page's bytes reach the WebView only as an attribute value, entity-escaped
 // in one pass, so no payload can close the attribute and add markup.
@@ -29,6 +31,8 @@ import {
   htmlRenderThemeWindowName,
   readHtmlRenderContentHeight,
   readHtmlRenderLinkRequest,
+  readHtmlRenderMessageRequest,
+  type HtmlRenderMessageRequest,
   type HtmlRenderTheme,
 } from "@ryco/shared/htmlRender";
 
@@ -45,7 +49,7 @@ const FRAME_ID = "ryco-render";
 // before the frame exists and never miss a fast page's first report. A theme
 // message also updates the wrapper's color scheme: a frame whose scheme differs
 // from its embedder's paints an opaque canvas.
-const RELAY_SCRIPT = `(function(){var h={"ui/notifications/size-changed":1,"ui/open-link":1};function f(){var e=document.getElementById(${JSON.stringify(FRAME_ID)});return e&&e.contentWindow;}window.__rycoPost=function(m){var t=m&&m.params&&m.params.theme,w=f();if(t==="light"||t==="dark")document.documentElement.style.colorScheme=t;if(w)w.postMessage(m,"*");};window.addEventListener("message",function(e){var d=e.data,w=f(),n=window.ReactNativeWebView;if(!w||e.source!==w||!d||typeof d!=="object"||d.jsonrpc!=="2.0"||!h.hasOwnProperty(d.method)||!n)return;try{n.postMessage(JSON.stringify({jsonrpc:"2.0",id:d.id,method:d.method,params:d.params}));}catch(x){}});})();`;
+const RELAY_SCRIPT = `(function(){var h={"ui/notifications/size-changed":1,"ui/open-link":1,"ui/message":1};function f(){var e=document.getElementById(${JSON.stringify(FRAME_ID)});return e&&e.contentWindow;}window.__rycoPost=function(m){var t=m&&m.params&&m.params.theme,w=f();if(t==="light"||t==="dark")document.documentElement.style.colorScheme=t;if(w)w.postMessage(m,"*");};window.addEventListener("message",function(e){var d=e.data,w=f(),n=window.ReactNativeWebView;if(!w||e.source!==w||!d||typeof d!=="object"||d.jsonrpc!=="2.0"||!h.hasOwnProperty(d.method)||!n)return;try{n.postMessage(JSON.stringify({jsonrpc:"2.0",id:d.id,method:d.method,params:d.params}));}catch(x){}});})();`;
 
 export interface HtmlRenderDocumentInput {
   /** The stored page, bootstrap included, exactly as the server stored it. */
@@ -55,6 +59,8 @@ export interface HtmlRenderDocumentInput {
   readonly theme: HtmlRenderTheme;
   /** Full screen lets the reader pinch-zoom; an inline frame in the feed does not. */
   readonly zoomable: boolean;
+  /** Tells the page's `ryco.send` that this view may send its messages (a hint; see `htmlRenderThemeWindowName`). */
+  readonly sendMessages?: boolean;
 }
 
 export function buildHtmlRenderDocument(input: HtmlRenderDocumentInput): string {
@@ -80,7 +86,7 @@ export function buildHtmlRenderDocument(input: HtmlRenderDocumentInput): string 
     "<body>",
     `<iframe id="${FRAME_ID}" title="${escapeHtmlAttributeValue(input.title)}"`,
     ` sandbox="${HTML_RENDER_FRAME_SANDBOX}" referrerpolicy="no-referrer"`,
-    ` name="${escapeHtmlAttributeValue(htmlRenderThemeWindowName(input.theme))}"`,
+    ` name="${escapeHtmlAttributeValue(htmlRenderThemeWindowName(input.theme, { sendMessages: input.sendMessages === true }))}"`,
     ` srcdoc="${escapeHtmlAttributeValue(input.html)}"></iframe>`,
     "</body>",
     "</html>",
@@ -114,11 +120,13 @@ export function isAllowedHtmlRenderNavigation(request: {
 /** A bridge message the client acts on. */
 export type HtmlRenderBridgeMessage =
   | { readonly kind: "content-height"; readonly height: number }
-  | { readonly kind: "open-link"; readonly id: string | number; readonly url: string };
+  | { readonly kind: "open-link"; readonly id: string | number; readonly url: string }
+  | { readonly kind: "message"; readonly request: HtmlRenderMessageRequest };
 
-// A link request is at most an 8 KiB URL plus its envelope; anything larger is
-// not one, and is dropped before it is parsed.
-const MAX_BRIDGE_MESSAGE_CHARS = 16 * 1024;
+// A link request is at most an 8 KiB URL plus its envelope, and a message
+// request at most 4,000 characters of text, each escaped to at most six; the
+// rest is not one, and is dropped before it is parsed.
+const MAX_BRIDGE_MESSAGE_CHARS = 32 * 1024;
 const MAX_REQUEST_ID_CHARS = 128;
 
 /**
@@ -135,6 +143,8 @@ export function parseHtmlRenderBridgeMessage(data: unknown): HtmlRenderBridgeMes
   }
   const height = readHtmlRenderContentHeight(message);
   if (height !== undefined) return { kind: "content-height", height: Math.ceil(height) };
+  const request = readHtmlRenderMessageRequest(message);
+  if (request !== undefined) return { kind: "message", request };
   const link = readHtmlRenderLinkRequest(message);
   if (link === undefined) return undefined;
   const idFits =

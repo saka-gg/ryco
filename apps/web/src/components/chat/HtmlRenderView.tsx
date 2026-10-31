@@ -165,6 +165,8 @@ export function HtmlRenderFullView(props: {
   readonly showSource: boolean;
   /** The reader pressed Escape inside the page (its keys never reach the app). */
   readonly onEscape?: (() => void) | undefined;
+  /** Where the page's `ryco.send` goes; absent where it may not send. */
+  readonly onSendMessage?: ((text: string) => Promise<void>) | undefined;
   /** The page area: its gutter and corners. */
   readonly className?: string;
 }) {
@@ -190,6 +192,7 @@ export function HtmlRenderFullView(props: {
           title={title}
           className="min-h-0 w-full flex-1"
           {...(props.onEscape ? { onEscape: props.onEscape } : {})}
+          onSendMessage={props.onSendMessage}
         />
       </div>
     </>

@@ -79,6 +79,11 @@ export const HtmlRenderCards = memo(function HtmlRenderCards(props: {
   readonly threadId: ThreadId | undefined;
   readonly renders: ReadonlyArray<TimelineTurnHtmlRender>;
   readonly appearance: ThemeAppearance;
+  /**
+   * The pages may send the reader's answers to the thread: they are the ones
+   * its own agent published (a turn's pages), not pages handed over.
+   */
+  readonly canSendMessages?: boolean;
 }) {
   const { open, dialog } = useHtmlRenderOpener();
   if (props.renders.length === 0) return null;
@@ -93,6 +98,7 @@ export const HtmlRenderCards = memo(function HtmlRenderCards(props: {
             messageId: render.messageId,
             attachment: render.attachment,
             htmlRender: render.htmlRender,
+            canSendMessages: props.canSendMessages === true,
           }}
           appearance={props.appearance}
           onOpen={(target, origin) => open({ target, origin })}

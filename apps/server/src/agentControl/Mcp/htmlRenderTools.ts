@@ -28,6 +28,7 @@ import {
   HTML_PREVIEW_TOOL_NAME,
   HTML_RENDER_COLUMN_WIDTH,
   HTML_RENDER_LAYOUT_GUIDE,
+  HTML_RENDER_MESSAGE_GUIDE,
   HTML_RENDER_MAX_HEIGHT,
   HTML_RENDER_MAX_HTML_CHARS,
   HTML_RENDER_MAX_PAGE_BYTES,
@@ -111,7 +112,7 @@ const PREVIEW_DESCRIPTOR: AgentControlMcpToolDescriptor = {
 
 const RENDER_DESCRIPTOR: AgentControlMcpToolDescriptor = {
   name: HTML_RENDER_TOOL_NAME,
-  description: `Show a finished HTML page (chart, table, diagram, collage, mockup) inline in this thread, above your final text reply; call it before writing that reply. The reader already sees the page, so the reply should not announce it, say where it is, or restate it: add only what the page doesn't say. Preview with ${HTML_PREVIEW_TOOL_NAME} first. Ryco fits the frame to the page's height at each reader's width when it could measure the page. A height below the page's contentHeight caps the frame there, and the rest scrolls inside it. Each page counts toward this turn's attachment budget (8 attachments, 50 MiB). ${HTML_RENDER_PAGE_RULES} ${HTML_RENDER_LAYOUT_GUIDE} ${HTML_RENDER_THEME_GUIDE}`,
+  description: `Show a finished HTML page (chart, table, diagram, collage, mockup) inline in this thread, above your final text reply; call it before writing that reply. The reader already sees the page, so the reply should not announce it, say where it is, or restate it: add only what the page doesn't say. Preview with ${HTML_PREVIEW_TOOL_NAME} first. Ryco fits the frame to the page's height at each reader's width when it could measure the page. A height below the page's contentHeight caps the frame there, and the rest scrolls inside it. Each page counts toward this turn's attachment budget (8 attachments, 50 MiB). ${HTML_RENDER_PAGE_RULES} ${HTML_RENDER_LAYOUT_GUIDE} ${HTML_RENDER_THEME_GUIDE} ${HTML_RENDER_MESSAGE_GUIDE}`,
   inputSchema: {
     type: "object",
     additionalProperties: false,

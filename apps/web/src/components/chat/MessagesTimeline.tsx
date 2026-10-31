@@ -162,6 +162,7 @@ import { DisclosureChevron } from "../ui/DisclosureChevron";
 import { DisclosureRegion } from "../ui/DisclosureRegion";
 import { DISCLOSURE_CLEANUP_BUFFER_MS, DISCLOSURE_TRANSITION_MS } from "../../lib/disclosureMotion";
 import {
+  canHtmlRenderSendFromMessage,
   deriveReadableCommandDisplay,
   normalizeToolTextForComparison,
   resolveCommandVisualKind,
@@ -1765,6 +1766,7 @@ function TimelineRowContent({ row }: { row: TimelineRow }) {
                   environmentId={ctx.activeThreadEnvironmentId}
                   threadId={parseScopedThreadKey(ctx.routeThreadKey)?.threadId}
                   messageId={row.message.id}
+                  rendersCanSendMessages={canHtmlRenderSendFromMessage(row.message)}
                 />
                 {!assistantResponseStillInProgress && row.turnHtmlRenders && (
                   <HtmlRenderCards
@@ -1772,6 +1774,8 @@ function TimelineRowContent({ row }: { row: TimelineRow }) {
                     threadId={parseScopedThreadKey(ctx.routeThreadKey)?.threadId}
                     renders={row.turnHtmlRenders}
                     appearance={ctx.resolvedTheme}
+                    // A turn's pages are the ones this thread's agent published.
+                    canSendMessages
                   />
                 )}
                 {!assistantResponseStillInProgress && (
@@ -1849,6 +1853,8 @@ function TimelineRowContent({ row }: { row: TimelineRow }) {
             messageId={row.messageId}
             attachment={row.attachment}
             htmlRender={row.htmlRender}
+            // A render row is a page this thread's agent published.
+            canSendMessages
           />
           {!(
             ctx.activeTurnInProgress &&

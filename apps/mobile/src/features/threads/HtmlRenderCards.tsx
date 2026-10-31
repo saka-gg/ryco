@@ -105,6 +105,8 @@ export function HtmlRenderCards(props: {
               messageId,
               attachment,
               title: htmlRender.title,
+              // A turn's pages are the ones this thread's agent published.
+              canSendMessages: true,
             })
           }
         />
