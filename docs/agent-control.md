@@ -262,7 +262,10 @@ only when its output changes (see [Command watch](./command-watch.md) for the ru
 - **Ending.** `ryco_unwatch_command` stops one watch or all of them; call it before handing the
   work back so the chat can settle. A watch also ends after 10 wakes, 7 days, 8 failed runs in a
   row or output over 4 KB, and with the chat's Stop, settle, archive or Trash. The user can stop
-  one with the `thread.command-watch.stop` command. While Agent Control is off, nothing runs.
+  one with the `thread.command-watch.stop` command. A chat's watches wake it at most 30 times a
+  day. While Agent Control is off, no run starts and no wake is sent.
+- **Visibility.** The command is visible to anyone who may replay the chat's events, as the
+  agent's own tool call already is: keep secrets out of it.
 
 ## Tasks
 

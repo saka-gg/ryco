@@ -50,14 +50,18 @@ const harness = (
     start: (request: CommandWatchStartInput) =>
       Effect.sync(() => {
         started.push(request);
-        return { watchId: "command-watch:1", started: true, watches: { active: [], ended: [] } };
+        return {
+          watchId: "command-watch:1",
+          started: true,
+          watches: { active: [], ended: [], recentWakes: [] },
+        };
       }),
     stop: (request: { threadId: ThreadId; watchId?: string | undefined }) =>
       Effect.sync(() => {
         stopped.push(request);
         return { stopped: ["command-watch:1"] };
       }),
-    list: () => Effect.succeed({ active: [], ended: [] }),
+    list: () => Effect.succeed({ active: [], ended: [], recentWakes: [] }),
   } as unknown as CommandWatchRuntime;
   const base: AgentControlMcpTools = {
     descriptors: [],

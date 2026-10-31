@@ -12,12 +12,12 @@ CI, a deploy, a release. JSON sources work through the exit-1 gate, for example
 
 ## Who can do what
 
-| Action                  | Who                                                                                                              |
-| ----------------------- | ---------------------------------------------------------------------------------------------------------------- |
-| Start a watch           | The chat's own agent, through `ryco_watch_command` (Agent Control)                                               |
-| Stop a watch            | The agent (`ryco_unwatch_command`), an operator (`thread.command-watch.stop`), the chat's lifecycle              |
-| Read the command text   | The agent (its own chat's watches). Clients get no command text yet: the watch list for operators is a follow-up |
-| See that a chat watches | Every client: thread shells carry `commandWatchCount`, never commands                                            |
+| Action                  | Who                                                                                                                                                                                                                                                             |
+| ----------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Start a watch           | The chat's own agent, through `ryco_watch_command` (Agent Control)                                                                                                                                                                                              |
+| Stop a watch            | The agent (`ryco_unwatch_command`), an operator (`thread.command-watch.stop`), the chat's lifecycle                                                                                                                                                             |
+| Read the command text   | The agent (`ryco_list_command_watches`), and anyone who may replay the chat's events, viewers included: the watch events carry the whole watch, as the agent's own `ryco_watch_command` call is already kept as a thread activity. Keep secrets out of commands |
+| See that a chat watches | Every client: thread shells carry `commandWatchCount`, never commands                                                                                                                                                                                           |
 
 No client can start a watch: there is no RPC or client command for it.
 
@@ -72,13 +72,15 @@ chat right now, and the user can stop it.
 | 10th wake                                            | Delivered, then the watch ends (`wake-limit`) |
 | 7 days after the start                               | Ends the watch (`expired`)                    |
 
-Failure, too-long, wake-limit and expiry tell the agent with a closing message.
+Failure, too-long, wake-limit and expiry tell the agent with a closing message. A closing message
+never invites a new watch (T3 Code's do): it tells the agent to hand the work back.
 
 ## Numbers
 
 | Rule                                          | Value                            | Source                           |
 | --------------------------------------------- | -------------------------------- | -------------------------------- |
 | Watches per chat / per node                   | 5 / 50                           | T3 Code / Ryco                   |
+| Wakes per chat in 24 hours, all watches       | 30                               | Ryco (T3 and Synara have none)   |
 | Interval                                      | 1 to 1,440 minutes, default 10   | T3 Code                          |
 | Looks at watched chats                        | every 30 s while any, else 5 min | T3 Code                          |
 | Run timeout, then SIGKILL                     | 60 s, then 2 s                   | T3 Code, Ryco                    |
@@ -97,10 +99,19 @@ in memory and tried again every 10 seconds and on the chat's events, without run
 again; after a day it ends the watch (`expired`). The wake's progress and its turn start commit in
 one command, fenced on the watch's revision and generation, and refused together.
 
-A watch never wakes a chat with more authority, or in another checkout, than when it started: the
-decider refuses a wake to a chat outside Full access or default mode, and the next look ends the
-watch (`scope-changed`). While Agent Control is off, nothing runs and nothing wakes; after a day of
-that the watch ends (`expired`).
+A watch never wakes a chat with more authority, or in another checkout, than when it started.
+Leaving Full access or default mode ends the chat's watches in that same command (`scope-changed`),
+so switching away and straight back does not keep them. The decider refuses a wake, or any change,
+for a chat whose checkout, project root or runtime differs from the watch's, and the next look ends
+the watch. A run already in flight records nothing once its chat moved.
+
+The chat's watches together may wake it 30 times in 24 hours. A wake past that budget waits, like
+any held wake, so an agent that starts a new watch whenever one ends cannot keep waking itself.
+
+While Agent Control is off, no new run starts (a run that waited for a free slot checks again
+before it starts) and no wake is sent: a run already in progress finishes, and its wake waits
+until Agent Control is back on. After a day of that the watch ends (`expired`). The runtime itself
+loads only on a node with a command watch.
 
 After a restart, due times, failure counts and held wakes start over (every watch runs at its next
 look; an unchanged output wakes nobody). A wake whose turn start provably never reached the provider

@@ -17,9 +17,10 @@
  * - Who stops: the agent (`ryco_unwatch_command`), an operator (the client command
  *   `thread.command-watch.stop`), and the chat's own lifecycle (Stop, settle, archive, Trash,
  *   leaving Full access or default mode).
- * - Who reads the command text: the agent, of its own chat's watches (`ryco_list_command_watches`).
- *   Thread shells, which every client reads, carry only how many watches run; no client reads
- *   the command text yet.
+ * - Who reads the command text: the agent, through `ryco_list_command_watches`, and anyone who
+ *   may replay the chat's events (viewers included): the watch events carry the whole watch,
+ *   just as the agent's own `ryco_watch_command` call is kept as a thread activity. Thread
+ *   shells carry only how many watches run.
  * - What runs: the stored command, in the cwd the node resolved when the watch started (never
  *   from the agent's input), with the terminal's environment (no `RYCO_*`), no stdin, in its own
  *   process group that a timeout kills; see `commandWatchRuntime.ts`.
@@ -27,7 +28,7 @@
  * @module CommandWatchService
  */
 import { isThreadSnoozed } from "@ryco/shared/threadSnooze";
-import { Context, Duration, Effect, Layer, Option, Scope } from "effect";
+import { Context, Deferred, Duration, Effect, Layer, Option, Scope } from "effect";
 import { ChildProcessSpawner } from "effect/process";
 import * as SqlClient from "effect/sql/SqlClient";
 
@@ -85,8 +86,9 @@ export const commandWatchRuntimeDeps = Effect.gen(function* () {
 });
 
 /**
- * The watch's runtime, loaded once. Its looks start `COMMAND_WATCH_FIRST_SCAN_DELAY_MS` after
- * commands are admitted (tests build the runtime with `makeCommandWatchRuntime` and drive it).
+ * The watch's runtime, loaded once, and only on a node with a command watch: one that survived
+ * a restart (its looks start `COMMAND_WATCH_FIRST_SCAN_DELAY_MS` after commands are admitted),
+ * or the first call (an agent's start). Tests build the runtime with `makeCommandWatchRuntime`.
  */
 export const CommandWatchServiceLive = Layer.effect(
   CommandWatchService,
@@ -95,6 +97,7 @@ export const CommandWatchServiceLive = Layer.effect(
     const startup = yield* ServerRuntimeStartup;
     // Runs belong to the layer: releasing it interrupts them, which ends their process groups.
     const scope = yield* Effect.scope;
+    const wanted = yield* Deferred.make<void>();
 
     const runtime: Effect.Effect<CommandWatchRuntime> = yield* Effect.cached(
       Effect.promise(() => import("./commandWatchRuntime.ts")).pipe(
@@ -106,6 +109,21 @@ export const CommandWatchServiceLive = Layer.effect(
     yield* Effect.forkScoped(
       startup.awaitCommandReady.pipe(
         Effect.andThen(Effect.sleep(Duration.millis(COMMAND_WATCH_FIRST_SCAN_DELAY_MS))),
+        Effect.andThen(
+          deps.engine.getReadModel === undefined
+            ? Effect.void
+            : deps.engine
+                .getReadModel()
+                .pipe(
+                  Effect.flatMap((model) =>
+                    model.threads.some(
+                      (thread) => (thread.commandWatchState?.active.length ?? 0) > 0,
+                    )
+                      ? Effect.void
+                      : Deferred.await(wanted),
+                  ),
+                ),
+        ),
         Effect.andThen(runtime),
         Effect.flatMap((loaded) => loaded.run),
         Effect.catchCause((cause) => Effect.logWarning("Command watches stopped", { cause })),
@@ -114,7 +132,11 @@ export const CommandWatchServiceLive = Layer.effect(
 
     // A watch change is a command like any other: it waits for startup to admit commands.
     return {
-      runtime: startup.awaitCommandReady.pipe(Effect.orDie, Effect.andThen(runtime)),
+      runtime: startup.awaitCommandReady.pipe(
+        Effect.orDie,
+        Effect.andThen(Deferred.succeed(wanted, undefined)),
+        Effect.andThen(runtime),
+      ),
     } satisfies CommandWatchServiceShape;
   }),
 );

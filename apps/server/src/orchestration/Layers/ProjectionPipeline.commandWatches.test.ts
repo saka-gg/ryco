@@ -124,7 +124,11 @@ layer("command watch projection", (it) => {
       const threadId = yield* setup("store");
       const [row] = yield* watchRow(threadId);
       assert.equal(row?.activeCount, 1);
-      assert.deepEqual(JSON.parse(row!.watchesJson), { active: [watch()], ended: [] });
+      assert.deepEqual(JSON.parse(row!.watchesJson), {
+        active: [watch()],
+        ended: [],
+        recentWakes: [],
+      });
 
       const shell = Option.getOrThrow(yield* query.getThreadShellById(threadId));
       assert.equal(shell.commandWatchCount, 1);
@@ -136,7 +140,7 @@ layer("command watch projection", (it) => {
       const readModel = yield* query.getCommandReadModel();
       assert.deepEqual(
         readModel.threads.find((thread) => thread.id === threadId)?.commandWatchState,
-        { active: [watch()], ended: [] },
+        { active: [watch()], ended: [], recentWakes: [] },
       );
     }),
   );

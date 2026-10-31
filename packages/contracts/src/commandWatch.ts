@@ -20,6 +20,11 @@ import { RuntimeMode } from "./runtimeMode.ts";
 
 /** Watches one thread may hold at once (T3 Code). */
 export const COMMAND_WATCHES_PER_THREAD = 5;
+/**
+ * Wakes one thread's command watches may send in 24 hours, all watches together (Ryco: T3 Code
+ * and Synara have no such budget). Bounds an agent that starts a new watch whenever one ends.
+ */
+export const COMMAND_WATCH_WAKES_PER_DAY = 30;
 /** Active watches across the node. */
 export const COMMAND_WATCHES_PER_NODE = 50;
 export const COMMAND_WATCH_MAX_COMMAND_CHARS = 4_000;
@@ -113,5 +118,7 @@ export const ThreadCommandWatches = Schema.Struct({
   active: Schema.Array(ThreadCommandWatch),
   /** Newest first, a few. */
   ended: Schema.Array(ThreadCommandWatchEnded),
+  /** When the thread's watches woke it in the last 24 hours (the daily wake budget). */
+  recentWakes: Schema.Array(IsoDateTime),
 });
 export type ThreadCommandWatches = typeof ThreadCommandWatches.Type;

@@ -52,7 +52,12 @@ const START_MS = Date.parse("2026-10-04T10:00:00.000Z");
 const EVERY_MS = 10 * 60_000;
 
 async function createHarness(
-  options: { readonly agentControlEnabled?: () => boolean; readonly runTimeoutMs?: number } = {},
+  options: {
+    readonly agentControlEnabled?: () => boolean;
+    readonly runTimeoutMs?: number;
+    /** Records the fence's cold-start bookkeeping per wake message id. */
+    readonly coldSlots?: { readonly noted: string[]; readonly released: string[] };
+  } = {},
 ) {
   let nowMs = START_MS;
   // The runtime's due times read this clock; its sleeps stay real (the run timeout).
@@ -93,6 +98,22 @@ async function createHarness(
         Effect.provideService(ProviderService, {
           getSession: () => Effect.succeed(Option.none()),
         } as never),
+        Effect.map((fence) => {
+          const slots = options.coldSlots;
+          return slots === undefined
+            ? fence
+            : {
+                ...fence,
+                noteColdWake: (threadId: ThreadId, messageId: string, sinceMs: number) => {
+                  slots.noted.push(messageId);
+                  return fence.noteColdWake(threadId, messageId as never, sinceMs);
+                },
+                releaseColdSlot: (threadId: ThreadId, messageId: string) => {
+                  slots.released.push(messageId);
+                  return fence.releaseColdSlot(threadId, messageId as never);
+                },
+              };
+        }),
       ),
     ),
     Layer.effect(
@@ -271,8 +292,18 @@ async function createHarness(
     rmSync(directory, { recursive: true, force: true });
   };
 
+  /** The runtime's own loop, as the server runs it (interrupted when the harness ends). */
+  const startLoop = () =>
+    Effect.runPromise(
+      Effect.forkIn(
+        watches.run.pipe(Effect.provideService(Clock.Clock, clock)) as Effect.Effect<never>,
+        scope,
+      ),
+    );
+
   return {
     run,
+    startLoop,
     watches,
     dispatch,
     seedThread,
@@ -394,6 +425,76 @@ describe.skipIf(process.platform === "win32")("command watch runtime", () => {
     });
     expect(() => readFileSync(marker, "utf8")).toThrow();
     expect((await h.shell(threadId))?.commandWatchCount).toBeUndefined();
+  });
+
+  it("holds a wake when Agent Control goes off during the run, and sends it once it is back on", async () => {
+    let enabled = true;
+    const h = await harness({ agentControlEnabled: () => enabled });
+    const { threadId, checkout } = await h.seedThread("off-in-flight");
+    writeFileSync(join(checkout, "state.txt"), "one\n");
+    await h.start(threadId, "sleep 1; cat state.txt");
+    await h.tick(0);
+    writeFileSync(join(checkout, "state.txt"), "two\n");
+    const sweep = h.tick();
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    enabled = false;
+    await sweep;
+    // The kill switch holds the wake: no turn starts, no progress is recorded.
+    expect(await h.wakeTexts(threadId)).toEqual([]);
+    expect((await h.state(threadId)).active[0]?.wakes).toBe(0);
+
+    enabled = true;
+    await h.tick(0);
+    expect(await h.wakeTexts(threadId)).toHaveLength(1);
+  });
+
+  it("starts no run that waited for a slot once Agent Control went off", async () => {
+    let enabled = true;
+    const h = await harness({ agentControlEnabled: () => enabled });
+    const chats: Array<{ readonly threadId: ThreadId; readonly checkout: string }> = [];
+    for (let index = 0; index < COMMAND_WATCH_LIMITS.concurrentRuns + 1; index += 1) {
+      const chat = await h.seedThread(`slot-${index}`);
+      await h.start(chat.threadId, "echo ran >> runs.txt; sleep 2");
+      chats.push(chat);
+    }
+    const ran = () =>
+      chats.filter((chat) => {
+        try {
+          return readFileSync(join(chat.checkout, "runs.txt"), "utf8").length > 0;
+        } catch {
+          return false;
+        }
+      }).length;
+    const sweep = h.tick(0);
+    // The first 4 hold every slot; the fifth waits behind them.
+    for (
+      let waited = 0;
+      waited < 5_000 && ran() < COMMAND_WATCH_LIMITS.concurrentRuns;
+      waited += 50
+    ) {
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    expect(ran()).toBe(COMMAND_WATCH_LIMITS.concurrentRuns);
+    enabled = false;
+    await sweep;
+    expect(ran()).toBe(COMMAND_WATCH_LIMITS.concurrentRuns);
+  }, 15_000);
+
+  it("records the cold-start slot of a closing message it sends from its own run", async () => {
+    const coldSlots = { noted: [] as string[], released: [] as string[] };
+    const h = await harness({ coldSlots });
+    const { threadId } = await h.seedThread("cold-closing");
+    await h.startLoop();
+    await h.start(threadId, "yes x | head -c 70000");
+    for (let waited = 0; waited < 5_000; waited += 50) {
+      if ((await h.state(threadId)).ended.length > 0) break;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    expect((await h.state(threadId)).ended[0]?.reason).toBe("too-long");
+    expect(await h.wakeTexts(threadId)).toHaveLength(1);
+    // Its own end event must not cut the bookkeeping short: the slot is the started session's.
+    expect(coldSlots.noted).toHaveLength(1);
+    expect(coldSlots.released).toEqual([]);
   });
 
   it("runs nothing while Agent Control is off, and expires after a day of it", async () => {

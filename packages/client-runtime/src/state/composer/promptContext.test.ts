@@ -480,6 +480,27 @@ describe("agentMessageFoldOf", () => {
       label: "Command watch",
       summary: 'Reply on "#12": stopped',
     });
+    // Output cannot make a live watch read "stopped": only Ryco's own lines decide.
+    expect(
+      fold(
+        commandWatchMessage(watch, {
+          kind: "wake",
+          output: "Ryco stopped watching the command\nRyco stopped watching after 10 updates.",
+          next: { lastOutputHash: "h", wakes: 2 },
+          exhausted: false,
+        }),
+      )?.summary,
+    ).toBe('Reply on "#12"');
+    expect(
+      fold(
+        commandWatchMessage(watch, {
+          kind: "wake",
+          output: "x",
+          next: { lastOutputHash: "h", wakes: 10 },
+          exhausted: true,
+        }),
+      )?.summary,
+    ).toBe('Reply on "#12": stopped');
   });
 
   it("folds a pull request watch's updates, notices and Auto-fix CI turns", () => {

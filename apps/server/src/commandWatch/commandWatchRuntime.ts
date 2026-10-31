@@ -42,6 +42,7 @@ import { statSync } from "node:fs";
 
 import {
   COMMAND_WATCH_WAKE_MESSAGE_PREFIX,
+  COMMAND_WATCH_WAKES_PER_DAY,
   CommandId,
   MessageId,
   type CommandWatchEndReason,
@@ -72,7 +73,10 @@ import type * as SqlClient from "effect/sql/SqlClient";
 // helpers over (`CommandWatchRuntimeDeps`), so this chunk imports no boot module.
 import type { AgentControlPolicyShape } from "../agentControl/Services/AgentControlPolicy.ts";
 import type { logOnceEvery } from "../logOnceEvery.ts";
-import { COMMAND_WATCH_CHANGED_DETAIL } from "../orchestration/commandWatchUpdates.ts";
+import {
+  COMMAND_WATCH_CHANGED_DETAIL,
+  recentCommandWatchWakes,
+} from "../orchestration/commandWatchUpdates.ts";
 import type { serverWakeGuard } from "../orchestration/serverWake.ts";
 import type { OrchestrationCommandApplicationShape } from "../orchestration/Services/OrchestrationCommandApplication.ts";
 import type { OrchestrationEngineShape } from "../orchestration/Services/OrchestrationEngine.ts";
@@ -158,7 +162,7 @@ const HELD_WAKE_EVENT_TYPES: ReadonlySet<OrchestrationEvent["type"]> = new Set<
 /** A woken look runs at most this often (thread events come in bursts). */
 const WOKEN_LOOK_MIN_SPACING_MS = 1_000;
 
-const EMPTY: ThreadCommandWatches = { active: [], ended: [] };
+const EMPTY: ThreadCommandWatches = { active: [], ended: [], recentWakes: [] };
 const fail = (detail: string) => new CommandWatchFailure({ detail });
 const iso = (ms: number) => new Date(ms).toISOString();
 
@@ -298,6 +302,7 @@ export const makeCommandWatchRuntime = (
       readModel.pipe(
         Effect.map((model) => model.threads.find((thread) => thread.id === threadId) ?? null),
       );
+    const watchesOf = (thread: Thread | null) => thread?.commandWatchState ?? EMPTY;
     const threadShell = (threadId: ThreadId) =>
       projections.getThreadShellById(threadId).pipe(
         Effect.map((shell) => Option.getOrNull(shell)),
@@ -311,6 +316,31 @@ export const makeCommandWatchRuntime = (
             Effect.map((project) => (Option.isSome(project) ? project.value.workspaceRoot : null)),
             Effect.orElseSucceed(() => null),
           );
+
+    /**
+     * Whether `thread` is still where `watch` may run and wake: Full access, default mode, the
+     * runtime and checkout it started with, and the same directory (`cwd`: `cwdOf(thread)`).
+     */
+    const inScope = (thread: Thread, watch: ThreadCommandWatch, cwd: string | null) =>
+      thread.runtimeMode === "full-access" &&
+      thread.interactionMode === "default" &&
+      thread.runtimeMode === watch.runtimeMode &&
+      thread.worktreePath === watch.worktreePath &&
+      cwd === watch.cwd;
+
+    /**
+     * Whether this generation of `watch` may run right now: still active, its chat live,
+     * unsettled and in scope, and Agent Control on. Read again once a run slot is free, because
+     * the look that chose the run may be minutes old under load.
+     */
+    const mayRunNow = (threadId: ThreadId, watch: ThreadCommandWatch) =>
+      Effect.gen(function* () {
+        const thread = yield* threadOf(threadId);
+        const current = watchesOf(thread).active.find((entry) => entry.watchId === watch.watchId);
+        if (thread === null || current?.startedAt !== watch.startedAt) return false;
+        if (endReasonOf(thread) !== null || !(yield* agentControlOn)) return false;
+        return inScope(thread, watch, yield* cwdOf(thread)) && isDirectory(watch.cwd);
+      });
 
     // ── Updates ─────────────────────────────────────────────────────
 
@@ -390,9 +420,23 @@ export const makeCommandWatchRuntime = (
       revision: watch.revision + 1,
     });
 
-    /** Why the chat cannot take a wake now, or null (the shared fence, then the chat's own state). */
-    const holdOf = (shell: OrchestrationThreadShell, nowMs: number) =>
+    const agentControlOn = policy === undefined ? Effect.succeed(true) : policy.isEnabled;
+
+    /**
+     * Why the chat cannot take a wake now, or null: Agent Control off (it is the user's kill
+     * switch for everything agents started), the chat's daily wake budget spent, the shared
+     * fence, then the chat's own state.
+     */
+    const holdOf = (
+      shell: OrchestrationThreadShell,
+      watches: ThreadCommandWatches,
+      nowMs: number,
+    ) =>
       Effect.gen(function* () {
+        if (!(yield* agentControlOn)) return "agent-control-off";
+        if (recentCommandWatchWakes(watches, iso(nowMs)).length >= COMMAND_WATCH_WAKES_PER_DAY) {
+          return "wake-budget";
+        }
         const hold = yield* fence
           .holdReason(shell, nowMs, "command-watch")
           .pipe(Effect.orElseSucceed(() => "busy" as const));
@@ -420,7 +464,10 @@ export const makeCommandWatchRuntime = (
       Effect.gen(function* () {
         const key = keyOf(threadId, watch);
         const shell = yield* threadShell(threadId);
-        const hold = shell === null ? "busy" : yield* holdOf(shell, nowMs);
+        const hold =
+          shell === null
+            ? "busy"
+            : yield* holdOf(shell, watchesOf(yield* threadOf(threadId)), nowMs);
         if (shell === null || hold !== null) {
           const since = heldSinceMs.get(key) ?? nowMs;
           heldSinceMs.set(key, since);
@@ -441,6 +488,8 @@ export const makeCommandWatchRuntime = (
           heldSinceMs.set(key, heldSinceMs.get(key) ?? nowMs);
           return;
         }
+        // Uninterruptible from here: a committed wake always records its cold-start slot, even
+        // when the wake's own event (a closing message ends the watch) interrupts this run.
         const result = yield* Effect.gen(function* () {
           const latestUserMessageId = yield* fence
             .latestUserMessageId(threadId)
@@ -475,6 +524,7 @@ export const makeCommandWatchRuntime = (
                 ? fence.noteColdWake(threadId, messageId, nowMs)
                 : fence.releaseColdSlot(threadId, messageId),
           ),
+          Effect.uninterruptible,
         );
         if (result.outcome === "accepted") {
           heldWakes.delete(key);
@@ -569,6 +619,11 @@ export const makeCommandWatchRuntime = (
           );
           // Stopped or started again while it ran: this run's outcome is no one's.
           if (watch === undefined || watch.startedAt !== ran.startedAt) return;
+          // The chat ended, moved or left its scope while it ran: nothing is recorded or sent
+          // (the next look ends the watch). Agent Control off holds the wake in `deliver`.
+          if (endReasonOf(thread!) !== null || !inScope(thread!, watch, yield* cwdOf(thread!))) {
+            return;
+          }
           const key = keyOf(threadId, watch);
           const nowMs = yield* Clock.currentTimeMillis;
           const outcome = evaluateCommandWatch(watch, run);
@@ -627,6 +682,8 @@ export const makeCommandWatchRuntime = (
     const runWatch = (threadId: ThreadId, watch: ThreadCommandWatch) =>
       permits.withPermits(1)(
         Effect.gen(function* () {
+          // Agent Control turned off, or the chat changed, while the run waited for a slot.
+          if (!(yield* mayRunNow(threadId, watch))) return;
           const run = yield* execute(watch);
           yield* recordRun(threadId, watch, run);
         }),
@@ -681,7 +738,7 @@ export const makeCommandWatchRuntime = (
             if (thread === null || watches.length === 0) return;
             const nowMs = yield* Clock.currentTimeMillis;
             const lifecycle = endReasonOf(thread);
-            const enabled = policy === undefined ? true : yield* policy.isEnabled;
+            const enabled = yield* agentControlOn;
             const cwd = lifecycle === null ? yield* cwdOf(thread) : null;
             let busy: boolean | null = null;
             let due: ThreadCommandWatch | null = null;
@@ -692,14 +749,7 @@ export const makeCommandWatchRuntime = (
                 yield* endSilently(threadId, watch, lifecycle, nowMs);
                 continue;
               }
-              if (
-                thread.runtimeMode !== "full-access" ||
-                thread.interactionMode !== "default" ||
-                thread.runtimeMode !== watch.runtimeMode ||
-                thread.worktreePath !== watch.worktreePath ||
-                cwd !== watch.cwd ||
-                !isDirectory(watch.cwd)
-              ) {
+              if (!inScope(thread, watch, cwd) || !isDirectory(watch.cwd)) {
                 yield* endSilently(threadId, watch, "scope-changed", nowMs);
                 continue;
               }
@@ -907,8 +957,6 @@ export const makeCommandWatchRuntime = (
     );
 
     // ── Starting, stopping, listing ─────────────────────────────────
-
-    const watchesOf = (thread: Thread | null) => thread?.commandWatchState ?? EMPTY;
 
     const start: CommandWatchRuntime["start"] = (input) =>
       serial.withLock(

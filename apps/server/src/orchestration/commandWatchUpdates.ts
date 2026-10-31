@@ -35,6 +35,7 @@ export interface CommandWatchHost {
   readonly wakeMessagePrefix: string;
   readonly perThread: number;
   readonly perNode: number;
+  readonly wakesPerDay: number;
 }
 
 /**
@@ -45,7 +46,26 @@ export const COMMAND_WATCH_CHANGED_DETAIL = "The command watch changed while it 
 /** Ended watches a thread keeps (newest first), for the agent's list and the user's detail. */
 export const COMMAND_WATCH_ENDED_KEPT = 4;
 
-const EMPTY: ThreadCommandWatches = { active: [], ended: [] };
+const EMPTY: ThreadCommandWatches = { active: [], ended: [], recentWakes: [] };
+const DAY_MS = 24 * 60 * 60_000;
+
+/** The thread's wakes in the 24 hours before `nowIso` (the daily wake budget's window). */
+export const recentCommandWatchWakes = (
+  watches: ThreadCommandWatches,
+  nowIso: string,
+): ReadonlyArray<string> => {
+  const since = Date.parse(nowIso) - DAY_MS;
+  return watches.recentWakes.filter((at) => Date.parse(at) > since);
+};
+
+/**
+ * Where the chat's commands run now: its checkout, else its project's root. A watch runs, and
+ * wakes, only while this is still the directory it started in.
+ */
+const chatCwd = (readModel: OrchestrationReadModel, thread: Thread): string | null =>
+  thread.worktreePath ??
+  readModel.projects.find((project) => project.id === thread.projectId)?.workspaceRoot ??
+  null;
 
 export const commandWatchesOf = (thread: Thread): ThreadCommandWatches =>
   thread.commandWatchState ?? EMPTY;
@@ -73,6 +93,7 @@ export function endCommandWatches(
       })),
       ...watches.ended,
     ].slice(0, COMMAND_WATCH_ENDED_KEPT),
+    recentWakes: watches.recentWakes,
   };
 }
 
@@ -117,10 +138,12 @@ export function makeCommandWatchRules(host: CommandWatchHost) {
       if (current === undefined) {
         const lifecycleBlocker = host.threadLifecycleTurnBlocker(readModel, thread);
         if (lifecycleBlocker !== null) return lifecycleBlocker;
-        // The captured scope is the chat's own, now: a wake never runs with more.
+        // The captured scope is the chat's own, now: a wake never runs with more, and the
+        // directory is the chat's, never one the agent named.
         if (
           next.runtimeMode !== thread.runtimeMode ||
           next.worktreePath !== thread.worktreePath ||
+          next.cwd !== chatCwd(readModel, thread) ||
           next.lastOutputHash !== null ||
           next.wakes !== 0 ||
           next.delivery !== null
@@ -164,8 +187,21 @@ export function makeCommandWatchRules(host: CommandWatchHost) {
       if (!commandWatchScopeAllows(thread)) {
         return "Command watches need the chat in Full access and default mode.";
       }
+      // A run that started before the chat moved to another checkout (or project root) never
+      // records into, nor wakes, the chat where it is now.
+      if (
+        current !== undefined &&
+        (thread.worktreePath !== current.worktreePath ||
+          thread.runtimeMode !== current.runtimeMode ||
+          chatCwd(readModel, thread) !== current.cwd)
+      ) {
+        return "The chat's checkout or permissions changed since the command watch started.";
+      }
     }
     if (wake !== undefined) {
+      if (recentCommandWatchWakes(watches, command.createdAt).length >= host.wakesPerDay) {
+        return `This chat's command watches already woke it ${host.wakesPerDay} times in the last 24 hours.`;
+      }
       if (!wake.messageId.startsWith(host.wakeMessagePrefix)) {
         return "A command watch update carries a command watch message id.";
       }
@@ -177,6 +213,12 @@ export function makeCommandWatchRules(host: CommandWatchHost) {
   };
 
   /** The thread's watches after an update `updateBlocker` accepted. */
+  /** The daily budget's window after `command`: its wake added, older ones dropped. */
+  const withWake = (watches: ThreadCommandWatches, command: ThreadCommandWatchUpdateCommand) => {
+    const recent = recentCommandWatchWakes(watches, command.createdAt);
+    return command.wake === undefined ? recent : [...recent, command.createdAt];
+  };
+
   const afterUpdate = (
     thread: Thread,
     command: ThreadCommandWatchUpdateCommand,
@@ -184,12 +226,16 @@ export function makeCommandWatchRules(host: CommandWatchHost) {
     const watches = commandWatchesOf(thread);
     const next = command.next;
     if (next === null) {
-      return endCommandWatches(watches, {
-        watchIds: new Set([command.watchId]),
-        // The blocker requires a reason for an end.
-        reason: command.endReason ?? "unwatched",
-        endedAt: command.createdAt,
-      });
+      return {
+        ...endCommandWatches(watches, {
+          watchIds: new Set([command.watchId]),
+          // The blocker requires a reason for an end.
+          reason: command.endReason ?? "unwatched",
+          endedAt: command.createdAt,
+        }),
+        // A closing message is a wake too.
+        recentWakes: withWake(watches, command),
+      };
     }
     const index = watches.active.findIndex((watch) => watch.watchId === next.watchId);
     return {
@@ -198,6 +244,7 @@ export function makeCommandWatchRules(host: CommandWatchHost) {
           ? [...watches.active, next]
           : watches.active.map((watch, at) => (at === index ? next : watch)),
       ended: watches.ended,
+      recentWakes: withWake(watches, command),
     };
   };
 

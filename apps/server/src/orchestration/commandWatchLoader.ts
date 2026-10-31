@@ -6,6 +6,7 @@
  */
 import {
   COMMAND_WATCH_WAKE_MESSAGE_PREFIX,
+  COMMAND_WATCH_WAKES_PER_DAY,
   COMMAND_WATCHES_PER_NODE,
   COMMAND_WATCHES_PER_THREAD,
 } from "@ryco/contracts";
@@ -26,6 +27,7 @@ export const loadCommandWatchRules: Effect.Effect<CommandWatchRules> = Effect.pr
         wakeMessagePrefix: COMMAND_WATCH_WAKE_MESSAGE_PREFIX,
         perThread: COMMAND_WATCHES_PER_THREAD,
         perNode: COMMAND_WATCHES_PER_NODE,
+        wakesPerDay: COMMAND_WATCH_WAKES_PER_DAY,
       }),
     )),
 );

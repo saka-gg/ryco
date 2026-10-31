@@ -1,4 +1,5 @@
 import {
+  COMMAND_WATCH_WAKES_PER_DAY,
   COMMAND_WATCHES_PER_NODE,
   COMMAND_WATCHES_PER_THREAD,
   ClientOrchestrationCommand,
@@ -403,6 +404,7 @@ describe("thread.command-watch.update", () => {
               watch({ watchId: `command-watch:elsewhere-${index}`, command: `echo ${index}` }),
             ),
             ended: [],
+            recentWakes: [],
           },
         },
       ],
@@ -472,19 +474,85 @@ describe("thread.command-watch.update", () => {
     ).toContain("command watch message id");
   });
 
-  it("refuses a wake, and any change but an end, once the chat left Full access", async () => {
-    const lowered = await dispatch(await watched(), {
+  it("ends watches in the mode change that leaves Full access or default mode, so a round trip cannot keep them", async () => {
+    for (const leave of [
+      { type: "thread.runtime-mode.set", runtimeMode: "auto-accept-edits" },
+      { type: "thread.runtime-mode.set", runtimeMode: "approval-required" },
+      { type: "thread.interaction-mode.set", interactionMode: "plan" },
+    ] as const) {
+      const left = await dispatch(await watched(), {
+        ...leave,
+        commandId: CommandId.make("client-leave"),
+        threadId,
+        createdAt: updateAt,
+      } as OrchestrationCommand);
+      expect(left.events.map((event) => event.type)).toEqual([
+        leave.type === "thread.runtime-mode.set"
+          ? "thread.runtime-mode-set"
+          : "thread.interaction-mode-set",
+        "thread.command-watch-updated",
+      ]);
+      expect(endedReasons(left.events)).toEqual(["scope-changed"]);
+      expect(new Set(left.events.map((event) => event.commandId)).size).toBe(1);
+      // Coming straight back starts nothing again.
+      const back = await dispatch(
+        left.readModel,
+        (leave.type === "thread.runtime-mode.set"
+          ? {
+              type: "thread.runtime-mode.set",
+              commandId: CommandId.make("client-back"),
+              threadId,
+              runtimeMode: "full-access",
+              createdAt: updateAt,
+            }
+          : {
+              type: "thread.interaction-mode.set",
+              commandId: CommandId.make("client-back"),
+              threadId,
+              interactionMode: "default",
+              createdAt: updateAt,
+            }) as OrchestrationCommand,
+      );
+      expect(back.events).toHaveLength(1);
+      expect(threadOf(back.readModel).commandWatchState?.active).toEqual([]);
+      // The run that was in flight cannot wake the chat.
+      expect(await rejection(back.readModel, withWake(1))).toContain(COMMAND_WATCH_CHANGED_DETAIL);
+    }
+    // Staying in scope ends nothing.
+    const stay = await dispatch(await watched(), {
       type: "thread.runtime-mode.set",
-      commandId: CommandId.make("client-runtime"),
+      commandId: CommandId.make("client-stay"),
       threadId,
-      runtimeMode: "auto-accept-edits",
+      runtimeMode: "full-access",
       createdAt: updateAt,
     });
-    expect(await rejection(lowered.readModel, withWake(1))).toContain(
-      "Full access and default mode",
+    expect(stay.events.map((event) => event.type)).toEqual(["thread.runtime-mode-set"]);
+  });
+
+  it("refuses a wake or a change once the chat moved to another checkout, and a start elsewhere", async () => {
+    const moved = await dispatch(await watched(), {
+      type: "thread.meta.update",
+      commandId: CommandId.make("client-move"),
+      threadId,
+      worktreePath: "/tmp/command-watch-elsewhere",
+    } as OrchestrationCommand);
+    expect(threadOf(moved.readModel).worktreePath).toBe("/tmp/command-watch-elsewhere");
+    expect(await rejection(moved.readModel, withWake(1))).toContain(
+      "checkout or permissions changed",
     );
+    expect(
+      await rejection(
+        moved.readModel,
+        update({
+          expectedRevision: 1,
+          expectedStartedAt: startedAt,
+          next: watch({ revision: 2, lastOutputHash: "a".repeat(64) }),
+        }),
+      ),
+    ).toContain("checkout or permissions changed");
+    // Ending still works.
     const ended = await dispatch(
-      lowered.readModel,
+      moved.readModel,
       update({
         expectedRevision: 1,
         expectedStartedAt: startedAt,
@@ -493,10 +561,51 @@ describe("thread.command-watch.update", () => {
       }),
     );
     expect(endedReasons(ended.events)).toEqual(["scope-changed"]);
-    expect(threadOf(ended.readModel).commandWatchState).toEqual({
-      active: [],
-      ended: [{ watchId, label: watch().label, reason: "scope-changed", endedAt: updateAt }],
+    // A new watch's directory is the chat's, never another one.
+    expect(await rejection(await seed(), update({ next: watch({ cwd: "/etc" }) }))).toContain(
+      "chat's own scope",
+    );
+  });
+
+  it(`spends a daily budget of ${COMMAND_WATCH_WAKES_PER_DAY} wakes across the chat's watches`, async () => {
+    const readModel = await watched();
+    const thread = threadOf(readModel);
+    const now = Date.parse(updateAt);
+    const spent = (count: number, agoMs: number): OrchestrationReadModel => ({
+      ...readModel,
+      threads: readModel.threads.map((entry) =>
+        entry.id !== threadId
+          ? entry
+          : {
+              ...thread,
+              commandWatchState: {
+                ...thread.commandWatchState!,
+                recentWakes: Array.from({ length: count }, (_, index) =>
+                  new Date(now - agoMs - index * 1_000).toISOString(),
+                ),
+              },
+            },
+      ),
     });
+    expect(await rejection(spent(COMMAND_WATCH_WAKES_PER_DAY, 60_000), withWake(1))).toContain(
+      `woke it ${COMMAND_WATCH_WAKES_PER_DAY} times in the last 24 hours`,
+    );
+    // Wakes older than a day no longer count, and an accepted wake is added.
+    const old = await dispatch(spent(COMMAND_WATCH_WAKES_PER_DAY, 25 * 60 * 60_000), withWake(1));
+    expect(threadOf(old.readModel).commandWatchState?.recentWakes).toEqual([updateAt]);
+    // A closing message counts too, and lifecycle ends keep the window.
+    const one = await dispatch(spent(COMMAND_WATCH_WAKES_PER_DAY - 1, 60_000), withWake(1));
+    expect(threadOf(one.readModel).commandWatchState?.recentWakes).toHaveLength(
+      COMMAND_WATCH_WAKES_PER_DAY,
+    );
+    const archived = await dispatch(one.readModel, {
+      type: "thread.archive",
+      commandId: CommandId.make("client-archive-budget"),
+      threadId,
+    });
+    expect(threadOf(archived.readModel).commandWatchState?.recentWakes).toHaveLength(
+      COMMAND_WATCH_WAKES_PER_DAY,
+    );
   });
 
   it("ends a watch with a closing wake", async () => {

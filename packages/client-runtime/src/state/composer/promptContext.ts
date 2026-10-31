@@ -424,11 +424,16 @@ export function agentMessageFoldOf(message: {
   }
   if (id.startsWith(COMMAND_WATCH_WAKE_MESSAGE_PREFIX)) {
     const label = commandWatchLabelOf(message.text);
+    // Only Ryco's own lines say whether the watch stopped: the body's first line (a closing
+    // message) or the line after the fence (the last wake). Output sits inside the fence.
+    const lines = message.text.split("\n");
+    const stopped = [lines[1], lines.at(-1)].some((line) =>
+      line?.startsWith("Ryco stopped watching"),
+    );
     return {
       kind: "command-watch",
       label: "Command watch",
-      summary:
-        /\bRyco stopped watching\b/u.test(message.text) && label ? `${label}: stopped` : label,
+      summary: stopped && label ? `${label}: stopped` : label,
     };
   }
   if (id.startsWith(PULL_REQUEST_WATCH_WAKE_MESSAGE_PREFIX)) {

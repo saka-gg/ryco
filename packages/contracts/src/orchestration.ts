@@ -3143,7 +3143,7 @@ export type ThreadPullRequestWatchUpdateCommand = typeof ThreadPullRequestWatchU
 /**
  * Server-only (the command watch service): start, record, wake or end one command watch, fenced
  * like the pull request watch's update. Clients never send it: the agent starts a watch through
- * Agent Control, and the user's stop goes through `threads.stopCommandWatch`.
+ * Agent Control, and the user's stop is the client command `thread.command-watch.stop`.
  */
 const ThreadCommandWatchUpdateCommand = Schema.Struct({
   type: Schema.Literal("thread.command-watch.update"),

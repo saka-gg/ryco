@@ -537,7 +537,7 @@ function pullRequestWatchesEndedEvent(input: {
 const commandWatchesEndedEvent = Effect.fnUntraced(function* (
   command: OrchestrationCommand,
   thread: OrchestrationReadModel["threads"][number],
-  reason: "settled" | "archived" | "trashed" | "stopped",
+  reason: "settled" | "archived" | "trashed" | "stopped" | "scope-changed",
   occurredAt: string,
 ) {
   if ((thread.commandWatchState?.active.length ?? 0) === 0) return null;
@@ -1652,49 +1652,61 @@ const decideCommand = Effect.fn("decideOrchestrationCommand.command")(function* 
     }
 
     case "thread.runtime-mode.set": {
-      yield* requireThread({
+      const thread = yield* requireThread({
         readModel,
         command,
         threadId: command.threadId,
       });
       const occurredAt = nowIso();
-      return {
-        ...withEventBase({
-          aggregateKind: "thread",
-          aggregateId: command.threadId,
-          occurredAt,
-          commandId: command.commandId,
-        }),
-        type: "thread.runtime-mode-set",
-        payload: {
-          threadId: command.threadId,
-          runtimeMode: command.runtimeMode,
-          updatedAt: occurredAt,
+      // Command watches run unattended only in Full access: leaving it ends them (T3 Code).
+      return withWatchesEnded(
+        {
+          ...withEventBase({
+            aggregateKind: "thread",
+            aggregateId: command.threadId,
+            occurredAt,
+            commandId: command.commandId,
+          }),
+          type: "thread.runtime-mode-set",
+          payload: {
+            threadId: command.threadId,
+            runtimeMode: command.runtimeMode,
+            updatedAt: occurredAt,
+          },
         },
-      };
+        command.runtimeMode === "full-access"
+          ? []
+          : [yield* commandWatchesEndedEvent(command, thread, "scope-changed", occurredAt)],
+      );
     }
 
     case "thread.interaction-mode.set": {
-      yield* requireThread({
+      const thread = yield* requireThread({
         readModel,
         command,
         threadId: command.threadId,
       });
       const occurredAt = nowIso();
-      return {
-        ...withEventBase({
-          aggregateKind: "thread",
-          aggregateId: command.threadId,
-          occurredAt,
-          commandId: command.commandId,
-        }),
-        type: "thread.interaction-mode-set",
-        payload: {
-          threadId: command.threadId,
-          interactionMode: command.interactionMode,
-          updatedAt: occurredAt,
+      // And in default mode only.
+      return withWatchesEnded(
+        {
+          ...withEventBase({
+            aggregateKind: "thread",
+            aggregateId: command.threadId,
+            occurredAt,
+            commandId: command.commandId,
+          }),
+          type: "thread.interaction-mode-set",
+          payload: {
+            threadId: command.threadId,
+            interactionMode: command.interactionMode,
+            updatedAt: occurredAt,
+          },
         },
-      };
+        command.interactionMode === "default"
+          ? []
+          : [yield* commandWatchesEndedEvent(command, thread, "scope-changed", occurredAt)],
+      );
     }
 
     case "thread.token-mode.set": {
