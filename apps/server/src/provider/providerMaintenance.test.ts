@@ -395,11 +395,33 @@ describe("providerMaintenance", () => {
     expect(pinned(capabilities("npm", ["install", "-g", spec], "npm-global"), "1.1.0-beta.1")).toBe(
       null,
     );
-    // Homebrew and a provider's own updater take no version and run as they are.
+    // Homebrew takes no version: it installs what its local formula names, never one a tap
+    // update fetched meanwhile.
     const brew = capabilities("brew", ["upgrade", "package-tool"], "homebrew");
-    expect(pinned(brew)).toEqual(brew.update);
+    expect(pinned(brew)).toEqual({ ...brew.update, env: { HOMEBREW_NO_AUTO_UPDATE: "1" } });
+    // A provider's own updater runs only on an install a path proved to be its own.
+    const proven = (input: ProviderMaintenanceCapabilities): ProviderMaintenanceCapabilities => ({
+      ...input,
+      update: { ...input.update!, installProven: true },
+    });
     const native = capabilities("/home/me/.local/bin/tool", ["update"], "packageTool-native");
-    expect(pinned(native)).toEqual(native.update);
+    expect(pinned(native)).toBeNull();
+    expect(pinned(proven(native))).toEqual(proven(native).update);
+    // OpenCode's takes the version: `opencode upgrade [target]`.
+    const openCode = proven(
+      makeProviderMaintenanceCapabilities({
+        provider: driver("opencode"),
+        packageName: "opencode-ai",
+        updateExecutable: "/home/me/.opencode/bin/opencode",
+        updateArgs: ["upgrade"],
+        updateLockKey: "opencode-native",
+      }),
+    );
+    expect(pinned(openCode)).toMatchObject({
+      args: ["upgrade", "1.1.0"],
+      command: "/home/me/.opencode/bin/opencode upgrade 1.1.0",
+    });
+    expect(pinned(openCode, "1.1.0-beta.1")).toBeNull();
   });
 
   it("treats only Homebrew and provider-native lock keys as self-updating", () => {
@@ -933,6 +955,8 @@ describe("providerMaintenance", () => {
               executable: nativePath,
               args: ["update"],
               lockKey: "nativePackageTool-native",
+              // A path only its own installer writes: unattended updates may run it.
+              installProven: true,
             },
           });
         }),
@@ -993,6 +1017,8 @@ describe("providerMaintenance", () => {
             args: ["update", "--self"],
             lockKey: "packageTool-native",
           });
+          // Assumed for want of a better answer: one-click updates only.
+          expect(capabilities.update?.installProven).toBeUndefined();
 
           // Without a native updater the same unmapped path stays manual, never npm.
           expect(
@@ -1126,6 +1152,7 @@ describe("providerMaintenance", () => {
           args: ["update"],
           lockKey: "codex-native",
           env: { CODEX_HOME: "C:\\Users\\Me\\.codex" },
+          installProven: true,
         });
       }),
     );

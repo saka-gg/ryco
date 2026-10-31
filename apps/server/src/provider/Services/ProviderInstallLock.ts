@@ -4,8 +4,10 @@
  *
  * Desktop's backend, a CLI service, Nightly and dev servers on one host share one lock folder
  * (independent of RYCO_HOME), so two of them never run `npm i -g` on the same prefix at once,
- * and a provider session does not start while its CLI is being replaced. The lock itself
- * (`../providerInstallLock.ts`) loads with the first install or provider session start.
+ * and a provider session does not start while its CLI is being replaced. Beside the locks, each
+ * process with agents at work keeps a busy marker, so an unattended update elsewhere on the host
+ * waits for them. The lock itself (`../providerInstallLock.ts`) loads with the first install,
+ * provider session start or busy period.
  *
  * @module ProviderInstallLock
  */

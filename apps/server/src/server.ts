@@ -146,7 +146,8 @@ import { AdvertisedEndpointRegistryLive } from "./remote/AdvertisedEndpointRegis
 import { SleepInhibitorLive } from "./service/sleepInhibitor.ts";
 import { EventLoopMonitorLive } from "./observability/EventLoopMonitor.ts";
 import { HeapSnapshotLive } from "./observability/HeapSnapshotSignal.ts";
-import { makeAgentWorkHoldLayer } from "./agentWorkHold.ts";
+import { makeAgentWorkHoldLayer, ProviderBusyMarkerLive } from "./agentWorkHold.ts";
+import { AgentWorkActivityLive } from "./orchestration/AgentWorkActivity.ts";
 import { ClientInteractionLive } from "./updates/ClientInteraction.ts";
 import { UnattendedUpdatesLauncherLive } from "./updates/unattendedUpdatesLauncher.ts";
 import { StartupStallMonitorLive, trackStartupLayer } from "./startupStallMonitor.ts";
@@ -936,11 +937,15 @@ export const makeServerLayer = Layer.unwrap(
       runtimeStateLayer,
       tailscaleServeLayer,
       SleepInhibitorLive,
-      // Agent work for sleep holds: Desktop main holds the machine awake from it in desktop
-      // mode, and a headless node without --prevent-sleep holds it itself.
-      makeAgentWorkHoldLayer(config),
-      // Unattended provider updates, loaded only once a node's owner turns them on.
-      UnattendedUpdatesLauncherLive,
+      // One agent-work tracker for the process. Sleep holds: Desktop main holds the machine awake
+      // from it in desktop mode, and a headless node without --prevent-sleep holds it itself.
+      // The busy marker: other Ryco processes on this machine wait for these agents before an
+      // unattended update. Unattended updates, loaded only once a node's owner turns them on.
+      Layer.mergeAll(
+        makeAgentWorkHoldLayer(config),
+        ProviderBusyMarkerLive,
+        UnattendedUpdatesLauncherLive,
+      ).pipe(Layer.provide(AgentWorkActivityLive)),
     );
 
     // Shutdown runs these stages in reverse build order; the markers log how

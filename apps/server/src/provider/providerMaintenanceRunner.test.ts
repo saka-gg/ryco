@@ -26,6 +26,7 @@ import {
 } from "effect";
 import { HttpClient, HttpClientResponse } from "effect/http";
 import { ChildProcessSpawner } from "effect/process";
+import { TestClock } from "effect/testing";
 
 import { ProviderRegistry, type ProviderRegistryShape } from "./Services/ProviderRegistry.ts";
 import { makeProviderInstallLockLive } from "./Layers/ProviderInstallLock.ts";
@@ -39,6 +40,7 @@ import {
   type ProviderMaintenanceCapabilities,
 } from "./providerMaintenance.ts";
 import { BUNDLED_MODEL_MANIFEST, ModelManifest, type ModelManifestData } from "./ModelManifest.ts";
+import { clearProviderReleaseAgeCacheForTests } from "./providerReleaseAge.ts";
 
 const CODEX_DRIVER = ProviderDriverKind.make("codex");
 const CURSOR_DRIVER = ProviderDriverKind.make("cursor");
@@ -53,6 +55,7 @@ const EXITED_PID = spawnSync(process.execPath, ["-e", ""]).pid!;
 
 afterEach(() => {
   clearLatestProviderVersionCacheForTests();
+  clearProviderReleaseAgeCacheForTests();
 });
 
 function lifecycleFor(provider: ProviderDriverKind): ProviderMaintenanceCapabilities {
@@ -1151,25 +1154,76 @@ describe("unattended provider updates", () => {
       ],
     },
   ]);
-  const windowOpen = Effect.succeed(true);
+  const NOW = Date.parse("2026-10-31T12:00:00.000Z");
+  const hoursAgo = (hours: number) => new Date(NOW - hours * 3_600_000).toISOString();
+  const windowOpen = (_heldLockKey: string) => Effect.succeed(true);
 
+  /**
+   * The npm registry: `latest` names `latest`, and the package document dates the versions in
+   * `published` (every version 3 days old unless given).
+   */
+  const registryHttpClient = (
+    latest: string,
+    published: Readonly<Record<string, string>> = { [latest]: hoursAgo(72) },
+  ) =>
+    Layer.succeed(
+      HttpClient.HttpClient,
+      HttpClient.make((request) =>
+        Effect.succeed(
+          HttpClientResponse.fromWeb(
+            request,
+            Response.json(
+              request.url.endsWith("/latest") ? { version: latest } : { time: published },
+              {
+                headers: { "content-type": "application/json" },
+              },
+            ),
+          ),
+        ),
+      ),
+    );
+
+  /** A manifest whose fetch now rates differently from the copy in memory. */
+  const refreshingManifestLayer = (current: ModelManifestData, fetched: ModelManifestData) =>
+    Layer.effect(
+      ModelManifest,
+      Ref.make(current).pipe(
+        Effect.map((ref) => ({
+          current: Ref.get(ref),
+          refresh: Ref.set(ref, fetched).pipe(Effect.as(fetched)),
+          refreshIfStale: Ref.get(ref),
+          refreshInBackground: Effect.void,
+        })),
+      ),
+    );
+
+  /** The runner over an instance whose CLI on disk is `disk.version` (0.250.0 at first). */
   const setup = (
     options: {
       readonly capabilities?: ProviderMaintenanceCapabilities;
       readonly installLockDirectory?: string;
+      readonly manifest?: Layer.Layer<ModelManifest>;
     } = {},
   ) =>
     Effect.gen(function* () {
+      yield* TestClock.setTime(NOW);
+      const disk = { version: "0.250.0" };
       const { registry, updateStatesRef } = yield* makeRegistry(installedCodex);
+      const onDisk = (providers: ReadonlyArray<ServerProvider>) =>
+        providers.map((candidate) => ({ ...candidate, version: disk.version }));
       const runner = yield* makeTestRunner(
-        options.capabilities === undefined
-          ? registry
-          : {
-              ...registry,
-              getProviderMaintenanceCapabilitiesForInstance: () =>
-                Effect.succeed(options.capabilities!),
-            },
-        staticManifestLayer(RATED_MANIFEST),
+        {
+          ...registry,
+          getProviders: Effect.map(registry.getProviders, onDisk),
+          refreshInstance: (instanceId) => Effect.map(registry.refreshInstance(instanceId), onDisk),
+          ...(options.capabilities === undefined
+            ? {}
+            : {
+                getProviderMaintenanceCapabilitiesForInstance: () =>
+                  Effect.succeed(options.capabilities!),
+              }),
+        },
+        options.manifest ?? staticManifestLayer(RATED_MANIFEST),
         options.installLockDirectory === undefined
           ? undefined
           : { installLockDirectory: options.installLockDirectory },
@@ -1177,36 +1231,178 @@ describe("unattended provider updates", () => {
       const states = Ref.get(updateStatesRef).pipe(
         Effect.map((all) => all.map((state) => `${state.status}: ${state.message}`)),
       );
-      return { runner, states };
+      const update = (targetVersion = "0.260.0", beforeInstall = windowOpen) =>
+        runner.updateProviderUnattended({
+          provider: CODEX_DRIVER,
+          instanceId: CODEX_INSTANCE_ID,
+          targetVersion,
+          beforeInstall,
+        });
+      return { runner, states, disk, update };
     });
 
-  const spawnerRecording = (calls: Array<string>, code = 0) =>
+  /** Records each installer run. Tests set what it leaves on disk in `beforeInstall`. */
+  const spawnerRecording = (calls: Array<string>, options: { readonly code?: number } = {}) =>
     mockSpawnerLayer((command, args) => {
       calls.push([command, ...args].join(" "));
-      return { stdout: "updated", code };
+      return { stdout: "updated", code: options.code ?? 0 };
     });
 
-  it.effect("installs a supported release, pinned to the version it rated", () => {
+  const nativeCodex = (installProven: boolean) => {
+    const capabilities = makeProviderMaintenanceCapabilities({
+      provider: CODEX_DRIVER,
+      packageName: "@openai/codex",
+      updateExecutable: "/home/me/.codex/bin/codex",
+      updateArgs: ["update"],
+      updateLockKey: "codex-native",
+    });
+    return installProven
+      ? { ...capabilities, update: { ...capabilities.update!, installProven: true as const } }
+      : capabilities;
+  };
+
+  it.effect("installs a supported release two days old, pinned to the version it rated", () => {
     const calls: Array<string> = [];
     return Effect.gen(function* () {
-      const { runner, states } = yield* setup();
-      const outcome = yield* runner.updateProviderUnattended({
-        provider: CODEX_DRIVER,
-        instanceId: CODEX_INSTANCE_ID,
-        targetVersion: "0.260.0",
-        beforeInstall: windowOpen,
-      });
+      const { update, states, disk } = yield* setup();
+      // Right before the installer runs: what the pinned npm install leaves on disk.
+      const outcome = yield* update("0.260.0", () =>
+        Effect.sync(() => {
+          disk.version = "0.260.0";
+          return true;
+        }),
+      );
       assert.deepStrictEqual(outcome, { kind: "installed", version: "0.260.0" });
       // Never `@latest`: a release published after the rating cannot land.
       assert.deepStrictEqual(calls, ["npm install -g @openai/codex@0.260.0"]);
       // No queued state for an update nobody clicked; every recorded step says it was automatic.
       assert.deepStrictEqual(yield* states, [
         "running: Automatic update: Updating provider.",
-        "unchanged: Automatic update: Update command completed, but Ryco still detects an outdated provider version.",
+        "succeeded: Automatic update: Provider updated.",
       ]);
-    }).pipe(
-      Effect.provide(Layer.mergeAll(latestVersionHttpClient("0.260.0"), spawnerRecording(calls))),
-    );
+    }).pipe(Effect.provide(Layer.mergeAll(registryHttpClient("0.260.0"), spawnerRecording(calls))));
+  });
+
+  it.effect(
+    "records a failure when the updater installed a release this Ryco does not support",
+    () => {
+      const calls: Array<string> = [];
+      return Effect.gen(function* () {
+        // Codex's own updater takes no version: it installed 0.271.0, which nothing rates.
+        const { update, states, disk } = yield* setup({ capabilities: nativeCodex(true) });
+        const outcome = yield* update("0.260.0", () =>
+          Effect.sync(() => {
+            disk.version = "0.271.0";
+            return true;
+          }),
+        );
+        const message =
+          "Automatic update: installed 0.271.0, which this Ryco release does not support (unknown). Update the provider from Settings, or update Ryco.";
+        assert.deepStrictEqual(outcome, { kind: "failed", message });
+        assert.deepStrictEqual(calls, ["/home/me/.codex/bin/codex update"]);
+        assert.deepStrictEqual(yield* states, [
+          "running: Automatic update: Updating provider.",
+          `failed: ${message}`,
+        ]);
+      }).pipe(
+        Effect.provide(Layer.mergeAll(registryHttpClient("0.260.0"), spawnerRecording(calls))),
+      );
+    },
+  );
+
+  it.effect("records a failure when the installer left another version than the one rated", () =>
+    Effect.gen(function* () {
+      for (const [left, message] of [
+        // Supported, but not what Ryco checked.
+        [
+          "0.261.0",
+          "Automatic update: installed 0.261.0 instead of 0.260.0, the release Ryco checked.",
+        ],
+        // An updater that reports failure and exits 0 (OpenCode's does) changed nothing.
+        [
+          "0.250.0",
+          "Automatic update: the installer exited without installing 0.260.0; 0.250.0 is still installed.",
+        ],
+      ] as const) {
+        clearLatestProviderVersionCacheForTests();
+        const calls: Array<string> = [];
+        yield* Effect.gen(function* () {
+          const { update, states, disk } = yield* setup();
+          const outcome = yield* update("0.260.0", () =>
+            Effect.sync(() => {
+              disk.version = left;
+              return true;
+            }),
+          );
+          assert.deepStrictEqual(outcome, { kind: "failed", message });
+          assert.deepStrictEqual((yield* states).at(-1), `failed: ${message}`);
+        }).pipe(
+          Effect.provide(Layer.mergeAll(registryHttpClient("0.260.0"), spawnerRecording(calls))),
+        );
+      }
+    }),
+  );
+
+  it.effect("runs a provider's own updater only on an install Ryco identified as its own", () => {
+    const calls: Array<string> = [];
+    return Effect.gen(function* () {
+      // The fallback for a path no installer is proven for: one-click updates only.
+      const guessed = yield* setup({ capabilities: nativeCodex(false) });
+      const outcome = yield* guessed.update();
+      assert.strictEqual(outcome.kind, "skipped");
+      assert.deepStrictEqual(calls, []);
+      assert.deepStrictEqual(yield* guessed.states, []);
+    }).pipe(Effect.provide(Layer.mergeAll(registryHttpClient("0.260.0"), spawnerRecording(calls))));
+  });
+
+  it.effect("leaves a release published less than 48 hours ago, or undated, alone", () =>
+    Effect.gen(function* () {
+      for (const published of [{ "0.260.0": hoursAgo(47) }, {}]) {
+        clearLatestProviderVersionCacheForTests();
+        clearProviderReleaseAgeCacheForTests();
+        const calls: Array<string> = [];
+        yield* Effect.gen(function* () {
+          const { update, states } = yield* setup();
+          const outcome = yield* update();
+          assert.strictEqual(outcome.kind, "skipped");
+          assert.deepStrictEqual(calls, []);
+          assert.deepStrictEqual(yield* states, []);
+        }).pipe(
+          Effect.provide(
+            Layer.mergeAll(registryHttpClient("0.260.0", published), spawnerRecording(calls)),
+          ),
+        );
+      }
+    }),
+  );
+
+  it.effect("rates the release against the manifest fetched under the lock", () => {
+    const calls: Array<string> = [];
+    return Effect.gen(function* () {
+      // The copy in memory rates 0.260.0 supported; the manifest published since breaks it.
+      const { update, states } = yield* setup({
+        manifest: refreshingManifestLayer(
+          RATED_MANIFEST,
+          manifestWithPolicies([
+            {
+              driver: "codex",
+              rycoRange: ">=0.0.0",
+              ranges: [
+                { range: ">=0.260.0 <0.261.0", status: "broken", message: "Breaks approvals." },
+                { range: ">=0.250.0 <0.270.0", status: "supported" },
+              ],
+            },
+          ]),
+        ),
+      });
+      const outcome = yield* update();
+      assert.deepStrictEqual(outcome, {
+        kind: "skipped",
+        reason: "This Ryco release rates 0.260.0 broken.",
+      });
+      assert.deepStrictEqual(calls, []);
+      assert.deepStrictEqual(yield* states, []);
+    }).pipe(Effect.provide(Layer.mergeAll(registryHttpClient("0.260.0"), spawnerRecording(calls))));
   });
 
   it.effect("skips a release this Ryco rates unknown or graceful, and records nothing", () => {
@@ -1215,16 +1411,11 @@ describe("unattended provider updates", () => {
       for (const version of ["0.280.0", "0.270.0"]) {
         clearLatestProviderVersionCacheForTests();
         yield* Effect.gen(function* () {
-          const { runner, states } = yield* setup();
-          const outcome = yield* runner.updateProviderUnattended({
-            provider: CODEX_DRIVER,
-            instanceId: CODEX_INSTANCE_ID,
-            targetVersion: version,
-            beforeInstall: windowOpen,
-          });
+          const { update, states } = yield* setup();
+          const outcome = yield* update(version);
           assert.strictEqual(outcome.kind, "skipped");
           assert.deepStrictEqual(yield* states, []);
-        }).pipe(Effect.provide(latestVersionHttpClient(version)));
+        }).pipe(Effect.provide(registryHttpClient(version)));
       }
       assert.deepStrictEqual(calls, []);
     }).pipe(Effect.provide(spawnerRecording(calls)));
@@ -1233,7 +1424,7 @@ describe("unattended provider updates", () => {
   it.effect("skips an installer that cannot be pinned to the rated version", () => {
     const calls: Array<string> = [];
     return Effect.gen(function* () {
-      const { runner, states } = yield* setup({
+      const { update, states } = yield* setup({
         capabilities: makeProviderMaintenanceCapabilities({
           provider: CODEX_DRIVER,
           packageName: "@openai/codex",
@@ -1242,53 +1433,47 @@ describe("unattended provider updates", () => {
           updateLockKey: "vite-plus-global",
         }),
       });
-      const outcome = yield* runner.updateProviderUnattended({
-        provider: CODEX_DRIVER,
-        instanceId: CODEX_INSTANCE_ID,
-        targetVersion: "0.260.0",
-        beforeInstall: windowOpen,
-      });
+      const outcome = yield* update();
       assert.strictEqual(outcome.kind, "skipped");
       assert.deepStrictEqual(calls, []);
       assert.deepStrictEqual(yield* states, []);
-    }).pipe(
-      Effect.provide(Layer.mergeAll(latestVersionHttpClient("0.260.0"), spawnerRecording(calls))),
-    );
+    }).pipe(Effect.provide(Layer.mergeAll(registryHttpClient("0.260.0"), spawnerRecording(calls))));
   });
 
   it.effect("skips when a newer release appeared after the pass picked one", () => {
     const calls: Array<string> = [];
     return Effect.gen(function* () {
-      const { runner } = yield* setup();
-      const outcome = yield* runner.updateProviderUnattended({
-        provider: CODEX_DRIVER,
-        instanceId: CODEX_INSTANCE_ID,
-        targetVersion: "0.259.0",
-        beforeInstall: windowOpen,
-      });
+      const { update } = yield* setup();
+      const outcome = yield* update("0.259.0");
       assert.strictEqual(outcome.kind, "skipped");
       assert.deepStrictEqual(calls, []);
     }).pipe(
-      Effect.provide(Layer.mergeAll(latestVersionHttpClient("0.260.0"), spawnerRecording(calls))),
+      Effect.provide(
+        Layer.mergeAll(
+          registryHttpClient("0.260.0", { "0.259.0": hoursAgo(96), "0.260.0": hoursAgo(72) }),
+          spawnerRecording(calls),
+        ),
+      ),
     );
   });
 
   it.effect("postpones without a failure when the window closes under the lock", () => {
     const calls: Array<string> = [];
     return Effect.gen(function* () {
-      const { runner, states } = yield* setup();
-      const outcome = yield* runner.updateProviderUnattended({
-        provider: CODEX_DRIVER,
-        instanceId: CODEX_INSTANCE_ID,
-        targetVersion: "0.260.0",
-        beforeInstall: Effect.succeed(false),
-      });
+      const { update, states } = yield* setup();
+      const asked: Array<string> = [];
+      const outcome = yield* update("0.260.0", (heldLockKey) =>
+        Effect.sync(() => {
+          asked.push(heldLockKey);
+          return false;
+        }),
+      );
       assert.strictEqual(outcome.kind, "postponed");
+      // The window is asked to set aside only the lock this run holds.
+      assert.deepStrictEqual(asked, ["npm-global"]);
       assert.deepStrictEqual(calls, []);
       assert.deepStrictEqual(yield* states, []);
-    }).pipe(
-      Effect.provide(Layer.mergeAll(latestVersionHttpClient("0.260.0"), spawnerRecording(calls))),
-    );
+    }).pipe(Effect.provide(Layer.mergeAll(registryHttpClient("0.260.0"), spawnerRecording(calls))));
   });
 
   it.effect("postpones at once while another Ryco on this machine installs the CLI", () => {
@@ -1305,32 +1490,20 @@ describe("unattended provider updates", () => {
         .pipe(Effect.forkScoped);
       yield* Deferred.await(holding);
 
-      const { runner, states } = yield* setup({ installLockDirectory });
-      const outcome = yield* runner.updateProviderUnattended({
-        provider: CODEX_DRIVER,
-        instanceId: CODEX_INSTANCE_ID,
-        targetVersion: "0.260.0",
-        beforeInstall: windowOpen,
-      });
+      const { update, states } = yield* setup({ installLockDirectory });
+      const outcome = yield* update();
       assert.strictEqual(outcome.kind, "postponed");
       assert.deepStrictEqual(calls, []);
       assert.deepStrictEqual(yield* states, []);
       yield* Deferred.succeed(releaseOther, undefined);
-    }).pipe(
-      Effect.provide(Layer.mergeAll(latestVersionHttpClient("0.260.0"), spawnerRecording(calls))),
-    );
+    }).pipe(Effect.provide(Layer.mergeAll(registryHttpClient("0.260.0"), spawnerRecording(calls))));
   });
 
   it.effect("records a failed install in the update state, as a one-click update does", () => {
     const calls: Array<string> = [];
     return Effect.gen(function* () {
-      const { runner, states } = yield* setup();
-      const outcome = yield* runner.updateProviderUnattended({
-        provider: CODEX_DRIVER,
-        instanceId: CODEX_INSTANCE_ID,
-        targetVersion: "0.260.0",
-        beforeInstall: windowOpen,
-      });
+      const { update, states } = yield* setup();
+      const outcome = yield* update();
       assert.deepStrictEqual(outcome, {
         kind: "failed",
         message: "Automatic update: Update command exited with code 1.",
@@ -1342,7 +1515,7 @@ describe("unattended provider updates", () => {
       ]);
     }).pipe(
       Effect.provide(
-        Layer.mergeAll(latestVersionHttpClient("0.260.0"), spawnerRecording(calls, 1)),
+        Layer.mergeAll(registryHttpClient("0.260.0"), spawnerRecording(calls, { code: 1 })),
       ),
     );
   });

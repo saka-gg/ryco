@@ -82,6 +82,11 @@ export interface ProviderMaintenanceCommandAction {
    * install through the same variables the provider runs with (e.g. `CODEX_HOME`).
    */
   readonly env?: NodeJS.ProcessEnv;
+  /**
+   * A provider's own updater found at a path only its installer writes, not assumed for want of
+   * a better answer. Unattended updates run such an updater only then.
+   */
+  readonly installProven?: true;
 }
 
 /** Where a configured binary was found, as the resolver sees it. */
@@ -857,8 +862,13 @@ export const resolvePackageManagedProviderMaintenance = Effect.fn(
     : manual;
   // A native-looking launcher can still delegate to a mise-owned install.
   const miseOwned = commandPaths.some(isMiseCommandPath) || (yield* isMiseWrapperScript(context));
-  if (nativeUpdate?.isCommandPath && commandPaths.some(nativeUpdate.isCommandPath) && !miseOwned) {
-    return native;
+  if (
+    native.update &&
+    nativeUpdate?.isCommandPath &&
+    commandPaths.some(nativeUpdate.isCommandPath) &&
+    !miseOwned
+  ) {
+    return { ...native, update: { ...native.update, installProven: true } };
   }
   // A `node_modules` path not proven below belongs to another package or a project, so the
   // provider's own updater could act on the wrong install.

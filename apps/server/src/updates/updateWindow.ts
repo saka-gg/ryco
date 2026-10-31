@@ -9,8 +9,10 @@
  * 2. Nothing an update would interrupt runs: no agent works or stopped working less than 2 minutes
  *    ago, no session is starting, no thread waits on an approval or a question
  *    (`AgentWorkActivity.interruptible`).
- * 3. No Ryco on this machine runs a provider installer (the host-wide install lock), unless the
- *    caller holds that lock itself.
+ * 3. No Ryco on this machine runs a provider installer (the host-wide install lock), the one lock
+ *    the caller holds itself aside.
+ * 4. No other Ryco process on this machine has agents working (its busy marker beside the lock):
+ *    provider CLIs are the machine's, so another node's turn would lose its CLI too.
  *
  * Port of T3 Code's unmerged `UpdateWindow` (pingdotgg/t3code#17585).
  *
@@ -32,8 +34,8 @@ export interface UpdateWindowSources {
 }
 
 export interface UpdateWindowOptions {
-  /** The caller holds an install lock, which would otherwise close the window on itself. */
-  readonly ignoreInstallLocks?: boolean;
+  /** The install lock the caller holds, which would otherwise close the window on itself. */
+  readonly heldLockKey?: string;
 }
 
 export interface UpdateWindow {
@@ -48,15 +50,17 @@ export interface UpdateWindow {
 export function makeUpdateWindow(sources: UpdateWindowSources): UpdateWindow {
   const isOpen = (options?: UpdateWindowOptions): Effect.Effect<boolean> =>
     Effect.gen(function* () {
-      // Cheapest first: a timestamp, the in-memory model, then one readdir.
+      // Cheapest first: a timestamp, the in-memory model, then two readdirs.
       if (Duration.isLessThan(yield* sources.clientInteraction.sinceLast, QUIET_PERIOD)) {
         return false;
       }
       if (yield* sources.agentWork.interruptible) return false;
-      if (options?.ignoreInstallLocks === true) return true;
       // Covers one-click updates and installs other Ryco processes on this machine run.
       const lock = yield* sources.installLock.lock;
-      return !(yield* lock.anyHeld);
+      const held =
+        options?.heldLockKey === undefined ? lock.anyHeld : lock.anyHeldExcept(options.heldLockKey);
+      if (yield* held) return false;
+      return !(yield* lock.othersBusy);
     }).pipe(
       Effect.catchCause((cause) =>
         Cause.hasInterruptsOnly(cause)

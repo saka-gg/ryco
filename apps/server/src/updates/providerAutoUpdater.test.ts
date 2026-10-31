@@ -72,8 +72,13 @@ const setup = (
     const lookups: Array<string> = [];
     // Runs between the pick and the runner's check under the lock.
     let beforeRunner: Effect.Effect<void> = Effect.void;
+    // What each `isOpen` was asked to set aside.
+    const windowChecks: Array<string | undefined> = [];
     const window: UpdateWindow = {
-      isOpen: () => Ref.get(open),
+      isOpen: (checkOptions) =>
+        Effect.sync(() => windowChecks.push(checkOptions?.heldLockKey)).pipe(
+          Effect.andThen(Ref.get(open)),
+        ),
       runIfOpen: (effect) =>
         Effect.flatMap(Ref.get(open), (isOpen) =>
           isOpen ? Effect.asSome(effect) : Effect.succeedNone,
@@ -108,7 +113,7 @@ const setup = (
           Effect.gen(function* () {
             yield* beforeRunner;
             requests.push(`${input.instanceId}@${input.targetVersion}`);
-            if (!(yield* input.beforeInstall)) {
+            if (!(yield* input.beforeInstall("npm-global"))) {
               return { kind: "postponed", reason: "The update window closed." } as const;
             }
             installs.push(`${input.instanceId}@${input.targetVersion}`);
@@ -121,6 +126,7 @@ const setup = (
       requests,
       installs,
       lookups,
+      windowChecks,
       setEnabled: (value: boolean) => Ref.set(enabled, value),
       setOpen: (value: boolean) => Ref.set(open, value),
       setLatest: (value: string) => Ref.set(latest, value),
@@ -194,6 +200,8 @@ describe("providerAutoUpdater", () => {
       yield* test.updater.pass;
       assert.deepStrictEqual(test.requests, ["codex@1.1.0", "codex@1.1.0"]);
       assert.deepStrictEqual(test.installs, ["codex@1.1.0"]);
+      // Under the lock the window sets aside only the lock the runner holds.
+      assert.deepStrictEqual(test.windowChecks, ["npm-global", "npm-global"]);
     }),
   );
 

@@ -103,12 +103,11 @@ export function makeProviderAutoUpdater(sources: ProviderAutoUpdaterSources) {
       provider: picked.provider,
       instanceId,
       targetVersion: picked.targetVersion,
-      // Under the install lock, which would close the window on itself.
-      beforeInstall: Effect.gen(function* () {
-        return (
-          (yield* sources.enabled) && (yield* sources.window.isOpen({ ignoreInstallLocks: true }))
-        );
-      }),
+      // Under the install lock, which must not close the window on itself.
+      beforeInstall: (heldLockKey) =>
+        Effect.gen(function* () {
+          return (yield* sources.enabled) && (yield* sources.window.isOpen({ heldLockKey }));
+        }),
     });
     // Postponed, not failed: the next open window gets a fresh try.
     if (outcome.kind === "postponed") attempts.delete(picked.attemptKey);

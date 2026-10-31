@@ -4,7 +4,7 @@ import type {
   OrchestrationThread,
 } from "@ryco/contracts";
 import { assert, describe, it } from "@effect/vitest";
-import { Deferred, Effect, Fiber, Logger, PubSub, Stream } from "effect";
+import { Clock, Deferred, Effect, Fiber, Logger, PubSub, Stream } from "effect";
 import { TestClock } from "effect/testing";
 
 import {
@@ -367,6 +367,59 @@ describe("AgentWorkActivity", () => {
 
         // A session starting needs no domain event to count: it is read at the call.
         harness.setThreads([thread("thread", { session: session("starting", null) })]);
+        assert.isTrue(yield* harness.activity.interruptible);
+      }),
+    ),
+  );
+
+  it.effect("reads a turn that just started at the call, before any report says so", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const harness = yield* makeHarness();
+        yield* harness.openGate;
+        // No domain event yet: the tracker has not recomputed, and still reports idle.
+        harness.setThreads([running()]);
+        assert.isFalse((yield* harness.activity.current).working);
+        assert.isTrue(yield* harness.activity.interruptible);
+      }),
+    ),
+  );
+
+  it.effect("keeps the tail after work on the monotonic clock, whatever the wall clock does", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const harness = yield* makeHarness();
+        yield* harness.openGate;
+        harness.setThreads([running()]);
+        yield* harness.publish("thread.session-set");
+        harness.setThreads([idle()]);
+        yield* harness.publish("thread.session-set");
+        // The wall clock moves back an hour (a clock correction): the tail still ends 2 minutes
+        // after the work did.
+        yield* TestClock.setTime((yield* Clock.currentTimeMillis) - 3_600_000);
+        yield* harness.advance(AGENT_WORK_RELEASE_DEBOUNCE_MS - 1);
+        assert.isTrue(yield* harness.activity.interruptible);
+        yield* harness.advance(1);
+        assert.isFalse(yield* harness.activity.interruptible);
+      }),
+    ),
+  );
+
+  it.effect("counts a failed recompute or a failed read as something to interrupt", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const harness = yield* makeHarness();
+        yield* harness.openGate;
+        harness.setThreads([idle()]);
+        harness.state.failReads = 1;
+        yield* harness.publish("thread.session-set");
+        // The recompute failed and reports idle; the window must not trust that for 2 minutes.
+        assert.isFalse((yield* harness.activity.current).keepAwake);
+        assert.isTrue(yield* harness.activity.interruptible);
+        yield* harness.advance(AGENT_WORK_RELEASE_DEBOUNCE_MS);
+        assert.isFalse(yield* harness.activity.interruptible);
+        // A read that fails at the call cannot tell either.
+        harness.state.failReads = 1;
         assert.isTrue(yield* harness.activity.interruptible);
       }),
     ),

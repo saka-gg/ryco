@@ -409,12 +409,12 @@ describe("server boot import boundaries", () => {
     expect(reached(/^apps\/server\/src\/orchestration\/serverQueueDrainRuntime\.ts$/u)).toEqual([]);
     // Delegation slots load with the first queue held for one (a capped ryco_create_threads).
     expect(reached(/^apps\/server\/src\/agentControl\/delegationSlotRuntime\.ts$/u)).toEqual([]);
-    // The provider update runner (with its unattended pinning rule) loads with the first update,
-    // the host-wide provider install lock with the first install or provider session start; boot
-    // carries their facades.
+    // The provider update runner (with its unattended pinning and release-age rules) loads with
+    // the first update, the host-wide provider install lock (and its busy markers) with the first
+    // install, provider session start or busy period; boot carries their facades.
     expect(
       reached(
-        /^apps\/server\/src\/provider\/provider(?:InstallLock|MaintenanceRunnerRuntime|UpdatePinning)\.ts$/u,
+        /^apps\/server\/src\/provider\/provider(?:InstallLock|MaintenanceRunnerRuntime|UpdatePinning|ReleaseAge)\.ts$/u,
       ),
     ).toEqual([]);
     expect(graph.files).toContain("apps/server/src/provider/Layers/ProviderInstallLock.ts");

@@ -129,7 +129,9 @@ export const agentControlPromptSummaryForPlan = (plan: AgentControlActionPlan): 
     case "removeProject":
       return `Unlink project ${plan.expected.title}; workspace files will be retained`;
     case "changeSettings":
-      return `Change ${plan.change.kind}`;
+      return plan.change.kind === "providerUpdateChecks" && plan.change.startsAutomaticUpdates
+        ? "Turn on provider update checks; this node's automatic provider updates would start installing CLI updates"
+        : `Change ${plan.change.kind}`;
     case "createAutomation":
       return `Create automation ${plan.automationId}${automationTargetSummary(plan.definition.execution)}; each run requires separate approval`;
     case "updateAutomation":

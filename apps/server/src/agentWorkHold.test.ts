@@ -7,13 +7,14 @@ import type {
 } from "@ryco/contracts";
 import { assert, describe, it } from "@effect/vitest";
 import { afterEach } from "vite-plus/test";
-import { Effect, Layer, PubSub, Stream, SubscriptionRef } from "effect";
+import { Effect, Exit, Layer, PubSub, Scope, Stream, SubscriptionRef } from "effect";
 import { TestClock } from "effect/testing";
 
 import {
   agentWorkHoldConsumers,
   DesktopAgentWorkFramesLive,
   makeAgentWorkHoldLayer,
+  ProviderBusyMarkerLive,
 } from "./agentWorkHold.ts";
 import {
   attachDesktopLifecycleChannel,
@@ -22,8 +23,11 @@ import {
 import {
   AGENT_WORK_RELEASE_DEBOUNCE_MS,
   AgentWorkActivity,
+  AgentWorkActivityLive,
   type AgentWorkState,
 } from "./orchestration/AgentWorkActivity.ts";
+import type { ProviderInstallLockRuntime } from "./provider/providerInstallLock.ts";
+import { ProviderInstallLock } from "./provider/Services/ProviderInstallLock.ts";
 import {
   OrchestrationEngineService,
   type OrchestrationEngineShape,
@@ -147,6 +151,7 @@ describe("makeAgentWorkHoldLayer", () => {
         } as unknown as OrchestrationEngineShape;
         yield* Layer.build(
           makeAgentWorkHoldLayer({ mode: "desktop" }).pipe(
+            Layer.provide(AgentWorkActivityLive),
             Layer.provide(
               Layer.mergeAll(
                 Layer.succeed(OrchestrationEngineService, engine),
@@ -197,5 +202,61 @@ describe("makeAgentWorkHoldLayer", () => {
         });
       }),
     ),
+  );
+});
+
+describe("ProviderBusyMarkerLive", () => {
+  it.effect("keeps this process's busy marker while agents work or their tail lasts", () =>
+    Effect.gen(function* () {
+      const ref = yield* SubscriptionRef.make<AgentWorkState>({
+        working: false,
+        keepAwake: false,
+      });
+      const marks: Array<string> = [];
+      // The lock's marker, as `holdBusy` keeps it: written, then removed once interrupted.
+      const holdBusy = Effect.acquireUseRelease(
+        Effect.sync(() => marks.push("marked")),
+        () => Effect.never,
+        () => Effect.sync(() => marks.push("removed")),
+      );
+      const scope = yield* Scope.make();
+      yield* Layer.buildWithScope(
+        ProviderBusyMarkerLive.pipe(
+          Layer.provide(
+            Layer.mergeAll(
+              Layer.succeed(AgentWorkActivity, {
+                current: SubscriptionRef.get(ref),
+                changes: SubscriptionRef.changes(ref),
+                interruptible: Effect.succeed(false),
+              }),
+              Layer.succeed(ProviderInstallLock, {
+                lock: Effect.succeed({ holdBusy } as unknown as ProviderInstallLockRuntime),
+                beforeLaunch: () => Effect.void,
+              }),
+            ),
+          ),
+        ),
+        scope,
+      );
+      yield* settle;
+      // Idle at first: nothing on disk.
+      assert.deepStrictEqual(marks, []);
+
+      yield* SubscriptionRef.set(ref, { working: true, keepAwake: true });
+      yield* settle;
+      // A turn ends, the tail goes on: still one marker.
+      yield* SubscriptionRef.set(ref, { working: false, keepAwake: true });
+      yield* settle;
+      assert.deepStrictEqual(marks, ["marked"]);
+      yield* SubscriptionRef.set(ref, { working: false, keepAwake: false });
+      yield* settle;
+      assert.deepStrictEqual(marks, ["marked", "removed"]);
+
+      // A server that stops while its agents work removes it too.
+      yield* SubscriptionRef.set(ref, { working: true, keepAwake: true });
+      yield* settle;
+      yield* Scope.close(scope, Exit.void);
+      assert.deepStrictEqual(marks, ["marked", "removed", "marked", "removed"]);
+    }),
   );
 });

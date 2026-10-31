@@ -23,6 +23,14 @@
  * The folder is the platform's per-user cache folder, never RYCO_HOME, so stable, Nightly, CLI
  * and dev nodes on one host take the same locks.
  *
+ * Beside it, a busy folder (`provider-install-busy`) holds one marker per Ryco process whose
+ * agents are working (`<pid>.<run>.busy`, a record of the same shape, refreshed every
+ * {@link BUSY_MARKER_REFRESH_INTERVAL} and removed when the work ends), so an unattended update
+ * in one process waits while another process's agent runs a CLI they share. A marker counts like
+ * a lock record: while its pid lives and it is younger than `MAX_LOCK_AGE` (older, until seen
+ * unchanged for `EXPIRED_TAKEOVER_GRACE`). Markers of exited processes are ignored and removed by
+ * the next process that writes one.
+ *
  * @module providerInstallLock
  */
 import { createHash, randomUUID } from "node:crypto";
@@ -58,6 +66,9 @@ export const IDLE_POLL_INTERVAL = Duration.seconds(1);
  * after `MAX_LOCK_AGE`), and the launch goes ahead.
  */
 export const LAUNCH_WAIT = Duration.minutes(10);
+/** A busy marker is rewritten this often while its process works, well within `MAX_LOCK_AGE`. */
+export const BUSY_MARKER_REFRESH_INTERVAL = Duration.minutes(5);
+const BUSY_MARKER_SUFFIX = ".busy";
 /** A record is two short lines; anything larger is not one Ryco wrote and is never read. */
 const MAX_RECORD_BYTES = 4_096;
 /** File names stop at 255 bytes: longer encoded keys keep a prefix and a digest. */
@@ -102,6 +113,8 @@ export const nodeProviderInstallLockFiles: ProviderInstallLockFiles = {
 export interface ProviderInstallLockOptions {
   /** The host's shared lock folder when omitted; tests pass a temp directory. */
   readonly directory?: string | undefined;
+  /** The busy marker folder; `<directory>-busy` when omitted. */
+  readonly busyDirectory?: string | undefined;
   readonly files?: ProviderInstallLockFiles;
 }
 
@@ -172,6 +185,21 @@ export interface ProviderInstallLockRuntime {
   ) => Effect.Effect<void>;
   /** Whether any lock is held right now. A failed read is an error, not "free". */
   readonly anyHeld: Effect.Effect<boolean, ProviderInstallLockError>;
+  /**
+   * Whether any lock but `lockKey`'s is held right now: a run that holds `lockKey` asks this,
+   * since its own record would otherwise count. A failed read is an error, not "free".
+   */
+  readonly anyHeldExcept: (lockKey: string) => Effect.Effect<boolean, ProviderInstallLockError>;
+  /**
+   * Publishes this process's busy marker, keeps it fresh, and removes it once interrupted. Runs
+   * until interrupted; fails only when the marker cannot be written at first.
+   */
+  readonly holdBusy: Effect.Effect<never, ProviderInstallLockError>;
+  /**
+   * Whether another Ryco process on this host has a live busy marker: its agents are working.
+   * This process's own marker never counts. A failed read is an error, not "idle".
+   */
+  readonly othersBusy: Effect.Effect<boolean, ProviderInstallLockError>;
   /** Whether `lockKey` is held right now. A failed read is an error, not "free". */
   readonly isHeld: (lockKey: string) => Effect.Effect<boolean, ProviderInstallLockError>;
 }
@@ -330,16 +358,20 @@ export function makeProviderInstallLock(
       homeDirectory: homedir(),
     });
   const files = options.files ?? nodeProviderInstallLockFiles;
+  const busyDirectory = options.busyDirectory ?? `${directory}-busy`;
 
-  const lockError = (cause: unknown) =>
+  const lockError = (cause: unknown, folder = directory) =>
     new ProviderInstallLockError({
-      message: `Ryco could not use its provider install lock folder ${directory}: ${
+      message: `Ryco could not use its provider install lock folder ${folder}: ${
         cause instanceof Error ? cause.message : String(cause)
       }`,
       cause,
     });
-  const call = <A>(run: () => Promise<A>): Effect.Effect<A, ProviderInstallLockError> =>
-    Effect.tryPromise({ try: run, catch: lockError });
+  const call = <A>(
+    run: () => Promise<A>,
+    folder = directory,
+  ): Effect.Effect<A, ProviderInstallLockError> =>
+    Effect.tryPromise({ try: run, catch: (cause) => lockError(cause, folder) });
   const removeQuietly = (file: string) =>
     files.unlink(file).catch((cause: unknown) => {
       if (errorCode(cause) !== "ENOENT") throw cause;
@@ -347,27 +379,31 @@ export function makeProviderInstallLock(
   const remove = (file: string) => call(() => removeQuietly(file));
   const join = (name: string) => path.join(directory, name);
 
-  const ensureDirectory = call(async () => {
-    await files.mkdir(directory, { recursive: true, mode: DIRECTORY_MODE });
-    const info = await files.lstat(directory);
-    const problem = directoryProblem(info);
-    if (problem !== undefined) throw new RefusedDirectory(problem);
-    if (POSIX && (info.mode & 0o077) !== 0) await files.chmod(directory, DIRECTORY_MODE);
-  });
+  const ensureDirectoryAt = (folder: string) =>
+    call(async () => {
+      await files.mkdir(folder, { recursive: true, mode: DIRECTORY_MODE });
+      const info = await files.lstat(folder);
+      const problem = directoryProblem(info);
+      if (problem !== undefined) throw new RefusedDirectory(problem);
+      if (POSIX && (info.mode & 0o077) !== 0) await files.chmod(folder, DIRECTORY_MODE);
+    }, folder);
+  const ensureDirectory = ensureDirectoryAt(directory);
 
-  /** The folder's names; none when it does not exist yet. A link or foreign folder is an error. */
-  const readNames = call(async () => {
-    let info: Stats;
-    try {
-      info = await files.lstat(directory);
-    } catch (cause) {
-      if (errorCode(cause) === "ENOENT") return [];
-      throw cause;
-    }
-    const problem = directoryProblem(info);
-    if (problem !== undefined) throw new RefusedDirectory(problem);
-    return files.readdir(directory);
-  });
+  /** A folder's names; none when it does not exist yet. A link or foreign folder is an error. */
+  const readNamesAt = (folder: string) =>
+    call(async () => {
+      let info: Stats;
+      try {
+        info = await files.lstat(folder);
+      } catch (cause) {
+        if (errorCode(cause) === "ENOENT") return [];
+        throw cause;
+      }
+      const problem = directoryProblem(info);
+      if (problem !== undefined) throw new RefusedDirectory(problem);
+      return files.readdir(folder);
+    }, folder);
+  const readNames = readNamesAt(directory);
 
   const generations = readNames.pipe(
     Effect.map((names) =>
@@ -579,18 +615,62 @@ export function makeProviderInstallLock(
   /**
    * `launch` reads an expired record whose pid lives as free at once: a launch must not wait out
    * the takeover grace of a stale record, and at worst starts a CLI a woken owner is replacing.
+   * `except` skips that one key's records.
    */
-  const isHeld = (lockKey: string | undefined, launch = false) =>
+  const isHeld = (lockKey: string | undefined, launch = false, except?: string) =>
     Effect.gen(function* () {
       const key = lockKey === undefined ? undefined : providerInstallLockName(lockKey);
+      const skipped = except === undefined ? undefined : providerInstallLockName(except);
       const read = launch ? readRecord : observeRecord;
       // Every generation counts: a provisional successor must not hide a resumed older owner.
       for (const entry of yield* generations) {
-        if (key !== undefined && entry.key !== key) continue;
+        if ((key !== undefined && entry.key !== key) || entry.key === skipped) continue;
         if ((yield* read(join(entry.name)))?.held) return true;
       }
       return false;
     });
+
+  // This process's busy marker; the run id tells it apart from a process that reused the pid.
+  const busyOwner = randomUUID();
+  const busyName = `${process.pid}.${busyOwner}${BUSY_MARKER_SUFFIX}`;
+  const busyFile = path.join(busyDirectory, busyName);
+  const busyMarkers = readNamesAt(busyDirectory).pipe(
+    Effect.map((names) =>
+      names.filter((name) => name.endsWith(BUSY_MARKER_SUFFIX) && name !== busyName),
+    ),
+  );
+  const writeBusyMarker = ensureDirectoryAt(busyDirectory).pipe(
+    Effect.andThen(replace(busyFile, `${process.pid}\n${busyOwner}`, busyOwner)),
+  );
+  /** Markers of processes that exited: nobody else removes them. */
+  const pruneBusyMarkers = Effect.gen(function* () {
+    for (const name of yield* busyMarkers) {
+      const file = path.join(busyDirectory, name);
+      const record = yield* readRecord(file);
+      // One that cannot go (a folder someone made) leaves the others to go anyway.
+      if (record !== undefined && !record.held && !record.expiredLive) {
+        yield* Effect.ignore(remove(file));
+      }
+    }
+  });
+  const holdBusy: ProviderInstallLockRuntime["holdBusy"] = Effect.acquireUseRelease(
+    writeBusyMarker.pipe(Effect.tap(() => Effect.ignore(pruneBusyMarkers))),
+    () =>
+      Effect.forever(
+        Effect.sleep(BUSY_MARKER_REFRESH_INTERVAL).pipe(
+          Effect.andThen(writeBusyMarker),
+          // A failed refresh leaves the last marker, which still counts for an hour.
+          Effect.ignore,
+        ),
+      ),
+    () => Effect.ignore(remove(busyFile)),
+  );
+  const othersBusy = Effect.gen(function* () {
+    for (const name of yield* busyMarkers) {
+      if ((yield* observeRecord(path.join(busyDirectory, name)))?.held) return true;
+    }
+    return false;
+  });
 
   const pollUntilIdle = (lockKey: string | undefined, launch = false): Effect.Effect<void> =>
     Effect.suspend(() =>
@@ -651,6 +731,9 @@ export function makeProviderInstallLock(
     untilIdle: (lockKey) => pollUntilIdle(lockKey),
     beforeLaunch,
     anyHeld: isHeld(undefined),
+    anyHeldExcept: (lockKey) => isHeld(undefined, false, lockKey),
     isHeld: (lockKey) => isHeld(lockKey),
+    holdBusy,
+    othersBusy,
   };
 }

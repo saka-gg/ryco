@@ -11,7 +11,11 @@ import {
 } from "../../updates/nodeUpdatePermissions";
 import { Switch } from "../ui/switch";
 import { toastManager } from "../ui/toast";
-import { automaticUpdatesView, type AutomaticUpdatesView } from "./AutomaticUpdatesSettings.logic";
+import {
+  automaticUpdatesSwitch,
+  automaticUpdatesView,
+  type AutomaticUpdatesView,
+} from "./AutomaticUpdatesSettings.logic";
 import { SettingsRow, SettingsSection } from "./settingsLayout";
 
 function subscribeAutomaticUpdatesView(listener: () => void): () => void {
@@ -72,19 +76,22 @@ function AutomaticUpdatesRow({
       })
       .finally(() => setSaving(false));
   };
+  const { checked, checksOff, canChange } = automaticUpdatesSwitch(view);
   return (
     <SettingsRow
       title={label}
       status={
-        view === "checks-off"
-          ? "Turn on provider update checks for this node first (General settings)."
+        checksOff
+          ? checked
+            ? "Does nothing while provider update checks are off for this node (General settings)."
+            : "Acts only while provider update checks are on. Turn them on for this node first (General settings)."
           : undefined
       }
       control={
         <Switch
-          checked={view === "on"}
-          disabled={saving || view === "checks-off"}
-          onCheckedChange={(checked) => save(Boolean(checked))}
+          checked={checked}
+          disabled={saving || !canChange}
+          onCheckedChange={(next) => save(Boolean(next))}
           aria-label={`Update ${label} automatically`}
         />
       }
@@ -112,7 +119,7 @@ export function AutomaticUpdatesSettings({
   return (
     <SettingsSection
       title="Update automatically"
-      description="Install provider CLI updates on their own once nobody has used Ryco for 2 minutes and no agent is working. Only releases this Ryco version supports, one at a time."
+      description="Install provider CLI updates on their own once nobody has used Ryco for 2 minutes and no agent on this computer is working. Only versions this Ryco release has checked and rates supported, at least 2 days after their release, one at a time. Other updates still wait for you."
     >
       {rows.map((row) => (
         <AutomaticUpdatesRow

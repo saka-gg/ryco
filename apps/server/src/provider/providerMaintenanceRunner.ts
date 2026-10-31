@@ -29,9 +29,10 @@ export interface UnattendedProviderUpdateInput {
   readonly targetVersion: string;
   /**
    * The last check, under both locks, right before the installer starts: whether the update
-   * window is still open and the setting still on. False postpones; a failure counts as false.
+   * window is still open and the setting still on. It gets the host install lock this run holds,
+   * which must not close the window on itself. False postpones; a failure counts as false.
    */
-  readonly beforeInstall: Effect.Effect<boolean>;
+  readonly beforeInstall: (heldLockKey: string) => Effect.Effect<boolean>;
 }
 
 /**
@@ -55,9 +56,11 @@ export interface ProviderMaintenanceRunnerShape {
         },
   ) => Effect.Effect<ServerProviderUpdatedPayload, ServerProviderUpdateError>;
   /**
-   * Installs `targetVersion` unattended, only if it is rated `supported`, its install can be
-   * pinned to it, the instance is still behind it, and `beforeInstall` agrees. Never waits for a
-   * lock: one that is held postpones.
+   * Installs `targetVersion` unattended, only if it was published at least 48 hours ago, a fresh
+   * manifest rates it `supported`, its install can be pinned to it (or is a self-updating install
+   * Ryco identified), the instance is still behind it, and `beforeInstall` agrees. Afterwards the
+   * installed version must be `targetVersion` and rated `supported`, or the run is recorded as
+   * failed. Never waits for a lock: one that is held postpones.
    */
   readonly updateProviderUnattended: (
     input: UnattendedProviderUpdateInput,

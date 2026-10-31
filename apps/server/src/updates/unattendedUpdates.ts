@@ -12,7 +12,7 @@
  *
  * @module unattendedUpdates
  */
-import { Effect, type Scope } from "effect";
+import { Effect } from "effect";
 
 import type { AgentWorkActivityShape } from "../orchestration/AgentWorkActivity.ts";
 import type { ProviderInstallLockShape } from "../provider/Services/ProviderInstallLock.ts";
@@ -24,25 +24,23 @@ export interface UnattendedUpdatesSources extends Omit<ProviderAutoUpdaterSource
   readonly clientInteraction: Pick<ClientInteractionShape, "sinceLast">;
   readonly installLock: Pick<ProviderInstallLockShape, "lock">;
   /**
-   * Builds this run's agent-work tracker in the run's scope. Its own instance: with the setting
-   * off (the default) nothing tracks agent work for updates at all. It reports nothing before the
-   * startup command gate opens, which keeps the window closed until then.
+   * The process's agent-work tracker (shared with sleep holds and the busy marker). It reports
+   * nothing before the startup command gate opens, which keeps the window closed until then.
    */
-  readonly makeAgentWork: Effect.Effect<AgentWorkActivityShape, never, Scope.Scope>;
+  readonly agentWork: Pick<AgentWorkActivityShape, "interruptible">;
 }
 
 /** Runs unattended updates until interrupted. */
 export const runUnattendedUpdates = (sources: UnattendedUpdatesSources): Effect.Effect<void> =>
   Effect.gen(function* () {
-    const agentWork = yield* sources.makeAgentWork;
     const updater = makeProviderAutoUpdater({
       ...sources,
       window: makeUpdateWindow({
-        agentWork,
+        agentWork: sources.agentWork,
         clientInteraction: sources.clientInteraction,
         installLock: sources.installLock,
       }),
     });
     yield* Effect.logInfo("Automatic provider updates are on");
     yield* updater.run;
-  }).pipe(Effect.scoped);
+  });

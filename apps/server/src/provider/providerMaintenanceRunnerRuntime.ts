@@ -13,7 +13,7 @@ import {
   type ServerProviderUpdateState,
 } from "@ryco/contracts";
 import { isBlockingProviderCompatibilityStatus } from "@ryco/shared/providerCapabilities";
-import { Cause, DateTime, Duration, Effect, Option, Ref, Schema } from "effect";
+import { Cause, Clock, DateTime, Duration, Effect, Option, Ref, Schema } from "effect";
 import { HttpClient } from "effect/http";
 import { ChildProcessSpawner } from "effect/process";
 
@@ -35,11 +35,16 @@ import type {
 } from "./providerMaintenance.ts";
 import { BUNDLED_MODEL_MANIFEST, ModelManifest } from "./ModelManifest.ts";
 import { rateProviderVersion } from "./providerCompatibility.ts";
+import { compareCliVersions } from "./cliVersion.ts";
+import { fetchNpmVersionPublishedAt, MINIMUM_RELEASE_AGE } from "./providerReleaseAge.ts";
 import { ServerSettingsService } from "../serverSettings.ts";
 import { collectUint8StreamText } from "../stream/collectUint8StreamText.ts";
 
 const UPDATE_TIMEOUT_MS = 5 * 60_000;
 const UPDATE_OUTPUT_MAX_BYTES = 10_000;
+/** An unattended update refreshes the compatibility manifest first; a slow one keeps the last. */
+const UNATTENDED_MANIFEST_REFRESH_TIMEOUT = Duration.seconds(15);
+const MINIMUM_RELEASE_AGE_MS = Duration.toMillis(MINIMUM_RELEASE_AGE);
 
 export interface ProviderMaintenanceCommandResult {
   readonly stdout: string;
@@ -196,6 +201,15 @@ export const make = Effect.fn("ProviderMaintenanceRunner.make")(function* () {
     onNone: () => Effect.succeed(BUNDLED_MODEL_MANIFEST),
     onSome: (service) => service.current,
   });
+  // The manifest fetched now, bounded: the one in memory may be an hour old.
+  const refreshedManifest = Option.match(manifestService, {
+    onNone: () => Effect.succeed(BUNDLED_MODEL_MANIFEST),
+    onSome: (service) =>
+      service.refresh.pipe(
+        Effect.timeoutOption(UNATTENDED_MANIFEST_REFRESH_TIMEOUT),
+        Effect.flatMap(Option.match({ onNone: () => service.current, onSome: Effect.succeed })),
+      ),
+  });
   const runMaintenanceCommand = (
     action: ProviderMaintenanceCommandAction,
     onSpawned: (pid: number) => Effect.Effect<void, Error>,
@@ -313,6 +327,11 @@ export const make = Effect.fn("ProviderMaintenanceRunner.make")(function* () {
       readonly recordChildPid: (pid: number) => Effect.Effect<void, Error>;
       /** Prefixes every recorded message, so an update nobody clicked says so. */
       readonly messagePrefix: string;
+      /**
+       * Judges the version the instance reports after the installer exited 0 (`null` when it
+       * reports none): a message records the run as failed, `null` accepts it.
+       */
+      readonly judgeInstalled?: (version: string | null) => Effect.Effect<string | null>;
     }) {
       const { setUpdateState, finish } = updateStateWriter(input.instanceId);
       const message = (text: string) => `${input.messagePrefix}${text}`;
@@ -346,6 +365,21 @@ export const make = Effect.fn("ProviderMaintenanceRunner.make")(function* () {
         input.capabilities,
         input.instanceId,
       );
+      const rejected =
+        input.judgeInstalled === undefined
+          ? null
+          : yield* input.judgeInstalled(verifiedProviders[0]?.version ?? null);
+      if (rejected !== null) {
+        return yield* finish(
+          makeUpdateState({
+            status: "failed",
+            startedAt,
+            finishedAt,
+            message: message(rejected),
+            output: commandOutput(result),
+          }),
+        );
+      }
       const couldNotVerify = verifiedProviders.length === 0;
       const stillOutdated =
         couldNotVerify ||
@@ -526,6 +560,7 @@ export const make = Effect.fn("ProviderMaintenanceRunner.make")(function* () {
   const updateProviderUnattended: ProviderMaintenanceRunnerShape["updateProviderUnattended"] =
     Effect.fn("ProviderMaintenanceRunner.updateProviderUnattended")(function* (input) {
       const { provider, instanceId, targetKey } = resolveInstance(input);
+      const { targetVersion } = input;
       const skipped = (reason: string) => ({ kind: "skipped", reason }) as const;
       const postponed = (reason: string) => ({ kind: "postponed", reason }) as const;
       const capabilities = yield* providerRegistry.getProviderMaintenanceCapabilitiesForInstance(
@@ -534,10 +569,27 @@ export const make = Effect.fn("ProviderMaintenanceRunner.make")(function* () {
       );
       const update = capabilities.update;
       if (!update) return skipped("This provider does not support one-click updates.");
+      const action = resolvePinnedProviderUpdateAction(capabilities, targetVersion);
+      if (action === null) {
+        return skipped(`Ryco does not run this installer unattended for ${targetVersion}.`);
+      }
+
+      // Before the locks: the registry document can take a while, and the answer never changes.
+      const publishedAt =
+        capabilities.packageName === null
+          ? null
+          : yield* fetchNpmVersionPublishedAt(capabilities.packageName, targetVersion).pipe(
+              Effect.provideService(HttpClient.HttpClient, httpClient),
+            );
+      if (publishedAt === null) {
+        return skipped(`Ryco could not tell when ${targetVersion} was published.`);
+      }
+      if ((yield* Clock.currentTimeMillis) - publishedAt < MINIMUM_RELEASE_AGE_MS) {
+        return skipped(`${targetVersion} was published less than 48 hours ago.`);
+      }
 
       const startedAtRef = yield* Ref.make<string | null>(null);
       const messagePrefix = "Automatic update: ";
-
       // Under both locks, so it judges what would be installed right now. Nothing it rejects
       // touches the instance's update state; only a run that starts an installer records one.
       const gateAndInstall = Effect.fn("ProviderMaintenanceRunner.unattendedGateAndInstall")(
@@ -545,22 +597,19 @@ export const make = Effect.fn("ProviderMaintenanceRunner.make")(function* () {
           const latestVersion = yield* resolveLatestProviderVersion(capabilities, {
             fresh: true,
           }).pipe(Effect.provideService(HttpClient.HttpClient, httpClient));
-          if (latestVersion !== input.targetVersion) {
+          if (latestVersion !== targetVersion) {
             return skipped("The newest release changed since this pass picked it.");
           }
           const rating = rateProviderVersion({
-            manifest: yield* currentManifest,
+            manifest: yield* refreshedManifest,
             driver: provider,
-            version: latestVersion,
+            version: targetVersion,
           });
           if (rating?.status !== "supported") {
             return skipped(
-              `This Ryco release rates ${latestVersion} ${rating?.status ?? "unknown"}.`,
+              `This Ryco release rates ${targetVersion} ${rating?.status ?? "unknown"}.`,
             );
           }
-          const action = resolvePinnedProviderUpdateAction(capabilities, latestVersion);
-          if (action === null)
-            return skipped(`Its installer cannot be pinned to ${latestVersion}.`);
           // Probed again: another Ryco on this machine, or a one-click update, may have
           // installed it meanwhile, or the instance was turned off.
           const current = (yield* providerRegistry.refreshInstance(instanceId)).find(
@@ -572,15 +621,36 @@ export const make = Effect.fn("ProviderMaintenanceRunner.make")(function* () {
           const advisory = createProviderVersionAdvisory({
             driver: provider,
             currentVersion: current.version,
-            latestVersion,
+            latestVersion: targetVersion,
             maintenanceCapabilities: capabilities,
           });
           if (advisory.status !== "behind_latest") {
-            return skipped(`${latestVersion} is not newer than the installed version.`);
+            return skipped(`${targetVersion} is not newer than the installed version.`);
           }
-          if (!(yield* input.beforeInstall.pipe(Effect.orElseSucceed(() => false)))) {
+          if (
+            !(yield* input.beforeInstall(update.lockKey).pipe(Effect.orElseSucceed(() => false)))
+          ) {
             return postponed("The update window closed.");
           }
+          /** Accepts only the release this run rated, rated supported again now it is on disk. */
+          const judgeInstalled = (version: string | null) =>
+            Effect.gen(function* () {
+              if (version === null) return "Ryco could not read the version it installed.";
+              if (version === current.version) {
+                return `the installer exited without installing ${targetVersion}; ${version} is still installed.`;
+              }
+              const rating = rateProviderVersion({
+                manifest: yield* currentManifest,
+                driver: provider,
+                version,
+              });
+              if (rating?.status !== "supported") {
+                return `installed ${version}, which this Ryco release does not support (${rating?.status ?? "unknown"}). Update the provider from Settings, or update Ryco.`;
+              }
+              return compareCliVersions(version, targetVersion) === 0
+                ? null
+                : `installed ${version} instead of ${targetVersion}, the release Ryco checked.`;
+            });
           const { state } = yield* installAndVerify({
             provider,
             instanceId,
@@ -589,10 +659,11 @@ export const make = Effect.fn("ProviderMaintenanceRunner.make")(function* () {
             startedAtRef,
             recordChildPid,
             messagePrefix,
+            judgeInstalled,
           });
           return state.status === "failed"
             ? ({ kind: "failed", message: state.message ?? "Update command failed." } as const)
-            : ({ kind: "installed", version: latestVersion } as const);
+            : ({ kind: "installed", version: targetVersion } as const);
         },
       );
 

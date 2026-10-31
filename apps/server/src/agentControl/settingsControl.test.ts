@@ -1,7 +1,13 @@
-import { AgentControlMcpSettingsChangeRequest, DEFAULT_SERVER_SETTINGS } from "@ryco/contracts";
+import {
+  AgentControlMcpSettingsChangeRequest,
+  DEFAULT_SERVER_SETTINGS,
+  ProviderInstanceId,
+  ThreadId,
+} from "@ryco/contracts";
 import { Schema } from "effect";
 import { describe, expect, it } from "vite-plus/test";
 
+import { isRoutineAgentControlAction } from "./routineActions.ts";
 import { agentControlSettingsPlan, agentControlSettingsSummary } from "./settingsControl.ts";
 
 const decodeChange = Schema.decodeUnknownSync(AgentControlMcpSettingsChangeRequest);
@@ -79,6 +85,7 @@ describe("Agent Control settings allowlist", () => {
     const enabled = { ...DEFAULT_SERVER_SETTINGS, automaticUpdates: true };
     const disabled = { ...DEFAULT_SERVER_SETTINGS, automaticUpdates: false };
     expect(agentControlSettingsSummary(enabled)).toEqual(agentControlSettingsSummary(disabled));
+    // With provider update checks on, no change the agent can ask for depends on it.
     for (const kind of CHANGE_KINDS) {
       for (const value of [true, false]) {
         const change = decodeChange({ kind, value });
@@ -88,5 +95,48 @@ describe("Agent Control settings allowlist", () => {
       }
     }
     expect(() => decodeChange({ kind: "automaticUpdates", value: true })).toThrow();
+  });
+
+  // Checks on while the owner's automatic updates are on means Ryco installs CLIs on its own.
+  it("asks the owner before turning on provider update checks that would start automatic updates", () => {
+    const principal = {
+      kind: "provider-session",
+      threadId: ThreadId.make("thread-1"),
+      providerInstanceId: ProviderInstanceId.make("codex"),
+    } as const;
+    const routine = (settings: typeof DEFAULT_SERVER_SETTINGS, value: boolean) =>
+      isRoutineAgentControlAction(
+        principal,
+        agentControlSettingsPlan(settings, { kind: "providerUpdateChecks", value }),
+      );
+    const checksOff = { ...DEFAULT_SERVER_SETTINGS, enableProviderUpdateChecks: false };
+    expect(
+      agentControlSettingsPlan(
+        { ...checksOff, automaticUpdates: true },
+        { kind: "providerUpdateChecks", value: true },
+      ),
+    ).toEqual({
+      kind: "changeSettings",
+      change: {
+        kind: "providerUpdateChecks",
+        before: false,
+        after: true,
+        startsAutomaticUpdates: true,
+      },
+    });
+    expect(routine({ ...checksOff, automaticUpdates: true }, true)).toBe(false);
+    // Anything that starts no unattended install stays routine.
+    expect(routine({ ...checksOff, automaticUpdates: false }, true)).toBe(true);
+    expect(routine({ ...checksOff, automaticUpdates: true }, false)).toBe(true);
+    expect(routine({ ...DEFAULT_SERVER_SETTINGS, automaticUpdates: true }, false)).toBe(true);
+    expect(
+      isRoutineAgentControlAction(
+        principal,
+        agentControlSettingsPlan(DEFAULT_SERVER_SETTINGS, {
+          kind: "legacyTokenStreaming",
+          value: true,
+        }),
+      ),
+    ).toBe(true);
   });
 });

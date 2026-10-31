@@ -1,7 +1,7 @@
 import { DEFAULT_SERVER_SETTINGS, type ServerConfig } from "@ryco/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
-import { automaticUpdatesView } from "./AutomaticUpdatesSettings.logic";
+import { automaticUpdatesSwitch, automaticUpdatesView } from "./AutomaticUpdatesSettings.logic";
 
 function config(input: {
   readonly capability?: boolean;
@@ -45,16 +45,38 @@ describe("automaticUpdatesView", () => {
     expect(automaticUpdatesView({ config: null, owner: true })).toBe("hidden");
   });
 
-  it("is unavailable while provider update checks are off", () => {
-    expect(
+  it("shows the real value while provider update checks are off", () => {
+    const checksOff = (automaticUpdates: boolean) =>
       automaticUpdatesView({
-        config: config({
-          capability: true,
-          automaticUpdates: true,
-          enableProviderUpdateChecks: false,
-        }),
+        config: config({ capability: true, automaticUpdates, enableProviderUpdateChecks: false }),
         owner: true,
-      }),
-    ).toBe("checks-off");
+      });
+    expect(checksOff(true)).toBe("on-checks-off");
+    expect(checksOff(false)).toBe("off-checks-off");
+  });
+});
+
+describe("automaticUpdatesSwitch", () => {
+  it("can always be turned off, and turned on only while provider update checks are on", () => {
+    expect(automaticUpdatesSwitch("on")).toEqual({
+      checked: true,
+      checksOff: false,
+      canChange: true,
+    });
+    expect(automaticUpdatesSwitch("off")).toEqual({
+      checked: false,
+      checksOff: false,
+      canChange: true,
+    });
+    expect(automaticUpdatesSwitch("on-checks-off")).toEqual({
+      checked: true,
+      checksOff: true,
+      canChange: true,
+    });
+    expect(automaticUpdatesSwitch("off-checks-off")).toEqual({
+      checked: false,
+      checksOff: true,
+      canChange: false,
+    });
   });
 });

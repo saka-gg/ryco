@@ -77,7 +77,10 @@ describe("Settings → Updates", () => {
         settings: { ...DEFAULT_SERVER_SETTINGS, ...settings },
       }) as unknown as ServerConfig;
     writeEnvironmentServerConfig(M4_ID, nodeConfig({ automaticUpdates: true }));
-    writeEnvironmentServerConfig(THIS_MAC_ID, nodeConfig({}));
+    writeEnvironmentServerConfig(
+      THIS_MAC_ID,
+      nodeConfig({ automaticUpdates: true, enableProviderUpdateChecks: false }),
+    );
     writeEnvironmentServerConfig(LINUX_ID, nodeConfig({ enableProviderUpdateChecks: false }));
     // Too old to update unattended: no switch at all.
     writeEnvironmentServerConfig(OFFLINE_ID, nodeConfig({}, false));
@@ -87,13 +90,25 @@ describe("Settings → Updates", () => {
     const toggle = (name: string) =>
       page.getByRole("switch", { name: `Update ${name} automatically`, exact: true });
     await expect.element(toggle("MacBook Pro M4")).toBeChecked();
-    await expect.element(toggle("This Mac")).not.toBeChecked();
+    await expect.element(toggle("MacBook Pro M4")).toBeEnabled();
+    // Unattended updates act only with provider update checks on: the switch shows the real
+    // value, and can still be turned off.
+    await expect.element(toggle("This Mac")).toBeChecked();
     await expect.element(toggle("This Mac")).toBeEnabled();
-    // Unattended updates need provider update checks.
+    await expect
+      .element(
+        page.getByText(
+          "Does nothing while provider update checks are off for this node (General settings).",
+        ),
+      )
+      .toBeVisible();
+    await expect.element(toggle("Linux box")).not.toBeChecked();
     await expect.element(toggle("Linux box")).toBeDisabled();
     await expect
       .element(
-        page.getByText("Turn on provider update checks for this node first (General settings)."),
+        page.getByText(
+          "Acts only while provider update checks are on. Turn them on for this node first (General settings).",
+        ),
       )
       .toBeVisible();
     expect(toggle("Studio PC").elements()).toHaveLength(0);
