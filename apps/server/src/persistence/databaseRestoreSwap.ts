@@ -64,7 +64,7 @@ import {
 } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 
-import { Data, Effect, Layer, Option, Schema } from "effect";
+import { Data, Effect, Layer, Schema } from "effect";
 import * as SqlClient from "effect/sql/SqlClient";
 
 import {
@@ -80,11 +80,6 @@ import {
   restoreDatabaseBackup,
   type RestoreResult,
 } from "./databaseBackups.ts";
-import {
-  acquireDatabaseMaintenance,
-  DatabaseOwnerLease,
-  isDatabaseOwnerLockDisabled,
-} from "./databaseOwnerLock.ts";
 import { databaseRestoreJournalPath } from "./databaseRestoreJournal.ts";
 
 /** The session signing key's file in the secrets directory (SessionCredentialService). */
@@ -294,15 +289,12 @@ export async function undoDatabaseRestoreSwap(
 }
 
 /**
- * Finishes an interrupted in-place restore of `dbPath`, if its journal is there. Runs as the
- * database's owner: under the caller's ownership (`owned`, or a `DatabaseOwnerLease` for
- * `dbPath`), otherwise under maintenance ownership taken here (refused while a server owns the
- * database).
+ * Finishes an interrupted in-place restore of `dbPath`, if its journal is there. The caller owns
+ * the database (`asDatabaseOwner`). This module never imports the owner lock: the startup hook
+ * loads it through `import()`, and a static edge to the lock from here splits the lock and what
+ * it imports out of the boot chunk, about 5 KB more boot code.
  */
-export const finishInterruptedDatabaseRestore = (
-  dbPath: string,
-  options?: { readonly owned?: boolean | undefined },
-) =>
+export const finishInterruptedDatabaseRestore = (dbPath: string) =>
   Effect.gen(function* () {
     const journalPath = databaseRestoreJournalPath(dbPath);
     const finish = Effect.tryPromise({
@@ -318,17 +310,7 @@ export const finishInterruptedDatabaseRestore = (
           cause,
         }),
     }).pipe(Effect.uninterruptible);
-    const lease = yield* Effect.serviceOption(DatabaseOwnerLease);
-    const finished =
-      options?.owned === true ||
-      (Option.isSome(lease) && lease.value.dbPath === dbPath) ||
-      (yield* isDatabaseOwnerLockDisabled)
-        ? yield* finish
-        : yield* Effect.scoped(
-            acquireDatabaseMaintenance(dbPath, "finish an interrupted database restore").pipe(
-              Effect.andThen(finish),
-            ),
-          );
+    const finished = yield* finish;
     if (finished) {
       yield* Effect.logWarning(
         "finished an interrupted in-place restore of the database: every device and integration must pair again",
@@ -434,7 +416,7 @@ export const replaceDatabaseWithBackup = Effect.fn("replaceDatabaseWithBackup")(
   const dbPath = input.live.dbPath;
   const stateDir = dirname(dbPath);
   const journalPath = databaseRestoreJournalPath(dbPath);
-  yield* finishInterruptedDatabaseRestore(dbPath, { owned: true });
+  yield* finishInterruptedDatabaseRestore(dbPath);
   // No journal is left now, so no staging directory is in use (this process owns the database).
   yield* Effect.promise(async () => {
     for (const name of await readdir(stateDir).catch(() => [] as string[])) {

@@ -948,6 +948,30 @@ export const acquireDatabaseMaintenance = (
   });
 
 /**
+ * Runs `effect` as the owner of `dbPath`: at once under the caller's
+ * {@link DatabaseOwnerLease} for it (or with the lock disabled), otherwise
+ * under maintenance ownership taken for `purpose` (refused while a server owns
+ * the database).
+ */
+export const asDatabaseOwner = <A, E, R>(
+  dbPath: string,
+  purpose: string,
+  effect: Effect.Effect<A, E, R>,
+): Effect.Effect<A, E | DatabaseOwnedError, R> =>
+  Effect.gen(function* () {
+    const lease = yield* Effect.serviceOption(DatabaseOwnerLease);
+    if (
+      (Option.isSome(lease) && lease.value.dbPath === dbPath) ||
+      (yield* isDatabaseOwnerLockDisabled)
+    ) {
+      return yield* effect;
+    }
+    return yield* Effect.scoped(
+      acquireDatabaseMaintenance(dbPath, purpose).pipe(Effect.andThen(effect)),
+    );
+  });
+
+/**
  * The server's ownership of `ServerConfig.dbPath`, held until the layer is
  * released. Provide it outside the persistence layers, so it is taken before
  * the database is opened and released after it is closed.

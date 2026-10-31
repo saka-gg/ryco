@@ -8,6 +8,7 @@ import {
   needsPremigrationBackup,
   readPremigrationBackupMode,
 } from "../databaseBackupPolicy.ts";
+import { asDatabaseOwner } from "../databaseOwnerLock.ts";
 import { databaseRestoreJournalPath } from "../databaseRestoreJournal.ts";
 import { inspectMigrationLedger, runMigrations } from "../Migrations.ts";
 import type { SqliteCheckpointWorkerOptions } from "../SqliteCheckpointWorker.ts";
@@ -232,7 +233,11 @@ export const makeSqlitePersistenceLive = Effect.fn("makeSqlitePersistenceLive")(
     const { finishInterruptedDatabaseRestore } = yield* Effect.promise(
       () => import("../databaseRestoreSwap.ts"),
     );
-    yield* finishInterruptedDatabaseRestore(dbPath);
+    yield* asDatabaseOwner(
+      dbPath,
+      "finish an interrupted database restore",
+      finishInterruptedDatabaseRestore(dbPath),
+    );
   }
   // Only a database without content needs `setup` to choose auto_vacuum before WAL. Every other
   // file keeps the Bun client's own WAL switch, which retries SQLITE_BUSY (setup's does not).

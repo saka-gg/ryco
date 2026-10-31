@@ -145,9 +145,7 @@ describe("in-place restore journal", () => {
     const swap = makeSwap();
     return Effect.gen(function* () {
       NodeFS.writeFileSync(swap.journalPath, JSON.stringify({ ...swap.journal, aside: ".." }));
-      const failure = yield* finishInterruptedDatabaseRestore(swap.dbPath, { owned: true }).pipe(
-        Effect.flip,
-      );
+      const failure = yield* finishInterruptedDatabaseRestore(swap.dbPath).pipe(Effect.flip);
       assert.include(failure.message, "was not used");
       // Startup stops with a reason instead of crash-looping.
       assert.equal(classifyFatalStartupError(failure), "database-restore-interrupted");

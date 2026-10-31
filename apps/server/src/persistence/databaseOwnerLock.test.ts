@@ -13,6 +13,7 @@ import { ServerConfig } from "../config.ts";
 import {
   acquireDatabaseMaintenance,
   acquireDatabaseServer,
+  asDatabaseOwner,
   type DatabaseOwnedError,
   DatabaseOwnerLease,
   DatabaseOwnerLeaseLive,
@@ -306,6 +307,50 @@ describe("database owner lock", () => {
           const waitedMs = Date.now() - refusedAt;
           assert.isAtLeast(waitedMs, 280);
           assert.isBelow(waitedMs, 5_000);
+        }),
+      );
+    }).pipe(Effect.ensuring(cleanup(dbPath)));
+  });
+
+  it.live("runs an operation as the database's owner, under its lease or maintenance", () => {
+    const dbPath = makeDbPath();
+    const world = makeWorld([100, 200]);
+    const ownerKind = probeDatabaseOwner(dbPath).pipe(
+      asProcess(world, 200),
+      Effect.map((probed) => (probed.state === "owned" ? probed.owner.kind : null)),
+    );
+    return Effect.gen(function* () {
+      // Nobody owns the database: maintenance ownership for the operation, released after it.
+      assert.equal(
+        yield* asDatabaseOwner(dbPath, "restore", ownerKind).pipe(asProcess(world, 100)),
+        "maintenance",
+      );
+      assert.isNull(yield* ownerKind);
+
+      yield* Effect.scoped(
+        Effect.gen(function* () {
+          const lease = yield* acquireDatabaseServer(dbPath, { launcher: "serve" }).pipe(
+            asProcess(world, 100),
+          );
+          // Another process is refused at once, and the operation never runs.
+          let ran = false;
+          const refused = yield* asDatabaseOwner(
+            dbPath,
+            "restore",
+            Effect.sync(() => {
+              ran = true;
+            }),
+          ).pipe(asProcess(world, 200), Effect.exit);
+          assert.equal(ownedFailure(refused).owner?.kind, "server");
+          assert.isFalse(ran);
+          // The server itself runs it under its lease (its startup finishing a restore).
+          assert.equal(
+            yield* asDatabaseOwner(dbPath, "restore", ownerKind).pipe(
+              Effect.provideService(DatabaseOwnerLease, lease),
+              asProcess(world, 100),
+            ),
+            "server",
+          );
         }),
       );
     }).pipe(Effect.ensuring(cleanup(dbPath)));
