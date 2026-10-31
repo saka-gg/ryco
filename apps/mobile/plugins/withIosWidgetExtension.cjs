@@ -31,8 +31,8 @@ const APP_GROUP_INFO_KEY = "RycoWidgetsAppGroup";
 const APP_GROUPS_ENTITLEMENT = "com.apple.security.application-groups";
 const MODULE_DIR = path.join(__dirname, "..", "modules", "ryco-widgets");
 /**
- * Sources compiled into the extension; `WidgetGroupStore.swift` and
- * `AgentActivityAttributes.swift` are shared with the app's module.
+ * Sources compiled into the extension; `WidgetGroupStore.swift` and the agent
+ * Live Activity's attributes and content state are shared with the app's module.
  */
 const EXTENSION_SOURCES = [
   path.join(MODULE_DIR, "extension", "AgentActivityWidget.swift"),
@@ -41,6 +41,7 @@ const EXTENSION_SOURCES = [
   path.join(MODULE_DIR, "extension", "SubscriptionUsageWidget.swift"),
   path.join(MODULE_DIR, "extension", "WidgetTimelineStore.swift"),
   path.join(MODULE_DIR, "ios", "AgentActivityAttributes.swift"),
+  path.join(MODULE_DIR, "ios", "AgentActivityContentState.swift"),
   path.join(MODULE_DIR, "ios", "WidgetGroupStore.swift"),
 ];
 const ENTITLEMENTS_FILE = `${TARGET_NAME}.entitlements`;

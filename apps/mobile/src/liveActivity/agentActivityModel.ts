@@ -26,6 +26,12 @@ export const AGENT_ACTIVITY_DISMISS_AFTER_MS = 15 * 60_000;
 export const AGENT_ACTIVITY_COALESCE_MS = 1_000;
 /** ActivityKit refuses a content state over 4 KB. */
 export const AGENT_ACTIVITY_MAX_STATE_BYTES = 4096;
+/**
+ * What the app sends at most: 512 bytes under ActivityKit's limit, because Swift's encoding is
+ * larger than this JSON (`JSONEncoder` escapes every slash, and every link has several). The
+ * native module checks its own encoding again (`AgentActivityContentState.fitted`).
+ */
+export const AGENT_ACTIVITY_STATE_BUDGET_BYTES = 3584;
 
 /** `modules/ryco-widgets/ios/AgentActivityAttributes.swift` `ContentState`. */
 export interface AgentActivityContentState {
@@ -66,6 +72,11 @@ export interface AgentActivityContext {
   readonly signedIn: boolean;
   /** Some machine is live, so the summary says what runs; until then nothing is decided. */
   readonly known: boolean;
+  /**
+   * Since when no machine has been live while Ryco runs, or null while one is. Coming to the
+   * foreground starts it again: a resumed app gets its machines' time to reconnect.
+   */
+  readonly unknownSinceMs: number | null;
   readonly nowMs: number;
 }
 
@@ -127,13 +138,13 @@ function utf8Bytes(text: string): number {
 }
 
 /**
- * The state as the native module takes it, under ActivityKit's 4 KB: rows go from the end, the
- * counts stay. Five rows of the longest titles fit with room to spare; this guards the rest.
+ * The state as the native module takes it, within {@link AGENT_ACTIVITY_STATE_BUDGET_BYTES}: rows
+ * go from the end, the counts stay. Five rows of the longest titles fit; this guards the rest.
  */
 export function encodeAgentActivityState(state: AgentActivityContentState): string {
   let rows = state.rows;
   let json = JSON.stringify(state);
-  while (utf8Bytes(json) > AGENT_ACTIVITY_MAX_STATE_BYTES && rows.length > 0) {
+  while (utf8Bytes(json) > AGENT_ACTIVITY_STATE_BUDGET_BYTES && rows.length > 0) {
     rows = rows.slice(0, -1);
     json = JSON.stringify({ ...state, rows });
   }
@@ -145,7 +156,7 @@ export function encodeAgentActivityState(state: AgentActivityContentState): stri
  * foreground with work running or waiting, never in the background; it updates when what it
  * shows changes (and before it goes stale while Ryco runs); and it ends once nothing runs or
  * waits, staying with its results for 15 minutes. Turning the switch off or signing out ends it
- * at once.
+ * at once, and so does no machine being live for the stale window while Ryco runs.
  */
 export function decideAgentActivity(
   cards: readonly AgentActivityCard[],
@@ -164,8 +175,16 @@ export function decideAgentActivity(
   if (!context.enabled || !context.signedIn) {
     return card ? { kind: "end", id: card.id, state: null, dismissAtMs: null } : { kind: "noop" };
   }
-  if (!context.known) return { kind: "noop" };
   const { nowMs } = context;
+  if (!context.known) {
+    // Nothing can say what still runs: past the stale window the card goes instead of sitting.
+    const unknownTooLong =
+      context.unknownSinceMs !== null &&
+      nowMs - context.unknownSinceMs >= AGENT_ACTIVITY_STALE_AFTER_MS;
+    return card !== undefined && unknownTooLong
+      ? { kind: "end", id: card.id, state: null, dismissAtMs: null }
+      : { kind: "noop" };
+  }
   const state = agentActivityContentState(summary, links, nowMs);
   const staleAtMs = nowMs + AGENT_ACTIVITY_STALE_AFTER_MS;
   if (card === undefined) {

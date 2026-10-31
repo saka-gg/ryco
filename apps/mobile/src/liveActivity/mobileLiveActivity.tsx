@@ -4,11 +4,10 @@ import * as Linking from "expo-linking";
 import { useEffect, useMemo, useState } from "react";
 import { AppState } from "react-native";
 
-import { useHomeEnvironments } from "../features/home/useHomeEnvironments";
+import { useInboxSource } from "../features/home/useInboxSource";
 import { buildInboxSections } from "../features/inbox/inboxModel";
 import { useHostedHubStore } from "../hostedHub/state";
 import { threadAlertLinkPath } from "../notifications/threadAlerts.logic";
-import { useHomeWorkspaceData } from "../state/homeData";
 import { usePreferences } from "../state/preferencesStore";
 import { rycoWidgetsNative } from "../widgets/rycoWidgetsNative";
 import { agentActivityThreads } from "./agentActivityModel";
@@ -46,8 +45,10 @@ export function startMobileLiveActivity(): LiveActivityRuntime | null {
 }
 
 /**
- * Feeds the runtime the Inbox as Home builds it, while the switch is on: the same machines,
- * threads and rules, so the card never disagrees with the list it opens.
+ * Feeds the runtime the Inbox as Home builds it, while the switch is on: the same source
+ * (`useInboxSource`: machines, threads, messages queued on this phone, woken threads seen) and
+ * rules, without Home's search and machine filter, so the card never disagrees with the list it
+ * opens.
  */
 export function LiveActivityFeed({ runtime }: { readonly runtime: LiveActivityRuntime }) {
   const [nowMs, setNowMs] = useState(() => Date.now());
@@ -55,25 +56,25 @@ export function LiveActivityFeed({ runtime }: { readonly runtime: LiveActivityRu
     const timer = setInterval(() => setNowMs(Date.now()), RESULT_CLOCK_MS);
     return () => clearInterval(timer);
   }, []);
-  const environments = useHomeEnvironments();
-  const { projects, worktrees, threads } = useHomeWorkspaceData();
+  const source = useInboxSource(nowMs);
   const preferences = usePreferences();
   const account = useHostedHubStore((state) => state.account?.id ?? null);
   const glance = useMemo(() => {
     const sections = buildInboxSections({
-      projects,
-      worktrees,
-      threads,
-      environments,
+      ...source,
       autoSettleAfterDays: preferences.sidebarAutoSettleAfterDays,
       nowMs,
     });
-    const activityThreads = agentActivityThreads({ sections, threads, environments });
+    const activityThreads = agentActivityThreads({
+      sections,
+      threads: source.threads,
+      environments: source.environments,
+    });
     return {
       summary: summarizeAgentActivity(activityThreads, nowMs),
       known: activityThreads.some((thread) => thread.live),
     };
-  }, [environments, nowMs, preferences.sidebarAutoSettleAfterDays, projects, threads, worktrees]);
+  }, [nowMs, preferences.sidebarAutoSettleAfterDays, source]);
   useEffect(() => {
     runtime.setSummary(glance.summary, glance.known, account);
   }, [account, glance, runtime]);

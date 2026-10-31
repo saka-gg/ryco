@@ -80,6 +80,19 @@ public final class RycoWidgetsModule: Module {
       await activity.end(content, dismissalPolicy: policy)
     }
 
+    /// Ends cards at once, off the Lock Screen and the Dynamic Island: every
+    /// card (sign-out, the switch going off), or only those that already ended
+    /// and still show their results for a while (before a new card starts, so
+    /// there is never a second one).
+    AsyncFunction("dismissAgentActivities") { (endedOnly: Bool) async -> Void in
+      for activity in Activity<AgentActivityAttributes>.activities
+      where activity.activityState != .dismissed
+        && (!endedOnly || activity.activityState == .ended)
+      {
+        await activity.end(nil, dismissalPolicy: .immediate)
+      }
+    }
+
     /// The cards still showing work (active or stale), with when each was last updated.
     AsyncFunction("listAgentActivities") { () -> [[String: Any]] in
       Activity<AgentActivityAttributes>.activities
@@ -100,13 +113,17 @@ public final class RycoWidgetsModule: Module {
     Activity<AgentActivityAttributes>.activities.first { $0.id == id }
   }
 
+  /// The app's state, trimmed to ActivityKit's limit as Swift encodes it.
   private static func decodeState(_ json: String) throws -> AgentActivityAttributes.ContentState {
+    let state: AgentActivityAttributes.ContentState
     do {
-      return try JSONDecoder().decode(
+      state = try JSONDecoder().decode(
         AgentActivityAttributes.ContentState.self, from: Data(json.utf8))
     } catch {
       throw WidgetsModuleError.invalidActivityState
     }
+    guard let fitted = state.fitted() else { throw WidgetsModuleError.invalidActivityState }
+    return fitted
   }
 
   private static func date(_ epochMs: Double) -> Date {

@@ -54,6 +54,7 @@ function harness(
       async (_id: string, _state: string | null, _dismissAt: number | null) => undefined,
     ),
     listAgentActivities: vi.fn(async () => options.left ?? []),
+    dismissAgentActivities: vi.fn(async (_endedOnly: boolean) => undefined),
   } satisfies LiveActivityNative;
   const runtime = startLiveActivityRuntime({
     native,
@@ -142,8 +143,56 @@ describe("the Live Activity runtime", () => {
     expect(ended).toMatchObject({ counts: { running: 0, done: 1 }, rows: [{ phase: "done" }] });
     expect(dismissAt).toBe(ended.updatedAt + AGENT_ACTIVITY_DISMISS_AFTER_MS);
     await h.runtime.stop();
-    // Stopping ends nothing more: the card already ended.
+    // Stopping (sign-out) also takes the card that still shows its results, titles and all.
     expect(h.native.endAgentActivity).toHaveBeenCalledTimes(1);
+    expect(h.native.dismissAgentActivities).toHaveBeenLastCalledWith(false);
+  });
+
+  it("removes a card still showing its results before work that starts again gets one", async () => {
+    const h = harness();
+    h.runtime.setEnabled(true);
+    h.runtime.setSummary(summary(1), true, null);
+    await flush(h.runtime);
+    h.runtime.setSummary(summary(0), true, null);
+    await flush(h.runtime);
+    h.native.dismissAgentActivities.mockClear();
+    // Five minutes later, well within the results' fifteen minutes, work runs again.
+    await vi.advanceTimersByTimeAsync(5 * 60_000);
+    h.runtime.setSummary(summary(1), true, null);
+    await flush(h.runtime);
+    expect(h.native.startAgentActivity).toHaveBeenCalledTimes(2);
+    expect(h.native.dismissAgentActivities.mock.calls).toEqual([[true]]);
+    expect(h.native.dismissAgentActivities.mock.invocationCallOrder[0]!).toBeLessThan(
+      h.native.startAgentActivity.mock.invocationCallOrder[1]!,
+    );
+    await h.runtime.stop();
+  });
+
+  it("ends the card once no machine was live for the stale window, counting again after a return", async () => {
+    const h = harness();
+    h.runtime.setEnabled(true);
+    h.runtime.setSummary(summary(1), true, null);
+    await flush(h.runtime);
+    // Every machine drops; the feed's clock keeps asking every minute.
+    for (let minute = 0; minute < 9; minute += 1) {
+      h.runtime.setSummary(summary(1), false, null);
+      await flush(h.runtime, 60_000);
+    }
+    expect(h.native.endAgentActivity).not.toHaveBeenCalled();
+    // Ryco was away and comes back: its machines get the whole window again.
+    h.setActive(false);
+    h.setActive(true);
+    await flush(h.runtime, 0);
+    for (let minute = 0; minute < 10; minute += 1) {
+      h.runtime.setSummary(summary(1), false, null);
+      await flush(h.runtime, 60_000);
+    }
+    expect(h.native.endAgentActivity).not.toHaveBeenCalled();
+    // Ten minutes since the return, still nothing live: the card goes at once.
+    h.runtime.setSummary(summary(1), false, null);
+    await flush(h.runtime);
+    expect(h.native.endAgentActivity).toHaveBeenCalledWith("card-1", null, null);
+    await h.runtime.stop();
   });
 
   it("never starts in the background, and starts when Ryco comes back with work running", async () => {
@@ -166,11 +215,13 @@ describe("the Live Activity runtime", () => {
     await flush(h.runtime);
     h.runtime.setSummary(summary(1), true, "account-b");
     await flush(h.runtime);
-    expect(h.native.endAgentActivity).toHaveBeenCalledWith("card-1", null, null);
+    // Every Ryco card goes, also one this launch never knew.
+    expect(h.native.dismissAgentActivities).toHaveBeenCalledWith(false);
     // The new account's work gets a card of its own.
     expect(h.native.startAgentActivity).toHaveBeenCalledTimes(2);
+    h.native.dismissAgentActivities.mockClear();
     await h.runtime.stop();
-    expect(h.native.endAgentActivity).toHaveBeenLastCalledWith("card-2", null, null);
+    expect(h.native.dismissAgentActivities.mock.calls).toEqual([[false]]);
     expect(h.listeners.size).toBe(0);
   });
 
@@ -193,7 +244,9 @@ describe("the Live Activity runtime", () => {
     expect(staleAt).toBe(timestamp + AGENT_ACTIVITY_STALE_AFTER_MS);
     h.runtime.setEnabled(false);
     await flush(h.runtime, 0);
-    expect(h.native.endAgentActivity).toHaveBeenLastCalledWith("left-2", null, null);
+    // Off means no card at all, also one still showing its results.
+    expect(h.native.dismissAgentActivities).toHaveBeenLastCalledWith(false);
+    expect(h.native.updateAgentActivity).toHaveBeenCalledTimes(1);
     await h.runtime.stop();
   });
 

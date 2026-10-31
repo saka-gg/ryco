@@ -24,6 +24,11 @@ export interface RycoWidgetsNativeModule {
     stateJson: string | null,
     dismissAtMs: number | null,
   ) => Promise<void>;
+  /**
+   * Ends cards at once: every one, or only those that ended and still show their results
+   * (`endedOnly`).
+   */
+  readonly dismissAgentActivities: (endedOnly: boolean) => Promise<void>;
   /** The cards still showing work, with their last update and stale date (epoch ms). */
   readonly listAgentActivities: () => Promise<
     ReadonlyArray<{ readonly id: string; readonly updatedAt: number; readonly staleAt?: number }>

@@ -374,6 +374,17 @@ describe("mobile launch graph boundaries", () => {
         /^apps\/mobile\/src\/liveActivity\/liveActivityRuntime\.ts$/u,
       ]),
     ).not.toEqual([]);
+    // The sign-in screen ends the cards with a module that loads neither the runtime nor the Inbox.
+    expect([...staticGraph("src/liveActivity/endLiveActivities.ts").keys()].map(display)).toContain(
+      "apps/mobile/src/widgets/rycoWidgetsNative.ts",
+    );
+    expect(
+      chainsTo("src/liveActivity/endLiveActivities.ts", [
+        /^apps\/mobile\/src\/liveActivity\/(?!endLiveActivities)/u,
+        /^apps\/mobile\/src\/features\//u,
+        /^packages\/client-runtime\/src\/state\//u,
+      ]),
+    ).toEqual([]);
   });
 
   it("checks the push key at every launch without loading push alerts", () => {

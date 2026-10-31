@@ -18,6 +18,7 @@ export type LiveActivityNative = Pick<
   | "updateAgentActivity"
   | "endAgentActivity"
   | "listAgentActivities"
+  | "dismissAgentActivities"
 >;
 
 export interface LiveActivityRuntimeDeps {
@@ -44,7 +45,7 @@ export interface LiveActivityRuntime {
     known: boolean,
     account: string | null,
   ) => void;
-  /** Ends every card at once (sign-out) and stops. */
+  /** Ends every card at once (sign-out), also one still showing its results, and stops. */
   readonly stop: () => Promise<void>;
   /** Resolves once the work asked for so far is done. */
   readonly settled: () => Promise<void>;
@@ -62,7 +63,8 @@ const MAX_STEPS = 4;
 /**
  * Drives the one Live Activity card from the app's own state while it runs (phase 1: local
  * only, no push token). It decides with {@link decideAgentActivity}, coalesces changes for a
- * second, runs one native call at a time, and adopts a card an earlier launch left.
+ * second, runs one native call at a time, and adopts a card an earlier launch left. A card that
+ * ended and still shows its results is gone before another starts, so there is never a second.
  */
 export function startLiveActivityRuntime(deps: LiveActivityRuntimeDeps): LiveActivityRuntime {
   const now = deps.now ?? Date.now;
@@ -71,6 +73,8 @@ export function startLiveActivityRuntime(deps: LiveActivityRuntimeDeps): LiveAct
   let cards: AgentActivityCard[] = [];
   let summary = EMPTY_SUMMARY;
   let known = false;
+  // Nothing is known at first: the machines get the stale window to answer.
+  let unknownSince: number | null = now();
   let account: string | null = null;
   let enabled = false;
   let foreground = deps.appState.isActive();
@@ -85,10 +89,10 @@ export function startLiveActivityRuntime(deps: LiveActivityRuntimeDeps): LiveAct
     return work;
   };
 
+  /** Every Ryco card, also those this runtime never knew or already ended with results. */
   const endAll = async () => {
-    const ending = cards;
     cards = [];
-    for (const card of ending) await deps.native.endAgentActivity(card.id, null, null);
+    await deps.native.dismissAgentActivities(false);
   };
 
   const step = async (): Promise<boolean> => {
@@ -100,6 +104,7 @@ export function startLiveActivityRuntime(deps: LiveActivityRuntimeDeps): LiveAct
         enabled: enabled && deps.native.activitiesEnabled(),
         signedIn: true,
         known,
+        unknownSinceMs: unknownSince,
         nowMs: now(),
       },
       deps.links,
@@ -122,6 +127,9 @@ export function startLiveActivityRuntime(deps: LiveActivityRuntimeDeps): LiveAct
       case "start": {
         if (startBlocked) return false;
         try {
+          // An ended card shows its results for up to 15 minutes, and iOS lists it no more:
+          // without this, work that starts again meanwhile would put a second card beside it.
+          await deps.native.dismissAgentActivities(true);
           const id = await deps.native.startAgentActivity(
             encodeAgentActivityState(decision.state),
             decision.staleAtMs,
@@ -187,7 +195,11 @@ export function startLiveActivityRuntime(deps: LiveActivityRuntimeDeps): LiveAct
 
   const unsubscribe = deps.appState.subscribe((active) => {
     foreground = active;
-    if (active) startBlocked = false;
+    if (active) {
+      startBlocked = false;
+      // Back from suspension: the machines get the stale window again to reconnect.
+      if (unknownSince !== null) unknownSince = now();
+    }
     schedule(0);
   });
 
@@ -211,6 +223,8 @@ export function startLiveActivityRuntime(deps: LiveActivityRuntimeDeps): LiveAct
       if (next === enabled) return;
       enabled = next;
       if (next) startBlocked = false;
+      // Off means no card at all, also one still showing its results.
+      else void enqueue(endAll);
       schedule(0);
     },
     setSummary: (next, nextKnown, nextAccount) => {
@@ -218,6 +232,8 @@ export function startLiveActivityRuntime(deps: LiveActivityRuntimeDeps): LiveAct
       account = nextAccount;
       summary = next;
       known = nextKnown;
+      if (known) unknownSince = null;
+      else unknownSince ??= now();
       if (switched) void enqueue(endAll);
       schedule();
     },

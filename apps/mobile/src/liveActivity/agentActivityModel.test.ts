@@ -7,6 +7,7 @@ import {
   AGENT_ACTIVITY_DISMISS_AFTER_MS,
   AGENT_ACTIVITY_MAX_STATE_BYTES,
   AGENT_ACTIVITY_STALE_AFTER_MS,
+  AGENT_ACTIVITY_STATE_BUDGET_BYTES,
   agentActivityContentState,
   agentActivityShownKey,
   agentActivityThreads,
@@ -48,8 +49,11 @@ const CONTEXT: AgentActivityContext = {
   enabled: true,
   signedIn: true,
   known: true,
+  unknownSinceMs: null,
   nowMs: NOW,
 };
+/** No machine is live yet, since a moment ago. */
+const UNKNOWN: AgentActivityContext = { ...CONTEXT, known: false, unknownSinceMs: NOW - 1_000 };
 
 function card(overrides: Partial<AgentActivityCard> = {}): AgentActivityCard {
   const state = agentActivityContentState(RUNNING, LINKS, NOW - 1_000);
@@ -87,7 +91,8 @@ describe("deciding the Live Activity", () => {
       { ...CONTEXT, foreground: false },
       { ...CONTEXT, enabled: false },
       { ...CONTEXT, signedIn: false },
-      { ...CONTEXT, known: false },
+      UNKNOWN,
+      { ...UNKNOWN, unknownSinceMs: NOW - AGENT_ACTIVITY_STALE_AFTER_MS },
     ]) {
       expect(decideAgentActivity([], RUNNING, context, LINKS)).toEqual({ kind: "noop" });
     }
@@ -155,9 +160,7 @@ describe("deciding the Live Activity", () => {
 
   it("ends a stale card an earlier launch left once nothing runs, and waits until machines answer", () => {
     const leftOver = card({ shownKey: null, staleAt: NOW - 1 });
-    expect(decideAgentActivity([leftOver], SETTLED, { ...CONTEXT, known: false }, LINKS)).toEqual({
-      kind: "noop",
-    });
+    expect(decideAgentActivity([leftOver], SETTLED, UNKNOWN, LINKS)).toEqual({ kind: "noop" });
     expect(decideAgentActivity([leftOver], SETTLED, CONTEXT, LINKS)).toEqual({
       kind: "end",
       id: "card-1",
@@ -172,8 +175,26 @@ describe("deciding the Live Activity", () => {
   });
 });
 
+describe("a card no machine can speak for", () => {
+  it("stays while machines may still answer, and ends once none was live for the stale window", () => {
+    const unknownFor = (ms: number): AgentActivityContext => ({
+      ...UNKNOWN,
+      unknownSinceMs: NOW - ms,
+    });
+    expect(
+      decideAgentActivity([card()], RUNNING, unknownFor(AGENT_ACTIVITY_STALE_AFTER_MS - 1), LINKS),
+    ).toEqual({ kind: "noop" });
+    for (const summaryNow of [RUNNING, SETTLED]) {
+      expect(
+        decideAgentActivity([card()], summaryNow, unknownFor(AGENT_ACTIVITY_STALE_AFTER_MS), LINKS),
+      ).toEqual({ kind: "end", id: "card-1", state: null, dismissAtMs: null });
+    }
+    expect(AGENT_ACTIVITY_STALE_AFTER_MS).toBe(10 * 60_000);
+  });
+});
+
 describe("the Live Activity state", () => {
-  it("stays under ActivityKit's 4 KB with five rows of the longest titles", () => {
+  it("stays within its budget, under ActivityKit's 4 KB, with five rows of the longest titles", () => {
     const emoji = "🧪".repeat(48);
     const rows = Array.from({ length: 5 }, (_, index) => ({
       key: `environment-${"e".repeat(30)}:thread-${index}-${"t".repeat(30)}`,
@@ -186,8 +207,32 @@ describe("the Live Activity state", () => {
     const json = encodeAgentActivityState(
       agentActivityContentState(summary({ needsYou: 5 }, rows), LINKS, NOW),
     );
-    expect(new TextEncoder().encode(json).length).toBeLessThan(AGENT_ACTIVITY_MAX_STATE_BYTES);
+    expect(new TextEncoder().encode(json).length).toBeLessThanOrEqual(
+      AGENT_ACTIVITY_STATE_BUDGET_BYTES,
+    );
     expect(JSON.parse(json).rows).toHaveLength(5);
+  });
+
+  it("keeps a margin under 4 KB for Swift's larger encoding", () => {
+    expect(AGENT_ACTIVITY_MAX_STATE_BYTES - AGENT_ACTIVITY_STATE_BUDGET_BYTES).toBe(512);
+    // About 3.8 KB as JavaScript encodes it: under ActivityKit's limit, over the budget.
+    const rows = Array.from({ length: 5 }, (_, index) => ({
+      key: `k${index}`,
+      environmentId: "env",
+      threadId: `t${index}`,
+      title: "x".repeat(680),
+      projectName: null,
+      phase: "running" as const,
+    }));
+    const state = agentActivityContentState(summary({ running: 5 }, rows), LINKS, NOW);
+    const whole = new TextEncoder().encode(JSON.stringify(state)).length;
+    expect(whole).toBeGreaterThan(AGENT_ACTIVITY_STATE_BUDGET_BYTES);
+    expect(whole).toBeLessThan(AGENT_ACTIVITY_MAX_STATE_BYTES);
+    const json = encodeAgentActivityState(state);
+    expect(new TextEncoder().encode(json).length).toBeLessThanOrEqual(
+      AGENT_ACTIVITY_STATE_BUDGET_BYTES,
+    );
+    expect(JSON.parse(json).rows).toHaveLength(4);
   });
 
   it("drops rows, never the counts, from a state that would not fit", () => {
@@ -203,7 +248,7 @@ describe("the Live Activity state", () => {
       agentActivityContentState(summary({ running: 5 }, rows), LINKS, NOW),
     );
     expect(new TextEncoder().encode(json).length).toBeLessThanOrEqual(
-      AGENT_ACTIVITY_MAX_STATE_BYTES,
+      AGENT_ACTIVITY_STATE_BUDGET_BYTES,
     );
     expect(JSON.parse(json)).toMatchObject({ counts: { running: 5 }, rows: [{}] });
   });
