@@ -41,6 +41,11 @@ export const GITHUB_FINGERPRINT_QUIET_AFTER_MS = 30 * 60_000;
  * the watch's two-minute sweep, so watched pull requests keep sharing one document.
  */
 export const GITHUB_FINGERPRINT_TRACK_MS = 5 * 60_000;
+/**
+ * An answer given this soon after the change a reader waits for may not show it yet (GitHub moves
+ * a pull request's head a few seconds after a push), so it never gets the quiet window.
+ */
+export const GITHUB_FINGERPRINT_SETTLE_MS = 60_000;
 /** Reads that start this close together share a document (T3 `SUMMARY_BATCH_WINDOW`). */
 const BATCH_WINDOW = Duration.millis(10);
 const BOARD_CAPACITY = 512;
@@ -87,8 +92,10 @@ const hostKey = (host: string) => host.trim().toLowerCase();
 const targetKey = (target: GitHubFingerprintTarget) =>
   `${hostKey(target.host)}\u0000${target.owner.toLowerCase()}/${target.name.toLowerCase()}#${target.number}`;
 
-const reuseWindowMs = (answer: Answer, nowMs: number) =>
-  answer.quietFromMs !== null && nowMs >= answer.quietFromMs
+const reuseWindowMs = (answer: Answer, nowMs: number, changedAtMs: number) =>
+  answer.quietFromMs !== null &&
+  nowMs >= answer.quietFromMs &&
+  answer.fetchedAtMs - changedAtMs >= GITHUB_FINGERPRINT_SETTLE_MS
     ? GITHUB_QUIET_FINGERPRINT_REUSE_MS
     : GITHUB_FINGERPRINT_REUSE_MS;
 
@@ -250,7 +257,7 @@ export function makeGitHubPullRequestFingerprintBoard<E>(options: {
           reuseSinceMs !== undefined &&
           answer !== null &&
           answer.fetchedAtMs >= reuseSinceMs &&
-          nowMs - answer.fetchedAtMs < reuseWindowMs(answer, nowMs)
+          nowMs - answer.fetchedAtMs < reuseWindowMs(answer, nowMs, reuseSinceMs)
         ) {
           return Effect.succeed(answer.fingerprint);
         }

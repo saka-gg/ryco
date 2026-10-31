@@ -1,5 +1,5 @@
 import { afterEach, assert, describe, expect, it, vi } from "@effect/vitest";
-import { Effect, Fiber, Layer } from "effect";
+import { Clock, Effect, Fiber, Layer } from "effect";
 import { ChildProcessSpawner } from "effect/process";
 import { TestClock } from "effect/testing";
 
@@ -8,6 +8,7 @@ import * as GitHubCli from "./GitHubCli.ts";
 import {
   GITHUB_FINGERPRINT_QUIET_AFTER_MS,
   GITHUB_FINGERPRINT_REUSE_MS,
+  GITHUB_FINGERPRINT_SETTLE_MS,
   GITHUB_QUIET_FINGERPRINT_REUSE_MS,
 } from "./gitHubPullRequestFingerprintBoard.ts";
 import { buildGitHubPullRequestWatchFingerprintsQuery } from "./gitHubPullRequestWatchFingerprint.ts";
@@ -42,6 +43,25 @@ const watchedPullRequest = {
                 { state: "IN_PROGRESS", count: 1 },
                 { state: "SUCCESS", count: 3 },
               ],
+              statusContextCountsByState: [],
+            },
+          },
+        },
+      },
+    ],
+  },
+};
+
+/** Nobody updated it for half an hour (at the clock's start) and nothing is in flight. */
+const quietPullRequest = {
+  ...watchedPullRequest,
+  commits: {
+    nodes: [
+      {
+        commit: {
+          statusCheckRollup: {
+            contexts: {
+              checkRunCountsByState: [{ state: "SUCCESS", count: 3 }],
               statusContextCountsByState: [],
             },
           },
@@ -267,25 +287,7 @@ describe("GitHubCli pull request watch fingerprint", () => {
 
   it.effect("reuses a quiet pull request's answer for five minutes", () =>
     Effect.gen(function* () {
-      // Nobody updated it for half an hour and nothing is in flight.
-      const quiet = {
-        ...watchedPullRequest,
-        commits: {
-          nodes: [
-            {
-              commit: {
-                statusCheckRollup: {
-                  contexts: {
-                    checkRunCountsByState: [{ state: "SUCCESS", count: 3 }],
-                    statusContextCountsByState: [],
-                  },
-                },
-              },
-            },
-          ],
-        },
-      };
-      mockRun.mockImplementation(() => Effect.succeed(batchAnswer([quiet])));
+      mockRun.mockImplementation(() => Effect.succeed(batchAnswer([quietPullRequest])));
       const gh = yield* GitHubCli.GitHubCli;
       const row = { ...lookup, reuseSinceMs: 0 };
 
@@ -305,6 +307,32 @@ describe("GitHubCli pull request watch fingerprint", () => {
       yield* settle(gh.getPullRequestWatchFingerprint(row));
       assert.equal(mockRun.mock.calls.length, 4);
     }).pipe(Effect.provide(layer)),
+  );
+
+  it.effect(
+    "keeps the short window for an answer given right after the change a reader waits for",
+    () =>
+      Effect.gen(function* () {
+        mockRun.mockImplementation(() => Effect.succeed(batchAnswer([quietPullRequest])));
+        const gh = yield* GitHubCli.GitHubCli;
+        yield* TestClock.adjust(GITHUB_FINGERPRINT_QUIET_AFTER_MS);
+        // A push: GitHub may show the new head only seconds later, in an answer that still
+        // looks quiet.
+        const row = { ...lookup, reuseSinceMs: yield* Clock.currentTimeMillis };
+        yield* TestClock.adjust(5_000);
+        yield* settle(gh.getPullRequestWatchFingerprint(row));
+        yield* TestClock.adjust(GITHUB_FINGERPRINT_REUSE_MS);
+        yield* settle(gh.getPullRequestWatchFingerprint(row));
+        assert.equal(mockRun.mock.calls.length, 2);
+
+        // An answer a minute after the change gets the quiet window again.
+        yield* TestClock.adjust(GITHUB_FINGERPRINT_SETTLE_MS);
+        yield* settle(gh.getPullRequestWatchFingerprint(row));
+        assert.equal(mockRun.mock.calls.length, 3);
+        yield* TestClock.adjust(GITHUB_QUIET_FINGERPRINT_REUSE_MS - 1_000);
+        yield* settle(gh.getPullRequestWatchFingerprint(row));
+        assert.equal(mockRun.mock.calls.length, 3);
+      }).pipe(Effect.provide(layer)),
   );
 
   it.effect("fails only the pull request whose part of the answer failed", () =>

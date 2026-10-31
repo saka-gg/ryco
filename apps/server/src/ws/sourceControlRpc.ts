@@ -86,6 +86,12 @@ export function selectCreatedChangeRequest(
   );
 }
 
+/**
+ * Each server's row revalidation, keyed by its git workflow service (built once per server), so
+ * connections share it and a second server in the same process (tests) gets its own.
+ */
+const rowRevalidationByServer = new WeakMap<object, Promise<ChangeRequestRowRevalidation>>();
+
 export const makeSourceControlHandlers = (ctx: WsRpcContext) => {
   const {
     ownerEffect,
@@ -107,12 +113,18 @@ export const makeSourceControlHandlers = (ctx: WsRpcContext) => {
 
   const linkFailure = pullRequestLinkFailure;
 
-  /** Row reads on host fingerprints, loaded with the first row read (off the boot path). */
-  let rowRevalidation: Promise<ChangeRequestRowRevalidation> | undefined;
+  /**
+   * Row reads on host fingerprints, loaded with the first row read (off the boot path). One per
+   * server, not per connection: every window, phone and reconnect shares what the rows learned.
+   */
   const loadRowRevalidation = Effect.promise(() => {
-    rowRevalidation ??= import("../sourceControl/changeRequestRowRevalidation.ts").then((module) =>
-      module.makeChangeRequestRowRevalidation(),
-    );
+    let rowRevalidation = rowRevalidationByServer.get(gitWorkflow);
+    if (rowRevalidation === undefined) {
+      rowRevalidation = import("../sourceControl/changeRequestRowRevalidation.ts").then((module) =>
+        module.makeChangeRequestRowRevalidation(),
+      );
+      rowRevalidationByServer.set(gitWorkflow, rowRevalidation);
+    }
     return rowRevalidation;
   });
 

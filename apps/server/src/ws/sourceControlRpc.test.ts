@@ -125,7 +125,7 @@ function makeContext(
       Effect.sync(() => refreshes.push(`worktrees:${input.reason}`)),
     refreshGitStatus: () => Effect.sync(() => refreshes.push("git-status")),
   } as unknown as WsRpcContext;
-  return { handlers: makeSourceControlHandlers(ctx), refreshes, listInvalidations };
+  return { handlers: makeSourceControlHandlers(ctx), ctx, refreshes, listInvalidations };
 }
 
 describe("selectCreatedChangeRequest", () => {
@@ -552,6 +552,46 @@ describe("pull request page handlers", () => {
       fingerprint = { status: fingerprint.status, remarks: fingerprint.remarks };
       expect(yield* poll()).toMatchObject({ version: 6 });
       expect(yield* poll()).toMatchObject({ version: 7 });
+    }),
+  );
+
+  it.effect("shares what rows learned across the server's connections", () =>
+    Effect.gen(function* () {
+      let now = 1_000_000;
+      let details = 0;
+      const listCache = makeRepositoryListCache({ nowMs: () => now });
+      const { handlers, ctx } = makeContext(
+        {
+          getChangeRequestDetail: (input) =>
+            Effect.sync(
+              () => ({ number: Number(input.reference), url: "u", version: ++details }) as never,
+            ),
+          getChangeRequestWatchFingerprint: () =>
+            Effect.succeed({
+              status: "OPEN MERGEABLE abc SUCCESS:3",
+              remarks: "0  0  0",
+              revision: "2026-10-30T00:00:00Z ready",
+            }),
+        },
+        undefined,
+        { listCache },
+      );
+      const pollOn = (connection: typeof handlers) => {
+        now += 30_000;
+        return connection[WS_METHODS.sourceControlGetChangeRequestDetail]({
+          cwd: "/repo",
+          reference: "42",
+          view: "row",
+        }).pipe(Effect.provide(handlerLayer));
+      };
+
+      expect(yield* pollOn(handlers)).toMatchObject({ version: 1 });
+      expect(yield* pollOn(handlers)).toMatchObject({ version: 2 });
+      // Another window, a phone or a reconnect polls the same row: the fingerprint the first
+      // connection's rows took still stands for it.
+      const other = makeSourceControlHandlers(ctx);
+      expect(yield* pollOn(other)).toMatchObject({ version: 2 });
+      expect(details).toBe(2);
     }),
   );
 
