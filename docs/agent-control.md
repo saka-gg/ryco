@@ -295,9 +295,17 @@ handoff would start from.
   it, and a delegated chat whose result is still awaited cannot move.
 - **Refusals.** A chat that already has its own worktree, an archived or settled chat, a project
   that is not a Git repository, a branch that exists already, and a branch name Git rejects or
-  that would shadow another ref: one that starts with `refs/`, `heads/`, `tags/`, `remotes/` or a
-  configured remote's name and a slash (such as `origin/main`), a full commit id, a name Git
-  already resolves (a tag, a commit), or one with text-direction control characters.
+  that would shadow another ref. Branch names must be printable ASCII: anything else (accents,
+  emoji, spaces, invisible and text-direction characters, look-alike letters) is refused, so a
+  name never reads differently from what Git stores and never names an existing ref in another
+  Unicode form. Refused as shadowing: names that start with `refs/`, `heads/`, `tags/`, `remotes/`
+  or a configured remote's name and a slash (such as `origin/main`); Git's pseudo-refs (`HEAD` and
+  every `*_HEAD` such as `FETCH_HEAD`, `AUTO_MERGE` and the others Git keeps beside them); names of
+  4 or more hex digits only (they read as abbreviated commit ids); names of an existing branch, tag
+  or remote branch; and names Git already resolves (a commit, `stash`). All of these compare
+  without letter case, because a checkout on macOS or Windows keeps its refs in a file system that
+  ignores case: there `MAIN` is `main`'s ref, and a worktree on it would move the shared
+  checkout's `main` with every commit.
 - **Same worktree as every other.** The worktree is made like a delegated worktree (path policy,
   setup ownership, `.worktreeinclude`, submodules) and gets its workspace record. The project's
   setup script starts in a terminal unless the agent skips it or the user turned setup scripts
@@ -309,20 +317,26 @@ handoff would start from.
   the worktree with the conversation carried over (a resume, or a context handoff for providers
   that keep conversations per directory). Without a continuation the chat waits there for the
   next message.
-- **Stop.** A Stop of the turn that asked (or a newer turn in the chat) before the chat moves rolls
-  the handoff back: the worktree and its branch are removed, and nothing is queued. A Stop right
-  after the move keeps the move but queues the continuation with the queue held, as a Stop holds
-  it, so nothing starts until the person resumes the queue.
+- **Stop.** The handoff checks the turn that asked one last time after the worktree is made and
+  just before the chat moves. A Stop of that turn (or a newer turn in the chat) before that check
+  rolls the handoff back: the worktree and its branch are removed, and nothing is queued. A Stop
+  after it keeps the move, and the continuation is queued with the queue held, with the hold a
+  Stop records (`interrupted`), so nothing starts until the person resumes the queue. The queue
+  decides that hold together with the add (`thread.queue.add`'s `holdIfTurnInterrupted`), so a
+  Stop that lands just before the add is held too; a newer turn pauses the queue instead.
 - **Rollback.** If the chat is archived, settled, moved or deleted while the worktree is made, or
   the move is refused (the chat's branch changed since the check), the worktree and its branch
   are removed again. Once the chat points at the worktree, nothing removes it: a later failure
-  (queueing the continuation, starting the setup script) is reported in the answer. A restart in
+  (linking the chat to the worktree's record, queueing the continuation, starting the setup
+  script) is reported in the answer. A setup script that fails to start is named in fixed words
+  (such as "the worktree folder was not found"); the error itself goes to the server log. A restart in
   the middle finishes the move when the chat already points at the worktree (linking it to the
   worktree's record and queueing the continuation with the queue held, as after every restart),
   and otherwise removes the worktree and its branch. The worktree stays when the chat is deleted.
 - **Answer.** The receipt plus `worktreePath`, `branch`, `baseRef`, `startedFromOrigin`,
   `setupScript` (`started`, `no-script`, `skipped`, `failed`), `continuation` (`queued`, `held`,
-  `skipped`, `failed`) and a `note` for the agent. The worktree path is the chat's own new
+  `skipped`, `failed`), `worktreeAttached` (whether the chat was linked to the worktree's record)
+  and a `note` for the agent. The worktree path is the chat's own new
   checkout; it is read from the chat for the answer, and neither the receipt nor its `note`
   keeps it. When the outcome is not in within the wait, the answer says so (`timedOut`) and its
   `note` tells the agent to end its turn. Calling again with the same `requestId` answers with

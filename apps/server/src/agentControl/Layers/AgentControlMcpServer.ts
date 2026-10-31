@@ -70,6 +70,7 @@ import {
   AGENT_CONTROL_DEVICE_IMAGE_MAX_BASE64_CHARS,
   makeAgentControlMcpTools,
   proposalVisibleToSession,
+  replayedAgentControlMutation,
   submitAgentControlMutation,
   withCompleteAgentControlCatalog,
 } from "../Mcp/tools.ts";
@@ -342,7 +343,8 @@ const makeAgentControlMcpServer = Effect.gen(function* () {
               timeoutMs: AGENT_CONTROL_MCP_WAIT_TIMEOUT_MS_MAX,
               visible: (proposal) => proposalVisibleToSession(proposal, session),
             }),
-          proposals,
+          replay: (session, requestId, plan) =>
+            replayedAgentControlMutation(proposals, session, requestId, plan),
           ...(Option.isSome(git)
             ? { checkoutBranch: (cwd) => git.value.localStatus({ cwd }) }
             : {}),

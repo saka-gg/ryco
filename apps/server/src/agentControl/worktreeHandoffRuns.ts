@@ -37,6 +37,7 @@ import {
   type FollowUpQueueHoldInput,
   type MessageId,
   type OrchestrationProjectShell,
+  type OrchestrationReadModel,
   type OrchestrationThreadShell,
   type ServerSettings,
   type ThreadId,
@@ -79,7 +80,7 @@ export interface WorktreeHandoffGitDriver {
     readonly readOnly?: boolean;
     readonly maxOutputBytes?: number;
     readonly timeoutMs?: number;
-  }) => Effect.Effect<{ readonly exitCode: number }, Error>;
+  }) => Effect.Effect<{ readonly exitCode: number; readonly stdout: string }, Error>;
 }
 
 export interface WorktreeHandoffRunDeps {
@@ -95,6 +96,8 @@ export interface WorktreeHandoffRunDeps {
   };
   /** Refuses branch names that would shadow a remote's branches or an existing ref. */
   readonly gitDriver: Option.Option<WorktreeHandoffGitDriver>;
+  /** The node's read model, where a queue's hold is decided (absent in some test doubles). */
+  readonly readModel: (() => Effect.Effect<OrchestrationReadModel>) | undefined;
   /** The executor's deterministic ids of an operation's steps. */
   readonly ids: {
     readonly commandIdFor: (operationId: AgentControlOperationId, step: string) => CommandId;
@@ -170,35 +173,57 @@ export const worktreeHandoffBlocker = (
       ? "This chat already works in its own worktree. Keep working there, or ask for a new chat in another worktree (ryco_create_threads with envMode worktree)."
       : null;
 
-/** Ref namespaces a branch must not start with: `git` would read the name as another ref. */
+/**
+ * Printable ASCII only. Anything else may read differently from what Git stores (invisible and
+ * text-direction characters, look-alike letters), or name the same ref in another form on a
+ * file system that folds case or normalizes Unicode (macOS, Windows).
+ */
+const NOT_PLAIN_ASCII = /[^\x21-\x7E]/u;
+/** Ref namespaces a branch must not start with (in any case): Git reads the name as another ref. */
 const SHADOWING_PREFIXES = ["refs/", "heads/", "tags/", "remotes/"];
-/** A full SHA-1 or SHA-256 object name. */
-const FULL_OBJECT_NAME = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/iu;
-/** Text-direction controls: a name that reads differently from what Git stores. */
-const BIDI_CONTROLS = /[\u202A-\u202E\u2066-\u2069]/u;
+/**
+ * Git's own root refs, in any case: `HEAD`, every `*_HEAD` (`FETCH_HEAD`, `ORIG_HEAD`,
+ * `MERGE_HEAD`...) and the others Git keeps beside them.
+ */
+const PSEUDO_REF =
+  /^(?:(?:[a-z_-]*_)?head|auto_merge|bisect_expected_rev|notes_merge_partial|notes_merge_ref|merge_autostash)$/iu;
+/** Hex digits only, 4 or more: Git reads the name as an abbreviated commit id first. */
+const OBJECT_NAME_LIKE = /^[0-9a-f]{4,}$/iu;
+const PLAIN_NAME_HINT = "Choose a plain branch name such as feature/my-change.";
 
 /**
- * Why a handoff refuses this branch name, or null: Git's branch-name rules, text-direction
- * controls, and names that would shadow other refs (ref namespaces, full object names). The
- * executor also refuses `<remote>/` names and names Git already resolves
- * (`worktreeHandoffBranchShadow`). Checked by the tool and again before Git runs.
+ * Why a handoff refuses this branch name, or null: printable ASCII only, Git's branch-name rules,
+ * and names that would shadow other refs (ref namespaces, Git's pseudo-refs, names that read as
+ * commit ids). The executor also refuses `<remote>/` names, names of existing refs in any letter
+ * case, and names Git already resolves (`worktreeHandoffBranchShadow`). Checked by the tool and
+ * again before Git runs.
  */
 export const worktreeHandoffBranchProblem = (branch: string): string | null => {
   // Checked first, so the answer never echoes a name that reads differently than it is.
-  if (BIDI_CONTROLS.test(branch)) {
-    return "The branch name contains text-direction control characters. Choose a plain name.";
+  if (NOT_PLAIN_ASCII.test(branch)) {
+    return `The branch name may use only plain ASCII letters, digits and punctuation: no spaces, accents, emoji or invisible characters. ${PLAIN_NAME_HINT}`;
   }
   if (!isAdoptableBranchName(branch)) return `Git does not accept "${branch}" as a branch name.`;
-  if (
-    SHADOWING_PREFIXES.some((prefix) => branch.startsWith(prefix)) ||
-    FULL_OBJECT_NAME.test(branch)
-  ) {
-    return `"${branch}" would shadow another Git ref. Choose a plain branch name such as feature/my-change.`;
+  const folded = branch.toLowerCase();
+  if (SHADOWING_PREFIXES.some((prefix) => folded.startsWith(prefix))) {
+    return `"${branch}" would shadow another Git ref. ${PLAIN_NAME_HINT}`;
+  }
+  if (PSEUDO_REF.test(branch)) {
+    return `"${branch}" is a name Git keeps for itself (like HEAD or FETCH_HEAD). ${PLAIN_NAME_HINT}`;
+  }
+  if (OBJECT_NAME_LIKE.test(branch)) {
+    return `"${branch}" reads as a commit id. ${PLAIN_NAME_HINT}`;
   }
   return null;
 };
 
-/** `<remote>/` names and names Git already resolves (a tag, a remote branch, a commit). */
+/** The ref namespaces Git looks a short name up in, as a branch would shadow them. */
+const LOOKUP_NAMESPACES = ["refs/heads/", "refs/tags/", "refs/remotes/"];
+
+/**
+ * `<remote>/` names, names of existing refs in any letter case, and names Git already resolves
+ * (a tag, a remote branch, a commit).
+ */
 const worktreeHandoffBranchShadow = (
   driver: Option.Option<WorktreeHandoffGitDriver>,
   cwd: string,
@@ -206,10 +231,37 @@ const worktreeHandoffBranchShadow = (
 ) =>
   Effect.gen(function* () {
     if (Option.isNone(driver)) return null;
+    // Compared case-insensitively: a checkout on macOS or Windows stores refs in a file system
+    // that ignores case, so `ORIGIN/main` is `origin/main`'s ref file there.
+    const folded = branch.toLowerCase();
     const { remoteNames } = yield* driver.value.readConfigSnapshot(cwd);
-    const remote = remoteNames.find((name) => branch.startsWith(`${name}/`));
+    const remote = remoteNames.find((name) => folded.startsWith(`${name.toLowerCase()}/`));
     if (remote !== undefined) {
       return `"${branch}" would shadow the branches of the remote ${remote}. Choose a name that does not start with "${remote}/".`;
+    }
+    // `git worktree add -b MAIN` where `main` is would share `main`'s ref file with the shared
+    // checkout, so the agent's commits would move it. Git's own lookup misses case variants of
+    // packed refs, so the refs are listed (Git filters them ignoring case) and compared here.
+    const candidates = LOOKUP_NAMESPACES.map((namespace) => `${namespace}${branch}`);
+    const listed = yield* driver.value.execute({
+      operation: "AgentControlExecution.worktreeHandoffBranch",
+      cwd,
+      args: ["for-each-ref", "--ignore-case", "--format=%(refname)", ...candidates],
+      allowNonZeroExit: true,
+      readOnly: true,
+      maxOutputBytes: 1_048_576,
+      timeoutMs: 15_000,
+    });
+    if (listed.exitCode !== 0) {
+      return "Ryco could not read this project's Git refs to check the branch name. Try again.";
+    }
+    const wanted = new Set(candidates.map((ref) => ref.toLowerCase()));
+    const clash = listed.stdout
+      .split("\n")
+      .map((line) => line.trim())
+      .find((ref) => wanted.has(ref.toLowerCase()));
+    if (clash !== undefined) {
+      return `"${branch}" names the existing Git ref ${clash} (Git treats names that differ only in letter case as one on macOS and Windows). Choose another branch name.`;
     }
     const resolved = yield* driver.value.execute({
       operation: "AgentControlExecution.worktreeHandoffBranch",
@@ -258,11 +310,43 @@ const withoutHandoffWorktree = (state: AgentControlOperationState): AgentControl
   return rest;
 };
 
-const causeMessage = (cause: Cause.Cause<unknown>): string => {
-  const failure = Cause.squash(cause);
-  return failure instanceof Error && failure.message.trim().length > 0
-    ? failure.message
-    : "unknown error";
+const TERMINAL_CWD_FAILURES = new Map([
+  ["notFound", "the worktree folder was not found"],
+  ["notDirectory", "the worktree path is not a folder"],
+  ["outsideWorkspace", "the worktree is outside the folders Ryco may use"],
+  ["cleanupPending", "the worktree is being cleaned up"],
+]);
+const SETUP_FAILURES = new Map([
+  ["TerminalBusyError", "its terminal was busy"],
+  ["PtySpawnError", "its terminal could not start"],
+  ["TerminalNotRunningError", "its terminal stopped"],
+  ["TerminalInputRejectedError", "its terminal refused the command"],
+  ["TerminalSessionLookupError", "its terminal could not be opened"],
+  ["TerminalHistoryError", "its terminal could not be opened"],
+]);
+
+/**
+ * Why the setup script did not start, in fixed words by error tag: the stored note keeps no error
+ * text, which can carry a path (a `TerminalCwdError` names the folder). The log has the cause.
+ */
+export const setupFailureText = (cause: Cause.Cause<unknown>): string => {
+  const failure: unknown = Cause.squash(cause);
+  const field = (name: string): unknown =>
+    typeof failure === "object" && failure !== null && name in failure
+      ? (failure as Record<string, unknown>)[name]
+      : undefined;
+  const tag = field("_tag");
+  if (tag === "TerminalCwdError") {
+    const reason = field("reason");
+    return (
+      (typeof reason === "string" ? TERMINAL_CWD_FAILURES.get(reason) : undefined) ??
+      "the worktree folder could not be read"
+    );
+  }
+  return (
+    (typeof tag === "string" ? SETUP_FAILURES.get(tag) : undefined) ??
+    "an unexpected error (the server log has the details)"
+  );
 };
 
 const samePath = (left: string | null, right: string) =>
@@ -296,9 +380,24 @@ export const worktreeHandoffNote = (input: {
         : outcome.continuation === "failed"
           ? "Your continuation prompt could not be queued: the chat waits in the worktree for the next message. End your turn now."
           : "The chat continues in the worktree with its next message. End your turn now.";
-  const note = `${input.restarted === true ? "Ryco restarted during the move and finished it. " : ""}Moved this chat into a new worktree on branch ${outcome.branch}, from ${outcome.baseRef}. Uncommitted changes in the shared checkout stayed there. ${setup} ${next} The rest of this turn still runs in the shared checkout, so make no more changes in it.`;
+  const link =
+    outcome.worktreeAttached === false
+      ? " Ryco could not link the chat to the worktree's record, so the app may not list it with the worktree; the chat still works in the worktree."
+      : "";
+  const note = `${input.restarted === true ? "Ryco restarted during the move and finished it. " : ""}Moved this chat into a new worktree on branch ${outcome.branch}, from ${outcome.baseRef}.${link} Uncommitted changes in the shared checkout stayed there. ${setup} ${next} The rest of this turn still runs in the shared checkout, so make no more changes in it.`;
   return note.length <= 2_000 ? note : `${note.slice(0, 1_999)}…`;
 };
+
+/** Whether the chat's follow-up queue is held, as the node's read model has it. */
+const queueIsHeld = (deps: WorktreeHandoffRunDeps, threadId: ThreadId) =>
+  deps.readModel === undefined
+    ? Effect.succeed(false)
+    : Effect.map(
+        deps.readModel(),
+        (model) =>
+          (model.threads.find((thread) => thread.id === threadId)?.followUpQueue?.hold ?? null) !==
+          null,
+      );
 
 /**
  * One handoff per chat at a time on this node: a second one while the first runs is refused
@@ -368,9 +467,16 @@ const handOff = (
     if (!local.isRepo) {
       return yield* refuse("This chat's project is not a Git repository, so it has no worktrees.");
     }
-    if ((yield* deps.git.listLocalBranchNames(project.workspaceRoot)).includes(plan.branch)) {
+    // In any letter case: macOS and Windows checkouts keep `Main` and `main` in one ref file.
+    const folded = plan.branch.toLowerCase();
+    const existing = (yield* deps.git.listLocalBranchNames(project.workspaceRoot)).find(
+      (name) => name.toLowerCase() === folded,
+    );
+    if (existing !== undefined) {
       return yield* refuse(
-        `Branch ${plan.branch} already exists. Choose another name, or delete that branch first.`,
+        existing === plan.branch
+          ? `Branch ${plan.branch} already exists. Choose another name, or delete that branch first.`
+          : `Branch ${existing} already exists, and Git treats names that differ only in letter case as one on macOS and Windows. Choose another name.`,
       );
     }
     const shadow = yield* worktreeHandoffBranchShadow(
@@ -476,6 +582,8 @@ const handOff = (
       bound,
       project,
       runSetupScript,
+      // A Stop that lands after the read below still holds it: the add decides it again.
+      ...(askingTurnId === undefined ? {} : { askingTurnId }),
       // A Stop or a newer turn since the late check holds the continuation instead.
       hold: (moved) => {
         const end = askingTurnEnd(moved, askingTurnId);
@@ -571,6 +679,8 @@ const finishMove = (
     readonly project: OrchestrationProjectShell | undefined;
     readonly runSetupScript: boolean;
     readonly restarted?: boolean;
+    /** The turn that asked: a Stop of it the hold below did not see still holds the queue. */
+    readonly askingTurnId?: TurnId;
     /** The hold the continuation is queued with, as the moved chat stands (none: sent as usual). */
     readonly hold: (thread: OrchestrationThreadShell) => FollowUpQueueHoldInput | undefined;
   },
@@ -581,14 +691,25 @@ const finishMove = (
     const done = (step: string) => state().completedSteps.includes(step);
     const commandId = (step: string) => deps.ids.commandIdFor(operationId, step);
     const { bound } = input;
+    let worktreeAttached = true;
     if (!done(ATTACHED_STEP)) {
-      yield* deps.dispatch(ATTACHED_STEP, {
-        type: "thread.attach-to-worktree",
-        commandId: commandId("handoff-thread-attach"),
-        threadId: plan.threadId,
-        worktreeId: bound.worktreeId,
-        attachedAt: new Date().toISOString(),
-      });
+      // The move stands without the link: the chat works in the worktree's folder either way.
+      const attached = yield* Effect.exit(
+        deps.dispatch(ATTACHED_STEP, {
+          type: "thread.attach-to-worktree",
+          commandId: commandId("handoff-thread-attach"),
+          threadId: plan.threadId,
+          worktreeId: bound.worktreeId,
+          attachedAt: new Date().toISOString(),
+        }),
+      );
+      if (attached._tag === "Failure") {
+        worktreeAttached = false;
+        yield* Effect.logWarning("worktree handoff could not link the chat to its worktree", {
+          threadId: plan.threadId,
+          cause: Cause.pretty(attached.cause),
+        });
+      }
     }
 
     // Right after the move, so the next turn has its prompt even if setup fails. The queue sends
@@ -612,6 +733,9 @@ const finishMove = (
               // Its agent may edit or remove it (`ryco_queue_*`).
               queuedBy: plan.threadId,
               ...(hold === undefined ? {} : { hold }),
+              ...(input.askingTurnId === undefined
+                ? {}
+                : { holdIfTurnInterrupted: input.askingTurnId }),
               entry: {
                 messageId: deps.ids.messageIdFor(operationId, "handoff-continuation"),
                 text,
@@ -624,7 +748,9 @@ const finishMove = (
               createdAt: new Date().toISOString(),
             },
           });
-          return hold === undefined ? ("queued" as const) : ("held" as const);
+          // The add may have held the queue itself, or found it held already.
+          const held = hold !== undefined || (yield* queueIsHeld(deps, plan.threadId));
+          return held ? ("held" as const) : ("queued" as const);
         }),
       );
       if (queued._tag === "Success") {
@@ -657,7 +783,11 @@ const finishMove = (
         if (launched.value.status === "started") setupScriptName = launched.value.scriptName;
       } else {
         setupScript = "failed";
-        setupFailure = causeMessage(launched.cause).slice(0, 300);
+        setupFailure = setupFailureText(launched.cause);
+        yield* Effect.logWarning("worktree handoff setup script did not start", {
+          threadId: plan.threadId,
+          cause: Cause.pretty(launched.cause),
+        });
       }
     }
 
@@ -667,6 +797,7 @@ const finishMove = (
       startedFromOrigin: plan.startFromOrigin,
       setupScript,
       continuation,
+      worktreeAttached,
     };
     yield* deps.checkpoint({
       ...state(),
