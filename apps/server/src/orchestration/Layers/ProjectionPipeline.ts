@@ -52,6 +52,7 @@ import { ProjectionThreadActivityRepositoryLive } from "../../persistence/Layers
 import { ProjectionThreadMessageRepositoryLive } from "../../persistence/Layers/ProjectionThreadMessages.ts";
 import { ProjectionThreadProposedPlanRepositoryLive } from "../../persistence/Layers/ProjectionThreadProposedPlans.ts";
 import { loadFollowUpQueueProjection } from "../../persistence/followUpQueueProjectionLoader.ts";
+import { loadCommandWatchProjection } from "../../persistence/commandWatchProjectionLoader.ts";
 import { ProjectionThreadPullRequestWatchRepositoryLive } from "../../persistence/Layers/ProjectionThreadPullRequestWatches.ts";
 import { ProjectionThreadSessionRepositoryLive } from "../../persistence/Layers/ProjectionThreadSessions.ts";
 import { ProjectionThreadUserInputRequestRepositoryLive } from "../../persistence/Layers/ProjectionThreadUserInputRequests.ts";
@@ -116,6 +117,7 @@ export const ORCHESTRATION_EVENT_PROJECTORS = {
   "thread.deleted": [
     ORCHESTRATION_PROJECTOR_NAMES.threads,
     ORCHESTRATION_PROJECTOR_NAMES.threadPullRequestWatches,
+    ORCHESTRATION_PROJECTOR_NAMES.threadCommandWatches,
     ORCHESTRATION_PROJECTOR_NAMES.threadFollowUpQueues,
   ],
   "thread.trashed": [ORCHESTRATION_PROJECTOR_NAMES.threads],
@@ -137,6 +139,7 @@ export const ORCHESTRATION_EVENT_PROJECTORS = {
   // Its own table only: watch progress is not thread activity, so `projection_threads` (and
   // its `updated_at`) stays untouched.
   "thread.pull-request-watch-updated": [ORCHESTRATION_PROJECTOR_NAMES.threadPullRequestWatches],
+  "thread.command-watch-updated": [ORCHESTRATION_PROJECTOR_NAMES.threadCommandWatches],
   // Their own tables only: the queue is not thread activity, so `projection_threads` (and its
   // `updated_at`) stays untouched; shells read the queue's summary from its tables.
   "thread.queue-entry-added": [ORCHESTRATION_PROJECTOR_NAMES.threadFollowUpQueues],
@@ -2527,6 +2530,16 @@ export const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationP
       }
     });
 
+    // The writes load with the first command watch event or permanent delete
+    // (`commandWatchProjection.ts`).
+    const applyThreadCommandWatchesProjection: ProjectorDefinition["apply"] = (event) =>
+      event.type === "thread.command-watch-updated" || event.type === "thread.deleted"
+        ? loadCommandWatchProjection.pipe(
+            Effect.flatMap((projection) => projection.applyCommandWatchEvent(sql, event)),
+            Effect.mapError(toPersistenceSqlError("ProjectionPipeline.commandWatches:write")),
+          )
+        : Effect.void;
+
     // Mirrors `projectFollowUpQueueEvent` (the in-memory projector); every write is idempotent.
     // The writes load with the first queue event (`followUpQueueProjection.ts`).
     const applyThreadFollowUpQueuesProjection: ProjectorDefinition["apply"] = Effect.fn(
@@ -2613,6 +2626,10 @@ export const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationP
       {
         name: ORCHESTRATION_PROJECTOR_NAMES.threadPullRequestWatches,
         apply: applyThreadPullRequestWatchesProjection,
+      },
+      {
+        name: ORCHESTRATION_PROJECTOR_NAMES.threadCommandWatches,
+        apply: applyThreadCommandWatchesProjection,
       },
       {
         name: ORCHESTRATION_PROJECTOR_NAMES.threadFollowUpQueues,

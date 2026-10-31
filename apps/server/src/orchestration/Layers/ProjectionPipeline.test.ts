@@ -109,16 +109,20 @@ it("routes each event only to its explicit projection owners", () => {
   assert.deepEqual(ORCHESTRATION_EVENT_PROJECTORS["thread.pull-request-watch-updated"], [
     ORCHESTRATION_PROJECTOR_NAMES.threadPullRequestWatches,
   ]);
+  assert.deepEqual(ORCHESTRATION_EVENT_PROJECTORS["thread.command-watch-updated"], [
+    ORCHESTRATION_PROJECTOR_NAMES.threadCommandWatches,
+  ]);
   assert.deepEqual(ORCHESTRATION_EVENT_PROJECTORS["thread.deleted"], [
     ORCHESTRATION_PROJECTOR_NAMES.threads,
     ORCHESTRATION_PROJECTOR_NAMES.threadPullRequestWatches,
+    ORCHESTRATION_PROJECTOR_NAMES.threadCommandWatches,
     ORCHESTRATION_PROJECTOR_NAMES.threadFollowUpQueues,
   ]);
   // The follow-up queue has its own tables too.
   assert.deepEqual(ORCHESTRATION_EVENT_PROJECTORS["thread.queue-entry-added"], [
     ORCHESTRATION_PROJECTOR_NAMES.threadFollowUpQueues,
   ]);
-  assert.equal(Object.keys(ORCHESTRATION_EVENT_PROJECTORS).length, 59);
+  assert.equal(Object.keys(ORCHESTRATION_EVENT_PROJECTORS).length, 60);
 });
 
 it.layer(BaseTestLayer)("OrchestrationProjectionPipeline", (it) => {

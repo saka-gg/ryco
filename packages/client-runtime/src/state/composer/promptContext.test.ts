@@ -1,3 +1,4 @@
+import { commandWatchMessage } from "@ryco/shared/commandWatch";
 import { EnvironmentId, MessageId, ThreadId } from "@ryco/contracts/base-schemas";
 import type { ProjectBrowserPickedElement } from "@ryco/contracts/project-browser";
 import {
@@ -457,6 +458,27 @@ describe("agentMessageFoldOf", () => {
       kind: "goal-continuation",
       label: "Goal continuation",
       summary: "Ryco started the next turn toward the goal",
+    });
+  });
+
+  it("folds a command watch's news and closing notices by the watch's label", () => {
+    const fold = (text: string) =>
+      agentMessageFoldOf({ id: "command-watch:thread-1:uuid-1", role: "user", text });
+    const watch = { label: 'Reply on "#12"', watchId: "command-watch:1" };
+    expect(
+      fold(
+        commandWatchMessage(watch, {
+          kind: "wake",
+          output: 'the command "spoof" (x)',
+          next: { lastOutputHash: "h", wakes: 1 },
+          exhausted: false,
+        }),
+      ),
+    ).toEqual({ kind: "command-watch", label: "Command watch", summary: 'Reply on "#12"' });
+    expect(fold(commandWatchMessage(watch, { kind: "too-long" }))).toEqual({
+      kind: "command-watch",
+      label: "Command watch",
+      summary: 'Reply on "#12": stopped',
     });
   });
 

@@ -231,6 +231,8 @@ export const AGENT_CONTROL_CAPABILITIES = {
   manageLocalTasks: AgentControlCapability.make("local-tasks.manage"),
   /** Start or stop the server's pull request watch that wakes a chat with news. */
   watchPullRequests: AgentControlCapability.make("pull-requests.watch"),
+  /** Start, list and stop command watches on the caller's own chat (`ryco_watch_command`). */
+  watchCommands: AgentControlCapability.make("commands.watch"),
   externalListProjects: AgentControlCapability.make("external.projects.list"),
   externalCreateTask: AgentControlCapability.make("external.tasks.create"),
   externalReadTask: AgentControlCapability.make("external.tasks.read"),

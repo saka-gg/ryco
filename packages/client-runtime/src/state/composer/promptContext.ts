@@ -1,6 +1,7 @@
 import {
   AGENT_CONTROL_MESSAGE_ID_PREFIX,
   AGENT_SENT_MESSAGE_ID_SUFFIX,
+  COMMAND_WATCH_WAKE_MESSAGE_PREFIX,
   DELEGATION_RESULT_MESSAGE_ID_PREFIX,
   GOAL_CONTINUATION_MESSAGE_ID_PREFIX,
   PULL_REQUEST_WATCH_WAKE_MESSAGE_PREFIX,
@@ -320,7 +321,12 @@ export function deriveDisplayedUserMessageContext(prompt: string): DisplayedUser
 
 /** A user-role message no person typed, shown folded to one line until it is opened. */
 export interface AgentMessageFold {
-  readonly kind: "delegation-result" | "agent-message" | "goal-continuation" | "pull-request";
+  readonly kind:
+    | "delegation-result"
+    | "agent-message"
+    | "goal-continuation"
+    | "pull-request"
+    | "command-watch";
   /**
    * "Results from 2 delegated tasks" · "Message from another agent" · "Goal continuation" ·
    * "Pull request update" or "Auto-fix CI".
@@ -344,6 +350,19 @@ const DELEGATION_SECTION_STATE =
 const AUTO_FIX_ATTEMPT = /^Auto-fix CI\b.*? PR #(\d+) at \S+, (attempt \d+ of \d+)/;
 /** The pull request an update or notice names first (`pull request #12`, `PR #12`). */
 const PULL_REQUEST_NUMBER = /\b(?:pull request|PR) #(\d+)/i;
+/** The watch's label, JSON-quoted after "the command" in every command watch message. */
+const COMMAND_WATCH_LABEL = /\bthe command (?:Ryco is watching for you, )?("(?:[^"\\]|\\.)*")/u;
+
+function commandWatchLabelOf(text: string): string {
+  const quoted = COMMAND_WATCH_LABEL.exec(text)?.[1];
+  if (quoted === undefined) return "";
+  try {
+    const label: unknown = JSON.parse(quoted);
+    return typeof label === "string" ? label : "";
+  } catch {
+    return "";
+  }
+}
 
 function firstLine(text: string): string {
   const line =
@@ -401,6 +420,15 @@ export function agentMessageFoldOf(message: {
       kind: "goal-continuation",
       label: "Goal continuation",
       summary: "Ryco started the next turn toward the goal",
+    };
+  }
+  if (id.startsWith(COMMAND_WATCH_WAKE_MESSAGE_PREFIX)) {
+    const label = commandWatchLabelOf(message.text);
+    return {
+      kind: "command-watch",
+      label: "Command watch",
+      summary:
+        /\bRyco stopped watching\b/u.test(message.text) && label ? `${label}: stopped` : label,
     };
   }
   if (id.startsWith(PULL_REQUEST_WATCH_WAKE_MESSAGE_PREFIX)) {

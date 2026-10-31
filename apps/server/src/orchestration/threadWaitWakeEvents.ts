@@ -54,6 +54,7 @@ const THREAD_WAIT_ROUTES = {
   "thread.unsettled": "ignore",
   // Watch state, which no wait reads; a turn a watch starts arrives as a session-set.
   "thread.pull-request-watch-updated": "ignore",
+  "thread.command-watch-updated": "ignore",
   // Follow-up queue state, which no wait reads; a turn the queue starts arrives as a session-set.
   "thread.queue-entry-added": "ignore",
   "thread.queue-entry-edited": "ignore",

@@ -226,6 +226,7 @@ describe("threadBusyReason", () => {
     pinned: false,
     backgroundLiveness: null,
     pullRequestWatched: false,
+    commandWatched: false,
     prNumber: null,
     prState: null,
     prTerminalAt: null,

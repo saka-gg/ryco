@@ -99,6 +99,9 @@ called. This matters for clients such as Codex that cache the initial MCP catalo
   [Tasks](#tasks)).
 - `ryco_watch_pull_request`, `ryco_unwatch_pull_request`: have Ryco wake a chat with a pull
   request's news instead of polling (see [Pull request watches](#pull-request-watches)).
+- `ryco_watch_command`, `ryco_unwatch_command`, `ryco_list_command_watches`: have Ryco run a shell
+  command for the caller's own chat on an interval and wake it only when the output changes (see
+  [Command watches](#command-watches)).
 - `ryco_html_preview`, `ryco_html_render`: check a self-contained HTML page in Ryco's headless
   browser, then show it inline above the reply as a sandboxed page that follows the user's theme,
   with a card at the end of the reply (see [HTML renders](./user/html-renders.md)). Both need the
@@ -241,6 +244,25 @@ required checks pass, someone else comments or reviews, or the branch starts to 
   settling, archiving or a user Stop. A wake is news, not a merge decision.
 - **Scope.** Agents cannot turn Auto-fix CI on or off. While Agent Control is off, an agent-started
   watch holds its news. Standalone integrations cannot watch pull requests.
+
+## Command watches
+
+An agent that waits on something that is not a pull request (an issue reply, another
+repository's CI, a deploy, a release) calls `ryco_watch_command` with a read-only check, a label
+and an interval, and ends its turn. Ryco runs the check with no model involved and wakes the chat
+only when its output changes (see [Command watch](./command-watch.md) for the rules and numbers).
+
+- **Own chat only.** The tools take no thread id: a watch always belongs to the caller's chat.
+  Starting or stopping needs the `commands.watch` grant and exact active-turn authority; listing
+  needs the grant. They run at once (no approval) and never reach standalone integrations.
+- **Full access only.** The chat must be in Full access and default mode, because Ryco runs the
+  command later without asking. Leaving either ends its watches.
+- **Delegated chats.** A chat delegated with `returnToOrigin` whose result is still awaited cannot
+  watch; it reports what to watch, and the delegating chat watches it.
+- **Ending.** `ryco_unwatch_command` stops one watch or all of them; call it before handing the
+  work back so the chat can settle. A watch also ends after 10 wakes, 7 days, 8 failed runs in a
+  row or output over 4 KB, and with the chat's Stop, settle, archive or Trash. The user can stop
+  one with the `thread.command-watch.stop` command. While Agent Control is off, nothing runs.
 
 ## Tasks
 

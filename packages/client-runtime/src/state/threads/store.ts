@@ -574,6 +574,9 @@ function mapThreadSummary(
     ...(thread.pullRequestWatches === undefined
       ? {}
       : { pullRequestWatches: thread.pullRequestWatches }),
+    ...(thread.commandWatchCount === undefined
+      ? {}
+      : { commandWatchCount: thread.commandWatchCount }),
     ...(thread.followUpQueueSummary === undefined
       ? {}
       : { followUpQueueSummary: thread.followUpQueueSummary }),
@@ -822,6 +825,7 @@ function sidebarThreadSummariesEqual(
     // shell whose only change is its watches must still compare unequal here. Plain wire data,
     // compared whole so a field the summary gains later can never be missed.
     plainDataEqual(left.pullRequestWatches, right.pullRequestWatches) &&
+    left.commandWatchCount === right.commandWatchCount &&
     // Queue events do not move `updatedAt` either.
     plainDataEqual(left.followUpQueueSummary, right.followUpQueueSummary)
   );

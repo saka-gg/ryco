@@ -1,6 +1,7 @@
 export { WorktreeRelocatedPayload } from "@ryco/contracts";
 export {
   ThreadPullRequestWatchUpdatedPayload,
+  ThreadCommandWatchUpdatedPayload,
   ThreadQueueEntriesRemovedPayload,
   ThreadQueueEntryAddedPayload,
   ThreadQueueEntryEditedPayload,

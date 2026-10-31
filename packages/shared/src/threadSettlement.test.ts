@@ -39,6 +39,7 @@ function input(overrides: Partial<ThreadSettlementInput> = {}): ThreadSettlement
     pinned: false,
     backgroundLiveness: null,
     pullRequestWatched: false,
+    commandWatched: false,
     prNumber: null,
     prState: null,
     prTerminalAt: null,
@@ -453,6 +454,19 @@ describe("classifyThreadSettlement", () => {
     ).toBe("pinned");
   });
 
+  it("a thread with a command watch never auto-settles, and can still be settled by hand", () => {
+    const quiet = {
+      autoSettleAfterDays: 7 as const,
+      nowMs: Date.parse("2026-08-30T12:00:00.000Z"),
+    };
+    expect(classifyThreadSettlement(input(quiet))).toBe("settled");
+    const watched = input({ ...quiet, commandWatched: true });
+    expect(getThreadAutoSettlementBlocker(watched)).toBe("command-watch");
+    expect(classifyThreadSettlement(watched)).toBe("active");
+    expect(getNextThreadSettlementEvaluationAtMs(watched)).toBeNull();
+    expect(canSettleThread(watched)).toEqual({ canSettle: true, blocker: null });
+  });
+
   it("settles inactive work only when the opt-in boundary has passed", () => {
     const inactive = input({
       autoSettleAfterDays: 7,
@@ -589,6 +603,7 @@ describe("effective settlement timestamp and sorting", () => {
     ["pinned", { pinned: true }],
     ["working", { backgroundLiveness: "working" }],
     ["watched", { pullRequestWatched: true }],
+    ["command-watched", { commandWatched: true }],
     ["unknown PR", { prNumber: 12, prState: null }],
   ] as const)("does not schedule an evaluation for a %s thread", (_label, overrides) => {
     expect(

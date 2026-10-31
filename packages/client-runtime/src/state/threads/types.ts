@@ -350,6 +350,8 @@ export interface SidebarThreadSummary {
    * when it has none, and from older servers.
    */
   pullRequestWatches?: ThreadPullRequestWatchShell;
+  /** How many command watches the node runs for this thread; absent while none, and from older servers. */
+  commandWatchCount?: number;
   /**
    * The node's follow-up queue for this thread (count, hold, head preview) while it holds an
    * entry. Absent when empty, and from older servers.

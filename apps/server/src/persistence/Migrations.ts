@@ -150,6 +150,7 @@ import Migration0095, {
   ensureThreadFollowUpQueueTables,
 } from "./Migrations/095_ThreadFollowUpQueue.ts";
 import Migration0096 from "./Migrations/096_AuthAccessLinkAccount.ts";
+import Migration0097 from "./Migrations/097_CommandWatches.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -257,6 +258,7 @@ export const migrationEntries = [
   [94, "PullRequestWatches", Migration0094],
   [95, "ThreadFollowUpQueue", Migration0095],
   [96, "AuthAccessLinkAccount", Migration0096],
+  [97, "CommandWatches", Migration0097],
 ] as const;
 
 export const makeMigrationLoader = (throughId?: number) =>
@@ -846,6 +848,8 @@ const compatibilityRepairs = [
   { key: "pull-request-watches", since: 94, run: () => repairPullRequestWatchesTable() },
   { key: "follow-up-queue", since: 95, run: () => repairThreadFollowUpQueueTables() },
   { key: "auth-access-link-account", since: 96, run: () => repairAuthAccessLinkAccountColumn() },
+  // 097 again when another branch recorded 097 (or a later id) first; it is idempotent.
+  { key: "command-watches", since: 97, run: () => Migration0097 },
 ] as const;
 
 export type CompatibilityRepairKey = (typeof compatibilityRepairs)[number]["key"];

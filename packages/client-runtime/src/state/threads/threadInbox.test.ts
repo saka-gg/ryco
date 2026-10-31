@@ -543,6 +543,21 @@ describe("thread inbox", () => {
       expect(inbox.settled.map((entry) => entry.thread?.id)).toEqual([ended.id]);
     });
 
+    it("keeps a thread the node runs a command watch for active", () => {
+      const watched = makeThread(environmentA, "thread-command-watched", {
+        ...staleActivity,
+        commandWatchCount: 2,
+      });
+      const quiet = makeThread(environmentA, "thread-quiet", staleActivity);
+      const inbox = buildThreadInbox(
+        baseInput({ autoSettleAfterDays: 7, threads: [watched, quiet] }),
+      );
+
+      expect(inbox.active.map((entry) => entry.thread?.id)).toEqual([watched.id]);
+      expect(inbox.active[0]?.lifecycle.autoSettlementBlocker).toBe("command-watch");
+      expect(inbox.settled.map((entry) => entry.thread?.id)).toEqual([quiet.id]);
+    });
+
     it("keeps a PR worktree whose state is unknown active", () => {
       const thread = makeThread(environmentA, "thread-unknown-pr", {
         ...staleActivity,

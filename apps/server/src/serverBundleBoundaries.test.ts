@@ -217,6 +217,29 @@ describe("server boot import boundaries", () => {
     );
   });
 
+  it("loads the command watch runner, its rules, its SQL and its tools after the server serves", () => {
+    // Only the thin service layer and the two loaders are on the serve path; the runner, the
+    // decider's command watch rules, the projection SQL, the Agent Control tools and the shared
+    // run rules (with the output sanitiser) load through import().
+    const lazy =
+      /(?:apps\/server\/src\/(?:commandWatch\/commandWatchRuntime|orchestration\/commandWatchUpdates|persistence\/commandWatchProjection|agentControl\/Mcp\/commandWatchTools)|packages\/shared\/src\/(?:commandWatch|untrustedText))\.ts$/u;
+    const graph = staticGraph("src/cliMain.ts");
+    expect(graph.files.filter((file) => lazy.test(file))).toEqual([]);
+    expect(graph.files).toContain("apps/server/src/commandWatch/CommandWatchService.ts");
+    expect(
+      staticGraph("src/cliMain.ts", { dynamic: true })
+        .files.filter((file) => lazy.test(file))
+        .toSorted(),
+    ).toEqual([
+      "apps/server/src/agentControl/Mcp/commandWatchTools.ts",
+      "apps/server/src/commandWatch/commandWatchRuntime.ts",
+      "apps/server/src/orchestration/commandWatchUpdates.ts",
+      "apps/server/src/persistence/commandWatchProjection.ts",
+      "packages/shared/src/commandWatch.ts",
+      "packages/shared/src/untrustedText.ts",
+    ]);
+  });
+
   it("keeps optional feature stacks off the serve path", () => {
     const graph = staticGraph("src/cliMain.ts");
     const reached = (pattern: RegExp) => graph.files.filter((file) => pattern.test(file));
@@ -608,6 +631,16 @@ describe.skipIf(!hasCurrentBuild)("built server bundle pull request watches", ()
     expect(boot).toContain("function summarizePullRequestWatches(");
     expect(boot).not.toContain("function decidePullRequestWatch(");
     expect(boot).not.toContain("function renderPullRequestWatchWake(");
+  });
+
+  it("keeps the command watch runner, rules, SQL and tools out of the boot chunks", () => {
+    const cliChunk = readFileSync(builtEntry, "utf8").match(/import\("(\.\/cliMain[^"]+)"\)/u)?.[1];
+    const serve = builtStaticClosure(path.resolve(serverRoot, "dist", cliChunk!));
+    for (const chunk of serve.chunks) {
+      expect(readFileSync(chunk, "utf8")).not.toMatch(
+        /^\/\/#region (?:src\/(?:commandWatch\/commandWatchRuntime|orchestration\/commandWatchUpdates|persistence\/commandWatchProjection|agentControl\/Mcp\/commandWatchTools)|\.\.\/\.\.\/packages\/shared\/src\/(?:commandWatch|untrustedText))\.ts$/mu,
+      );
+    }
   });
 
   it("keeps the watch sweep and its host-read adapters out of the boot chunks", () => {

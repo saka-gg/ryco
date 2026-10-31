@@ -12,7 +12,11 @@ import { extractThreadReferences } from "@ryco/shared/threadMentions";
 import { AGENT_CONTROL_DEVICE_TOOL } from "../../providerTools/deviceToolGateway.ts";
 import { LocalTaskService } from "../../tasks/LocalTaskService.ts";
 import { makeDelegatedTaskControl } from "../delegatedTaskControl.ts";
-import { CompletionReturnRepository } from "../../persistence/Layers/AgentControlCompletionReturns.ts";
+import {
+  CompletionReturnRepository,
+  isPendingCompletionReturn,
+} from "../../persistence/Layers/AgentControlCompletionReturns.ts";
+import { CommandWatchService } from "../../commandWatch/CommandWatchService.ts";
 import { AgentControlProposalRepository } from "../../persistence/Services/AgentControlProposals.ts";
 import * as SqlClient from "effect/sql/SqlClient";
 import { TerminalManager } from "../../terminal/Services/Manager.ts";
@@ -34,7 +38,11 @@ import { TerminalManager } from "../../terminal/Services/Manager.ts";
  *
  * @module AgentControlMcpServer
  */
-import { AGENT_CONTROL_CAPABILITIES, AGENT_CONTROL_QUEUE_MCP_TOOLS } from "@ryco/contracts";
+import {
+  AGENT_CONTROL_CAPABILITIES,
+  AGENT_CONTROL_COMMAND_WATCH_MCP_TOOLS,
+  AGENT_CONTROL_QUEUE_MCP_TOOLS,
+} from "@ryco/contracts";
 import { Effect, Exit, Layer, Option, Scope, Stream } from "effect";
 import { ServerConfig } from "../../config.ts";
 import { CliProxyService } from "../../cliProxy/CliProxyService.ts";
@@ -99,6 +107,7 @@ const makeAgentControlMcpServer = Effect.gen(function* () {
   const sql = yield* Effect.serviceOption(SqlClient.SqlClient);
   const localTasks = yield* Effect.serviceOption(LocalTaskService);
   const cliProxy = yield* Effect.serviceOption(CliProxyService);
+  const commandWatches = yield* Effect.serviceOption(CommandWatchService);
   const toolDeps = {
     policy,
     proposals,
@@ -256,7 +265,31 @@ const makeAgentControlMcpServer = Effect.gen(function* () {
             ),
         })
       : queueTools;
-  const tools = withCompleteAgentControlCatalog(deviceTools);
+  // Command watches on the caller's own chat. Their module loads the first time a session that
+  // may watch commands lists or calls tools, never at boot.
+  const watchTools = Option.isSome(commandWatches)
+    ? withLazyAgentControlTools(deviceTools, {
+        names: Object.values(AGENT_CONTROL_COMMAND_WATCH_MCP_TOOLS),
+        writeNames: [
+          AGENT_CONTROL_COMMAND_WATCH_MCP_TOOLS.watch,
+          AGENT_CONTROL_COMMAND_WATCH_MCP_TOOLS.unwatch,
+        ],
+        mayUse: (session) =>
+          session.grantedCapabilities.includes(AGENT_CONTROL_CAPABILITIES.watchCommands),
+        load: () =>
+          import("../Mcp/commandWatchTools.ts").then((module) =>
+            module.withCommandWatchTools(deviceTools, {
+              policy,
+              registry,
+              projections,
+              watches: commandWatches.value,
+              completionReturns: Option.getOrUndefined(completionReturns),
+              isPendingCompletionReturn,
+            }),
+          ),
+      })
+    : deviceTools;
+  const tools = withCompleteAgentControlCatalog(watchTools);
 
   // Start/stop transitions are serialized so a rapid settings flip cannot
   // interleave a start with a teardown. `shuttingDown` latches inside the

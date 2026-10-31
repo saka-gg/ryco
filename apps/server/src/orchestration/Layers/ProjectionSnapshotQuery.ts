@@ -49,6 +49,8 @@ import {
   ThreadFollowUpQueueShell,
   ThreadPullRequestWatches,
   ThreadPullRequestWatchShell,
+  ThreadCommandWatches,
+  PositiveInt,
   TrimmedNonEmptyString,
   ThreadUsageLimit,
   TurnDispatchMode,
@@ -56,6 +58,7 @@ import {
 } from "@ryco/contracts";
 import { pullRequestWatchShellAt } from "@ryco/shared/pullRequestWatchSummary";
 import { loadFollowUpQueueProjection } from "../../persistence/followUpQueueProjectionLoader.ts";
+import { loadCommandWatchProjection } from "../../persistence/commandWatchProjectionLoader.ts";
 import { readWorktreePullRequestLinks } from "@ryco/shared/worktreePullRequests";
 import { Clock, Deferred, Effect, Layer, Option, Schema, type Scope, Struct } from "effect";
 import { backgroundWorkCheckpoint } from "@ryco/shared/backgroundWork";
@@ -149,6 +152,8 @@ const ProjectionThreadDbRowSchema = ProjectionThread.mapFields(
     pullRequestWatches: Schema.NullOr(Schema.fromJsonString(ThreadPullRequestWatchShell)),
     // Computed by the query from the queue tables; null while the queue is empty.
     followUpQueueSummary: Schema.NullOr(Schema.fromJsonString(ThreadFollowUpQueueShell)),
+    // Active command watches; null while none is.
+    commandWatchCount: Schema.NullOr(PositiveInt),
   }),
 );
 const ProjectionThreadShellDbRowSchema = ProjectionThreadDbRowSchema.mapFields(
@@ -180,6 +185,9 @@ const pullRequestWatchShellField = (
   const shell = pullRequestWatchShellAt(summary, nowMs);
   return shell === null ? {} : { pullRequestWatches: shell };
 };
+/** A thread shell's `commandWatchCount` key: left out while none is active. */
+const commandWatchCountField = (count: typeof PositiveInt.Type | null) =>
+  count === null ? {} : { commandWatchCount: count };
 /** A thread shell's `followUpQueueSummary` key: left out while the queue is empty. */
 const followUpQueueSummaryField = (
   summary: ThreadFollowUpQueueShell | null,
@@ -931,6 +939,11 @@ const makeProjectionSnapshotQueryOn = Effect.fn("makeProjectionSnapshotQueryOn")
     deleted_at AS "deletedAt",
     repository_identity_json AS "repositoryIdentityJson"
   `;
+  // The same for command watches: their count, NULL also while none is active.
+  const commandWatchCountColumn = sql`(
+    SELECT command_rows.active_count FROM projection_thread_command_watches command_rows
+    WHERE command_rows.thread_id = projection_threads.thread_id AND command_rows.active_count > 0
+  )`;
   // One primary-key lookup per thread row; NULL for threads that never watched.
   const pullRequestWatchSummaryColumn = sql`(
     SELECT watch_rows.summary_json FROM projection_thread_pull_request_watches watch_rows
@@ -1000,7 +1013,8 @@ const makeProjectionSnapshotQueryOn = Effect.fn("makeProjectionSnapshotQueryOn")
     lineage_source_message_id AS "lineageSourceMessageId",
     lineage_source_turn_id AS "lineageSourceTurnId",
     ${pullRequestWatchSummaryColumn} AS "pullRequestWatches",
-    ${followUpQueueSummaryColumn} AS "followUpQueueSummary"
+    ${followUpQueueSummaryColumn} AS "followUpQueueSummary",
+    ${commandWatchCountColumn} AS "commandWatchCount"
   `;
 
   // Every row, deleted ones included: the command read model and the full snapshot need them.
@@ -1402,6 +1416,21 @@ const makeProjectionSnapshotQueryOn = Effect.fn("makeProjectionSnapshotQueryOn")
         ),
       ),
     );
+
+  // Every thread's command watches, for the command read model only. One probe first; the read
+  // (`commandWatchProjection.ts`) loads only when a row exists.
+  const readCommandWatches = Effect.gen(function* () {
+    const probe = yield* sql`SELECT 1 FROM projection_thread_command_watches LIMIT 1`;
+    if (probe.length === 0) return new Map<ThreadId, ThreadCommandWatches>();
+    return yield* (yield* loadCommandWatchProjection).readCommandWatches(sql, ThreadCommandWatches);
+  }).pipe(
+    Effect.mapError(
+      toPersistenceSqlOrDecodeError(
+        "ProjectionSnapshotQuery.getCommandReadModel:listCommandWatches:query",
+        "ProjectionSnapshotQuery.getCommandReadModel:listCommandWatches:decodeRows",
+      ),
+    ),
+  );
 
   // Every thread's full watch state (active and ended), for the command read model only.
   const listThreadPullRequestWatchRows = SqlSchema.findAll({
@@ -1828,7 +1857,8 @@ const makeProjectionSnapshotQueryOn = Effect.fn("makeProjectionSnapshotQueryOn")
           lineage_source_message_id AS "lineageSourceMessageId",
           lineage_source_turn_id AS "lineageSourceTurnId",
           ${pullRequestWatchSummaryColumn} AS "pullRequestWatches",
-          ${followUpQueueSummaryColumn} AS "followUpQueueSummary"
+          ${followUpQueueSummaryColumn} AS "followUpQueueSummary",
+          ${commandWatchCountColumn} AS "commandWatchCount"
         FROM projection_threads
         WHERE thread_id = ${threadId}
           AND deleted_at IS NULL
@@ -3195,6 +3225,7 @@ const makeProjectionSnapshotQueryOn = Effect.fn("makeProjectionSnapshotQueryOn")
             ),
           ),
           readFollowUpQueues("ProjectionSnapshotQuery.getCommandReadModel"),
+          readCommandWatches,
         ]),
       )
       .pipe(
@@ -3211,6 +3242,7 @@ const makeProjectionSnapshotQueryOn = Effect.fn("makeProjectionSnapshotQueryOn")
             stateRows,
             pullRequestWatchRows,
             followUpQueuesByThreadId,
+            commandWatchesByThreadId,
           ]) =>
             Effect.sync(() => {
               let updatedAt: string | null = null;
@@ -3361,6 +3393,7 @@ const makeProjectionSnapshotQueryOn = Effect.fn("makeProjectionSnapshotQueryOn")
                 }
                 const pullRequestWatchState = pullRequestWatchesByThread.get(row.threadId);
                 const followUpQueue = followUpQueuesByThreadId.get(row.threadId);
+                const commandWatchState = commandWatchesByThreadId.get(row.threadId);
                 threads.push(
                   withThreadLineage(
                     {
@@ -3388,6 +3421,7 @@ const makeProjectionSnapshotQueryOn = Effect.fn("makeProjectionSnapshotQueryOn")
                       usageLimit: row.usageLimit ?? null,
                       ...(pullRequestWatchState === undefined ? {} : { pullRequestWatchState }),
                       ...(followUpQueue === undefined ? {} : { followUpQueue }),
+                      ...(commandWatchState === undefined ? {} : { commandWatchState }),
                       deletedAt: row.deletedAt,
                       trashedAt: row.trashedAt,
                       messages: userMessageAnchorsByThread.get(row.threadId) ?? [],
@@ -3640,6 +3674,7 @@ const makeProjectionSnapshotQueryOn = Effect.fn("makeProjectionSnapshotQueryOn")
                     ),
                     ...pullRequestWatchShellField(row.pullRequestWatches, nowMs),
                     ...followUpQueueSummaryField(row.followUpQueueSummary),
+                    ...commandWatchCountField(row.commandWatchCount),
                   },
                   projectionThreadLineage(row),
                 ),
@@ -4069,6 +4104,7 @@ const makeProjectionSnapshotQueryOn = Effect.fn("makeProjectionSnapshotQueryOn")
             ),
             ...pullRequestWatchShellField(threadRow.value.pullRequestWatches, Date.now()),
             ...followUpQueueSummaryField(threadRow.value.followUpQueueSummary),
+            ...commandWatchCountField(threadRow.value.commandWatchCount),
           } satisfies OrchestrationThreadShell,
           projectionThreadLineage(threadRow.value),
         ),

@@ -17,7 +17,7 @@ import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
 import { open } from "node:fs/promises";
 
-import { sanitizeDisplayText } from "@ryco/shared/displayText";
+import { sanitizeUntrustedLine } from "@ryco/shared/untrustedText";
 
 import { RYCO_THREAD_ID_ENV } from "./threadAttributionEnv.ts";
 
@@ -77,7 +77,7 @@ export function parseLsofListeners(output: string): ReadonlyArray<LocalListener>
       pid = Number.isSafeInteger(parsed) && parsed > 0 ? parsed : null;
       processName = null;
     } else if (tag === "c") {
-      processName = sanitizeDisplayText(value, PROCESS_NAME_MAX_CHARS) || null;
+      processName = sanitizeUntrustedLine(value, PROCESS_NAME_MAX_CHARS) || null;
     } else if (tag === "n" && pid !== null) {
       const name = value.split(" ", 1)[0] ?? "";
       const colon = name.lastIndexOf(":");
