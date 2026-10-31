@@ -6,10 +6,7 @@ import { buildTemporaryWorktreeBranchName } from "@ryco/shared/git";
 import { excludeChatProjects } from "@ryco/shared/projectKind";
 import { KeyboardAvoidingView, useKeyboardState } from "react-native-keyboard-controller";
 import { StackActions, type StaticScreenProps, useNavigation } from "@react-navigation/native";
-import {
-  linkedPromptDraftAction,
-  PROMPT_LINK_LOOKUP_WAIT_MS,
-} from "@ryco/client-runtime/promptLinks";
+import { PROMPT_LINK_LOOKUP_WAIT_MS } from "@ryco/client-runtime/promptLinks";
 import { promptLinkSearchFromParams } from "@ryco/shared/promptLinks";
 import { useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
 import { Alert, Pressable, ScrollView, TextInput, View } from "react-native";
@@ -72,6 +69,7 @@ import {
 import {
   CLEARED_PROMPT_LINK_PARAMS,
   isMobilePromptLinkLookupSettled,
+  mobilePromptLinkDraftAction,
   planMobilePromptLink,
 } from "./promptLinkModel";
 import { useNewTaskRepository } from "./useNewTaskRepository";
@@ -193,6 +191,8 @@ function NewTaskContent(props: NewTaskRouteScreenProps) {
   const [workspacePickerVisible, setWorkspacePickerVisible] = useState(false);
   const [failure, setFailure] = useState<{ readonly message: string } | null>(null);
   const [attachmentError, setAttachmentError] = useState<string | null>(null);
+  // A prompt link's notice (`promptLinkModel.ts`), until the user dismisses it.
+  const [linkNotice, setLinkNotice] = useState<string | null>(null);
   const placeholderColor = useThemeColor("--color-placeholder");
   const textColor = useThemeColor("--color-foreground");
   const serverConfigs = useEnvironmentServerConfigs();
@@ -438,8 +438,11 @@ function NewTaskContent(props: NewTaskRouteScreenProps) {
       return;
     }
     // Nothing is sent: the draft shows what the link asked for, and the user sends it.
+    const movesProject =
+      plan.target !== null &&
+      (plan.target.environmentId !== environmentId || plan.target.projectId !== projectId);
     const apply = () => {
-      if (plan.target) selectProject(plan.target);
+      if (plan.target && movesProject) selectProject(plan.target);
       if (plan.target && plan.worktreeId) {
         locationEdited.current = true;
         setWorktreeSelection({ kind: "existing", worktreeId: plan.worktreeId });
@@ -450,22 +453,28 @@ function NewTaskContent(props: NewTaskRouteScreenProps) {
       }
       if (plan.prompt.length > 0) setPrompt(plan.prompt);
       resetAttempt();
-      Alert.alert("Prompt from a link", plan.notice);
+      // It stays on the sheet until dismissed: the prompt must be read before it is sent.
+      setLinkNotice(plan.notice);
     };
-    // Typed text is never replaced, nor moved to another project, without asking.
-    const linkedPrompt = plan.prompt.length > 0;
-    const action = linkedPrompt
-      ? linkedPromptDraftAction(prompt, plan.prompt)
-      : prompt.trim().length > 0 && plan.target !== null
-        ? "ask"
-        : "fill";
+    // The user's text, attachments and hand-picked choices never change without asking.
+    const action = mobilePromptLinkDraftAction(plan, {
+      prompt,
+      attachments: attachments.length,
+      environmentId,
+      projectId,
+      worktreeId: worktreeSelection.kind === "existing" ? worktreeSelection.worktreeId : null,
+      modelSelection,
+      modelEdited: modelEdited.current,
+      locationEdited: locationEdited.current,
+    });
     if (action !== "ask") {
       apply();
       return;
     }
+    const linkedPrompt = plan.prompt.length > 0;
     Alert.alert(
       "Linked prompt ready",
-      `${linkedPrompt ? "Replace your draft with the linked prompt?" : "Keep your text and start this task where the link says?"} ${plan.notice}`,
+      `${linkedPrompt ? "Your task holds your own text, attachments or choices. Replace its text with the linked prompt?" : "Your task holds your own text, attachments or choices. Start it where the link says?"} ${plan.notice}`,
       [
         { text: "Keep mine", style: "cancel" },
         { text: linkedPrompt ? "Replace" : "Use the link", onPress: apply },
@@ -665,6 +674,15 @@ function NewTaskContent(props: NewTaskRouteScreenProps) {
           {attachmentError ? (
             <View className="mb-4">
               <ErrorBanner message={attachmentError} />
+            </View>
+          ) : null}
+          {linkNotice ? (
+            <View className="mb-4 gap-2 rounded-2xl border border-border bg-card px-3.5 py-3">
+              <Text className="font-ryco-medium text-sm text-foreground">Prompt from a link</Text>
+              <Text className="text-sm font-sans text-foreground-muted">{linkNotice}</Text>
+              <Pressable accessibilityRole="button" hitSlop={8} onPress={() => setLinkNotice(null)}>
+                <Text className="font-ryco-medium text-sm text-foreground">Dismiss</Text>
+              </Pressable>
             </View>
           ) : null}
 

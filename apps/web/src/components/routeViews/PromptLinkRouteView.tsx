@@ -3,7 +3,6 @@ import {
   PROMPT_LINK_LOOKUP_WAIT_MS,
   promptLinkChatEnvironmentId,
   promptLinkModelNote,
-  promptLinkPullRequestCheckoutNote,
   resolvePromptLinkModelSelection,
   resolvePromptLinkPullRequest,
 } from "@ryco/client-runtime/promptLinks";
@@ -53,7 +52,8 @@ import {
   useStore,
 } from "../../store";
 import { buildThreadRouteParams, resolveThreadRouteTarget } from "../../threadRoutes";
-import { placeLinkedPrompt } from "../promptLinks/linkedPrompt";
+import { type LinkedDraftLocation, placeLinkedPrompt } from "../promptLinks/linkedPrompt";
+import { offerPromptLinkCheckout } from "../promptLinks/promptLinkCheckoutOffers";
 import {
   resolvePromptLinkLookup,
   type PromptLinkLookupState,
@@ -64,7 +64,7 @@ import { SidebarInset } from "../ui/sidebar";
 
 /** The `/new` route body, loaded by the route file through `lazyRouteComponent`. */
 export function PromptLinkRoute(): ReactElement {
-  // Read raw: the router's search parsing turns `prompt=123` into a number.
+  // The router keeps a link's keys as written (`lib/routerSearch.ts`), so the query is the text.
   const search = useLocation({ select: (location) => location.searchStr });
   const locationKey = useLocation({
     select: (location) => location.state.__TSR_key ?? location.href,
@@ -193,17 +193,16 @@ function PromptLinkOpener(props: {
     return target?.kind === "draft" ? target.draftId : null;
   };
 
-  /** The link's model and notes, for a draft on `environmentId`. */
-  const modelRequest = (environmentId: EnvironmentId, draftId: DraftId) => {
-    if (link.kind !== "new" || link.provider === null) return { note: null, apply: () => {} };
+  /** The link's model and the note about it, for a draft on `environmentId`. */
+  const modelRequest = (environmentId: EnvironmentId) => {
+    if (link.kind !== "new" || link.provider === null) {
+      return { note: null, modelSelection: null };
+    }
     const request = { provider: link.provider, model: link.model };
     const resolved = resolvePromptLinkModelSelection(readProviders(environmentId), request);
     return {
       note: promptLinkModelNote(request, resolved),
-      apply: () => {
-        if (resolved)
-          useComposerDraftStore.getState().setModelSelection(draftId, resolved.selection);
-      },
+      modelSelection: resolved?.selection ?? null,
     };
   };
 
@@ -225,39 +224,27 @@ function PromptLinkOpener(props: {
       return;
     }
     setState({ status: "opened" });
-    const model = modelRequest(project.environmentId, draftId);
+    const model = modelRequest(project.environmentId);
     const notes: Array<string | null> = [model.note];
-    let applyLocation = () => {};
+    let location: LinkedDraftLocation | null = null;
+    let onPlaced: (() => void) | undefined;
     if (pullRequest !== null) {
-      const store = useComposerDraftStore.getState();
       const { worktree } = pullRequest;
       const worktreePath = worktree?.worktreePath ?? null;
       if (worktree && worktreePath !== null) {
-        // The pull request is checked out already: the draft runs there. This is the
-        // "existing worktree" row of `NewThreadWorkLocation.logic.ts`; importing that module
-        // here would split it out of the chat route's chunk.
-        applyLocation = () =>
-          store.setDraftThreadContext(draftId, {
-            envMode: "local",
-            worktreePath,
-            branch: worktree.branch || null,
-            worktreeSource: null,
-          });
+        // The pull request is checked out already: the draft runs there, and nothing is set up.
+        location = { worktreePath, branch: worktree.branch || null };
       } else if (
         readHostedRpcCapability(WS_METHODS.gitCreateWorktreeForProject, project.environmentId)
           .allowed
       ) {
-        // Recorded only: the worktree is created by Send, the way a picked pull request is.
-        notes.push(promptLinkPullRequestCheckoutNote(pullRequest.pullRequest));
-        const { number } = pullRequest.pullRequest;
-        applyLocation = () =>
-          store.setDraftThreadContext(draftId, {
-            envMode: "worktree",
-            worktreePath: null,
-            branch: null,
-            worktreeSource: { kind: "pr", number, label: `#${number}` },
-            worktreeBranchName: null,
-            fetchOrigin: true,
+        // Never recorded from a link: creating the worktree runs the project's setup script on
+        // the pull request's code. The composer offers it, and only the user's click picks it.
+        onPlaced = () =>
+          offerPromptLinkCheckout(draftId, {
+            environmentId: project.environmentId,
+            projectId: project.id,
+            pullRequest: pullRequest.pullRequest,
           });
       } else {
         notes.push(
@@ -267,10 +254,9 @@ function PromptLinkOpener(props: {
     }
     placeLinkedPrompt(draftId, prompt, {
       notes,
-      apply: () => {
-        model.apply();
-        applyLocation();
-      },
+      modelSelection: model.modelSelection,
+      location,
+      ...(onPlaced ? { onPlaced } : {}),
     });
   };
 
@@ -309,8 +295,11 @@ function PromptLinkOpener(props: {
       return;
     }
     setState({ status: "opened" });
-    const model = modelRequest(environmentId, draftId);
-    placeLinkedPrompt(draftId, prompt, { notes: [model.note], apply: model.apply });
+    const model = modelRequest(environmentId);
+    placeLinkedPrompt(draftId, prompt, {
+      notes: [model.note],
+      modelSelection: model.modelSelection,
+    });
   };
 
   /** "Start without a project": a pull request link names its pull request in the prompt. */

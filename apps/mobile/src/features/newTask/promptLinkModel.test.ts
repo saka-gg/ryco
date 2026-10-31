@@ -19,7 +19,9 @@ import { promptLinkSearchFromParams } from "@ryco/shared/promptLinks";
 import {
   CLEARED_PROMPT_LINK_PARAMS,
   isMobilePromptLinkLookupSettled,
+  mobilePromptLinkDraftAction,
   planMobilePromptLink,
+  type MobilePromptLinkSheet,
 } from "./promptLinkModel";
 
 const ENV = EnvironmentId.make("env-phone");
@@ -162,6 +164,60 @@ describe("planMobilePromptLink", () => {
       "provider",
       "repo",
     ]);
+  });
+});
+
+describe("mobilePromptLinkDraftAction", () => {
+  const sheet = (extra: Partial<MobilePromptLinkSheet> = {}): MobilePromptLinkSheet => ({
+    prompt: "",
+    attachments: 0,
+    environmentId: ENV,
+    projectId: PROJECT,
+    worktreeId: null,
+    modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.4" },
+    modelEdited: false,
+    locationEdited: false,
+    ...extra,
+  });
+  const draftPlan = (params: Record<string, string>, extra?: { withPullRequest?: boolean }) => {
+    const planned = plan(params, extra);
+    if (planned.kind !== "draft") throw new Error("not a draft");
+    return planned;
+  };
+  const withModel = draftPlan({
+    prompt: "Fix it",
+    repo: "saka-gg/ryco",
+    provider: "codex",
+    model: "gpt-5.5",
+  });
+
+  it("fills an untouched sheet, and keeps one that already matches the link", () => {
+    expect(mobilePromptLinkDraftAction(withModel, sheet())).toBe("fill");
+    expect(
+      mobilePromptLinkDraftAction(
+        withModel,
+        sheet({
+          prompt: "Fix it",
+          modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.5" },
+        }),
+      ),
+    ).toBe("keep");
+  });
+
+  it("asks before it changes the user's text, attachments, or a model or checkout they picked", () => {
+    expect(mobilePromptLinkDraftAction(withModel, sheet({ prompt: "Mine" }))).toBe("ask");
+    // No text, but the linked prompt would be sent with the user's images.
+    expect(mobilePromptLinkDraftAction(withModel, sheet({ attachments: 1 }))).toBe("ask");
+    expect(mobilePromptLinkDraftAction(withModel, sheet({ modelEdited: true }))).toBe("ask");
+    // A pull request link moves the task to the checkout that carries it.
+    const pullRequest = draftPlan({ pr: "saka-gg/ryco/42" }, { withPullRequest: true });
+    expect(mobilePromptLinkDraftAction(pullRequest, sheet({ locationEdited: true }))).toBe("ask");
+    expect(mobilePromptLinkDraftAction(pullRequest, sheet())).toBe("fill");
+    // Moving to another project resets the sheet's model, so a picked model counts.
+    const elsewhere = sheet({ projectId: ProjectId.make("project-other"), modelEdited: true });
+    expect(
+      mobilePromptLinkDraftAction(draftPlan({ prompt: "x", repo: "saka-gg/ryco" }), elsewhere),
+    ).toBe("ask");
   });
 });
 

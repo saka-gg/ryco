@@ -26,6 +26,8 @@ import {
   createRootRoute,
   createRoute,
   createRouter,
+  lazyRouteComponent,
+  useParams,
 } from "@tanstack/react-router";
 import { act } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
@@ -33,6 +35,11 @@ import { page } from "vite-plus/test/browser";
 import { render } from "vitest-browser-react";
 
 import { useComposerDraftStore, type DraftId } from "../../composerDraftStore";
+import {
+  parseRouterSearch,
+  stringifyRouterSearch,
+  validatePromptLinkSearch,
+} from "../../lib/routerSearch";
 import {
   __resetEnvironmentApiOverridesForTests,
   __setEnvironmentApiOverrideForTests,
@@ -46,9 +53,11 @@ import { hostedHubStore } from "../../hostedHub/state";
 import type { HostedHubNode } from "../../hostedHub/types";
 import { AppAtomRegistryProvider } from "../../rpc/atomRegistry";
 import { useStore } from "../../store";
-import { PromptLinkRoute } from "../routeViews/PromptLinkRouteView";
+import { ComposerBannerStack } from "../chat/ComposerBannerStack";
+import { usePromptLinkCheckoutBannerItem } from "../chat/promptLinkCheckoutBanner";
 import { SidebarProvider } from "../ui/sidebar";
 import { toastManager } from "../ui/toast";
+import { resetPromptLinkCheckoutOffersForTests } from "./promptLinkCheckoutOffers";
 
 const ENV = EnvironmentId.make("env-prompt-links");
 const PROJECT = ProjectId.make("project-ryco");
@@ -202,15 +211,34 @@ function fakeNode() {
 
 let mounted: Awaited<ReturnType<typeof render>> | null = null;
 
+/** The draft page with its composer notices, as the chat view shows them. */
+function DraftPage() {
+  const { draftId } = useParams({ strict: false }) as { readonly draftId: DraftId };
+  const session = useComposerDraftStore((store) => store.getDraftSession(draftId));
+  const item = usePromptLinkCheckoutBannerItem({ draftId, draftSession: session });
+  return (
+    <>
+      <p>Draft page</p>
+      <ComposerBannerStack items={item ? [item] : []} />
+    </>
+  );
+}
+
 async function mountAt(url: string) {
   const rootRoute = createRootRoute({ component: () => <Outlet /> });
   const routeTree = rootRoute.addChildren([
-    createRoute({ getParentRoute: () => rootRoute, path: "/new", component: PromptLinkRoute }),
+    // The app's own search handling, `/new` validation and lazy view: the router settles the
+    // address before the view reads it, and a link's text must survive that.
     createRoute({
       getParentRoute: () => rootRoute,
-      path: "/draft/$draftId",
-      component: () => <p>Draft page</p>,
+      path: "/new",
+      validateSearch: validatePromptLinkSearch,
+      component: lazyRouteComponent(
+        () => import("../routeViews/PromptLinkRouteView"),
+        "PromptLinkRoute",
+      ),
     }),
+    createRoute({ getParentRoute: () => rootRoute, path: "/draft/$draftId", component: DraftPage }),
     createRoute({
       getParentRoute: () => rootRoute,
       path: "/$environmentId/$threadId",
@@ -220,6 +248,8 @@ async function mountAt(url: string) {
   const router = createRouter({
     routeTree,
     history: createMemoryHistory({ initialEntries: [url] }),
+    parseSearch: parseRouterSearch,
+    stringifySearch: stringifyRouterSearch,
   });
   mounted = await render(
     <AppAtomRegistryProvider>
@@ -265,6 +295,7 @@ afterEach(async () => {
   resetPrimaryEnvironmentDescriptorForTests();
   useStore.setState({ activeEnvironmentId: null, environmentStateById: {} });
   resetHostedEnvironmentSessionsForTests();
+  resetPromptLinkCheckoutOffersForTests();
   hostedHubStore.setState(hostedHubStore.getInitialState(), true);
   vi.unstubAllEnvs();
   document.body.innerHTML = "";
@@ -353,6 +384,52 @@ describe("prompt links", () => {
     expect(draftPrompt(draftId)).toBe("Second");
   });
 
+  it("asks before it adds a prompt to a draft with contexts, or switches the model of a draft with text", async () => {
+    seedNode({ pullRequestThread: false });
+    __setEnvironmentApiOverrideForTests(ENV, fakeNode().api);
+    const toasts = vi.spyOn(toastManager, "add");
+    const first = { prompt: "First", repo: "saka-gg/ryco", provider: "codex", model: "gpt-5.4" };
+    const router = await mountAt(link(first));
+    const draftId = await openedDraft(router);
+    await vi.waitFor(() => expect(draftPrompt(draftId)).toBe("First"));
+    const modelOf = () => {
+      const draft = useComposerDraftStore.getState().getComposerDraft(draftId);
+      return draft?.activeProvider ? draft.modelSelectionByProvider[draft.activeProvider] : null;
+    };
+    expect(modelOf()?.model).toBe("gpt-5.4");
+
+    // The same prompt, another model: the draft keeps its model until the user agrees.
+    toasts.mockClear();
+    await router.navigate({ href: link({ ...first, model: "gpt-5.5" }) });
+    await vi.waitFor(() =>
+      expect(toasts).toHaveBeenCalledWith(
+        expect.objectContaining({ title: "Linked prompt ready", timeout: 0 }),
+      ),
+    );
+    expect(modelOf()?.model).toBe("gpt-5.4");
+
+    // No text, but an issue context the linked prompt would be sent with.
+    useComposerDraftStore.getState().setPrompt(draftId, "");
+    useComposerDraftStore.getState().addSourceControlContext(draftId, {
+      id: "issue-1",
+      kind: "issue",
+      provider: "github",
+      reference: "saka-gg/ryco#1",
+      detail: { provider: "github", number: 1, title: "An issue", url: "", state: "open" },
+      fetchedAt: AT,
+      staleAfter: AT,
+    } as never);
+    expect(draftPrompt(draftId)).toBe("");
+    toasts.mockClear();
+    await router.navigate({ href: link({ prompt: "Second", repo: "saka-gg/ryco" }) });
+    await vi.waitFor(() =>
+      expect(toasts).toHaveBeenCalledWith(
+        expect.objectContaining({ title: "Linked prompt ready", timeout: 0 }),
+      ),
+    );
+    expect(draftPrompt(draftId)).toBe("");
+  });
+
   it("removes hidden characters and warns until the warning is dismissed", async () => {
     seedNode({ pullRequestThread: false });
     __setEnvironmentApiOverrideForTests(ENV, fakeNode().api);
@@ -406,7 +483,7 @@ describe("prompt links", () => {
     expect(node.git.createWorktreeForProject).not.toHaveBeenCalled();
   });
 
-  it("records a pull request checkout for Send when no thread works on it yet", async () => {
+  it("offers the pull request checkout in the composer, and records it only when the user clicks", async () => {
     seedNode({ pullRequestThread: false });
     const node = fakeNode();
     __setEnvironmentApiOverrideForTests(ENV, node.api);
@@ -417,21 +494,62 @@ describe("prompt links", () => {
     const draftId = await openedDraft(router);
 
     await vi.waitFor(() => expect(draftPrompt(draftId)).toBe("Review it"));
+    // The link leaves the draft in the project's checkout: Send would set nothing up.
     expect(useComposerDraftStore.getState().getDraftSession(draftId)).toMatchObject({
-      envMode: "worktree",
+      envMode: "local",
       worktreePath: null,
-      worktreeSource: { kind: "pr", number: 7 },
+      worktreeSource: null,
     });
     expect(toasts).toHaveBeenCalledWith(
       expect.objectContaining({
-        description: expect.stringContaining(
-          "Send checks out saka-gg/ryco#7 into a new worktree first, which runs your project's setup script on its code.",
-        ),
+        description: "This prompt came from a link. Read it before you send it.",
       }),
     );
-    // The checkout waits for Send.
+    // The composer says what the link is for until the user acts on it.
+    await expect.element(page.getByText("This link is for saka-gg/ryco#7")).toBeVisible();
+    const checkOut = page.getByRole("button", { name: "Check out #7 (runs your setup script)" });
+    await expect.element(checkOut).toBeVisible();
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    expect(useComposerDraftStore.getState().getDraftSession(draftId)?.worktreeSource).toBeNull();
+
+    await checkOut.click();
+    // Exactly what picking the pull request in "Work in … from …" records.
+    expect(useComposerDraftStore.getState().getDraftSession(draftId)).toMatchObject({
+      envMode: "worktree",
+      worktreePath: null,
+      branch: null,
+      worktreeSource: { kind: "pr", number: 7, label: "#7" },
+    });
+    await expect.element(page.getByText("This link is for saka-gg/ryco#7")).not.toBeInTheDocument();
+    // Even then the checkout waits for Send.
     expect(node.git.createWorktreeForProject).not.toHaveBeenCalled();
     expect(node.orchestration.dispatchCommand).not.toHaveBeenCalled();
+  });
+
+  it("drops the checkout offer when the user dismisses it", async () => {
+    seedNode({ pullRequestThread: false });
+    __setEnvironmentApiOverrideForTests(ENV, fakeNode().api);
+    const router = await mountAt(link({ pr: "saka-gg/ryco/7" }));
+    const draftId = await openedDraft(router);
+    await expect.element(page.getByText("This link is for saka-gg/ryco#7")).toBeVisible();
+
+    await page.getByRole("button", { name: "Dismiss the pull request checkout" }).click();
+    await expect.element(page.getByText("This link is for saka-gg/ryco#7")).not.toBeInTheDocument();
+    expect(useComposerDraftStore.getState().getDraftSession(draftId)?.worktreeSource).toBeNull();
+  });
+
+  it.each([
+    ["a number", "123"],
+    ["a quoted string", '"fix it"'],
+    ["true", "true"],
+    ["null", "null"],
+    ["JSON", '{"a":1}'],
+  ])("keeps a prompt that reads as %s exactly as written", async (_, prompt) => {
+    seedNode({ pullRequestThread: false });
+    __setEnvironmentApiOverrideForTests(ENV, fakeNode().api);
+    const router = await mountAt(link({ prompt, repo: "saka-gg/ryco" }));
+    const draftId = await openedDraft(router);
+    await vi.waitFor(() => expect(draftPrompt(draftId)).toBe(prompt));
   });
 
   it("waits on the hosted site until the selected node's session is adoptable", async () => {
