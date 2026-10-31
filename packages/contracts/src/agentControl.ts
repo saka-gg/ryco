@@ -233,6 +233,11 @@ export const AGENT_CONTROL_CAPABILITIES = {
   watchPullRequests: AgentControlCapability.make("pull-requests.watch"),
   /** Start, list and stop command watches on the caller's own chat (`ryco_watch_command`). */
   watchCommands: AgentControlCapability.make("commands.watch"),
+  /**
+   * Ask the user for a secret through a private card (`ryco_request_secret`); the node writes the
+   * answer into a Git-ignored dotenv file of the caller's own checkout.
+   */
+  requestSecrets: AgentControlCapability.make("secrets.request"),
   externalListProjects: AgentControlCapability.make("external.projects.list"),
   externalCreateTask: AgentControlCapability.make("external.tasks.create"),
   externalReadTask: AgentControlCapability.make("external.tasks.read"),

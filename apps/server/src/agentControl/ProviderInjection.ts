@@ -170,6 +170,7 @@ const grantedCapabilities = [
   AGENT_CONTROL_CAPABILITIES.manageLocalTasks,
   AGENT_CONTROL_CAPABILITIES.watchPullRequests,
   AGENT_CONTROL_CAPABILITIES.watchCommands,
+  AGENT_CONTROL_CAPABILITIES.requestSecrets,
 ] as const;
 
 const grantsDeviceControl = (capabilities: ReadonlyArray<string>): boolean =>

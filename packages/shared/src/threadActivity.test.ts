@@ -8,8 +8,6 @@ import {
   compareThreadActivitiesInLifecycleOrder,
   compareThreadActivitySequence,
   compactsOnRequest,
-  derivePendingThreadRequestState,
-  derivePendingThreadRequests,
   isContextCompactionActivity,
   isNativeCompactionCommand,
   isTerminalContextHandoffActivity,
@@ -20,6 +18,10 @@ import {
   retainThreadMessagesAfterRevert,
   retainTurnItemsAfterRevert,
 } from "./threadActivity.ts";
+import {
+  derivePendingThreadRequestState,
+  derivePendingThreadRequests,
+} from "./pendingThreadRequests.ts";
 
 function activity(id: string, kind = "tool.completed", payload: unknown = {}) {
   return {

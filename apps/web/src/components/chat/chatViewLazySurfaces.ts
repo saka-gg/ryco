@@ -47,6 +47,14 @@ export const LazyAgentControlApprovals = preloadableLazy(() =>
 );
 
 /**
+ * The private cards for an agent's secret requests (`ryco_request_secret`). Only threads whose
+ * agent asked for one load it.
+ */
+export const LazySecretRequestCards = preloadableLazy(() =>
+  import("./SecretRequestCards").then((module) => module.SecretRequestCards),
+);
+
+/**
  * The composer's delegation dock. Only threads that delegate, were delegated
  * or use Agent Control show it, so it loads right after the first frame.
  */
