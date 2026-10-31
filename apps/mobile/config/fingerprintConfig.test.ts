@@ -5,6 +5,8 @@ import * as NodePath from "node:path";
 
 import { describe, expect, it } from "vite-plus/test";
 
+import { UPDATE_SIGNING_CERTIFICATE } from "./testCertificates";
+
 const require = createRequire(import.meta.url);
 const { fileHookTransform } = require("../fingerprint.config.js") as {
   fileHookTransform: (
@@ -16,10 +18,7 @@ const { fileHookTransform } = require("../fingerprint.config.js") as {
 };
 
 const MOBILE_ROOT = NodePath.join(import.meta.dirname, "..");
-const CERTIFICATE = NodeFS.readFileSync(
-  NodePath.join(import.meta.dirname, "fixtures", "update-signing-certificate.pem"),
-  "utf8",
-);
+const CERTIFICATE = UPDATE_SIGNING_CERTIFICATE;
 
 const expoConfig = (codeSigningCertificate?: string) =>
   JSON.stringify({

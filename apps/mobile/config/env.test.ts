@@ -8,21 +8,12 @@ import {
   resolveMobileRepoRoot,
   resolveMobileUpdates,
 } from "./env";
+import { CERTIFICATE_WITHOUT_CODE_SIGNING, UPDATE_SIGNING_CERTIFICATE } from "./testCertificates";
 
 const PROJECT_ID = "0f8a2c9e-1234-4abc-9def-0123456789ab";
 const PROJECT_ROOT = "/workspace/apps/mobile";
 
-// Self-signed public certificates made for these tests (their private keys were discarded):
-// one as `npx expo-updates codesigning:generate` makes it (RSA, code signing), one without
-// the code-signing usage expo-updates requires.
-const CERTIFICATE = NodeFS.readFileSync(
-  NodePath.join(import.meta.dirname, "fixtures", "update-signing-certificate.pem"),
-  "utf8",
-);
-const CERTIFICATE_WITHOUT_CODE_SIGNING = NodeFS.readFileSync(
-  NodePath.join(import.meta.dirname, "fixtures", "update-certificate-without-code-signing.pem"),
-  "utf8",
-);
+const CERTIFICATE = UPDATE_SIGNING_CERTIFICATE;
 
 function readFrom(files: Record<string, string>) {
   return (path: string) => {
