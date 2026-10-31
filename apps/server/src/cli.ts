@@ -80,6 +80,7 @@ import {
   E2eeSessionListView,
 } from "./hubConnector/e2eeOperatorContract.ts";
 import { expandHomePath, resolveBaseDir } from "./os-jank.ts";
+import { runRequestedFlavorImport } from "./flavorImportStartup.ts";
 import { runServer } from "./server.ts";
 import { loadTerminalQrCode } from "./startupAccess.ts";
 import {
@@ -215,6 +216,11 @@ const BootstrapEnvelopeSchema = Schema.Struct({
    * `process.env` before any layer is built; unknown names are ignored.
    */
   shellEnvironment: Schema.optional(Schema.Record(Schema.String, Schema.String)),
+  /**
+   * Ryco Nightly only: the one Ryco data home this backend may copy from when Ryco left a copy
+   * request in its home (flavorImportStartup.ts). Honoured only in desktop mode.
+   */
+  flavorImport: Schema.optional(Schema.Struct({ allowedSourceHome: Schema.String })),
 });
 
 const modeFlag = Flag.Literals("mode", RuntimeMode.literals).pipe(
@@ -874,6 +880,9 @@ export const resolveServerConfig = (
       ...(desktopControlToken === undefined ? {} : { desktopControlToken }),
       ...(mode === "desktop" && bootstrap?.computerUseBridge
         ? { computerUseBridge: bootstrap.computerUseBridge }
+        : {}),
+      ...(mode === "desktop" && bootstrap?.flavorImport
+        ? { flavorImport: bootstrap.flavorImport }
         : {}),
       autoBootstrapProjectFromCwd,
       logWebSocketEvents,
@@ -3532,8 +3541,10 @@ const runServerCommand = (
     const config = yield* resolveServerConfig(flags, logLevel, { ...options, useNodeConfig: true });
     yield* refuseDesktopOwnedNode(config.baseDir);
     // resolveServerConfig has started the desktop pipe watch this race reads
-    // (initializeDesktopResourceTelemetry), so it must stay ahead of it.
-    return yield* runServer.pipe(
+    // (initializeDesktopResourceTelemetry), so it must stay ahead of it. A copy of Ryco's data
+    // that Ryco Nightly was asked for replaces its database before the server opens it.
+    return yield* runRequestedFlavorImport(config).pipe(
+      Effect.andThen(runServer),
       Effect.provideService(ServerConfig, config),
       withDesktopParentLifetime,
     );

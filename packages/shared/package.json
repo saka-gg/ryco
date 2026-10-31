@@ -529,6 +529,10 @@
       "types": "./src/desktopFlavor.ts",
       "import": "./src/desktopFlavor.ts"
     },
+    "./flavorImport": {
+      "types": "./src/flavorImport.ts",
+      "import": "./src/flavorImport.ts"
+    },
     "./desktopIdentity": {
       "types": "./src/desktopIdentity.ts",
       "import": "./src/desktopIdentity.ts"

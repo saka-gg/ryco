@@ -78,6 +78,28 @@ downgrades a binary over a database a newer one migrated.
   (`packages/shared/src/nightlyFeatures.ts`). The node is authoritative, from its own version.
 - CLI nodes keep the in-place npm `nightly` dist-tag.
 
+### Copying Ryco's data into Ryco Nightly
+
+Ryco can ask Ryco Nightly for a copy of its data. Ryco writes `import-requested.json` into
+Nightly's home; Nightly's backend takes the copy on its next start, before it opens its database,
+and reports the outcome in `import-result.json` beside it (`packages/shared/src/flavorImport.ts`,
+`apps/server/src/flavorImport/`). Nothing is ever written into Ryco's home.
+
+- Nightly copies only from the home Ryco handed over when it opened Nightly (`RYCO_STABLE_HOME`),
+  else `~/.ryco`, and never from its own. Links are refused, and a request older than an hour is
+  dropped without copying.
+- It copies the database (a live `VACUUM INTO`, as `ryco db backup` takes it), `settings.json`,
+  `keybindings.json`, `attachments/` and `task-files/`, and nothing else: never the node identity,
+  environment id, Hub state, secrets, saved connections, logs, backups or runtime files. Nightly
+  stays a node of its own and enrolls with the Hub by itself.
+- The copy is migrated to Nightly's schema, then scrubbed by a table policy
+  (`flavorImportTablePolicy.ts`; a new table must be classified there). Sessions, pairing links,
+  Agent Control integrations, Atlassian connections, pull request watches, follow-up queues,
+  restart continuations, provider session bindings and storage ownership are cleared; schedules
+  and chat goals are paused; unfinished proposals, operations and hand-offs are cancelled. A Ryco
+  database newer than Nightly is refused ("Update Ryco Nightly, then copy again").
+- Nightly's previous data is replaced only once everything is copied; a failed move puts it back.
+
 ### Rolling it out (`RYCO_DESKTOP_NIGHTLY_IDENTITY`)
 
 Before the split, nightly builds used the stable app's identity and data ("Ryco (Nightly)"). The
