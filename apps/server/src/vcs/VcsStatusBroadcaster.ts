@@ -519,6 +519,7 @@ export const layer = Layer.effect(
 
     const refreshRemoteStatus = Effect.fn("VcsStatusBroadcaster.refreshRemoteStatus")(function* (
       rawCwd: string,
+      options?: { readonly periodic?: boolean },
     ) {
       const cwd = normalizeCwd(rawCwd);
       // An explicit refresh or poll brings the remote-tracking refs up to date
@@ -537,7 +538,7 @@ export const layer = Layer.effect(
         cwd,
         "refresh",
         Effect.gen(function* () {
-          yield* workflow.invalidateRemoteStatus(cwd);
+          yield* workflow.invalidateRemoteStatus(cwd, options);
           const remote = yield* workflow.remoteStatus({ cwd });
           return yield* updateCachedRemoteStatus(cwd, remote, { publish: true });
         }),
@@ -589,7 +590,7 @@ export const layer = Layer.effect(
             return DEFAULT_VCS_STATUS_REFRESH_INTERVAL;
           }
 
-          const exit = yield* refreshRemoteStatus(cwd).pipe(Effect.exit);
+          const exit = yield* refreshRemoteStatus(cwd, { periodic: true }).pipe(Effect.exit);
           if (Exit.isSuccess(exit)) {
             yield* Ref.set(consecutiveFailuresRef, 0);
             return configuredInterval;

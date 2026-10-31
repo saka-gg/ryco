@@ -475,6 +475,114 @@ describe("pull request page handlers", () => {
     }),
   );
 
+  it.effect("reads a row again only when the host's fingerprint moved", () =>
+    Effect.gen(function* () {
+      let now = 1_000_000;
+      let details = 0;
+      let fingerprint: { status: string; remarks: string; revision?: string } = {
+        status: "OPEN MERGEABLE abc SUCCESS:3",
+        remarks: "0  0  0",
+        revision: "2026-10-30T00:00:00Z ready",
+      };
+      const asked: Array<{ readonly number: number; readonly reuseSinceMs?: number | undefined }> =
+        [];
+      const listCache = makeRepositoryListCache({ nowMs: () => now });
+      const { handlers } = makeContext(
+        {
+          getChangeRequestDetail: (input) =>
+            Effect.sync(
+              () =>
+                ({
+                  number: Number(input.reference),
+                  url: `https://github.com/acme/repo/pull/${input.reference}`,
+                  version: ++details,
+                }) as never,
+            ),
+          getChangeRequestWatchFingerprint: (input) =>
+            Effect.sync(() => {
+              asked.push({ number: input.number, reuseSinceMs: input.reuseSinceMs });
+              return fingerprint;
+            }),
+          addChangeRequestComment: () => Effect.succeed({} as never),
+        },
+        undefined,
+        { listCache },
+      );
+      const read = handlers[WS_METHODS.sourceControlGetChangeRequestDetail]({
+        cwd: "/repo",
+        reference: "42",
+        view: "row",
+      }).pipe(Effect.provide(handlerLayer));
+      const poll = () => {
+        now += 30_000;
+        return read;
+      };
+
+      expect(yield* read).toMatchObject({ number: 42, version: 1 });
+      // The first fingerprint comes before the second full read, which it then stands for.
+      expect(yield* poll()).toMatchObject({ version: 2 });
+      expect(yield* poll()).toMatchObject({ version: 2 });
+      expect(yield* poll()).toMatchObject({ version: 2 });
+      expect(details).toBe(2);
+      expect(asked.at(-1)).toEqual({ number: 42, reuseSinceMs: 0 });
+
+      // A check finished: the fingerprint moved.
+      fingerprint = { ...fingerprint, status: "OPEN MERGEABLE abc FAILURE:1,SUCCESS:2" };
+      expect(yield* poll()).toMatchObject({ version: 3 });
+      // So does a new title (the revision).
+      fingerprint = { ...fingerprint, revision: "2026-10-30T01:00:00Z ready" };
+      expect(yield* poll()).toMatchObject({ version: 4 });
+      expect(yield* poll()).toMatchObject({ version: 4 });
+
+      // A push or an agent turn refreshes the repository: the next fingerprint must be newer.
+      yield* listCache.invalidate("repo", { revalidate: "fresh" });
+      const refreshedAt = now;
+      expect(yield* poll()).toMatchObject({ version: 4 });
+      expect(asked.at(-1)?.reuseSinceMs).toBe(refreshedAt);
+
+      // A change Ryco made reads the row in full at once, whatever the fingerprint says.
+      yield* handlers[WS_METHODS.sourceControlAddChangeRequestComment]({
+        cwd: "/repo",
+        reference: "42",
+        body: "LGTM",
+      }).pipe(Effect.provide(handlerLayer));
+      expect(yield* read).toMatchObject({ version: 5 });
+
+      // A fingerprint without a revision (a host that offers none) never stands for a row.
+      fingerprint = { status: fingerprint.status, remarks: fingerprint.remarks };
+      expect(yield* poll()).toMatchObject({ version: 6 });
+      expect(yield* poll()).toMatchObject({ version: 7 });
+    }),
+  );
+
+  it.effect("reads rows of a host without a fingerprint in full, as before", () =>
+    Effect.gen(function* () {
+      let now = 1_000_000;
+      let details = 0;
+      const listCache = makeRepositoryListCache({ nowMs: () => now });
+      const { handlers } = makeContext(
+        {
+          getChangeRequestDetail: (input) =>
+            Effect.sync(
+              () => ({ number: Number(input.reference), url: "u", version: ++details }) as never,
+            ),
+        },
+        undefined,
+        { listCache },
+      );
+      const read = handlers[WS_METHODS.sourceControlGetChangeRequestDetail]({
+        cwd: "/repo",
+        reference: "42",
+        view: "row",
+      }).pipe(Effect.provide(handlerLayer));
+      for (let poll = 0; poll < 4; poll += 1) {
+        yield* read;
+        now += 30_000;
+      }
+      expect(details).toBe(4);
+    }),
+  );
+
   it.effect("passes commit scope through to the diff", () =>
     Effect.gen(function* () {
       const seen: Array<unknown> = [];

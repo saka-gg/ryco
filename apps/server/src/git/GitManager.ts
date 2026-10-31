@@ -85,7 +85,10 @@ import {
   type PullRequestIndexScope,
 } from "../sourceControl/pullRequestIndex.ts";
 import { pausedUntilOf } from "../sourceControl/lastGoodWhilePaused.ts";
-import { makeRepositoryListCache } from "../sourceControl/repositoryListCache.ts";
+import {
+  makeRepositoryListCache,
+  type RepositoryChanges,
+} from "../sourceControl/repositoryListCache.ts";
 import { inBackgroundProcessLane } from "../processGovernor.ts";
 import { makeCheckoutGenerations } from "./checkoutGenerations.ts";
 import { readCheckoutHead } from "../vcs/gitCheckoutHead.ts";
@@ -167,6 +170,13 @@ export interface GitManagerShape {
      * (see `lastGoodWhilePaused`): for reads background readers make, not for large ones.
      */
     readonly lastGood?: boolean;
+    /**
+     * Read through this instead of `load`, told what the repository went through (see
+     * `repositoryListCache`): remote refreshes say a fingerprint must be newer than them (a
+     * poll's says nothing changed), change request mutations (`invalidateRepositoryLists`)
+     * that only a full read will do.
+     */
+    readonly revalidate?: (changes: RepositoryChanges) => Effect.Effect<A, E, R>;
   }) => Effect.Effect<A, E, R>;
   /**
    * A forge read for the involvement list across repositories
@@ -196,7 +206,11 @@ export interface GitManagerShape {
     cwd: string,
   ) => Effect.Effect<ReadonlyMap<number, IndexedPullRequestState>, never>;
   readonly invalidateLocalStatus: (cwd: string) => Effect.Effect<void, never>;
-  readonly invalidateRemoteStatus: (cwd: string) => Effect.Effect<void, never>;
+  /** `periodic`: a poll's refresh, which says nothing changed (cached row details may stand). */
+  readonly invalidateRemoteStatus: (
+    cwd: string,
+    options?: { readonly periodic?: boolean },
+  ) => Effect.Effect<void, never>;
   readonly invalidateStatus: (cwd: string) => Effect.Effect<void, never>;
   readonly resolvePullRequest: (
     input: GitPullRequestRefInput,
@@ -1387,7 +1401,7 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* (
       Effect.map((pausedUntil) => pausedUntil !== null),
     );
 
-  const invalidatePullRequestIndex = (cwd: string) =>
+  const invalidatePullRequestIndex = (cwd: string, options?: { readonly periodic?: boolean }) =>
     resolvePullRequestIndexTarget(cwd).pipe(
       Effect.flatMap((target) =>
         target === null
@@ -1397,7 +1411,13 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* (
                 Effect.all(
                   [
                     pullRequestIndex.invalidate(target.repository, { keepHeldWhile }),
-                    repositoryListCache.invalidate(target.repository, { keepHeldWhile }),
+                    // A refresh follows git actions, agent turns and polls, not edits made
+                    // through Ryco: a row detail may stand on a fingerprint, given since the
+                    // refresh unless it is a poll's.
+                    repositoryListCache.invalidate(target.repository, {
+                      keepHeldWhile,
+                      revalidate: options?.periodic === true ? "reuse" : "fresh",
+                    }),
                   ],
                   { discard: true },
                 ),
@@ -1468,6 +1488,7 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* (
               load: input.load,
               ...(input.ttlMs !== undefined ? { ttlMs: input.ttlMs } : {}),
               ...(input.lastGood !== undefined ? { lastGood: input.lastGood } : {}),
+              ...(input.revalidate !== undefined ? { revalidate: input.revalidate } : {}),
             }),
       ),
     );
@@ -2184,13 +2205,13 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* (
   // see change requests created meanwhile, so it also drops the repository's index.
   const invalidateRemoteStatus: GitManagerShape["invalidateRemoteStatus"] = Effect.fn(
     "invalidateRemoteStatus",
-  )(function* (cwd) {
+  )(function* (cwd, options) {
     const cacheKey = yield* normalizeStatusCacheKey(cwd);
     yield* Effect.all(
       [
         Cache.invalidate(remoteStatusResultCache, cacheKey),
         invalidateRefSummary(cacheKey),
-        invalidatePullRequestIndex(cacheKey),
+        invalidatePullRequestIndex(cacheKey, options),
       ],
       { discard: true },
     );

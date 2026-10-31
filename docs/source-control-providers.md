@@ -126,7 +126,9 @@ instead of starting `gh` for each read:
 
 - pull request and issue states (the sidebar, linked pull requests and issues);
 - pull request and issue lists, and the background lookups of which pull request belongs to a
-  branch.
+  branch;
+- pull request fingerprints (below), and a repository's merge settings, which Ryco revalidates with
+  their ETag, so an unchanged answer does not count against GitHub's REST rate limit.
 
 Everything else (free-text pull request and issue search, pull request details, reviews,
 comments, creating pull requests, checkouts, GitHub Actions) still runs through `gh`, and so does
@@ -144,6 +146,26 @@ finding which GitHub repository a checkout belongs to (`gh repo view`, cached).
 - GitHub Enterprise Server with a private certificate authority: set `NODE_EXTRA_CA_CERTS` to that
   certificate for the server process so these reads can use the API; without it they keep using
   `gh`.
+
+#### How Ryco spends GitHub's rate limit
+
+Every machine signed in to one GitHub account shares its GraphQL budget of 5,000 points an hour, so
+the reads Ryco makes by itself are rationed:
+
+- A sidebar row polls its pull request every 30 seconds while the window is in front. A row is read
+  in full (the pull request, its stack and required checks: three points) only when the pull
+  request's fingerprint moved: its state, draft flag, head, mergeability, check results, comments,
+  reviews or `updatedAt` (title, labels, review requests). One fingerprint request answers up to 25
+  pull requests of a host for one point, and rows and pull request watches share it. A row is read in
+  full anyway every 30 minutes (5 for a stacked pull request, whose row shows the other entries).
+- A fingerprint stands for 20 seconds; for a pull request nobody updated for 30 minutes and with no
+  check running, 5 minutes.
+- A push, a finished agent turn or a git action in Ryco asks for a fingerprint newer than itself, and
+  anything you change through Ryco (a comment, a merge, an edit) reads the row in full at once. The
+  pull request you have open is read in full every 30 seconds, as before.
+- `node apps/server/scripts/measure-github-quota.ts` counts the points of a simulated busy node (10
+  open pull requests in 3 repositories, 3 with CI running, one watched): about 940 an hour, down from
+  about 4,260 when every row was read in full (`--baseline`).
 
 ### For GitLab
 

@@ -2,13 +2,17 @@ import { describe, expect, it } from "vite-plus/test";
 import { Result } from "effect";
 
 import {
-  decodeGitHubPullRequestWatchFingerprintJson,
-  GITHUB_PULL_REQUEST_WATCH_FINGERPRINT_QUERY,
+  buildGitHubPullRequestWatchFingerprintsQuery,
+  decodeGitHubPullRequestWatchFingerprintsJson,
+  type GitHubWatchFingerprintAnswer,
 } from "./gitHubPullRequestWatchFingerprint.ts";
 
+const QUIET_AFTER_MS = 30 * 60_000;
+
 /**
- * Shaped exactly like GitHub's answer to GITHUB_PULL_REQUEST_WATCH_FINGERPRINT_QUERY
- * (captured read-only from public pull requests on 2026-10-24 and trimmed):
+ * Shaped exactly like GitHub's answer for one pull request of the batched
+ * fingerprint query (captured read-only from public pull requests on 2026-10-24
+ * and trimmed):
  * GitHub lists every state, zero counts included, and `updatedAt` is the
  * creation time until an edit moves it.
  */
@@ -26,10 +30,14 @@ function pullRequest(
     readonly reviews?: number;
     readonly reviewUpdatedAt?: string;
     readonly threads?: number;
+    readonly updatedAt?: string;
+    readonly isDraft?: boolean;
   } = {},
 ) {
   return {
     state: overrides.state ?? "OPEN",
+    isDraft: overrides.isDraft ?? false,
+    updatedAt: overrides.updatedAt ?? "2026-10-05T23:40:00Z",
     mergeable: overrides.mergeable === undefined ? "MERGEABLE" : overrides.mergeable,
     headRefOid: overrides.headRefOid ?? "02b209f16e8b9b203165c3fbcf85fc4d4ad770ee",
     comments: {
@@ -67,19 +75,38 @@ function pullRequest(
 }
 
 const answer = (body: object) => JSON.stringify(body);
-const fingerprintOf = (pr: object) => {
-  const decoded = decodeGitHubPullRequestWatchFingerprintJson(
-    answer({ data: { repository: { pullRequest: pr } } }),
+const decode = (body: object | string, count = 1) =>
+  decodeGitHubPullRequestWatchFingerprintsJson(
+    typeof body === "string" ? body : answer(body),
+    count,
+    { quietAfterMs: QUIET_AFTER_MS },
   );
+/** The one pull request of a one-entry batch, or the batch's failure. */
+const decodeOne = (body: object | string): Result.Result<GitHubWatchFingerprintAnswer, string> =>
+  Result.map(decode(body), (answers) => answers[0]!);
+const fingerprintOf = (pr: object) => {
+  const decoded = decodeOne({ data: { w0: { pullRequest: pr } } });
   if (!Result.isSuccess(decoded)) throw new Error(decoded.failure);
-  if (decoded.success === null) throw new Error("expected a fingerprint");
-  return decoded.success;
+  if (decoded.success.kind !== "found")
+    throw new Error(`expected a fingerprint: ${decoded.success.kind}`);
+  return decoded.success.fingerprint;
 };
+const failed = (decoded: Result.Result<GitHubWatchFingerprintAnswer, string>) =>
+  Result.isSuccess(decoded) && decoded.success.kind === "failed";
 
-describe("GITHUB_PULL_REQUEST_WATCH_FINGERPRINT_QUERY", () => {
-  it("asks only for state, head, counts and the newest updates", () => {
-    const query = GITHUB_PULL_REQUEST_WATCH_FINGERPRINT_QUERY;
-    expect(query).toContain("pullRequest(number: $number)");
+describe("buildGitHubPullRequestWatchFingerprintsQuery", () => {
+  it("asks only for state, head, counts and the newest updates, an alias per pull request", () => {
+    const { query, variables } = buildGitHubPullRequestWatchFingerprintsQuery([
+      { owner: "acme", name: "web", number: 7 },
+      { owner: "acme", name: "api", number: 8 },
+    ]);
+    expect(query).toContain("$o0: String!, $n0: String!, $p0: Int!");
+    expect(query).toContain("w0: repository(owner: $o0, name: $n0)");
+    expect(query).toContain("w1: repository(owner: $o1, name: $n1)");
+    expect(query).toContain("pullRequest(number: $p1)");
+    // Names travel as variables, never inside the document; numbers as GraphQL Ints.
+    expect(query).not.toContain("acme");
+    expect(variables).toEqual({ o0: "acme", n0: "web", p0: 7, o1: "acme", n1: "api", p1: 8 });
     // The most recently updated comment stands for every comment.
     expect(query).toContain(
       "comments(first: 1, orderBy: { field: UPDATED_AT, direction: DESC }) { totalCount nodes { updatedAt } }",
@@ -87,18 +114,32 @@ describe("GITHUB_PULL_REQUEST_WATCH_FINGERPRINT_QUERY", () => {
     expect(query).toContain("reviews(last: 100) { totalCount nodes { updatedAt } }");
     expect(query).toContain("checkRunCountsByState { state count }");
     expect(query).toContain("statusContextCountsByState { state count }");
+    expect(query).toMatch(/\bupdatedAt\b[\s\S]*\bisDraft\b|\bisDraft\b[\s\S]*\bupdatedAt\b/u);
     // Never comment bodies or check names: the full reads bring those.
     expect(query).not.toMatch(/\bbody\b|\blogin\b|\bcontext\b/u);
   });
 });
 
-describe("decodeGitHubPullRequestWatchFingerprintJson", () => {
+describe("decodeGitHubPullRequestWatchFingerprintsJson", () => {
   it("joins state, mergeability, head and the nonzero check counts, sorted", () => {
     expect(fingerprintOf(pullRequest({ running: 1, failed: 1 }))).toEqual({
       status:
         "OPEN MERGEABLE 02b209f16e8b9b203165c3fbcf85fc4d4ad770ee FAILURE:1,IN_PROGRESS:1,SKIPPED:2,SUCCESS:4 SUCCESS:1",
       remarks: "1 2026-10-05T23:40:00Z 0  0",
+      revision: "2026-10-05T23:40:00Z ready",
     });
+  });
+
+  it("moves the revision with the pull request's own updates and drafts, nothing else", () => {
+    const before = fingerprintOf(pullRequest());
+    const retitled = fingerprintOf(pullRequest({ updatedAt: "2026-10-06T09:00:00Z" }));
+    const drafted = fingerprintOf(pullRequest({ isDraft: true }));
+    for (const moved of [retitled, drafted]) {
+      expect(moved.revision).not.toBe(before.revision);
+      expect(moved.status).toBe(before.status);
+      expect(moved.remarks).toBe(before.remarks);
+    }
+    expect(fingerprintOf(pullRequest({ running: 1 })).revision).toBe(before.revision);
   });
 
   it("moves status with checks and remarks with comments, each without the other", () => {
@@ -180,7 +221,11 @@ describe("decodeGitHubPullRequestWatchFingerprintJson", () => {
       reviews: null,
       commits: { nodes: [{ commit: { statusCheckRollup: null } }] },
     };
-    expect(fingerprintOf(sparse)).toEqual({ status: "OPEN  abc123  ", remarks: "3  0  0" });
+    expect(fingerprintOf(sparse)).toEqual({
+      status: "OPEN  abc123  ",
+      remarks: "3  0  0",
+      revision: " ready",
+    });
     expect(
       fingerprintOf({
         ...sparse,
@@ -202,57 +247,131 @@ describe("decodeGitHubPullRequestWatchFingerprintJson", () => {
     ).toBe("OPEN  abc123  ");
   });
 
-  it("answers null when GitHub resolves no such pull request or repository", () => {
-    // Both captured read-only from GitHub on 2026-10-24.
-    const missingPullRequest = answer({
-      data: { repository: { pullRequest: null } },
+  it("answers gone when GitHub resolves no such pull request or repository", () => {
+    // Both captured read-only from GitHub on 2026-10-24 (alias paths as in a batched answer).
+    const missingPullRequest = {
+      data: { w0: { pullRequest: null } },
       errors: [
         {
           type: "NOT_FOUND",
-          path: ["repository", "pullRequest"],
+          path: ["w0", "pullRequest"],
           locations: [{ line: 3, column: 5 }],
           message: "Could not resolve to a PullRequest with the number of 999999.",
         },
       ],
-    });
-    const missingRepository = answer({
-      data: { repository: null },
+    };
+    const missingRepository = {
+      data: { w0: null },
       errors: [
         {
           type: "NOT_FOUND",
-          path: ["repository"],
+          path: ["w0"],
           message: "Could not resolve to a Repository with the name 'acme/gone'.",
         },
       ],
+    };
+    expect(decodeOne(missingPullRequest)).toEqual(Result.succeed({ kind: "gone" }));
+    expect(decodeOne(missingRepository)).toEqual(Result.succeed({ kind: "gone" }));
+  });
+
+  it("answers each pull request of a batch on its own when one of them is gone", () => {
+    const decoded = decode(
+      {
+        data: {
+          w0: { pullRequest: pullRequest({ comments: 1 }) },
+          w1: { pullRequest: null },
+          w2: { pullRequest: pullRequest({ comments: 3 }) },
+        },
+        errors: [
+          {
+            type: "NOT_FOUND",
+            path: ["w1", "pullRequest"],
+            message: "Could not resolve to a PullRequest with the number of 8.",
+          },
+        ],
+      },
+      3,
+    );
+    if (!Result.isSuccess(decoded)) throw new Error(decoded.failure);
+    expect(decoded.success.map((entry) => entry.kind)).toEqual(["found", "gone", "found"]);
+    const [first, , third] = decoded.success;
+    expect(first?.kind === "found" && first.fingerprint.remarks.startsWith("1 ")).toBe(true);
+    expect(third?.kind === "found" && third.fingerprint.remarks.startsWith("3 ")).toBe(true);
+  });
+
+  it("fails one pull request alone for its own error, and the whole batch for the document's", () => {
+    const decoded = decode(
+      {
+        data: { w0: { pullRequest: pullRequest() }, w1: { pullRequest: pullRequest() } },
+        errors: [
+          {
+            type: "FORBIDDEN",
+            path: ["w1", "pullRequest", "commits"],
+            message: "Resource not accessible by integration",
+          },
+        ],
+      },
+      2,
+    );
+    if (!Result.isSuccess(decoded)) throw new Error(decoded.failure);
+    expect(decoded.success[0]?.kind).toBe("found");
+    expect(decoded.success[1]).toEqual({
+      kind: "failed",
+      detail: "GitHub GraphQL returned errors: Resource not accessible by integration",
     });
-    expect(decodeGitHubPullRequestWatchFingerprintJson(missingPullRequest)).toEqual(
-      Result.succeed(null),
+    // A rate limit names no alias: every pull request of the document fails with it.
+    const limited = decode(
+      { data: null, errors: [{ type: "RATE_LIMITED", message: "API rate limit exceeded." }] },
+      2,
     );
-    expect(decodeGitHubPullRequestWatchFingerprintJson(missingRepository)).toEqual(
-      Result.succeed(null),
+    expect(Result.isFailure(limited)).toBe(true);
+    if (Result.isFailure(limited)) expect(limited.failure).toContain("rate limit");
+    // An alias GitHub left out of the answer gets no fingerprint.
+    const short = decode({ data: { w0: { pullRequest: pullRequest() } } }, 2);
+    expect(Result.isSuccess(short) && short.success[1]?.kind).toBe("failed");
+  });
+
+  it("dates when a settled pull request turns quiet, and never while something is in flight", () => {
+    const quietFrom = (pr: object) => {
+      const decoded = decodeOne({ data: { w0: { pullRequest: pr } } });
+      if (!Result.isSuccess(decoded) || decoded.success.kind !== "found") throw new Error("found");
+      return decoded.success.quietFromMs;
+    };
+    expect(quietFrom(pullRequest({ updatedAt: "2026-10-05T23:40:00Z" }))).toBe(
+      Date.parse("2026-10-05T23:40:00Z") + QUIET_AFTER_MS,
     );
+    expect(quietFrom(pullRequest({ running: 1 }))).toBeNull();
+    expect(quietFrom(pullRequest({ mergeable: "UNKNOWN" }))).toBeNull();
+    const pendingStatus = pullRequest();
+    pendingStatus.commits.nodes[0]!.commit.statusCheckRollup.contexts.statusContextCountsByState = [
+      { state: "PENDING", count: 1 },
+    ];
+    expect(quietFrom(pendingStatus)).toBeNull();
   });
 
   it("reads a check rollup the token may not see as no checks", () => {
     const { commits: _commits, ...withoutRollup } = pullRequest();
-    const rollupPath = ["repository", "pullRequest", "commits", "nodes", 0, "commit"];
+    const rollupPath = ["w0", "pullRequest", "commits", "nodes", 0, "commit"];
     const denied = (error: object) =>
-      decodeGitHubPullRequestWatchFingerprintJson(
-        answer({
-          data: {
-            repository: {
-              pullRequest: {
-                ...withoutRollup,
-                commits: { nodes: [{ commit: { statusCheckRollup: null } }] },
-              },
+      decodeOne({
+        data: {
+          w0: {
+            pullRequest: {
+              ...withoutRollup,
+              commits: { nodes: [{ commit: { statusCheckRollup: null } }] },
             },
           },
-          errors: [error],
-        }),
-      );
+        },
+        errors: [error],
+      });
     const expected = Result.succeed({
-      status: "OPEN MERGEABLE 02b209f16e8b9b203165c3fbcf85fc4d4ad770ee  ",
-      remarks: "1 2026-10-05T23:40:00Z 0  0",
+      kind: "found",
+      fingerprint: {
+        status: "OPEN MERGEABLE 02b209f16e8b9b203165c3fbcf85fc4d4ad770ee  ",
+        remarks: "1 2026-10-05T23:40:00Z 0  0",
+        revision: "2026-10-05T23:40:00Z ready",
+      },
+      quietFromMs: Date.parse("2026-10-05T23:40:00Z") + QUIET_AFTER_MS,
     });
     // A fine-grained token: typed FORBIDDEN.
     expect(
@@ -271,51 +390,41 @@ describe("decodeGitHubPullRequestWatchFingerprintJson", () => {
     ).toEqual(expected);
     // Any other rollup error still fails the read.
     expect(
-      Result.isFailure(
+      failed(
         denied({ path: [...rollupPath, "statusCheckRollup"], message: "Something went wrong" }),
       ),
     ).toBe(true);
   });
 
   it("fails on any other GraphQL error, even beside data", () => {
-    const partial = decodeGitHubPullRequestWatchFingerprintJson(
-      answer({
-        data: { repository: { pullRequest: pullRequest() } },
-        errors: [
-          {
-            type: "FORBIDDEN",
-            path: ["repository", "pullRequest", "commits", "nodes", 0, "commit"],
-            message: "Resource not accessible by integration",
-          },
-        ],
-      }),
-    );
-    expect(Result.isFailure(partial)).toBe(true);
-    if (Result.isFailure(partial)) expect(partial.failure).toContain("not accessible");
+    const partial = decodeOne({
+      data: { w0: { pullRequest: pullRequest() } },
+      errors: [
+        {
+          type: "FORBIDDEN",
+          path: ["w0", "pullRequest", "commits", "nodes", 0, "commit"],
+          message: "Resource not accessible by integration",
+        },
+      ],
+    });
+    expect(failed(partial)).toBe(true);
+    if (Result.isSuccess(partial) && partial.success.kind === "failed") {
+      expect(partial.success.detail).toContain("not accessible");
+    }
 
     // A NOT_FOUND below the pull request is not a missing pull request.
-    const nested = decodeGitHubPullRequestWatchFingerprintJson(
-      answer({
-        data: { repository: { pullRequest: pullRequest() } },
-        errors: [{ type: "NOT_FOUND", path: ["repository", "pullRequest", "commits"] }],
-      }),
-    );
-    expect(Result.isFailure(nested)).toBe(true);
+    const nested = decodeOne({
+      data: { w0: { pullRequest: pullRequest() } },
+      errors: [{ type: "NOT_FOUND", path: ["w0", "pullRequest", "commits"] }],
+    });
+    expect(failed(nested)).toBe(true);
   });
 
   it("fails on an answer without data or without the identity fields", () => {
-    expect(Result.isFailure(decodeGitHubPullRequestWatchFingerprintJson(answer({})))).toBe(true);
-    expect(
-      Result.isFailure(decodeGitHubPullRequestWatchFingerprintJson(answer({ data: null }))),
-    ).toBe(true);
+    expect(Result.isFailure(decodeOne({}))).toBe(true);
+    expect(Result.isFailure(decodeOne({ data: null }))).toBe(true);
     const { headRefOid: _headRefOid, ...headless } = pullRequest();
-    expect(
-      Result.isFailure(
-        decodeGitHubPullRequestWatchFingerprintJson(
-          answer({ data: { repository: { pullRequest: headless } } }),
-        ),
-      ),
-    ).toBe(true);
-    expect(Result.isFailure(decodeGitHubPullRequestWatchFingerprintJson("not json"))).toBe(true);
+    expect(failed(decodeOne({ data: { w0: { pullRequest: headless } } }))).toBe(true);
+    expect(Result.isFailure(decodeOne("not json"))).toBe(true);
   });
 });

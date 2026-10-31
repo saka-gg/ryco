@@ -921,13 +921,19 @@ export const makePullRequestWatchRuntime = (
         return withReviewThreadTails(activity, tails);
       });
 
+    interface PassOptions {
+      readonly forceDetail: boolean;
+      /** When the pass began: a fingerprint read since is this pass's own. */
+      readonly startedAtMs: number;
+    }
+
     type GroupOutcome =
       | { readonly kind: "read"; readonly read: GroupRead; readonly fresh: boolean }
       | { readonly kind: "none" }
       | { readonly kind: "paused" }
       | { readonly kind: "failed"; readonly consecutiveFailures: number };
 
-    const readGroup = (group: Group, options: { readonly forceDetail: boolean }) =>
+    const readGroup = (group: Group, options: PassOptions) =>
       Effect.gen(function* () {
         const nowMs = yield* Clock.currentTimeMillis;
         const cached = cachedRead.get(group.key);
@@ -952,7 +958,14 @@ export const makePullRequestWatchRuntime = (
           provider.getChangeRequestWatchFingerprint === undefined
             ? null
             : yield* provider
-                .getChangeRequestWatchFingerprint({ cwd, number: group.number, url: group.url })
+                .getChangeRequestWatchFingerprint({
+                  cwd,
+                  number: group.number,
+                  url: group.url,
+                  // Another group's read this pass carries this one too (GitHub batches a host's
+                  // pull requests), so its answer stands in for a read of its own.
+                  reuseSinceMs: options.startedAtMs,
+                })
                 .pipe(
                   // A failed fingerprint falls back to the plan without one; a rate limit pauses.
                   Effect.catch((error) =>
@@ -1123,7 +1136,7 @@ export const makePullRequestWatchRuntime = (
         { discard: true },
       );
 
-    const passGroup = (group: Group, options: { readonly forceDetail: boolean }) =>
+    const passGroup = (group: Group, options: PassOptions) =>
       Effect.gen(function* () {
         const outcome: GroupOutcome = yield* readGroup(group, options);
         switch (outcome.kind) {
@@ -1229,6 +1242,7 @@ export const makePullRequestWatchRuntime = (
       readonly forceDetail: boolean;
     }) =>
       Effect.gen(function* () {
+        const startedAtMs = yield* Clock.currentTimeMillis;
         const { groups, ends } = yield* collectGroups;
         if (options.only === null) {
           yield* Effect.forEach(ends, ({ member, reason }) => endMember(member, reason), {
@@ -1239,7 +1253,8 @@ export const makePullRequestWatchRuntime = (
         const selected = [...groups.values()].filter(
           (group) => options.only === null || options.only.has(group.key),
         );
-        yield* Effect.forEach(selected, (group) => passGroup(group, options), {
+        const pass: PassOptions = { forceDetail: options.forceDetail, startedAtMs };
+        yield* Effect.forEach(selected, (group) => passGroup(group, pass), {
           concurrency: LIMITS.groupReadConcurrency,
           discard: true,
         });

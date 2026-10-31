@@ -185,13 +185,19 @@ describe("server boot import boundaries", () => {
   });
 
   it("loads the pull request watch fingerprint with the GitHub client", () => {
-    // Its query and decoder ride with GitHubCli, which loads on first GitHub use.
+    // Its query, decoder and batching board ride with GitHubCli, which loads on first GitHub
+    // use; the row reads that stand on it load with the first row read.
     const graph = staticGraph("src/cliMain.ts");
     expect(
       graph.files.filter((file) =>
-        file.endsWith("/sourceControl/gitHubPullRequestWatchFingerprint.ts"),
+        /\/sourceControl\/(?:gitHubPullRequestWatchFingerprint|gitHubPullRequestFingerprintBoard|changeRequestRowRevalidation)\.ts$/u.test(
+          file,
+        ),
       ),
     ).toEqual([]);
+    expect(staticGraph("src/cliMain.ts", { dynamic: true }).files).toContain(
+      "apps/server/src/sourceControl/changeRequestRowRevalidation.ts",
+    );
   });
 
   it("loads the pull request watch sweep after the server serves", () => {

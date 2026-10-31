@@ -165,11 +165,15 @@ export interface SourceControlLinkStates {
  * passes so the watch reads a change request in full only when it moved.
  * `status` moves with the state, mergeability, head or checks, which the
  * detail read reports; `remarks` moves with comments, reviews and review
- * threads, which only the costlier activity read reports.
+ * threads, which only the costlier activity read reports. `revision`, where
+ * the host gives one, moves with the rest a change request row shows (GitHub:
+ * `updatedAt`, which title, label and review-request edits move, and the draft
+ * flag), so a row read can stand on a fingerprint too.
  */
 export interface ChangeRequestWatchFingerprint {
   readonly status: string;
   readonly remarks: string;
+  readonly revision?: string;
 }
 
 /** One page of a search across every repository on a host (see `searchInvolvedChangeRequests`). */
@@ -352,6 +356,12 @@ export interface SourceControlProviderShape {
     readonly number: number;
     /** The change request's web URL (`ChangeRequest.url`), which names its repository and host. */
     readonly url: string;
+    /**
+     * An answer the host gave at or after this time may stand in for a new read, within the
+     * provider's own reuse window (GitHub: 20 s, 5 min for a pull request nobody updated for
+     * 30 min). Omitted: ask the host now.
+     */
+    readonly reuseSinceMs?: number | undefined;
   }) => Effect.Effect<ChangeRequestWatchFingerprint | null, SourceControlProviderError>;
   /**
    * One review thread with every comment the host returns for it (GitHub: up to 100), for a

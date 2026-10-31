@@ -5,7 +5,7 @@ import { SourceControlProviderError } from "@ryco/contracts";
 import { inBackgroundProcessLane } from "../processGovernor.ts";
 import { ForgeRequestPausedError } from "./forgeRateLimit.ts";
 import { markServedWhilePaused, pausedUntilOf } from "./lastGoodWhilePaused.ts";
-import { makeRepositoryListCache } from "./repositoryListCache.ts";
+import { makeRepositoryListCache, type RepositoryChanges } from "./repositoryListCache.ts";
 
 const rateLimited = (retryAt?: number) =>
   new SourceControlProviderError({
@@ -367,6 +367,46 @@ describe("repositoryListCache", () => {
       expect(yield* read("busy")).toBe(4);
       now = 600_000;
       expect(yield* read("busy")).toBe(4);
+    }),
+  );
+
+  it.effect("tells a revalidating read what its repository went through", () =>
+    Effect.gen(function* () {
+      let now = 0;
+      const cache = makeRepositoryListCache({ ttlMs: 1_000, nowMs: () => now });
+      const seen: Array<RepositoryChanges> = [];
+      let loads = 0;
+      const read = (repository = "a") =>
+        cache.get({
+          repository,
+          key: "detail",
+          load: Effect.sync(() => ++loads),
+          revalidate: (changes) => Effect.sync(() => (seen.push(changes), -1)),
+        });
+
+      // Read through `revalidate`, never `load`, and cached like any read.
+      expect(yield* read()).toBe(-1);
+      expect(yield* read()).toBe(-1);
+      expect(loads).toBe(0);
+      expect(seen).toEqual([{ changedAtMs: 0, mutations: 0 }]);
+      // A git action or an agent turn: a fingerprint must be newer than it.
+      now = 100;
+      yield* cache.invalidate("a", { revalidate: "fresh" });
+      yield* read();
+      expect(seen.at(-1)).toEqual({ changedAtMs: 100, mutations: 0 });
+      // A poll's refresh drops the entry and says nothing changed.
+      now = 200;
+      yield* cache.invalidate("a", { revalidate: "reuse" });
+      yield* read();
+      expect(seen.at(-1)).toEqual({ changedAtMs: 100, mutations: 0 });
+      // A mutation through Ryco.
+      now = 300;
+      yield* cache.invalidate("a");
+      yield* read();
+      expect(seen.at(-1)).toEqual({ changedAtMs: 300, mutations: 1 });
+      // Per repository.
+      yield* read("b");
+      expect(seen.at(-1)).toEqual({ changedAtMs: 0, mutations: 0 });
     }),
   );
 });

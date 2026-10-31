@@ -99,7 +99,7 @@ export interface GitWorkflowServiceShape {
   readonly invalidateRepositoryLists: GitManagerShape["invalidateRepositoryLists"];
   readonly refreshRemoteTrackingRefs: GitManagerShape["refreshRemoteTrackingRefs"];
   readonly invalidateLocalStatus: (cwd: string) => Effect.Effect<void, never>;
-  readonly invalidateRemoteStatus: (cwd: string) => Effect.Effect<void, never>;
+  readonly invalidateRemoteStatus: GitManagerShape["invalidateRemoteStatus"];
   readonly invalidateStatus: (cwd: string) => Effect.Effect<void, never>;
   readonly pullCurrentBranch: (cwd: string) => Effect.Effect<VcsPullResult, GitCommandError>;
   readonly runStackedAction: (
