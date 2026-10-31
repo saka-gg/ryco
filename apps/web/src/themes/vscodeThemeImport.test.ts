@@ -9,6 +9,8 @@ import {
   pairVsCodeThemes,
   parseJsonc,
   parseVsCodeColor,
+  relabelVsCodeThemeCollisions,
+  vsCodeBaseThemeNames,
 } from "./vscodeThemeImport";
 
 // Hand-written fixtures, not copies of published themes.
@@ -43,6 +45,66 @@ describe("VS Code theme import", () => {
         "colors": { "editor.background": "#000", },
       }`),
     ).toEqual({ name: "a // not a comment", colors: { "editor.background": "#000" } });
+  });
+
+  it("drops trailing commas only outside strings", () => {
+    expect(parseJsonc(`{ "name": "Theme ,}", "tags": ["a", "b ,]",], }`)).toEqual({
+      name: "Theme ,}",
+      tags: ["a", "b ,]"],
+    });
+  });
+
+  it("takes a primary color that reads as text before one that only stands apart", () => {
+    const theme = convertVsCodeTheme({
+      type: "dark",
+      colors: {
+        "editor.background": "#282a36",
+        // About 1.6:1 on the background: visible as a button, unreadable as text.
+        "button.background": "#44475a",
+        focusBorder: "#bd93f9",
+      },
+    });
+    expect(theme.tokens.primary).toBe("#bd93f9");
+    expect(contrastRatio(rgb(theme.tokens.primary!), rgb("#282a36"))).toBeGreaterThanOrEqual(3);
+    // With nothing that reads, the most visible candidate still beats Ryco's default.
+    expect(
+      convertVsCodeTheme({
+        type: "dark",
+        colors: { "editor.background": "#282a36", "button.background": "#44475a" },
+      }).tokens.primary,
+    ).toBe("#44475a");
+  });
+
+  it("names same-name themes picked together after their files", () => {
+    const [plain, soft, third] = relabelVsCodeThemeCollisions([
+      convertVsCodeTheme({ ...darkTheme, name: "Dracula" }, { sourceName: "dracula.json" }),
+      convertVsCodeTheme({ ...darkTheme, name: "Dracula" }, { sourceName: "dracula-soft.json" }),
+      convertVsCodeTheme({ ...darkTheme, name: "Dracula" }, { sourceName: "Dracula.json" }),
+    ]);
+    expect([plain?.name, soft?.name, third?.name]).toEqual([
+      "Dracula",
+      "Dracula Soft",
+      "Dracula 2",
+    ]);
+  });
+
+  it("knows which picked files are another file's base", () => {
+    const files = new Map<string, unknown>([
+      ["child.json", { include: "./base.json", colors: {} }],
+      ["base.json", { include: "./root.json", colors: {} }],
+      ["root.json", { colors: { "editor.background": "#000000" } }],
+      ["alone.json", { colors: { "editor.background": "#ffffff" } }],
+    ]);
+    expect([...vsCodeBaseThemeNames(files)].toSorted()).toEqual(["base.json", "root.json"]);
+  });
+
+  it("says when base themes include each other", () => {
+    const loop = { a: { include: "b.json", colors: {} }, b: { include: "a.json", colors: {} } };
+    const theme = convertVsCodeTheme(
+      { name: "Loop", include: "a.json", colors: { "editor.background": "#101010" } },
+      { siblings: new Map(Object.entries(loop).map(([key, value]) => [`${key}.json`, value])) },
+    );
+    expect(theme.notices.join(" ")).toMatch(/include each other/u);
   });
 
   it("fills only the theme's own variant, with the editor background as the background", () => {

@@ -224,7 +224,14 @@ export async function importThemesFromFiles(
       }
     });
     const siblings = new Map(values.map((file) => [file.name, file.value]));
-    const themes = values.map((file) => {
+    // A file another picked file builds on only supplies colors: it is not a theme of its own,
+    // needs no editor background, and never becomes the active theme. When every file is someone's
+    // base (two that include each other), each is imported.
+    const bases = vscode.vsCodeBaseThemeNames(siblings);
+    const themeFiles = values.some((file) => !bases.has(file.name))
+      ? values.filter((file) => !bases.has(file.name))
+      : values;
+    const themes = themeFiles.map((file) => {
       if (!vscode.isVsCodeThemeFile(file.value)) {
         throw new Error(`${file.name} is neither a Ryco theme nor a VS Code color theme.`);
       }
@@ -232,7 +239,7 @@ export async function importThemesFromFiles(
       notices.push(...theme.notices.map((notice) => `${theme.name}: ${notice}`));
       return theme;
     });
-    for (const theme of vscode.pairVsCodeThemes(themes)) {
+    for (const theme of vscode.pairVsCodeThemes(vscode.relabelVsCodeThemeCollisions(themes))) {
       converted.push({ ...theme, id: generateCustomThemeId(themeIdFromName(theme.name)) });
     }
   }

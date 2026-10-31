@@ -64,8 +64,34 @@ export function parseJsonc(text: string): unknown {
     out += char;
     index += 1;
   }
-  // Trailing commas before a closing bracket or brace (outside strings, which are gone now).
-  return JSON.parse(out.replaceAll(/,(\s*[\]}])/gu, "$1"));
+  return JSON.parse(withoutTrailingCommas(out));
+}
+
+/** Drops a comma before a closing bracket or brace, outside strings (whose text stays as it is). */
+function withoutTrailingCommas(text: string): string {
+  let out = "";
+  let inString = false;
+  for (let index = 0; index < text.length; index += 1) {
+    const char = text[index]!;
+    if (inString) {
+      out += char;
+      if (char === "\\") {
+        out += text[index + 1] ?? "";
+        index += 1;
+      } else if (char === '"') {
+        inString = false;
+      }
+      continue;
+    }
+    if (char === '"') inString = true;
+    if (char === ",") {
+      let next = index + 1;
+      while (next < text.length && /\s/u.test(text[next]!)) next += 1;
+      if (text[next] === "]" || text[next] === "}") continue;
+    }
+    out += char;
+  }
+  return out;
 }
 
 function decodeGamma(value: number): number {
@@ -211,6 +237,32 @@ export interface ImportedVsCodeTheme {
   readonly variant: ThemeVariant;
   readonly tokens: ThemeTokens;
   readonly notices: ReadonlyArray<string>;
+  /** The file it came from, which names it apart from another file's theme of the same name. */
+  readonly sourceName?: string;
+}
+
+/** The file name an `include` points at; bases are looked up among the picked files by it. */
+function includeBaseName(include: string): string {
+  return include.split(/[/\\]/u).at(-1) ?? include;
+}
+
+/**
+ * The picked files another picked file builds on (`include`, as deep as the import follows it).
+ * They supply colors to the themes built on them and are not imported as themes of their own.
+ */
+export function vsCodeBaseThemeNames(files: ReadonlyMap<string, unknown>): ReadonlySet<string> {
+  const bases = new Set<string>();
+  for (const value of files.values()) {
+    let current = value;
+    for (let depth = 0; depth < MAX_INCLUDE_DEPTH; depth += 1) {
+      if (!isRecord(current) || typeof current.include !== "string") break;
+      const name = includeBaseName(current.include);
+      if (!files.has(name) || bases.has(name)) break;
+      bases.add(name);
+      current = files.get(name);
+    }
+  }
+  return bases;
 }
 
 /**
@@ -227,11 +279,21 @@ function collectColors(
 ): Record<string, unknown> {
   const own = isRecord(value.colors) ? value.colors : {};
   if (typeof value.include !== "string") return own;
-  const baseName = value.include.split(/[/\\]/u).at(-1) ?? value.include;
+  const baseName = includeBaseName(value.include);
   const base = siblings.get(baseName);
-  if (base === undefined || !isRecord(base) || depth >= MAX_INCLUDE_DEPTH || seen.has(baseName)) {
+  if (base === undefined || !isRecord(base)) {
     notices.push(
       `Its base theme ${baseName} was not picked with it, so only its own colors came in.`,
+    );
+    return own;
+  }
+  if (seen.has(baseName)) {
+    notices.push(`Its base themes include each other (${baseName}), so that loop was left out.`);
+    return own;
+  }
+  if (depth >= MAX_INCLUDE_DEPTH) {
+    notices.push(
+      `Its base themes go more than ${MAX_INCLUDE_DEPTH} deep, so ${baseName} and below were left out.`,
     );
     return own;
   }
@@ -329,7 +391,17 @@ export function convertVsCodeTheme(
     );
   }
 
-  const primary = standingApart(1.1, "button.background", "focusBorder", "textLink.foreground");
+  // Ryco also uses the primary color as text, so a candidate that reads (3:1) wins; one that only
+  // stands apart from the background (1.1:1) is the last resort.
+  const primaryKeys = [
+    "button.background",
+    "focusBorder",
+    "textLink.foreground",
+    "activityBarBadge.background",
+    "progressBar.background",
+    "badge.background",
+  ];
+  const primary = standingApart(3, ...primaryKeys) ?? standingApart(1.1, ...primaryKeys);
   if (primary) {
     set("primary", primary);
     set("primary-foreground", readableOn(primary, "button.foreground"));
@@ -390,7 +462,13 @@ export function convertVsCodeTheme(
     tokens["scrollbar-thumb-thin-hover"] = hover;
   }
 
-  return { name: resolveName(value, options.sourceName), variant, tokens, notices };
+  return {
+    name: resolveName(value, options.sourceName),
+    variant,
+    tokens,
+    notices,
+    ...(options.sourceName !== undefined ? { sourceName: options.sourceName } : {}),
+  };
 }
 
 /**
@@ -399,6 +477,46 @@ export function convertVsCodeTheme(
  * everything else stays its own theme. Ambiguous groups (two darks for one light) are not
  * guessed at.
  */
+/**
+ * Themes of one name picked together (dracula.json and dracula-soft.json both say "Dracula")
+ * take their file's name instead, as T3 Code's `resolveThemeLabelCollisions` does, so they stay
+ * apart; a name still shared is numbered.
+ */
+export function relabelVsCodeThemeCollisions(
+  themes: ReadonlyArray<ImportedVsCodeTheme>,
+): ReadonlyArray<ImportedVsCodeTheme> {
+  const counts = new Map<string, number>();
+  for (const theme of themes) {
+    const key = theme.name.toLowerCase();
+    counts.set(key, (counts.get(key) ?? 0) + 1);
+  }
+  const relabelled = themes.map((theme) => {
+    if ((counts.get(theme.name.toLowerCase()) ?? 0) < 2 || theme.sourceName === undefined) {
+      return theme;
+    }
+    const fromFile = humanizeThemeName(
+      theme.sourceName.replace(/\.[^.]+$/u, "").replace(/-color-theme$/u, ""),
+    ).slice(0, MAX_NAME_LENGTH);
+    return fromFile.length > 0 && fromFile.toLowerCase() !== theme.name.toLowerCase()
+      ? { ...theme, name: fromFile }
+      : theme;
+  });
+  return numberSharedNames(relabelled);
+}
+
+/** "Name", "Name 2", "Name 3": a name shared within one import is numbered. */
+function numberSharedNames<T extends { readonly name: string }>(entries: ReadonlyArray<T>): T[] {
+  const seen = new Set<string>();
+  return entries.map((entry) => {
+    let name = entry.name;
+    for (let suffix = 2; seen.has(name.toLowerCase()) && suffix < 100; suffix += 1) {
+      name = `${entry.name.slice(0, MAX_NAME_LENGTH - 4)} ${suffix}`;
+    }
+    seen.add(name.toLowerCase());
+    return name === entry.name ? entry : { ...entry, name };
+  });
+}
+
 export function pairVsCodeThemes(
   themes: ReadonlyArray<ImportedVsCodeTheme>,
 ): ReadonlyArray<Omit<ThemeDefinition, "id">> {
@@ -440,5 +558,6 @@ export function pairVsCodeThemes(
       dark: group.dark[0]!.tokens,
     });
   }
-  return out;
+  // A pair's family name can meet a theme of that name picked on its own.
+  return numberSharedNames(out);
 }
