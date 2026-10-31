@@ -889,6 +889,13 @@ export type TurnSteerRejectionReason = typeof TurnSteerRejectionReason.Type;
  */
 export const TurnSteerDeliveryUncertain = Schema.optionalKey(Schema.Boolean);
 
+/**
+ * Set on a `deferred` steer rejection of a provider that steers by stopping the turn
+ * (interrupt-restart): the turn was stopped to take this message, so the follow-up queue moves
+ * it to its head and sends it as the next turn. An optional flag, like `deliveryUncertain`.
+ */
+export const TurnSteerRestartedTurn = Schema.optionalKey(Schema.Boolean);
+
 export const OrchestrationMessage = Schema.Struct({
   id: MessageId,
   role: OrchestrationMessageRole,
@@ -3066,6 +3073,7 @@ const ThreadTurnSteerResolveCommand = Schema.Union([
       status: Schema.Literal("rejected"),
       error: TrimmedNonEmptyString.check(Schema.isMaxLength(1_000)),
       reason: Schema.optionalKey(TurnSteerRejectionReason),
+      restartedTurn: TurnSteerRestartedTurn,
       deliveryUncertain: TurnSteerDeliveryUncertain,
       resolvedAt: IsoDateTime,
     }),
@@ -3642,6 +3650,7 @@ export const ThreadTurnSteerRejectedPayload = Schema.Struct({
   error: TrimmedNonEmptyString.check(Schema.isMaxLength(1_000)),
   reason: Schema.optionalKey(TurnSteerRejectionReason),
   deliveryUncertain: TurnSteerDeliveryUncertain,
+  restartedTurn: TurnSteerRestartedTurn,
   resolvedAt: IsoDateTime,
 });
 export type ThreadTurnSteerRejectedPayload = typeof ThreadTurnSteerRejectedPayload.Type;

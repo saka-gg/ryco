@@ -257,7 +257,11 @@ export const ComposerQueuedMessages = memo(function ComposerQueuedMessages({
                   className={cn(textButtonClass, "gap-1")}
                   disabled={steerUnavailableReason !== null || isSteering || busy}
                   onClick={() => onSteer(row)}
-                  aria-label={`Steer ${rowLabel} into the active turn`}
+                  aria-label={
+                    steerRestarts
+                      ? `Stop the running turn and send ${rowLabel} next`
+                      : `Steer ${rowLabel} into the active turn`
+                  }
                   title={
                     steerUnavailableReason ??
                     (steerRestarts

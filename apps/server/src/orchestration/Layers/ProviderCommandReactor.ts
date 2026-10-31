@@ -2764,6 +2764,7 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
           readonly error: string;
           readonly reason: TurnSteerRejectionReason;
           readonly deliveryUncertain?: boolean;
+          readonly restartedTurn?: true;
           readonly resolvedAt: string;
         },
     commandId: CommandId = serverCommandId("turn-steer-resolve"),
@@ -2841,6 +2842,7 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
                   status: "rejected",
                   error: classified.error,
                   reason: classified.reason,
+                  ...(classified.restartedTurn ? { restartedTurn: true as const } : {}),
                   resolvedAt: new Date().toISOString(),
                 });
               }),

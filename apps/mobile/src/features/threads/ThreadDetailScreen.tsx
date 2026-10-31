@@ -1634,6 +1634,14 @@ export function ThreadDetailScreen(props: {
     [environmentId, navigation, threadId],
   );
 
+  // A steer on the running turn's provider stops the turn and sends the message next.
+  const activeProviderSteering = providerSteering(
+    providers.find(
+      (entry) =>
+        entry.instanceId ===
+        (thread?.session?.providerInstanceId ?? thread?.modelSelection?.instanceId),
+    ),
+  );
   const openTerminal = useCallback(
     () =>
       navigation.navigate("ThreadTerminal", {
@@ -2750,6 +2758,7 @@ export function ThreadDetailScreen(props: {
       )}
 
       <ThreadQueuedMessages
+        steerRestarts={activeProviderSteering === "restart"}
         rows={queueView.rows}
         localMessages={localQueuedMessages}
         hold={queueView.hold}
