@@ -28,6 +28,7 @@ import {
   EventLogCompactionDeferredLive,
   ONLINE_COMPACTION_PASS_OPTIONS,
 } from "./EventLogCompactionDeferred.ts";
+import { EventLogCompactionUsageReaderLive } from "../../statistics/statisticsRows.ts";
 import { OrchestrationCommandReceiptRepositoryLive } from "./OrchestrationCommandReceipts.ts";
 import { OrchestrationEventStoreLive } from "./OrchestrationEventStore.ts";
 import { SqlitePersistenceMemory } from "./Sqlite.ts";
@@ -587,7 +588,7 @@ describe("EventLogCompaction", () => {
 
 /** The server's layer: the pass loads with `import()` on first use. */
 const DeferredTestLayer = Layer.mergeAll(
-  EventLogCompactionDeferredLive,
+  EventLogCompactionDeferredLive.pipe(Layer.provide(EventLogCompactionUsageReaderLive)),
   OrchestrationEventStoreLive,
 ).pipe(Layer.provideMerge(SqlitePersistenceMemory));
 

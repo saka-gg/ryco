@@ -164,7 +164,8 @@ const SERVICE_STOP_POLL_MS = 250;
  * Offline: the whole log from the beginning (what online passes leave behind goes too), an
  * unbounded carry, no pauses, large selection windows and delete transactions (no event loop to
  * protect; fewer, larger transactions write each page to the WAL fewer times), and every old
- * receipt.
+ * receipt. No retention: it removes events by age, which the server's own upkeep does on its
+ * schedule; the doctor only removes what replays to the same state.
  */
 export const DOCTOR_COMPACTION_PASS_OPTIONS: EventLogCompactionPassOptions = {
   ...ONLINE_COMPACTION_PASS_OPTIONS,
@@ -185,6 +186,7 @@ export const DOCTOR_COMPACTION_PASS_OPTIONS: EventLogCompactionPassOptions = {
     deleteBatch: 10_000,
     maxScanRows: Number.POSITIVE_INFINITY,
   },
+  retention: null,
   mode: "delete",
 };
 

@@ -32,11 +32,6 @@ import * as SqlClient from "effect/sql/SqlClient";
 import type { SqlError } from "effect/sql/SqlError";
 
 import {
-  inheritedActivityRowSql,
-  inheritedItemIdSql,
-  inheritedTurnRowSql,
-} from "../orchestration/forkInheritanceSql.ts";
-import {
   isPersistenceError,
   toPersistenceDecodeError,
   toPersistenceSqlError,
@@ -49,6 +44,8 @@ import {
   buildStatisticsThreadMeta,
   computeStatisticsThreadPartial,
   groupStatisticsRowsByThread,
+  mergeStatisticsThreadPartials,
+  normalizeStatisticsThreadPartial,
   StatisticsProjectRow,
   StatisticsThreadRow,
   StatisticsTokenActivityRow,
@@ -58,6 +55,14 @@ import {
   statisticsThreadMetaKey,
   type StatisticsThreadPartial,
 } from "./statisticsAggregation.ts";
+import {
+  selectStatisticsThreads,
+  selectStatisticsTokenActivities,
+  selectStatisticsToolUses,
+  selectStatisticsTurns,
+} from "./statisticsRows.ts";
+
+export { selectStatisticsTokenActivities, selectStatisticsToolUses } from "./statisticsRows.ts";
 
 /**
  * StatisticsQueryShape - service API.
@@ -90,104 +95,6 @@ const INCREMENTAL_THREAD_LIMIT = 256;
 const PERSIST_CHUNK_THREADS = 200;
 /** Yield to other fibers between aggregation chunks of this many threads. */
 const AGGREGATION_CHUNK_THREADS = 256;
-
-/**
- * Context-window token activities: durable event history first, then projection
- * rows that have no event (imported/projection-only). `scope` is a JSON array
- * of thread ids, or `null` for every thread.
- *
- * In the NOT EXISTS lookup the `+` operators strip the TEXT column affinity of
- * `a.activity_id`/`a.created_at`. Without them SQLite cannot use the expression
- * columns of idx_orch_events_statistics_usage and rescans the thread's events,
- * re-extracting JSON, once per projection row.
- */
-export function selectStatisticsTokenActivities(sql: SqlClient.SqlClient, scope: string | null) {
-  return sql`
-    SELECT
-      stream_id AS "threadId",
-      json_extract(payload_json, '$.activity.turnId') AS "turnId",
-      COALESCE(json_extract(payload_json, '$.activity.sequence'), sequence) AS sequence,
-      json_extract(payload_json, '$.activity.createdAt') AS "createdAt",
-      json_extract(payload_json, '$.activity.payload') AS "payloadJson"
-    FROM orchestration_events
-    WHERE event_type = 'thread.activity-appended'
-      AND json_extract(payload_json, '$.activity.kind') = 'context-window.updated'
-      ${scope === null ? sql`` : sql`AND stream_id IN (SELECT value FROM json_each(${scope}))`}
-      AND NOT ${inheritedItemIdSql(
-        sql,
-        sql.literal("json_extract(payload_json, '$.activity.id')"),
-        sql.literal("stream_id"),
-      )}
-    UNION ALL
-    SELECT
-      thread_id AS "threadId", turn_id AS "turnId", sequence,
-      created_at AS "createdAt", payload_json AS "payloadJson"
-    FROM projection_thread_activities a
-    WHERE kind = 'context-window.updated'
-      ${scope === null ? sql`` : sql`AND a.thread_id IN (SELECT value FROM json_each(${scope}))`}
-      AND NOT ${inheritedActivityRowSql(sql, "a")}
-      AND NOT EXISTS (
-        SELECT 1 FROM orchestration_events e
-        WHERE e.event_type = 'thread.activity-appended'
-          AND json_extract(e.payload_json, '$.activity.kind') = 'context-window.updated'
-          AND e.stream_id = a.thread_id
-          AND json_extract(e.payload_json, '$.activity.id') = +a.activity_id
-          AND json_extract(e.payload_json, '$.activity.createdAt') = +a.created_at
-      )
-    ORDER BY "threadId", "createdAt", sequence
-  `;
-}
-
-/** Completed tool calls per (thread, UTC day). See {@link selectStatisticsTokenActivities} for `scope`. */
-export function selectStatisticsToolUses(sql: SqlClient.SqlClient, scope: string | null) {
-  return sql`
-    SELECT
-      thread_id AS "threadId",
-      substr(created_at, 1, 10) AS "date",
-      COUNT(*) AS "count"
-    FROM projection_thread_activities
-    WHERE kind = 'tool.completed'
-      ${scope === null ? sql`` : sql`AND thread_id IN (SELECT value FROM json_each(${scope}))`}
-      AND NOT ${inheritedActivityRowSql(sql, "projection_thread_activities")}
-    GROUP BY thread_id, substr(created_at, 1, 10)
-  `;
-}
-
-/**
- * Turns with their checkpoint file totals. SQLite sums the files (on the read worker when there
- * is one), so the main thread never parses checkpoint_files_json. Malformed or non-array JSON
- * counts as no files, and only numeric additions/deletions count, as before in JS.
- */
-const checkpointFilesTotal = (sql: SqlClient.SqlClient, field: "additions" | "deletions") => sql`
-  CASE WHEN json_valid(turns.checkpoint_files_json) THEN
-    CASE WHEN json_type(turns.checkpoint_files_json) = 'array' THEN (
-      SELECT COALESCE(SUM(
-        CASE WHEN json_type(files.value, ${`$.${field}`}) IN ('integer', 'real')
-          THEN json_extract(files.value, ${`$.${field}`}) ELSE 0 END
-      ), 0)
-      FROM json_each(turns.checkpoint_files_json) AS files
-    ) ELSE 0 END
-  ELSE 0 END
-`;
-
-function selectStatisticsTurns(sql: SqlClient.SqlClient, scope: string | null) {
-  return sql`
-    SELECT
-      thread_id AS "threadId",
-      started_at AS "startedAt",
-      completed_at AS "completedAt",
-      checkpoint_turn_count AS "checkpointTurnCount",
-      CASE WHEN json_valid(turns.checkpoint_files_json) THEN
-        CASE WHEN json_type(turns.checkpoint_files_json) = 'array'
-          THEN json_array_length(turns.checkpoint_files_json) ELSE 0 END
-      ELSE 0 END AS "filesChanged",
-      ${checkpointFilesTotal(sql, "additions")} AS additions,
-      ${checkpointFilesTotal(sql, "deletions")} AS deletions
-    FROM projection_turns turns
-    WHERE NOT ${inheritedTurnRowSql(sql, "turns")}
-      ${scope === null ? sql`` : sql`AND thread_id IN (SELECT value FROM json_each(${scope}))`}
-  `;
-}
 
 interface StatisticsRevision {
   /** Writes on the main connection. Never reset by a rollback. */
@@ -256,6 +163,75 @@ const readError = (operation: string) => (cause: SqlError | ProjectionRepository
     ? (cause as ProjectionRepositoryError)
     : toPersistenceSqlError(`StatisticsQuery.getStatistics:${operation}`)(cause);
 
+/**
+ * The usage of deleted thread incarnations whose events retention removed
+ * (`statistics_usage_rollups`), with the stream's newest sequence: a thread whose newest event is
+ * still the deletion a rollup was taken at is frozen (its partial is the rollups alone); a later
+ * event means the id was created again, and its live rows add to the rollups.
+ */
+const listUsageRollups = (db: SqlClient.SqlClient) =>
+  db<{
+    readonly threadId: string;
+    readonly deletedSequence: number;
+    readonly partialJson: string;
+    readonly head: number | null;
+  }>`
+    SELECT
+      r.thread_id AS "threadId",
+      r.deleted_sequence AS "deletedSequence",
+      r.partial_json AS "partialJson",
+      (
+        SELECT MAX(e.sequence) FROM orchestration_events e
+        WHERE e.aggregate_kind = 'thread' AND e.stream_id = r.thread_id
+      ) AS "head"
+    FROM statistics_usage_rollups r
+  `;
+
+interface ThreadUsageRollup {
+  readonly frozen: boolean;
+  readonly partials: ReadonlyArray<StatisticsThreadPartial>;
+}
+
+const parsePartial = (json: string) => {
+  try {
+    return normalizeStatisticsThreadPartial(JSON.parse(json));
+  } catch {
+    return undefined;
+  }
+};
+
+function groupUsageRollups(
+  rows: ReadonlyArray<{
+    readonly threadId: string;
+    readonly deletedSequence: number;
+    readonly partialJson: string;
+    readonly head: number | null;
+  }>,
+): ReadonlyMap<string, ThreadUsageRollup> {
+  const byThread = new Map<
+    string,
+    { latest: number; head: number | null; partials: StatisticsThreadPartial[] }
+  >();
+  for (const row of rows) {
+    let entry = byThread.get(row.threadId);
+    if (entry === undefined) {
+      entry = { latest: 0, head: row.head === null ? null : Number(row.head), partials: [] };
+      byThread.set(row.threadId, entry);
+    }
+    entry.latest = Math.max(entry.latest, Number(row.deletedSequence));
+    const partial = parsePartial(row.partialJson);
+    if (partial !== undefined) entry.partials.push(partial);
+  }
+  const rollups = new Map<string, ThreadUsageRollup>();
+  for (const [threadId, entry] of byThread) {
+    rollups.set(threadId, {
+      frozen: entry.head === null || entry.head <= entry.latest,
+      partials: entry.partials,
+    });
+  }
+  return rollups;
+}
+
 export const makeStatisticsQuery = Effect.gen(function* () {
   const sql = yield* SqlClient.SqlClient;
   // Row reads run on the read-only worker connection when the runtime has one, so neither the
@@ -284,24 +260,7 @@ export const makeStatisticsQuery = Effect.gen(function* () {
   `.pipe(Effect.map((rows) => rows[0]!));
 
   const listThreadRows = (db: SqlClient.SqlClient) =>
-    db`
-      SELECT
-        t.thread_id AS "threadId",
-        t.project_id AS "projectId",
-        json_extract(t.model_selection_json, '$.model') AS "model",
-        COALESCE(
-          json_extract(t.model_selection_json, '$.instanceId'),
-          json_extract(t.model_selection_json, '$.provider')
-        ) AS "providerInstanceId",
-        t.created_at AS "createdAt",
-        COALESCE(
-          s.provider_name,
-          json_extract(t.model_selection_json, '$.instanceId'),
-          json_extract(t.model_selection_json, '$.provider')
-        ) AS "providerName"
-      FROM projection_threads t
-      LEFT JOIN projection_thread_sessions s ON s.thread_id = t.thread_id
-    `.pipe(
+    selectStatisticsThreads(db, null).pipe(
       Effect.flatMap(decodeThreadRows),
       Effect.mapError((cause) =>
         Schema.isSchemaError(cause)
@@ -398,6 +357,7 @@ export const makeStatisticsQuery = Effect.gen(function* () {
         tokenRows: yield* readScoped((scope) => selectStatisticsTokenActivities(db, scope)),
         toolRows: yield* readScoped((scope) => selectStatisticsToolUses(db, scope)),
         turnRows: yield* readScoped((scope) => selectStatisticsTurns(db, scope)),
+        rollups: groupUsageRollups(yield* listUsageRollups(db)),
       };
     });
 
@@ -413,18 +373,32 @@ export const makeStatisticsQuery = Effect.gen(function* () {
         decodeToolUseRows(read.toolRows).pipe(Effect.mapError(decodeError("listToolUses"))),
         decodeTurnRows(read.turnRows).pipe(Effect.mapError(decodeError("listTurns"))),
       ]);
+      // A frozen thread's rows (projection rows outlive its removed events) are already in its
+      // rollup: they are never counted again.
+      const live = <Row extends { readonly threadId: string }>(rows: ReadonlyArray<Row>) =>
+        read.rollups.size === 0
+          ? rows
+          : rows.filter((row) => read.rollups.get(row.threadId)?.frozen !== true);
       const groups = groupStatisticsRowsByThread({
-        threadIds: read.dirty ?? read.threadMeta.keys(),
-        tokens: tokenRows,
-        turns: turnRows,
-        tools: toolRows,
+        threadIds: read.dirty ?? new Set([...read.threadMeta.keys(), ...read.rollups.keys()]),
+        tokens: live(tokenRows),
+        turns: live(turnRows),
+        tools: live(toolRows),
       });
       const partials = new Map(read.dirty === null || state === undefined ? [] : state.partials);
       const changed = new Set<string>();
       let processed = 0;
       for (const [threadId, rows] of groups) {
         const meta = read.threadMeta.get(threadId);
-        const partial = computeStatisticsThreadPartial(meta, rows);
+        const rollup = read.rollups.get(threadId);
+        const computed = computeStatisticsThreadPartial(meta, rows);
+        const partial =
+          rollup === undefined
+            ? computed
+            : mergeStatisticsThreadPartials(statisticsThreadMetaKey(meta), [
+                ...(rollup.frozen ? [] : [computed]),
+                ...rollup.partials,
+              ]);
         // A thread without meta or rows contributes nothing and never turns dirty.
         if (meta === undefined && partial.earliest === undefined) partials.delete(threadId);
         else partials.set(threadId, partial);

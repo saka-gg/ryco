@@ -155,6 +155,7 @@ import Migration0098 from "./Migrations/098_ThreadForkOrigin.ts";
 import Migration0099, {
   ensureProjectionThreadTriageColumns,
 } from "./Migrations/099_ProjectionThreadTriage.ts";
+import Migration0100 from "./Migrations/100_EventRetention.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -265,6 +266,7 @@ export const migrationEntries = [
   [97, "CommandWatches", Migration0097],
   [98, "ThreadForkOrigin", Migration0098],
   [99, "ProjectionThreadTriage", Migration0099],
+  [100, "EventRetention", Migration0100],
 ] as const;
 
 export const makeMigrationLoader = (throughId?: number) =>
@@ -873,6 +875,8 @@ const compatibilityRepairs = [
     since: 99,
     run: () => repairProjectionThreadTriageColumns(),
   },
+  // 100 again when another branch recorded 100 (or a later id) first; it is idempotent.
+  { key: "event-retention", since: 100, run: () => Migration0100 },
 ] as const;
 
 export type CompatibilityRepairKey = (typeof compatibilityRepairs)[number]["key"];

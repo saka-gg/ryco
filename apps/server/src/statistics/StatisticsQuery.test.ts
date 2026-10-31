@@ -9,15 +9,21 @@ import { assert, describe, it } from "@effect/vitest";
 import { Deferred, Effect, Fiber, Layer, Schema, Scheduler, Scope } from "effect";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as SqlStatement from "effect/sql/Statement";
+import { TestClock } from "effect/testing";
 import { StatisticsSnapshot } from "@ryco/contracts";
 
 import {
   makeSqlitePersistenceLive,
   SqlitePersistenceMemory,
 } from "../persistence/Layers/Sqlite.ts";
-import { makeEventLogCompaction } from "../persistence/Layers/EventLogCompaction.ts";
+import {
+  makeEventLogCompaction,
+  makeEventLogCompactionWith,
+} from "../persistence/Layers/EventLogCompaction.ts";
+import { readStatisticsThreadPartial } from "./statisticsRows.ts";
 import { ONLINE_COMPACTION_PASS_OPTIONS } from "../persistence/Layers/EventLogCompactionDeferred.ts";
 import { SqliteReadClient } from "../persistence/SqliteReadClient.ts";
+import { ORCHESTRATION_PROJECTOR_NAMES } from "../orchestration/projectorNames.ts";
 import {
   selectStatisticsTokenActivities,
   selectStatisticsToolUses,
@@ -1776,5 +1782,156 @@ statisticsLayer("statistics after event-log compaction", (it) => {
         withoutGeneratedAt(cached),
       );
     }),
+  );
+});
+
+const insertLifecycleEvent = (
+  sql: SqlClient.SqlClient,
+  threadId: string,
+  type: "thread.created" | "thread.deleted",
+  occurredAt: string,
+) =>
+  sql`
+    INSERT INTO orchestration_events (
+      event_id, aggregate_kind, stream_id, stream_version, event_type, occurred_at,
+      actor_kind, payload_json, metadata_json
+    ) VALUES (
+      ${`${type}-${threadId}-${occurredAt}`}, 'thread', ${threadId},
+      (SELECT COUNT(*) FROM orchestration_events WHERE stream_id = ${threadId}),
+      ${type}, ${occurredAt}, 'system', ${JSON.stringify({ threadId })}, '{}'
+    )
+  `;
+
+statisticsLayer("statistics after event-log retention", (it) => {
+  it.effect(
+    "keep a deleted thread's usage once its events are gone, and add a re-created id's",
+    () =>
+      Effect.gen(function* () {
+        const sql = yield* SqlClient.SqlClient;
+        const statistics = yield* StatisticsQuery;
+        yield* clean(sql);
+        yield* sql`DELETE FROM statistics_usage_rollups`;
+        yield* sql`DELETE FROM orchestration_stream_floors`;
+        yield* TestClock.setTime(Date.parse("2026-07-01T00:00:00.000Z"));
+        yield* insertProject(sql, "retained-project", "Retention");
+        yield* insertThread(
+          sql,
+          "retained-thread",
+          "retained-project",
+          "claudeAgent",
+          "claude-opus-5-5",
+          "2026-06-10T00:00:00.000Z",
+        );
+        yield* insertThread(
+          sql,
+          "kept-thread",
+          "retained-project",
+          "codex",
+          "gpt-5.4",
+          "2026-06-10T00:00:00.000Z",
+        );
+        yield* insertLifecycleEvent(
+          sql,
+          "retained-thread",
+          "thread.created",
+          "2026-06-10T00:00:00.000Z",
+        );
+        for (const [thread, turnIndex] of [
+          ["retained-thread", 1],
+          ["retained-thread", 2],
+          ["kept-thread", 3],
+        ] as const) {
+          const turnId = `turn-r${turnIndex}`;
+          const createdAt = `2026-06-1${turnIndex}T00:00:00.000Z`;
+          yield* insertActivityEvent(sql, {
+            eventId: `retained-usage-${turnIndex}`,
+            threadId: thread,
+            activityId: `usage-${turnIndex}`,
+            kind: "context-window.updated",
+            turnId,
+            createdAt,
+            payload: { lastInputTokens: 100, lastOutputTokens: 20, lastUsedTokens: 120 },
+          });
+          yield* insertTurn(
+            sql,
+            thread,
+            turnId,
+            turnIndex,
+            createdAt,
+            createdAt.replace("T00:00", "T00:05"),
+            "[]",
+          );
+        }
+        // Deleted on June 20: retention removes its events a week later.
+        yield* insertLifecycleEvent(
+          sql,
+          "retained-thread",
+          "thread.deleted",
+          "2026-06-20T00:00:00.000Z",
+        );
+        yield* sql`
+        UPDATE projection_threads SET deleted_at = '2026-06-20T00:00:00.000Z'
+        WHERE thread_id = 'retained-thread'
+      `;
+        yield* sql`
+        INSERT INTO projection_state (projector, last_applied_sequence, updated_at)
+        SELECT value, (SELECT MAX(sequence) FROM orchestration_events), '2026-06-20T00:00:00.000Z'
+        FROM json_each(${JSON.stringify(Object.values(ORCHESTRATION_PROJECTOR_NAMES))})
+        WHERE true
+        ON CONFLICT (projector) DO UPDATE SET last_applied_sequence = excluded.last_applied_sequence
+      `;
+        const before = yield* recompute(sql, statistics);
+        const cached = yield* statistics.getStatistics();
+        assert.equal(before.totals.totalTokens, 360);
+
+        const compaction = yield* makeEventLogCompactionWith({
+          readThreadUsage: readStatisticsThreadPartial,
+        });
+        const pass = yield* compaction.runPass({
+          ...ONLINE_COMPACTION_PASS_OPTIONS,
+          horizon: "head",
+          interBatchPauseMs: 0,
+          idleRatio: 0,
+          receipts: null,
+        });
+        assert.equal(pass.retention?.deletedEvents, 3);
+        const [left] = yield* sql<{ readonly count: number }>`
+        SELECT count(*) AS count FROM orchestration_events WHERE stream_id = 'retained-thread'
+      `;
+        assert.equal(left?.count, 1);
+
+        // The projection rows outlive the events; the rollup counts them once.
+        assert.deepEqual(
+          withoutGeneratedAt(yield* recompute(sql, statistics)),
+          withoutGeneratedAt(before),
+        );
+        assert.deepEqual(
+          withoutGeneratedAt(yield* statistics.getStatistics()),
+          withoutGeneratedAt(cached),
+        );
+
+        // Created again: the projections reset its rows, and its new usage adds to the rollup.
+        yield* insertLifecycleEvent(
+          sql,
+          "retained-thread",
+          "thread.created",
+          "2026-06-29T00:00:00.000Z",
+        );
+        yield* sql`DELETE FROM projection_turns WHERE thread_id = 'retained-thread'`;
+        yield* sql`UPDATE projection_threads SET deleted_at = NULL WHERE thread_id = 'retained-thread'`;
+        yield* insertActivityEvent(sql, {
+          eventId: "retained-usage-again",
+          threadId: "retained-thread",
+          activityId: "usage-again",
+          kind: "context-window.updated",
+          turnId: "turn-again",
+          createdAt: "2026-06-29T00:01:00.000Z",
+          payload: { lastInputTokens: 10, lastOutputTokens: 2, lastUsedTokens: 12 },
+        });
+        yield* sql`UPDATE projection_state SET last_applied_sequence = (SELECT MAX(sequence) FROM orchestration_events)`;
+        const again = yield* recompute(sql, statistics);
+        assert.equal(again.totals.totalTokens, 372);
+        assert.equal(again.totals.turns, before.totals.turns);
+      }),
   );
 });

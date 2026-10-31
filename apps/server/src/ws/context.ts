@@ -1331,6 +1331,14 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
         .refreshStatus(cwd)
         .pipe(Effect.ignoreCause({ log: true }), Effect.forkDetach, Effect.asVoid);
 
+    // The whole log's retention floor (`EventLogRetention`); 0 without an event store.
+    const readLogReplayFloor = Option.match(orchestrationEventStore, {
+      onNone: () => Effect.succeed(0),
+      onSome: (eventStore) =>
+        eventStore.readReplayFloor === undefined
+          ? Effect.succeed(0)
+          : eventStore.readReplayFloor({ aggregateKind: "log", streamId: "" }),
+    });
     const { enrichOrchestrationEvents, makeReplayableShellStream, makeReplayableThreadStream } =
       makeOrchestrationStreamHelpers({
         orchestrationEngine,
@@ -1340,6 +1348,7 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
           onNone: () => ({}),
           onSome: (eventStore) => ({
             ...(eventStore.probeResume ? { probeResume: eventStore.probeResume } : {}),
+            ...(eventStore.readReplayFloor ? { readReplayFloor: eventStore.readReplayFloor } : {}),
             readStreamEventsPage: eventStore.readStreamEventsPage,
           }),
         }),
@@ -1503,6 +1512,7 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
       enrichOrchestrationEvents,
       makeReplayableShellStream,
       makeReplayableThreadStream,
+      readLogReplayFloor,
       loadServerConfig,
       streamChatsConfigSnapshots,
       loadAdvertisedEndpoints,

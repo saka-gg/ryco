@@ -66,8 +66,9 @@ import { readDatabaseStorageReport } from "../src/persistence/databaseStorageRep
 import {
   EventLogCompactionLive,
   isPrunableReceiptCommandId,
-  makeEventLogCompaction,
+  makeEventLogCompactionWith,
 } from "../src/persistence/Layers/EventLogCompaction.ts";
+import { readStatisticsThreadPartial } from "../src/statistics/statisticsRows.ts";
 import {
   hasCompactionBacklog,
   ONLINE_COMPACTION_PASS_OPTIONS,
@@ -226,9 +227,9 @@ async function compact(dbPath: string) {
     const compaction = await runtime.runPromise(
       Effect.gen(function* () {
         const sql = yield* SqlClient.SqlClient;
-        return yield* noReadWorker
-          ? makeEventLogCompaction.pipe(Effect.provideService(SqliteReadClient, sql))
-          : makeEventLogCompaction;
+        // As the server builds it: retention rolls a deleted thread's usage up with Statistics' reader.
+        const make = makeEventLogCompactionWith({ readThreadUsage: readStatisticsThreadPartial });
+        return yield* noReadWorker ? make.pipe(Effect.provideService(SqliteReadClient, sql)) : make;
       }),
     );
     // Warm the read worker and caches outside the measured window like a running server.
@@ -295,7 +296,27 @@ async function compact(dbPath: string) {
         mainThreadMs: round(pass.mainThreadMs, 0),
         maxBatchMs: round(pass.maxBatchMs),
         stopReason: pass.stopReason,
+        retention: pass.retention,
       })),
+      retention: {
+        deletedThreads: passes.reduce(
+          (total, pass) => total + (pass.retention?.deletedThreads ?? 0),
+          0,
+        ),
+        trimmedThreads: passes.reduce(
+          (total, pass) => total + (pass.retention?.trimmedThreads ?? 0),
+          0,
+        ),
+        deletedEvents: passes.reduce(
+          (total, pass) => total + (pass.retention?.deletedEvents ?? 0),
+          0,
+        ),
+        deletedBytes: passes.reduce(
+          (total, pass) => total + (pass.retention?.deletedBytes ?? 0),
+          0,
+        ),
+        rollups: passes.reduce((total, pass) => total + (pass.retention?.rollups ?? 0), 0),
+      },
       deletedEvents: passes.reduce((total, pass) => total + pass.deletedEvents, 0),
       deletedBytes: passes.reduce((total, pass) => total + pass.deletedBytes, 0),
       deletedReceipts: passes.reduce((total, pass) => total + pass.deletedReceipts, 0),
