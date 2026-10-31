@@ -11,8 +11,9 @@
  * `link()`ed to `N+1`, which fails when a contender got there first (rename would overwrite
  * it). The record's first line lists the pids that keep it held (this server, then the
  * installer child), the second names the owning run. A record is held while any of its pids
- * lives and it is younger than `MAX_LOCK_AGE`; a finished run writes `released`. The highest
- * generation stays after release, so a delayed contender cannot reuse its number.
+ * lives and it is younger than `MAX_LOCK_AGE` (older, until a contender has seen it unchanged for
+ * `EXPIRED_TAKEOVER_GRACE`: its owner may have slept); a finished run writes `released`. The
+ * highest generation stays after release, so a delayed contender cannot reuse its number.
  *
  * Nothing in the folder is followed: records are opened with O_NOFOLLOW after an `lstat`, a
  * link or any other entry that is not a plain record counts as held until it is an hour old,
@@ -41,6 +42,15 @@ import type { ProviderMaintenanceCapabilities } from "./providerMaintenance.ts";
  */
 export const MAX_LOCK_AGE = Duration.hours(1);
 const MAX_LOCK_AGE_MS = Duration.toMillis(MAX_LOCK_AGE);
+/**
+ * An expired record whose pid still lives is taken over only once it has stayed unchanged this
+ * long on the contender's own monotonic clock. Its age is wall-clock time, which runs on while
+ * the host sleeps (or jumps with the clock): an owner frozen mid-install by a closed lid looks
+ * hours old at wake, while its installer, and the installer's 5 minute timeout, only resume
+ * then. A resumed owner rewrites its record once its installer ends; a hung one never does.
+ */
+export const EXPIRED_TAKEOVER_GRACE = Duration.minutes(10);
+const EXPIRED_TAKEOVER_GRACE_NANOS = Duration.toNanosUnsafe(EXPIRED_TAKEOVER_GRACE);
 export const IDLE_POLL_INTERVAL = Duration.seconds(1);
 /**
  * The longest a provider launch waits for its installer's lock. Ryco's installer times out after
@@ -154,7 +164,8 @@ export interface ProviderInstallLockRuntime {
   /**
    * Holds a provider process launch while its installer's lock is held. An empty folder costs
    * one readdir and `capabilities` are not even read; no installer waits for nothing. Gives up
-   * after `LAUNCH_WAIT`, and goes ahead when the folder cannot be read.
+   * after `LAUNCH_WAIT`, and goes ahead when the folder cannot be read. An expired record does
+   * not hold a launch, even within its `EXPIRED_TAKEOVER_GRACE`.
    */
   readonly beforeLaunch: (
     capabilities: Effect.Effect<ProviderMaintenanceCapabilities>,
@@ -376,6 +387,29 @@ export function makeProviderInstallLock(
       return classify(entry, yield* Clock.currentTimeMillis);
     });
 
+  /** When this process first saw each expired record whose pid lives, as it still is. */
+  const expiredSightings = new Map<string, { readonly identity: string; readonly since: bigint }>();
+
+  /**
+   * `readRecord`, except that an expired record whose pid lives still holds until this process
+   * has seen it unchanged for `EXPIRED_TAKEOVER_GRACE`.
+   */
+  const observeRecord = (file: string) =>
+    Effect.gen(function* () {
+      const record = yield* readRecord(file);
+      if (record === undefined || !record.expiredLive) {
+        expiredSightings.delete(file);
+        return record;
+      }
+      const now = yield* Clock.monotonicTimeNanos;
+      const seen = expiredSightings.get(file);
+      if (seen === undefined || seen.identity !== record.identity) {
+        expiredSightings.set(file, { identity: record.identity, since: now });
+        return { ...record, held: true };
+      }
+      return now - seen.since >= EXPIRED_TAKEOVER_GRACE_NANOS ? record : { ...record, held: true };
+    });
+
   /** Publishes a complete record exclusively; a paused writer must never look abandoned. */
   const createExclusively = (file: string, contents: string, owner: string) =>
     call(async () => {
@@ -437,7 +471,8 @@ export function makeProviderInstallLock(
     const previous = (yield* generations).filter((entry) => entry.key === key);
     const highest = previous.reduce((max, entry) => Math.max(max, entry.generation), 0);
     const previousFile = highest > 0 ? join(`${key}.${highest}`) : undefined;
-    const previousRecord = previousFile === undefined ? undefined : yield* readRecord(previousFile);
+    const previousRecord =
+      previousFile === undefined ? undefined : yield* observeRecord(previousFile);
     if (previousRecord?.held) return undefined;
     const next = highest + 1;
     if (!Number.isSafeInteger(next)) {
@@ -471,7 +506,7 @@ export function makeProviderInstallLock(
       // A rejected successor can disappear after another contender snapshots it. That contender
       // must not skip the resumed owner below the missing generation.
       for (const entry of previous) {
-        if (entry.generation < highest && (yield* readRecord(join(entry.name)))?.held) {
+        if (entry.generation < highest && (yield* observeRecord(join(entry.name)))?.held) {
           return yield* backOff;
         }
       }
@@ -541,24 +576,29 @@ export function makeProviderInstallLock(
       );
     });
 
-  const isHeld = (lockKey: string | undefined) =>
+  /**
+   * `launch` reads an expired record whose pid lives as free at once: a launch must not wait out
+   * the takeover grace of a stale record, and at worst starts a CLI a woken owner is replacing.
+   */
+  const isHeld = (lockKey: string | undefined, launch = false) =>
     Effect.gen(function* () {
       const key = lockKey === undefined ? undefined : providerInstallLockName(lockKey);
+      const read = launch ? readRecord : observeRecord;
       // Every generation counts: a provisional successor must not hide a resumed older owner.
       for (const entry of yield* generations) {
         if (key !== undefined && entry.key !== key) continue;
-        if ((yield* readRecord(join(entry.name)))?.held) return true;
+        if ((yield* read(join(entry.name)))?.held) return true;
       }
       return false;
     });
 
-  const pollUntilIdle = (lockKey: string | undefined): Effect.Effect<void> =>
+  const pollUntilIdle = (lockKey: string | undefined, launch = false): Effect.Effect<void> =>
     Effect.suspend(() =>
-      isHeld(lockKey).pipe(
+      isHeld(lockKey, launch).pipe(
         Effect.orElseSucceed(() => false),
         Effect.flatMap((held) =>
           held
-            ? Effect.sleep(IDLE_POLL_INTERVAL).pipe(Effect.andThen(pollUntilIdle(lockKey)))
+            ? Effect.sleep(IDLE_POLL_INTERVAL).pipe(Effect.andThen(pollUntilIdle(lockKey, launch)))
             : Effect.void,
         ),
       ),
@@ -590,7 +630,7 @@ export function makeProviderInstallLock(
       const key = (yield* capabilities).update?.lockKey;
       if (key === undefined) return;
       const startedAt = yield* Clock.currentTimeMillis;
-      const idle = yield* pollUntilIdle(key).pipe(Effect.timeoutOption(LAUNCH_WAIT));
+      const idle = yield* pollUntilIdle(key, true).pipe(Effect.timeoutOption(LAUNCH_WAIT));
       const waitedMs = (yield* Clock.currentTimeMillis) - startedAt;
       if (Option.isNone(idle)) {
         yield* Effect.logWarning("provider launch stopped waiting for its install lock", {
@@ -608,7 +648,7 @@ export function makeProviderInstallLock(
   return {
     tryRun,
     runWhenFree,
-    untilIdle: pollUntilIdle,
+    untilIdle: (lockKey) => pollUntilIdle(lockKey),
     beforeLaunch,
     anyHeld: isHeld(undefined),
     isHeld: (lockKey) => isHeld(lockKey),

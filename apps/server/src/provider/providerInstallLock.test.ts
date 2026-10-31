@@ -14,6 +14,7 @@ import {
   makeProviderMaintenanceCapabilities,
 } from "./providerMaintenance.ts";
 import {
+  EXPIRED_TAKEOVER_GRACE,
   LAUNCH_WAIT,
   makeProviderInstallLock,
   nodeProviderInstallLockFiles,
@@ -154,17 +155,44 @@ describe("providerInstallLock", () => {
     }),
   );
 
-  it.effect("keeps a live lock until it is an hour old", () =>
+  it.effect("keeps a live lock until it is an hour old, then unchanged for the grace", () =>
     Effect.gen(function* () {
-      const { first, second, record } = yield* withFolder;
+      const { second, record } = yield* withFolder;
       yield* writeAged(record(1), `${process.pid}\nlive-owner`);
       yield* TestClock.adjust(Duration.minutes(59));
       assert.isTrue(yield* second.anyHeld);
       assert.deepStrictEqual(yield* second.tryRun("k", () => Effect.void), Option.none());
+      // An hour old on the wall clock: from now on this process watches it stay unchanged.
       yield* TestClock.adjust(Duration.minutes(1));
+      assert.isTrue(yield* second.anyHeld);
+      // A launch does not wait out the grace (a wait would hang on the test clock).
+      yield* second.beforeLaunch(installedWith("k"));
+      yield* TestClock.adjust(Duration.subtract(EXPIRED_TAKEOVER_GRACE, Duration.seconds(1)));
+      assert.deepStrictEqual(yield* second.tryRun("k", () => Effect.void), Option.none());
+      yield* TestClock.adjust(Duration.seconds(1));
       assert.isFalse(yield* second.anyHeld);
       yield* second.untilIdle("k");
-      assert.deepStrictEqual(yield* first.tryRun("k", () => Effect.succeed(1)), Option.some(1));
+      assert.deepStrictEqual(yield* second.tryRun("k", () => Effect.succeed(1)), Option.some(1));
+    }),
+  );
+
+  it.effect("does not take over a live owner whose host slept through the hour", () =>
+    Effect.gen(function* () {
+      const { second, record } = yield* withFolder;
+      // The owner's installer runs; the lid closes. At wake its record is 8 hours old on the
+      // wall clock, but the installer (and its 5 minute timeout) only resume now.
+      yield* writeAged(record(1), `${process.pid} ${process.pid}\nasleep-owner`);
+      yield* TestClock.adjust(Duration.hours(8));
+      assert.deepStrictEqual(
+        yield* second.tryRun("k", () => Effect.die("must not install beside it")),
+        Option.none(),
+      );
+      yield* TestClock.adjust(Duration.minutes(4));
+      assert.isTrue(yield* second.isHeld("k"));
+      // The installer ends and its owner releases: the lock is free the ordinary way.
+      yield* fs(() => NodeFs.writeFile(record(1), "released\nasleep-owner"));
+      assert.isFalse(yield* second.isHeld("k"));
+      assert.deepStrictEqual(yield* second.tryRun("k", () => Effect.succeed(1)), Option.some(1));
     }),
   );
 
@@ -178,6 +206,7 @@ describe("providerInstallLock", () => {
         yield* writeAged(previous, contents);
         yield* TestClock.adjust(Duration.hours(1));
         // The paused owner writes (or touches) its record right after the successor linked N+1.
+        // That successor has watched the record stay unchanged for the whole grace.
         const lock = lockWith({
           link: async (existingFile, newFile) => {
             await nodeProviderInstallLockFiles.link(existingFile, newFile);
@@ -190,6 +219,8 @@ describe("providerInstallLock", () => {
             }
           },
         });
+        assert.isTrue(yield* lock.anyHeld);
+        yield* TestClock.adjust(EXPIRED_TAKEOVER_GRACE);
         assert.deepStrictEqual(
           yield* lock.tryRun("k", () => Effect.die("must not install")),
           Option.none(),
