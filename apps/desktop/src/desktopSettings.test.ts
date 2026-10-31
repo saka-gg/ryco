@@ -748,3 +748,30 @@ describe("desktop settings from before Ryco Nightly", () => {
     expect(fs.readFileSync(settingsPath, "utf8")).not.toContain("updateChannel");
   });
 });
+
+describe("Ryco Nightly desktop defaults", () => {
+  it("serves Tailscale on its own port, so turning Serve on never replaces Ryco's", () => {
+    expect(
+      resolveDefaultDesktopSettings("0.1.38-nightly.20261101.4", "nightly").tailscaleServePort,
+    ).toBe(8443);
+    expect(resolveDefaultDesktopSettings("0.1.37").tailscaleServePort).toBe(443);
+    const settingsPath = makeSettingsPath();
+    fs.writeFileSync(settingsPath, JSON.stringify({ tailscaleServeEnabled: true }), "utf8");
+    expect(
+      readDesktopSettings(settingsPath, "0.1.38-nightly.20261101.4", undefined, "nightly")
+        .tailscaleServePort,
+    ).toBe(8443);
+  });
+
+  it("names Ryco Nightly's Hub node apart unless the user chose a name", () => {
+    const settings = { ...DEFAULT_DESKTOP_SETTINGS, hubConnectorEnabled: true };
+    expect(resolveDesktopHubConnectorLaunch(settings, "studio Nightly").nodeName).toBe(
+      "studio Nightly",
+    );
+    expect(
+      resolveDesktopHubConnectorLaunch({ ...settings, hubNodeName: "My box" }, "studio Nightly")
+        .nodeName,
+    ).toBe("My box");
+    expect(resolveDesktopHubConnectorLaunch(settings).nodeName).toBeNull();
+  });
+});

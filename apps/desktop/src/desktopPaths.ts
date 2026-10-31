@@ -27,8 +27,13 @@ export interface DesktopPaths {
 export function configuredDesktopBaseDir(
   flavor: RycoDesktopFlavor,
   env: NodeJS.ProcessEnv = process.env,
+  homeDir: string = OS.homedir(),
 ): string | undefined {
-  return env[rycoDesktopFlavorIdentity(flavor).homeEnv];
+  const configured = env[rycoDesktopFlavorIdentity(flavor).homeEnv]?.trim() || undefined;
+  if (configured === undefined || flavor !== "nightly") return configured;
+  // Never Ryco's own home, however it is spelled.
+  const stableHome = Path.join(homeDir, rycoDesktopFlavorIdentity("stable").homeDirectoryName);
+  return Path.resolve(configured) === Path.resolve(stableHome) ? undefined : configured;
 }
 
 export function resolveDesktopPaths(input: {

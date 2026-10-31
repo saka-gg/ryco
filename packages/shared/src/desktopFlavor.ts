@@ -56,6 +56,15 @@ export interface RycoDesktopFlavorIdentity {
   readonly linuxName: string;
   /** electron-updater channel; the app accepts no version outside it. */
   readonly updateChannel: "latest" | "nightly";
+  /**
+   * The start of every release file name (`artifactName`). The updater accepts only files of
+   * its own app: a nightly version alone does not say which app a build is, the file name does.
+   */
+  readonly artifactPrefix: "Ryco-" | "Ryco-Nightly-";
+  /** First backend port to try: both apps can run at once, each keeping its renderer origin. */
+  readonly defaultBackendPort: number;
+  /** Default Tailscale Serve HTTPS port, so turning Serve on in one app never replaces the other's. */
+  readonly defaultTailscaleServePort: number;
 }
 
 export const RYCO_DESKTOP_FLAVOR_IDENTITIES: Readonly<
@@ -72,6 +81,9 @@ export const RYCO_DESKTOP_FLAVOR_IDENTITIES: Readonly<
     appUserModelId: "com.sak0a.ryco",
     linuxName: "ryco",
     updateChannel: "latest",
+    artifactPrefix: "Ryco-",
+    defaultBackendPort: 7926,
+    defaultTailscaleServePort: 443,
   },
   nightly: {
     flavor: "nightly",
@@ -84,6 +96,9 @@ export const RYCO_DESKTOP_FLAVOR_IDENTITIES: Readonly<
     appUserModelId: "com.sak0a.ryco.nightly",
     linuxName: "ryco-nightly",
     updateChannel: "nightly",
+    artifactPrefix: "Ryco-Nightly-",
+    defaultBackendPort: 7936,
+    defaultTailscaleServePort: 8443,
   },
 };
 
@@ -97,6 +112,28 @@ export function rycoDesktopFlavorIdentity(flavor: RycoDesktopFlavor): RycoDeskto
  * retires it): it follows stable releases, which install as an ordinary update
  * because a nightly's base is the next stable patch.
  */
+/**
+ * Whether every file of an offered update belongs to this app. Legacy-identity nightlies and
+ * Ryco Nightly share version shapes and channel manifests, so the version check alone cannot
+ * keep one from installing over the other; their file names can.
+ */
+export function updateFilesBelongToFlavor(
+  files: ReadonlyArray<{ readonly url: string }>,
+  flavor: RycoDesktopFlavor,
+): boolean {
+  const nightlyPrefix = RYCO_DESKTOP_FLAVOR_IDENTITIES.nightly.artifactPrefix;
+  return (
+    files.length > 0 &&
+    files.every((file) => {
+      const name = file.url.split(/[/\\]/u).at(-1) ?? "";
+      return flavor === "nightly"
+        ? name.startsWith(nightlyPrefix)
+        : name.startsWith(RYCO_DESKTOP_FLAVOR_IDENTITIES.stable.artifactPrefix) &&
+            !name.startsWith(nightlyPrefix);
+    })
+  );
+}
+
 export function desktopUpdateChannelForFlavor(flavor: RycoDesktopFlavor): "latest" | "nightly" {
   return rycoDesktopFlavorIdentity(flavor).updateChannel;
 }

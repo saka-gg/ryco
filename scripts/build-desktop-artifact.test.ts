@@ -432,6 +432,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
           "separate",
         );
         assert.equal(config.appId, "com.laurinfrank.ryco.nightly");
+        assert.equal(config.artifactName, "Ryco-Nightly-${version}-${arch}.${ext}");
         assert.equal(config.productName, "Ryco Nightly");
         assert.deepStrictEqual(config.extraMetadata, { rycoDesktopFlavor: "nightly" });
         if (platform === "mac") {
@@ -474,6 +475,7 @@ it.layer(NodeServices.layer)("build-desktop-artifact", (it) => {
         undefined,
       );
       assert.equal(stable.appId, "com.laurinfrank.ryco");
+      assert.equal(stable.artifactName, "Ryco-${version}-${arch}.${ext}");
       assert.deepStrictEqual(stable.extraMetadata, { rycoDesktopFlavor: "stable" });
     }),
   );

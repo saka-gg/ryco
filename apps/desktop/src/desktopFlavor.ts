@@ -10,16 +10,17 @@ import {
 /**
  * Which app this is, Ryco or Ryco Nightly, from the field the build wrote into
  * the packaged `package.json`. The value is part of the signed bundle, so no
- * environment variable can turn one app into the other. Development builds and
+ * environment variable can turn one app into the other. Unpackaged (development) builds and
  * builds from before the split read as stable. Light enough for the launch entry:
  * `node:fs` and `node:path` only.
  */
 export function readDesktopFlavor(input: {
   readonly appPath: string;
-  readonly isDevelopment: boolean;
+  /** Only a packaged app has a flavor; no environment variable (not even a dev server URL) changes it. */
+  readonly isPackaged: boolean;
   readonly readFile?: (path: string) => string;
 }): RycoDesktopFlavor {
-  if (input.isDevelopment) return "stable";
+  if (!input.isPackaged) return "stable";
   try {
     const packageJson: unknown = JSON.parse(
       (input.readFile ?? ((path) => FS.readFileSync(path, "utf8")))(

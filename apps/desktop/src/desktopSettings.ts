@@ -6,6 +6,7 @@ import type {
   DesktopQuitShortcutMode,
   DesktopServerExposureMode,
 } from "@ryco/contracts";
+import { type RycoDesktopFlavor, rycoDesktopFlavorIdentity } from "@ryco/shared/desktopFlavor";
 import { normalizeHubNodeName } from "@ryco/shared/nodeIdentity";
 
 import { normalizeDesktopBackendPort } from "./backendPort.ts";
@@ -131,8 +132,14 @@ export const DEFAULT_DESKTOP_SETTINGS: DesktopSettings = {
  * nightlies (`@ryco/shared/desktopFlavor`). A file from before the split may still carry
  * `updateChannel`; it is ignored, and dropped on the next write.
  */
-export function resolveDefaultDesktopSettings(_appVersion: string): DesktopSettings {
-  return { ...DEFAULT_DESKTOP_SETTINGS };
+export function resolveDefaultDesktopSettings(
+  _appVersion: string,
+  flavor: RycoDesktopFlavor = "stable",
+): DesktopSettings {
+  return {
+    ...DEFAULT_DESKTOP_SETTINGS,
+    tailscaleServePort: rycoDesktopFlavorIdentity(flavor).defaultTailscaleServePort,
+  };
 }
 
 export function setDesktopServerExposurePreference(
@@ -258,10 +265,13 @@ export function setDesktopKeepAwakeMode(
   return settings.keepAwakeMode === mode ? settings : { ...settings, keepAwakeMode: mode };
 }
 
-export function normalizeTailscaleServePort(value: unknown): number {
+export function normalizeTailscaleServePort(
+  value: unknown,
+  fallback: number = DEFAULT_TAILSCALE_SERVE_PORT,
+): number {
   return typeof value === "number" && Number.isInteger(value) && value >= 1 && value <= 65_535
     ? value
-    : DEFAULT_TAILSCALE_SERVE_PORT;
+    : fallback;
 }
 
 export function setDesktopHubPreference(
@@ -335,10 +345,12 @@ export interface DesktopHubConnectorLaunch {
  */
 export function resolveDesktopHubConnectorLaunch(
   settings: DesktopSettings,
+  /** The node name when the user chose none (Ryco Nightly: `<host> Nightly`). */
+  defaultNodeName: string | null = null,
 ): DesktopHubConnectorLaunch {
   const shared = {
     origin: settings.hubOrigin,
-    nodeName: settings.hubNodeName,
+    nodeName: settings.hubNodeName ?? defaultNodeName,
     allowFileSecretStore: settings.hubAllowFileSecretStore,
   };
   if (settings.hubOrigin === null) return { ...shared, enabled: false, standby: false };
@@ -420,8 +432,9 @@ export function readDesktopSettings(
      */
     readonly hasRetainedHubSession: () => boolean;
   },
+  flavor: RycoDesktopFlavor = "stable",
 ): DesktopSettings {
-  const defaultSettings = resolveDefaultDesktopSettings(appVersion);
+  const defaultSettings = resolveDefaultDesktopSettings(appVersion, flavor);
 
   try {
     if (!FS.existsSync(settingsPath)) {
@@ -463,7 +476,10 @@ export function readDesktopSettings(
       serverExposureMode:
         parsed.serverExposureMode === "network-accessible" ? "network-accessible" : "local-only",
       tailscaleServeEnabled: parsed.tailscaleServeEnabled === true,
-      tailscaleServePort: normalizeTailscaleServePort(parsed.tailscaleServePort),
+      tailscaleServePort: normalizeTailscaleServePort(
+        parsed.tailscaleServePort,
+        defaultSettings.tailscaleServePort,
+      ),
       keepAwakeMode: resolveDesktopKeepAwakeMode(parsed, () =>
         readRememberedDesktopKeepAwakeMode(settingsPath),
       ),

@@ -76,7 +76,7 @@ import type {
 import { isRemoteEditorLink } from "@ryco/shared/remoteEditorLink";
 import { AsyncRotatingFileSink, DESKTOP_BACKEND_LOG_FILE_NAME } from "@ryco/shared/logging";
 import { normalizeHubNodeName } from "@ryco/shared/nodeIdentity";
-import { rycoDesktopFlavorIdentity } from "@ryco/shared/desktopFlavor";
+import { rycoDesktopFlavorIdentity, updateFilesBelongToFlavor } from "@ryco/shared/desktopFlavor";
 import { readEnv } from "@ryco/shared/runtimeEnv";
 import { parsePersistedServerObservabilitySettings } from "@ryco/shared/serverSettings";
 import {
@@ -140,7 +140,11 @@ import {
 import { pruneStaleDesktopCompileCaches } from "./compileCacheDirectory.ts";
 import { createDesktopWorkspaceActivity } from "./desktopBackgroundSignal.ts";
 import { readDesktopFlavor } from "./desktopFlavor.ts";
-import { resolveDesktopPaths, resolveDesktopUserDataPath } from "./desktopPaths.ts";
+import {
+  configuredDesktopBaseDir,
+  resolveDesktopPaths,
+  resolveDesktopUserDataPath,
+} from "./desktopPaths.ts";
 import { registerDeferredIpcHandlers } from "./deferredIpc.ts";
 import {
   DESKTOP_STARTUP_MARKS_CHANNEL,
@@ -349,12 +353,12 @@ const isDevelopment = Boolean(process.env.VITE_DEV_SERVER_URL);
 const isDesktopAuthorizationCallbackRelay =
   isDevelopment && process.env.RYCO_DESKTOP_CALLBACK_RELAY === "1";
 /** Ryco or Ryco Nightly (`@ryco/shared/desktopFlavor`): the data home, profile and update channel follow it. */
-const DESKTOP_FLAVOR = readDesktopFlavor({ appPath: app.getAppPath(), isDevelopment });
+const DESKTOP_FLAVOR = readDesktopFlavor({ appPath: app.getAppPath(), isPackaged: app.isPackaged });
 const DESKTOP_FLAVOR_IDENTITY = rycoDesktopFlavorIdentity(DESKTOP_FLAVOR);
 /** The one channel this app updates from; it never takes a version outside it, nor a downgrade. */
 const DESKTOP_UPDATE_CHANNEL: DesktopUpdateChannel = DESKTOP_FLAVOR_IDENTITY.updateChannel;
 const DESKTOP_PATHS = resolveDesktopPaths({
-  configuredBaseDir: readEnv(DESKTOP_FLAVOR_IDENTITY.homeEnv),
+  configuredBaseDir: configuredDesktopBaseDir(DESKTOP_FLAVOR),
   isDevelopment,
   flavor: DESKTOP_FLAVOR,
 });
@@ -653,22 +657,27 @@ let backendObservabilitySettings = readPersistedBackendObservabilitySettings();
 let desktopSettingsUnreadable = false;
 let desktopSettings = ((): DesktopSettings => {
   try {
-    return readDesktopSettings(DESKTOP_SETTINGS_PATH, app.getVersion(), {
-      hasRetainedHubSession: () => {
-        try {
-          return desktopProtectedRecordExists({
-            directory: NATIVE_SECURITY_DIR,
-            name: "hub-session-token",
-          });
-        } catch {
-          // Unreadable: assume a session, which only keeps the connector off.
-          return true;
-        }
+    return readDesktopSettings(
+      DESKTOP_SETTINGS_PATH,
+      app.getVersion(),
+      {
+        hasRetainedHubSession: () => {
+          try {
+            return desktopProtectedRecordExists({
+              directory: NATIVE_SECURITY_DIR,
+              name: "hub-session-token",
+            });
+          } catch {
+            // Unreadable: assume a session, which only keeps the connector off.
+            return true;
+          }
+        },
       },
-    });
+      DESKTOP_FLAVOR,
+    );
   } catch {
     desktopSettingsUnreadable = true;
-    return resolveDefaultDesktopSettings(app.getVersion());
+    return resolveDefaultDesktopSettings(app.getVersion(), DESKTOP_FLAVOR);
   }
 })();
 let desktopServerExposureMode: DesktopServerExposureMode = desktopSettings.serverExposureMode;
@@ -947,6 +956,19 @@ function desktopAuthorizationVariant(): DesktopAuthorizationVariant {
   return DESKTOP_FLAVOR === "nightly" || desktopAppBranding.stageLabel === "Nightly"
     ? "preview"
     : "production";
+}
+
+/**
+ * Ryco Nightly is a node of its own in the same account: name it apart from Ryco's node on
+ * this computer unless the user chose a name.
+ */
+function desktopDefaultHubNodeName(): string | null {
+  if (DESKTOP_FLAVOR !== "nightly") return null;
+  try {
+    return normalizeHubNodeName(`${desktopHostedDeviceLabel()} Nightly`);
+  } catch {
+    return null;
+  }
 }
 
 function desktopHostedDeviceLabel(): string {
@@ -1529,7 +1551,7 @@ function desktopHubRestartRequired(settings: DesktopSettings = desktopSettings):
   return (
     backendHubLaunch !== null &&
     desktopHubLaunchNeedsRestart(
-      resolveDesktopHubConnectorLaunch(settings),
+      resolveDesktopHubConnectorLaunch(settings, desktopDefaultHubNodeName()),
       backendHubLaunch,
       backendHubConnectorEnabled,
     )
@@ -3368,6 +3390,14 @@ async function configureAutoUpdater(): Promise<void> {
   });
   autoUpdater.on("update-available", (info) => {
     downloadedUpdateFilePath = null;
+    if (!updateFilesBelongToFlavor(info.files, DESKTOP_FLAVOR)) {
+      console.info(
+        `[desktop-updater] Ignoring ${info.version}: its files belong to the other app (${info.files.map((file) => file.url).join(", ")}).`,
+      );
+      setUpdateState(reduceDesktopUpdateStateOnNoUpdate(updateState, new Date().toISOString()));
+      lastLoggedDownloadMilestone = -1;
+      return;
+    }
     if (!doesVersionMatchDesktopUpdateChannel(info.version, updateState.channel)) {
       console.info(
         `[desktop-updater] Ignoring ${info.version} because it does not match the selected '${updateState.channel}' channel.`,
@@ -3894,7 +3924,7 @@ function startBackend(): void {
   const child = launched.child;
   const childControlToken = Crypto.randomBytes(32).toString("base64url");
   backendControlToken = childControlToken;
-  const hubLaunch = resolveDesktopHubConnectorLaunch(desktopSettings);
+  const hubLaunch = resolveDesktopHubConnectorLaunch(desktopSettings, desktopDefaultHubNodeName());
   backendHubLaunch = hubLaunch;
   backendHubConnectorEnabled = null;
   const tailscaleServe = resolveDesktopTailscaleServeLaunch(desktopSettings);
@@ -5487,7 +5517,11 @@ async function selectDesktopBackendPort(
     settingsPort: desktopSettings.backendPort,
   });
   const hasPriorRendererState = hasPriorDesktopRendererState(userDataPath);
-  const startPort = resolveDesktopBackendStartPort({ persistedPort, hasPriorRendererState });
+  const startPort = resolveDesktopBackendStartPort({
+    persistedPort,
+    hasPriorRendererState,
+    defaultPort: DESKTOP_FLAVOR_IDENTITY.defaultBackendPort,
+  });
   const port = await resolveDesktopBackendPort({
     host: DESKTOP_LOOPBACK_HOST,
     startPort,

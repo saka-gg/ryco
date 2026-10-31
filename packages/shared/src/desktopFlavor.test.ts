@@ -5,6 +5,7 @@ import {
   isLegacyInPlaceNightly,
   isNightlyVersion,
   parseRycoDesktopFlavor,
+  updateFilesBelongToFlavor,
   RYCO_DESKTOP_FLAVOR_IDENTITIES,
   releaseChannelForVersion,
 } from "./desktopFlavor.ts";
@@ -22,6 +23,9 @@ describe("Ryco and Ryco Nightly identities", () => {
       "appUserModelId",
       "linuxName",
       "updateChannel",
+      "artifactPrefix",
+      "defaultBackendPort",
+      "defaultTailscaleServePort",
     ] as const) {
       expect(nightly[key], key).not.toBe(stable[key]);
     }
@@ -61,5 +65,27 @@ describe("nightly versions", () => {
       isLegacyInPlaceNightly({ flavor: "nightly", appVersion: "0.1.38-nightly.20261101.4" }),
     ).toBe(false);
     expect(isLegacyInPlaceNightly({ flavor: "stable", appVersion: "0.1.37" })).toBe(false);
+  });
+});
+
+describe("updateFilesBelongToFlavor", () => {
+  const files = (...names: string[]) => names.map((url) => ({ url }));
+  it("lets each app take only its own release files", () => {
+    const nightly = files("Ryco-Nightly-0.1.38-nightly.20261101.4-arm64-mac.zip");
+    const stable = files("Ryco-0.1.37-arm64-mac.zip", "Ryco-0.1.37-arm64.dmg");
+    // A legacy-identity nightly has stable-shaped file names.
+    const legacyNightly = files("Ryco-0.1.38-nightly.20261101.4-arm64-mac.zip");
+    expect(updateFilesBelongToFlavor(nightly, "nightly")).toBe(true);
+    expect(updateFilesBelongToFlavor(stable, "nightly")).toBe(false);
+    expect(updateFilesBelongToFlavor(legacyNightly, "nightly")).toBe(false);
+    expect(updateFilesBelongToFlavor(stable, "stable")).toBe(true);
+    expect(updateFilesBelongToFlavor(nightly, "stable")).toBe(false);
+    expect(updateFilesBelongToFlavor([], "stable")).toBe(false);
+    expect(
+      updateFilesBelongToFlavor(
+        files("https://github.com/o/r/releases/download/v1/Ryco-Nightly-1.0.0-x64.exe"),
+        "nightly",
+      ),
+    ).toBe(true);
   });
 });

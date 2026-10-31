@@ -1,7 +1,9 @@
 /**
- * Features that ship in Ryco Nightly builds but stay off in stable releases.
+ * Features that ship in nightly releases but stay off in stable ones.
  *
- * The code ships in both; a stable node switches every listed feature off.
+ * Decided by the node's version: on for every nightly node (Ryco Nightly, the bridge release
+ * that retires the in-place nightly, and CLI nodes on the npm `nightly` dist-tag), off on a
+ * stable one. The code ships in both; a stable node switches every listed feature off.
  * Promote a feature to stable by deleting its entry, and every gate resolves
  * itself (Synara's BETA_ONLY_FEATURES). The node is authoritative: it refuses
  * the capability on a stable release, and clients only hide entry points, from

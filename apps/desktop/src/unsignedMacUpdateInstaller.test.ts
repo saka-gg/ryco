@@ -1,5 +1,5 @@
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -111,7 +111,8 @@ describe("createUnsignedMacUpdateInstallScript", () => {
     expect(script).toContain("WAIT_PID=123");
     expect(script).toContain('/usr/bin/ditto -x -k "$UPDATE_ZIP" "$STAGING_DIR"');
     expect(script).toContain("/usr/bin/xattr -dr com.apple.quarantine");
-    expect(script).toContain('/usr/bin/open "$TARGET_APP"');
+    expect(script).toContain("OPEN_COMMAND='/usr/bin/open'");
+    expect(script).toContain('"$OPEN_COMMAND" "$TARGET_APP"');
     // The bundle id check runs before anything is copied over the app.
     expect(script).toContain("EXPECTED_BUNDLE_ID='com.laurinfrank.ryco'");
     expect(script.indexOf('"$SOURCE_BUNDLE_ID" != "$EXPECTED_BUNDLE_ID"')).toBeGreaterThan(-1);
@@ -142,6 +143,12 @@ describe.runIf(process.platform === "darwin")("the unsigned macOS installer scri
     mkdirSync(join(target, "Contents"), { recursive: true });
     writeFileSync(join(target, "Contents", "marker"), "stable");
     const scriptPath = join(root, "install.zsh");
+    const opened = join(root, "open.zsh");
+    writeFileSync(
+      opened,
+      `#!/bin/zsh\nprint -r -- "$1" >> ${JSON.stringify(join(root, "opened.log"))}\n`,
+    );
+    chmodSync(opened, 0o755);
     writeFileSync(
       scriptPath,
       createUnsignedMacUpdateInstallScript({
@@ -151,17 +158,26 @@ describe.runIf(process.platform === "darwin")("the unsigned macOS installer scri
         targetAppPath: target,
         // A pid that is not running, so the script does not wait.
         waitPid: 999_999,
+        // Records instead of launching anything.
+        openCommand: opened,
         logPath: join(root, "install.log"),
       }),
     );
     const result = spawnSync("/bin/zsh", [scriptPath], { encoding: "utf8" });
-    return { result, target, log: () => readFileSync(join(root, "install.log"), "utf8") };
+    return {
+      result,
+      target,
+      log: () => readFileSync(join(root, "install.log"), "utf8"),
+      opened: () => readFileSync(join(root, "opened.log"), "utf8").trim(),
+    };
   };
 
   it("refuses a downloaded bundle of another app and leaves this one in place", () => {
-    const { result, target, log } = installWith("com.laurinfrank.ryco.nightly");
+    const { result, target, log, opened } = installWith("com.laurinfrank.ryco.nightly");
     expect(result.status).toBe(1);
     expect(readFileSync(join(target, "Contents", "marker"), "utf8")).toBe("stable");
     expect(log()).toContain("refusing to replace this app with another one");
+    // The app quit for the install comes back as it was.
+    expect(opened()).toBe(target);
   });
 });

@@ -34,7 +34,7 @@ import { externalBridgeLaunchArgs } from "./externalBridgeLaunch.ts";
 // itself took before any Ryco code ran.
 const entryStartedAtMs = performance.now();
 const isDevelopment = Boolean(process.env.VITE_DEV_SERVER_URL);
-const desktopFlavor = readDesktopFlavor({ appPath: app.getAppPath(), isDevelopment });
+const desktopFlavor = readDesktopFlavor({ appPath: app.getAppPath(), isPackaged: app.isPackaged });
 const compileCacheHook = resolve(__dirname, "compileCache.cjs");
 
 /** Enable the V8 compile cache here and, through the environment, in Node-mode children. */

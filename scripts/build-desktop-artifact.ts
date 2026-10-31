@@ -997,7 +997,8 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
     productName: resolveDesktopProductName(version, nightlyIdentity),
     // Read at runtime (RYCO_DESKTOP_FLAVOR_METADATA_KEY): the packaged app cannot lose its flavor.
     extraMetadata: { [RYCO_DESKTOP_FLAVOR_METADATA_KEY]: flavor.flavor },
-    artifactName: "Ryco-${version}-${arch}.${ext}",
+    // The updater accepts only its own app's files (updateFilesBelongToFlavor).
+    artifactName: `${flavor.artifactPrefix}\${version}-\${arch}.\${ext}`,
     directories: {
       buildResources: "apps/desktop/resources",
     },
@@ -1291,9 +1292,10 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
   );
 
   const appVersion = options.version ?? serverPackageJson.version;
-  const nightlyIdentity = resolveDesktopNightlyIdentityMode(
-    readEnv("RYCO_DESKTOP_NIGHTLY_IDENTITY"),
-  );
+  // Read only for a nightly: a stray value never fails a stable release.
+  const nightlyIdentity = isNightlyVersion(appVersion)
+    ? resolveDesktopNightlyIdentityMode(readEnv("RYCO_DESKTOP_NIGHTLY_IDENTITY"))
+    : "legacy";
   const buildFlavor = resolveDesktopBuildFlavor(appVersion, nightlyIdentity);
   const iconAssets = resolveDesktopBuildIconAssets(appVersion);
   const webAssetBrand = resolveDesktopWebAssetBrand(appVersion);

@@ -14,7 +14,7 @@ describe("readDesktopFlavor", () => {
     expect(
       readDesktopFlavor({
         appPath,
-        isDevelopment: false,
+        isPackaged: true,
         readFile: reading(JSON.stringify({ name: "ryco-nightly", rycoDesktopFlavor: "nightly" })),
       }),
     ).toBe("nightly");
@@ -22,17 +22,17 @@ describe("readDesktopFlavor", () => {
 
   it("reads a build from before the split, or an unreadable file, as stable", () => {
     for (const contents of [JSON.stringify({ name: "ryco" }), "not json", new Error("ENOENT")]) {
-      expect(
-        readDesktopFlavor({ appPath, isDevelopment: false, readFile: reading(contents) }),
-      ).toBe("stable");
+      expect(readDesktopFlavor({ appPath, isPackaged: true, readFile: reading(contents) })).toBe(
+        "stable",
+      );
     }
   });
 
-  it("treats development as stable", () => {
+  it("treats an unpackaged (development) app as stable", () => {
     expect(
       readDesktopFlavor({
         appPath,
-        isDevelopment: true,
+        isPackaged: false,
         readFile: () => JSON.stringify({ rycoDesktopFlavor: "nightly" }),
       }),
     ).toBe("stable");

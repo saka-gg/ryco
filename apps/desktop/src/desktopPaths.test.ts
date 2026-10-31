@@ -73,5 +73,8 @@ describe("Ryco Nightly paths", () => {
     expect(configuredDesktopBaseDir("nightly", { RYCO_NIGHTLY_HOME: "/srv/nightly" })).toBe(
       "/srv/nightly",
     );
+    expect(
+      configuredDesktopBaseDir("nightly", { RYCO_NIGHTLY_HOME: "/Users/me/.ryco/" }, "/Users/me"),
+    ).toBeUndefined();
   });
 });
