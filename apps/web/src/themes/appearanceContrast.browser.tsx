@@ -28,13 +28,17 @@ function luminance([r, g, b]: readonly [number, number, number]): number {
   return 0.2126 * channel(r) + 0.7152 * channel(g) + 0.0722 * channel(b);
 }
 
-function contrastAt(percent: number | null, dark: boolean): number {
+function contrastAt(
+  percent: number | null,
+  dark: boolean,
+  className = "text-muted-foreground bg-background",
+): number {
   document.documentElement.classList.toggle("dark", dark);
   if (percent === null) resetAppearancePreference("contrast");
   else setAppearancePreference("contrast", String(percent));
   applyAppearancePreferencesToDocument();
   const probe = document.createElement("span");
-  probe.className = "text-muted-foreground bg-background";
+  probe.className = className;
   probe.textContent = "Aa";
   document.body.append(probe);
   const style = getComputedStyle(probe);
@@ -61,6 +65,13 @@ describe("appearance contrast", () => {
       expect(softer).toBeLessThan(theme);
       // 100 % is exactly the theme.
       expect(contrastAt(100, dark)).toBeCloseTo(theme, 5);
+    });
+
+    it(`moves the active sidebar row with the rest of the sidebar in ${dark ? "dark" : "light"} mode`, () => {
+      const row = "text-sidebar-accent-foreground bg-sidebar";
+      const theme = contrastAt(null, dark, row);
+      expect(contrastAt(150, dark, row)).toBeGreaterThan(theme);
+      expect(contrastAt(50, dark, row)).toBeLessThan(theme);
     });
   }
 });

@@ -726,9 +726,22 @@ describe("contrast", () => {
     expect(buildContrastCssRule(60)).toContain("--appearance-contrast-base: 60%;");
   });
 
-  it("accepts only whole percents from 50 to 200", () => {
+  it("covers the active sidebar row, and moves each border toward its own text", () => {
+    const rule = buildContrastCssRule(150);
+    expect(rule).toContain(
+      "--color-sidebar-accent-foreground: color-mix(in oklab, color-mix(in oklab, var(--sidebar-accent-foreground) var(--appearance-contrast-base), var(--sidebar)),",
+    );
+    expect(rule).toMatch(
+      /--color-border: [^;]*var\(--foreground\) var\(--appearance-contrast-border-boost\)\);/u,
+    );
+    expect(rule).toMatch(
+      /--color-sidebar-border: [^;]*var\(--sidebar-foreground\) var\(--appearance-contrast-border-boost\)\);/u,
+    );
+  });
+
+  it("accepts only the slider's stops, every 10 % from 50 to 200", () => {
     expect(isValidPreferenceValue("contrast", "150")).toBe(true);
-    for (const value of ["40", "210", "1e2", "150.5", ""]) {
+    for (const value of ["40", "210", "1e2", "150.5", "", "55", "199"]) {
       expect(isValidPreferenceValue("contrast", value), value).toBe(false);
     }
     expect(APPEARANCE_CONTRAST_OPTIONS.map((option) => option.value)).toEqual(

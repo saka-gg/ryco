@@ -250,8 +250,15 @@ const CONTRAST_TEXT_TOKENS = [
   ["muted-foreground", "background"],
   ["accent-foreground", "accent"],
   ["sidebar-foreground", "sidebar"],
+  // The active and hovered sidebar row: its tint is translucent over the sidebar.
+  ["sidebar-accent-foreground", "sidebar"],
 ] as const;
-const CONTRAST_BORDER_TOKENS = ["border", "input", "sidebar-border"] as const;
+/** Border tokens, each faded toward transparent below 100 % and toward its own text above. */
+const CONTRAST_BORDER_TOKENS = [
+  ["border", "foreground"],
+  ["input", "foreground"],
+  ["sidebar-border", "sidebar-foreground"],
+] as const;
 
 /**
  * Port of T3 Code's appearance contrast (6e9c57f7ba): below 100 % text fades toward its surface
@@ -268,8 +275,8 @@ export function buildContrastCssRule(contrast: number): string {
       `--color-${token}: color-mix(in oklab, color-mix(in oklab, var(--${token}) var(--appearance-contrast-base), var(--${surface})), var(--appearance-contrast-target) var(--appearance-contrast-boost));`,
   ).join(" ");
   const borders = CONTRAST_BORDER_TOKENS.map(
-    (token) =>
-      `--color-${token}: color-mix(in srgb, color-mix(in srgb, var(--${token}) var(--appearance-contrast-base), transparent), var(--foreground) var(--appearance-contrast-border-boost));`,
+    ([token, text]) =>
+      `--color-${token}: color-mix(in srgb, color-mix(in srgb, var(--${token}) var(--appearance-contrast-base), transparent), var(--${text}) var(--appearance-contrast-border-boost));`,
   ).join(" ");
   return ` :root { --appearance-contrast-base: ${base}%; --appearance-contrast-boost: ${boost}%; --appearance-contrast-border-boost: ${boost / 4}%; --appearance-contrast-target: black; ${text} ${borders} } :root.dark { --appearance-contrast-target: white; }`;
 }
@@ -302,7 +309,9 @@ const RADIUS_TOKEN_OFFSETS_PX = {
 } as const;
 
 /** Integer-valued keys, stored as decimal strings and validated against a range. */
-const NUMERIC_RANGES: Partial<Record<AppearancePreferenceKey, { min: number; max: number }>> = {
+const NUMERIC_RANGES: Partial<
+  Record<AppearancePreferenceKey, { min: number; max: number; step?: number }>
+> = {
   windowTranslucencyOpacity: {
     min: WINDOW_TRANSLUCENCY_OPACITY_MIN,
     max: WINDOW_TRANSLUCENCY_OPACITY_MAX,
@@ -311,7 +320,12 @@ const NUMERIC_RANGES: Partial<Record<AppearancePreferenceKey, { min: number; max
     min: DESKTOP_WINDOW_BLUR_RADIUS_MIN,
     max: DESKTOP_WINDOW_BLUR_RADIUS_MAX,
   },
-  contrast: { min: APPEARANCE_CONTRAST_MIN, max: APPEARANCE_CONTRAST_MAX },
+  // Only the slider's stops, so a stored value always matches where the slider sits.
+  contrast: {
+    min: APPEARANCE_CONTRAST_MIN,
+    max: APPEARANCE_CONTRAST_MAX,
+    step: APPEARANCE_CONTRAST_STEP,
+  },
 };
 
 const OPTION_VALUES: Partial<Record<AppearancePreferenceKey, ReadonlySet<string>>> = {
@@ -405,7 +419,11 @@ export function isValidPreferenceValue(
   if (range) {
     const number = Number(value);
     return (
-      /^\d+$/.test(value) && Number.isInteger(number) && number >= range.min && number <= range.max
+      /^\d+$/.test(value) &&
+      Number.isInteger(number) &&
+      number >= range.min &&
+      number <= range.max &&
+      (number - range.min) % (range.step ?? 1) === 0
     );
   }
   return OPTION_VALUES[key]?.has(value) ?? false;
