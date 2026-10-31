@@ -263,6 +263,9 @@ export const RPC_ACCESS_POLICY = {
   [WS_METHODS.threadsSetManualPosition]: "operator",
   // Creates a thread (and possibly a worktree) without starting a turn, like dispatchCommand.
   [WS_METHODS.threadsFork]: "operator",
+  // The same tier as a fork on the node itself: the caller's own role on this node decides, never
+  // anything the carried conversation says about its source.
+  [WS_METHODS.threadsForkCarried]: "operator",
   // The servers a thread's agents and terminals started: ports, pids, process names and page
   // titles, which an operator who can open the thread's terminal sees there anyway.
   [WS_METHODS.threadsSubscribeLocalServers]: "operator",
@@ -557,6 +560,8 @@ export const RPC_DELIVERY_EFFECT_POLICY = {
   [WS_METHODS.threadsSetManualPosition]: "mutation",
   // Idempotent by forkKey: a dropped request is retried with the same key after acknowledgement.
   [WS_METHODS.threadsFork]: "mutation",
+  // Idempotent by forkKey and the carried conversation's digest, like `threads.fork`.
+  [WS_METHODS.threadsForkCarried]: "mutation",
   [WS_METHODS.threadsSubscribeLocalServers]: "read",
   // Signals a process group: never replayed (a repeat finds the server gone).
   [WS_METHODS.threadsStopLocalServer]: "mutation",

@@ -137,6 +137,35 @@ describe("applyGitStatusStreamEvent", () => {
   });
 });
 
+describe("applyGitStatusStreamEvent upstream identity", () => {
+  it("keeps the upstream's name and commit through a local update", () => {
+    const remote: VcsStatusRemoteResult = {
+      hasUpstream: true,
+      upstreamRef: "origin/feature/demo",
+      headCommit: "d".repeat(40),
+      aheadCount: 0,
+      behindCount: 0,
+      pr: null,
+    };
+    const current = applyGitStatusStreamEvent(null, { _tag: "remoteUpdated", remote });
+    const updated = applyGitStatusStreamEvent(current, {
+      _tag: "localUpdated",
+      local: {
+        isRepo: true,
+        hasPrimaryRemote: true,
+        isDefaultRef: false,
+        refName: "feature/demo",
+        hasWorkingTreeChanges: true,
+        workingTree: { files: [], insertions: 0, deletions: 0 },
+      },
+    });
+    expect(updated).toMatchObject({
+      upstreamRef: "origin/feature/demo",
+      headCommit: "d".repeat(40),
+    });
+  });
+});
+
 describe("configurable worktree namespaces", () => {
   it.each(["team/agents", "Team", "", "team.v2"])(
     "generates and recognizes %j temporary branches",

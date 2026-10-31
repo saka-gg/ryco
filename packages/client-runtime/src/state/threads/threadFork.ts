@@ -52,6 +52,11 @@ const THREAD_FORK_ERROR_COPY = {
   "idempotency-conflict": "A fork from this reply was already requested with different options.",
   "preparation-failed": "Preparing the fork didn't finish.",
   deleted: "This fork was created earlier, but it has since been deleted.",
+  "history-too-large":
+    "This conversation is too long to continue on another machine. Fork from an earlier reply.",
+  "history-invalid": "The other machine couldn't read this conversation.",
+  "base-ref-unavailable":
+    "The other machine couldn't fetch this branch, or its copy doesn't have the commit you're on. Push it, and check both machines use the same origin.",
 } as const satisfies Record<ThreadForkErrorReason, string>;
 
 /**

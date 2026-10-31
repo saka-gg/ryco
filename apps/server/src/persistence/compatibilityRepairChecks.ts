@@ -263,6 +263,8 @@ const checks: Record<CompatibilityRepairKey, (c: SchemaCatalog) => RepairApplied
   "command-watches": (c) =>
     c.has("table", "projection_thread_command_watches") &&
     c.has("index", "idx_projection_thread_command_watches_active"),
+  // The column only, on the table 084 creates.
+  "thread-fork-origin": (c) => columnsUnlessAbsent(c, "thread_forks", ["origin_json"]),
 };
 
 /** Of `keys`, the repairs whose effect this database already has, read without writing. */

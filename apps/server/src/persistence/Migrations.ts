@@ -151,6 +151,7 @@ import Migration0095, {
 } from "./Migrations/095_ThreadFollowUpQueue.ts";
 import Migration0096 from "./Migrations/096_AuthAccessLinkAccount.ts";
 import Migration0097 from "./Migrations/097_CommandWatches.ts";
+import Migration0098 from "./Migrations/098_ThreadForkOrigin.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -259,6 +260,7 @@ export const migrationEntries = [
   [95, "ThreadFollowUpQueue", Migration0095],
   [96, "AuthAccessLinkAccount", Migration0096],
   [97, "CommandWatches", Migration0097],
+  [98, "ThreadForkOrigin", Migration0098],
 ] as const;
 
 export const makeMigrationLoader = (throughId?: number) =>
@@ -850,6 +852,8 @@ const compatibilityRepairs = [
   { key: "auth-access-link-account", since: 96, run: () => repairAuthAccessLinkAccountColumn() },
   // 097 again when another branch recorded 097 (or a later id) first; it is idempotent.
   { key: "command-watches", since: 97, run: () => Migration0097 },
+  // 098 again when another branch recorded 098 (or a later id) first; it is idempotent.
+  { key: "thread-fork-origin", since: 98, run: () => Migration0098 },
 ] as const;
 
 export type CompatibilityRepairKey = (typeof compatibilityRepairs)[number]["key"];

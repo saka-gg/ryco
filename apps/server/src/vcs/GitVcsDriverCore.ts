@@ -1825,6 +1825,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
         : null;
 
     let refName: string | null = null;
+    let headCommit: string | null = null;
     let upstreamRef: string | null = null;
     let aheadCount = 0;
     let behindCount = 0;
@@ -1836,6 +1837,12 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
       if (line.startsWith("# branch.head ")) {
         const value = line.slice("# branch.head ".length).trim();
         refName = value.startsWith("(") ? null : value;
+        continue;
+      }
+      if (line.startsWith("# branch.oid ")) {
+        const value = line.slice("# branch.oid ".length).trim();
+        // `(initial)` on an unborn branch.
+        headCommit = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(value) ? value : null;
         continue;
       }
       if (line.startsWith("# branch.upstream ")) {
@@ -1927,6 +1934,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
       hasOriginRemote: hasPrimaryRemote,
       isDefaultBranch,
       branch: refName,
+      ...(headCommit !== null ? { headCommit } : {}),
       upstreamRef,
       hasWorkingTreeChanges,
       workingTree: {
@@ -2030,6 +2038,8 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
         workingTree: details.workingTree,
         ...(details.committed ? { committed: details.committed } : {}),
         hasUpstream: details.hasUpstream,
+        upstreamRef: details.upstreamRef,
+        ...(details.headCommit ? { headCommit: details.headCommit } : {}),
         aheadCount: details.aheadCount,
         behindCount: details.behindCount,
         aheadOfDefaultCount: details.aheadOfDefaultCount,
@@ -2588,7 +2598,12 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     Effect.gen(function* () {
       const key = worktreeBaseKey(input.cwd, input.refName);
       const existing = reusableWorktreeBasePrefetch(key);
-      if (existing) return yield* Fiber.join(existing.fiber).pipe(Effect.asVoid);
+      if (existing && input.fresh !== true) {
+        return yield* Fiber.join(existing.fiber).pipe(Effect.asVoid);
+      }
+      // A fresh fetch waits for one still running (two fetches of a ref at once can fail on its
+      // lock), then fetches again whatever that one found.
+      if (existing && existing.settledAt === null) yield* Fiber.await(existing.fiber);
       for (const [candidate, entry] of worktreeBasePrefetches) {
         if (
           entry.settledAt !== null &&
@@ -2616,6 +2631,17 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
       worktreeBasePrefetches.set(key, entry);
       yield* Fiber.join(entry.fiber).pipe(Effect.asVoid);
     });
+
+  const isAncestorCommit: GitVcsDriver.GitVcsDriverShape["isAncestorCommit"] = (input) =>
+    executeGit(
+      "GitVcsDriver.isAncestorCommit",
+      input.cwd,
+      ["merge-base", "--is-ancestor", input.ancestor, input.descendant],
+      { allowNonZeroExit: true, readOnly: true, timeoutMs: 15_000 },
+    ).pipe(
+      // 1: not an ancestor; anything else: Git does not know one of the commits.
+      Effect.map((result) => (result.exitCode === 0 ? true : result.exitCode === 1 ? false : null)),
+    );
 
   const notARepositoryRefs = {
     exitCode: ChildProcessSpawner.ExitCode(128),
@@ -3679,6 +3705,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     invalidateRefListing,
     createWorktree,
     prefetchWorktreeBase,
+    isAncestorCommit,
     assertWorktreeSetupComplete: (checkoutPath) =>
       worktreePolicy
         .assertExistingPath({ path: checkoutPath, operation: "GitVcsDriver.worktreeSetup" })

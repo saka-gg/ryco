@@ -9,6 +9,7 @@ import {
   MessageId,
   ProjectId,
   type ThreadForkAttemptState,
+  type ThreadForkCarriedRequest,
   ThreadForkError,
   type ThreadForkInput,
   type ThreadForkResult,
@@ -44,6 +45,14 @@ const request: ThreadForkInput = {
   destination: { kind: "current-checkout" },
 };
 
+/** A carried conversation is not even looked at before access: this one would not decode. */
+const carriedRequest: ThreadForkCarriedRequest = {
+  forkKey: "fork-key-rpc-carried-0001",
+  projectId: null,
+  destination: { kind: "new-chat" },
+  history: { schemaVersion: 1, messages: "not a conversation" },
+};
+
 const forked: ThreadForkResult = {
   threadId: ThreadId.make("fork-thread"),
   projectId: ProjectId.make("project"),
@@ -64,12 +73,18 @@ function fixture(
     readonly attempt?: ThreadForkAttemptState;
   } = {},
 ) {
-  const counts = { fork: 0, gate: 0, forkInsideGate: 0 };
+  const counts = { fork: 0, forkCarried: 0, gate: 0, forkInsideGate: 0 };
   let insideGate = false;
   const service: ThreadForkShape = {
     fork: () =>
       Effect.sync(() => {
         counts.fork++;
+        if (insideGate) counts.forkInsideGate++;
+        return forked;
+      }),
+    forkCarried: () =>
+      Effect.sync(() => {
+        counts.forkCarried++;
         if (insideGate) counts.forkInsideGate++;
         return forked;
       }),
@@ -99,7 +114,9 @@ function fixture(
   } as unknown as WsRpcContext;
   const handlers = makeThreadForkHandlers(ctx);
   const run = () => Effect.runPromise(Effect.exit(handlers[WS_METHODS.threadsFork](request)));
-  return { counts, run };
+  const runCarried = () =>
+    Effect.runPromise(Effect.exit(handlers[WS_METHODS.threadsForkCarried](carriedRequest)));
+  return { counts, run, runCarried };
 }
 
 const directSession = (role: "owner" | "client") =>
@@ -122,12 +139,12 @@ describe("threads.fork RPC", () => {
         expect(exit, label).toMatchObject({ _tag: "Success", value: forked });
         // Admitted through the startup gate, then run outside it: a long fork never holds up
         // the commands queued behind it.
-        expect(counts, label).toEqual({ fork: 1, gate: 1, forkInsideGate: 0 });
+        expect(counts, label).toEqual({ fork: 1, forkCarried: 0, gate: 1, forkInsideGate: 0 });
       } else {
         const error = exit._tag === "Failure" ? Cause.squash(exit.cause) : null;
         expect(error, label).toBeInstanceOf(AuthRpcError);
         expect(error, label).toMatchObject({ status: 403 });
-        expect(counts, label).toEqual({ fork: 0, gate: 0, forkInsideGate: 0 });
+        expect(counts, label).toEqual({ fork: 0, forkCarried: 0, gate: 0, forkInsideGate: 0 });
       }
     }
     // Hosted clients see the same boundary before they send anything.
@@ -143,6 +160,33 @@ describe("threads.fork RPC", () => {
           method: WS_METHODS.threadsFork,
         }).allowed,
       ).toBe(role !== "viewer");
+    }
+  });
+
+  it("refuses threads.forkCarried to viewers before the carried conversation is decoded", async () => {
+    expect(rpcAccessFor(WS_METHODS.threadsForkCarried)).toBe("operator");
+    const cases: ReadonlyArray<readonly [string, RpcPrincipal, boolean]> = [
+      ["relay viewer", relayRpcPrincipal("viewer", "fixture"), false],
+      ["direct client", directRpcPrincipal(directSession("client")), false],
+      ["relay operator", relayRpcPrincipal("operator", "fixture"), true],
+      ["direct owner", directRpcPrincipal(directSession("owner")), true],
+    ];
+    for (const [label, principal, allowed] of cases) {
+      const { counts, runCarried } = fixture(principal);
+      const exit = await runCarried();
+      if (allowed) {
+        expect(exit, label).toMatchObject({ _tag: "Success", value: forked });
+        expect(counts, label).toEqual({ fork: 0, forkCarried: 1, gate: 1, forkInsideGate: 0 });
+      } else {
+        const error = exit._tag === "Failure" ? Cause.squash(exit.cause) : null;
+        expect(error, label).toBeInstanceOf(AuthRpcError);
+        expect(error, label).toMatchObject({ status: 403 });
+        // The fork service, which alone decodes the conversation, was never reached.
+        expect(counts, label).toEqual({ fork: 0, forkCarried: 0, gate: 0, forkInsideGate: 0 });
+      }
+    }
+    for (const role of ["viewer", "operator", "owner"] as const) {
+      expect(hostedRoleAllows(role, WS_METHODS.threadsForkCarried)).toBe(role !== "viewer");
     }
   });
 

@@ -77,6 +77,7 @@ describe("pre-auth server environment descriptor", () => {
       "terminalWriteRequireIdle",
       "threadBranchAdoption",
       "threadFork",
+      "threadForkCarried",
       "threadLocalServerStop",
       "threadLocalServers",
       "threadSettlement",
