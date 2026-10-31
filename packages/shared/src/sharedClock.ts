@@ -10,7 +10,10 @@
 export type SharedClockListener = (nowMs: number) => void;
 
 export interface SharedClock {
-  /** Tells `listener` the time now at once, then on every tick. Returns its unsubscribe. */
+  /**
+   * Tells `listener` the current tick's instant at once (a stopped clock ticks first), then every
+   * tick. Returns its unsubscribe.
+   */
   readonly subscribe: (listener: SharedClockListener) => () => void;
   /**
    * A `useSyncExternalStore` snapshot: the instant of the last tick, the same value until the
@@ -87,10 +90,8 @@ export function createSharedClock(options: SharedClockOptions): SharedClock {
       if (visibility !== null && stopWatchingVisibility === null) {
         stopWatchingVisibility = visibility.subscribe(onVisibilityChange);
       }
-      listener(now());
-      start();
       let subscribed = true;
-      return () => {
+      const unsubscribe = () => {
         if (!subscribed) return;
         subscribed = false;
         listeners.delete(listener);
@@ -99,6 +100,17 @@ export function createSharedClock(options: SharedClockOptions): SharedClock {
         stopWatchingVisibility?.();
         stopWatchingVisibility = null;
       };
+      try {
+        // A running clock tells the new label the instant every other label shows; a stopped
+        // one ticks first, so `read` agrees with what the label was told.
+        if (timer === null) tick();
+        else listener(nowMs);
+        start();
+      } catch (error) {
+        unsubscribe();
+        throw error;
+      }
+      return unsubscribe;
     },
   };
 }

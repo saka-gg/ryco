@@ -155,3 +155,57 @@ describe("shared second clock with a visibility source", () => {
     expect(h.setInterval).not.toHaveBeenCalled();
   });
 });
+
+describe("createSharedClock subscribe", () => {
+  it("tells a new label the instant the running labels show, and ticks first when stopped", () => {
+    let nowMs = 10_000;
+    let tick: (() => void) | undefined;
+    const clock = createSharedClock({
+      intervalMs: 1000,
+      now: () => nowMs,
+      setInterval: (callback) => {
+        tick = callback;
+        return 1;
+      },
+      clearInterval: () => {
+        tick = undefined;
+      },
+    });
+    const first: number[] = [];
+    clock.subscribe((value) => first.push(value));
+    expect(first).toEqual([10_000]);
+    expect(clock.read()).toBe(10_000);
+
+    nowMs = 10_600;
+    const second: number[] = [];
+    clock.subscribe((value) => second.push(value));
+    // Mid-interval: the same instant as the first label and as read().
+    expect(second).toEqual([10_000]);
+    expect(clock.read()).toBe(10_000);
+    nowMs = 11_000;
+    tick?.();
+    expect(first.at(-1)).toBe(11_000);
+    expect(second.at(-1)).toBe(11_000);
+  });
+
+  it("never keeps a listener that throws on subscribe", () => {
+    let running = false;
+    const clock = createSharedClock({
+      intervalMs: 1000,
+      now: () => 0,
+      setInterval: () => {
+        running = true;
+        return 1;
+      },
+      clearInterval: () => {
+        running = false;
+      },
+    });
+    expect(() =>
+      clock.subscribe(() => {
+        throw new Error("boom");
+      }),
+    ).toThrow("boom");
+    expect(running).toBe(false);
+  });
+});
