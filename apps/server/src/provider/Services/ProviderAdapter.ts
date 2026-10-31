@@ -31,7 +31,14 @@ import type { ProviderTaskEndedError, ProviderUnsupportedError } from "../Errors
 import type { Stream } from "effect";
 
 export type ProviderSessionModelSwitchMode = "in-session" | "unsupported";
-export type ProviderTurnSteeringMode = "native" | "unsupported";
+/**
+ * - `native`: the adapter adds a message to the running turn (`steerTurn`).
+ * - `interrupt-restart`: no native steering, but the turn can be stopped and the message sent as
+ *   the next turn. ProviderService stops the turn and defers the steer, so the message goes
+ *   next from the follow-up queue (T3's steering degradation for providers without it).
+ * - `unsupported`: the message stays queued until the turn ends on its own.
+ */
+export type ProviderTurnSteeringMode = "native" | "interrupt-restart" | "unsupported";
 export type ProviderConversationRollbackMode = "native" | "unsupported";
 
 export interface ProviderAdapterCapabilities {
@@ -44,7 +51,7 @@ export interface ProviderAdapterCapabilities {
    *   session to change model.
    */
   readonly sessionModelSwitch: ProviderSessionModelSwitchMode;
-  /** Native in-flight turn steering support. Missing is treated as unsupported. */
+  /** How a running turn takes a steer (`ProviderTurnSteeringMode`). Missing is treated as unsupported. */
   readonly turnSteering?: ProviderTurnSteeringMode;
   /**
    * Whether the provider can make its conversation forget turns. Missing is

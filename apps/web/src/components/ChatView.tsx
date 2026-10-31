@@ -131,6 +131,7 @@ import {
   resolveFollowUpQueueEditState,
   resolveQueuedMessageEditUnavailableReason,
   resolveQueuedMessageSteerEligibility,
+  providerSteering,
   selectServerFollowUpQueueWaiting,
   selectThreadFollowUpQueue,
   shouldQueueFollowUpOnServer,
@@ -5046,7 +5047,7 @@ export default function ChatView(props: ChatViewProps) {
         mutationReady: dispatchCapability.allowed && !activeEnvironmentUnavailable,
         turnRunning: phase === "running",
         activeTurnId: activeThread?.session?.activeTurnId,
-        supportsTurnSteering: provider?.supportsTurnSteering === true,
+        supportsTurnSteering: providerSteering(provider) !== null,
         queuedModelSelection: snapshot.modelSelection,
         activeModelSelection: activeThread?.modelSelection,
         queuedRuntimeMode: snapshot.runtimeMode,
@@ -5244,6 +5245,15 @@ export default function ChatView(props: ChatViewProps) {
     },
     [queuedMessages, steerQueuedEntry, steerServerQueuedMessage],
   );
+
+  /** A steer on the running turn's provider stops the turn and sends the message next. */
+  const followUpSteerRestarts = useMemo(() => {
+    const providerInstanceId = activeThread?.session?.providerInstanceId;
+    const provider = providerInstanceId
+      ? composerProviderStatuses.find((entry) => entry.instanceId === providerInstanceId)
+      : undefined;
+    return providerSteering(provider) === "restart";
+  }, [activeThread?.session?.providerInstanceId, composerProviderStatuses]);
 
   /** The composer's running-state hint: why its current selection could not steer. */
   const getFollowUpSteerUnavailableReason = useCallback(
@@ -7732,6 +7742,7 @@ export default function ChatView(props: ChatViewProps) {
                 }
                 showSteerAction={presentationTier !== "phone"}
                 getSteerUnavailableReason={getQueuedSteerUnavailableReason}
+                steerRestarts={followUpSteerRestarts}
                 onSteer={(row) => void handleSteerQueuedMessage(row)}
                 editingId={activeServerQueueEdit?.messageId ?? null}
                 editingAttachments={
@@ -7836,6 +7847,7 @@ export default function ChatView(props: ChatViewProps) {
                   scheduleStickToBottom={scrollToEnd}
                   followUpSurfaceAllowsSteer={presentationTier !== "phone"}
                   getFollowUpSteerUnavailableReason={getFollowUpSteerUnavailableReason}
+                  followUpSteerRestarts={followUpSteerRestarts}
                   onSend={onSend}
                   onInterrupt={worktreeSetupRunning ? cancelWorktreeSetup : onInterrupt}
                   onImplementPlanInNewThread={onImplementPlanInNewThread}

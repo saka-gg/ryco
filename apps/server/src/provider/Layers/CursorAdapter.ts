@@ -1324,6 +1324,8 @@ export function makeCursorAdapter(
       provider: PROVIDER,
       capabilities: {
         sessionModelSwitch: "in-session",
+        // A steer stops the turn (session/cancel) and sends the message next (ProviderService).
+        turnSteering: "interrupt-restart",
         // sendTurn awaits the whole prompt after emitting turn.started.
         turnSubmission: "completion",
         // Unverified: session/load is sent with the new cwd.

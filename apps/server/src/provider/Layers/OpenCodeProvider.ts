@@ -40,6 +40,7 @@ export const OPENCODE_V2_LOCAL_DATA_NOTE =
 const OPENCODE_PRESENTATION = {
   displayName: "OpenCode",
   showInteractionModeToggle: false,
+  turnSteeringMode: "interrupt-restart",
 } as const;
 class OpenCodeProbeError extends Data.TaggedError("OpenCodeProbeError")<{
   readonly cause: unknown;

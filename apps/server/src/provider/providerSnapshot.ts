@@ -39,6 +39,8 @@ export interface ServerProviderPresentation {
   readonly showInteractionModeToggle?: boolean;
   readonly supportsAskMode?: boolean;
   readonly supportsTurnSteering?: boolean;
+  /** `ServerProvider.turnSteeringMode`: set for providers that steer by stopping the turn. */
+  readonly turnSteeringMode?: "interrupt-restart";
 }
 
 export type ServerProviderDraft = Omit<ServerProvider, "instanceId" | "driver">;
@@ -207,6 +209,9 @@ export function buildServerProvider(input: {
       : {}),
     ...(typeof input.presentation.supportsTurnSteering === "boolean"
       ? { supportsTurnSteering: input.presentation.supportsTurnSteering }
+      : {}),
+    ...(input.presentation.turnSteeringMode
+      ? { turnSteeringMode: input.presentation.turnSteeringMode }
       : {}),
     enabled: input.enabled,
     installed: input.probe.installed,

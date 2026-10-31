@@ -20,6 +20,7 @@ const PROVIDER = ProviderDriverKind.make("copilot");
 const COPILOT_PRESENTATION = {
   displayName: "GitHub Copilot",
   showInteractionModeToggle: true,
+  turnSteeringMode: "interrupt-restart",
 } as const;
 const COPILOT_HEALTH_CHECK_TIMEOUT_MS = 10_000;
 

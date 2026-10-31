@@ -66,6 +66,18 @@ approval of another turn arrives or the redirected turn asks again after those 1
 seconds, or when the draft changed meanwhile. If declines went through before that, the
 next send on the same turn steers whatever the setting says.
 
+## Steering providers without native steering
+
+Claude and Codex add a steer to the running turn. GitHub Copilot, OpenCode and Cursor cannot, so
+they report `turnSteeringMode: "interrupt-restart"` on their provider status (adapter capability
+`turnSteering: "interrupt-restart"`), and a steer stops the turn instead: `ProviderService` asks
+the adapter to interrupt it and defers the steer, so the message goes back to the follow-up queue
+and is sent as the next turn once the stopped turn settles. A node's own stop holds no queue (only
+a person's Stop does). If the turn cannot be stopped, the message stays queued. The composer says
+"Stop this turn and send this next", and a queued message's Steer button says the same. Explicit
+steers only: with the follow-up setting on Queue, Enter still waits for the turn to end. Older
+clients ignore the field and keep queueing; ACP registry agents keep queueing too (as in T3).
+
 ## Lifecycle integration boundary
 
 `apps/server/src/orchestration/approvalResponses.ts` owns `requireApprovalClaim`,

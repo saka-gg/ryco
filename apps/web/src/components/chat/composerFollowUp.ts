@@ -115,6 +115,8 @@ export function describeRunningFollowUp(input: {
   readonly approvalRedirect?: ApprovalRedirect["kind"];
   readonly sendShortcut?: SendShortcut;
   readonly platform?: string;
+  /** The provider steers by stopping the turn and sending the message next. */
+  readonly steerRestarts?: boolean;
 }): RunningFollowUpDescription {
   if (!input.surfaceAllowsSteer) return { effective: "queue", placeholder: null };
   const shortcut = followUpInvertShortcutLabel(input.sendShortcut ?? "enter", input.platform);
@@ -128,11 +130,18 @@ export function describeRunningFollowUp(input: {
   }
   if (input.followUpBehavior === "steer" || input.approvalRedirect === "steer") {
     return steerAvailable
-      ? { effective: "steer", placeholder: `Steer this turn · ${shortcut} to queue instead` }
+      ? {
+          effective: "steer",
+          placeholder: input.steerRestarts
+            ? `Stop this turn and send this next · ${shortcut} to queue instead`
+            : `Steer this turn · ${shortcut} to queue instead`,
+        }
       : { effective: "queue", placeholder: "Queue a follow-up · steering unavailable" };
   }
   return {
     effective: "queue",
-    placeholder: steerAvailable ? `Queue a follow-up · ${shortcut} to steer` : "Queue a follow-up",
+    placeholder: steerAvailable
+      ? `Queue a follow-up · ${shortcut} to ${input.steerRestarts ? "stop this turn and send" : "steer"}`
+      : "Queue a follow-up",
   };
 }
