@@ -1,8 +1,11 @@
 import { parseScopedThreadKey, scopedThreadKey } from "@ryco/client-runtime/scoped";
 import { selectThreadLiveDetailLoaded } from "@ryco/client-runtime/state/threads";
-import { listRunningThreadKeys } from "@ryco/client-runtime/state/threads/runningThreads";
+import {
+  keepRunningThreadKeys,
+  listRunningThreadKeys,
+} from "@ryco/client-runtime/state/threads/runningThreads";
 import { useParams } from "@tanstack/react-router";
-import { useMemo } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useShallow } from "zustand/react/shallow";
 
 import { useStore } from "../../store";
@@ -12,9 +15,12 @@ import { useSidebarThreadPrewarm } from "../sidebar/hooks/useSidebarThreadPrewar
 /**
  * The most running threads kept subscribed. Retained subscriptions do not count against the
  * detail cache's 32-entry, 12 MiB budget, so this bounds what a fleet of running agents can
- * hold; past it, the most recently updated threads stay warm.
+ * hold. The choice is sticky (`keepRunningThreadKeys`): a kept thread stays until it stops, and
+ * freed places go to the most recently updated others.
  */
 export const RUNNING_THREAD_KEEP_ALIVE_LIMIT = 16;
+/** How many running threads the selection looks at, newest first. */
+const RUNNING_THREADS_CONSIDERED = 256;
 
 /**
  * Desktop only (T3 Code #13554): keeps the detail streams of threads with a turn in progress
@@ -26,15 +32,21 @@ export const RUNNING_THREAD_KEEP_ALIVE_LIMIT = 16;
  */
 export function RunningThreadKeepAlive() {
   const runningKeys = useStore(
-    useShallow((state) => listRunningThreadKeys(state, RUNNING_THREAD_KEEP_ALIVE_LIMIT)),
+    useShallow((state) => listRunningThreadKeys(state, RUNNING_THREADS_CONSIDERED)),
   );
+  const [keptKeys, setKeptKeys] = useState<ReadonlyArray<string>>([]);
+  useEffect(() => {
+    setKeptKeys((previous) =>
+      keepRunningThreadKeys(previous, runningKeys, RUNNING_THREAD_KEEP_ALIVE_LIMIT),
+    );
+  }, [runningKeys]);
   const runningRefs = useMemo(
     () =>
-      runningKeys.flatMap((key) => {
+      keptKeys.flatMap((key) => {
         const ref = parseScopedThreadKey(key);
         return ref ? [ref] : [];
       }),
-    [runningKeys],
+    [keptKeys],
   );
   const routeThreadRef = useParams({
     strict: false,

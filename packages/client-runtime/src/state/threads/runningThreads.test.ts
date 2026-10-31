@@ -7,7 +7,7 @@ import {
 import { describe, expect, it } from "vite-plus/test";
 
 import { scopedThreadKey, scopeThreadRef } from "../../scoped.ts";
-import { listRunningThreadKeys } from "./runningThreads.ts";
+import { keepRunningThreadKeys, listRunningThreadKeys } from "./runningThreads.ts";
 import type { AppState, EnvironmentState } from "./store.ts";
 
 const environmentId = EnvironmentId.make("environment-running");
@@ -98,5 +98,69 @@ describe("listRunningThreadKeys", () => {
       key(environmentId, ThreadId.make("running")),
     ]);
     expect(listRunningThreadKeys(state, 0)).toEqual([]);
+  });
+});
+
+describe("keepRunningThreadKeys", () => {
+  it("keeps a running thread until it stops and fills freed places newest first", () => {
+    const first = keepRunningThreadKeys([], ["c", "b", "a"], 2);
+    expect(first).toEqual(["c", "b"]);
+    // "a" became the most recently updated: the kept ones still run, so nothing changes.
+    expect(keepRunningThreadKeys(first, ["a", "c", "b"], 2)).toBe(first);
+    // "c" stopped: its place goes to the newest other one.
+    expect(keepRunningThreadKeys(first, ["a", "b", "d"], 2)).toEqual(["b", "a"]);
+    expect(keepRunningThreadKeys(["b", "a"], [], 2)).toEqual([]);
+  });
+});
+
+describe("listRunningThreadKeys caching", () => {
+  it("answers from the cache while an environment's maps keep their identity", () => {
+    const shells = {
+      [ThreadId.make("t-1")]: { id: ThreadId.make("t-1"), projectId, archivedAt: null },
+    } as never as EnvironmentState["threadShellById"];
+    const environment: EnvironmentState = {
+      ...emptyEnvironment(),
+      threadShellById: shells,
+      threadSessionById: {
+        [ThreadId.make("t-1")]: {
+          orchestrationStatus: "running",
+          updatedAt: "2026-10-30T00:00:00Z",
+        },
+      } as never,
+    };
+    const state: AppState = {
+      activeEnvironmentId: environmentId,
+      environmentStateById: { [environmentId]: environment },
+    };
+    expect(listRunningThreadKeys(state, 10)).toEqual([
+      scopedKeyOf(environmentId, ThreadId.make("t-1")),
+    ]);
+    // The same map objects: the scan is skipped (a mutation in place would go unseen).
+    (shells as Record<string, unknown>)[ThreadId.make("t-2")] = {
+      id: ThreadId.make("t-2"),
+      projectId,
+      archivedAt: null,
+    };
+    expect(listRunningThreadKeys(state, 10)).toHaveLength(1);
+    // A new sessions map (what the store does on a change) is scanned again.
+    const next: AppState = {
+      ...state,
+      environmentStateById: {
+        [environmentId]: {
+          ...environment,
+          threadSessionById: {
+            ...environment.threadSessionById,
+            [ThreadId.make("t-2")]: {
+              orchestrationStatus: "starting",
+              updatedAt: "2026-10-30T00:00:01Z",
+            },
+          } as never,
+        },
+      },
+    };
+    expect(listRunningThreadKeys(next, 10)).toEqual([
+      scopedKeyOf(environmentId, ThreadId.make("t-2")),
+      scopedKeyOf(environmentId, ThreadId.make("t-1")),
+    ]);
   });
 });
