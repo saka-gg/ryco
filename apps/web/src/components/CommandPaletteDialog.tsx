@@ -5,6 +5,7 @@ import { useAppKeybindings } from "../appKeybindings";
 import { usePresentationTier } from "../hooks/usePresentationTier";
 import { useSettingsPageTarget } from "../hooks/useSettingsPageTarget";
 import { useThreadExportAction } from "../hooks/useThreadExportAction";
+import { usePromptLinkPaletteItems } from "./promptLinks/usePromptLinkPaletteItems";
 
 import { DeviceIcon } from "./DeviceIcon";
 
@@ -1532,9 +1533,10 @@ function OpenCommandPaletteDialog() {
     activeThread ? scopeThreadRef(activeThread.environmentId, activeThread.id) : null,
   );
   const appearanceItems = useAppearancePaletteItems();
+  const promptLinkItems = usePromptLinkPaletteItems();
   const presentationTier = usePresentationTier();
   const actionItems: Array<CommandPaletteActionItem | CommandPaletteSubmenuItem> =
-    presentationTier === "phone" ? [] : [exportAction];
+    presentationTier === "phone" ? [] : [exportAction, ...promptLinkItems];
 
   actionItems.push(
     {
