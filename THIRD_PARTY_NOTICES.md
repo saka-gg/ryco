@@ -85,6 +85,9 @@ The OpenCode 2 client and mappings in `apps/server/src/provider/openCodeV2Client
 `openCodeV2Mapping.ts` and `openCodeV2Events.ts` are adapted from Synara's `openCodeV2Client.ts`,
 `openCodeV2Mapping.ts` and `openCodeV2Messages.ts` at commit
 `ea912dcf14a38c12f30ebc3bfdf80af6ca446bea`, under the same license.
+The streaming Markdown block splitter and block renderer in `apps/web/src/markdown-blocks.ts` and
+their tests are adapted from Synara's `apps/web/src/components/chat/streamingMarkdownBlocks.ts` at
+commit `bba7dcb8c9d46512e8abac2510dff80a7782b98e` (#1963), under the same license.
 
 ### MIT License
 
