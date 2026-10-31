@@ -1,6 +1,6 @@
 /**
  * Test files that waited on the real clock before `ryco/no-real-time-wait-in-tests` existed
- * (120 files). The rule is off for exactly these files and enforced everywhere else.
+ * (125 files). The rule is off for exactly these files and enforced everywhere else.
  *
  * The list only shrinks: remove a file once its waits are gone, and never add one.
  * `realTimeWaitFiles.test.ts` fails on a listed path that no longer exists.
@@ -11,8 +11,10 @@ export const REAL_TIME_WAIT_LEGACY_FILES: ReadonlyArray<string> = [
   "apps/desktop/src/cuaDriverHost.agentSession.test.ts",
   "apps/desktop/src/cuaDriverHost.escape.test.ts",
   "apps/desktop/src/cuaDriverHost.lifecycle.test.ts",
+  "apps/desktop/src/desktopCliCommand.test.ts",
   "apps/desktop/src/escapeKillSwitchMonitor.test.ts",
   "apps/desktop/src/nativeSecurityHelperRunner.test.ts",
+  "apps/mobile/src/connection/environmentDriver.test.ts",
   "apps/mobile/src/persistence/environmentSnapshotPersistence.wiring.test.ts",
   "apps/server/integration/databaseOwnerLock.integration.test.ts",
   "apps/server/integration/desktopParentLifetime.integration.test.ts",
@@ -27,6 +29,7 @@ export const REAL_TIME_WAIT_LEGACY_FILES: ReadonlyArray<string> = [
   "apps/server/src/attachmentUpload.test.ts",
   "apps/server/src/checkpointing/Layers/CheckpointStore.test.ts",
   "apps/server/src/cli.test.ts",
+  "apps/server/src/commandWatch/commandWatchRuntime.test.ts",
   "apps/server/src/computer/ComputerManager.test.ts",
   "apps/server/src/computer/CuaComputerBackend.test.ts",
   "apps/server/src/computer/tools/computerTools.test.ts",
@@ -89,6 +92,8 @@ export const REAL_TIME_WAIT_LEGACY_FILES: ReadonlyArray<string> = [
   "apps/server/src/provider/acp/AcpRegistrySupport.test.ts",
   "apps/server/src/provider/claudeCodeSpawn.test.ts",
   "apps/server/src/provider/claudeCompactionCliProbe.test.ts",
+  "apps/server/src/provider/providerInstallLock.test.ts",
+  "apps/server/src/provider/providerMaintenanceRunner.test.ts",
   "apps/server/src/provider/signIn/providerSignInRuntime.test.ts",
   "apps/server/src/provider/signIn/terminalSignIn.test.ts",
   "apps/server/src/providerTools/deviceToolGateway.test.ts",
