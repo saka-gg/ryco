@@ -180,6 +180,27 @@ describe("restartCandidateShape + classifyRestartCandidate", () => {
     expect(classify(thread({ activities: pendingApproval }))).toEqual(skipped("pending-request"));
   });
 
+  it("(f) skips a thread whose agent waits for a secret on its card", () => {
+    const pendingSecret = [
+      {
+        id: EventId.make("secret-1"),
+        kind: "secret.requested",
+        tone: "info" as const,
+        summary: "Asked for API_KEY for .env",
+        payload: {
+          requestId: `secret-request-${"1".repeat(32)}`,
+          key: "API_KEY",
+          purpose: "Call the API",
+          file: ".env",
+          expiresAt: "2026-10-05T10:00:03.000Z",
+        },
+        turnId,
+        createdAt: "2026-10-04T10:00:03.000Z",
+      },
+    ] as OrchestrationThread["activities"];
+    expect(classify(thread({ activities: pendingSecret }))).toEqual(skipped("pending-request"));
+  });
+
   it("(g)-(j) skips steers, computer use, delegated children, limits and lost conversations", () => {
     expect(
       classify(thread(), { signals: { ...NO_RESTART_SIGNALS, unresolvedSteer: true } }),

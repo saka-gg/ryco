@@ -160,6 +160,9 @@ export function createEnvironmentApi(rpcClient: WsRpcClient): EnvironmentApi {
             ...(rpcClient.threads.stopLocalServer
               ? { stopLocalServer: rpcClient.threads.stopLocalServer }
               : {}),
+            ...(rpcClient.threads.answerSecretRequest
+              ? { answerSecretRequest: rpcClient.threads.answerSecretRequest }
+              : {}),
           },
         }
       : {}),

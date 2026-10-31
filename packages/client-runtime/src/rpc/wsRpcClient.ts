@@ -430,6 +430,8 @@ export interface WsRpcClient {
     ) => () => void;
     /** Only for nodes that advertise `threadLocalServerStop`; never retried (it signals). */
     readonly stopLocalServer: RpcUnaryMethod<typeof WS_METHODS.threadsStopLocalServer>;
+    /** Only for nodes that advertise `secretRequests`; never retried (a repeat finds it answered). */
+    readonly answerSecretRequest: RpcUnaryMethod<typeof WS_METHODS.secretsAnswerRequest>;
   };
   readonly server: {
     readonly getConfig: RpcUnaryNoArgMethod<typeof WS_METHODS.serverGetConfig>;
@@ -1073,6 +1075,8 @@ export function createWsRpcClient(
         ),
       stopLocalServer: (input) =>
         transport.request((client) => client[WS_METHODS.threadsStopLocalServer](input)),
+      answerSecretRequest: (input) =>
+        transport.request((client) => client[WS_METHODS.secretsAnswerRequest](input)),
     },
     server: {
       getConfig: () => transport.request((client) => client[WS_METHODS.serverGetConfig]({})),

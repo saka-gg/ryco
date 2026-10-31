@@ -104,6 +104,7 @@ import type {
 import type { ExternalIdentitySummary } from "./hostedIdentity.ts";
 import type { RelayEffectiveRole } from "./relay.ts";
 import type { ThreadForkInput, ThreadForkResult } from "./threadFork.ts";
+import type { SecretRequestAnswerInput, SecretRequestAnswerResult } from "./secretRequest.ts";
 import type { ThreadForkCarriedInput } from "./threadForkCarried.ts";
 import type {
   ThreadLocalServerList,
@@ -1719,6 +1720,11 @@ export interface EnvironmentApi {
     ) => () => void;
     /** Only for nodes that advertise `threadLocalServerStop`. */
     stopLocalServer?: (input: ThreadStopLocalServerInput) => Promise<ThreadStopLocalServerResult>;
+    /**
+     * The owner's answer to an agent's secret request (`secrets.answerRequest`), on nodes that
+     * advertise `secretRequests`. Never retried: a repeat finds the request already answered.
+     */
+    answerSecretRequest?: (input: SecretRequestAnswerInput) => Promise<SecretRequestAnswerResult>;
   };
   orchestration: {
     dispatchCommand: (command: ClientOrchestrationCommand) => Promise<{ sequence: number }>;

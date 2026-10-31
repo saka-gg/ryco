@@ -215,6 +215,11 @@ describe("shared RPC access policy", () => {
     expect(hostedRoleAllows("viewer", WS_METHODS.threadsStopLocalServer)).toBe(false);
     expect(hostedRoleAllows("operator", WS_METHODS.threadsStopLocalServer)).toBe(true);
     expect(rpcDeliveryEffectFor(WS_METHODS.threadsStopLocalServer)).toBe("mutation");
+    // An agent's requested secret: only the owner types it in, and it is never replayed.
+    expect(hostedRoleAllows("operator", WS_METHODS.secretsAnswerRequest)).toBe(false);
+    expect(hostedRoleAllows("viewer", WS_METHODS.secretsAnswerRequest)).toBe(false);
+    expect(hostedRoleAllows("owner", WS_METHODS.secretsAnswerRequest)).toBe(true);
+    expect(rpcDeliveryEffectFor(WS_METHODS.secretsAnswerRequest)).toBe("mutation");
     // Long-lived read streams outside the session-sync set.
     expect(rpcDeliveryEffectFor(AGENT_CONTROL_WS_METHODS.subscribeProposals)).toBe("read");
     expect(rpcDeliveryEffectFor(DEVICE_WS_METHODS.subscribeEvents)).toBe("read");
