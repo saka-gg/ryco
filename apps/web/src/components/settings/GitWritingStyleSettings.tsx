@@ -1,6 +1,7 @@
 import { Schema } from "effect";
 import { GitWritingStyle, WS_METHODS, type ServerConfig } from "@ryco/contracts";
-import { DEFAULT_UNIFIED_SETTINGS } from "@ryco/contracts/settings";
+import { DEFAULT_UNIFIED_SETTINGS, type ServerSettings } from "@ryco/contracts/settings";
+import type { NodeSettingsConfig } from "@ryco/client-runtime/state/settings/nodeSettingsFanOut";
 import {
   DEFAULT_GIT_WRITING_STYLE,
   GIT_WRITING_STYLE_OPTIONS,
@@ -14,6 +15,7 @@ import { useServerConfigSelector } from "../../rpc/serverState";
 import { useSettingsTarget } from "../../settingsTarget";
 import { DraftTextarea } from "../ui/draft-textarea";
 import { Switch } from "../ui/switch";
+import { ApplyToAllNodes } from "./ApplyToAllNodes";
 import {
   ProjectOverrideSelectEditor,
   ProjectOverrideSelectSetting,
@@ -24,6 +26,7 @@ import { SettingResetButton, SettingsRow, SettingsSection } from "./settingsLayo
 const GIT_WRITING_INSTRUCTION_ROWS = [
   {
     key: "commitMessageInstructions",
+    select: (settings: ServerSettings) => settings.commitMessageInstructions,
     title: "Commit message instructions",
     description:
       "Added to the prompt whenever a commit message is generated. They take precedence over the writing style.",
@@ -31,6 +34,7 @@ const GIT_WRITING_INSTRUCTION_ROWS = [
   },
   {
     key: "pullRequestInstructions",
+    select: (settings: ServerSettings) => settings.pullRequestInstructions,
     title: "Pull request instructions",
     description:
       "Added to the prompt for generated pull request titles and descriptions. They take precedence over the writing style.",
@@ -40,6 +44,18 @@ const GIT_WRITING_INSTRUCTION_ROWS = [
 ] as const;
 
 const GIT_WRITING_INSTRUCTIONS_MAX_LENGTH = 4_000;
+
+/** Instructions as the "Mixed" list shows them: the start of the text, or None. */
+function formatInstructions(text: string): string {
+  const line = text.trim().replace(/\s+/g, " ");
+  if (!line) return "None";
+  return line.length > 60 ? `${line.slice(0, 59)}…` : line;
+}
+
+const selectPullRequestTemplates = (settings: ServerSettings): boolean =>
+  settings.pullRequestTemplates;
+const nodeKeepsPullRequestTemplates = (config: NodeSettingsConfig): boolean =>
+  config.environment.capabilities.changeRequestTemplates === true;
 
 function styleLabel(style: GitWritingStyle): string {
   return GIT_WRITING_STYLE_OPTIONS.find((option) => option.value === style)?.label ?? style;
@@ -64,6 +80,7 @@ const GIT_WRITING_STYLE_SETTING: ProjectOverrideSelectSpec<GitWritingStyle> = {
     };
   },
   patch: gitWritingStylePatch,
+  applyToAllNodesLabel: "writing style",
   unsupportedStatus: "Update this node to choose a writing style.",
   inheritStatus: (node) => `Uses the device default (${styleLabel(node)}).`,
   saveFailed: "Could not save the writing style. Try again.",
@@ -113,6 +130,15 @@ export function GitWritingSettingsSection() {
           key={row.key}
           title={row.title}
           description={row.description}
+          status={
+            <ApplyToAllNodes
+              label={row.title.toLowerCase()}
+              select={row.select}
+              format={formatInstructions}
+              patch={{ [row.key]: settings[row.key] }}
+              disabled={!settingsCapability.allowed}
+            />
+          }
           resetAction={
             settings[row.key] !== DEFAULT_UNIFIED_SETTINGS[row.key] ? (
               <SettingResetButton
@@ -135,7 +161,20 @@ export function GitWritingSettingsSection() {
       <SettingsRow
         title="Pull request templates"
         description="Fill generated pull request descriptions from the repository's template, and offer its templates when you open a pull request."
-        status={templatesSupported ? null : "Update this node to use pull request templates."}
+        status={
+          templatesSupported ? (
+            <ApplyToAllNodes
+              label="pull request templates"
+              select={selectPullRequestTemplates}
+              format={(on) => (on ? "On" : "Off")}
+              patch={{ pullRequestTemplates: settings.pullRequestTemplates }}
+              supported={nodeKeepsPullRequestTemplates}
+              disabled={!settingsCapability.allowed}
+            />
+          ) : (
+            "Update this node to use pull request templates."
+          )
+        }
         resetAction={
           templatesSupported &&
           settings.pullRequestTemplates !== DEFAULT_UNIFIED_SETTINGS.pullRequestTemplates ? (

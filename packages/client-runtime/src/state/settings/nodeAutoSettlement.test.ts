@@ -2,14 +2,11 @@ import { DEFAULT_SERVER_SETTINGS, EnvironmentId, type ServerConfig } from "@ryco
 import { describe, expect, it, vi } from "vite-plus/test";
 
 import {
-  applyAutoSettleRuleToNodes,
   autoSettleRuleHandOverKey,
   autoSettleRuleHandOverPatch,
   autoSettleRuleScopeNote,
-  autoSettleRuleTargetBlocker,
   changeAutoSettleRule,
   createAutoSettleRuleHandOver,
-  describeAutoSettleRuleApplyResult,
   readAutoSettleRuleHandOverKey,
   readNodeAutoSettleRule,
   resolveAutoSettleRuleEdit,
@@ -183,81 +180,6 @@ describe("autoSettleRuleHandOverKey", () => {
 
   it("is null for a client on the shared default, which never hands it over", () => {
     expect(autoSettleRuleHandOverKey(listed, 7)).toBeNull();
-  });
-});
-
-describe("autoSettleRuleTargetBlocker", () => {
-  const config = nodeConfig({ nodeAutoSettlement: true });
-
-  it("says why a node cannot take the rule now, or nothing when it can", () => {
-    expect(autoSettleRuleTargetBlocker({ connected: true, config, canWrite: true })).toBeNull();
-    expect(autoSettleRuleTargetBlocker({ connected: false, config, canWrite: true })).toBe(
-      "disconnected",
-    );
-    expect(autoSettleRuleTargetBlocker({ connected: true, config: null, canWrite: true })).toBe(
-      "disconnected",
-    );
-    expect(
-      autoSettleRuleTargetBlocker({ connected: true, config: nodeConfig({}), canWrite: true }),
-    ).toBe("unsupported");
-    expect(autoSettleRuleTargetBlocker({ connected: true, config, canWrite: false })).toBe(
-      "read-only",
-    );
-  });
-});
-
-describe("applyAutoSettleRuleToNodes", () => {
-  it("writes to every reachable node and reports the ones it could not", async () => {
-    const writeA = vi.fn(async () => undefined);
-    const result = await applyAutoSettleRuleToNodes(14, [
-      { environmentId: NODE_A, label: "Studio", blocker: null, write: writeA },
-      {
-        environmentId: NODE_B,
-        label: "Laptop",
-        blocker: null,
-        write: async () => {
-          throw new Error("Connection lost");
-        },
-      },
-      {
-        environmentId: EnvironmentId.make("node-c"),
-        label: "Old box",
-        blocker: "unsupported",
-        write: async () => undefined,
-      },
-    ]);
-
-    expect(writeA).toHaveBeenCalledWith({ threadAutoSettleAfterDays: 14 });
-    expect(result.applied).toEqual([{ environmentId: NODE_A, label: "Studio" }]);
-    expect(result.notApplied).toEqual([
-      { environmentId: NODE_B, label: "Laptop", reason: "failed", detail: "Connection lost" },
-      { environmentId: EnvironmentId.make("node-c"), label: "Old box", reason: "unsupported" },
-    ]);
-  });
-});
-
-describe("describeAutoSettleRuleApplyResult", () => {
-  it("names the nodes it reached and every node it could not", () => {
-    expect(
-      describeAutoSettleRuleApplyResult({
-        applied: [{ environmentId: NODE_A, label: "Studio" }],
-        notApplied: [
-          { environmentId: NODE_B, label: "Laptop", reason: "disconnected" },
-          { environmentId: EnvironmentId.make("old"), label: "Old box", reason: "unsupported" },
-          {
-            environmentId: EnvironmentId.make("mini"),
-            label: "Mini",
-            reason: "failed",
-            detail: "Connection lost",
-          },
-        ],
-      }),
-    ).toBe(
-      "Applied to Studio. Not changed: Laptop (not connected), Old box (needs an update), Mini (Connection lost).",
-    );
-    expect(describeAutoSettleRuleApplyResult({ applied: [], notApplied: [] })).toBe(
-      "No node was changed.",
-    );
   });
 });
 
