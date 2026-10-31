@@ -24,13 +24,21 @@ import {
 export const SecretRequestStatus = Schema.Literals(["pending", "provided", "declined", "expired"]);
 export type SecretRequestStatus = typeof SecretRequestStatus.Type;
 
-/** The `secret.requested` activity's payload: what the card shows. Never a value. */
+/**
+ * Which checkout the request was opened for: 32 hex characters derived on the node from the
+ * checkout's real path, never the path itself. An answer is written only while the thread's
+ * checkout still has this identity (the worktree was not removed, the thread not moved).
+ */
+export const SecretRequestCheckoutId = Schema.String.check(Schema.isPattern(/^[0-9a-f]{32}$/));
+
+/** The `secret.requested` activity's payload: what the card shows. Never a value or a path. */
 export const SecretRequestedActivityPayload = Schema.Struct({
   requestId: SecretRequestId,
   key: SecretRequestKey,
   purpose: TrimmedNonEmptyString.check(Schema.isMaxLength(SECRET_REQUEST_PURPOSE_MAX_CHARS)),
   file: SecretRequestFile,
   expiresAt: IsoDateTime,
+  checkoutId: SecretRequestCheckoutId,
 });
 export type SecretRequestedActivityPayload = typeof SecretRequestedActivityPayload.Type;
 

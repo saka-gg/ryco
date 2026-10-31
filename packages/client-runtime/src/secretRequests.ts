@@ -15,19 +15,25 @@ import {
 import type { ThreadId } from "@ryco/contracts";
 import { WS_METHODS } from "@ryco/contracts/rpc";
 import { hostedRoleAllows } from "@ryco/shared/rpcAccessPolicy";
+import { secretRequestFailureMessage } from "@ryco/shared/secretRequests";
 import {
   pendingSecretRequests,
-  secretRequestFailureMessage,
   type SecretRequestActivity,
   type SecretRequestView,
-} from "@ryco/shared/secretRequests";
+} from "@ryco/shared/secretRequestState";
 import * as Schema from "effect/Schema";
 
-export type { SecretRequestView } from "@ryco/shared/secretRequests";
+export type { SecretRequestView } from "@ryco/shared/secretRequestState";
 
-/** The promise the card makes about the value, under the field. */
-export const SECRET_REQUEST_PRIVACY_NOTE =
-  "Written only to this file on your node. Never shown to the agent or kept in the chat.";
+/**
+ * What happens to the value, under the field. Only what is true: the node writes it into the
+ * file and the chat does not keep it, but the agent runs on the node and its code (or the agent
+ * itself) can read that file.
+ */
+export function secretRequestPrivacyNote(file: string): string {
+  return `Written to ${file} on your node, where the agent's code can read it. Not kept in the chat.`;
+}
+
 export const SECRET_REQUEST_FIELD_PLACEHOLDER = "Paste the value";
 
 /** Cheap: whether a thread has ever asked, so a client loads the card only then. */

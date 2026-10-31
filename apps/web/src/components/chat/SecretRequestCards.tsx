@@ -1,10 +1,10 @@
 import {
   SECRET_REQUEST_FIELD_PLACEHOLDER,
-  SECRET_REQUEST_PRIVACY_NOTE,
   secretRequestAnswerInput,
   secretRequestCards,
   secretRequestFailureText,
   secretRequestOutcomeText,
+  secretRequestPrivacyNote,
   type SecretRequestView,
 } from "@ryco/client-runtime/secretRequests";
 import {
@@ -186,7 +186,7 @@ function SecretRequestCard({
               )}
             </button>
           </div>
-          <p className="text-xs text-muted-foreground">{SECRET_REQUEST_PRIVACY_NOTE}</p>
+          <p className="text-xs text-muted-foreground">{secretRequestPrivacyNote(request.file)}</p>
           <div className="flex gap-3">
             <button
               type="button"

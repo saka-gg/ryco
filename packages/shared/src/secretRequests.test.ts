@@ -3,12 +3,14 @@ import { SecretRequestId } from "@ryco/contracts/secret-request";
 
 import { canSettleThread, type ThreadSettlementInput } from "./threadSettlement.ts";
 import {
-  derivePendingProviderCallbackRequests,
   derivePendingThreadRequestState,
   derivePendingThreadRequests,
+} from "./pendingThreadRequests.ts";
+import {
+  derivePendingProviderCallbackRequests,
   isThreadActivityMilestone,
 } from "./threadActivity.ts";
-import { deriveSecretRequests, pendingSecretRequests } from "./secretRequests.ts";
+import { deriveSecretRequests, pendingSecretRequests } from "./secretRequestState.ts";
 
 const requestId = SecretRequestId.make(`secret-request-${"a".repeat(32)}`);
 const otherId = SecretRequestId.make(`secret-request-${"b".repeat(32)}`);
@@ -19,7 +21,14 @@ const requested = (id = requestId, overrides: Record<string, unknown> = {}) => (
   kind: "secret.requested",
   createdAt: "2026-10-30T12:00:00.000Z",
   turnId: "turn-1",
-  payload: { requestId: id, key: "STRIPE_KEY", purpose: "Charge cards", file: ".env", expiresAt },
+  payload: {
+    requestId: id,
+    key: "STRIPE_KEY",
+    purpose: "Charge cards",
+    file: ".env",
+    expiresAt,
+    checkoutId: "c".repeat(32),
+  },
   ...overrides,
 });
 const resolved = (status: string, id = requestId, createdAt = "2026-10-30T12:05:00.000Z") => ({
@@ -74,7 +83,7 @@ describe("deriveSecretRequests", () => {
   it("ignores malformed payloads, a repeated request and a resolution without a request", () => {
     const requests = deriveSecretRequests([
       requested(requestId, {
-        payload: { requestId, key: "lower", purpose: "x", file: ".env", expiresAt },
+        payload: { ...requested().payload, key: "lower" },
       }),
       resolved("provided", otherId),
       requested(),
@@ -122,6 +131,42 @@ describe("secret requests as pending requests", () => {
     ).toEqual([]);
   });
 
+  it("agrees with the card on which payloads count, on early resolutions and on expiry", () => {
+    const pendingIds = (activities: ReadonlyArray<ReturnType<typeof requested>>, nowMs?: number) =>
+      [
+        derivePendingThreadRequests(activities, nowMs).map((request) => request.requestId),
+        pendingSecretRequests(activities, nowMs).map((request) => request.requestId),
+      ] as const;
+    // A payload the contract refuses (a lower-case key, no checkout identity) is no request.
+    for (const payload of [
+      { ...requested().payload, key: "lower" },
+      { ...requested().payload, checkoutId: undefined },
+    ]) {
+      expect(pendingIds([requested(requestId, { payload })])).toEqual([[], []]);
+    }
+    // A resolution recorded before its request still closes it.
+    const early = [
+      resolved("declined", requestId, "2026-10-30T11:00:00.000Z"),
+      requested(),
+    ] as ReadonlyArray<ReturnType<typeof requested>>;
+    expect(pendingIds(early)).toEqual([[], []]);
+    expect(deriveSecretRequests(early)[0]?.status).toBe("declined");
+    // Past its expiry, a request no longer holds the thread, recorded or not.
+    const after = Date.parse(expiresAt);
+    expect(pendingIds([requested()], after - 1)).toEqual([[requestId], [requestId]]);
+    expect(pendingIds([requested()], after)).toEqual([[], []]);
+    expect(derivePendingThreadRequestState([requested()], after).hasPendingUserInput).toBe(false);
+    // Oldest first in both.
+    const two = [
+      requested(otherId, { id: "b", createdAt: "2026-10-30T12:00:00.000Z" }),
+      requested(requestId, { id: "a", createdAt: "2026-10-30T12:01:00.000Z" }),
+    ];
+    expect(pendingIds(two)).toEqual([
+      [otherId, requestId],
+      [otherId, requestId],
+    ]);
+  });
+
   it("leaves secret requests out of the provider callbacks a turn's end or a restart clears", () => {
     expect(derivePendingProviderCallbackRequests([requested()])).toEqual([]);
   });
@@ -148,6 +193,7 @@ describe("secret requests as pending requests", () => {
       pinned: false,
       backgroundLiveness: null,
       pullRequestWatched: false,
+      commandWatched: false,
       prNumber: null,
       prState: null,
       prTerminalAt: null,

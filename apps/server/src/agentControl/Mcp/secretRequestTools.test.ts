@@ -18,6 +18,7 @@ import { TestClock } from "effect/testing";
 import { findThreadInArray } from "../../orchestration/threadIndex.ts";
 import {
   answerSecretRequest,
+  SECRET_REQUEST_EXPIRY_RETRY_MS,
   scheduleSecretRequestExpiries,
   secretRequestIdFor,
 } from "../../secretRequests/secretRequests.ts";
@@ -45,9 +46,17 @@ const session = (
 });
 
 /** A fake engine holding one thread's activities, and a checkout that is not a Git repository. */
-const harness = (input: { readonly authority?: boolean; readonly enabled?: boolean } = {}) => {
+const harness = (
+  input: {
+    readonly authority?: boolean;
+    readonly enabled?: boolean;
+    /** How many `secret.resolved` records fail before one succeeds. */
+    readonly failedResolutions?: number;
+  } = {},
+) => {
   const activities: OrchestrationThreadActivity[] = [];
   const dispatched: OrchestrationCommand[] = [];
+  let failedResolutions = input.failedResolutions ?? 0;
   const engine = {
     getReadModel: () =>
       Effect.sync(
@@ -60,15 +69,19 @@ const harness = (input: { readonly authority?: boolean; readonly enabled?: boole
           }) as never,
       ),
     dispatch: (command: OrchestrationCommand) =>
-      Effect.sync(() => {
-        dispatched.push(command);
-        if (command.type === "thread.activity.append" && command.threadId === threadId) {
-          if (!activities.some((activity) => activity.id === command.activity.id)) {
-            activities.push(command.activity);
-          }
-        }
-        return { sequence: dispatched.length };
-      }),
+      command.type === "thread.activity.append" &&
+      command.activity.kind === "secret.resolved" &&
+      failedResolutions-- > 0
+        ? Effect.fail({ _tag: "OrchestrationDispatchError" })
+        : Effect.sync(() => {
+            dispatched.push(command);
+            if (command.type === "thread.activity.append" && command.threadId === threadId) {
+              if (!activities.some((activity) => activity.id === command.activity.id)) {
+                activities.push(command.activity);
+              }
+            }
+            return { sequence: dispatched.length };
+          }),
     subscribeDomainEvents: Effect.die("not used"),
   };
   const checkouts: string[] = [];
@@ -197,9 +210,9 @@ describe("ryco_request_secret authorization", () => {
 });
 
 describe("secret request expiry", () => {
-  const openCard = (h: ReturnType<typeof harness>) =>
+  const openCard = (h: ReturnType<typeof harness>, callerRequestId = "stripe") =>
     Effect.sync(() => {
-      const requestId = secretRequestIdFor(threadId, "stripe");
+      const requestId = secretRequestIdFor(threadId, callerRequestId);
       h.activities.push({
         id: `${requestId}:requested` as never,
         tone: "info",
@@ -211,6 +224,7 @@ describe("secret request expiry", () => {
           purpose: "Charge test cards",
           file: ".env",
           expiresAt: new Date(DAY_MS).toISOString(),
+          checkoutId: "c".repeat(32),
         },
         turnId: TurnId.make("turn-caller"),
         createdAt: new Date(0).toISOString(),
@@ -267,6 +281,30 @@ describe("secret request expiry", () => {
           .map((activity) => activity.payload),
         [{ requestId, status: "expired" }],
       );
+    }),
+  );
+
+  it.effect("tries a failed expiry record again, with backoff, until it is recorded", () =>
+    Effect.gen(function* () {
+      const h = harness({ failedResolutions: 2 });
+      const requestId = yield* openCard(h, "retried");
+      const resolutions = () =>
+        h.activities
+          .filter((activity) => activity.kind === "secret.resolved")
+          .map((activity) => activity.payload);
+      yield* scheduleSecretRequestExpiries(h.deps, [
+        { id: threadId, deletedAt: null, activities: [...h.activities] },
+      ]);
+      yield* TestClock.adjust(DAY_MS);
+      yield* Effect.yieldNow;
+      assert.deepEqual(resolutions(), []);
+      yield* TestClock.adjust(SECRET_REQUEST_EXPIRY_RETRY_MS);
+      yield* Effect.yieldNow;
+      assert.deepEqual(resolutions(), []);
+      // The second wait is twice as long.
+      yield* TestClock.adjust(2 * SECRET_REQUEST_EXPIRY_RETRY_MS);
+      yield* Effect.yieldNow;
+      assert.deepEqual(resolutions(), [{ requestId, status: "expired" }]);
     }),
   );
 });

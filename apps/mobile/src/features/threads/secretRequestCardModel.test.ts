@@ -25,6 +25,7 @@ const activities = [
       purpose: "Read the database",
       file: ".env",
       expiresAt: "2026-11-01T08:00:00.000Z",
+      checkoutId: "c".repeat(32),
     },
   },
 ];

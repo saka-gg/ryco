@@ -26,7 +26,7 @@ import {
   AgentControlRequestSecretInput,
   type SecretRequestStatus,
 } from "@ryco/contracts/secret-request-details";
-import type { SecretRequestView } from "@ryco/shared/secretRequests";
+import type { SecretRequestView } from "@ryco/shared/secretRequestState";
 import { Effect, Option, Schema } from "effect";
 
 import type { threadWakeSource, waitUntil } from "../eventDrivenWait.ts";
@@ -51,7 +51,7 @@ import type {
 export const SECRET_REQUEST_TOOL_DESCRIPTOR: AgentControlMcpToolDescriptor = {
   name: AGENT_CONTROL_SECRET_REQUEST_MCP_TOOL,
   description:
-    "Ask the user for a secret (an API key, token or password) through a private card in this thread. Never ask for secrets in chat; use this tool. The user types the value on the card and Ryco writes it as KEY='value' into a dotenv file in this thread's own checkout (default .env). The value is never shown to you, the transcript or any response: the result says only pending, provided, declined or expired. The file must be ignored by Git (add it to .gitignore first) and named like .env, .env.local, name.env or .dev.vars. While pending, call again with the same requestId to keep waiting, or end your turn and tell the user the card is waiting. Once provided, load the key from the environment in your code; never print, log or copy the value, and do not read the file to see it. Requests expire after 24 hours.",
+    "Ask the user for a secret (an API key, token or password) through a private card in this thread. Never ask for secrets in chat; use this tool. The user types the value on the card and Ryco writes it as KEY='value' into a dotenv file in this thread's own checkout (default .env). The value is never shown to you, the transcript or any response: the result says only pending, provided, declined or expired. The file must be ignored by Git (add it to .gitignore first), not tracked under any letter case, in this checkout's own repository (not a nested one), and named like .env, .env.local, name.env or .dev.vars. While pending, call again with the same requestId to keep waiting, or end your turn and tell the user the card is waiting. Once provided, load the key from the environment in your code; never print, log or copy the value, and do not read the file to see it. Requests expire after 24 hours.",
   inputSchema: {
     type: "object",
     properties: {

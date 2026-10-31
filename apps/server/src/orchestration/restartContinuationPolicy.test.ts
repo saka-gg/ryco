@@ -193,6 +193,7 @@ describe("restartCandidateShape + classifyRestartCandidate", () => {
           purpose: "Call the API",
           file: ".env",
           expiresAt: "2026-10-05T10:00:03.000Z",
+          checkoutId: "c".repeat(32),
         },
         turnId,
         createdAt: "2026-10-04T10:00:03.000Z",
