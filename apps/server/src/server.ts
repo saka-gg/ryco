@@ -22,6 +22,7 @@ import { RestartContinuationLive } from "./orchestration/Layers/RestartContinuat
 import { CompletionReturnDeliveryLive } from "./agentControl/Layers/CompletionReturnDelivery.ts";
 import { ServerWakeFenceLive } from "./orchestration/Layers/ServerWakeFence.ts";
 import { PullRequestWatchServiceLive } from "./sourceControl/PullRequestWatchService.ts";
+import { CommandWatchServiceLive } from "./commandWatch/CommandWatchService.ts";
 import { ServerQueueDrainLive } from "./orchestration/Layers/ServerQueueDrain.ts";
 import { AgentControlWorkspacesLive } from "./agentControl/workspaceLifecycle.ts";
 import { AutomationCentreLive } from "./agentControl/Layers/AutomationCentre.ts";
@@ -634,6 +635,12 @@ const PullRequestWatchLayerLive = PullRequestWatchServiceLive.pipe(
   Layer.provideMerge(OrchestrationCommandApplicationLive),
 );
 
+/** Command watches, like the pull request watch: their looks start once commands are admitted. */
+const CommandWatchLayerLive = CommandWatchServiceLive.pipe(
+  Layer.provideMerge(ServerRuntimeStartupLive),
+  Layer.provideMerge(OrchestrationCommandApplicationLive),
+);
+
 // The private Agent Control MCP listener joins the runtime services here:
 // it consumes projections, proposals, provider snapshots, and the session
 // registry from the runtime dependencies, and its endpoint never touches
@@ -733,6 +740,8 @@ const RuntimeServicesLive = Layer.mergeAll(
   // execution share one instance (its read cache and per-chat lock). First in this list, so
   // the startup it waits on is built with every service below (chat folders, the fork ledger).
   Layer.provideMerge(PullRequestWatchLayerLive),
+  // Command watches, beneath the services too: Agent Control's tools and the stop RPC share one.
+  Layer.provideMerge(CommandWatchLayerLive),
   // "No project" chat folders and the chats capability clients read from the server config.
   // Beneath the services so startup can clean up chats that never got a conversation.
   Layer.provideMerge(ChatFoldersLive),

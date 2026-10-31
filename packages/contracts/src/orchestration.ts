@@ -39,6 +39,7 @@ import {
   ThreadPullRequestWatches,
   ThreadPullRequestWatchShell,
 } from "./pullRequestWatch.ts";
+import { CommandWatchEndReason, ThreadCommandWatch, ThreadCommandWatches } from "./commandWatch.ts";
 import {
   IssueState,
   PullRequestState,
@@ -1260,6 +1261,8 @@ export const OrchestrationThread = Schema.Struct({
    * carries it; clients read the summary (`OrchestrationThreadShell.pullRequestWatches`).
    */
   pullRequestWatchState: Schema.optional(ThreadPullRequestWatches),
+  /** The thread's command watches, full state (the command read model only, like the above). */
+  commandWatchState: Schema.optional(ThreadCommandWatches),
   /**
    * The server-owned follow-up queue, full entries: the command read model, thread detail and
    * the thread window carry it, never shells. Absent while empty and from older servers.
@@ -1370,6 +1373,11 @@ export const OrchestrationThreadShell = Schema.Struct({
    * within a day, so shells of other threads do not grow. Absent from older servers.
    */
   pullRequestWatches: Schema.optionalKey(ThreadPullRequestWatchShell),
+  /**
+   * How many command watches the node runs for the thread: present only while one does (it keeps
+   * the thread from settling on its own). Never the commands. Absent from older servers.
+   */
+  commandWatchCount: Schema.optionalKey(PositiveInt),
   /**
    * The server-owned follow-up queue's summary: present only while it holds an entry, so shells
    * of other threads do not grow. Absent from older servers. (Thread detail carries the
@@ -2181,6 +2189,7 @@ export const ServerWakeSource = Schema.Literals([
   "pull-request-watch",
   "goal-continuation",
   "follow-up-queue",
+  "command-watch",
 ]);
 export type ServerWakeSource = typeof ServerWakeSource.Type;
 
@@ -2248,9 +2257,10 @@ export type TurnOrigin = typeof TurnOrigin.Type;
  * result waking its parent (`delegation-result:`), Agent Control sends
  * (`message-agent-control-<operation>-<step>`; `-send-message` is an agent's message to an
  * existing thread, naming its sender as `-from:<thread>` before the suffix, see
- * `@ryco/shared/interThreadMessage`), the next turn toward a thread's goal (`goal-continuation:`) and a pull
- * request watch's update (`pull-request-watch:<thread>:<uuid>`). Clients render them by origin
- * and may never send or queue them.
+ * `@ryco/shared/interThreadMessage`), the next turn toward a thread's goal (`goal-continuation:`),
+ * a pull request watch's update (`pull-request-watch:<thread>:<uuid>`) and a command watch's
+ * (`command-watch:<thread>:<uuid>`). Clients render them by origin and may never send or queue
+ * them.
  */
 export const DELEGATION_RESULT_MESSAGE_ID_PREFIX = "delegation-result:";
 export const AGENT_CONTROL_MESSAGE_ID_PREFIX = "message-agent-control-";
@@ -2258,11 +2268,13 @@ export const AGENT_SENT_MESSAGE_ID_SUFFIX = "-send-message";
 /** The server's goal continuation module keeps its own copy (it imports no values). */
 export const GOAL_CONTINUATION_MESSAGE_ID_PREFIX = "goal-continuation:";
 export const PULL_REQUEST_WATCH_WAKE_MESSAGE_PREFIX = "pull-request-watch:";
+export const COMMAND_WATCH_WAKE_MESSAGE_PREFIX = "command-watch:";
 export const SERVER_MINTED_MESSAGE_ID_PREFIXES: ReadonlyArray<string> = [
   DELEGATION_RESULT_MESSAGE_ID_PREFIX,
   AGENT_CONTROL_MESSAGE_ID_PREFIX,
   GOAL_CONTINUATION_MESSAGE_ID_PREFIX,
   PULL_REQUEST_WATCH_WAKE_MESSAGE_PREFIX,
+  COMMAND_WATCH_WAKE_MESSAGE_PREFIX,
 ];
 
 /**
@@ -2780,6 +2792,20 @@ const ThreadStatusBucketOverrideCommand = Schema.Struct({
   changedAt: IsoDateTime,
 });
 
+/**
+ * The user's stop of a command watch (`watchId`), or of every command watch of the thread. A
+ * client may only stop watches: agents start them through Agent Control. Stopping what already
+ * ended is an accepted no-op.
+ */
+const ThreadCommandWatchStopCommand = Schema.Struct({
+  type: Schema.Literal("thread.command-watch.stop"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  watchId: Schema.optional(TrimmedNonEmptyString),
+  createdAt: IsoDateTime,
+});
+export type ThreadCommandWatchStopCommand = typeof ThreadCommandWatchStopCommand.Type;
+
 const ThreadManualPositionSetCommand = Schema.Struct({
   type: Schema.Literal("thread.manual-position.set"),
   commandId: CommandId,
@@ -2846,6 +2872,7 @@ const DispatchableClientOrchestrationCommand = Schema.Union([
   ThreadStatusBucketOverrideCommand,
   ThreadManualPositionSetCommand,
   WorktreeManualPositionSetCommand,
+  ThreadCommandWatchStopCommand,
 ]);
 export type DispatchableClientOrchestrationCommand =
   typeof DispatchableClientOrchestrationCommand.Type;
@@ -2900,6 +2927,7 @@ export const ClientOrchestrationCommand = Schema.Union([
   ThreadStatusBucketOverrideCommand,
   ThreadManualPositionSetCommand,
   WorktreeManualPositionSetCommand,
+  ThreadCommandWatchStopCommand,
 ]);
 export type ClientOrchestrationCommand = typeof ClientOrchestrationCommand.Type;
 
@@ -3071,13 +3099,10 @@ const ThreadGoalProviderClearCommand = Schema.Struct({
 });
 
 /**
- * Server-only (the pull request watch service). One revision-fenced change of one watch and,
- * optionally, the wake it sends, decided and committed together: the watch event first, then
- * the wake's own turn start, which passes the same decision as any `thread.turn.start`. A
- * refusal rejects both, so progress is never recorded without its wake or the reverse.
+ * What every revision-fenced watch update carries (pull request and command watches), besides
+ * the watch after the change (`next`) and an end's reason.
  */
-const ThreadPullRequestWatchUpdateCommand = Schema.Struct({
-  type: Schema.Literal("thread.pull-request-watch.update"),
+const WatchUpdateFields = {
   commandId: CommandId,
   threadId: ThreadId,
   watchId: TrimmedNonEmptyString,
@@ -3089,9 +3114,6 @@ const ThreadPullRequestWatchUpdateCommand = Schema.Struct({
    * a stale pass from a current one.
    */
   expectedStartedAt: Schema.NullOr(IsoDateTime),
-  /** The watch after the change; null ends it with `endReason`. */
-  next: Schema.NullOr(ThreadPullRequestWatch),
-  endReason: Schema.optional(PullRequestWatchEndReason),
   /** The queued turn this change sends to the thread's agent. */
   wake: Schema.optional(
     Schema.Struct({
@@ -3101,8 +3123,35 @@ const ThreadPullRequestWatchUpdateCommand = Schema.Struct({
     }),
   ),
   createdAt: IsoDateTime,
+};
+
+/**
+ * Server-only (the pull request watch service). One revision-fenced change of one watch and,
+ * optionally, the wake it sends, decided and committed together: the watch event first, then
+ * the wake's own turn start, which passes the same decision as any `thread.turn.start`. A
+ * refusal rejects both, so progress is never recorded without its wake or the reverse.
+ */
+const ThreadPullRequestWatchUpdateCommand = Schema.Struct({
+  type: Schema.Literal("thread.pull-request-watch.update"),
+  ...WatchUpdateFields,
+  /** The watch after the change; null ends it with `endReason`. */
+  next: Schema.NullOr(ThreadPullRequestWatch),
+  endReason: Schema.optional(PullRequestWatchEndReason),
 });
 export type ThreadPullRequestWatchUpdateCommand = typeof ThreadPullRequestWatchUpdateCommand.Type;
+
+/**
+ * Server-only (the command watch service): start, record, wake or end one command watch, fenced
+ * like the pull request watch's update. Clients never send it: the agent starts a watch through
+ * Agent Control, and the user's stop is the client command `thread.command-watch.stop`.
+ */
+const ThreadCommandWatchUpdateCommand = Schema.Struct({
+  type: Schema.Literal("thread.command-watch.update"),
+  ...WatchUpdateFields,
+  next: Schema.NullOr(ThreadCommandWatch),
+  endReason: Schema.optional(CommandWatchEndReason),
+});
+export type ThreadCommandWatchUpdateCommand = typeof ThreadCommandWatchUpdateCommand.Type;
 
 /**
  * Server-only (the follow-up queue drain): records a hold the node itself causes (a restart, a
@@ -3191,6 +3240,7 @@ const InternalOrchestrationCommand = Schema.Union([
   WorktreePullRequestsUpdateCommand,
   WorktreeRelocateCommand,
   ThreadPullRequestWatchUpdateCommand,
+  ThreadCommandWatchUpdateCommand,
   ThreadQueueHoldRecordCommand,
 ]);
 export type InternalOrchestrationCommand = typeof InternalOrchestrationCommand.Type;
@@ -3225,6 +3275,7 @@ export const OrchestrationEventType = Schema.Literals([
   "thread.goal-updated",
   "thread.goal-cleared",
   "thread.pull-request-watch-updated",
+  "thread.command-watch-updated",
   "thread.queue-entry-added",
   "thread.queue-entry-edited",
   "thread.queue-reordered",
@@ -3456,6 +3507,17 @@ export const ThreadPullRequestWatchUpdatedPayload = Schema.Struct({
   updatedAt: IsoDateTime,
 });
 export type ThreadPullRequestWatchUpdatedPayload = typeof ThreadPullRequestWatchUpdatedPayload.Type;
+
+/** A thread's command watches after a change, like the pull request watch's payload. */
+export const ThreadCommandWatchUpdatedPayload = Schema.Struct({
+  threadId: ThreadId,
+  watches: ThreadCommandWatches,
+  changed: Schema.Array(
+    Schema.Struct({ watchId: TrimmedNonEmptyString, ended: Schema.NullOr(CommandWatchEndReason) }),
+  ),
+  updatedAt: IsoDateTime,
+});
+export type ThreadCommandWatchUpdatedPayload = typeof ThreadCommandWatchUpdatedPayload.Type;
 
 /**
  * Follow-up queue events. Only `added` and `edited` carry an entry (the full entry, so
@@ -3934,6 +3996,11 @@ export const OrchestrationEvent = Schema.Union([
     ...EventBaseFields,
     type: Schema.Literal("thread.pull-request-watch-updated"),
     payload: ThreadPullRequestWatchUpdatedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("thread.command-watch-updated"),
+    payload: ThreadCommandWatchUpdatedPayload,
   }),
   Schema.Struct({
     ...EventBaseFields,

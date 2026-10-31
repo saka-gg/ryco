@@ -38,6 +38,7 @@ export type ThreadAutoSettlementBlocker =
   | "pinned"
   | "background-work"
   | "pull-request-watch"
+  | "command-watch"
   | "pull-request-open"
   | "pull-request-unknown";
 
@@ -68,6 +69,8 @@ export interface ThreadSettlementInput {
    * ends the watch).
    */
   readonly pullRequestWatched: boolean;
+  /** The node runs a command watch for this thread (it wakes the agent on new output): same rule. */
+  readonly commandWatched: boolean;
   readonly prNumber: number | null;
   readonly prState: PullRequestState | null;
   /**
@@ -228,6 +231,7 @@ export function getThreadAutoSettlementBlocker(
   if (input.pinned) return "pinned";
   if (input.backgroundLiveness === "working") return "background-work";
   if (input.pullRequestWatched) return "pull-request-watch";
+  if (input.commandWatched) return "command-watch";
   if (input.prState === "open") return "pull-request-open";
   if (input.prState === null && input.prNumber !== null) return "pull-request-unknown";
   return null;

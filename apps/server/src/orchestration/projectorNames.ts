@@ -18,6 +18,7 @@ export const ORCHESTRATION_PROJECTOR_NAMES = {
   pendingApprovals: "projection.pending-approvals",
   worktrees: "projection.worktrees",
   threadPullRequestWatches: "projection.thread-pull-request-watches",
+  threadCommandWatches: "projection.thread-command-watches",
   threadFollowUpQueues: "projection.thread-follow-up-queues",
 } as const;
 

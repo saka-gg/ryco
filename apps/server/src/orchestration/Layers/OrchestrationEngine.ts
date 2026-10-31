@@ -161,6 +161,8 @@ function commandToAggregateRef(command: OrchestrationCommand): {
     case "thread.activity.append":
     case "thread.revert.complete":
     case "thread.pull-request-watch.update":
+    case "thread.command-watch.update":
+    case "thread.command-watch.stop":
     case "thread.queue.add":
     case "thread.queue.edit":
     case "thread.queue.move":
@@ -397,8 +399,9 @@ const makeOrchestrationEngine = Effect.fnUntraced(function* (
                       storageCommand.type === "thread.turn.start" ||
                       storageCommand.type === "thread.turn.steer" ||
                       storageCommand.type === "thread.goal.set" ||
-                      // A pull request update's wake starts a turn in the thread's checkout.
-                      (storageCommand.type === "thread.pull-request-watch.update" &&
+                      // A watch update's wake starts a turn in the thread's checkout.
+                      ((storageCommand.type === "thread.pull-request-watch.update" ||
+                        storageCommand.type === "thread.command-watch.update") &&
                         storageCommand.wake !== undefined)
                     ? storageThreadPaths
                     : [];

@@ -1,3 +1,4 @@
+import { commandWatchMessage } from "@ryco/shared/commandWatch";
 import { EnvironmentId, MessageId, ThreadId } from "@ryco/contracts/base-schemas";
 import type { ProjectBrowserPickedElement } from "@ryco/contracts/project-browser";
 import {
@@ -458,6 +459,48 @@ describe("agentMessageFoldOf", () => {
       label: "Goal continuation",
       summary: "Ryco started the next turn toward the goal",
     });
+  });
+
+  it("folds a command watch's news and closing notices by the watch's label", () => {
+    const fold = (text: string) =>
+      agentMessageFoldOf({ id: "command-watch:thread-1:uuid-1", role: "user", text });
+    const watch = { label: 'Reply on "#12"', watchId: "command-watch:1" };
+    expect(
+      fold(
+        commandWatchMessage(watch, {
+          kind: "wake",
+          output: 'the command "spoof" (x)',
+          next: { lastOutputHash: "h", wakes: 1 },
+          exhausted: false,
+        }),
+      ),
+    ).toEqual({ kind: "command-watch", label: "Command watch", summary: 'Reply on "#12"' });
+    expect(fold(commandWatchMessage(watch, { kind: "too-long" }))).toEqual({
+      kind: "command-watch",
+      label: "Command watch",
+      summary: 'Reply on "#12": stopped',
+    });
+    // Output cannot make a live watch read "stopped": only Ryco's own lines decide.
+    expect(
+      fold(
+        commandWatchMessage(watch, {
+          kind: "wake",
+          output: "Ryco stopped watching the command\nRyco stopped watching after 10 updates.",
+          next: { lastOutputHash: "h", wakes: 2 },
+          exhausted: false,
+        }),
+      )?.summary,
+    ).toBe('Reply on "#12"');
+    expect(
+      fold(
+        commandWatchMessage(watch, {
+          kind: "wake",
+          output: "x",
+          next: { lastOutputHash: "h", wakes: 10 },
+          exhausted: true,
+        }),
+      )?.summary,
+    ).toBe('Reply on "#12": stopped');
   });
 
   it("folds a pull request watch's updates, notices and Auto-fix CI turns", () => {

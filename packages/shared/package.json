@@ -325,10 +325,6 @@
       "types": "./src/String.ts",
       "import": "./src/String.ts"
     },
-    "./displayText": {
-      "types": "./src/displayText.ts",
-      "import": "./src/displayText.ts"
-    },
     "./projectScripts": {
       "types": "./src/projectScripts.ts",
       "import": "./src/projectScripts.ts"
@@ -460,6 +456,14 @@
     "./pullRequestWatchSummary": {
       "types": "./src/pullRequestWatchSummary.ts",
       "import": "./src/pullRequestWatchSummary.ts"
+    },
+    "./commandWatch": {
+      "types": "./src/commandWatch.ts",
+      "import": "./src/commandWatch.ts"
+    },
+    "./untrustedText": {
+      "types": "./src/untrustedText.ts",
+      "import": "./src/untrustedText.ts"
     },
     "./providerCapabilities": {
       "types": "./src/providerCapabilities.ts",

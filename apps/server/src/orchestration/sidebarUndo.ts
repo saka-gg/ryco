@@ -30,8 +30,8 @@ type Receipt = {
 };
 
 // These commands are provider/internal-only. Client actions always invalidate the prior receipt.
-// A pull request watch update without a wake only records watch progress (a wake starts a turn,
-// which changes the sidebar state anyway).
+// A pull request or command watch update without a wake only records watch progress (a wake
+// starts a turn, which changes the sidebar state anyway).
 function isProviderProgress(command: OrchestrationCommand) {
   return (
     command.type === "thread.message.assistant.delta" ||
@@ -39,7 +39,9 @@ function isProviderProgress(command: OrchestrationCommand) {
     command.type === "thread.activity.append" ||
     command.type === "thread.turn.diff.complete" ||
     command.type === "thread.proposed-plan.upsert" ||
-    (command.type === "thread.pull-request-watch.update" && command.wake === undefined) ||
+    ((command.type === "thread.pull-request-watch.update" ||
+      command.type === "thread.command-watch.update") &&
+      command.wake === undefined) ||
     // A hold the node records on the follow-up queue, which the sidebar does not show.
     command.type === "thread.queue.hold.record"
   );

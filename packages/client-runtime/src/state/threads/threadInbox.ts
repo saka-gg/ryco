@@ -398,6 +398,7 @@ function settlementInput(input: {
     pinned: input.pinned,
     backgroundLiveness: input.thread.backgroundLiveness ?? null,
     pullRequestWatched: (input.thread.pullRequestWatches?.active.length ?? 0) > 0,
+    commandWatched: input.thread.commandWatchCount !== undefined,
     ...threadPullRequestSettlementFields(input.thread, input.worktree),
     worktreeUpdatedAt: input.worktree?.updatedAt ?? null,
     updatedAt: input.thread.updatedAt ?? null,
