@@ -22,10 +22,8 @@ const unavailableMessage = (capability: NodeBrowserCapability) =>
     : capability.reason === "crashed"
       ? "The node's browser stopped several times in a row. Ryco tries again in a few minutes."
       : capability.reason === "sandbox-blocked"
-        ? "This node gives Chrome no usable sandbox, so it cannot run browser tabs."
-        : capability.reason === "root-without-sandbox"
-          ? "Ryco runs as root on this node, where Chrome has no sandbox. Run Ryco as a regular user, or set RYCO_NODE_BROWSER_NO_SANDBOX=1 on the node to allow tabs without it."
-          : "Browser tabs are not available on this node.";
+        ? "This node gives Chrome no usable sandbox (on Linux, unprivileged user namespaces are often restricted), so it cannot run browser tabs. Allow them for Chrome, or set RYCO_NODE_BROWSER_NO_SANDBOX=1 on the node to run tabs without the sandbox."
+        : "Browser tabs are not available on this node.";
 
 const errorText = (error: unknown) =>
   typeof error === "object" &&

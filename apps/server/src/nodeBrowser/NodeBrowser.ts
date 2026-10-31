@@ -128,7 +128,6 @@ export const makeNodeBrowserLayer = (options?: {
           Effect.flatMap((module) =>
             module.makeNodeBrowserRuntime({
               baseCapability,
-              noSandbox: nodeBrowserSandboxDisabled(env),
               ...(options?.launch ? { launch: options.launch } : {}),
             }),
           ),
