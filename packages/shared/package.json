@@ -16,6 +16,7 @@
     "./worktreeSubmodules": "./src/worktreeSubmodules.ts",
     "./gitWritingStyle": "./src/gitWritingStyle.ts",
     "./projectPreferences": "./src/projectPreferences.ts",
+    "./promptLinks": "./src/promptLinks.ts",
     "./terminalPaste": "./src/terminalPaste.ts",
     "./terminalReports": "./src/terminalReports.ts",
     "./cliProxyHubUrl": "./src/cliProxyHubUrl.ts",

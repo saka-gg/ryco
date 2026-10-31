@@ -97,6 +97,37 @@ export function workLocationDraftPatch(location: WorkLocation): {
   }
 }
 
+/** The source a picked pull request records, labelled `#N title` (`#N` without a title). */
+export function pullRequestWorktreeSource(
+  number: number,
+  title: string | null,
+): { readonly kind: "pr"; readonly number: number; readonly label: string } {
+  const trimmed = title?.trim();
+  return { kind: "pr", number, label: trimmed ? `#${number} ${trimmed}` : `#${number}` };
+}
+
+/**
+ * The draft-context patch of picking a pull request by hand: the "a new worktree" target, then
+ * the pull request as its source. The worktree is created from it on first send, and that runs
+ * the project's setup script on the pull request's code, so only a user's pick may record it.
+ */
+export function pullRequestCheckoutDraftPatch(
+  number: number,
+  title: string | null,
+): {
+  readonly envMode: "worktree";
+  readonly worktreePath: null;
+  readonly branch: null;
+  readonly worktreeSource: ReturnType<typeof pullRequestWorktreeSource>;
+} {
+  return {
+    envMode: "worktree",
+    worktreePath: null,
+    branch: null,
+    worktreeSource: pullRequestWorktreeSource(number, title),
+  };
+}
+
 /** Short label for a worktree, preferring its title over the raw branch. */
 export function worktreeChoiceLabel(worktree: WorktreeChoice): string {
   const title = worktree.title?.trim();
