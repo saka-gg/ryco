@@ -242,6 +242,10 @@
       "types": "./src/state/settings/index.ts",
       "import": "./src/state/settings/index.ts"
     },
+    "./state/settings/projectPreferenceEditing": {
+      "types": "./src/state/settings/projectPreferenceEditing.ts",
+      "import": "./src/state/settings/projectPreferenceEditing.ts"
+    },
     "./state/terminal": {
       "types": "./src/state/terminal/index.ts",
       "import": "./src/state/terminal/index.ts"

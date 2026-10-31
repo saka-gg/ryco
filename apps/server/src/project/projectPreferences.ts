@@ -1,9 +1,13 @@
 import {
   DEFAULT_MODEL,
+  PROJECT_PREFERENCE_VALUE_KEYS,
   ProviderInstanceId,
   type EffectiveProjectPreferences,
   type ModelSelection,
+  type PreferenceSource,
   type ProjectId,
+  type ProjectPreferences,
+  type ProjectPreferenceValueKey,
   type ServerSettings,
   type ThreadEnvMode,
 } from "@ryco/contracts";
@@ -47,23 +51,35 @@ export function resolveProjectPreferences(input: {
             ? "legacy-project"
             : "builtin",
     },
-    defaultThreadEnvMode: {
-      value: overrides?.defaultThreadEnvMode ?? settings.defaultThreadEnvMode,
-      source: overrides?.defaultThreadEnvMode !== undefined ? "project" : "node",
-    },
-    worktreeBranchPrefix: {
-      value: overrides?.worktreeBranchPrefix ?? settings.worktreeBranchPrefix,
-      source: overrides?.worktreeBranchPrefix !== undefined ? "project" : "node",
-    },
-    runSetupScript: {
-      value: overrides?.runSetupScript ?? settings.runSetupScript,
-      source: overrides?.runSetupScript !== undefined ? "project" : "node",
-    },
+    ...inheritNodeSettings(settings, overrides),
     worktreeRoot: {
       value: root || settings.worktreeRoot,
       source: root ? "project" : settings.worktreeRoot ? "node" : "builtin",
     },
   };
+}
+
+type InheritedPreferences = {
+  readonly [K in ProjectPreferenceValueKey]: Exclude<EffectiveProjectPreferences[K], undefined>;
+};
+
+/**
+ * Every registry key but the initial model: a project override wins, otherwise the node setting
+ * of the same name applies.
+ */
+function inheritNodeSettings(
+  settings: ServerSettings,
+  overrides: ProjectPreferences | undefined,
+): InheritedPreferences {
+  const inherited: Record<string, { readonly value: unknown; readonly source: PreferenceSource }> =
+    {};
+  for (const key of PROJECT_PREFERENCE_VALUE_KEYS) {
+    inherited[key] = {
+      value: overrides?.[key] ?? settings[key],
+      source: overrides?.[key] !== undefined ? "project" : "node",
+    };
+  }
+  return inherited as InheritedPreferences;
 }
 
 /** Omitted creation choices inherit; explicit choices (including false/empty) win. */

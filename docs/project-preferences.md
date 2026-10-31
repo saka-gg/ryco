@@ -33,6 +33,19 @@ their existing keys. `worktreeRoot` / `projectWorktreeRoots` retain their existi
 path validation and persistence. No repository configuration is read for these
 general preferences.
 
+That allowlist is one registry in `packages/contracts/src/settings.ts`:
+`PROJECT_PREFERENCE_VALUES` lists each node setting a project may override, by
+the node setting's own name and value schema, and `initialModelSelection` is the
+one special key. The stored overrides, their patch, the compare-and-set values
+and `EffectiveProjectPreferences` all derive from it, and so do the server's
+inheritance loop, the shared row descriptors (`@ryco/shared/projectPreferences`)
+and the client write builder
+(`@ryco/client-runtime/state/settings/projectPreferenceEditing`). The registry
+is the whole opt-in: a key added there fails typecheck until every surface
+handles it, and a contracts test keeps it to reviewed creation preferences.
+Keys added after the first three overrides are optional in the effective reply,
+because an older node omits them; clients hide those rows instead of guessing.
+
 The server resolver first uses a project model override, then the node's
 initial model, then the existing project `defaultModelSelection`, then Ryco's
 built-in model. A legacy project preset therefore only stands in for the

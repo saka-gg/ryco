@@ -1,9 +1,14 @@
 import {
   DEFAULT_MODEL,
   DEFAULT_SERVER_SETTINGS,
+  EffectiveProjectPreferences,
+  PROJECT_PREFERENCE_VALUE_KEYS,
   ProjectId,
   ProviderInstanceId,
+  type ProjectPreferenceValueKey,
+  type ServerSettings,
 } from "@ryco/contracts";
+import { Schema } from "effect";
 import { describe, expect, it } from "vitest";
 import { applyServerSettingsPatch } from "@ryco/shared/serverSettings";
 import {
@@ -130,6 +135,72 @@ describe("authoritative project preferences", () => {
       resolveProjectPreferences({ settings, project: { ...project, id: ProjectId.make("other") } })
         .defaultThreadEnvMode.source,
     ).toBe("node");
+  });
+});
+
+/**
+ * One node value and one project value per registry key, the project's falsy where it can be.
+ * A key added to the registry fails typecheck here until it has a row.
+ */
+const INHERITANCE: {
+  readonly [K in ProjectPreferenceValueKey]: {
+    readonly node: ServerSettings[K];
+    readonly project: ServerSettings[K];
+  };
+} = {
+  defaultThreadEnvMode: { node: "worktree", project: "local" },
+  worktreeBranchPrefix: { node: "team/tasks", project: "" },
+  runSetupScript: { node: false, project: true },
+};
+
+describe("registry inheritance", () => {
+  it.each(PROJECT_PREFERENCE_VALUE_KEYS)("resolves %s from the project, else the node", (key) => {
+    const sample = INHERITANCE[key];
+    const other = { ...project, id: ProjectId.make("other") };
+    expect(resolveProjectPreferences({ settings: DEFAULT_SERVER_SETTINGS, project })[key]).toEqual({
+      value: DEFAULT_SERVER_SETTINGS[key],
+      source: "node",
+    });
+    let settings = applyServerSettingsPatch(DEFAULT_SERVER_SETTINGS, { [key]: sample.node });
+    expect(resolveProjectPreferences({ settings, project })[key]).toEqual({
+      value: sample.node,
+      source: "node",
+    });
+    expect(resolveProjectPreferences({ settings })[key]).toEqual({
+      value: sample.node,
+      source: "node",
+    });
+    settings = applyServerSettingsPatch(settings, {
+      projectPreferences: { p: { [key]: sample.project } },
+    });
+    expect(resolveProjectPreferences({ settings, project })[key]).toEqual({
+      value: sample.project,
+      source: "project",
+    });
+    expect(resolveProjectPreferences({ settings, project: other })[key]).toEqual({
+      value: sample.node,
+      source: "node",
+    });
+    settings = applyServerSettingsPatch(settings, { projectPreferences: { p: { [key]: null } } });
+    expect(resolveProjectPreferences({ settings, project })[key]).toEqual({
+      value: sample.node,
+      source: "node",
+    });
+  });
+  it("resolves every effective field, in a shape the RPC schema encodes", () => {
+    const settings = applyServerSettingsPatch(DEFAULT_SERVER_SETTINGS, {
+      initialModelSelection: model,
+      projectPreferences: { p: { runSetupScript: false } },
+    });
+    const effective = resolveProjectPreferences({ settings, project });
+    expect(Object.keys(effective).toSorted()).toEqual(
+      Object.keys(EffectiveProjectPreferences.fields).toSorted(),
+    );
+    expect(
+      Schema.decodeUnknownSync(EffectiveProjectPreferences)(
+        Schema.encodeSync(EffectiveProjectPreferences)(effective),
+      ),
+    ).toEqual(effective);
   });
 });
 
