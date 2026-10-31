@@ -67,6 +67,7 @@ import {
   type LinkedAccessCheck,
 } from "./linkedAccessCheck.ts";
 import { makeLinkedAccessAsker } from "./linkedAccessCheckHttp.ts";
+import { linkedAccessRevocation } from "./linkedAccessRevocation.ts";
 import type { RelayChannelSessionFactory } from "./RelayChannelRegistry.ts";
 import type { ProjectionRepositoryError } from "../persistence/Errors.ts";
 import {
@@ -444,24 +445,19 @@ const makeHubConnectorService = (dependencies: HubConnectorLiveDependencies) =>
     // withdrawn local authorization or an access the Hub withdrew or narrowed
     // ends them, like the relay lease. Its unredeemed linked codes go with them,
     // so a code issued just before cannot link it again.
-    const revokeLinkedSessions = (selector: LinkedSessionSelector) =>
-      Option.isNone(authSessions)
-        ? Promise.resolve()
-        : runPromise(
-            Effect.all(
-              [
-                authSessions.value.revokeLinked(selector),
-                linkedCodes === undefined
-                  ? Effect.void
-                  : linkedCodes.revoke(linkedCodeSelector(selector)),
-              ],
-              { discard: true },
-            ).pipe(
-              Effect.catchCause((cause) =>
-                Effect.logError("Failed to revoke Hub-linked direct sessions", { cause }),
-              ),
-            ),
-          );
+    const revokeLinkedSessions = (selector: LinkedSessionSelector) => {
+      if (Option.isNone(authSessions)) return Promise.resolve();
+      const revocation = linkedAccessRevocation({
+        revokeCodes:
+          linkedCodes === undefined
+            ? Effect.void
+            : linkedCodes.revoke(linkedCodeSelector(selector)),
+        revokeSessions: authSessions.value.revokeLinked(selector),
+      });
+      const done = runPromise(revocation.now);
+      void done.then(() => runPromise(revocation.resweep));
+      return done;
+    };
     // A device's pending codes go with its sessions, narrowed the same way (all roles).
     const linkedCodeSelector = (selector: LinkedSessionSelector): LinkedCodeSelector => {
       if ("allLinks" in selector) return selector;
