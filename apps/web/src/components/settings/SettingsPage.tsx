@@ -368,6 +368,11 @@ function PanelFallback() {
   );
 }
 
+// Export and Import of this app's preferences load with the first general page that shows them.
+const LazyClientSettingsFileActions = preloadableLazy(() =>
+  import("./ClientSettingsFileActions").then((module) => module.ClientSettingsFileActions),
+);
+
 function RestoreDefaultsButton({ onRestored }: { onRestored: () => void }) {
   const { changedSettingLabels, restoreDefaults } = useSettingsRestore(onRestored);
   return (
@@ -1101,7 +1106,12 @@ export function SettingsPage() {
                           ) : null}
                         </div>
                         {showRestore ? (
-                          <div className="shrink-0 pt-6">
+                          <div className="flex shrink-0 items-start gap-2 pt-6">
+                            {destination === "client" ? (
+                              <Suspense fallback={null}>
+                                <LazyClientSettingsFileActions />
+                              </Suspense>
+                            ) : null}
                             <RestoreDefaultsButton onRestored={handleRestored} />
                           </div>
                         ) : null}
