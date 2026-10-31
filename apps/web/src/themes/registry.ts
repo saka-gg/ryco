@@ -14,6 +14,8 @@ const KNOWN_TOKEN_NAMES = new Set<string>(THEME_TOKEN_NAMES);
 
 export const CUSTOM_THEMES_STORAGE_KEY = "ryco:custom-themes";
 export const ACTIVE_THEME_STORAGE_KEY = "ryco:active-theme";
+/** The palette dark mode uses when it differs from the light one; absent means the same theme. */
+export const ACTIVE_DARK_THEME_STORAGE_KEY = "ryco:active-theme-dark";
 export const THEME_STYLE_ELEMENT_ID = "ryco-active-theme";
 
 export { DEFAULT_THEME, DEFAULT_THEME_ID };
@@ -175,9 +177,14 @@ export function deleteCustomTheme(id: string): void {
   if (isBuiltInThemeId(id)) return;
   const themes = getCustomThemes().filter((theme) => theme.id !== id);
   setCustomThemes(themes);
-  if (getStoredActiveThemeId() === id) {
-    setActiveThemeId(DEFAULT_THEME_ID);
-    applyThemeToDocument(DEFAULT_THEME);
+  const wasDarkPick =
+    typeof localStorage !== "undefined" &&
+    localStorage.getItem(ACTIVE_DARK_THEME_STORAGE_KEY) === id;
+  if (wasDarkPick) setActiveDarkThemeId(null);
+  if (getStoredActiveThemeId() === id) setActiveThemeId(DEFAULT_THEME_ID);
+  if (wasDarkPick || getStoredActiveThemeId() === DEFAULT_THEME_ID) {
+    const pair = getActiveThemePair();
+    applyThemeToDocument(pair.light, pair.dark);
   }
 }
 
@@ -277,6 +284,34 @@ export function setActiveThemeId(id: string): void {
   notifyThemeRegistryChange();
 }
 
+/**
+ * The theme whose dark palette dark mode uses, when the user picked one apart from the active
+ * theme (T3's light/dark halves); null means the active theme covers both. An id no theme has
+ * any more (a deleted custom theme) reads as null.
+ */
+export function getActiveDarkThemeId(): string | null {
+  if (typeof localStorage === "undefined") return null;
+  const stored = localStorage.getItem(ACTIVE_DARK_THEME_STORAGE_KEY);
+  return stored !== null && getAllThemes().some((theme) => theme.id === stored) ? stored : null;
+}
+
+export function setActiveDarkThemeId(id: string | null): void {
+  if (typeof localStorage === "undefined") return;
+  if (id === null) localStorage.removeItem(ACTIVE_DARK_THEME_STORAGE_KEY);
+  else localStorage.setItem(ACTIVE_DARK_THEME_STORAGE_KEY, id);
+  notifyThemeRegistryChange();
+}
+
+/** The themes the document shows: light mode's palette and dark mode's. */
+export function getActiveThemePair(): {
+  readonly light: ThemeDefinition;
+  readonly dark: ThemeDefinition;
+} {
+  const light = findTheme(getActiveThemeId());
+  const darkId = getActiveDarkThemeId();
+  return { light, dark: darkId === null ? light : findTheme(darkId) };
+}
+
 export function resolveTokens(theme: ThemeDefinition, variant: ThemeVariant): ThemeTokens {
   const base = (variant === "dark" ? DEFAULT_THEME.dark : DEFAULT_THEME.light) ?? {};
   const overlay = (variant === "dark" ? theme.dark : theme.light) ?? {};
@@ -321,24 +356,34 @@ export function themeTokensToStyle(tokens: ThemeTokens): CSSProperties {
 }
 
 // Theme definitions are cached objects (built-ins, parsed custom themes), so
-// the last built stylesheet is reused while the same object is applied.
-let themeDocumentCssCache: { readonly theme: ThemeDefinition; readonly css: string | null } | null =
-  null;
+// the last built stylesheet is reused while the same objects are applied.
+let themeDocumentCssCache: {
+  readonly light: ThemeDefinition;
+  readonly dark: ThemeDefinition;
+  readonly css: string | null;
+} | null = null;
 
 /**
- * The stylesheet text {@link applyThemeToDocument} writes for `theme`, or
- * `null` for the default theme, which needs no sheet. The text covers both
- * variants (`:root` and `:root.dark`), so it does not depend on the dark class.
+ * The stylesheet text {@link applyThemeToDocument} writes for `light` (light
+ * mode's palette) and `dark` (dark mode's, the same theme unless picked apart),
+ * or `null` when both are the default theme, which needs no sheet. The text
+ * covers both variants (`:root` and `:root.dark`), so it does not depend on the
+ * dark class.
  */
-export function buildThemeDocumentCss(theme: ThemeDefinition): string | null {
-  if (themeDocumentCssCache?.theme === theme) return themeDocumentCssCache.css;
+export function buildThemeDocumentCss(
+  light: ThemeDefinition,
+  dark: ThemeDefinition = light,
+): string | null {
+  if (themeDocumentCssCache?.light === light && themeDocumentCssCache.dark === dark) {
+    return themeDocumentCssCache.css;
+  }
   let css: string | null = null;
-  if (theme.id !== DEFAULT_THEME_ID) {
-    const lightCss = tokensToCss(materializeTokens(resolveTokens(theme, "light")));
-    const darkCss = tokensToCss(materializeTokens(resolveTokens(theme, "dark")));
+  if (light.id !== DEFAULT_THEME_ID || dark.id !== DEFAULT_THEME_ID) {
+    const lightCss = tokensToCss(materializeTokens(resolveTokens(light, "light")));
+    const darkCss = tokensToCss(materializeTokens(resolveTokens(dark, "dark")));
     css = `:root { ${lightCss} } :root.dark { ${darkCss} }`;
   }
-  themeDocumentCssCache = { theme, css };
+  themeDocumentCssCache = { light, dark, css };
   return css;
 }
 
@@ -346,11 +391,14 @@ export function buildThemeDocumentCss(theme: ThemeDefinition): string | null {
  * Whether {@link applyThemeToDocument} would change the document for `theme`.
  * Lets callers skip work (the transition guard) when an apply is a no-op.
  */
-export function themeDocumentNeedsUpdate(theme: ThemeDefinition): boolean {
+export function themeDocumentNeedsUpdate(
+  light: ThemeDefinition,
+  dark: ThemeDefinition = light,
+): boolean {
   if (typeof document === "undefined" || typeof document.getElementById !== "function") {
     return false;
   }
-  const css = buildThemeDocumentCss(theme);
+  const css = buildThemeDocumentCss(light, dark);
   const existing = document.getElementById(THEME_STYLE_ELEMENT_ID);
   if (css === null) return existing !== null;
   return !(existing instanceof HTMLStyleElement) || existing.textContent !== css;
@@ -361,11 +409,14 @@ export function themeDocumentNeedsUpdate(theme: ThemeDefinition): boolean {
  * restyles the whole document, so identical text is never written again.
  * Returns whether the document changed.
  */
-export function applyThemeToDocument(theme: ThemeDefinition): boolean {
+export function applyThemeToDocument(
+  light: ThemeDefinition,
+  dark: ThemeDefinition = light,
+): boolean {
   if (typeof document === "undefined" || typeof document.getElementById !== "function") {
     return false;
   }
-  const css = buildThemeDocumentCss(theme);
+  const css = buildThemeDocumentCss(light, dark);
   if (css === null) return removeThemeStyleElement();
 
   const style = ensureThemeStyleElement();

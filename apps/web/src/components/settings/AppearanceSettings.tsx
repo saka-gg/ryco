@@ -22,6 +22,7 @@ import {
 
 import { usePresentationTier } from "../../hooks/usePresentationTier";
 import { COLOR_MODE_OPTIONS, useTheme } from "../../hooks/useTheme";
+import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 import { cn } from "../../lib/utils";
 import {
   APPEARANCE_PREFERENCES_STORAGE_KEY,
@@ -45,6 +46,7 @@ import {
   duplicateTheme,
   findTheme,
   generateCustomThemeId,
+  getActiveThemePair,
   getAllThemes,
   isBuiltInThemeId,
   setActiveThemeId,
@@ -102,7 +104,16 @@ export function AppearanceSettingsPanel({
   const isHub = surface === "hub";
   // The frozen phone tier keeps the comfortable chat width, so it does not offer the setting.
   const isPhoneTier = usePresentationTier() === "phone";
-  const { theme, setTheme, resolvedTheme, activeThemeId, setActiveTheme } = useTheme();
+  const {
+    theme,
+    setTheme,
+    resolvedTheme,
+    activeThemeId,
+    setActiveTheme,
+    darkThemeId,
+    setDarkTheme,
+  } = useTheme();
+  const darkPaletteId = darkThemeId ?? activeThemeId;
   const [editingId, setEditingId] = useState<string | null>(null);
   const [draft, setDraft] = useState<ThemeDefinition | null>(null);
   const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null);
@@ -216,7 +227,8 @@ export function AppearanceSettingsPanel({
     if (editing.source.id !== editing.draft.id) {
       setActiveTheme(editing.draft.id);
     } else {
-      applyThemeToDocument(editing.draft);
+      const pair = getActiveThemePair();
+      applyThemeToDocument(pair.light, pair.dark);
     }
     setEditingId(null);
     setDraft(null);
@@ -224,7 +236,11 @@ export function AppearanceSettingsPanel({
   }, [editing, refresh, setActiveTheme]);
 
   const handleCancel = useCallback(() => {
-    if (editing) applyThemeToDocument(editing.source);
+    if (editing) {
+      // Back to what the document showed: the active theme, and dark mode's own palette.
+      const pair = getActiveThemePair();
+      applyThemeToDocument(pair.light, pair.dark);
+    }
     setEditingId(null);
     setDraft(null);
   }, [editing]);
@@ -322,12 +338,12 @@ export function AppearanceSettingsPanel({
               <div className="relative overflow-hidden rounded-[min(var(--radius-lg),0.625rem)]">
                 <ThemePreview
                   compact
-                  theme={findTheme(activeThemeId)}
+                  theme={findTheme(option.value === "dark" ? darkPaletteId : activeThemeId)}
                   variant={option.value === "dark" ? "dark" : "light"}
                 />
                 {option.value === "system" && (
                   <div className="absolute inset-0 [clip-path:inset(0_0_0_50%)]">
-                    <ThemePreview compact theme={findTheme(activeThemeId)} variant="dark" />
+                    <ThemePreview compact theme={findTheme(darkPaletteId)} variant="dark" />
                   </div>
                 )}
               </div>
@@ -509,6 +525,34 @@ export function AppearanceSettingsPanel({
             );
           })}
         </div>
+        <SettingsRow
+          title="Dark mode palette"
+          description="Use another theme's dark colors in dark mode, or the palette above for both."
+          control={
+            <Select
+              value={darkThemeId ?? SAME_AS_LIGHT}
+              onValueChange={(value) =>
+                setDarkTheme(value === SAME_AS_LIGHT || value === null ? null : value)
+              }
+            >
+              <SelectTrigger className="w-full sm:w-48" aria-label="Dark mode palette">
+                <SelectValue>
+                  {darkThemeId === null ? "Same as light" : findTheme(darkThemeId).name}
+                </SelectValue>
+              </SelectTrigger>
+              <SelectPopup align="end" alignItemWithTrigger={false}>
+                <SelectItem hideIndicator value={SAME_AS_LIGHT}>
+                  Same as light
+                </SelectItem>
+                {themes.map((entry) => (
+                  <SelectItem hideIndicator key={entry.id} value={entry.id}>
+                    {entry.name}
+                  </SelectItem>
+                ))}
+              </SelectPopup>
+            </Select>
+          }
+        />
       </SettingsSection>
 
       {!isHub && <DiffAppearanceSettings />}
@@ -700,6 +744,9 @@ export function AppearanceSettingsPanel({
     </SettingsPageContainer>
   );
 }
+
+/** The Dark mode palette choice that keeps the active theme for both modes. */
+const SAME_AS_LIGHT = "__same-as-light";
 
 const APPEARANCE_TILE_CLASS =
   "min-w-0 rounded-[min(var(--radius-xl),0.875rem)] border bg-card text-left outline-none transition-[background-color,border-color,box-shadow] duration-(--app-motion-duration-chip) focus-visible:ring-2 focus-visible:ring-ring";

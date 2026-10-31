@@ -137,6 +137,25 @@ describe("AppearanceSettingsPanel", () => {
     });
   });
 
+  it("picks dark mode's palette apart from the light one, or the same", async () => {
+    mounted = await render(<AppearanceSettingsPanel />);
+
+    await page.getByRole("combobox", { name: "Dark mode palette" }).click();
+    await page.getByRole("option", { name: "Dracula" }).click();
+    expect(localStorage.getItem("ryco:active-theme-dark")).toBe("dracula");
+    await vi.waitFor(() => {
+      // The default theme stays the light half; Dracula's dark colors fill dark mode.
+      expect(document.getElementById(THEME_STYLE_ELEMENT_ID)?.textContent).toContain("#282A36");
+    });
+
+    await page.getByRole("combobox", { name: "Dark mode palette" }).click();
+    await page.getByRole("option", { name: "Same as light" }).click();
+    expect(localStorage.getItem("ryco:active-theme-dark")).toBeNull();
+    await vi.waitFor(() => {
+      expect(document.getElementById(THEME_STYLE_ELEMENT_ID)).toBeNull();
+    });
+  });
+
   it("adds, duplicates, and deletes custom themes", async () => {
     mounted = await render(<AppearanceSettingsPanel />);
 

@@ -18,6 +18,8 @@ function makeInput(overrides: Partial<AppearancePaletteInput> = {}): AppearanceP
     resolvedTheme: "dark",
     setActiveTheme: vi.fn(),
     setTheme: vi.fn(),
+    darkThemeId: null,
+    setDarkTheme: vi.fn(),
     ...overrides,
   };
 }
