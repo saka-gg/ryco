@@ -410,6 +410,29 @@ describe("bundle budgets", () => {
     }
   });
 
+  it("keeps the desktop account prompt and alert dialogs out of boot", () => {
+    const boot = DEFAULT_BUNDLE_BUDGET_POLICY.closures.find((entry) => entry.name === "boot")!;
+    const forbidden = (source: string) =>
+      boot.forbiddenSources.some((rule) => rule.pattern.test(source));
+    for (const source of [
+      "apps/web/src/components/DesktopAccountConnect.tsx",
+      "apps/web/src/components/settings/useDesktopRelaunchGuard.tsx",
+      "apps/web/src/components/ui/alert-dialog.tsx",
+      "node_modules/@base-ui/react/alert-dialog/handle.mjs",
+    ]) {
+      assert.isTrue(forbidden(source), source);
+    }
+    for (const source of [
+      // What boot keeps: the empty thread view that loads the prompt, and the
+      // mobile sidebar's sheet, a dialog that is not an alert dialog.
+      "apps/web/src/components/NoActiveThreadState.tsx",
+      "apps/web/src/components/ui/sheet.tsx",
+      "node_modules/@base-ui/react/dialog/popup/DialogPopup.mjs",
+    ]) {
+      assert.isFalse(forbidden(source), source);
+    }
+  });
+
   it("forbids the hosted runtime in every default standard closure", () => {
     for (const closure of DEFAULT_BUNDLE_BUDGET_POLICY.closures) {
       const forbidden = (source: string) =>
