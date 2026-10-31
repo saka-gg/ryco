@@ -96,10 +96,11 @@ describe("the App Group", () => {
     });
   });
 
-  it("is named in the app's Info.plist, where its module looks for it", async () => {
+  it("is named in the app's Info.plist, where its module looks for it, beside Live Activities", async () => {
     expect(await runMod(plugin(CONFIG), "infoPlist", { CFBundleName: "Ryco Dev" })).toEqual({
       CFBundleName: "Ryco Dev",
       RycoWidgetsAppGroup: APP_GROUP,
+      NSSupportsLiveActivities: true,
     });
   });
 });
@@ -125,10 +126,14 @@ describe("the extension's Info.plist", () => {
       expect(readFileSync(join(extension, "RycoWidgets.entitlements"), "utf8")).toContain(
         APP_GROUP,
       );
-      // Every extension source, and the store it shares with the app's module.
+      // Every extension source, and what it shares with the app's module.
       const sources = readdirSync(join(WIDGETS_MODULE, "extension"))
         .filter((file) => file.endsWith(".swift"))
-        .concat("WidgetGroupStore.swift");
+        .concat(
+          "AgentActivityAttributes.swift",
+          "AgentActivityContentState.swift",
+          "WidgetGroupStore.swift",
+        );
       expect(readdirSync(extension).toSorted()).toEqual(
         [...sources, "Info.plist", "RycoWidgets.entitlements"].toSorted(),
       );
@@ -210,6 +215,9 @@ describe("the extension target", () => {
       const phases = extension.buildPhases as Array<{ value: string; comment: string }>;
       const sources = phases.find((phase) => phase.comment === "Sources")!;
       expect(phaseFiles(project, sources.value, "PBXSourcesBuildPhase").toSorted()).toEqual([
+        "AgentActivityAttributes.swift in Sources",
+        "AgentActivityContentState.swift in Sources",
+        "AgentActivityWidget.swift in Sources",
         "RycoWidgetsBundle.swift in Sources",
         "SubscriptionUsageContent.swift in Sources",
         "SubscriptionUsageWidget.swift in Sources",

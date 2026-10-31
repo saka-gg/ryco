@@ -2,7 +2,8 @@
 // this test runs under Node, so it pulls the types in for itself.
 /// <reference types="node" />
 import { execFileSync, spawnSync } from "node:child_process";
-import { mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -13,6 +14,12 @@ import {
   buildSubscriptionUsageTimeline,
   TAP_TO_REFRESH,
 } from "../../../src/widgets/subscriptionUsageSnapshot";
+import {
+  AGENT_ACTIVITY_MAX_STATE_BYTES,
+  AGENT_ACTIVITY_STATE_BUDGET_BYTES,
+  agentActivityContentState,
+  encodeAgentActivityState,
+} from "../../../src/liveActivity/agentActivityModel";
 import { encodeWidgetTimeline } from "../../../src/widgets/widgetTimeline";
 
 /**
@@ -24,12 +31,12 @@ import { encodeWidgetTimeline } from "../../../src/widgets/widgetTimeline";
  */
 const MODULE_DIR = fileURLToPath(new URL("..", import.meta.url));
 const SHARED_SOURCES = [join(MODULE_DIR, "ios/WidgetGroupStore.swift")];
-const EXTENSION_SOURCES = [
-  ...readdirSync(join(MODULE_DIR, "extension"))
-    .filter((file) => file.endsWith(".swift"))
-    .map((file) => join(MODULE_DIR, "extension", file)),
-  ...SHARED_SOURCES,
-];
+/** What the config plugin compiles into the extension: its sources and the app module's shared ones. */
+const EXTENSION_SOURCES = (
+  createRequire(import.meta.url)("../../../plugins/withIosWidgetExtension.cjs") as {
+    readonly EXTENSION_SOURCES: readonly string[];
+  }
+).EXTENSION_SOURCES;
 /** The extension's Foundation-only sources: what reads and selects, not what renders. */
 const READER_SOURCES = [
   join(MODULE_DIR, "extension/WidgetTimelineStore.swift"),
@@ -108,6 +115,38 @@ function usageTimeline(): string {
     "ryco-dev://settings/statistics?tab=limits",
   );
   return encodeWidgetTimeline(buildSubscriptionUsageTimeline(snapshot, NOW));
+}
+
+/** The Live Activity's content state: Foundation only, so it runs on the Mac. */
+const ACTIVITY_STATE_SOURCES = [
+  join(MODULE_DIR, "ios/AgentActivityContentState.swift"),
+  join(MODULE_DIR, "test/activityState/main.swift"),
+];
+
+/** Five rows as the app encodes them, of the given titles. */
+function activityState(title: string): string {
+  const id = (prefix: string, index: number) => `${prefix}-${index}-${"0".repeat(30)}`;
+  return encodeAgentActivityState(
+    agentActivityContentState(
+      {
+        counts: { running: 5, needsYou: 0, failed: 0, done: 0 },
+        rows: Array.from({ length: 5 }, (_, index) => ({
+          key: `${id("environment", index)}:${id("thread", index)}`,
+          environmentId: id("environment", index),
+          threadId: id("thread", index),
+          title,
+          projectName: "🧪".repeat(24),
+          phase: "running" as const,
+        })),
+        settled: false,
+      },
+      {
+        inbox: "ryco-dev://",
+        thread: (environmentId, threadId) => `ryco-dev://threads/${environmentId}/${threadId}`,
+      },
+      1_700_000_000_000,
+    ),
+  );
 }
 
 const swiftcAvailable =
@@ -233,6 +272,37 @@ describe.skipIf(!swiftcAvailable)("the widget extension's Swift", () => {
       ]);
       // The footer and the Lock Screen say what the app's expired detail says.
       expect(output.tapToRefresh).toBe(TAP_TO_REFRESH);
+    });
+  }, 180_000);
+  it("measures the Live Activity state as Swift encodes it, and trims it to ActivityKit's 4 KB", () => {
+    withTemporaryDirectory((directory) => {
+      const binary = join(directory, "activity-state");
+      execFileSync("xcrun", ["swiftc", "-o", binary, ...ACTIVITY_STATE_SOURCES], { stdio: "pipe" });
+      const longest = activityState("🧪".repeat(48));
+      // Slashes cost one byte each in this JSON and two in Swift's.
+      const slashes = activityState("/".repeat(400));
+      const states = join(directory, "states.json");
+      writeFileSync(states, JSON.stringify([longest, slashes]));
+      const output = JSON.parse(execFileSync(binary, [states], { encoding: "utf8" })) as {
+        readonly maxBytes: number;
+        readonly states: ReadonlyArray<Record<string, number>>;
+      };
+      expect(output.maxBytes).toBe(AGENT_ACTIVITY_MAX_STATE_BYTES);
+      for (const json of [longest, slashes]) {
+        expect(Buffer.byteLength(json)).toBeLessThanOrEqual(AGENT_ACTIVITY_STATE_BUDGET_BYTES);
+        expect((JSON.parse(json) as { rows: unknown[] }).rows).toHaveLength(5);
+      }
+      const [fits, trimmed] = output.states;
+      // The app's margin covers Swift's encoding of its longest rows: nothing is trimmed.
+      expect(fits).toMatchObject({ rows: 5, fittedRows: 5 });
+      expect(fits!.swiftBytes).toBeGreaterThan(Buffer.byteLength(longest));
+      expect(fits!.swiftBytes).toBeLessThanOrEqual(AGENT_ACTIVITY_MAX_STATE_BYTES);
+      // Past 4 KB as Swift encodes it, rows go from the end and the counts stay.
+      expect(trimmed!.swiftBytes).toBeGreaterThan(AGENT_ACTIVITY_MAX_STATE_BYTES);
+      expect(trimmed!.fittedRows).toBeGreaterThan(0);
+      expect(trimmed!.fittedRows).toBeLessThan(5);
+      expect(trimmed!.fittedBytes).toBeLessThanOrEqual(AGENT_ACTIVITY_MAX_STATE_BYTES);
+      expect(trimmed!.fittedRunning).toBe(5);
     });
   }, 180_000);
 });

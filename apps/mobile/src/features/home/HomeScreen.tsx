@@ -1,7 +1,6 @@
 import { KeyboardAvoidingView } from "react-native-keyboard-controller";
 import { useIsFocused, useNavigation } from "@react-navigation/native";
 import { useHeaderHeight } from "@react-navigation/elements";
-import { getQueuedThreadKeys } from "@ryco/client-runtime/state/message-queue";
 import {
   useCallback,
   useEffect,
@@ -23,11 +22,10 @@ import { SymbolView } from "../../components/AppSymbol";
 import { useDirectoryPresenceDemand } from "../../hostedHub/directoryDemand";
 import { useThemeColor } from "../../lib/useThemeColor";
 import { openThread as openThreadOverSheets } from "../../navigation/openThread";
-import { useListedEnvironmentsWorkspaceData } from "../../state/homeData";
-import { useMessageQueueStore } from "../../state/messageQueueStore";
 import { resolveHomeGroupingMode } from "../../state/homeGrouping";
 import { usePreferences } from "../../state/preferencesStore";
-import { markSnoozeWokeSeen, useSnoozeWokeSeen } from "../../state/snoozeWokeSeen";
+import { markSnoozeWokeSeen } from "../../state/snoozeWokeSeen";
+import { useStore } from "../../state/threadsRuntime";
 import {
   buildInboxSections,
   createInboxSectionStabilizer,
@@ -45,7 +43,7 @@ import { buildHomeChromeModel } from "./homeChromeModel";
 import { createHomeModeState, reduceHomeModeState, type HomeMode } from "./homeMode";
 import { createHomeScrollMemory, homeListFilterKey } from "./homeScrollMemory";
 import { useAutoSettleRuleHandOver } from "./useAutoSettleRuleHandOver";
-import { useHomeEnvironments } from "./useHomeEnvironments";
+import { useInboxSource } from "./useInboxSource";
 import { NeedsVerificationSection } from "./NeedsVerificationSection";
 import { QueuedTasksSection } from "../newTask/QueuedTasksSection";
 
@@ -87,15 +85,15 @@ export function HomeScreen() {
     };
   }, [isFocused]);
   // The same clock keeps cached Hub nodes' "last seen" text current.
-  const environments = useHomeEnvironments({ nowMs });
-  const { projects, worktrees, threads } = useListedEnvironmentsWorkspaceData(environments);
-  const queuesByThreadKey = useMessageQueueStore((state) => state.queuesByThreadKey);
-  const localQueuedThreadIds = useMemo(
-    () => getQueuedThreadKeys(queuesByThreadKey),
-    [queuesByThreadKey],
-  );
+  const {
+    environments,
+    projects,
+    worktrees,
+    threads,
+    localQueuedThreadIds,
+    wokeSeenAtByThreadKey: wokeSeen,
+  } = useInboxSource(nowMs);
   const preferences = usePreferences();
-  const wokeSeen = useSnoozeWokeSeen();
   useAutoSettleRuleHandOver(environments, preferences.sidebarAutoSettleAfterDays);
   const groupingMode = resolveHomeGroupingMode(preferences.projectGroupingEnabled);
 

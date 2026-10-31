@@ -30,12 +30,18 @@ const TARGET_NAME = "RycoWidgets";
 const APP_GROUP_INFO_KEY = "RycoWidgetsAppGroup";
 const APP_GROUPS_ENTITLEMENT = "com.apple.security.application-groups";
 const MODULE_DIR = path.join(__dirname, "..", "modules", "ryco-widgets");
-/** Sources compiled into the extension; `WidgetGroupStore.swift` is shared with the app's module. */
+/**
+ * Sources compiled into the extension; `WidgetGroupStore.swift` and the agent
+ * Live Activity's attributes and content state are shared with the app's module.
+ */
 const EXTENSION_SOURCES = [
+  path.join(MODULE_DIR, "extension", "AgentActivityWidget.swift"),
   path.join(MODULE_DIR, "extension", "RycoWidgetsBundle.swift"),
   path.join(MODULE_DIR, "extension", "SubscriptionUsageContent.swift"),
   path.join(MODULE_DIR, "extension", "SubscriptionUsageWidget.swift"),
   path.join(MODULE_DIR, "extension", "WidgetTimelineStore.swift"),
+  path.join(MODULE_DIR, "ios", "AgentActivityAttributes.swift"),
+  path.join(MODULE_DIR, "ios", "AgentActivityContentState.swift"),
   path.join(MODULE_DIR, "ios", "WidgetGroupStore.swift"),
 ];
 const ENTITLEMENTS_FILE = `${TARGET_NAME}.entitlements`;
@@ -79,9 +85,18 @@ function widgetsEntitlements(bundleIdentifier) {
   return { [APP_GROUPS_ENTITLEMENT]: [widgetsAppGroup(bundleIdentifier)] };
 }
 
-/** The keys the app's own Info.plist gets, so its module finds the group. */
+/**
+ * The keys the app's own Info.plist gets: the group, so its module finds it,
+ * and Live Activity support, which the extension renders. iOS then offers a
+ * Live Activities switch for Ryco; the app starts one only once its own
+ * setting is on.
+ */
 function addWidgetsAppInfoPlistKeys(infoPlist, bundleIdentifier) {
-  return { ...infoPlist, [APP_GROUP_INFO_KEY]: widgetsAppGroup(bundleIdentifier) };
+  return {
+    ...infoPlist,
+    [APP_GROUP_INFO_KEY]: widgetsAppGroup(bundleIdentifier),
+    NSSupportsLiveActivities: true,
+  };
 }
 
 /** The extension's Info.plist, with the app's versions (`extensionInfoPlist`). */
@@ -154,6 +169,7 @@ const withIosWidgetExtension = (config) => {
 
 module.exports = withIosWidgetExtension;
 module.exports.TARGET_NAME = TARGET_NAME;
+module.exports.EXTENSION_SOURCES = EXTENSION_SOURCES;
 module.exports.addWidgetsAppGroup = addWidgetsAppGroup;
 module.exports.addWidgetsAppInfoPlistKeys = addWidgetsAppInfoPlistKeys;
 module.exports.addWidgetsTarget = addWidgetsTarget;

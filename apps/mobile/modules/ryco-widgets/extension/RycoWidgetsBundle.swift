@@ -8,5 +8,6 @@ import WidgetKit
 struct RycoWidgetsBundle: WidgetBundle {
   var body: some Widget {
     SubscriptionUsageWidget()
+    AgentActivityWidget()
   }
 }
