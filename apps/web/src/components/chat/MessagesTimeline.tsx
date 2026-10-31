@@ -1,4 +1,5 @@
 import { parseScopedThreadKey } from "@ryco/client-runtime/scoped";
+import { interThreadMessageOf } from "@ryco/client-runtime/state/threads/interThreadMessage";
 import type { RememberedThreadReadingAnchor } from "@ryco/client-runtime/state/threads";
 import {
   type EnvironmentId,
@@ -116,6 +117,7 @@ import { LazyMessageActionsSheet } from "../shell/phone/lazyPhoneThreadSurfaces"
 import { usePhoneThreadSurfaceReady } from "../shell/phone/usePhoneThreadSurfaceReady";
 import { ContextHandoffMarkerRow } from "./ContextHandoffMarkerRow";
 import { ForkOriginMarkerRow } from "./ForkOriginMarkerRow";
+import { InterThreadMessageRow } from "./InterThreadMessageRow";
 import { UserInputExchangeRow } from "./UserInputExchangeRow";
 import { THREAD_FORK_COPY } from "@ryco/client-runtime/state/threads";
 import { EDIT_FROM_HERE_COPY } from "@ryco/client-runtime/state/session";
@@ -1408,8 +1410,6 @@ function renderChapterEntryPanel(entry: TimelineWorkEntry, panelId: string) {
 }
 
 function TimelineRowContent({ row }: { row: TimelineRow }) {
-  // A delegated result or another agent's message reads as one line until opened.
-  const agentFold = row.kind === "message" ? agentMessageFoldOf(row.message) : null;
   const [agentFoldOpen, setAgentFoldOpen] = useState(false);
   // This row renderer reads both contexts (it depends on streaming + stable
   // fields), so it re-renders on streaming transitions as before. The merged
@@ -1419,6 +1419,13 @@ function TimelineRowContent({ row }: { row: TimelineRow }) {
   // Phone tier: long-press on a message bubble opens the message action
   // sheet with the same copy/revert actions as the desktop hover row.
   const isPhoneTier = usePresentationTier() === "phone";
+  // Another chat's message (an agent's, or a delegated task's result) sits between the
+  // person's and the agent's. The frozen phone tier keeps its one-line fold.
+  const interThread =
+    row.kind === "message" && !isPhoneTier ? interThreadMessageOf(row.message) : null;
+  // Ryco's own wakes (and, on the phone tier, other chats') read as one line until opened.
+  const agentFold =
+    row.kind === "message" && interThread === null ? agentMessageFoldOf(row.message) : null;
   const messageLongPress = useLongPress(
     () => {
       if (row.kind !== "message") return;
@@ -1557,6 +1564,15 @@ function TimelineRowContent({ row }: { row: TimelineRow }) {
         <UserInputExchangeRow exchange={row.exchange} timestampFormat={ctx.timestampFormat} />
       )}
 
+      {row.kind === "message" && interThread !== null ? (
+        <InterThreadMessageRow
+          message={row.message}
+          inter={interThread}
+          environmentId={ctx.activeThreadEnvironmentId}
+          threadId={parseScopedThreadKey(ctx.routeThreadKey)?.threadId}
+        />
+      ) : null}
+
       {row.kind === "message" && row.message.role === "user" && agentFold && !agentFoldOpen ? (
         <div className="flex justify-end">
           <button
@@ -1593,6 +1609,7 @@ function TimelineRowContent({ row }: { row: TimelineRow }) {
 
       {row.kind === "message" &&
         row.message.role === "user" &&
+        interThread === null &&
         (!agentFold || agentFoldOpen) &&
         (() => {
           const userImages = row.message.attachments ?? [];

@@ -22,6 +22,11 @@ export function buildThreadRouteParams(ref: ScopedThreadRef): {
   };
 }
 
+/** The address of a thread's route, for a link that also navigates in place. */
+export function buildThreadRouteHref(ref: ScopedThreadRef): string {
+  return `/${encodeURIComponent(ref.environmentId)}/${encodeURIComponent(ref.threadId)}`;
+}
+
 export function buildDraftThreadRouteParams(draftId: DraftId): {
   draftId: DraftId;
 } {

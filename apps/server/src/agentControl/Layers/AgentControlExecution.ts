@@ -5,6 +5,7 @@ import { WorkspaceLifecycle } from "../../workspace/WorkspaceLifecycle.ts";
 import { workspacePlanLifecycleAction } from "../workspaceLifecycle.ts";
 import { AGENT_CONTROL_MESSAGE_ID_PREFIX, DEFAULT_SERVER_SETTINGS } from "@ryco/contracts";
 import { buildGeneratedWorktreeBranchName } from "@ryco/shared/git";
+import { agentSentMessageId } from "@ryco/shared/interThreadMessage";
 import { setupProjectScript } from "@ryco/shared/projectScripts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { hasDelegationLimits } from "../../orchestration/delegationLimits.ts";
@@ -1488,7 +1489,14 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
           const expectedTarget = agentControlTargetSnapshots(proposal.principal).find(
             (snapshot) => snapshot.threadId === plan.threadId,
           );
-          const messageId = messageIdFor(operation.operationId, "send-message");
+          // The id names the sending chat, so the target shows who wrote it.
+          const messageId = MessageId.make(
+            agentSentMessageId({
+              operationSlug: operationSlug(operation.operationId),
+              senderThreadId:
+                proposal.principal.kind === "provider-session" ? proposal.principal.threadId : null,
+            }),
+          );
           let delivery: "queued" | "steered" | "queued-after-steer-fallback" = "queued";
           let shouldQueue = plan.delivery === "queue";
 
