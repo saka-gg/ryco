@@ -83,7 +83,10 @@ import {
   buildGeneratedWorktreeBranchName,
   extractTemporaryWorktreeBranchPrefix,
 } from "@ryco/shared/git";
-import { resolveProjectPreferences } from "../../project/projectPreferences.ts";
+import {
+  resolveProjectPreferences,
+  resolveProjectPreferenceValue,
+} from "../../project/projectPreferences.ts";
 import {
   Cache,
   Cause,
@@ -1692,7 +1695,7 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
         ),
       );
       if (Option.isNone(settings)) return;
-      const { textGenerationModelSelection, worktreeBranchChangeTypes } = settings.value;
+      const { textGenerationModelSelection } = settings.value;
       // A signed-out or failing provider would only retry its errors in the
       // background: generation moves to a ready provider, or is skipped.
       const modelSelection = Option.isSome(providerRegistry)
@@ -1713,6 +1716,11 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
         settings: settings.value,
         ...(input.project !== undefined ? { project: input.project } : {}),
       }).worktreeBranchPrefix.value;
+      const worktreeBranchChangeTypes = resolveProjectPreferenceValue(
+        settings.value,
+        input.project?.id,
+        "worktreeBranchChangeTypes",
+      );
       const wantsTitle = canReplaceThreadTitle(thread.title, input.titleSeed);
       const oldBranch = thread.branch;
       const worktreePath = thread.worktreePath;

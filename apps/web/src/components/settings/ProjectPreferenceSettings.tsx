@@ -162,6 +162,7 @@ function ProjectPreferenceEditor(props: {
   function valueRow(key: ProjectPreferenceValueKey) {
     if (effective && !projectPreferenceSupported(effective, key)) return null;
     const field = PROJECT_PREFERENCE_FIELDS[key];
+    if (!projectId && field.nodeDefaultRow === "separate") return null;
     const value = effective?.[key]?.value;
     const control =
       field.kind === "text" ? (

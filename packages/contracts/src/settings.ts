@@ -714,7 +714,10 @@ const REPORTED_PROJECT_PREFERENCE_VALUES = {
  * Overrides added since: an older node's effective preferences omit them, so they are optional
  * in {@link EffectiveProjectPreferences} and a client hides their rows. New keys go here.
  */
-const ADDED_PROJECT_PREFERENCE_VALUES = {};
+const ADDED_PROJECT_PREFERENCE_VALUES = {
+  worktreeBranchChangeTypes: Schema.Boolean,
+  pullRequestTemplates: Schema.Boolean,
+};
 /**
  * The whole opt-in for project overrides. Each key is the node setting of the same name, with
  * its plain value schema; a project may set it for itself and otherwise inherits the node's

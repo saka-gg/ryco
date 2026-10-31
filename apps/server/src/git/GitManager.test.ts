@@ -4045,6 +4045,7 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
     options: {
       readonly settingsPatch?: ServerSettingsPatch;
       readonly gitOperations?: Array<string>;
+      readonly checkoutProjectId?: string;
     } = {},
   ) =>
     Effect.gen(function* () {
@@ -4063,7 +4064,13 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
           },
         },
       });
-      const result = yield* runStackedAction(manager, { cwd: repoDir, action: "commit_push_pr" });
+      const result = yield* runStackedAction(
+        manager,
+        { cwd: repoDir, action: "commit_push_pr" },
+        options.checkoutProjectId === undefined
+          ? undefined
+          : { checkoutProjectId: Effect.succeed(options.checkoutProjectId) },
+      );
       expect(result.pr.status).toBe("created");
       expect(prPolicies).toHaveLength(1);
       return { policy: prPolicies[0], manager };
@@ -4115,6 +4122,41 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
       expect(
         gitOperations.filter((operation) => operation.startsWith("changeRequestTemplates.")),
       ).toEqual([]);
+    }),
+  );
+
+  it.effect("follows the checkout's project when it turns pull request templates off", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTemplateFixture({
+        ".github/pull_request_template.md": "## What changed\n",
+      });
+      const gitOperations: Array<string> = [];
+      const { policy } = yield* createPullRequestWithTemplates(repoDir, {
+        settingsPatch: {
+          pullRequestTemplates: true,
+          gitWritingStyle: "default",
+          projectPreferences: { "project-without-templates": { pullRequestTemplates: false } },
+        },
+        gitOperations,
+        checkoutProjectId: "project-without-templates",
+      });
+      expect(policy).toBeUndefined();
+      expect(
+        gitOperations.filter((operation) => operation.startsWith("changeRequestTemplates.")),
+      ).toEqual([]);
+
+      // Another project of the node keeps the node's setting.
+      const other = yield* createPullRequestWithTemplates(
+        yield* makeTemplateFixture({ ".github/pull_request_template.md": "## What changed\n" }),
+        {
+          settingsPatch: {
+            gitWritingStyle: "default",
+            projectPreferences: { "project-without-templates": { pullRequestTemplates: false } },
+          },
+          checkoutProjectId: "another-project",
+        },
+      );
+      expect(other.policy?.changeRequestTemplate?.path).toBe(".github/pull_request_template.md");
     }),
   );
 

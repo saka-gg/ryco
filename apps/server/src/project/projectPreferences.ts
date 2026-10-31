@@ -82,6 +82,21 @@ function inheritNodeSettings(
   return inherited as InheritedPreferences;
 }
 
+/**
+ * One registry key's effective value, for a consumer that has only the project's id (or none,
+ * which gives the node setting).
+ */
+export function resolveProjectPreferenceValue<K extends ProjectPreferenceValueKey>(
+  settings: ServerSettings,
+  projectId: string | null | undefined,
+  key: K,
+): ServerSettings[K] {
+  const override = projectId
+    ? settings.projectPreferences[projectId as ProjectId]?.[key]
+    : undefined;
+  return (override ?? settings[key]) as ServerSettings[K];
+}
+
 /** Omitted creation choices inherit; explicit choices (including false/empty) win. */
 export function resolveThreadCreationPreferences(input: {
   readonly effective: EffectiveProjectPreferences;

@@ -33,6 +33,15 @@ const REVIEWED_PROJECT_PREFERENCE_KEYS = [
   "defaultThreadEnvMode",
   "worktreeBranchPrefix",
   "runSetupScript",
+  // Both only shape generated text: branch names and pull request descriptions.
+  "worktreeBranchChangeTypes",
+  "pullRequestTemplates",
+] as const;
+
+/** Added after nodes first reported effective preferences: an older node's reply omits them. */
+const ADDED_PROJECT_PREFERENCE_KEYS = [
+  "worktreeBranchChangeTypes",
+  "pullRequestTemplates",
 ] as const;
 
 /** Node settings that grant authority or name a path; none may become a project override. */
@@ -57,12 +66,16 @@ const LegacyProjectPreferences = Schema.Struct({
   defaultThreadEnvMode: Schema.optionalKey(ThreadEnvMode),
   worktreeBranchPrefix: Schema.optionalKey(WorktreeBranchPrefix),
   runSetupScript: Schema.optionalKey(Schema.Boolean),
+  worktreeBranchChangeTypes: Schema.optionalKey(Schema.Boolean),
+  pullRequestTemplates: Schema.optionalKey(Schema.Boolean),
 });
 const LegacyProjectPreferencesPatch = Schema.Struct({
   initialModelSelection: Schema.optionalKey(Schema.NullOr(InitialModelSelection)),
   defaultThreadEnvMode: Schema.optionalKey(Schema.NullOr(ThreadEnvMode)),
   worktreeBranchPrefix: Schema.optionalKey(Schema.NullOr(WorktreeBranchPrefix)),
   runSetupScript: Schema.optionalKey(Schema.NullOr(Schema.Boolean)),
+  worktreeBranchChangeTypes: Schema.optionalKey(Schema.NullOr(Schema.Boolean)),
+  pullRequestTemplates: Schema.optionalKey(Schema.NullOr(Schema.Boolean)),
 }).pipe(rejectExcessProperties);
 const LegacyProjectPreferencesExpected = Schema.Struct({
   ...LegacyProjectPreferencesPatch.fields,
@@ -77,6 +90,8 @@ const LegacyEffectiveProjectPreferences = Schema.Struct({
   defaultThreadEnvMode: legacySourced(ThreadEnvMode),
   worktreeBranchPrefix: legacySourced(WorktreeBranchPrefix),
   runSetupScript: legacySourced(Schema.Boolean),
+  worktreeBranchChangeTypes: Schema.optionalKey(legacySourced(Schema.Boolean)),
+  pullRequestTemplates: Schema.optionalKey(legacySourced(Schema.Boolean)),
   worktreeRoot: legacySourced(WorktreeRoot),
   overrides: LegacyProjectPreferences.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
 });
@@ -189,8 +204,24 @@ describe("project preference registry", () => {
     expect(decode(reply)._tag).toBe("Success");
     for (const key of PROJECT_PREFERENCE_KEYS) {
       const { [key]: _omitted, ...older } = reply;
-      expect(decode(older)._tag, key).toBe("Failure");
+      expect(decode(older)._tag, key).toBe(
+        (ADDED_PROJECT_PREFERENCE_KEYS as ReadonlyArray<string>).includes(key)
+          ? "Success"
+          : "Failure",
+      );
     }
+  });
+
+  it("accepts a reply that has the keys added since, and one without them", () => {
+    const decode = Schema.decodeUnknownExit(EffectiveProjectPreferences);
+    const older = JSON.parse(CORPUS.effective[2]);
+    for (const key of ADDED_PROJECT_PREFERENCE_KEYS) expect(older).not.toHaveProperty(key);
+    const newer = {
+      ...older,
+      worktreeBranchChangeTypes: { value: false, source: "project" },
+      pullRequestTemplates: { value: true, source: "node" },
+    };
+    expect(decode(newer)).toMatchObject({ _tag: "Success", value: newer });
   });
 
   it("holds only reviewed creation preferences, never execution authority", () => {
@@ -227,7 +258,10 @@ describe("project preference registry", () => {
       readonly [K in ProjectPreferenceValueKey]: (typeof PROJECT_PREFERENCE_VALUES.Type)[K];
     }>().toEqualTypeOf<Pick<ServerSettings, ProjectPreferenceValueKey>>();
     expectTypeOf<{
-      readonly [K in ProjectPreferenceValueKey]: EffectiveProjectPreferences[K]["value"];
+      // Keys added since are optional in the reply; present, they carry the node setting's type.
+      readonly [K in ProjectPreferenceValueKey]: NonNullable<
+        EffectiveProjectPreferences[K]
+      >["value"];
     }>().toEqualTypeOf<Pick<ServerSettings, ProjectPreferenceValueKey>>();
   });
 
