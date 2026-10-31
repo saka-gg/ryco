@@ -19,12 +19,28 @@ export async function canonicalCandidateFolders(
   return new Map(unique.map((folder, index) => [folder, resolved[index] ?? null]));
 }
 
+/** A folder on an unreachable network mount must not stall a discovery page. */
+const FOLDER_RESOLVE_TIMEOUT_MS = 1_000;
+
 async function canonicalFolder(folder: string): Promise<string | null> {
   if (folder.length === 0 || !path.isAbsolute(folder)) return null;
+  // A UNC path (`\\host\share`) would reach out over the network from a Windows node.
+  if (/^[\\/]{2}[^\\/]/u.test(folder)) return null;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const timeout = new Promise<null>((resolve) => {
+    timer = setTimeout(() => resolve(null), FOLDER_RESOLVE_TIMEOUT_MS);
+  });
+  const lookup = (async () => {
+    try {
+      const canonical = await realpath(folder);
+      return (await stat(canonical)).isDirectory() ? canonical : null;
+    } catch {
+      return null;
+    }
+  })();
   try {
-    const canonical = await realpath(folder);
-    return (await stat(canonical)).isDirectory() ? canonical : null;
-  } catch {
-    return null;
+    return await Promise.race([lookup, timeout]);
+  } finally {
+    clearTimeout(timer);
   }
 }

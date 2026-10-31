@@ -16,7 +16,7 @@ device), from **Import from Codex or Claude Code** in the welcome tour's project
    Codex and Claude Code conversations from one folder share it. Each group proposes a destination:
    the Ryco project whose folder holds it (the closest one when projects nest), else a new project
    in that folder. A folder that no longer exists, or a conversation without a recorded folder,
-   needs a project picked by hand; Ryco never proposes a project for a folder that is gone. Any
+   needs a project picked by hand; Ryco never proposes a new project for a folder that is gone (one inside an existing project still goes to that project). Any
    group's destination can be changed before importing.
 3. Select whole groups, or expand one and pick single conversations. Already imported and paused
    (quarantined) conversations cannot be selected. **Import selected** creates each new project with
