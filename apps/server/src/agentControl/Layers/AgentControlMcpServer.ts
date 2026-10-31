@@ -6,6 +6,7 @@ import { withArtifactTools } from "../Mcp/artifactTools.ts";
 import { withDelegationTools } from "../Mcp/delegationTools.ts";
 import { withLocalTaskTools } from "../Mcp/localTaskTools.ts";
 import { withLazyAgentControlTools } from "../Mcp/lazyTools.ts";
+import { PullRequestWatchService } from "../../sourceControl/PullRequestWatchService.ts";
 import { toMcpFollowUpQueue } from "../Mcp/threadTranscript.ts";
 import { findThreadInArray } from "../../orchestration/threadIndex.ts";
 import { extractThreadReferences } from "@ryco/shared/threadMentions";
@@ -41,6 +42,7 @@ import { TerminalManager } from "../../terminal/Services/Manager.ts";
 import {
   AGENT_CONTROL_CAPABILITIES,
   AGENT_CONTROL_COMMAND_WATCH_MCP_TOOLS,
+  AGENT_CONTROL_LINK_PULL_REQUEST_TOOL,
   AGENT_CONTROL_QUEUE_MCP_TOOLS,
 } from "@ryco/contracts";
 import { Effect, Exit, Layer, Option, Scope, Stream } from "effect";
@@ -108,6 +110,7 @@ const makeAgentControlMcpServer = Effect.gen(function* () {
   const localTasks = yield* Effect.serviceOption(LocalTaskService);
   const cliProxy = yield* Effect.serviceOption(CliProxyService);
   const commandWatches = yield* Effect.serviceOption(CommandWatchService);
+  const pullRequestWatch = yield* Effect.serviceOption(PullRequestWatchService);
   const toolDeps = {
     policy,
     proposals,
@@ -234,19 +237,36 @@ const makeAgentControlMcpServer = Effect.gen(function* () {
         }),
       ),
   });
+  // An agent links the pull requests it opens to its chat's workspace. Loads on first use.
+  const pullRequestTools = Option.isSome(pullRequestWatch)
+    ? withLazyAgentControlTools(queueTools, {
+        names: [AGENT_CONTROL_LINK_PULL_REQUEST_TOOL],
+        writeNames: [AGENT_CONTROL_LINK_PULL_REQUEST_TOOL],
+        mayUse: (session) =>
+          session.grantedCapabilities.includes(AGENT_CONTROL_CAPABILITIES.watchPullRequests),
+        load: () =>
+          import("../Mcp/pullRequestLinkTools.ts").then((module) =>
+            module.withPullRequestLinkTools(queueTools, {
+              policy,
+              registry,
+              pullRequestWatch: pullRequestWatch.value,
+            }),
+          ),
+      })
+    : queueTools;
   // Routine device input under per-task consent, where devices exist. Its
   // module (consent index, driving guide) loads the first time a session that
   // may drive devices lists or calls tools, never at boot.
   const deviceTools =
     Option.isSome(deviceService) && deviceService.value.supported
-      ? withLazyAgentControlTools(queueTools, {
+      ? withLazyAgentControlTools(pullRequestTools, {
           names: [AGENT_CONTROL_DEVICE_TOOL],
           writeNames: [AGENT_CONTROL_DEVICE_TOOL],
           mayUse: (session) =>
             session.grantedCapabilities.includes(AGENT_CONTROL_CAPABILITIES.controlDevices),
           load: () =>
             import("../Mcp/deviceRoutineTools.ts").then((module) =>
-              module.withDeviceRoutineTools(queueTools, {
+              module.withDeviceRoutineTools(pullRequestTools, {
                 policy,
                 registry,
                 proposals,
@@ -264,7 +284,7 @@ const makeAgentControlMcpServer = Effect.gen(function* () {
               }),
             ),
         })
-      : queueTools;
+      : pullRequestTools;
   // Command watches on the caller's own chat. Their module loads the first time a session that
   // may watch commands lists or calls tools, never at boot.
   const watchTools = Option.isSome(commandWatches)

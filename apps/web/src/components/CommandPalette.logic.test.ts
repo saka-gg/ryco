@@ -179,6 +179,35 @@ describe("buildThreadActionItems", () => {
     ]);
   });
 
+  it("finds a thread by its workspace's pull request number or URL", () => {
+    const threadItems = buildThreadActionItems({
+      threads: [
+        makeThread({ id: ThreadId.make("thread-with-pr"), title: "Inbox work" }),
+        makeThread({ id: ThreadId.make("thread-without-pr"), title: "Other work" }),
+      ],
+      projectTitleById: new Map([[PROJECT_ID, "Project"]]),
+      sortOrder: "updated_at",
+      icon: null,
+      extraSearchTerms: (thread) =>
+        thread.id === "thread-with-pr"
+          ? ["#675", "acme/app#675", "https://github.com/acme/app/pull/675"]
+          : [],
+      runThread: async (_thread) => undefined,
+    });
+    const find = (query: string) =>
+      filterCommandPaletteGroups({
+        activeGroups: [],
+        query,
+        isInSubmenu: false,
+        projectSearchItems: [],
+        threadSearchItems: threadItems,
+      })[0]?.items.map((item) => item.value);
+
+    expect(find("#675")).toEqual(["thread:thread-with-pr"]);
+    expect(find("acme/app#675")).toEqual(["thread:thread-with-pr"]);
+    expect(find("github.com/acme/app/pull/675")).toEqual(["thread:thread-with-pr"]);
+  });
+
   it("preserves thread project-name matches when there is no stronger title match", () => {
     const group: CommandPaletteGroup = {
       value: "threads-search",

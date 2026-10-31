@@ -97,6 +97,14 @@ called. This matters for clients such as Codex that cache the initial MCP catalo
   `ryco_update_local_task`, `ryco_add_local_task_file`, `ryco_remove_local_task_file`,
   `ryco_start_local_task_chat`, `ryco_propose_local_task_delete`: the user's Tasks page (see
   [Tasks](#tasks)).
+- `ryco_link_pull_request`: link a pull request the agent opened (or names, by number or URL) to
+  its own chat's workspace, so Ryco shows it beside the chat, follows its state and settles the
+  chat when it merges, without watching it. Same checks as watching: the repository must be the
+  checkout's, and a pull request the user removed from the workspace stays removed. A chat on the
+  project's main checkout is refused (the main workspace's pull requests are not shown with
+  chats; watch the pull request instead). The answer says whether this chat's workspace or
+  another workspace of the project has the link. Needs the pull request grant and an active turn. Thread search (inbox and palette) finds a chat by its
+  workspace's pull requests: `#123`, `owner/repo#123` or the URL.
 - `ryco_watch_pull_request`, `ryco_unwatch_pull_request`: have Ryco wake a chat with a pull
   request's news instead of polling (see [Pull request watches](#pull-request-watches)).
 - `ryco_watch_command`, `ryco_unwatch_command`, `ryco_list_command_watches`: have Ryco run a shell

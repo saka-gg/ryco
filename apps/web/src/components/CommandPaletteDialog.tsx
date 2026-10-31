@@ -103,6 +103,8 @@ import {
 } from "../lib/chatThreadActions";
 import { CHAT_PROJECT_LABEL, projectPlaceLabel } from "../composerDraftStore";
 import { excludeChatProjects, isChatProject } from "@ryco/shared/projectKind";
+import { pullRequestLinkSearchTerms } from "@ryco/shared/worktreePullRequests";
+import { createThreadWorktreeResolver } from "@ryco/client-runtime/state/threads";
 import {
   appendBrowsePathSegment,
   canNavigateUp,
@@ -128,10 +130,11 @@ import { deriveLogicalProjectKeyFromSettings } from "../logicalProject";
 import {
   selectProjectsAcrossEnvironments,
   selectSidebarThreadsAcrossEnvironments,
+  selectSidebarWorktreesAcrossEnvironments,
   useStore,
 } from "../store";
 import { requestCustomSnooze } from "../threadLifecycleCommands";
-import { isUnarchivedThreadEntry } from "../types";
+import { isUnarchivedThreadEntry, type SidebarThreadSummary } from "../types";
 import { buildThreadRouteParams } from "../threadRoutes";
 import { useUiStateStore } from "../uiStateStore";
 import {
@@ -557,6 +560,18 @@ function OpenCommandPaletteDialog() {
   // (title, project), while thread actions list only unarchived threads.
   const threads = useStore(useShallow(selectSidebarThreadsAcrossEnvironments));
   const unarchivedThreads = useMemo(() => threads.filter(isUnarchivedThreadEntry), [threads]);
+  const worktrees = useStore(useShallow(selectSidebarWorktreesAcrossEnvironments));
+  // A thread is found by its workspace's pull requests too (`#123`, `owner/repo#123`, the URL),
+  // as one search field so a workspace with many pull requests does not sink their rank.
+  const threadPullRequestSearchTerms = useMemo(() => {
+    const worktreeOf = createThreadWorktreeResolver(worktrees);
+    return (thread: SidebarThreadSummary): ReadonlyArray<string> => {
+      const pullRequests = worktreeOf(thread)?.pullRequests;
+      return pullRequests && pullRequests.length > 0
+        ? [pullRequestLinkSearchTerms(pullRequests).join(" ")]
+        : [];
+    };
+  }, [worktrees]);
   const keybindings = useAppKeybindings();
   const [viewStack, setViewStack] = useState<CommandPaletteView[]>([]);
   const currentView = viewStack.at(-1) ?? null;
@@ -1122,6 +1137,7 @@ function OpenCommandPaletteDialog() {
         icon: <MessageSquareIcon className={ITEM_ICON_CLASS} />,
         renderLeadingContent: (thread) => <ThreadRowLeadingStatus thread={thread} />,
         renderTrailingContent: (thread) => <ThreadRowTrailingStatus thread={thread} />,
+        extraSearchTerms: threadPullRequestSearchTerms,
         runThread: async (thread) => {
           await navigate({
             to: "/$environmentId/$threadId",
@@ -1134,6 +1150,7 @@ function OpenCommandPaletteDialog() {
       navigate,
       projectTitleById,
       settings.sidebarThreadSortOrder,
+      threadPullRequestSearchTerms,
       unarchivedThreads,
     ],
   );

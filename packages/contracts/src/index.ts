@@ -55,6 +55,7 @@ export * from "./projectBrowser.ts";
 export * from "./agentControlInspection.ts";
 export * from "./agentControlDelegation.ts";
 export * from "./agentControlQueue.ts";
+export * from "./agentControlPullRequestLink.ts";
 export * from "./agentControlLocalTasks.ts";
 
 export * from "./acpRegistry.ts";

@@ -82,6 +82,27 @@ export interface PullRequestWatchSetInput {
   readonly origin: "user" | "agent";
 }
 
+/** An agent links a pull request it names to its chat's workspace (`ryco_link_pull_request`). */
+export interface PullRequestLinkInput {
+  readonly threadId: ThreadId;
+  readonly number?: number | undefined;
+  readonly url?: string | undefined;
+}
+
+export interface PullRequestLinkResult {
+  readonly number: number;
+  readonly url: string | null;
+  readonly title: string | null;
+  readonly state: string | null;
+  /** It was linked before the call (to this chat's workspace or another of the project's). */
+  readonly alreadyLinked: boolean;
+  /**
+   * Which workspace has it: this chat's, or another workspace of the project already linking it
+   * (then this chat does not show it).
+   */
+  readonly linkedTo: "this-chat" | "another-workspace";
+}
+
 export interface PullRequestWatchServiceShape {
   /**
    * Start, change or stop a thread's watch. Reads the pull request once (interactive lane)
@@ -91,6 +112,10 @@ export interface PullRequestWatchServiceShape {
   readonly setWatch: (
     input: PullRequestWatchSetInput,
   ) => Effect.Effect<SourceControlSetPullRequestWatchResult, PullRequestWatchError>;
+  /** Links a named pull request to the chat's workspace, without watching it. */
+  readonly linkPullRequest: (
+    input: PullRequestLinkInput,
+  ) => Effect.Effect<PullRequestLinkResult, PullRequestWatchError>;
   /** One full pass now (tests, the measurement script). */
   readonly sweep: Effect.Effect<void>;
 }
@@ -229,6 +254,11 @@ export const makePullRequestWatchService = (options: {
         commandReady.pipe(
           Effect.andThen(runtime),
           Effect.flatMap((loaded) => loaded.setWatch(input)),
+        ),
+      linkPullRequest: (input) =>
+        commandReady.pipe(
+          Effect.andThen(runtime),
+          Effect.flatMap((loaded) => loaded.linkPullRequest(input)),
         ),
       sweep: runtime.pipe(Effect.flatMap((loaded) => loaded.sweep)),
     } satisfies PullRequestWatchServiceShape;

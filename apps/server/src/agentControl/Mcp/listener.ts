@@ -26,6 +26,7 @@ import {
   JSON_RPC_ERROR_CODES,
   jsonRpcError,
   jsonRpcResult,
+  mcpToolCallResult,
   parseJsonRpcMessage,
   type JsonRpcResponse,
 } from "./jsonRpc.ts";
@@ -64,6 +65,7 @@ export const AGENT_CONTROL_MCP_INITIALIZE_INSTRUCTIONS =
   "destructive and security-sensitive actions wait for user approval. Never approve your own requests. " +
   "Use ryco_wait_for_control_request for dispatch receipts. After delegating with returnToOrigin, end your turn; " +
   "Ryco wakes you with the results (use ryco_task_status instead of polling). " +
+  "After opening a pull request, link it to this chat with ryco_link_pull_request. " +
   "To follow a pull request's checks and reviews, call ryco_watch_pull_request instead of polling. " +
   "When available, ryco_computer and ryco_browser execute under separate opt-in desktop/app permissions; " +
   "these tools act directly and require an exact active turn. " +
@@ -324,7 +326,7 @@ const makeRequestHandler = (deps: AgentControlMcpListenerDeps) => {
             deps.tools.callTool(session.value, toolName, call.arguments),
             { signal: controller.signal },
           );
-          endJson(response, 200, jsonRpcResult(id ?? null, result));
+          endJson(response, 200, jsonRpcResult(id ?? null, mcpToolCallResult(result)));
         } catch {
           endJson(
             response,

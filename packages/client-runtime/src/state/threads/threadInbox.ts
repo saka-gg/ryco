@@ -27,6 +27,7 @@ import {
   type ThreadSettlementInput,
 } from "@ryco/shared/threadSettlement";
 import {
+  pullRequestLinkSearchTerms,
   resolveThreadPullRequestLink,
   type WorktreePullRequestLink,
 } from "@ryco/shared/worktreePullRequests";
@@ -240,6 +241,39 @@ function resolveWorktree(input: {
       )
       ?.find((worktree) => worktree.worktreePath === input.thread.worktreePath) ?? null
   );
+}
+
+function indexWorktrees(worktrees: ReadonlyArray<SidebarWorktreeSummary>) {
+  const worktreeByKey = new Map(
+    worktrees.map(
+      (worktree) =>
+        [scopedInboxWorktreeKey(worktree.environmentId, worktree.id), worktree] as const,
+    ),
+  );
+  const worktreesByProjectKey = new Map<string, SidebarWorktreeSummary[]>();
+  for (const worktree of worktrees) {
+    const key = scopedProjectKey({
+      environmentId: worktree.environmentId,
+      projectId: worktree.projectId,
+    });
+    const projectWorktrees = worktreesByProjectKey.get(key);
+    if (projectWorktrees) projectWorktrees.push(worktree);
+    else worktreesByProjectKey.set(key, [worktree]);
+  }
+  return { worktreeByKey, worktreesByProjectKey };
+}
+
+/**
+ * The workspace each thread belongs to, by the inbox's rule (its workspace id, else its
+ * checkout path): for surfaces that list threads outside the inbox, such as the palette.
+ */
+export function createThreadWorktreeResolver(
+  worktrees: ReadonlyArray<SidebarWorktreeSummary>,
+): (
+  thread: Pick<SidebarThreadSummary, "environmentId" | "projectId" | "worktreeId" | "worktreePath">,
+) => SidebarWorktreeSummary | null {
+  const index = indexWorktrees(worktrees);
+  return (thread) => resolveWorktree({ thread, ...index });
 }
 
 function connectionBlocker(
@@ -484,8 +518,9 @@ function filterEntry(entry: ThreadInboxEntry, filters: ThreadInboxFilters | unde
     entry.worktree?.issueTitle,
     entry.worktree?.workItemKey,
     entry.worktree?.workItemTitle,
-    // Every pull request the workspace carried, so "#675" finds its thread.
-    ...(entry.worktree?.pullRequests ?? []).flatMap((link) => [link.title, `#${link.number}`]),
+    // Every pull request the workspace carried, so "#675", "owner/repo#675" or its URL finds
+    // its thread.
+    ...pullRequestLinkSearchTerms(entry.worktree?.pullRequests ?? []),
   ].some((value) => value?.toLocaleLowerCase().includes(text) === true);
 }
 
@@ -530,22 +565,7 @@ export function buildThreadInbox(input: BuildThreadInboxInput): ThreadInboxModel
         ] as const,
     ),
   );
-  const worktreeByKey = new Map(
-    input.worktrees.map(
-      (worktree) =>
-        [scopedInboxWorktreeKey(worktree.environmentId, worktree.id), worktree] as const,
-    ),
-  );
-  const worktreesByProjectKey = new Map<string, SidebarWorktreeSummary[]>();
-  for (const worktree of input.worktrees) {
-    const key = scopedProjectKey({
-      environmentId: worktree.environmentId,
-      projectId: worktree.projectId,
-    });
-    const projectWorktrees = worktreesByProjectKey.get(key);
-    if (projectWorktrees) projectWorktrees.push(worktree);
-    else worktreesByProjectKey.set(key, [worktree]);
-  }
+  const { worktreeByKey, worktreesByProjectKey } = indexWorktrees(input.worktrees);
   const serverThreadKeys = new Set(
     input.threads.map((thread) => scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id))),
   );

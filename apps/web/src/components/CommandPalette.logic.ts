@@ -166,6 +166,8 @@ export function buildThreadActionItems<TThread extends BuildThreadActionItemsThr
   renderLeadingContent?: (thread: TThread) => ReactNode;
   /** Optional content rendered inline after the title text per-thread, once its row mounts. */
   renderTrailingContent?: (thread: TThread) => ReactNode;
+  /** Extra terms that find the thread: its workspace's pull requests (`#123`, URL, title). */
+  extraSearchTerms?: (thread: TThread) => ReadonlyArray<string>;
   runThread: (thread: Pick<SidebarThreadSummary, "environmentId" | "id">) => Promise<void>;
   limit?: number;
 }): CommandPaletteActionItem[] {
@@ -195,7 +197,12 @@ export function buildThreadActionItems<TThread extends BuildThreadActionItemsThr
       {
         kind: "action" as const,
         value: `thread:${thread.id}`,
-        searchTerms: [thread.title, projectTitle ?? ``, thread.branch ?? ``],
+        searchTerms: [
+          thread.title,
+          projectTitle ?? ``,
+          thread.branch ?? ``,
+          ...(input.extraSearchTerms?.(thread) ?? []),
+        ],
         idSearchTerms: [thread.id],
         title: thread.title,
         description: descriptionParts.join(` · `),
