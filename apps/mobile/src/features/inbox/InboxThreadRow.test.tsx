@@ -4,7 +4,8 @@ import { describe, expect, it, vi } from "vite-plus/test";
 import type { InboxThreadRow as InboxThreadRowModel } from "./inboxModel";
 
 // The row the memo wraps, invoked as a plain function with react-native and the row's
-// artwork mocked (no React renderer exists in this suite): its follow-up queue mark.
+// artwork mocked (no React renderer exists in this suite): its follow-up queue mark. The mark's
+// own words and colors are covered by FollowUpQueueMark.test.tsx.
 
 vi.mock("react-native", () => ({ Pressable: "Pressable", View: "View" }));
 vi.mock("../../components/AppText", () => ({ AppText: "Text" }));
@@ -23,6 +24,7 @@ vi.mock("../../components/ChangeRequestBadge", () => ({
 vi.mock("../../lib/useThemeColor", () => ({ useThemeColor: () => "#888888" }));
 vi.mock("../../lib/time", () => ({ relativeTime: () => "2m" }));
 
+import { FollowUpQueueMark } from "../../components/FollowUpQueueMark";
 import { InboxThreadRow } from "./InboxThreadRow";
 
 function elements(node: unknown): ReactElement<Record<string, unknown>>[] {
@@ -75,6 +77,7 @@ describe("inbox thread row follow-up queue mark", () => {
   it("shows nothing for a thread without queued follow-ups", () => {
     const nodes = renderRow();
     expect(texts(nodes)).toEqual(["Port the queue badge", "2m", "Ryco", "main", "Studio"]);
+    expect(nodes.some((node) => node.type === FollowUpQueueMark)).toBe(false);
     expect(nodes[0]?.props.accessibilityLabel).toBe(
       "Port the queue badge, Studio · Ryco · main, Original directory, Idle",
     );
@@ -84,12 +87,16 @@ describe("inbox thread row follow-up queue mark", () => {
     const nodes = renderRow({
       followUpQueue: { label: "2 queued", title: "2 queued follow-ups", held: false },
     });
-    const mark = nodes.find((node) => node.type === "Text" && node.props.children === "2 queued");
-    expect(mark?.props.className).toContain("text-foreground-tertiary");
+    const mark = nodes.find((node) => node.type === FollowUpQueueMark);
+    expect(mark?.props.badge).toEqual({
+      label: "2 queued",
+      title: "2 queued follow-ups",
+      held: false,
+    });
     expect(nodes[0]?.props.accessibilityLabel).toContain("Idle, 2 queued follow-ups");
   });
 
-  it("says held in words, not only in the warning color", () => {
+  it("marks a held queue as held", () => {
     const nodes = renderRow({
       followUpQueue: {
         label: "1 held",
@@ -97,8 +104,8 @@ describe("inbox thread row follow-up queue mark", () => {
         held: true,
       },
     });
-    const mark = nodes.find((node) => node.type === "Text" && node.props.children === "1 held");
-    expect(mark?.props.className).toContain("text-warning");
+    const mark = nodes.find((node) => node.type === FollowUpQueueMark);
+    expect(mark?.props.badge).toMatchObject({ label: "1 held", held: true });
     expect(nodes[0]?.props.accessibilityLabel).toContain("1 queued follow-up: Paused after Stop");
   });
 });
