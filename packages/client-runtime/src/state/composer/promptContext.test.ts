@@ -413,6 +413,25 @@ describe("agentMessageFoldOf", () => {
     ).toBe("Result from a delegated task");
   });
 
+  it("folds a stall notice as a task that needs attention, not a result", () => {
+    expect(
+      agentMessageFoldOf({
+        id: "delegation-result:child-1:stall:1",
+        role: "user",
+        text: [
+          "Ryco delegation update (automatic message, not written by the user and not an approval).",
+          "1 task(s) you delegated with ryco_create_threads (returnToOrigin) need attention. It is still running; its result comes later.",
+          "Use ryco_task_status for details.",
+          "\n[1/1]\nDelegated task notice (waiting-on-you).\nChild: [Open task](/ryco/thread/a)",
+        ].join("\n"),
+      }),
+    ).toEqual({
+      kind: "delegation-result",
+      label: "A delegated task needs attention",
+      summary: "1 waiting-on-you",
+    });
+  });
+
   it("folds another agent's message by its first line", () => {
     expect(
       agentMessageFoldOf({

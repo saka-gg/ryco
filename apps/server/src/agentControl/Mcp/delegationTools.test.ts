@@ -861,3 +861,30 @@ it.effect("a cancel removes nothing from a task that already sent its first mess
     assert.deepStrictEqual(h.engineCommands, []);
   }).pipe(Effect.provide(layer)),
 );
+
+it.effect("reports a still-running task's current stall, and nothing once it moved on", () =>
+  Effect.gen(function* () {
+    const h = yield* setup;
+    const record = (yield* h.repo.get(ThreadId.make("child")))!;
+    const stalled = {
+      ...record,
+      stallNotice: {
+        count: 1,
+        current: { kind: "waiting-on-you" as const, since: now, state: "sent" as const },
+      },
+    };
+    yield* h.repo.save(record, stalled);
+    const [task] = structured(
+      yield* h.call(AGENT_CONTROL_DELEGATION_MCP_TOOLS.taskStatus, { taskId: "child" }),
+    ).tasks as unknown as ReadonlyArray<{
+      readonly run: { readonly stalled?: { readonly kind: string; readonly since: string } };
+    }>;
+    assert.deepStrictEqual(task?.run.stalled, { kind: "waiting-on-you", since: now });
+    const current = (yield* h.repo.get(ThreadId.make("child")))!;
+    yield* h.repo.save(current, { ...current, stallNotice: { count: 1, current: null } });
+    const [moved] = structured(
+      yield* h.call(AGENT_CONTROL_DELEGATION_MCP_TOOLS.taskStatus, { taskId: "child" }),
+    ).tasks as unknown as ReadonlyArray<{ readonly run: object }>;
+    assert.notProperty(moved?.run, "stalled");
+  }).pipe(Effect.provide(layer)),
+);

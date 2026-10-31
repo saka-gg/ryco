@@ -1,7 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { assert, it } from "@effect/vitest";
+import { assert, describe, it } from "@effect/vitest";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { Clock, Effect, Fiber, Layer, Logger, Option, Schema } from "effect";
 import { TestClock } from "effect/testing";
@@ -2490,4 +2490,102 @@ it.effect("logs a failed scan and retries after the short pause", () => {
     assert.deepStrictEqual(loop.scanTimes, [0, 2_000, 4_000, 64_000]);
     yield* loop.stop;
   }).pipe(Effect.provide(logs));
+});
+
+describe("stall notices", () => {
+  /** The child's initial turn is bound and running on its live session. */
+  const running = (overrides: Partial<OrchestrationThreadShell> = {}) =>
+    withSession(shell("child", "child-turn", "child-runtime", overrides), {
+      status: "running",
+      activeTurnId: TurnId.make("child-turn"),
+    });
+  const stallWakes = (sent: ReadonlyArray<DelegationWakeCommand>) =>
+    sent.filter((command) => command.commandId.includes(":stall:"));
+
+  it.effect("tells the delegating chat once that a task never started, and keeps waiting", () =>
+    Effect.gen(function* () {
+      const h = yield* setup();
+      // Its first message went out, but no turn took it.
+      yield* h.sql`DELETE FROM projection_turns WHERE thread_id = 'child'`;
+      yield* h.tick(179);
+      assert.lengthOf(h.sent, 0);
+      yield* h.tick(181);
+      assert.lengthOf(h.sent, 1);
+      const wake = h.sent[0]!;
+      assert.equal(wake.commandId, "delegation-return:child:stall:1");
+      assert.equal(wake.message.messageId, "delegation-result:child:stall:1");
+      assert.include(wake.message.text, "need attention. It is still running");
+      assert.include(wake.message.text, "Delegated task notice (never-started).");
+      assert.include(wake.message.text, "has not started a turn 3 minutes after");
+      const row = yield* h.read();
+      assert.equal(row.status, "waiting");
+      assert.deepEqual(row.stallNotice, {
+        count: 1,
+        current: { kind: "never-started", since: at(0), state: "sent" },
+      });
+      // One notice per episode.
+      yield* h.tick(600);
+      assert.lengthOf(h.sent, 1);
+    }).pipe(Effect.provide(layer)),
+  );
+
+  it.effect("waits for an idle chat, and notices each new wait on the person once", () =>
+    Effect.gen(function* () {
+      const h = yield* setup();
+      yield* h.sql`UPDATE projection_turns SET state = 'running' WHERE thread_id = 'child'`;
+      h.setChild(running({ hasPendingApprovals: true }));
+      yield* h.tick(10);
+      yield* h.tick(309);
+      assert.lengthOf(h.sent, 0);
+      // Past five minutes, but the delegating chat is busy: the notice waits for it.
+      h.setParent(
+        withSession(shell("parent", "parent-turn", "parent-runtime"), {
+          status: "running",
+          activeTurnId: TurnId.make("parent-turn"),
+        }),
+      );
+      yield* h.tick(311);
+      assert.lengthOf(h.sent, 0);
+      assert.equal((yield* h.read()).stallNotice?.current?.state, "pending");
+      h.setParent(shell("parent", "parent-turn", "parent-runtime"));
+      yield* h.tick(320);
+      assert.lengthOf(stallWakes(h.sent), 1);
+      assert.include(h.sent[0]!.message.text, "Delegated task notice (waiting-on-you).");
+      assert.include(h.sent[0]!.message.text, "Ryco never answers for them");
+
+      // The person answered: the episode ends. A later wait is a new episode.
+      h.setChild(running());
+      yield* h.tick(330);
+      assert.deepEqual((yield* h.read()).stallNotice, { count: 1, current: null });
+      h.setChild(running({ hasPendingUserInput: true }));
+      yield* h.tick(400);
+      yield* h.tick(701);
+      assert.deepEqual(
+        stallWakes(h.sent).map((command) => command.commandId),
+        ["delegation-return:child:stall:1", "delegation-return:child:stall:2"],
+      );
+      assert.equal((yield* h.read()).status, "waiting");
+    }).pipe(Effect.provide(layer)),
+  );
+
+  it.effect("notices a task whose provider went quiet, until it moves again", () =>
+    Effect.gen(function* () {
+      const h = yield* setup();
+      yield* h.sql`UPDATE projection_turns SET state = 'running' WHERE thread_id = 'child'`;
+      h.setChild(running());
+      yield* h.tick(10);
+      assert.lengthOf(h.sent, 0);
+      yield* h.sql`INSERT INTO projection_thread_activities (activity_id, thread_id, turn_id, tone, kind, summary, payload_json, sequence, created_at)
+        VALUES ('quiet-1', 'child', 'child-turn', 'info', 'provider.turn.unresponsive', 'Provider is quiet',
+          ${JSON.stringify({ lastActivityAt: at(0) })}, 5, ${at(900)})`;
+      yield* h.tick(901);
+      assert.lengthOf(h.sent, 1);
+      assert.include(h.sent[0]!.message.text, "Delegated task notice (silent).");
+      assert.include(h.sent[0]!.message.text, "silent for 15 minutes");
+      yield* h.sql`INSERT INTO projection_thread_activities (activity_id, thread_id, turn_id, tone, kind, summary, payload_json, sequence, created_at)
+        VALUES ('tool-1', 'child', 'child-turn', 'info', 'tool.started', 'Tool', '{}', 6, ${at(950)})`;
+      yield* h.tick(951);
+      assert.deepEqual((yield* h.read()).stallNotice, { count: 1, current: null });
+    }).pipe(Effect.provide(layer)),
+  );
 });
