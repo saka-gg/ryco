@@ -1011,6 +1011,11 @@ export const AgentControlWorktreeHandoffOutcome = Schema.Struct({
   setupScript: Schema.Literals(["started", "no-script", "skipped", "failed"]),
   /** `held`: queued, with the queue held (the turn that asked was stopped, or Ryco restarted). */
   continuation: Schema.Literals(["queued", "held", "skipped", "failed"]),
+  /**
+   * Whether the moved chat was linked to the worktree's record (`thread.attach-to-worktree`);
+   * the move stands either way. Absent in outcomes recorded before it was reported.
+   */
+  worktreeAttached: Schema.optional(Schema.Boolean),
 });
 export type AgentControlWorktreeHandoffOutcome = typeof AgentControlWorktreeHandoffOutcome.Type;
 

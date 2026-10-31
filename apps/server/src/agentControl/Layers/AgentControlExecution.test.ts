@@ -21,6 +21,7 @@ import {
   PullRequestWatchError,
   ServerProvider,
   RuntimeSessionId,
+  TerminalCwdError,
   ThreadId,
   type ThreadQueueAddCommand,
   TurnId,
@@ -3475,10 +3476,22 @@ const makeHandoffHarness = (input: {
   readonly settings?: Parameters<typeof ServerSettingsService.layerTest>[0];
   /** How the move answers: refused by its branch fence, or applied with its answer lost. */
   readonly move?: "refused" | "lost";
-  /** The Git driver's remotes and the names it resolves. */
+  /** The link to the worktree's record fails. */
+  readonly attachFails?: boolean;
+  /** The setup script fails to start with this error. */
+  readonly setupError?: Error;
+  /**
+   * The turn that asked is stopped after the runner's last read and before its continuation is
+   * added: the queue holds it only when the add asks for that (as the decider does).
+   */
+  readonly stopBeforeAdd?: boolean;
+  /** The Git driver's remotes, its refs, and the names it resolves. */
   readonly gitDriver?: {
     readonly remoteNames: ReadonlyArray<string>;
+    readonly refs?: ReadonlyArray<string>;
     readonly resolves: ReadonlyArray<string>;
+    /** `git for-each-ref` fails. */
+    readonly listFails?: boolean;
   };
 }) =>
   Effect.gen(function* () {
@@ -3490,6 +3503,8 @@ const makeHandoffHarness = (input: {
     const setups: Array<Record<string, unknown>> = [];
     const listedRefs: string[] = [];
     const resolvedNames: string[] = [];
+    const forEachRefArgs: Array<ReadonlyArray<string>> = [];
+    let queueHold: Record<string, unknown> | null = null;
     let reads = 0;
     let movedTo: string | null = null;
     /** Changes the chat from the next read on (a Stop while the worktree is made). */
@@ -3502,6 +3517,18 @@ const makeHandoffHarness = (input: {
     };
     const make = makeTestExecution({
       ...stores,
+      // The node's read model, where the queue's hold is decided.
+      engine: {
+        getReadModel: () =>
+          Effect.sync(() => ({
+            threads: [
+              {
+                id: callerThreadId,
+                ...(queueHold === null ? {} : { followUpQueue: { entries: [], hold: queueHold } }),
+              },
+            ],
+          })),
+      },
       projections: {
         getShellSnapshot: () => Effect.succeed({ projects: [handoffProject] }),
         getThreadShellById: () => Effect.sync(() => Option.some(threadRead())),
@@ -3557,21 +3584,37 @@ const makeHandoffHarness = (input: {
               movedTo = command.worktreePath as string;
               if (input.move === "lost") return Effect.fail(new Error("The answer was lost."));
             }
+            if (command.type === "thread.attach-to-worktree" && input.attachFails === true) {
+              return Effect.fail(new Error("The worktree record is unavailable."));
+            }
+            if (
+              command.type === "thread.queue.add" &&
+              input.stopBeforeAdd === true &&
+              command.holdIfTurnInterrupted === askingTurnId
+            ) {
+              queueHold = {
+                reason: "interrupted",
+                detail: null,
+                causeKeys: [`interrupt:${askingTurnId}`],
+                heldAt: now,
+              };
+            }
             return Effect.succeed({ sequence: commands.length });
           }),
       },
     }).pipe(
       Effect.provideService(ProjectSetupScriptRunner, {
         runForThread: (request) =>
-          Effect.sync(() => {
+          Effect.suspend(() => {
             setups.push({ ...request });
-            return {
+            if (input.setupError !== undefined) return Effect.fail(input.setupError);
+            return Effect.succeed({
               status: "started" as const,
               scriptId: "setup",
               scriptName: "Install",
               terminalId: "terminal-1",
               cwd: request.worktreePath,
-            };
+            });
           }),
       }),
     );
@@ -3584,10 +3627,32 @@ const makeHandoffHarness = (input: {
                 Effect.succeed({ get: () => null, remoteNames: input.gitDriver!.remoteNames }),
               execute: (request: { readonly args: ReadonlyArray<string> }) =>
                 Effect.sync(() => {
+                  const driver = input.gitDriver!;
+                  if (request.args[0] === "for-each-ref") {
+                    forEachRefArgs.push(request.args);
+                    if (driver.listFails === true) return { exitCode: 129, stdout: "", stderr: "" };
+                    // As Git filters with --ignore-case: a pattern matches a ref completely, or
+                    // from its start up to a slash.
+                    const patterns = request.args
+                      .filter((arg) => arg.startsWith("refs/"))
+                      .map((pattern) => pattern.toLowerCase());
+                    const matching = (driver.refs ?? []).filter((ref) =>
+                      patterns.some(
+                        (pattern) =>
+                          ref.toLowerCase() === pattern ||
+                          ref.toLowerCase().startsWith(`${pattern}/`),
+                      ),
+                    );
+                    return {
+                      exitCode: 0,
+                      stdout: matching.map((ref) => `${ref}\n`).join(""),
+                      stderr: "",
+                    };
+                  }
                   const name = request.args.at(-1)!;
                   resolvedNames.push(name);
                   return {
-                    exitCode: input.gitDriver!.resolves.includes(name) ? 0 : 1,
+                    exitCode: driver.resolves.includes(name) ? 0 : 1,
                     stdout: "",
                     stderr: "",
                   };
@@ -3607,6 +3672,7 @@ const makeHandoffHarness = (input: {
       setups,
       listedRefs,
       resolvedNames,
+      forEachRefArgs,
       setThread: (overrides: Partial<OrchestrationThreadShell>) =>
         Effect.sync(() => {
           live = overrides;
@@ -3679,6 +3745,7 @@ it.effect("moves the caller's chat into a new worktree and queues its continuati
       startedFromOrigin: false,
       setupScript: "started",
       continuation: "queued",
+      worktreeAttached: true,
     });
     // The stored note names the branch, never the checkout path (the answer carries it).
     assert.include(result.detail, "on branch feature/handoff");
@@ -3782,6 +3849,129 @@ it.effect("a Stop right after the move queues the continuation held", () =>
     const result = handoffOutcome(settled);
     assert.strictEqual(result.execution?.worktreeHandoff?.continuation, "held");
     assert.include(result.detail, "held until the person resumes it");
+  }),
+);
+
+it.effect("a Stop after the runner's last read still holds the continuation it queues", () =>
+  Effect.gen(function* () {
+    // The turn that asked runs at every read, and is stopped just before the add: the add asks
+    // the queue to hold for a Stop of that turn, which the queue decides with the add.
+    const proposal = handoffProposal("handoff-stopped-before-add");
+    const h = yield* makeHandoffHarness({ proposal, stopBeforeAdd: true });
+    yield* h.executor.executeApproved(proposal.proposalId);
+
+    const settled = yield* Ref.get(h.stores.proposalRef);
+    assert.strictEqual(settled.status, "completed");
+    const queued = h.commands.find(
+      (command) => command.type === "thread.queue.add",
+    ) as unknown as ThreadQueueAddCommand;
+    assert.isUndefined(queued.hold);
+    assert.strictEqual(queued.holdIfTurnInterrupted, askingTurnId);
+    const result = handoffOutcome(settled);
+    assert.strictEqual(result.execution?.worktreeHandoff?.continuation, "held");
+    assert.include(result.detail, "held until the person resumes it");
+  }),
+);
+
+it.effect("a turn that asked and ended normally keeps the handoff", () =>
+  Effect.gen(function* () {
+    // The tool's wait timed out, so the agent ended its turn while the worktree was made.
+    const proposal = handoffProposal("handoff-turn-completed");
+    const h = yield* makeHandoffHarness({
+      proposal,
+      threadReads: [{}, { latestTurn: turnShell("completed") }],
+    });
+    yield* h.executor.executeApproved(proposal.proposalId);
+
+    const settled = yield* Ref.get(h.stores.proposalRef);
+    assert.strictEqual(settled.status, "completed");
+    assert.deepStrictEqual(
+      h.commands.map((command) => command.type),
+      ["worktree.create", "thread.meta.update", "thread.attach-to-worktree", "thread.queue.add"],
+    );
+    assert.deepStrictEqual(h.removed, []);
+    // Sent as usual: the chat is idle, so the queue starts the next turn in the worktree.
+    const queued = h.commands[3] as unknown as ThreadQueueAddCommand;
+    assert.isUndefined(queued.hold);
+    assert.strictEqual(handoffOutcome(settled).execution?.worktreeHandoff?.continuation, "queued");
+  }),
+);
+
+it.effect("a newer turn after the move pauses the queue for the continuation", () =>
+  Effect.gen(function* () {
+    const proposal = handoffProposal("handoff-superseded-after-move");
+    const h = yield* makeHandoffHarness({
+      proposal,
+      // Running at both checks; a newer turn is the chat's when the continuation is queued.
+      threadReads: [{}, {}, { latestTurn: turnShell("running", TurnId.make("turn-newer")) }],
+    });
+    yield* h.executor.executeApproved(proposal.proposalId);
+
+    const settled = yield* Ref.get(h.stores.proposalRef);
+    assert.strictEqual(settled.status, "completed");
+    const operation = Option.getOrThrow(yield* Ref.get(h.stores.operationRef));
+    const queued = h.commands.find(
+      (command) => command.type === "thread.queue.add",
+    ) as unknown as ThreadQueueAddCommand;
+    assert.deepInclude(queued.hold, {
+      reason: "paused",
+      causeKeys: [`paused:handoff:${operation.operationId}`],
+    });
+    assert.deepStrictEqual(h.removed, []);
+    assert.strictEqual(handoffOutcome(settled).execution?.worktreeHandoff?.continuation, "held");
+  }),
+);
+
+it.effect("a link to the worktree's record that fails is reported, and the move stands", () =>
+  Effect.gen(function* () {
+    const proposal = handoffProposal("handoff-attach-fails");
+    const h = yield* makeHandoffHarness({ proposal, attachFails: true });
+    yield* h.executor.executeApproved(proposal.proposalId);
+
+    const settled = yield* Ref.get(h.stores.proposalRef);
+    assert.strictEqual(settled.status, "completed");
+    // The continuation and the setup script still follow; nothing is removed.
+    assert.deepStrictEqual(
+      h.commands.map((command) => command.type),
+      ["worktree.create", "thread.meta.update", "thread.attach-to-worktree", "thread.queue.add"],
+    );
+    assert.lengthOf(h.setups, 1);
+    assert.deepStrictEqual(h.removed, []);
+    const result = handoffOutcome(settled);
+    assert.deepInclude(result.execution?.worktreeHandoff, {
+      worktreeAttached: false,
+      continuation: "queued",
+      setupScript: "started",
+    });
+    assert.include(result.detail, "could not link the chat to the worktree's record");
+    const operation = Option.getOrThrow(yield* Ref.get(h.stores.operationRef));
+    assert.notInclude(operation.state.completedSteps, "handoff-attached");
+  }),
+);
+
+it.effect("a setup script that fails to start is reported in fixed words, without its path", () =>
+  Effect.gen(function* () {
+    const proposal = handoffProposal("handoff-setup-fails");
+    const missing = "/workspace/worktrees/project/feature-handoff";
+    const h = yield* makeHandoffHarness({
+      proposal,
+      setupError: new TerminalCwdError({ cwd: missing, reason: "notFound" }),
+    });
+    yield* h.executor.executeApproved(proposal.proposalId);
+
+    const settled = yield* Ref.get(h.stores.proposalRef);
+    assert.strictEqual(settled.status, "completed");
+    const result = handoffOutcome(settled);
+    assert.strictEqual(result.execution?.worktreeHandoff?.setupScript, "failed");
+    assert.include(
+      result.detail,
+      "The setup script failed to start (the worktree folder was not found).",
+    );
+    const operation = Option.getOrThrow(yield* Ref.get(h.stores.operationRef));
+    for (const stored of [result.detail, operation.state.note ?? ""]) {
+      assert.notInclude(stored, missing);
+      assert.notInclude(stored, h.created[0]!.path as string);
+    }
   }),
 );
 
@@ -3924,18 +4114,41 @@ it.effect("refuses an existing branch or a project without Git, creating nothing
 
 it.effect("refuses branch names that would shadow other refs, before Git makes anything", () =>
   Effect.gen(function* () {
-    const gitDriver = { remoteNames: ["origin", "upstream"], resolves: ["v1.0", "feature/x"] };
+    const gitDriver = {
+      remoteNames: ["origin", "upstream"],
+      // `main` and `feature/x` packed: Git's own lookup misses their case variants.
+      refs: [
+        "refs/heads/main",
+        "refs/heads/feature/x",
+        "refs/remotes/origin/main",
+        "refs/tags/v1.0",
+      ],
+      resolves: ["stash"],
+    };
     for (const [branch, problem] of [
       ["origin/main", /shadow the branches of the remote origin/],
       ["upstream/fix", /shadow the branches of the remote upstream/],
-      ["v1.0", /already names a Git ref or commit/],
+      // Remote names and existing refs in any letter case: macOS and Windows checkouts keep
+      // their refs in a file system that ignores case.
+      ["ORIGIN/main", /shadow the branches of the remote origin/],
+      ["Upstream/fix", /shadow the branches of the remote upstream/],
+      ["MAIN", /Branch main already exists.*differ only in letter case/],
+      ["Feature/x", /names the existing Git ref refs\/heads\/feature\/x/],
+      ["V1.0", /names the existing Git ref refs\/tags\/v1\.0/],
+      ["v1.0", /names the existing Git ref refs\/tags\/v1\.0/],
+      ["stash", /already names a Git ref or commit/],
       ["refs/heads/x", /would shadow another Git ref/],
       ["heads/x", /would shadow another Git ref/],
       ["tags/v2", /would shadow another Git ref/],
       ["remotes/origin/main", /would shadow another Git ref/],
-      ["0123456789abcdef0123456789abcdef01234567", /would shadow another Git ref/],
-      ["feature/‮evil", /text-direction control characters/],
-      ["fix⁦x", /text-direction control characters/],
+      ["Refs/Heads/x", /would shadow another Git ref/],
+      ["FETCH_HEAD", /a name Git keeps for itself/],
+      ["auto_merge", /a name Git keeps for itself/],
+      ["0123456789abcdef0123456789abcdef01234567", /reads as a commit id/],
+      ["cafe", /reads as a commit id/],
+      ["feature/‮evil", /only plain ASCII/],
+      ["fix⁦x", /only plain ASCII/],
+      ["zero\u200Bwidth", /only plain ASCII/],
     ] as const) {
       const proposal = handoffProposal(`handoff-shadow-${branch.length}-${branch.charCodeAt(0)}`, {
         branch,
@@ -3946,12 +4159,36 @@ it.effect("refuses branch names that would shadow other refs, before Git makes a
       assert.lengthOf(h.created, 0, branch);
       assert.lengthOf(h.commands, 0, branch);
     }
-    // A plain new name passes, after Git confirmed it resolves to nothing yet.
+    // A plain new name passes, after Git listed no ref of that name in any letter case and
+    // confirmed it resolves to nothing yet.
     const plain = handoffProposal("handoff-plain-name", { branch: "feature/new" });
     const ok = yield* makeHandoffHarness({ proposal: plain, gitDriver });
     yield* ok.executor.executeApproved(plain.proposalId);
     assert.strictEqual((yield* Ref.get(ok.stores.proposalRef)).status, "completed");
+    assert.deepStrictEqual(ok.forEachRefArgs, [
+      [
+        "for-each-ref",
+        "--ignore-case",
+        "--format=%(refname)",
+        "refs/heads/feature/new",
+        "refs/tags/feature/new",
+        "refs/remotes/feature/new",
+      ],
+    ]);
     assert.deepStrictEqual(ok.resolvedNames, ["feature/new"]);
+
+    // Refs that cannot be listed refuse the name rather than let it through.
+    const unlisted = handoffProposal("handoff-refs-unlisted", { branch: "feature/new" });
+    const blind = yield* makeHandoffHarness({
+      proposal: unlisted,
+      gitDriver: { ...gitDriver, listFails: true },
+    });
+    yield* blind.executor.executeApproved(unlisted.proposalId);
+    assert.match(
+      handoffFailure(yield* Ref.get(blind.stores.proposalRef)),
+      /could not read this project's Git refs/,
+    );
+    assert.lengthOf(blind.created, 0);
   }),
 );
 

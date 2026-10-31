@@ -11,12 +11,13 @@ import {
   type AgentControlCapability,
   type OrchestrationThreadShell,
 } from "@ryco/contracts";
-import { Deferred, Effect, Fiber, Option } from "effect";
+import { Cause, Deferred, Effect, Fiber, Option } from "effect";
 
 import { computeAgentControlPlanDigest } from "../planDigest.ts";
 import type { AgentControlSessionRecord } from "../Services/AgentControlSessionRegistry.ts";
-import type { AgentControlMcpTools } from "./tools.ts";
+import { replayedAgentControlMutation, type AgentControlMcpTools } from "./tools.ts";
 import { withWorktreeHandoffTools } from "./worktreeHandoffTools.ts";
+import { setupFailureText, worktreeHandoffBranchProblem } from "../worktreeHandoffRuns.ts";
 
 const now = "2026-10-31T08:00:00.000Z";
 const callerId = ThreadId.make("thread-caller");
@@ -122,25 +123,32 @@ const harness = (
         if (input.gate) yield* Deferred.await(input.gate);
         return { receipt: receipt("approved") as never, replayed: false };
       }),
-    proposals: {
-      findByRequest: (principal, requestId) =>
-        Effect.succeed(
-          principal.kind !== "provider-session" ||
-            principal.threadId !== callerId ||
-            input.earlier?.[requestId] === undefined
-            ? Option.none()
-            : Option.some({
-                ...(receipt("completed") as object),
-                proposalId: `proposal-${requestId}`,
-                requestId,
-                principal: { kind: "provider-session", threadId: callerId },
-                plan: input.earlier[requestId],
-                planDigest: computeAgentControlPlanDigest(input.earlier[requestId]!),
-                promptSummary: "Move thread",
-                planVersion: 1,
-              } as never),
-        ),
-    },
+    // The node's own replay, over the caller's earlier requests.
+    replay: (caller, requestId, plan) =>
+      replayedAgentControlMutation(
+        {
+          findByRequest: (principal, earlierId) =>
+            Effect.succeed(
+              principal.kind !== "provider-session" ||
+                principal.threadId !== callerId ||
+                input.earlier?.[earlierId] === undefined
+                ? Option.none()
+                : Option.some({
+                    ...(receipt("completed") as object),
+                    proposalId: `proposal-${earlierId}`,
+                    requestId: earlierId,
+                    principal: { kind: "provider-session", threadId: callerId },
+                    plan: input.earlier[earlierId],
+                    planDigest: computeAgentControlPlanDigest(input.earlier[earlierId]!),
+                    promptSummary: "Move thread",
+                    planVersion: 1,
+                  } as never),
+            ),
+        },
+        caller,
+        requestId,
+        plan,
+      ),
     waitForTerminal: (_session, proposalId) =>
       Effect.sync(() => {
         waited.push(proposalId);
@@ -273,29 +281,65 @@ describe("ryco_worktree_handoff", () => {
       const archived = harness({ thread: { archivedAt: now } });
       assert.match(text(yield* archived.call(TOOLS.handoff, args)), /archived or settled/);
       const badBranch = harness();
-      for (const branch of ["-x", "a..b", "a b", "feature.lock", "HEAD"]) {
+      for (const branch of ["-x", "a..b", "feature.lock", "HEAD"]) {
         assert.match(
           text(yield* badBranch.call(TOOLS.handoff, { ...args, branch })),
           /Git does not accept/,
         );
       }
-      // Names Git would read as another ref, or that read differently from what Git stores.
+      // Names Git would read as another ref, in any letter case.
       for (const branch of [
         "refs/heads/main",
         "heads/main",
         "tags/v1",
         "remotes/origin/main",
-        "f".repeat(40),
-        "a".repeat(64),
+        "Refs/heads/main",
+        "HEADS/main",
       ]) {
         assert.match(
           text(yield* badBranch.call(TOOLS.handoff, { ...args, branch })),
           /would shadow another Git ref/,
+          branch,
         );
       }
-      for (const branch of ["fix-\u202Etxt", "a\u2066b", "\u202Amain"]) {
+      // Git's pseudo-refs, in any letter case.
+      for (const branch of [
+        "FETCH_HEAD",
+        "orig_head",
+        "Cherry_Pick_Head",
+        "Head",
+        "AUTO_MERGE",
+        "auto_merge",
+        "MERGE_AUTOSTASH",
+      ]) {
+        assert.match(
+          text(yield* badBranch.call(TOOLS.handoff, { ...args, branch })),
+          /a name Git keeps for itself/,
+          branch,
+        );
+      }
+      // Hex-only names of 4 or more characters read as (abbreviated) commit ids.
+      for (const branch of ["f".repeat(40), "a".repeat(64), "cafe", "DEADBEEF", "0123"]) {
+        assert.match(
+          text(yield* badBranch.call(TOOLS.handoff, { ...args, branch })),
+          /reads as a commit id/,
+          branch,
+        );
+      }
+      // Anything but printable ASCII: text-direction and invisible characters, look-alikes.
+      for (const branch of [
+        "fix-\u202Etxt",
+        "a\u2066b",
+        "\u202Amain",
+        "zero\u200Bwidth",
+        "mark\u200Eltr",
+        "arabic\u061Cmark",
+        "m\u0430in",
+        "caf\u00E9",
+        "a b",
+      ]) {
         const answer = text(yield* badBranch.call(TOOLS.handoff, { ...args, branch }));
-        assert.match(answer, /text-direction control characters/);
+        assert.match(answer, /only plain ASCII/, JSON.stringify(branch));
         // The answer never echoes such a name.
         assert.notInclude(answer, branch);
       }
@@ -402,4 +446,50 @@ describe("ryco_worktree_status", () => {
       );
     }),
   );
+});
+
+describe("worktree handoff rules", () => {
+  it("lets plain names through that only look like refused ones", () => {
+    for (const branch of [
+      "feature/handoff",
+      "overhead",
+      "ahead",
+      "fix/fetch_head",
+      "abc",
+      "cafe-fix",
+      "feature/deadbeef",
+      "v1.2.3",
+      "refsx/main",
+    ]) {
+      assert.isNull(worktreeHandoffBranchProblem(branch), branch);
+    }
+  });
+
+  it("words a setup failure by its tag, never with the error's own text", () => {
+    const cwd = "/Users/someone/worktrees/project/feature";
+    const failure = (error: object) => setupFailureText(Cause.fail(error));
+    const cwdError = (reason: string) => ({
+      _tag: "TerminalCwdError",
+      reason,
+      cwd,
+      message: `Terminal cwd does not exist: ${cwd}`,
+    });
+    assert.strictEqual(failure(cwdError("notFound")), "the worktree folder was not found");
+    assert.strictEqual(failure(cwdError("notDirectory")), "the worktree path is not a folder");
+    assert.strictEqual(failure(cwdError("statFailed")), "the worktree folder could not be read");
+    assert.strictEqual(
+      failure({ _tag: "TerminalBusyError", message: `busy in ${cwd}` }),
+      "its terminal was busy",
+    );
+    assert.strictEqual(
+      failure({ _tag: "PtySpawnError", message: `spawn ${cwd}` }),
+      "its terminal could not start",
+    );
+    for (const unknown of [new Error(`Failed in ${cwd}`), { _tag: "constructor" }, {}]) {
+      const text = failure(unknown);
+      assert.strictEqual(text, "an unexpected error (the server log has the details)");
+      assert.notInclude(text, cwd);
+    }
+    assert.notInclude(setupFailureText(Cause.die(new Error(cwd))), cwd);
+  });
 });

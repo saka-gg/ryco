@@ -1214,6 +1214,40 @@ export const proposalVisibleToSession = (
   proposal.principal.threadId === session.threadId;
 
 /**
+ * The caller's own earlier request of `requestId`, as a replayed mutation answer (its receipt),
+ * or none when the id is new. The same id with another plan is refused.
+ */
+export const replayedAgentControlMutation = (
+  proposals: Pick<AgentControlProposalServiceShape, "findByRequest">,
+  session: AgentControlSessionRecord,
+  requestId: Parameters<AgentControlProposalServiceShape["submit"]>[0]["requestId"],
+  plan: AgentControlActionPlan,
+) =>
+  Effect.gen(function* () {
+    if (proposals.findByRequest === undefined) return Option.none();
+    const existing = yield* proposals
+      .findByRequest(
+        {
+          kind: "provider-session",
+          threadId: session.threadId,
+          providerInstanceId: session.providerInstanceId,
+        },
+        requestId,
+      )
+      .pipe(Effect.mapError(() => new ToolFailure("Control request lookup failed.")));
+    if (Option.isNone(existing)) return Option.none();
+    if (existing.value.planDigest !== computeAgentControlPlanDigest(plan)) {
+      return yield* failTool("Request ID was already used with a different plan.");
+    }
+    return Option.some(
+      Schema.encodeSync(AgentControlMcpMutationResult)({
+        receipt: toAgentControlProposalReceipt(existing.value),
+        replayed: true,
+      }),
+    );
+  });
+
+/**
  * Submits a validated mutation plan for the caller's exact turn: routine plans execute, the rest
  * wait for the user's approval. Answers with the durable receipt, as every mutation tool does.
  */
@@ -1528,26 +1562,13 @@ export const makeAgentControlMcpTools = (deps: AgentControlMcpToolDeps): AgentCo
       }
       if (!authority) return yield* failTool("Exact active-turn authority required.");
       const input = yield* decodeArgs(AgentControlProposeWorkspaceInput, args);
-      if (deps.proposals.findByRequest) {
-        const existing = yield* deps.proposals
-          .findByRequest(
-            {
-              kind: "provider-session",
-              threadId: session.threadId,
-              providerInstanceId: session.providerInstanceId,
-            },
-            input.requestId,
-          )
-          .pipe(Effect.mapError(() => new ToolFailure("Control request lookup failed.")));
-        if (Option.isSome(existing)) {
-          if (existing.value.planDigest !== computeAgentControlPlanDigest(input.plan))
-            return yield* failTool("Request ID was already used with a different plan.");
-          return Schema.encodeSync(AgentControlMcpMutationResult)({
-            receipt: toAgentControlProposalReceipt(existing.value),
-            replayed: true,
-          });
-        }
-      }
+      const replayed = yield* replayedAgentControlMutation(
+        deps.proposals,
+        session,
+        input.requestId,
+        input.plan,
+      );
+      if (Option.isSome(replayed)) return replayed.value;
       return yield* submitMutation({
         session,
         authority,

@@ -27,19 +27,14 @@ import {
   AgentControlWorktreeHandoffPlan,
   rejectExcessProperties,
   type AgentControlMcpControlRequestResult,
-  AgentControlMcpMutationResult,
+  type AgentControlMcpMutationResult,
   type AgentControlProposalId,
   type TurnId,
 } from "@ryco/contracts";
 import { Effect, Option, Schema } from "effect";
 
 import type { ProjectionSnapshotQueryShape } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
-import { computeAgentControlPlanDigest } from "../planDigest.ts";
 import type { AgentControlPolicyShape } from "../Services/AgentControlPolicy.ts";
-import {
-  toAgentControlProposalReceipt,
-  type AgentControlProposalServiceShape,
-} from "../Services/AgentControlProposalService.ts";
 import type {
   AgentControlSessionRecord,
   AgentControlSessionRegistryShape,
@@ -68,7 +63,8 @@ const handoffDescriptor: AgentControlMcpToolDescriptor = {
         type: "string",
         minLength: 1,
         maxLength: 256,
-        description: "The new branch, which must not exist yet.",
+        description:
+          "The new branch, a plain ASCII name such as feature/my-change that no branch, tag or remote branch has yet in any letter case.",
       },
       baseRef: {
         type: "string",
@@ -151,8 +147,19 @@ export interface WorktreeHandoffToolDeps {
     typeof AgentControlMcpControlRequestResult.Encoded,
     { readonly reason: string }
   >;
-  /** Finds the caller's own earlier request of an id, so a replay answers with its receipt. */
-  readonly proposals?: Pick<AgentControlProposalServiceShape, "findByRequest">;
+  /**
+   * The caller's own earlier request of an id, so a replay answers with its receipt
+   * (`replayedAgentControlMutation`; handed in, as this lazily loaded module imports no boot
+   * values: a shared one would split into a chunk of its own that boot then loads too).
+   */
+  readonly replay?: (
+    session: AgentControlSessionRecord,
+    requestId: AgentControlRequestId,
+    plan: AgentControlWorktreeHandoffPlan,
+  ) => Effect.Effect<
+    Option.Option<typeof AgentControlMcpMutationResult.Encoded>,
+    { readonly reason: string }
+  >;
   /** The branch the shared checkout is on (null: detached), when Git can be read here. */
   readonly checkoutBranch?: (
     cwd: string,
@@ -241,30 +248,11 @@ export function withWorktreeHandoffTools(
 
   /** The caller's earlier request of this id, when it is one: its receipt, not a new request. */
   const replayOf = (session: AgentControlSessionRecord, input: typeof HandoffInput.Type) =>
-    Effect.gen(function* () {
-      const findByRequest = deps.proposals?.findByRequest;
-      if (findByRequest === undefined) return Option.none();
-      const existing = yield* findByRequest(
-        {
-          kind: "provider-session",
-          threadId: session.threadId,
-          providerInstanceId: session.providerInstanceId,
-        },
-        input.requestId,
-      ).pipe(Effect.mapError(() => new ToolFailure("Control request lookup failed.")));
-      if (Option.isNone(existing)) return Option.none();
-      if (existing.value.planDigest !== computeAgentControlPlanDigest(planOf(session, input))) {
-        return yield* Effect.fail(
-          new ToolFailure("Request ID was already used with a different plan."),
-        );
-      }
-      return Option.some(
-        Schema.encodeSync(AgentControlMcpMutationResult)({
-          receipt: toAgentControlProposalReceipt(existing.value),
-          replayed: true,
-        }),
-      );
-    });
+    deps.replay === undefined
+      ? Effect.succeed(Option.none<typeof AgentControlMcpMutationResult.Encoded>())
+      : deps
+          .replay(session, input.requestId, planOf(session, input))
+          .pipe(Effect.mapError((error) => new ToolFailure(error.reason)));
 
   /** Waits (bounded) for the request's outcome and answers with it. */
   const settle = (

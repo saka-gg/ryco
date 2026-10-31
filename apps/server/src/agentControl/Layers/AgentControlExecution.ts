@@ -798,6 +798,7 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
               loadThread,
               git,
               gitDriver,
+              readModel: engine.getReadModel,
               ids: { commandIdFor, messageIdFor, worktreeIdFor },
               operation: () => operation,
               checkpoint,
