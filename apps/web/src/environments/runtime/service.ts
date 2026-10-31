@@ -1915,13 +1915,24 @@ async function forgetFoldedEnvironment(environmentId: EnvironmentId): Promise<vo
   clearProjectIconCache(environmentId);
 }
 
-export async function removeSavedEnvironment(environmentId: EnvironmentId): Promise<void> {
+/**
+ * Ends what this client holds of a saved machine while it is in use: its
+ * connection (and SSH tunnel), thread subscriptions, threads and config. The
+ * record, its credential and its project artwork are the caller's to keep or
+ * forget.
+ */
+export async function teardownSavedEnvironmentSession(environmentId: EnvironmentId): Promise<void> {
   await disconnectSavedEnvironment(environmentId);
   disposeThreadDetailSubscriptionsForEnvironment(environmentId);
-  useSavedEnvironmentRegistryStore.getState().remove(environmentId);
   useSavedEnvironmentRuntimeStore.getState().clear(environmentId);
   forgetEnvironmentServerConfig(environmentId);
   useStore.getState().removeEnvironmentState(environmentId);
+}
+
+export async function removeSavedEnvironment(environmentId: EnvironmentId): Promise<void> {
+  // The teardown reads the record (an SSH machine's tunnel) before it goes.
+  await teardownSavedEnvironmentSession(environmentId);
+  useSavedEnvironmentRegistryStore.getState().remove(environmentId);
   // Project artwork is cached per node, past its connections: forget it too.
   clearProjectIconCache(environmentId);
   await removeSavedEnvironmentBearerToken(environmentId);

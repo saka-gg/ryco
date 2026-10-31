@@ -44,7 +44,10 @@ import {
 import { useNewThreadHandler } from "../hooks/useHandleNewThread";
 import { flushPreviewFiles, hasUnsavedPreviewFiles } from "./previewFileSessions";
 import type { BackgroundTask } from "@ryco/shared/backgroundWork";
-import { isThreadHistoryAnchorMissing } from "@ryco/client-runtime/connection";
+import {
+  isSavedEnvironmentSwitchedOff,
+  isThreadHistoryAnchorMissing,
+} from "@ryco/client-runtime/connection";
 import {
   deriveThreadBackgroundWork,
   keptChangesRestoreNote,
@@ -1920,7 +1923,9 @@ export default function ChatView(props: ChatViewProps) {
             },
           ]
         : []),
-      ...Object.values(savedEnvironmentRegistry).map((record) => {
+      ...Object.values(savedEnvironmentRegistry).flatMap((record) => {
+        // A machine switched off is not offered: it would only ever be unreachable.
+        if (isSavedEnvironmentSwitchedOff(record)) return [];
         const runtime = savedEnvironmentRuntimeById[record.environmentId];
         return {
           environmentId: record.environmentId,

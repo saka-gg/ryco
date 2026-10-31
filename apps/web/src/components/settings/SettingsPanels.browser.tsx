@@ -155,6 +155,11 @@ vi.mock("../../desktopRelaunchGuard.logic", async (importOriginal) => ({
 const mockUpdateEnvironmentServerSettings = vi.hoisted(() => vi.fn().mockResolvedValue(undefined));
 const originalNavigatorPlatform = navigator.platform;
 
+// The saved-machine switch reaches the real runtime the mock above stands in for.
+vi.mock("../../environments/runtime/savedEnvironmentSwitch", () => ({
+  setSavedEnvironmentEnabled: vi.fn(),
+}));
+
 vi.mock("../../environments/runtime", () => {
   const primaryConnection = {
     kind: "primary" as const,

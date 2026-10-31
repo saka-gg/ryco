@@ -1,5 +1,6 @@
 import { type ServerLifecycleWelcomePayload, WS_METHODS } from "@ryco/contracts";
 import { scopedProjectKey, scopeProjectRef } from "@ryco/client-runtime/scoped";
+import { isSavedEnvironmentSwitchedOff } from "@ryco/client-runtime/connection";
 import { Outlet, useLocation, useNavigate } from "@tanstack/react-router";
 import { useEffect, useEffectEvent, useRef, useState } from "react";
 
@@ -309,7 +310,9 @@ function HostedStaticEnvironmentBootstrap() {
       return;
     }
 
-    const firstSavedEnvironment = listSavedEnvironmentRecords()[0];
+    const firstSavedEnvironment = listSavedEnvironmentRecords().find(
+      (record) => !isSavedEnvironmentSwitchedOff(record),
+    );
     if (!firstSavedEnvironment) {
       return;
     }

@@ -89,6 +89,26 @@ describe("clientPersistenceStorage", () => {
     });
   });
 
+  it("keeps a switched-off machine off and its browser credential stored", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-04-09T00:00:00.000Z"));
+    getTestWindow();
+    const {
+      readBrowserSavedEnvironmentRegistry,
+      readBrowserSavedEnvironmentSecret,
+      writeBrowserSavedEnvironmentRegistry,
+      writeBrowserSavedEnvironmentSecret,
+    } = await import("./clientPersistenceStorage");
+    const switchedOff = { ...savedRegistryRecord, disabledAt: "2026-04-09T00:00:00.000Z" };
+
+    writeBrowserSavedEnvironmentRegistry([savedRegistryRecord]);
+    expect(writeBrowserSavedEnvironmentSecret(testEnvironmentId, "bearer-token")).toBe(true);
+    writeBrowserSavedEnvironmentRegistry([switchedOff]);
+
+    expect(readBrowserSavedEnvironmentRegistry()).toEqual([switchedOff]);
+    expect(readBrowserSavedEnvironmentSecret(testEnvironmentId)).toBe("bearer-token");
+  });
+
   it("migrates legacy browser secrets to the explicit expiry format on read", async () => {
     vi.useFakeTimers();
     vi.setSystemTime(new Date("2026-04-09T00:00:00.000Z"));

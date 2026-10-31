@@ -39,14 +39,20 @@ import {
   createEnvironmentConnectionSupervisor,
   type EnvironmentSupervisorInput,
   SAVED_ENVIRONMENT_CONNECT_TIMEOUT_MS,
+  SavedEnvironmentConnectionCancelledError,
   SavedEnvironmentCredentialError,
+  SavedEnvironmentSwitchedOffError,
   savedEnvironmentRetryDelayMs,
   type ShellAcceptance,
   VIEW_RESUME_HEARTBEAT_GRACE_MS,
   VIEW_RESUME_SILENT_MS,
 } from "./supervision.ts";
 
-type Record = { readonly environmentId: EnvironmentId; readonly lastConnectedAt?: string };
+type Record = {
+  readonly environmentId: EnvironmentId;
+  readonly lastConnectedAt?: string;
+  readonly disabledAt?: string;
+};
 
 const remote = "env-remote" as EnvironmentId;
 
@@ -614,6 +620,156 @@ describe("saved environment retry", () => {
     stop();
     await vi.advanceTimersByTimeAsync(120_000);
     expect(attempts).toBe(1);
+  });
+});
+
+describe("switched-off saved machines", () => {
+  const OFF_AT = "2026-10-31T09:00:00.000Z";
+  const other = "env-other" as EnvironmentId;
+
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  /** A saved connection as the platform registers it, which a sync can drop. */
+  const savedConnection = (environmentId: EnvironmentId) =>
+    ({
+      environmentId,
+      kind: "saved",
+      knownEnvironment: { source: "manual" },
+      client: { isHeartbeatFresh: () => false },
+      reconnect: vi.fn(async () => undefined),
+      dispose: vi.fn(async () => undefined),
+    }) as unknown as EnvironmentConnection;
+
+  it("never connects one on launch, a registry sync, a wake or a network change", async () => {
+    const attempts: EnvironmentId[] = [];
+    const { supervisor, notifyRegistry, resume, networkChanged } = makeSupervisor(
+      async (record) => {
+        attempts.push(record.environmentId);
+        throw new Error("connect ECONNREFUSED");
+      },
+      { records: [{ environmentId: remote, disabledAt: OFF_AT }, { environmentId: other }] },
+    );
+    const stop = supervisor.start();
+
+    await vi.advanceTimersByTimeAsync(0);
+    notifyRegistry();
+    await vi.advanceTimersByTimeAsync(5_000);
+    resume("online");
+    networkChanged();
+    await vi.advanceTimersByTimeAsync(120_000);
+
+    expect(attempts).not.toContain(remote);
+    expect(attempts.filter((environmentId) => environmentId === other).length).toBeGreaterThan(1);
+    stop();
+  });
+
+  it("refuses an explicit connect with a typed error, before any connect work", async () => {
+    const connect = vi.fn(async (record: Record) => connectionFor(record));
+    const { supervisor } = makeSupervisor(connect, {
+      records: [{ environmentId: remote, disabledAt: OFF_AT }],
+    });
+
+    const attempt = supervisor.ensureSavedEnvironmentConnection({ environmentId: remote }, () =>
+      connect({ environmentId: remote }),
+    );
+
+    await expect(attempt).rejects.toBeInstanceOf(SavedEnvironmentSwitchedOffError);
+    await expect(attempt).rejects.toBeInstanceOf(SavedEnvironmentConnectionCancelledError);
+    expect(connect).not.toHaveBeenCalled();
+  });
+
+  it("drops a connected one when it is switched off and reconnects it when switched on", async () => {
+    const records: Array<Record> = [{ environmentId: remote }];
+    const disconnected: EnvironmentId[] = [];
+    let attempts = 0;
+    const harness = makeSupervisor(
+      async (record) => {
+        attempts += 1;
+        return harness.supervisor.register(savedConnection(record.environmentId));
+      },
+      {
+        records,
+        disconnectSavedEnvironment: async (environmentId) => {
+          disconnected.push(environmentId);
+          await harness.supervisor.remove(environmentId);
+        },
+      },
+    );
+    const stop = harness.supervisor.start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(attempts).toBe(1);
+    expect(harness.supervisor.read(remote)).not.toBeNull();
+
+    records[0] = { environmentId: remote, disabledAt: OFF_AT };
+    harness.notifyRegistry();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(disconnected).toEqual([remote]);
+    expect(harness.supervisor.read(remote)).toBeNull();
+
+    // A wake reconnects live sockets and retries failures; there is neither.
+    harness.resume("online");
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(attempts).toBe(1);
+
+    records[0] = { environmentId: remote };
+    harness.notifyRegistry();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(attempts).toBe(2);
+    expect(harness.supervisor.read(remote)).not.toBeNull();
+    stop();
+  });
+
+  it("stops the retry ladder of an unreachable one that is switched off", async () => {
+    const records: Array<Record> = [{ environmentId: remote }];
+    let attempts = 0;
+    const { supervisor, notifyRegistry } = makeSupervisor(
+      async () => {
+        attempts += 1;
+        throw new Error("connect ECONNREFUSED");
+      },
+      { records },
+    );
+    const stop = supervisor.start();
+    await vi.advanceTimersByTimeAsync(0);
+    expect(attempts).toBe(1);
+
+    records[0] = { environmentId: remote, disabledAt: OFF_AT };
+    notifyRegistry();
+    await vi.advanceTimersByTimeAsync(120_000);
+    expect(attempts).toBe(1);
+    stop();
+  });
+
+  it("gives up an attempt under way and drops what it opened", async () => {
+    const records: Array<Record> = [{ environmentId: remote }];
+    let finish!: () => void;
+    const opened = savedConnection(remote);
+    const harness = makeSupervisor(
+      (record) =>
+        new Promise<EnvironmentConnection>((resolve) => {
+          finish = () => resolve(harness.supervisor.register(opened));
+          void record;
+        }),
+      { records },
+    );
+    const stop = harness.supervisor.start();
+    await vi.advanceTimersByTimeAsync(0);
+
+    records[0] = { environmentId: remote, disabledAt: OFF_AT };
+    harness.notifyRegistry();
+    await vi.advanceTimersByTimeAsync(0);
+    finish();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(harness.supervisor.read(remote)).toBeNull();
+    expect(opened.dispose).toHaveBeenCalled();
+    stop();
   });
 });
 

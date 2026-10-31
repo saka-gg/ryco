@@ -19,6 +19,19 @@ export interface SavedEnvironmentRecord {
   readonly lastConnectedAt: string | null;
   readonly desktopSsh?: PersistedSavedEnvironmentRecord["desktopSsh"];
   readonly hubLink?: PersistedSavedEnvironmentRecord["hubLink"];
+  /** When the user switched the machine off; absent while it is on. */
+  readonly disabledAt?: string;
+}
+
+/**
+ * The user switched this saved machine off: it stays saved with its credential
+ * and cached artwork, and every connect path (sync, resume, launch, an explicit
+ * connect) leaves it alone until it is switched on again.
+ */
+export function isSavedEnvironmentSwitchedOff(
+  record: { readonly disabledAt?: string | undefined } | null | undefined,
+): boolean {
+  return typeof record?.disabledAt === "string";
 }
 
 export interface SavedEnvironmentKV {

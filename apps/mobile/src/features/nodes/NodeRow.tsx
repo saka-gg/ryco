@@ -27,6 +27,8 @@ export interface NodeRowProps {
   readonly selected: boolean;
   readonly selectable?: boolean;
   readonly disabled?: boolean;
+  /** Shown faded but still actionable, like a machine that is switched off. */
+  readonly dimmed?: boolean;
   readonly showDivider?: boolean;
   readonly onPress?: () => void;
   readonly actions?: ReadonlyArray<NodeRowAction>;
@@ -34,7 +36,7 @@ export interface NodeRowProps {
 
 function NodeRowContent(props: NodeRowProps) {
   return (
-    <View className="flex-row items-start gap-3 px-4 py-4">
+    <View className={cn("flex-row items-start gap-3 px-4 py-4", props.dimmed && "opacity-45")}>
       {props.environmentId && (
         <DeviceIcon
           environmentId={props.environmentId}

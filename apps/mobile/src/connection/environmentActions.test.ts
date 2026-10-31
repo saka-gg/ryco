@@ -23,6 +23,11 @@ vi.mock("expo-sqlite/kv-store", () => ({
 }));
 vi.mock("expo-linking", () => ({ getInitialURL: async () => null }));
 vi.mock("expo-constants", () => ({ default: { expoConfig: { extra: {} } } }));
+const purgeEnvironmentSnapshot = vi.hoisted(() => vi.fn());
+vi.mock("../persistence/environmentSnapshotPersistence", () => ({
+  purgeEnvironmentSnapshot,
+  markEnvironmentSnapshotDirty: () => undefined,
+}));
 
 import { createEnvironmentActions, type EnvironmentActionsDeps } from "./environmentActions";
 import { useStore } from "../state/threadsRuntime";
@@ -60,7 +65,14 @@ function fakeRegistry(
       persistRecord,
       writeBearerToken,
       removeBearerToken,
-      registryStore: { getState: () => ({ upsert, remove: removeRecord, rename }) },
+      registryStore: {
+        getState: () => ({
+          byId: overrides.priorRecord ? { [ENV]: overrides.priorRecord } : {},
+          upsert,
+          remove: removeRecord,
+          rename,
+        }),
+      },
       runtimeStore: { getState: () => ({ clear: clearRuntime }) },
     },
     remoteApi: {
@@ -216,7 +228,69 @@ describe("environmentActions", () => {
     // latch, approval and legacy consent too. There is no generic secret-wipe
     // path this rides on, so a missed registration would show up only here.
     expect(forgetEnvironment).toHaveBeenCalledWith(ENV);
+    expect(purgeEnvironmentSnapshot).toHaveBeenCalledWith(ENV);
 
     removeEnvironmentState.mockRestore();
+  });
+
+  const SAVED = {
+    environmentId: ENV,
+    label: "Studio",
+    httpBaseUrl: "http://node.local/",
+    wsBaseUrl: "ws://node.local/",
+    createdAt: "2026-07-01T00:00:00.000Z",
+    lastConnectedAt: null,
+  } as SavedEnvironmentRecord;
+
+  it("switching a node off ends its session but keeps its pairing, trust, snapshot and artwork", async () => {
+    const reg = fakeRegistry({ priorRecord: SAVED });
+    purgeEnvironmentSnapshot.mockClear();
+    forgetEnvironment.mockClear();
+    const removeEnvironmentState = vi
+      .spyOn(useStore.getState(), "removeEnvironmentState")
+      .mockImplementation(() => undefined);
+    const iconProject = "icon-project-kept" as never;
+    await readProjectIconSource(
+      {
+        projects: { readIcon: async () => ({ mimeType: "image/png", dataBase64: "aWNvbg==" }) },
+      } as never,
+      ENV,
+      iconProject,
+      null,
+    );
+
+    await actions(reg).setSavedEnvironmentEnabled(ENV, false);
+
+    // The shared catalog switch is what keeps it off across syncs and launches.
+    expect(reg.spies.upsert).toHaveBeenCalledWith({ ...SAVED, disabledAt: expect.any(String) });
+    expect(reg.spies.upsert.mock.invocationCallOrder[0]).toBeLessThan(
+      reg.spies.supervisorRemove.mock.invocationCallOrder[0] ?? 0,
+    );
+    expect(reg.spies.cancelPendingSavedEnvironmentConnection).toHaveBeenCalledWith(ENV);
+    expect(reg.spies.supervisorRemove).toHaveBeenCalledWith(ENV);
+    expect(reg.spies.disposeForEnv).toHaveBeenCalledWith(ENV);
+    expect(reg.spies.clearRuntime).toHaveBeenCalledWith(ENV);
+    expect(removeEnvironmentState).toHaveBeenCalledWith(ENV);
+    // Nothing that pairing again would have to restore is forgotten.
+    expect(reg.spies.removeRecord).not.toHaveBeenCalled();
+    expect(reg.spies.removeBearerToken).not.toHaveBeenCalled();
+    expect(reg.spies.forgetSessionHint).not.toHaveBeenCalled();
+    expect(forgetEnvironment).not.toHaveBeenCalled();
+    expect(purgeEnvironmentSnapshot).not.toHaveBeenCalled();
+    expect(peekProjectIconSource(ENV, iconProject, null)).not.toBeUndefined();
+
+    removeEnvironmentState.mockRestore();
+  });
+
+  it("switching a node on only flips the switch: the supervisor's sync connects it", async () => {
+    const reg = fakeRegistry({
+      priorRecord: { ...SAVED, disabledAt: "2026-10-31T09:00:00.000Z" },
+    });
+
+    await actions(reg).setSavedEnvironmentEnabled(ENV, true);
+
+    expect(reg.spies.upsert).toHaveBeenCalledWith(SAVED);
+    expect(reg.spies.supervisorRemove).not.toHaveBeenCalled();
+    expect(reg.spies.clearRuntime).not.toHaveBeenCalled();
   });
 });

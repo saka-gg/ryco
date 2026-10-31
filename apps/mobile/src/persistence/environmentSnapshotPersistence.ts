@@ -122,6 +122,11 @@ export interface SnapshotPersistenceDeps {
    * not purge its store rows or its snapshot.
    */
   readonly hasDirectEnvironment: (environmentId: EnvironmentId) => boolean;
+  /**
+   * A node paired directly that the user switched off. Its stored snapshot is
+   * kept for when it is switched on, but not shown while it is off.
+   */
+  readonly isEnvironmentSwitchedOff?: (environmentId: EnvironmentId) => boolean;
   /** App backgrounding; pending captures are flushed before the OS may suspend us. */
   readonly subscribeBackground?: (listener: () => void) => () => void;
   /**
@@ -604,6 +609,8 @@ export function createSnapshotPersistenceRuntime(deps: SnapshotPersistenceDeps) 
             warn("could not remove stored conversation text"),
           );
         }
+        // Switched off: kept for when it is on again, never shown meanwhile.
+        if (deps.isEnvironmentSwitchedOff?.(environmentId) === true) continue;
         // Live data wins: a cached projection would be ignored at commit, so
         // decoding it is wasted work on the launch path.
         if (hasState(environmentId)) continue;
@@ -707,6 +714,7 @@ function createPreferencesContentCache(): ThreadContentCacheSetting {
 export async function initializeMobileSnapshotPersistence(deps: {
   readonly kv: Pick<KVService, "getItem" | "setItem" | "removeItem">;
   readonly hasDirectEnvironment: (environmentId: EnvironmentId) => boolean;
+  readonly isEnvironmentSwitchedOff?: (environmentId: EnvironmentId) => boolean;
   readonly subscribeBackground?: (listener: () => void) => () => void;
 }): Promise<void> {
   if (activeRuntime) return;
@@ -724,6 +732,9 @@ export async function initializeMobileSnapshotPersistence(deps: {
     store: useStore,
     now: () => Date.now(),
     hasDirectEnvironment: deps.hasDirectEnvironment,
+    ...(deps.isEnvironmentSwitchedOff
+      ? { isEnvironmentSwitchedOff: deps.isEnvironmentSwitchedOff }
+      : {}),
     contentCache,
     ...(deps.subscribeBackground ? { subscribeBackground: deps.subscribeBackground } : {}),
   });
