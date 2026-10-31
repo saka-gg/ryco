@@ -46,6 +46,12 @@ export interface HostedEnvironmentSessionRecord {
   readonly sessionEstablished: boolean;
   readonly sessionRecoveredAfterUnknown: boolean;
   readonly failure: HostedRelayFailure | null;
+  /**
+   * The kind of the failure the transport is waiting out: its last failure since it was last
+   * online, cleared when it is online again. Unlike `failure`, a later plain disconnect never
+   * brings an earlier outage's kind back.
+   */
+  readonly outageFailure: HostedRelayFailureKind | null;
   /** The {@link nodeKey} a terminal failure happened under; it blocks reconnecting until it changes. */
   readonly terminalNodeKey: string | null;
   /** The record's own session-sync deadline expired, or its shell snapshot failed. */
@@ -549,6 +555,7 @@ export function createHostedEnvironmentSessions(
       sessionEstablished: false,
       sessionRecoveredAfterUnknown: false,
       failure: null,
+      outageFailure: null,
       terminalNodeKey: null,
       syncFailed: false,
       snapshotAcceptedAt: null,
@@ -643,6 +650,7 @@ export function createHostedEnvironmentSessions(
         sessionEstablished: false,
         sessionRecoveredAfterUnknown: false,
         failure: null,
+        outageFailure: null,
         terminalNodeKey: null,
         syncFailed: false,
         snapshotAcceptedAt: null,
@@ -716,6 +724,7 @@ export function createHostedEnvironmentSessions(
         patch(environmentId, generation, (current) => ({
           transportStatus: status,
           transportReachedOnline: status === "online" || current.transportReachedOnline,
+          ...(status === "online" ? { outageFailure: null } : {}),
         }))
       ) {
         publish();
@@ -747,11 +756,13 @@ export function createHostedEnvironmentSessions(
           failure.retryable
             ? {
                 failure,
+                outageFailure: failure.kind,
                 transportStatus: "reconnecting",
                 sessionStatus: stickyDeliveryUnknown(current),
               }
             : {
                 failure,
+                outageFailure: failure.kind,
                 transportStatus: "terminal-failure",
                 effectiveRole: null,
                 sessionStatus: stickyDeliveryUnknown(current),
@@ -966,14 +977,10 @@ export function resetHostedEnvironmentSessionsForTests(): void {
   configuredPorts = defaultPorts;
 }
 
-/**
- * The failure a connection is waiting out: its last failure while its transport
- * is not online. A session record keeps its generation's last failure after it
- * reconnects, so an online transport means there is none.
- */
+/** The failure a connection is waiting out, or null while its transport is online. */
 export function hostedOutageFailure(record: {
   readonly transportStatus: string;
-  readonly failure: Pick<HostedRelayFailure, "kind"> | null;
+  readonly outageFailure: HostedRelayFailureKind | null;
 }): HostedRelayFailureKind | null {
-  return record.transportStatus === "online" ? null : (record.failure?.kind ?? null);
+  return record.transportStatus === "online" ? null : record.outageFailure;
 }

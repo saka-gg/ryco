@@ -50,16 +50,16 @@ export interface NodeRouteInput {
   readonly formatTime?: (ms: number) => string;
 }
 
-const DAY_MS = 24 * 60 * 60_000;
+/** Local midnight of `ms`'s day. */
+function startOfLocalDay(ms: number): number {
+  const date = new Date(ms);
+  date.setHours(0, 0, 0, 0);
+  return date.getTime();
+}
 
-function sameLocalDay(a: number, b: number): boolean {
-  const left = new Date(a);
-  const right = new Date(b);
-  return (
-    left.getFullYear() === right.getFullYear() &&
-    left.getMonth() === right.getMonth() &&
-    left.getDate() === right.getDate()
-  );
+/** Calendar days from `then` to `now`, by local dates: a DST night counts as one day. */
+function localDaysBetween(then: number, now: number): number {
+  return Math.round((startOfLocalDay(now) - startOfLocalDay(then)) / (24 * 60 * 60_000));
 }
 
 /**
@@ -73,9 +73,9 @@ export function describeOfflineSince(
   if (lastHeartbeatAt === null || lastHeartbeatAt === undefined) return null;
   if (!Number.isFinite(lastHeartbeatAt) || lastHeartbeatAt > options.nowMs) return null;
   const at = (options.formatTime ?? localClockTime)(lastHeartbeatAt);
-  if (sameLocalDay(lastHeartbeatAt, options.nowMs)) return `since ${at}`;
-  if (sameLocalDay(lastHeartbeatAt, options.nowMs - DAY_MS)) return `since yesterday ${at}`;
-  const days = Math.max(2, Math.floor((options.nowMs - lastHeartbeatAt) / DAY_MS));
+  const days = localDaysBetween(lastHeartbeatAt, options.nowMs);
+  if (days <= 0) return `since ${at}`;
+  if (days === 1) return `since yesterday ${at}`;
   return `for ${days} days`;
 }
 
@@ -101,14 +101,17 @@ function locate(input: NodeRouteInput): Located | null {
   if (input.deviceOffline === true || status?.browserStatus === "offline") {
     return { hop: "device", headline: "This device is offline", since: null };
   }
-  if (input.via === "hub") {
-    if (status?.browserStatus === "stale" || status?.browserStatus === "suspended") {
+  // A connection that is up proves the Hub and the node answer, whatever a lagging directory says.
+  const up = connected(input);
+  // A suspended browser is a hidden page or app, not a Hub that can't be reached.
+  if (input.via === "hub" && !up) {
+    if (status?.browserStatus === "stale") {
       return { hop: "hub", headline: "Can't reach the Hub", since: null };
     }
     const hub = failure === null ? undefined : HUB_UNREACHABLE[failure];
     if (hub !== undefined) return { hop: "hub", headline: hub, since: null };
   }
-  if (input.presence?.online === false) {
+  if (!up && input.presence?.online === false) {
     const since = describeOfflineSince(input.presence.lastHeartbeatAt, input);
     return {
       hop: "node",
@@ -116,10 +119,10 @@ function locate(input: NodeRouteInput): Located | null {
       since: input.presence.lastHeartbeatAt,
     };
   }
-  if (failure === "offline" || status?.selectionStatus === "offline") {
+  if (!up && (failure === "offline" || status?.selectionStatus === "offline")) {
     return { hop: "node", headline: `${node} is offline`, since: null };
   }
-  if (failure === "draining") {
+  if (!up && failure === "draining") {
     return { hop: "node", headline: `${node} is restarting`, since: null };
   }
   if (

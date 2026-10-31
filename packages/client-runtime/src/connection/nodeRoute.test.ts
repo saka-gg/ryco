@@ -126,6 +126,21 @@ describe("diagnoseNodeRoute", () => {
   });
 });
 
+describe("diagnoseNodeRoute while the connection is up", () => {
+  it("trusts the connection over a directory that has not caught up", () => {
+    expect(
+      diagnoseNodeRoute(hub({ presence: { online: false, lastHeartbeatAt: NOW - 60_000 } }))
+        .headline,
+    ).toBeNull();
+  });
+
+  it("reads a hidden page or app as nothing wrong", () => {
+    expect(
+      diagnoseNodeRoute(hub({ status: { ...reconnecting, browserStatus: "suspended" } })).headline,
+    ).toBeNull();
+  });
+});
+
 describe("describeOfflineSince", () => {
   it("says since when, then yesterday, then for how many days", () => {
     expect(describeOfflineSince(at(9, 5), { nowMs: NOW })).toBe("since 09:05");
@@ -134,13 +149,23 @@ describe("describeOfflineSince", () => {
     expect(describeOfflineSince(null, { nowMs: NOW })).toBeNull();
     expect(describeOfflineSince(NOW + 60_000, { nowMs: NOW })).toBeNull();
   });
+
+  it("counts calendar days, so the night of a clock change is still yesterday", () => {
+    // Whatever the machine's zone, 00:30 after a 22:40 heartbeat is the next calendar day.
+    const evening = new Date(2026, 2, 29, 22, 40).getTime();
+    const afterMidnight = new Date(2026, 2, 30, 0, 30).getTime();
+    expect(describeOfflineSince(evening, { nowMs: afterMidnight })).toBe("since yesterday 22:40");
+  });
 });
 
 describe("hostedOutageFailure", () => {
-  it("is the last failure only while the transport is not online", () => {
-    const failure = { kind: "tls" as const };
-    expect(hostedOutageFailure({ transportStatus: "reconnecting", failure })).toBe("tls");
-    expect(hostedOutageFailure({ transportStatus: "online", failure })).toBeNull();
-    expect(hostedOutageFailure({ transportStatus: "reconnecting", failure: null })).toBeNull();
+  it("is the failure being waited out only while the transport is not online", () => {
+    expect(hostedOutageFailure({ transportStatus: "reconnecting", outageFailure: "tls" })).toBe(
+      "tls",
+    );
+    expect(hostedOutageFailure({ transportStatus: "online", outageFailure: "tls" })).toBeNull();
+    expect(
+      hostedOutageFailure({ transportStatus: "reconnecting", outageFailure: null }),
+    ).toBeNull();
   });
 });

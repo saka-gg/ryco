@@ -298,6 +298,7 @@ function sessionRecord(
     sessionEstablished: true,
     sessionRecoveredAfterUnknown: false,
     failure: null,
+    outageFailure: null,
     terminalNodeKey: null,
     syncFailed: false,
     snapshotAcceptedAt: 1,
@@ -466,7 +467,7 @@ describe("the open thread's route line", () => {
     const record = sessionRecord(TARGET_NODE, {
       transportStatus: "reconnecting",
       sessionStatus: "closed",
-      failure: { kind: "dns", retryable: true, message: "lookup failed" } as never,
+      outageFailure: "dns",
     });
     expect(notice({ record })).toBe("Can't reach the Hub (DNS)");
     // Once the transport is back online, the failure it kept is history.
@@ -495,7 +496,7 @@ describe("the open thread's route line", () => {
     const selectedRecord = sessionRecord(SOURCE_NODE, {
       transportStatus: "reconnecting",
       sessionStatus: "closed",
-      failure: { kind: "tls", retryable: true, message: "handshake" } as never,
+      outageFailure: "tls",
     });
     expect(
       deriveHostedEnvironmentRouteNotice({
