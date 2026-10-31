@@ -86,18 +86,43 @@ describe("summarizeAgentActivity", () => {
     expect(summary.counts).toEqual({ running: 0, needsYou: 0, failed: 0, done: 0 });
   });
 
-  it("counts a delegated child only while it is blocked on you", () => {
+  it("counts a working delegated child as work, but gives its result to its parent", () => {
     const summary = summarizeAgentActivity(
       [
-        thread({ delegated: true }),
+        // The parent delegated and waits, with no turn of its own.
+        thread({ title: "Parent", state: "idle", unseen: false }),
+        thread({ title: "Child A", delegated: true }),
+        thread({ title: "Child B", delegated: true }),
         thread({ delegated: true, state: "needs-input", attention: "plan" }),
         thread({ delegated: true, state: "idle", unseen: true, finishedAtMs: NOW - 1 }),
         thread({ delegated: true, state: "needs-input", attention: "approval", title: "Sub" }),
       ],
       NOW,
     );
-    expect(summary.rows.map((row) => [row.title, row.phase])).toEqual([["Sub", "approval"]]);
-    expect(summary.counts).toEqual({ running: 0, needsYou: 1, failed: 0, done: 0 });
+    expect(summary.rows.map((row) => [row.title, row.phase])).toEqual([
+      ["Sub", "approval"],
+      ["Child A", "running"],
+      ["Child B", "running"],
+    ]);
+    expect(summary.counts).toEqual({ running: 2, needsYou: 1, failed: 0, done: 0 });
+    // Work runs, so a Live Activity must stay open.
+    expect(summary.settled).toBe(false);
+  });
+
+  it("shows a result whose finish time is ahead of this device's clock", () => {
+    const summary = summarizeAgentActivity(
+      [thread({ state: "idle", unseen: true, finishedAtMs: NOW + 20 * 60_000 })],
+      NOW,
+    );
+    expect(summary.counts.done).toBe(1);
+  });
+
+  it("orders rows with an unreadable time last, without breaking the sort", () => {
+    const summary = summarizeAgentActivity(
+      [thread({ title: "Unknown", updatedAtMs: Number.NaN }), thread({ title: "Known" })],
+      NOW,
+    );
+    expect(summary.rows.map((row) => row.title)).toEqual(["Known", "Unknown"]);
   });
 
   it("is settled when only results remain", () => {
@@ -121,5 +146,12 @@ describe("summarizeAgentActivity", () => {
     expect(row?.title).toHaveLength(48);
     expect(row?.title.endsWith("…")).toBe(true);
     expect(row?.projectName).toHaveLength(24);
+    // Whole characters: an emoji at the cut is never split in half.
+    const [emoji] = summarizeAgentActivity(
+      [thread({ title: `${"x".repeat(46)}🚀🚀🚀` })],
+      NOW,
+    ).rows;
+    expect(Array.from(emoji?.title ?? "")).toHaveLength(48);
+    expect(emoji?.title).toBe(`${"x".repeat(46)}🚀…`);
   });
 });

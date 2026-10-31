@@ -3,7 +3,9 @@
  * agent work right now: how many threads run, wait on the user, or just ended,
  * and the few that matter most. Pure, and built from the same attention rule
  * as the Inbox and "next thread that needs you", so a glance never disagrees
- * with the list it opens.
+ * with the list it opens. A working delegated child counts as running (its
+ * parent usually waits with no turn of its own); its result belongs to the
+ * parent, so it gets no result row.
  *
  * Rows are taken only from live machines: a cached or offline machine's state
  * is not current, so it never counts as running or waiting.
@@ -66,9 +68,15 @@ export interface AgentActivitySummary {
   readonly settled: boolean;
 }
 
+/** Shortened by whole characters, so an emoji is never cut in half. */
 function truncate(text: string, max: number): string {
-  const trimmed = text.trim();
-  return trimmed.length <= max ? trimmed : `${trimmed.slice(0, max - 1).trimEnd()}…`;
+  const characters = Array.from(text.trim());
+  return characters.length <= max
+    ? characters.join("")
+    : `${characters
+        .slice(0, max - 1)
+        .join("")
+        .trimEnd()}…`;
 }
 
 function phaseOf(thread: AgentActivityThread, nowMs: number): AgentActivityPhase | null {
@@ -76,14 +84,15 @@ function phaseOf(thread: AgentActivityThread, nowMs: number): AgentActivityPhase
   if (reason === "approval") return "approval";
   if (reason === "input") return "input";
   if (reason === "plan-ready") return "plan";
-  // A delegated child reports through its parent; it counts only while it is blocked on the user.
-  if (thread.resting || thread.delegated) return null;
+  if (thread.resting) return null;
+  // A working delegated child is work: its parent usually waits for it with no turn of its own.
   if (thread.state === "working") return "running";
   if (thread.state === "connecting") return "connecting";
+  // A delegated child's result returns to its parent (the attention rule): no row of its own.
+  if (thread.delegated) return null;
+  // A finish time ahead of this device's clock (the node's clock runs ahead) is "just now".
   const recent =
-    thread.finishedAtMs !== null &&
-    nowMs - thread.finishedAtMs >= 0 &&
-    nowMs - thread.finishedAtMs <= AGENT_ACTIVITY_RECENT_RESULT_MS;
+    thread.finishedAtMs !== null && nowMs - thread.finishedAtMs <= AGENT_ACTIVITY_RECENT_RESULT_MS;
   if (!recent) return null;
   if (reason === "failed") return "failed";
   if (reason === "completed") return "done";
@@ -104,7 +113,13 @@ function compareRows(
   }
   if (left.candidate) return -1;
   if (right.candidate) return 1;
-  const byRecency = (recencyMs.get(right.row.key) ?? 0) - (recencyMs.get(left.row.key) ?? 0);
+  const recency = (key: string) => {
+    const value = recencyMs.get(key);
+    return value !== undefined && Number.isFinite(value) ? value : Number.NEGATIVE_INFINITY;
+  };
+  const leftMs = recency(left.row.key);
+  const rightMs = recency(right.row.key);
+  const byRecency = leftMs === rightMs ? 0 : rightMs > leftMs ? 1 : -1;
   return byRecency !== 0 ? byRecency : left.row.key.localeCompare(right.row.key);
 }
 
