@@ -6,8 +6,13 @@ import { buildTemporaryWorktreeBranchName } from "@ryco/shared/git";
 import { excludeChatProjects } from "@ryco/shared/projectKind";
 import { KeyboardAvoidingView, useKeyboardState } from "react-native-keyboard-controller";
 import { StackActions, type StaticScreenProps, useNavigation } from "@react-navigation/native";
-import { useEffect, useMemo, useRef, useState } from "react";
-import { Pressable, ScrollView, TextInput, View } from "react-native";
+import {
+  linkedPromptDraftAction,
+  PROMPT_LINK_LOOKUP_WAIT_MS,
+} from "@ryco/client-runtime/promptLinks";
+import { promptLinkSearchFromParams } from "@ryco/shared/promptLinks";
+import { useEffect, useEffectEvent, useMemo, useRef, useState } from "react";
+import { Alert, Pressable, ScrollView, TextInput, View } from "react-native";
 
 import {
   getAutoRuntimeModeUnavailableReason,
@@ -64,6 +69,11 @@ import {
   deriveNewTaskDefaults,
   resolveNewTaskProjectChoice,
 } from "./newTaskModel";
+import {
+  CLEARED_PROMPT_LINK_PARAMS,
+  isMobilePromptLinkLookupSettled,
+  planMobilePromptLink,
+} from "./promptLinkModel";
 import { useNewTaskRepository } from "./useNewTaskRepository";
 
 type NewTaskRouteScreenProps = StaticScreenProps<{
@@ -72,6 +82,12 @@ type NewTaskRouteScreenProps = StaticScreenProps<{
   readonly worktreeId?: string;
   /** A launch whose thread screen chose Edit task: its draft comes back here. */
   readonly editLaunchKey?: string;
+  // A prompt link (`ryco://tasks/new?prompt=…`): see `promptLinkModel.ts`.
+  readonly prompt?: string | string[];
+  readonly repo?: string | string[];
+  readonly pr?: string | string[];
+  readonly provider?: string | string[];
+  readonly model?: string | string[];
 }>;
 
 function firstParam(value: string | string[] | undefined): string | null {
@@ -203,6 +219,22 @@ function NewTaskContent(props: NewTaskRouteScreenProps) {
   useEffect(() => {
     if (environmentId) useStore.getState().setActiveEnvironmentId(environmentId);
   }, [environmentId]);
+
+  // A prompt link fills this draft once its machines sent their projects (or the wait ran out).
+  // Clearing the params lets the same link open again later.
+  const linkSearch = useMemo(
+    () => promptLinkSearchFromParams(props.route.params),
+    [props.route.params],
+  );
+  const linkKey = linkSearch?.toString() ?? null;
+  const handledLinkRef = useRef<string | null>(null);
+  const linkLookupSettled = isMobilePromptLinkLookupSettled(environments);
+  const [linkWaitedOut, setLinkWaitedOut] = useState(false);
+  useEffect(() => {
+    if (linkKey === null || linkLookupSettled) return;
+    const timer = setTimeout(() => setLinkWaitedOut(true), PROMPT_LINK_LOOKUP_WAIT_MS);
+    return () => clearTimeout(timer);
+  }, [linkKey, linkLookupSettled]);
 
   const environment = environments.find((candidate) => candidate.environmentId === environmentId);
   const project = projects.find(
@@ -388,6 +420,69 @@ function NewTaskContent(props: NewTaskRouteScreenProps) {
     setNewBranch("");
     resetAttempt();
   };
+
+  const openPromptLink = useEffectEvent((search: URLSearchParams) => {
+    navigation.setParams(CLEARED_PROMPT_LINK_PARAMS as never);
+    const plan = planMobilePromptLink({
+      search,
+      projects,
+      threads,
+      worktrees,
+      environments,
+      serverConfigs,
+      // Right after the sheet chose its defaults, its state still holds the earlier choice.
+      fallbackEnvironmentId: environmentId ?? defaults.environment?.environmentId ?? null,
+    });
+    if (plan.kind === "invalid") {
+      Alert.alert("Could not open the link", plan.message);
+      return;
+    }
+    // Nothing is sent: the draft shows what the link asked for, and the user sends it.
+    const apply = () => {
+      if (plan.target) selectProject(plan.target);
+      if (plan.target && plan.worktreeId) {
+        locationEdited.current = true;
+        setWorktreeSelection({ kind: "existing", worktreeId: plan.worktreeId });
+      }
+      if (plan.modelSelection) {
+        modelEdited.current = true;
+        setModelSelection(plan.modelSelection);
+      }
+      if (plan.prompt.length > 0) setPrompt(plan.prompt);
+      resetAttempt();
+      Alert.alert("Prompt from a link", plan.notice);
+    };
+    // Typed text is never replaced, nor moved to another project, without asking.
+    const linkedPrompt = plan.prompt.length > 0;
+    const action = linkedPrompt
+      ? linkedPromptDraftAction(prompt, plan.prompt)
+      : prompt.trim().length > 0 && plan.target !== null
+        ? "ask"
+        : "fill";
+    if (action !== "ask") {
+      apply();
+      return;
+    }
+    Alert.alert(
+      "Linked prompt ready",
+      `${linkedPrompt ? "Replace your draft with the linked prompt?" : "Keep your text and start this task where the link says?"} ${plan.notice}`,
+      [
+        { text: "Keep mine", style: "cancel" },
+        { text: linkedPrompt ? "Replace" : "Use the link", onPress: apply },
+      ],
+    );
+  });
+
+  useEffect(() => {
+    if (linkSearch === null || linkKey === null) {
+      handledLinkRef.current = null;
+      return;
+    }
+    if (handledLinkRef.current === linkKey || !defaults.environment) return;
+    if (!linkLookupSettled && !linkWaitedOut) return;
+    handledLinkRef.current = linkKey;
+    openPromptLink(linkSearch);
+  }, [defaults.environment, linkKey, linkLookupSettled, linkSearch, linkWaitedOut]);
 
   const connected = environment?.connectionState === "connected";
   // A machine that is away takes the task once it is back: it waits in this

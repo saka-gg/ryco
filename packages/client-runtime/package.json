@@ -18,6 +18,10 @@
       "types": "./src/scoped.ts",
       "import": "./src/scoped.ts"
     },
+    "./promptLinks": {
+      "types": "./src/promptLinks.ts",
+      "import": "./src/promptLinks.ts"
+    },
     "./knownEnvironment": {
       "types": "./src/knownEnvironment.ts",
       "import": "./src/knownEnvironment.ts"
