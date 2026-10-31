@@ -202,6 +202,10 @@
       "types": "./src/state/threads/index.ts",
       "import": "./src/state/threads/index.ts"
     },
+    "./state/threads/carriedFork": {
+      "types": "./src/state/threads/carriedFork.ts",
+      "import": "./src/state/threads/carriedFork.ts"
+    },
     "./state/threads/interThreadMessage": {
       "types": "./src/state/threads/interThreadMessage.ts",
       "import": "./src/state/threads/interThreadMessage.ts"

@@ -104,6 +104,7 @@ import type {
 import type { ExternalIdentitySummary } from "./hostedIdentity.ts";
 import type { RelayEffectiveRole } from "./relay.ts";
 import type { ThreadForkInput, ThreadForkResult } from "./threadFork.ts";
+import type { ThreadForkCarriedInput } from "./threadForkCarried.ts";
 import type {
   ThreadLocalServerList,
   ThreadStopLocalServerInput,
@@ -1696,6 +1697,11 @@ export interface EnvironmentApi {
     setManualPosition: (input: ThreadsSetManualPositionInput) => Promise<EmptyRpcResult>;
     /** Optional so clients can feature-detect against older environments. */
     fork?: (input: ThreadForkInput) => Promise<ThreadForkResult>;
+    /**
+     * Continues a conversation carried from another node here (`threads.forkCarried`). Present
+     * when the client can send it; offer it only for nodes that advertise `threadForkCarried`.
+     */
+    forkCarried?: (input: ThreadForkCarriedInput) => Promise<ThreadForkResult>;
     /**
      * The servers a thread started (`threads.subscribeLocalServers`), current list first. Clients
      * call it only when the node's config advertises `threadLocalServers`; `watchThreadLocalServers`

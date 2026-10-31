@@ -151,6 +151,9 @@ export function createEnvironmentApi(rpcClient: WsRpcClient): EnvironmentApi {
             setManualBucket: rpcClient.threads.setManualBucket,
             setManualPosition: rpcClient.threads.setManualPosition,
             ...(rpcClient.threads.fork ? { fork: rpcClient.threads.fork } : {}),
+            ...(rpcClient.threads.forkCarried
+              ? { forkCarried: rpcClient.threads.forkCarried }
+              : {}),
             ...(rpcClient.threads.subscribeLocalServers
               ? { subscribeLocalServers: rpcClient.threads.subscribeLocalServers }
               : {}),
