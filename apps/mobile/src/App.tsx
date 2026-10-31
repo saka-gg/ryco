@@ -18,6 +18,7 @@ import { appBlurTargetRef } from "./lib/appBlurTarget";
 import { useThemeColor } from "./lib/useThemeColor";
 import { ConnectionRegistryProvider } from "./providers/ConnectionRegistryProvider";
 import { AppProviders } from "./providers/AppProviders";
+import { FatalRenderErrorBoundary } from "./diagnostics/FatalRenderErrorBoundary";
 import { useHostedAppLifecycle } from "./hostedHub/useHostedAppLifecycle";
 import { AppAccessGate } from "./features/access/AppAccessGate";
 import {
@@ -90,10 +91,20 @@ function HostedAppLifecycle() {
   return null;
 }
 
+// The boundary goes around everything, App's own hooks included: a crash while
+// rendering never reaches the global handler, so this is where it is recorded.
+export default function App() {
+  return (
+    <FatalRenderErrorBoundary>
+      <AppRoot />
+    </FatalRenderErrorBoundary>
+  );
+}
+
 // B2 app root: B1's provider stack (gesture/atom-registry/safe-area/keyboard) +
 // the connection-registry context + appearance preferences, then the full
 // navigation shell. Cloud auth, incoming-share, and the showcase rig are stripped.
-export default function App() {
+function AppRoot() {
   // Resolved via the single scheme seam, not the raw system scheme — dark today,
   // preference-overridable later (§4). Re-assert on mount so Fast Refresh keeps it.
   applyResolvedAppColorScheme();

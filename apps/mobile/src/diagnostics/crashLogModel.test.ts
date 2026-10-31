@@ -5,7 +5,6 @@ import {
   formatCrashReport,
   mergeCrashRecords,
   parseStartupCrashRecords,
-  stripPaths,
 } from "./crashLogModel";
 
 const startupEntry = (timestamp: number, description: string) => ({
@@ -37,13 +36,25 @@ describe("crash log model", () => {
     expect(records[0]?.detail).not.toContain("/var/containers");
   });
 
-  it("strips absolute paths from messages and stacks, not only frames", () => {
-    expect(
-      stripPaths("ENOENT: open '/var/mobile/Containers/Data/Application/X/Documents/a.json'"),
-    ).toBe("ENOENT: open 'a.json'");
-    expect(stripPaths("at f (file:///private/var/app/main.jsbundle:3:4)")).toBe(
-      "at f (main.jsbundle:3:4)",
-    );
+  it("redacts expo-updates' log as it reads it, messages and frames alike", () => {
+    const [record] = parseStartupCrashRecords([
+      {
+        timestamp: 1_000,
+        code: "JSRuntimeError",
+        level: "fatal",
+        message: [
+          "ErrorRecovery fatal exception: Unhandled JS Exception",
+          "Description: Unhandled JS Exception: Error: open '/var/mobile/Containers/Data/Application/X/Documents/a.json'",
+          "    at connect (wss://node.example/ws?wsToken=part-of-a-query)",
+          "    at load (C:\\Users\\Laurin\\app\\main.js:3:4)",
+        ].join("\n"),
+      },
+    ]);
+    expect(record).toMatchObject({
+      description: "Error: open 'a.json'",
+      frames: ["connect (ws)", "load (main.js:3:4)"],
+    });
+    expect(record?.detail).not.toMatch(/Containers|wsToken|Laurin/u);
   });
 
   it("merges both sources newest first, keeping a crash both caught once", () => {
@@ -69,6 +80,26 @@ describe("crash log model", () => {
       "TypeError: undefined is not an object",
     ]);
     expect(merged[0]?.frames).toEqual(["x (c.js:1:1)"]);
+  });
+
+  it("matches a multi-line message by its first line, the one expo-updates logs", () => {
+    const at = Date.parse("2026-10-31T06:00:00.000Z");
+    const app = appCrashRecords([
+      {
+        at: "2026-10-31T06:00:01.000Z",
+        message: "Error: Rendered more hooks than during the previous render.\nSecond line.",
+        stack: null,
+      },
+    ]);
+    expect(app[0]?.description).toBe("Error: Rendered more hooks than during the previous render.");
+    expect(app[0]?.detail).toContain("Second line.");
+    const merged = mergeCrashRecords(
+      app,
+      parseStartupCrashRecords([
+        startupEntry(at, "Error: Rendered more hooks than during the previous render."),
+      ]),
+    );
+    expect(merged).toHaveLength(1);
   });
 
   it("puts the version, update and launch fallback above the crashes", () => {

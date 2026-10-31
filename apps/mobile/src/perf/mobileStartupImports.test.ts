@@ -356,7 +356,13 @@ describe("mobile launch graph boundaries", () => {
 
   it("installs the crash recorder at launch without loading its file store or expo-updates", () => {
     const reachable = [...staticGraph(LAUNCH_ENTRY).keys()].map(display);
-    expect(reachable).toContain("apps/mobile/src/diagnostics/fatalErrorRecorder.ts");
+    expect(reachable).toEqual(
+      expect.arrayContaining([
+        "apps/mobile/src/diagnostics/fatalErrorRecorderEntry.ts",
+        "apps/mobile/src/diagnostics/FatalRenderErrorBoundary.tsx",
+        "apps/mobile/src/diagnostics/crashTextRedaction.ts",
+      ]),
+    );
     expect(chainsTo(LAUNCH_ENTRY, [/^pkg:expo-file-system$/u, /^pkg:expo-updates$/u])).toEqual([]);
   });
 

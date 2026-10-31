@@ -7,9 +7,12 @@ import {
   type FatalErrorStore,
   installFatalErrorRecorder,
   parseFatalErrorRecords,
+  recordRenderCrash,
 } from "./fatalErrorRecorder";
 
 const NOW = Date.parse("2026-10-31T06:00:00.000Z");
+// Built from parts, so no fixture looks like a real credential.
+const TOKEN = ["not", "a", "real", "token"].join("-");
 
 function memoryStore(initial: string | null = null): FatalErrorStore & { text: string | null } {
   const store = {
@@ -86,6 +89,55 @@ describe("fatal error recorder", () => {
     expect(records.every((record) => record.message.length <= 1024)).toBe(true);
     expect(records.some((record) => record.message === "too old")).toBe(false);
     expect(parseFatalErrorRecords("{not json", NOW)).toEqual([]);
+  });
+
+  it("writes the message and stack already redacted", () => {
+    const error = new Error(
+      `connect wss://node.example/ws?wsToken=${TOKEN} from /Users/Laurin Frank/Code/x.ts`,
+    );
+    error.stack = `Error: ${error.message}\n    at f (C:\\Users\\Laurin\\app\\main.js:1:2)`;
+    const text = appendFatalErrorRecord(null, error, NOW);
+    expect(text).not.toContain(TOKEN);
+    expect(text).not.toContain("Laurin");
+    expect(parseFatalErrorRecords(text, NOW)).toEqual([
+      {
+        at: "2026-10-31T06:00:00.000Z",
+        message: "Error: connect wss://node.example/ws from x.ts",
+        stack: "Error: connect wss://node.example/ws from x.ts\n    at f (main.js:1:2)",
+      },
+    ]);
+  });
+
+  it("records a render crash, then throws the same error on, even if the file fails", () => {
+    const thrownBy = (run: () => void): unknown => {
+      try {
+        run();
+      } catch (thrown) {
+        return thrown;
+      }
+      return undefined;
+    };
+    const store = memoryStore();
+    const error = new TypeError("cannot read property 'id' of undefined");
+    // The same object, so React finds the component stack it captured for it and reports the
+    // error as uncaught (fatal), as it did without the boundary.
+    expect(
+      thrownBy(() =>
+        recordRenderCrash(
+          () => store,
+          error,
+          () => NOW,
+        ),
+      ),
+    ).toBe(error);
+    expect(parseFatalErrorRecords(store.text, NOW)).toEqual([
+      expect.objectContaining({ message: "TypeError: cannot read property 'id' of undefined" }),
+    ]);
+
+    const failing = () => {
+      throw new Error("disk gone");
+    };
+    expect(thrownBy(() => recordRenderCrash(failing, error))).toBe(error);
   });
 
   it("never lets a failing file change how the app fails", () => {

@@ -20,13 +20,19 @@ export const BABEL_PRESET_EXPO = require.resolve("babel-preset-expo", { paths: [
 /** Loads a module as `babel-preset-expo` does, e.g. `@babel/core`. */
 export const requireFromBabelPreset = createRequire(BABEL_PRESET_EXPO);
 
+/**
+ * Loads a module as Expo's Metro config and transform worker do: `./transform-plugins` (its
+ * import/export plugin) or `@expo/metro/metro-transform-plugins`.
+ */
+export const requireFromExpoMetroConfig = createRequire(
+  require.resolve("@expo/metro-config", {
+    paths: [require.resolve("expo/package.json", { paths: [MOBILE_APP_DIR] })],
+  }),
+);
+
 /** Loads a module as Expo's Metro does, e.g. `metro-transform-plugins`. */
 export const requireFromMetro = createRequire(
-  createRequire(
-    require.resolve("@expo/metro-config", {
-      paths: [require.resolve("expo/package.json", { paths: [MOBILE_APP_DIR] })],
-    }),
-  ).resolve("metro/package.json"),
+  requireFromExpoMetroConfig.resolve("metro/package.json"),
 );
 
 /**

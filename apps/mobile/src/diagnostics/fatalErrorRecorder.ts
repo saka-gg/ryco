@@ -3,11 +3,17 @@
  * them after the next launch. expo-updates' own log keeps only startup crashes, and only while
  * over-the-air updates are on; this covers every fatal error, startup or not.
  *
- * Installed from `index.ts` before anything renders, so it stays tiny: the file store loads
- * with a function-scoped `require` only when an error is fatal, never at launch
- * (`mobileStartupImports.test.ts`). Nothing leaves the device; records are bounded and the
- * Diagnostics screen can clear them.
+ * Two doors lead here. `fatalErrorRecorderEntry.ts`, imported by `index.ts` right after the
+ * polyfills, wraps React Native's global handler, which sees errors thrown outside React. React
+ * hands an error thrown while rendering straight to React Native's ExceptionsManager instead,
+ * so `FatalRenderErrorBoundary.tsx` at the app root records those.
+ *
+ * It loads at launch, so it stays tiny: the file store loads with a function-scoped `require`
+ * only when an error is fatal (`mobileStartupImports.test.ts`). Messages and stacks are redacted
+ * before they are written (`crashTextRedaction.ts`). Nothing leaves the device; records are
+ * bounded and the Diagnostics screen can clear them.
  */
+import { redactCrashText } from "./crashTextRedaction";
 
 export interface FatalErrorRecord {
   /** ISO time of the crash. */
@@ -21,8 +27,14 @@ export const FATAL_ERROR_RECORD_LIMIT = 10;
 export const FATAL_ERROR_RECORD_MAX_AGE_MS = 7 * 24 * 60 * 60_000;
 const MESSAGE_LIMIT = 1024;
 const STACK_LIMIT = 4096;
+/**
+ * Redaction reads at most this much, so a huge message cannot hold up the crash. It only
+ * shortens text, and real text not by anywhere near this much, so a path or URL cut off here
+ * stays past the limits.
+ */
+const REDACTION_INPUT_LIMIT = 64 * 1024;
 
-/** Where the records live: one small JSON file in the app's documents. */
+/** Where the records live: one small JSON file in the app's cache directory. */
 export interface FatalErrorStore {
   readonly read: () => string | null;
   readonly write: (text: string) => void;
@@ -36,6 +48,8 @@ export interface ErrorUtilsLike {
 }
 
 const clip = (text: string, limit: number) => (text.length <= limit ? text : text.slice(0, limit));
+const redacted = (text: string, limit: number) =>
+  clip(redactCrashText(clip(text, REDACTION_INPUT_LIMIT)), limit);
 
 function isRecord(value: unknown): value is FatalErrorRecord {
   if (typeof value !== "object" || value === null) return false;
@@ -68,7 +82,7 @@ export function parseFatalErrorRecords(
   }
 }
 
-/** The file's next contents with `error` appended (bounded and capped). */
+/** The file's next contents with `error` appended (redacted, bounded and capped). */
 export function appendFatalErrorRecord(text: string | null, error: unknown, nowMs: number): string {
   const message =
     error instanceof Error
@@ -79,12 +93,26 @@ export function appendFatalErrorRecord(text: string | null, error: unknown, nowM
   const stack = error instanceof Error && typeof error.stack === "string" ? error.stack : null;
   const record: FatalErrorRecord = {
     at: new Date(nowMs).toISOString(),
-    message: clip(message, MESSAGE_LIMIT),
-    stack: stack === null ? null : clip(stack, STACK_LIMIT),
+    message: redacted(message, MESSAGE_LIMIT),
+    stack: stack === null ? null : redacted(stack, STACK_LIMIT),
   };
   return JSON.stringify(
     [...parseFatalErrorRecords(text, nowMs), record].slice(-FATAL_ERROR_RECORD_LIMIT),
   );
+}
+
+/** Appends `error` to the store. Best effort: it never throws, so the crash goes on as before. */
+export function recordFatalError(
+  store: () => FatalErrorStore,
+  error: unknown,
+  nowMs: number,
+): void {
+  try {
+    const opened = store();
+    opened.write(appendFatalErrorRecord(opened.read(), error, nowMs));
+  } catch {
+    // Recording is best effort; the crash itself goes on as before.
+  }
 }
 
 /**
@@ -101,14 +129,23 @@ export function installFatalErrorRecorder(input: {
   if (errorUtils === undefined) return;
   const previous = errorUtils.getGlobalHandler();
   errorUtils.setGlobalHandler((error, isFatal) => {
-    if (isFatal === true) {
-      try {
-        const store = input.store();
-        store.write(appendFatalErrorRecord(store.read(), error, (input.now ?? Date.now)()));
-      } catch {
-        // Recording is best effort; the crash itself goes on as before.
-      }
-    }
+    if (isFatal === true) recordFatalError(input.store, error, (input.now ?? Date.now)());
     previous(error, isFatal);
   });
+}
+
+/**
+ * The root error boundary's `componentDidCatch`: writes the record, then throws the same error
+ * on. With no boundary above, React treats the rethrown error as uncaught: it unmounts the app
+ * and reports the error to React Native as fatal (the red box, or the app ending), as it did
+ * before the boundary existed. Rethrowing the same object keeps the component stack React
+ * captured for it.
+ */
+export function recordRenderCrash(
+  store: () => FatalErrorStore,
+  error: unknown,
+  now: () => number = Date.now,
+): never {
+  recordFatalError(store, error, now());
+  throw error;
 }

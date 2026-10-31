@@ -106,7 +106,7 @@ export function SettingsDiagnosticsRouteScreen() {
         <SettingsRow
           first
           label="Copy crash report"
-          detail="Version, update and the crashes above, with file paths reduced to names."
+          detail="Version, update and the crashes above, with file paths reduced to names and web address queries removed."
           onPress={() => copyTextWithHaptic(report(), { target: "crash report" })}
         />
         <SettingsRow
@@ -118,8 +118,8 @@ export function SettingsDiagnosticsRouteScreen() {
       </SettingsSection>
 
       <Text className="mx-5 mt-2 font-sans text-xs leading-4 text-foreground-muted">
-        Crashes stay on this device until you copy them. The app keeps its own for seven days;
-        startup crashes caught by the update system are kept about a day.
+        Crashes stay on this device until you copy them. The app keeps its own for up to seven days,
+        outside device backups; startup crashes caught by the update system are kept about a day.
       </Text>
     </ScrollView>
   );
