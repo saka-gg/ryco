@@ -1,4 +1,3 @@
-import { EnvironmentId } from "@ryco/contracts";
 import { useRouter } from "@tanstack/react-router";
 import {
   ActivityIcon,
@@ -42,25 +41,16 @@ import {
 } from "../../appChrome";
 import { useAppPreferencesLabel, useDeviceName } from "../../deviceName";
 import { isElectron, isHostedHubMode } from "../../env";
-import { usePrimaryEnvironmentDescriptor } from "../../environments/primary";
-import { useSavedEnvironmentRegistryStore } from "../../environments/runtime";
-import { isSavedEnvironmentSwitchedOff } from "@ryco/client-runtime/connection";
 import { useAppSidebarCollapsed } from "../../hooks/useAppSidebarCollapsed";
 import { useSettingsPageTarget } from "../../hooks/useSettingsPageTarget";
 import { navigateHub } from "../../hostedHub/hubRoutes";
-import { useHostedHubStore } from "../../hostedHub/state";
 import { useHostedNodePageDemand } from "../../hostedHub/useHostedNodePageDemand";
 import { preloadableLazy, type PreloadableModule } from "../../lib/preloadableLazy";
 import { cn } from "../../lib/utils";
-import {
-  retainDesktopWorkspaceInteractiveScope,
-  useDesktopWorkspaceState,
-} from "../../platform/desktopWorkspace";
+import { retainDesktopWorkspaceInteractiveScope } from "../../platform/desktopWorkspace";
 import { type SettingsSectionId, useSettingsDialogStore } from "../../settingsDialogStore";
 import { SettingsEditingScopeProvider, SettingsTargetProvider } from "../../settingsTarget";
 import { DeviceIcon } from "../DeviceIcon";
-import { useHostedConnectionActions } from "../hostedHub/HostedConnectionControls";
-import { nodeSelectionBlocked, selectableNodes } from "../hostedHub/HostedNodeDisplay.logic";
 import { parseStatisticsSearch } from "../statistics/statisticsSearch";
 import { Button } from "../ui/button";
 import { Kbd } from "../ui/kbd";
@@ -86,6 +76,13 @@ import {
   type SettingsSearchTarget,
 } from "./settingsSearchReveal";
 import { SettingsCard, SettingsEmpty } from "./settingsLayout";
+import { useApplyToAllNodesShown } from "./ApplyToAllNodes";
+import { SettingsNodeMenu, useSettingsNodeMenu } from "./SettingsNodeMenu";
+import { SettingsScopeSentence } from "./SettingsScopeSentence";
+import {
+  settingsScopeSentenceShown,
+  settingsSectionHasNodeFanOut,
+} from "./SettingsScopeSentence.logic";
 import { useSettingsSubsections } from "./useSettingsSubsections";
 import { preloadWindowCaptureSettings } from "./WindowCaptureSettings";
 import { useActiveIndicator } from "../ui/useActiveIndicator";
@@ -680,18 +677,10 @@ export function SettingsPage() {
   const leaveSettings = useLeaveSettings();
   const router = useRouter();
   const appSidebarCollapsed = useAppSidebarCollapsed();
-  const primaryEnvironment = usePrimaryEnvironmentDescriptor();
-  const desktopWorkspace = useDesktopWorkspaceState();
   const section = useSettingsDialogStore((s) => s.section);
   const editingScope = useSettingsDialogStore((s) => s.editingScope);
   const showSection = useSettingsDialogStore((s) => s.showSection);
-  const setTargetEnvironmentId = useSettingsDialogStore((s) => s.setTargetEnvironmentId);
   const closeSettings = useSettingsDialogStore((s) => s.closeSettings);
-  const allSavedEnvironments = useSavedEnvironmentRegistryStore((state) => state.byId);
-  const hostedNodes = useHostedHubStore((state) => state.nodes);
-  const hostedDirectoryStatus = useHostedHubStore((state) => state.directoryStatus);
-  const hostedBrowserStatus = useHostedHubStore((state) => state.browserStatus);
-  const { switchNodeInPlace } = useHostedConnectionActions();
   const hosted = isHostedHubMode();
   const pageTarget = useSettingsPageTarget();
   const {
@@ -714,47 +703,19 @@ export function SettingsPage() {
   // settings.
   useHostedNodePageDemand(editingScope === "node" ? targetEnvironmentId : null);
 
-  const nodeChoices = new Map<EnvironmentId, string>();
-  if (primaryEnvironment) nodeChoices.set(primaryEnvironment.environmentId, primaryDeviceName);
-  if (hosted) {
-    // Hosted settings edit the selected node, so a hosted choice moves the
-    // selection cursor (below). Every node this browser may open is a choice,
-    // also before the cursor is on any node, as in a tab opened on settings.
-    for (const node of selectableNodes(hostedNodes)) {
-      nodeChoices.set(node.environmentId, node.label);
-    }
-  } else {
-    for (const entry of Object.values(allSavedEnvironments)) {
-      if (primaryEnvironment && entry.environmentId === desktopWorkspace.localEnvironmentId)
-        continue;
-      // A machine switched off has no settings to edit until it is on again.
-      if (isSavedEnvironmentSwitchedOff(entry)) continue;
-      nodeChoices.set(entry.environmentId, entry.label);
-    }
-    for (const machine of desktopWorkspace.machines) {
-      if (primaryEnvironment && machine.environmentId === desktopWorkspace.localEnvironmentId)
-        continue;
-      nodeChoices.set(machine.environmentId, machine.label);
-    }
-  }
-  if (targetEnvironmentId) nodeChoices.set(targetEnvironmentId, targetNodeLabel);
+  const [searchQuery, setSearchQuery] = useState("");
+  // One list of devices for the nav header's menu and the scope sentence.
+  const nodeMenu = useSettingsNodeMenu({
+    targetEnvironmentId,
+    targetLabel: targetNodeLabel,
+    targetConnected: authorizedTarget?.connected === true,
+    targetMachine: desktopWorkspaceMachine,
+    onSelect: () => setSearchQuery(""),
+  });
   // Hosted with no node under the cursor yet, the node group still shows, as
   // the device switcher and nothing else, so a node can be chosen here.
-  const showNodeGroup = settingsTarget !== null || (hosted && nodeChoices.size > 0);
-  // The directory's own rule for opening a node: a hosted choice waits for a
-  // current directory and a revalidated browser, as the directory's rows do.
-  const hostedChoiceBlocked = (environmentId: EnvironmentId): boolean => {
-    if (!hosted || environmentId === targetEnvironmentId) return false;
-    const node = hostedNodes.find((candidate) => candidate.environmentId === environmentId);
-    return (
-      !node ||
-      nodeSelectionBlocked({
-        directoryStatus: hostedDirectoryStatus,
-        browserStatus: hostedBrowserStatus,
-        node,
-      })
-    );
-  };
+  const showNodeGroup = settingsTarget !== null || (hosted && nodeMenu.choices.length > 0);
+  const fanOutShown = useApplyToAllNodesShown();
 
   const searchScope = readSettingsSearchScope(pageTarget);
   const clientItems = NAV_ITEMS.filter((item) =>
@@ -787,7 +748,6 @@ export function SettingsPage() {
     }
   }, [destination, editingScope, effectiveSection, hosted, roleFresh, section, showSection]);
 
-  const [searchQuery, setSearchQuery] = useState("");
   // The command palette can ask for a row before this page mounts; a request
   // that arrives while it shows replaces any search in progress.
   const revealRequest = useSettingsSearchRevealStore((state) => state.request);
@@ -891,55 +851,22 @@ export function SettingsPage() {
       <span className="min-w-0 flex-1 truncate" title={nodeHeaderLabel}>
         {nodeHeaderLabel}
       </span>
-      {nodeChoices.size > (settingsTarget ? 1 : 0) ? (
-        <Menu>
-          <Tooltip>
-            <TooltipTrigger
-              render={
-                <MenuTrigger
-                  render={
-                    <Button
-                      size="icon-xs"
-                      variant="ghost"
-                      aria-label="Settings device"
-                      className="size-6 text-muted-foreground hover:text-foreground sm:size-6"
-                    >
-                      <ChevronsUpDownIcon className="size-3.5" />
-                    </Button>
-                  }
-                />
-              }
-            />
-            <TooltipPopup side="right">Switch device</TooltipPopup>
-          </Tooltip>
-          <MenuPopup align="start" className="min-w-52">
-            <MenuRadioGroup
-              value={targetEnvironmentId ?? ""}
-              onValueChange={(value) => {
-                setSearchQuery("");
-                const environmentId = EnvironmentId.make(String(value));
-                setTargetEnvironmentId(environmentId);
-                if (!hosted) return;
-                // Through the same selection cursor the rest of the hosted app
-                // uses, staying on this page, whose address names no node: the
-                // node header follows once the selection has moved.
-                const node = hostedNodes.find(
-                  (candidate) => candidate.environmentId === environmentId,
-                );
-                if (node) void switchNodeInPlace(node);
-              }}
+      {nodeMenu.choices.length > (settingsTarget ? 1 : 0) ? (
+        <SettingsNodeMenu
+          model={nodeMenu}
+          tooltip="Switch device"
+          tooltipSide="right"
+          trigger={
+            <Button
+              size="icon-xs"
+              variant="ghost"
+              aria-label="Settings device"
+              className="size-6 text-muted-foreground hover:text-foreground sm:size-6"
             >
-              {[...nodeChoices].map(([id, label]) => (
-                <MenuRadioItem key={id} value={id} disabled={hostedChoiceBlocked(id)}>
-                  <span className="flex min-w-0 items-center gap-2">
-                    <DeviceIcon environmentId={id} label={label} className="size-3.5 shrink-0" />
-                    <span className="truncate">{label}</span>
-                  </span>
-                </MenuRadioItem>
-              ))}
-            </MenuRadioGroup>
-          </MenuPopup>
-        </Menu>
+              <ChevronsUpDownIcon className="size-3.5" />
+            </Button>
+          }
+        />
       ) : null}
     </div>
   ) : null;
@@ -1079,20 +1006,36 @@ export function SettingsPage() {
                     <div key={`${panelKey}:${restoreSignal}`} className="settings-panel-enter">
                       <header className="mb-8 flex items-start justify-between gap-4">
                         <div className="min-w-0">
-                          <p className="mb-1.5 flex items-center gap-1.5 text-xs text-muted-foreground">
-                            {destination === "node" ? (
-                              <DeviceIcon
-                                environmentId={targetEnvironmentId}
-                                label={targetNodeLabel}
-                                className="size-3.5 shrink-0"
-                              />
-                            ) : (
-                              <AppWindowIcon className="size-3.5 shrink-0" />
-                            )}
-                            <span className="truncate" data-testid="settings-scope-label">
-                              {destination === "node" ? targetNodeLabel : appPreferencesLabel}
-                            </span>
-                          </p>
+                          {settingsScopeSentenceShown(destination, effectiveSection) ? (
+                            <SettingsScopeSentence
+                              model={nodeMenu}
+                              environmentId={targetEnvironmentId}
+                              label={targetNodeLabel}
+                              status={
+                                nodeMenu.choices.find(
+                                  (choice) => choice.environmentId === targetEnvironmentId,
+                                )?.status ?? null
+                              }
+                              mixedClause={
+                                fanOutShown && settingsSectionHasNodeFanOut(effectiveSection)
+                              }
+                            />
+                          ) : (
+                            <p className="mb-1.5 flex items-center gap-1.5 text-xs text-muted-foreground">
+                              {destination === "node" ? (
+                                <DeviceIcon
+                                  environmentId={targetEnvironmentId}
+                                  label={targetNodeLabel}
+                                  className="size-3.5 shrink-0"
+                                />
+                              ) : (
+                                <AppWindowIcon className="size-3.5 shrink-0" />
+                              )}
+                              <span className="truncate" data-testid="settings-scope-label">
+                                {destination === "node" ? targetNodeLabel : appPreferencesLabel}
+                              </span>
+                            </p>
+                          )}
                           <h2 className="text-xl font-semibold tracking-[-0.015em] text-foreground">
                             {activeItem ? SETTINGS_SECTION_TITLES[activeItem.id] : "Settings"}
                           </h2>
