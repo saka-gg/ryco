@@ -186,6 +186,14 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
    */
   automaticUpdates: Schema.optionalKey(Schema.Boolean),
   /**
+   * The node is a desktop app's backend, and with `automaticUpdates` on the app also updates
+   * itself: it downloads its updates in the background and installs one when it quits
+   * (`install-on-quit`: Windows, a Linux AppImage named without a version) or when the person
+   * chooses Restart (`restart`: macOS, a Linux AppImage named with its version). Absent on other
+   * nodes, on development builds and on older servers.
+   */
+  desktopAppUpdates: Schema.optionalKey(Schema.Literals(["install-on-quit", "restart"])),
+  /**
    * The node prices usage with `usagePriceOverrides` (custom model prices and model mappings);
    * absent on older servers, which drop the key from settings patches.
    */

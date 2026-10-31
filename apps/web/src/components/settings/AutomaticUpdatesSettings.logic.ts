@@ -28,3 +28,19 @@ export function automaticUpdatesSwitch(view: Exclude<AutomaticUpdatesView, "hidd
   const checksOff = view.endsWith("-checks-off");
   return { checked, checksOff, canChange: checked || !checksOff };
 }
+
+/**
+ * What a desktop app node also does while the setting is on: it updates itself (downloads in
+ * the background, then installs at quit or at the person's Restart). `null` on other nodes and
+ * on desktop apps too old to say.
+ */
+export function automaticUpdatesDesktopNote(config: ServerConfig | null): string | null {
+  switch (config?.environment?.capabilities?.desktopAppUpdates) {
+    case "install-on-quit":
+      return "This desktop app also downloads its own updates in the background and installs one when you quit it. It never restarts by itself.";
+    case "restart":
+      return "This desktop app also downloads its own updates in the background. One installs only when you choose Restart.";
+    default:
+      return null;
+  }
+}

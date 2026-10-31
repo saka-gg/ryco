@@ -149,9 +149,23 @@ Known overlaps, left for later:
 - Runtime updater: `electron-updater` in `apps/desktop/src/main.ts`.
 - Update UX:
   - Each app follows one channel (see "Ryco Nightly"); there is no update-track switch.
-  - Background checks run on startup delay + interval.
-  - No automatic download or install.
-  - The desktop UI shows a rocket update button when an update is available; click once to download, click again after download to restart/install.
+  - Background checks run on startup delay (15 s) + interval (4 h).
+  - By default, no automatic download or install. The desktop UI shows a rocket update button when an update is available; click once to download, click again after download to restart/install.
+  - With the node setting **Update automatically** on (`automaticUpdates`, owner only, together
+    with update checks), the startup and interval checks also download what they find. The
+    backend tells Desktop main with an `app-update-policy` frame on its private pipe; nothing
+    else can set it, and it turns off while no backend reports it. Windows (NSIS) and a Linux
+    AppImage named without a version then install the download when the app quits normally,
+    silently and without starting it again (`autoInstallOnAppQuit`). A quit during a system
+    shutdown or logout (or after SIGTERM) installs nothing; the update waits for a later quit.
+    macOS never installs at quit: Squirrel.Mac stages an armed update irreversibly and the
+    unsigned installer replaces the bundle, so the download waits for **Restart**. Neither does
+    an AppImage named with its version, as the release files are: electron-updater would move the
+    update to a new versioned file name that nothing starts, leaving the person's launcher on a
+    deleted file. A version whose download or install failed is not downloaded or armed again in
+    the background. Development builds never update themselves.
+  - Every install writes `desktop-update-install.json` in the state directory; the next launch
+    says "Updated to X", or, when still on the old version, skips that version in the background.
 - Provider: GitHub Releases (`provider: github`) configured at build time.
 - Repository slug source:
   - `RYCO_DESKTOP_UPDATE_REPOSITORY` (format `owner/repo`), if set.

@@ -17,7 +17,10 @@ import {
 export interface DesktopBackendPipeHandlers {
   /** Readiness, startup phases and fatal errors of this backend generation. */
   readonly onLifecycleFrame?: (frame: DesktopBackendLifecycleFrame) => void;
-  /** A client's app update check or install request, relayed by the backend. */
+  /**
+   * A client's app update check or install request, relayed by the backend, or the backend's
+   * automatic update policy. Only this pipe carries them: it is the backend this app launched.
+   */
   readonly onAppUpdateRequest?: (frame: DesktopAppUpdateRequestFrame) => void;
   /** The updater's state now; reported once when the pipe attaches. */
   readonly appUpdateState?: () => DesktopUpdateState;
@@ -187,7 +190,11 @@ export function attachDesktopResourceTelemetry(
     createTelemetryLineReader(
       (value) => {
         if (typeof value !== "object" || value === null || !("type" in value)) return;
-        if (value.type === "app-update-check" || value.type === "app-update-install") {
+        if (
+          value.type === "app-update-check" ||
+          value.type === "app-update-install" ||
+          value.type === "app-update-policy"
+        ) {
           const request = parseDesktopAppUpdateRequestFrame(value);
           if (request === null) return;
           try {

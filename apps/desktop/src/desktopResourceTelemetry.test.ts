@@ -163,6 +163,9 @@ describe("desktop resource telemetry", () => {
         '{"type":"app-update-install","requestId":"req-1","targetVersion":"1.1.0"}',
         '{"type":"app-update-install","requestId":"","targetVersion":"1.1.0"}',
         '{"type":"app-update-install","targetVersion":"1.1.0"}',
+        '{"type":"app-update-policy","automatic":true}',
+        '{"type":"app-update-policy","automatic":"yes"}',
+        '{"type":"app-update-policy","automatic":false}',
         '{"type":"startup-ready"}',
         "",
       ].join("\n"),
@@ -170,6 +173,8 @@ describe("desktop resource telemetry", () => {
     expect(requests).toEqual([
       { type: "app-update-check" },
       { type: "app-update-install", requestId: "req-1", targetVersion: "1.1.0" },
+      { type: "app-update-policy", automatic: true },
+      { type: "app-update-policy", automatic: false },
     ]);
     expect(lifecycle).toEqual([{ type: "startup-ready" }]);
     expect(pipe.destroyed).toBe(false);

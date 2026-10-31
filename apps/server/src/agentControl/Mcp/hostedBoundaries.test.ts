@@ -52,6 +52,7 @@ describe("pre-auth server environment descriptor", () => {
       "cliProxyHubs",
       "conversationRevert",
       "crossRepositoryChangeRequests",
+      "desktopAppUpdates",
       "environmentIcon",
       "fileAttachments",
       "filesRevert",
