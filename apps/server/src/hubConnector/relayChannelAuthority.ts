@@ -5,7 +5,13 @@ import type {
   E2eeAdmittedAuthoritySnapshot,
 } from "@ryco/shared/relayE2eeHandshake";
 
-import type { RelayChannelAuthority, RpcPrincipalRole } from "../ws/RpcPrincipal.ts";
+import {
+  relayRpcPrincipal,
+  type RelayChannelAuthority,
+  type RpcPrincipal,
+  type RpcPrincipalRole,
+} from "../ws/RpcPrincipal.ts";
+import type { NodeE2eeChannelSession } from "./NodeE2eeChannelSession.ts";
 
 const ROLE_RANK: Readonly<Record<RpcPrincipalRole, number>> = {
   viewer: 0,
@@ -72,4 +78,25 @@ export function relayChannelAuthority(
         };
   }
   return { trustSource: "none" };
+}
+
+/**
+ * The RPC principal of one relay channel, read per request from the channel's own E2EE mode:
+ * the device its handshake authenticated only while the channel is `e2ee`, and the channel
+ * end-to-end encrypted only then. Every tier counts, web NX included: its records are sealed
+ * between the client and this node, so the Hub relays ciphertext. A `legacy` channel never
+ * becomes `e2ee` (§4.4), so a request read as encrypted arrived as an authenticated record.
+ */
+export function relayChannelPrincipal(
+  effectiveRole: RelayEffectiveRole,
+  channelId: string,
+  e2ee: Pick<NodeE2eeChannelSession, "mode">,
+  authority: () => RelayChannelAuthority,
+): RpcPrincipal {
+  return relayRpcPrincipal(
+    effectiveRole,
+    channelId,
+    () => (e2ee.mode() === "e2ee" ? authority() : { trustSource: "none" }),
+    () => e2ee.mode() === "e2ee",
+  );
 }

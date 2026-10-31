@@ -22,7 +22,7 @@ import {
   type SessionCredentialServiceShape,
 } from "./auth/Services/SessionCredentialService.ts";
 import { makeDeviceWsRpcLayer, makeWsRpcLayer } from "./ws/index.ts";
-import { directPeerOf, directRpcPrincipal, type RpcPrincipal } from "./ws/RpcPrincipal.ts";
+import { directConnectionOf, directRpcPrincipal, type RpcPrincipal } from "./ws/RpcPrincipal.ts";
 import { ContextHandoffInspectionLive } from "./orchestration/Layers/ContextHandoffInspection.ts";
 import { ContextHandoffRepositoryLive } from "./persistence/Layers/ContextHandoffs.ts";
 
@@ -100,7 +100,7 @@ export const websocketRpcRouteLayer = Layer.unwrap(
         const serverAuth = yield* ServerAuth;
         const sessions = yield* SessionCredentialService;
         const session = yield* serverAuth.authenticateWebSocketUpgrade(request);
-        const principal = { ...directRpcPrincipal(session), ...directPeerOf(request) };
+        const principal = { ...directRpcPrincipal(session), ...directConnectionOf(request) };
         const rpcWebSocketHttpEffect = yield* RpcServer.toHttpEffectWebsocket(WsHostedRpcGroup, {
           spanPrefix: "ws.rpc",
           spanAttributes: {

@@ -5,7 +5,7 @@ import { AuthSessionId } from "@ryco/contracts";
 
 import { authorizeRpcPrincipal } from "../auth/wsAuthorization.ts";
 import {
-  directPeerOf,
+  directConnectionOf,
   directRpcPrincipal,
   RELAY_UNIDENTIFIED_OWNER_KEY,
   type RelayChannelAuthority,
@@ -126,21 +126,23 @@ it("keeps a device one owner whether it reaches the node over the relay or a lin
   expect(linked.canManageLocalAccess).toBe(false);
 });
 
+type UpgradeRequest = Parameters<typeof directConnectionOf>[0];
+const upgrade = (
+  remoteAddress: string | undefined,
+  headers: Record<string, string | ReadonlyArray<string>> = {},
+  socket: { readonly localAddress?: string; readonly encrypted?: boolean } = {},
+) => ({ source: { socket: { remoteAddress, ...socket }, headers } }) as unknown as UpgradeRequest;
+const peerOf = (request: UpgradeRequest) => directConnectionOf(request).peer;
+
 it("derives where a turn comes from the connection, never the payload", () => {
-  const request = (remoteAddress: string | undefined, headers: Record<string, string> = {}) =>
-    ({ source: { socket: { remoteAddress }, headers } }) as unknown as Parameters<
-      typeof directPeerOf
-    >[0];
-  expect(directPeerOf(request("127.0.0.1"))).toEqual({ peer: "local" });
-  expect(directPeerOf(request("::ffff:127.0.0.1"))).toEqual({ peer: "local" });
-  expect(directPeerOf(request("::1"))).toEqual({ peer: "local" });
+  expect(peerOf(upgrade("127.0.0.1"))).toBe("local");
+  expect(peerOf(upgrade("::ffff:127.0.0.1"))).toBe("local");
+  expect(peerOf(upgrade("::1"))).toBe("local");
   // A local reverse proxy (Tailscale Serve) relays a remote client.
-  expect(directPeerOf(request("127.0.0.1", { "x-forwarded-for": "100.64.0.9" }))).toEqual({
-    peer: "remote",
-  });
-  expect(directPeerOf(request("192.168.1.20"))).toEqual({ peer: "remote" });
-  expect(directPeerOf(request(undefined))).toEqual({});
-  expect(directPeerOf({ source: {} } as unknown as Parameters<typeof directPeerOf>[0])).toEqual({});
+  expect(peerOf(upgrade("127.0.0.1", { "x-forwarded-for": "100.64.0.9" }))).toBe("remote");
+  expect(peerOf(upgrade("192.168.1.20"))).toBe("remote");
+  expect(directConnectionOf(upgrade(undefined))).toEqual({});
+  expect(directConnectionOf({ source: {} } as unknown as UpgradeRequest)).toEqual({});
 
   const direct = directRpcPrincipal({
     sessionId: AuthSessionId.make("session-owner"),
@@ -155,4 +157,58 @@ it("derives where a turn comes from the connection, never the payload", () => {
   expect(turnOriginOfPrincipal(relayRpcPrincipal("owner", "channel"))).toEqual({
     connection: "relay",
   });
+});
+
+it("records a direct socket's own addresses, TLS state and forwarding headers", () => {
+  expect(
+    directConnectionOf(
+      upgrade(
+        "127.0.0.1",
+        { "x-forwarded-for": "100.64.0.9", "x-forwarded-proto": "https", host: "node.ts.net" },
+        { localAddress: "127.0.0.1" },
+      ),
+    ).connection,
+  ).toEqual({
+    kind: "direct",
+    remote: "loopback",
+    local: "loopback",
+    tls: false,
+    forwarding: {
+      forwardedFor: "100.64.0.9",
+      forwarded: undefined,
+      forwardedProto: "https",
+      realIp: undefined,
+    },
+  });
+  const tls = directConnectionOf(
+    upgrade("192.168.1.20", { forwarded: ["for=a", "for=b"] }, { encrypted: true }),
+  ).connection;
+  expect(tls).toMatchObject({
+    kind: "direct",
+    remote: "other",
+    local: undefined,
+    tls: true,
+    forwarding: { forwarded: "for=a, for=b" },
+  });
+  // Addresses are recorded by kind: IPv4-mapped loopback, Tailscale over IPv4 and IPv6.
+  const kinds = (remoteAddress: string, localAddress: string) => {
+    const connection = directConnectionOf(upgrade(remoteAddress, {}, { localAddress })).connection;
+    return connection?.kind === "direct" ? [connection.remote, connection.local] : undefined;
+  };
+  expect(kinds("::ffff:127.0.0.1", "::ffff:127.0.0.1")).toEqual(["loopback", "loopback"]);
+  expect(kinds("::ffff:100.101.102.103", "100.64.0.7")).toEqual(["tailscale", "tailscale"]);
+  expect(kinds("fd7a:115c:a1e0::5", "192.168.1.10")).toEqual(["tailscale", "other"]);
+});
+
+it("reads a relay channel's encryption per request, and none by default", () => {
+  let encrypted = false;
+  const principal = relayRpcPrincipal("owner", "channel", undefined, () => encrypted);
+  const connection = principal.connection;
+  expect(connection?.kind).toBe("relay");
+  if (connection?.kind !== "relay") return;
+  expect(connection.endToEndEncrypted()).toBe(false);
+  encrypted = true;
+  expect(connection.endToEndEncrypted()).toBe(true);
+  const fallback = relayRpcPrincipal("owner", "channel").connection;
+  expect(fallback?.kind === "relay" && fallback.endToEndEncrypted()).toBe(false);
 });

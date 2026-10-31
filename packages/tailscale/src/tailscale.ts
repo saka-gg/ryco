@@ -102,6 +102,21 @@ export function isTailscaleIpv4Address(address: string): boolean {
   return first === 100 && second >= 64 && second <= 127;
 }
 
+/** Tailscale's own IPv6 range, `fd7a:115c:a1e0::/48`. */
+const TAILSCALE_IPV6_PREFIX = "fd7a:115c:a1e0:";
+
+/**
+ * Whether a socket address is a Tailscale address: IPv4 in `100.64.0.0/10` (IPv4-mapped IPv6
+ * forms included, as Node reports them on a dual-stack listener) or IPv6 in
+ * `fd7a:115c:a1e0::/48`.
+ */
+export function isTailscaleAddress(address: string): boolean {
+  const normalized = address.toLowerCase();
+  if (normalized.startsWith("::ffff:")) return isTailscaleIpv4Address(normalized.slice(7));
+  if (normalized.includes(":")) return normalized.startsWith(TAILSCALE_IPV6_PREFIX);
+  return isTailscaleIpv4Address(normalized);
+}
+
 export const parseTailscaleStatus = (
   rawStatusJson: string,
 ): Effect.Effect<TailscaleStatus, TailscaleStatusParseError> =>

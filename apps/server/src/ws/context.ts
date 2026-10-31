@@ -1465,6 +1465,8 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
       providerSignIn,
       nodeBrowser,
       nodePushRegistry,
+      /** How this connection's requests reach the node (`RpcPrincipal.connection`). */
+      connection: principal.connection,
       /** Who this relay channel's handshake authenticated; `none` off the relay. */
       relayAuthority: (): RelayChannelAuthority =>
         principal.relayAuthority?.() ?? { trustSource: "none" },

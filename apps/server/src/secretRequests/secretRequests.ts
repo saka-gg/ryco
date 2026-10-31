@@ -56,6 +56,8 @@ import type { OrchestrationEngineShape } from "../orchestration/Services/Orchest
 import type { ProjectionSnapshotQueryShape } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
 import type { findThreadInArray } from "../orchestration/threadIndex.ts";
 import type { WorkspaceAccessPolicyShape } from "../workspace/Services/WorkspaceAccessPolicy.ts";
+import type { RpcConnectionFacts } from "../ws/RpcPrincipal.ts";
+import { isEncryptedConnectionPath, rpcConnectionPath } from "../ws/rpcConnectionPath.ts";
 import {
   DotenvSinkError,
   LEFTOVER_TEMPORARY_MIN_AGE_MS,
@@ -482,15 +484,27 @@ export const currentSecretRequest = (
 /**
  * The owner's answer from the card: writes the value into the request's file (provide) or
  * closes the request (decline). Every failure is a fixed reason; the value appears in none.
+ *
+ * A value is taken only from a connection the node itself saw as encrypted, or as never on a
+ * network in the clear (`rpcConnectionPath`), and refused before anything reads it: it is not
+ * checked, written or recorded. A decline carries no value and is taken from any connection, so
+ * a request can always be closed.
  */
 export const answerSecretRequest = (
   deps: SecretRequestDeps,
   input: SecretRequestAnswerInput,
+  connection: RpcConnectionFacts | undefined,
 ): Effect.Effect<SecretRequestAnswerResult, SecretRequestError> =>
   withRequestLock(
     input.threadId,
     input.requestId,
     Effect.gen(function* () {
+      if (
+        input.answer.type === "provide" &&
+        !isEncryptedConnectionPath(rpcConnectionPath(connection))
+      ) {
+        return yield* failWith("unencrypted-connection");
+      }
       const thread = yield* readThread(deps, input.threadId);
       if (thread === undefined) return yield* failWith("not-found");
       const request = deriveSecretRequests(thread.activities).find(

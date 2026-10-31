@@ -67,6 +67,12 @@ describe("secret request cards", () => {
     expect(secretRequestFailureText(new SecretRequestError({ reason: "not-ignored" }))).toBe(
       "Git does not ignore that file, so Ryco will not write a secret there.",
     );
+    // The node's refusal of a value sent over an unencrypted connection, shown as is.
+    expect(
+      secretRequestFailureText(new SecretRequestError({ reason: "unencrypted-connection" })),
+    ).toBe(
+      "Secrets can only be sent over an encrypted connection. Open Ryco on the computer it runs on, or connect over HTTPS or Tailscale.",
+    );
     // A transport or encoding error could describe the payload: generic copy instead.
     const leaky = new Error(`Expected a string, got "${VALUE}"`);
     expect(secretRequestFailureText(leaky)).not.toContain(VALUE);

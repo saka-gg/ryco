@@ -238,7 +238,11 @@ describe("secret request expiry", () => {
       const requestId = yield* openCard(h);
       yield* TestClock.adjust(DAY_MS);
       const expired = yield* Effect.flip(
-        answerSecretRequest(h.deps, { threadId, requestId, answer: { type: "decline" } }),
+        answerSecretRequest(
+          h.deps,
+          { threadId, requestId, answer: { type: "decline" } },
+          undefined,
+        ),
       );
       assert.strictEqual(expired.reason, "expired");
       const resolutions = h.activities.filter((activity) => activity.kind === "secret.resolved");
@@ -247,7 +251,11 @@ describe("secret request expiry", () => {
         [{ requestId, status: "expired" }],
       );
       const again = yield* Effect.flip(
-        answerSecretRequest(h.deps, { threadId, requestId, answer: { type: "decline" } }),
+        answerSecretRequest(
+          h.deps,
+          { threadId, requestId, answer: { type: "decline" } },
+          undefined,
+        ),
       );
       assert.strictEqual(again.reason, "already-answered");
     }),

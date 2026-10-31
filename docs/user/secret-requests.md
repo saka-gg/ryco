@@ -70,8 +70,18 @@ stop an agent that ignores that. Treat a secret you give an agent like one you p
 On a shared node, an operator can open files of the project in Ryco's file viewer, the saved file
 included. Only the owner can answer a card, but do not save a secret an operator must not see.
 
-The value travels once, from the card to the node, over the connection your app uses. Through the
-Hub relay it is end-to-end encrypted when the channel is (a node's default `compatibility` policy
-still accepts channels without end-to-end encryption, for older apps). On a direct address it is
-encrypted by HTTPS or Tailscale; on a plain `http://` address on your network it is not. Ryco
-does not yet refuse an answer on an unencrypted connection.
+The value travels once, from the card to the node, over the connection your app uses. The node
+saves it only when that connection is encrypted, or never left the node's computer:
+
+- through your Ryco account, when the relay channel is end-to-end encrypted (the iPhone app, and
+  the web app's encrypted web channel);
+- on the node's own computer (the desktop app, or a browser at `localhost`);
+- over HTTPS (Tailscale Serve, say) or a Tailscale address.
+
+Anything else is refused, and the card says so: a relay channel without end-to-end encryption (a
+node's default `compatibility` policy still accepts them, for older apps), or a plain `http://`
+address on your network. The value stays in the field, so you can save it again once you are on
+an encrypted connection. Declining works over every connection.
+
+The node can only refuse a value it has received: by then it has crossed that connection. If you
+saved a secret over a plain `http://` address on a network you do not trust, replace the secret.

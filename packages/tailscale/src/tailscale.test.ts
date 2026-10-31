@@ -6,6 +6,7 @@ import {
   buildTailscaleHttpsBaseUrl,
   disableTailscaleServe,
   ensureTailscaleServe,
+  isTailscaleAddress,
   isTailscaleIpv4Address,
   parseTailscaleMagicDnsName,
   parseTailscaleStatus,
@@ -58,6 +59,22 @@ describe("tailscale", () => {
       assert.equal(isTailscaleIpv4Address("100.127.255.254"), true);
       assert.equal(isTailscaleIpv4Address("100.128.0.1"), false);
       assert.equal(isTailscaleIpv4Address("192.168.1.44"), false);
+    }),
+  );
+
+  it.effect("detects Tailscale socket addresses, IPv4-mapped and IPv6 included", () =>
+    Effect.sync(() => {
+      assert.equal(isTailscaleAddress("100.101.102.103"), true);
+      assert.equal(isTailscaleAddress("::ffff:100.101.102.103"), true);
+      assert.equal(isTailscaleAddress("::FFFF:100.64.0.1"), true);
+      assert.equal(isTailscaleAddress("fd7a:115c:a1e0::1"), true);
+      assert.equal(isTailscaleAddress("FD7A:115C:A1E0:ab12::5"), true);
+      assert.equal(isTailscaleAddress("::ffff:192.168.1.20"), false);
+      assert.equal(isTailscaleAddress("fd7a:115c:a1e1::1"), false);
+      assert.equal(isTailscaleAddress("fd00::1"), false);
+      assert.equal(isTailscaleAddress("100.128.0.1"), false);
+      assert.equal(isTailscaleAddress("::1"), false);
+      assert.equal(isTailscaleAddress(""), false);
     }),
   );
 

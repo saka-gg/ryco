@@ -166,6 +166,39 @@ describe("SecretRequestCards", () => {
       .toEqual([{ threadId: THREAD, requestId: REQUEST, answer: { type: "decline" } }]);
   });
 
+  it("shows an unencrypted connection's refusal and keeps the value to send again", async () => {
+    const refusing = fakeNode({
+      answers: true,
+      fail: new SecretRequestError({ reason: "unencrypted-connection" }),
+    });
+    const host = await mountCards([requested]);
+    const field = page.getByLabelText("Value for STRIPE_SECRET_KEY");
+    await field.fill(VALUE);
+    await page.getByRole("button", { name: "Save" }).click();
+    await expect
+      .element(page.getByRole("alert"))
+      .toHaveTextContent(
+        "Secrets can only be sent over an encrypted connection. Open Ryco on the computer it runs on, or connect over HTTPS or Tailscale.",
+      );
+    expect(refusing.sent).toHaveLength(1);
+    expect(host.querySelector('[role="alert"]')?.textContent).not.toContain(VALUE);
+    // The value stays in the field, masked, and Save works again once the connection does.
+    await expect.element(field).toHaveValue(VALUE);
+    await expect.element(field).toHaveAttribute("type", "password");
+    await expect.element(page.getByRole("button", { name: "Save" })).toBeEnabled();
+
+    const encrypted = fakeNode({ answers: true });
+    await page.getByRole("button", { name: "Save" }).click();
+    await expect
+      .poll(() => encrypted.sent)
+      .toEqual([
+        { threadId: THREAD, requestId: REQUEST, answer: { type: "provide", value: VALUE } },
+      ]);
+    await expect
+      .element(page.getByRole("status"))
+      .toHaveTextContent("Saved STRIPE_SECRET_KEY to .env");
+  });
+
   it("stays read-only on a node that cannot answer, and hides answered requests", async () => {
     const node = fakeNode({ answers: false });
     await mountCards([requested]);

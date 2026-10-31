@@ -380,10 +380,29 @@ app, not the frozen web phone tier), and the node writes `KEY='value'` into that
   only then records `provided`. Values with `$` or a backslash are refused (dotenv-expand and
   python-dotenv change them even in single quotes). Refusals carry a fixed reason, never the
   value.
-- **Transport.** The value travels over the answering client's connection: end-to-end encrypted
-  on an E2EE relay channel, but the node's default `compatibility` E2EE policy also admits relay
-  channels without it, and a plain `ws://` direct address is unencrypted. The node does not yet
-  refuse answers on such channels.
+- **Transport.** The value travels over the answering client's connection, and the node takes it
+  only from a connection it saw as encrypted or as never on a network in the clear. The RPC
+  principal records how the connection reached the node, from the node's own state, never from a
+  client's claim (`RpcPrincipal.connection`, classified by `ws/rpcConnectionPath.ts`):
+  - **Taken:** a relay channel in `e2ee` mode, on every tier (native IK, and web NX, whose records
+    are sealed between the browser and the node, so the Hub relays ciphertext; the Hub still
+    serves the web code, which no transport check can lift); a loopback peer without forwarding
+    headers (the desktop app, a browser on the node, an SSH port forward); a TLS socket, or a
+    loopback peer whose forwarding headers say HTTPS (`X-Forwarded-Proto` or `Forwarded`
+    `proto`, the last entry of each, every one present saying `https`), such as Tailscale Serve;
+    a socket whose two ends are both Tailscale addresses (`100.64.0.0/10` or
+    `fd7a:115c:a1e0::/48`; both ends, because a carrier-grade NAT source alone is not WireGuard).
+  - **Refused** with `SecretRequestError` `unencrypted-connection`, before the value is checked,
+    written or recorded: a relay channel in `legacy` mode (or still negotiating, or closed), plain
+    `ws://` from another machine, a loopback proxy that names a plain protocol or none, and a
+    principal without connection facts. Forwarding headers from a non-loopback peer are ignored.
+  - A decline carries no value and is taken over every connection, so a request can always be
+    closed.
+  - Not covered: the value has already crossed the connection when the node refuses it (the card
+    cannot see the connection's state before it sends); a local proxy that passes a client's own
+    `X-Forwarded-Proto` through untouched, or a plain TCP forwarder on the node (`socat`, say),
+    looks like the case it imitates; Tailscale Serve over plain HTTP is refused (Ryco sets Serve
+    up over HTTPS).
 - **Who else can read it.** Operators of a shared node can read the saved file with
   `projects.readFile`. Older clients and the web phone tier show the thread as waiting but have
   no card, so they can neither answer nor decline; the request then waits for its 24 hours.
