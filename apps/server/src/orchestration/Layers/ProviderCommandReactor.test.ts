@@ -27,6 +27,8 @@ import {
   ContextHandoffActivityPayload,
   GitCommandError,
   ModelSelection,
+  type OrchestrationSession,
+  type OrchestrationTurnOutcome,
   ProviderRuntimeEvent,
   ProviderSession,
   ProviderDriverKind,
@@ -51,6 +53,7 @@ import {
 import {
   Deferred,
   Effect,
+  Equal,
   Exit,
   Layer,
   ManagedRuntime,
@@ -4721,6 +4724,228 @@ describe("ProviderCommandReactor", () => {
     expect(harness.startSession).toHaveBeenCalledTimes(1);
     expect(harness.sendTurn.mock.calls[1]?.[0]).toMatchObject({
       modelSelection: { model: "gpt-5.1-codex" },
+    });
+  });
+
+  describe("a model pick stored on the thread", () => {
+    const threadId = ThreadId.make("thread-1");
+    const setSession = (
+      harness: ReactorHarness,
+      id: string,
+      session: OrchestrationSession,
+      turnOutcome?: OrchestrationTurnOutcome,
+    ) =>
+      Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.make(id),
+          threadId,
+          session,
+          ...(turnOutcome ? { turnOutcome } : {}),
+          createdAt: new Date().toISOString(),
+        }),
+      );
+    const storePick = async (harness: ReactorHarness, modelSelection: ModelSelection) => {
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.meta.update",
+          commandId: CommandId.make(`pick-${modelSelection.model}`),
+          threadId,
+          modelSelection,
+        }),
+      );
+      await waitFor(async () =>
+        Equal.equals((await readThread(harness))?.modelSelection, modelSelection),
+      );
+    };
+
+    it("neither restarts nor interrupts a running Claude turn, and the next turn applies it", async () => {
+      const claude = ProviderInstanceId.make("claudeAgent");
+      const first = createModelSelection(claude, "claude-sonnet-4-6", [
+        { id: "effort", value: "medium" },
+      ]);
+      const picked = createModelSelection(claude, "claude-sonnet-4-6", [
+        { id: "effort", value: "max" },
+      ]);
+      const harness = await createHarness({ threadModelSelection: first });
+      await dispatchTurnStart(harness, "stored-pick-1", first);
+      await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+      const bound = (await readThread(harness))?.session;
+      if (!bound) throw new Error("expected the first turn to bind a session");
+      const turnId = asTurnId("turn-stored-pick-1");
+      await setSession(harness, "stored-pick-running", {
+        ...bound,
+        status: "running",
+        activeTurnId: turnId,
+      });
+
+      // Another client stores the user's pick while the turn runs.
+      await storePick(harness, picked);
+      await harness.drain();
+      expect(harness.startSession).toHaveBeenCalledTimes(1);
+      expect(harness.stopSession).not.toHaveBeenCalled();
+      expect(harness.interruptTurn).not.toHaveBeenCalled();
+      expect((await readThread(harness))?.session).toMatchObject({
+        status: "running",
+        activeTurnId: turnId,
+        runtimeSessionId: bound.runtimeSessionId,
+      });
+
+      // The turn ends; the next one names no selection (a goal continuation) and runs on the pick.
+      await setSession(
+        harness,
+        "stored-pick-ready",
+        { ...bound, status: "ready", activeTurnId: null },
+        {
+          turnId,
+          state: "completed",
+          reason: "provider-turn-completed",
+          completedAt: new Date().toISOString(),
+        },
+      );
+      await dispatchTurnStart(harness, "stored-pick-2");
+      await waitFor(() => harness.sendTurn.mock.calls.length === 2);
+      expect(harness.startSession).toHaveBeenCalledTimes(2);
+      expect(harness.startSession.mock.calls[1]?.[1]).toMatchObject({
+        resumeCursor: { opaque: "resume-1" },
+        modelSelection: picked,
+      });
+      expect(harness.sendTurn.mock.calls[1]?.[0]).toMatchObject({ modelSelection: picked });
+    });
+
+    it("switches an in-session provider at the next turn that names no selection", async () => {
+      const harness = await createHarness();
+      await dispatchTurnStart(harness, "stored-codex-1");
+      await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+      const picked = { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.1-codex" };
+      await storePick(harness, picked);
+      await dispatchTurnStart(harness, "stored-codex-2");
+      await waitFor(() => harness.sendTurn.mock.calls.length === 2);
+      expect(harness.startSession).toHaveBeenCalledTimes(1);
+      expect(harness.sendTurn.mock.calls[1]?.[0]).toMatchObject({ modelSelection: picked });
+    });
+
+    it("keeps a pick stored while a sent turn started over the turn's own selection", async () => {
+      // Once the provider accepted the turn, the reactor either records the turn's selection
+      // (a dispatch) or first reads the thread and finds a newer pick: either settles the test.
+      let accepted = false;
+      let commitSettled = false;
+      const harness = await createHarness({
+        decorateDispatch:
+          (dispatch) =>
+          (command, ...rest) => {
+            if (command.commandId.startsWith("server:accepted-model-selection:")) {
+              return dispatch(command, ...rest).pipe(
+                Effect.ensuring(Effect.sync(() => void (commitSettled = true))),
+              );
+            }
+            return dispatch(command, ...rest);
+          },
+        decorateSnapshotQuery: (live) => ({
+          ...live,
+          getThreadShellById: (id) =>
+            live
+              .getThreadShellById(id)
+              .pipe(Effect.ensuring(Effect.sync(() => void (commitSettled ||= accepted)))),
+        }),
+      });
+      const codex = ProviderInstanceId.make("codex");
+      const gate = Effect.runSync(Deferred.make<void>());
+      harness.sendTurn.mockImplementationOnce(() =>
+        Deferred.await(gate).pipe(
+          Effect.andThen(Effect.sync(() => void (accepted = true))),
+          Effect.as({ threadId: ThreadId.make("thread-1"), turnId: asTurnId("turn-1") }),
+        ),
+      );
+      const sent = { instanceId: codex, model: "gpt-5.1-codex" };
+      await dispatchTurnStart(harness, "pick-while-starting", sent);
+      await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+      // The user picks again on another device before the provider accepted the turn.
+      const picked = { instanceId: codex, model: "gpt-5.2-codex" };
+      await storePick(harness, picked);
+      Effect.runSync(Deferred.succeed(gate, undefined));
+      await waitFor(() => commitSettled);
+      await harness.drain();
+      expect((await readThread(harness))?.modelSelection).toEqual(picked);
+    });
+
+    it("still records a send's own selection when no pick was stored meanwhile", async () => {
+      const harness = await createHarness();
+      const sent = { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.1-codex" };
+      await dispatchTurnStart(harness, "older-client-send", sent);
+      await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+      await harness.drain();
+      // An older client stores a pick only by sending it.
+      await waitFor(async () => Equal.equals((await readThread(harness))?.modelSelection, sent));
+    });
+
+    it("keeps the chat's pick after a queued follow-up ran with the model it was queued with", async () => {
+      const harness = await createHarness();
+      const codex = ProviderInstanceId.make("codex");
+      await dispatchTurnStart(harness, "before-queue");
+      await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+      await harness.drain();
+      const chatPick = (await readThread(harness))?.modelSelection;
+      const queuedWith = { instanceId: codex, model: "gpt-5.1-codex" };
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.queue.add",
+          commandId: CommandId.make("queue-add-follow-up"),
+          threadId,
+          entry: {
+            messageId: asMessageId("queued-follow-up"),
+            text: "queued follow-up",
+            attachments: [],
+            modelSelection: queuedWith,
+            runtimeMode: "approval-required",
+            interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          },
+          createdAt: new Date().toISOString(),
+        }),
+      );
+      await Effect.runPromise(
+        harness.engine.dispatch({
+          type: "thread.turn.start",
+          commandId: CommandId.make("queue-drain-follow-up"),
+          threadId,
+          message: {
+            messageId: asMessageId("queued-follow-up"),
+            role: "user",
+            text: "queued follow-up",
+            attachments: [],
+          },
+          modelSelection: queuedWith,
+          runtimeMode: "approval-required",
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          delegationReturnGuard: {
+            latestUserMessageId: asMessageId("before-queue"),
+            projectId: asProjectId("project-1"),
+            runtimeMode: "approval-required",
+            worktreePath: null,
+            source: "follow-up-queue",
+          },
+          queueDispatch: { messageId: asMessageId("queued-follow-up"), revision: 1 },
+          createdAt: new Date().toISOString(),
+        }),
+      );
+      await waitFor(() => harness.sendTurn.mock.calls.length === 2);
+      await harness.drain();
+      expect(harness.sendTurn.mock.calls[1]?.[0]).toMatchObject({ modelSelection: queuedWith });
+      expect((await readThread(harness))?.modelSelection).toEqual(chatPick);
+    });
+
+    it("keeps the session's model for a pick of another instance, which only a send hands off", async () => {
+      const harness = await createHarness();
+      await dispatchTurnStart(harness, "stored-other-1");
+      await waitFor(() => harness.sendTurn.mock.calls.length === 1);
+      await storePick(harness, {
+        instanceId: ProviderInstanceId.make("codex_personal"),
+        model: "gpt-5.1-codex",
+      });
+      await dispatchTurnStart(harness, "stored-other-2");
+      await waitFor(() => harness.sendTurn.mock.calls.length === 2);
+      expect(harness.startSession).toHaveBeenCalledTimes(1);
+      expect(harness.sendTurn.mock.calls[1]?.[0]).not.toHaveProperty("modelSelection");
     });
   });
 

@@ -307,6 +307,7 @@ import {
 import { selectThreadTerminalState, useTerminalStateStore } from "../terminalStateStore";
 import type { ModelPickMeta } from "./chat/modelPickerTuningBridge";
 import { ChatComposer, type ChatComposerHandle, type ComposerIntent } from "./chat/ChatComposer";
+import { noteComposerModelSelectionPicked } from "./chat/liveThreadModelSelection";
 import { PersistentThreadTerminalDrawer } from "./chat/ChatTerminalShell";
 import type { LinkedWorktreeItem } from "./worktrees/LinkedWorktreeItemDialog";
 import { MessagesTimeline } from "./chat/MessagesTimeline";
@@ -6771,13 +6772,13 @@ export default function ChatView(props: ChatViewProps) {
         refocusComposer();
         return;
       }
-      setComposerDraftModelSelection(
-        scopeThreadRef(activeThread.environmentId, activeThread.id),
-        nextModelSelection,
-      );
+      const pickedThreadRef = scopeThreadRef(activeThread.environmentId, activeThread.id);
+      setComposerDraftModelSelection(pickedThreadRef, nextModelSelection);
       if (!threadHasStarted(activeThread)) {
         setStickyComposerModelSelection(nextModelSelection);
       }
+      // A chat the node has stores the pick on its thread, so every client shows it.
+      if (isServerThread) noteComposerModelSelectionPicked(pickedThreadRef);
       const normalizedInteractionMode = normalizeInteractionModeForProviderTarget(
         interactionMode,
         entry.supportsAskMode ?? false,
@@ -6792,6 +6793,7 @@ export default function ChatView(props: ChatViewProps) {
       activeThreadStarted,
       handleInteractionModeChange,
       interactionMode,
+      isServerThread,
       lockedProvider,
       providerSelectionPolicy,
       scheduleComposerFocus,

@@ -67,6 +67,7 @@ import {
   requireNoBackgroundWorkForModelSwitch,
 } from "../commandInvariants.ts";
 import { ThreadBackgroundLivenessService } from "../ThreadBackgroundLiveness.ts";
+import { ThreadSessionModelSelectionsService } from "../ThreadSessionModelSelections.ts";
 import { createSidebarUndoReceipts } from "../sidebarUndo.ts";
 import { decideOrchestrationCommand } from "../decider.ts";
 import { createWorkspaceCommitFence } from "../workspaceCommitFence.ts";
@@ -214,6 +215,11 @@ const makeOrchestrationEngine = Effect.fnUntraced(function* (
   // background-work model-switch check instead of requiring the registry.
   const backgroundLiveness = Option.getOrUndefined(
     yield* Effect.serviceOption(ThreadBackgroundLivenessService),
+  );
+  // What each session runs, as the provider command reactor applied it: a pick a client stored
+  // on the thread since then still restarts a Claude session at the next turn.
+  const sessionModelSelections = Option.getOrUndefined(
+    yield* Effect.serviceOption(ThreadSessionModelSelectionsService),
   );
 
   const sidebarUndo = createSidebarUndoReceipts();
@@ -514,6 +520,9 @@ const makeOrchestrationEngine = Effect.fnUntraced(function* (
               events: eventBases,
               thread: findThreadInArray(commandReadModel.threads, envelope.command.threadId),
               liveTaskIds: backgroundLiveness.listLiveTaskIds,
+              ...(sessionModelSelections !== undefined
+                ? { sessionModelSelection: sessionModelSelections.get }
+                : {}),
             });
           }
           workspaceCommitFence.begin(eventBases);

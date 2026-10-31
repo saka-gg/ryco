@@ -67,6 +67,7 @@ const MockProjectAvatarStoreLive = Layer.succeed(ProjectAvatarStore, {
 });
 import { OrchestrationProjectionSnapshotQueryLive } from "./ProjectionSnapshotQuery.ts";
 import * as ThreadBackgroundLiveness from "../ThreadBackgroundLiveness.ts";
+import * as ThreadSessionModelSelections from "../ThreadSessionModelSelections.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import {
   OrchestrationProjectionPipeline,
@@ -99,6 +100,8 @@ async function createOrchestrationSystem(databasePath?: string) {
   ).pipe(
     // The same registry the engine reads (layers are memoized), so tests can feed it.
     Layer.provideMerge(ThreadBackgroundLiveness.layer),
+    // What each session runs, as the provider command reactor would record it.
+    Layer.provideMerge(ThreadSessionModelSelections.layer),
     Layer.provide(MockProjectAvatarStoreLive),
     Layer.provide(OrchestrationEventStoreLive),
     Layer.provide(OrchestrationCommandReceiptRepositoryLive),
@@ -116,6 +119,9 @@ async function createOrchestrationSystem(databasePath?: string) {
     engine,
     liveness: await runtime.runPromise(
       Effect.service(ThreadBackgroundLiveness.ThreadBackgroundLivenessService),
+    ),
+    sessionModelSelections: await runtime.runPromise(
+      Effect.service(ThreadSessionModelSelections.ThreadSessionModelSelectionsService),
     ),
     sql: await runtime.runPromise(Effect.service(SqlClient.SqlClient)),
     readModel: () => runtime.runPromise(snapshotQuery.getSnapshot()),
@@ -3510,6 +3516,50 @@ describe("model switches past native background work", () => {
           turn("other-model", { instanceId: claude, model: "fixture-2" }, true),
         ),
       );
+    } finally {
+      await system.dispose();
+    }
+  });
+
+  it("keeps asking when a pick stored on the thread differs from what the Claude session runs", async () => {
+    const system = await seedDelegationParent(undefined, { driver: "claudeAgent" });
+    try {
+      const claude = ProviderInstanceId.make("claudeAgent");
+      // The provider command reactor recorded what the live session applied.
+      system.sessionModelSelections.set(DELEGATION_PARENT_ID, {
+        instanceId: claude,
+        model: "fixture",
+      });
+      startBackgroundTask(system, "task-shell");
+      // A client stored the pick when it was made: the thread already names the new model,
+      // and the session takes it at the next turn.
+      const picked = { instanceId: claude, model: "fixture-2" };
+      await system.run(
+        system.engine.dispatch({
+          type: "thread.meta.update",
+          commandId: CommandId.make("composer-pick"),
+          threadId: DELEGATION_PARENT_ID,
+          modelSelection: picked,
+        }),
+      );
+      const send = handoffTo({
+        commandId: CommandId.make("composer-send:picked"),
+        message: {
+          messageId: MessageId.make("picked-message"),
+          role: "user",
+          text: "Keep going",
+          attachments: [],
+        },
+        modelSelection: picked,
+      });
+      // That turn still restarts the session, which would end its background work.
+      const refused = await system.run(Effect.flip(system.engine.dispatch(send)));
+      expect(refused).toBeInstanceOf(OrchestrationModelSwitchBlockedError);
+      expect(refused).toMatchObject({ taskIds: ["task-shell"] });
+
+      // Once the session runs the stored pick, the same turn restarts nothing.
+      system.sessionModelSelections.set(DELEGATION_PARENT_ID, picked);
+      await system.run(system.engine.dispatch(send));
     } finally {
       await system.dispose();
     }

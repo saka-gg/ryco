@@ -745,6 +745,34 @@ function enableThreadLifecycle(nextFixture: TestFixture): void {
   };
 }
 
+/** A `configureFixture` for a node that stores composer picks on the thread when they are made. */
+function enableLiveThreadModelSelection(nextFixture: TestFixture): void {
+  for (const key of ["serverConfig", "welcome"] as const) {
+    const environment = nextFixture[key].environment;
+    Object.assign(nextFixture[key], {
+      environment: {
+        ...environment,
+        capabilities: { ...environment.capabilities, liveThreadModelSelection: true },
+      },
+    });
+  }
+}
+
+/** The node pushes the thread with a model selection a client stored on it. */
+function pushThreadModelSelection(
+  threadId: ThreadId,
+  modelSelection: OrchestrationReadModel["threads"][number]["modelSelection"],
+): void {
+  fixture.snapshot = {
+    ...fixture.snapshot,
+    snapshotSequence: fixture.snapshot.snapshotSequence + 1,
+    threads: fixture.snapshot.threads.map((thread) =>
+      thread.id === threadId ? { ...thread, modelSelection } : thread,
+    ),
+  };
+  sendShellThreadUpsert(threadId);
+}
+
 function toShellThread(thread: OrchestrationReadModel["threads"][number]) {
   return {
     id: thread.id,
@@ -2983,6 +3011,8 @@ export {
   enableChatNewLocalShortcut,
   enableComposerStashShortcut,
   configureContextHandoffProviders,
+  enableLiveThreadModelSelection,
+  pushThreadModelSelection,
   openCommandPaletteFromTrigger,
   openNewWorkspaceDraft,
   createDraftFromChatNewLocalShortcut,

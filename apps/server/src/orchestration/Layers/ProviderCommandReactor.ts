@@ -10,6 +10,7 @@ import { computerToolInstructions } from "../../computer/tools/computerGuidance.
 import type { ComputerTurnIntent } from "@ryco/contracts";
 import { stageComputerTurn, computerTurnPlan } from "../../computer/computerTurnLifecycle.ts";
 import { parseComputerInvocation } from "@ryco/shared/computerInvocation";
+import { sameModelSelection } from "@ryco/shared/model";
 import {
   hasRetiredProjectMemory,
   REMOVED_PROJECT_MEMORY_MESSAGE,
@@ -139,6 +140,11 @@ import {
 import { ContextHandoffCoordinator } from "../Services/ContextHandoffCoordinator.ts";
 import { CheckpointReactor } from "../Services/CheckpointReactor.ts";
 import { ProviderRuntimeIngestionService } from "../Services/ProviderRuntimeIngestion.ts";
+import { ThreadBackgroundLivenessService } from "../ThreadBackgroundLiveness.ts";
+import {
+  make as makeThreadSessionModelSelections,
+  ThreadSessionModelSelectionsService,
+} from "../ThreadSessionModelSelections.ts";
 import {
   makeResumeFallbackRequestedActivity,
   type ResumeFallbackReason,
@@ -510,7 +516,14 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
       ),
     );
 
-  const threadModelSelections = new Map<string, ModelSelection>();
+  // What each session runs, shared with the engine's background-work check on turn starts. A
+  // reactor built without it (tests, tools) keeps its own record.
+  const threadModelSelections = Option.getOrElse(
+    yield* Effect.serviceOption(ThreadSessionModelSelectionsService),
+    makeThreadSessionModelSelections,
+  );
+  // Optional: without it a turn that names no selection never counts as stopping background work.
+  const backgroundLiveness = yield* Effect.serviceOption(ThreadBackgroundLivenessService);
   /** `threadId:runtimeSessionId` of runtimes that reported no goal, and whether goals are native there. */
   const goallessRuntimes = new Map<string, "native" | "unsupported">();
   const rememberGoallessRuntime = (runtimeKey: string, kind: "native" | "unsupported") => {
@@ -1425,6 +1438,9 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
     const { goal, native } = yield* reconcileThreadGoal(input.threadId);
     if (input.modelSelection !== undefined) {
       threadModelSelections.set(input.threadId, input.modelSelection);
+    } else if (threadModelSelections.get(input.threadId) === undefined) {
+      // A session this process has no record for started on the thread's stored selection.
+      threadModelSelections.set(input.threadId, thread.modelSelection);
     }
     const normalizedInput = withTurnOriginLine(
       appendThreadReferenceContext(
@@ -2024,6 +2040,15 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
         ),
       ),
     ).pipe(Effect.ensuring(laneControl.endTurnOwnership(threadId)));
+    // The coordinator started the target session on the handoff's selection, or restored the
+    // source: then the thread's selection stands in for what it runs.
+    const target = event.payload.modelSelection;
+    const live = yield* findThreadSession(providerService, threadId);
+    if (target !== undefined && live?.providerInstanceId === target.instanceId) {
+      threadModelSelections.set(threadId, target);
+    } else {
+      threadModelSelections.forget(threadId);
+    }
   });
 
   /**
@@ -2197,6 +2222,30 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
       );
   };
 
+  /**
+   * The chat's stored selection for a turn that names none (`implicitTurnModelSelection`), or
+   * undefined to run on what the session applied last. Clients store a pick on the thread when
+   * it is made; a model change never restarts or interrupts the session then, the next turn
+   * applies it.
+   */
+  const resolveImplicitTurnModelSelection = (thread: OrchestrationThreadShell) => {
+    const applied = threadModelSelections.get(thread.id);
+    if (applied === undefined || sameModelSelection(applied, thread.modelSelection)) {
+      return Effect.succeed(undefined);
+    }
+    return Effect.promise(() => import("../implicitTurnModelSelection.ts")).pipe(
+      Effect.flatMap((module) =>
+        module.resolveImplicitTurnModelSelection({
+          thread,
+          applied,
+          providerService,
+          backgroundLiveness: Option.getOrUndefined(backgroundLiveness),
+          changeRestartsSession: modelSelectionChangeRestartsSession,
+        }),
+      ),
+    );
+  };
+
   const prepareAndSubmitTurnStart = Effect.fn("prepareAndSubmitTurnStart")(function* (
     event: TurnStartRequestedEvent,
     fenceSequence: number,
@@ -2298,6 +2347,8 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
       projectionSnapshotQuery,
       event.payload.threadReferences,
     );
+    const turnModelSelection =
+      event.payload.modelSelection ?? (yield* resolveImplicitTurnModelSelection(thread));
     const prepared = yield* buildSendTurnRequestForThread({
       threadId: event.payload.threadId,
       thread,
@@ -2309,9 +2360,7 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
       ...(event.payload.origin !== undefined ? { origin: event.payload.origin } : {}),
       ...(event.payload.computerUse ? { computerUse: event.payload.computerUse } : {}),
       ...(message.attachments !== undefined ? { attachments: message.attachments } : {}),
-      ...(event.payload.modelSelection !== undefined
-        ? { modelSelection: event.payload.modelSelection }
-        : {}),
+      ...(turnModelSelection !== undefined ? { modelSelection: turnModelSelection } : {}),
       interactionMode: event.payload.interactionMode,
       tokenMode: event.payload.tokenMode,
       createdAt: event.payload.createdAt,
@@ -2363,15 +2412,29 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
       }).pipe(Effect.ensuring(Scope.close(generationScope, Exit.void)), Effect.forkScoped);
     }
 
-    const commitAcceptedModelSelection: Effect.Effect<unknown, OrchestrationDispatchError> =
-      event.payload.modelSelection !== undefined &&
-      !Equal.equals(thread.modelSelection, event.payload.modelSelection)
-        ? orchestrationEngine.dispatch({
-            type: "thread.meta.update",
-            commandId: serverCommandId("accepted-model-selection"),
-            threadId: event.payload.threadId,
-            modelSelection: event.payload.modelSelection,
-          })
+    // The thread's stored selection is the chat's: clients store a pick when it is made, and
+    // the session takes it at its next turn. A turn's own selection becomes the chat's only for
+    // a send that differs from it (an older client stores a pick only by sending it), never for
+    // a person's queued follow-up (it keeps the model it was queued with for its own turn), and
+    // never over a pick stored while this turn started.
+    const acceptedModelSelection = event.payload.modelSelection;
+    const commitAcceptedModelSelection =
+      acceptedModelSelection !== undefined &&
+      serverWakeSource(event.payload.delegationReturnGuard) !== "follow-up-queue" &&
+      !Equal.equals(thread.modelSelection, acceptedModelSelection)
+        ? resolveThread(threadId).pipe(
+            Effect.flatMap((current) =>
+              current !== undefined &&
+              sameModelSelection(current.modelSelection, thread.modelSelection)
+                ? orchestrationEngine.dispatch({
+                    type: "thread.meta.update",
+                    commandId: serverCommandId("accepted-model-selection"),
+                    threadId: event.payload.threadId,
+                    modelSelection: acceptedModelSelection,
+                  })
+                : Effect.void,
+            ),
+          )
         : Effect.void;
 
     // A Stop that arrived while the session was prepared, or while the baseline

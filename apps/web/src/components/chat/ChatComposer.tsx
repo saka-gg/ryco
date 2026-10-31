@@ -121,6 +121,7 @@ import {
 import { type ComposerPromptEditorHandle } from "../ComposerPromptEditor";
 import { type ComposerCommandItem } from "./ComposerCommandMenu";
 import { ComposerPrimaryActions } from "./ComposerPrimaryActions";
+import { useLiveThreadModelSelection } from "./liveThreadModelSelection";
 import { ApprovalCard } from "./ApprovalCard";
 import { ComposerPendingUserInputPanel } from "./ComposerPendingUserInputPanel";
 import { ComposerPlanFollowUpBanner } from "./ComposerPlanFollowUpBanner";
@@ -583,6 +584,9 @@ function useSetPromptFromTraits(input: {
 const selectProjectProviderCommandsSupported = (config: ServerConfig | null): boolean =>
   config?.environment.capabilities.providerProjectCommands === true;
 
+const selectLiveThreadModelSelectionSupported = (config: ServerConfig | null): boolean =>
+  config?.environment.capabilities.liveThreadModelSelection === true;
+
 export const ChatComposer = memo(
   forwardRef<ChatComposerHandle, ChatComposerProps>(function ChatComposer(props, ref) {
     const {
@@ -596,7 +600,7 @@ export const ChatComposer = memo(
       activeThreadEnvironmentId: _activeThreadEnvironmentId,
       activeThreadSessionProviderInstanceId,
       activeThreadStarted,
-      isServerThread: _isServerThread,
+      isServerThread,
       isLocalDraftThread: _isLocalDraftThread,
       activeThreadGoal,
       phase,
@@ -935,6 +939,17 @@ export const ChatComposer = memo(
         createModelSelection(selectedInstanceId, selectedModel, selectedModelOptionsForDispatch),
       [selectedInstanceId, selectedModel, selectedModelOptionsForDispatch],
     );
+    // A started chat's model, effort and speed follow the selection its node stores, live.
+    const liveThreadModelSelectionSupported = useEnvironmentServerConfigSelector(
+      environmentId,
+      selectLiveThreadModelSelectionSupported,
+    );
+    useLiveThreadModelSelection({
+      threadRef: routeKind === "server" && isServerThread ? routeThreadRef : null,
+      enabled: liveThreadModelSelectionSupported,
+      serverModelSelection: activeThreadModelSelection,
+      composerModelSelection: selectedModelSelection,
+    });
     const selectedModelForPicker = selectedModel;
     // Instance-keyed option list so the picker can show each configured
     // instance (built-in + custom) as a first-class sidebar entry. The
