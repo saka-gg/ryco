@@ -65,6 +65,8 @@ interface NativeComposerEditorProps extends ViewProps {
   readonly autoFocus: boolean;
   readonly autoCorrect: boolean;
   readonly spellCheck: boolean;
+  /** Return sends and Shift-Return starts a new line on a hardware keyboard. */
+  readonly submitsOnReturn: boolean;
   readonly onComposerChange: (event: NativeEditorEvent) => void;
   readonly onComposerSelectionChange?: (event: NativeSelectionEvent) => void;
   readonly onComposerPasteImages?: (event: NativePasteImagesEvent) => void;
@@ -274,6 +276,7 @@ export function ComposerEditor({
       onComposerFocus={onFocus}
       onComposerBlur={onBlur}
       onComposerSubmit={onSubmit}
+      submitsOnReturn={onSubmit !== undefined}
     />
   );
 }

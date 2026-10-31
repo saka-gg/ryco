@@ -52,6 +52,25 @@ export function useHomeWorkspaceData(eligibleEnvironmentIds?: ReadonlySet<string
   return useMemo(() => ({ projects, worktrees, threads }) as const, [projects, threads, worktrees]);
 }
 
+/**
+ * The workspace data of the environments a screen lists (Home's machines, the
+ * command palette's), so neither shows a project or thread from one it hides.
+ * Keyed by the ids alone: a list rebuilt for a clock tick or a status change
+ * keeps the same set, so the workspace rows are not refiltered.
+ */
+export function useListedEnvironmentsWorkspaceData(
+  environments: ReadonlyArray<{ readonly environmentId: string }>,
+) {
+  const environmentKey = environments
+    .map((environment) => environment.environmentId)
+    .join("\u0000");
+  const environmentIds = useMemo(
+    () => new Set(environmentKey === "" ? [] : environmentKey.split("\u0000")),
+    [environmentKey],
+  );
+  return useHomeWorkspaceData(environmentIds);
+}
+
 export function useHomeThreadGroups(): ReadonlyArray<HomeThreadGroup> {
   const preferences = usePreferences();
   const groupingMode = resolveHomeGroupingMode(preferences.projectGroupingEnabled);

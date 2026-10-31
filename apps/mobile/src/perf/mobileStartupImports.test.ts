@@ -279,6 +279,21 @@ describe("mobile launch graph boundaries", () => {
     expect(reachable).not.toContain("apps/mobile/src/features/threads/ThreadDetailScreen.tsx");
   });
 
+  it("loads the command palette and its search the first time Command-K opens it", () => {
+    const provider = read("features/keyboard/HardwareKeyboardCommandProvider.tsx");
+    expect(provider).toContain('require("./CommandPalette")');
+    const reachable = [...staticGraph(LAUNCH_ENTRY).keys()].map(display);
+    expect(reachable).toContain(
+      "apps/mobile/src/features/keyboard/HardwareKeyboardCommandProvider.tsx",
+    );
+    expect(
+      chainsTo(LAUNCH_ENTRY, [
+        /^apps\/mobile\/src\/features\/keyboard\/(?:CommandPalette\.tsx|commandPaletteModel\.ts)$/u,
+        /^packages\/client-runtime\/src\/commandPalette\//u,
+      ]),
+    ).toEqual([]);
+  });
+
   it("parses no shiki grammar or theme until a highlighter is needed", () => {
     const highlighter = read("features/review/shikiReviewHighlighter.ts");
     expect(

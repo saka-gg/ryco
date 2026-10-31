@@ -18,6 +18,7 @@ import { EmptyState } from "../../components/EmptyState";
 import type { InboxEmptyState, InboxSection, InboxThreadRow } from "./inboxModel";
 import {
   flattenInboxSections,
+  inboxThreadAtPosition,
   MOBILE_SETTLED_PAGE_SIZE,
   type InboxListItem,
 } from "./inboxListModel";
@@ -34,6 +35,12 @@ import {
   type InboxSnoozeMenuPreset,
 } from "./inboxRowActions";
 import { HOME_LIST_PADDING_BOTTOM } from "../home/homeChromeModel";
+import {
+  THREAD_JUMP_COMMANDS,
+  threadJumpIndex,
+  useHardwareKeyboardCommand,
+  type HardwareKeyboardCommand,
+} from "../keyboard/hardwareKeyboardCommands";
 import { WorkspaceConnectionStatus } from "../home/WorkspaceConnectionStatus";
 
 const EMPTY_COPY: Readonly<
@@ -202,6 +209,15 @@ export const InboxScreen = memo(function InboxScreen(props: {
       }),
     [props.sections, settledOpen, settledVisibleCount, snoozedOpen],
   );
+  // Command-1…9 open the first nine thread rows as this list shows them now.
+  const jumpToThread = useCallback(
+    (command: HardwareKeyboardCommand) => {
+      const row = inboxThreadAtPosition(data, threadJumpIndex(command));
+      if (row) onOpenThread(row);
+    },
+    [data, onOpenThread],
+  );
+  useHardwareKeyboardCommand(THREAD_JUMP_COMMANDS, jumpToThread);
   const empty = props.emptyState ? EMPTY_COPY[props.emptyState] : null;
   // Resolved per clock tick rather than per row and render, and kept by value
   // so rows keep their menus until a preset actually appears or lapses.

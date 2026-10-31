@@ -72,7 +72,7 @@ vi.mock("../../hostedHub/directoryDemand", () => ({
   useDirectoryPresenceDemand: directoryDemandMock,
 }));
 vi.mock("../../state/homeData", () => ({
-  useHomeWorkspaceData: () => ({ projects: [], worktrees: [], threads: [] }),
+  useListedEnvironmentsWorkspaceData: () => ({ projects: [], worktrees: [], threads: [] }),
 }));
 vi.mock("../../state/messageQueueStore", () => ({
   useMessageQueueStore: (selector: (state: Record<string, unknown>) => unknown) =>

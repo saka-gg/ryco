@@ -216,6 +216,7 @@ import {
   useStore,
 } from "../../state/threadsRuntime";
 import { useHomeEnvironments } from "../home/useHomeEnvironments";
+import { useHardwareKeyboardCommand } from "../keyboard/hardwareKeyboardCommands";
 import { TerminalHeaderButton } from "../terminal/TerminalHeaderButton";
 import { useRepositoryStatus } from "../newTask/useNewTaskRepository";
 import { NewTaskLaunchCard } from "../newTask/NewTaskLaunchCard";
@@ -1644,6 +1645,12 @@ export function ThreadDetailScreen(props: {
     () => navigation.navigate("ThreadDevice", { environmentId, threadId }),
     [environmentId, navigation, threadId],
   );
+
+  // A hardware keyboard opens the same tools as the header buttons, only while
+  // they show (Command-Shift-F, -T and -R).
+  useHardwareKeyboardCommand("review", headerModel?.reviewVisible ? openReview : undefined);
+  useHardwareKeyboardCommand("files", headerModel?.filesVisible ? openFiles : undefined);
+  useHardwareKeyboardCommand("terminal", headerModel?.terminalVisible ? openTerminal : undefined);
 
   useLayoutEffect(() => {
     navigation.setOptions({

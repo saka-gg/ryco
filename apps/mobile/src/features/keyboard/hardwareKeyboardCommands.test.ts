@@ -5,6 +5,8 @@ import {
   getRegisteredHardwareKeyboardCommands,
   registerHardwareKeyboardCommand,
   subscribeToHardwareKeyboardCommandRegistrations,
+  THREAD_JUMP_COMMANDS,
+  threadJumpIndex,
 } from "./hardwareKeyboardCommands";
 
 // The provider reads the registered set through useSyncExternalStore and builds
@@ -93,5 +95,40 @@ describe("hardware keyboard command registrations", () => {
     expect(dispatchHardwareKeyboardCommand("back")).toBe(true);
     expect(calls).toEqual(["screen", "app"]);
     expect(dispatchHardwareKeyboardCommand("newTask")).toBe(false);
+  });
+});
+
+describe("thread jump commands", () => {
+  it("lists Command-1 through Command-9 in order with their positions", () => {
+    expect(THREAD_JUMP_COMMANDS).toEqual([
+      "thread.jump.1",
+      "thread.jump.2",
+      "thread.jump.3",
+      "thread.jump.4",
+      "thread.jump.5",
+      "thread.jump.6",
+      "thread.jump.7",
+      "thread.jump.8",
+      "thread.jump.9",
+    ]);
+    expect(threadJumpIndex("thread.jump.1")).toBe(0);
+    expect(threadJumpIndex("thread.jump.9")).toBe(8);
+    expect(threadJumpIndex("commandPalette")).toBe(-1);
+  });
+
+  it("registers one handler for several commands and tells it which one came", () => {
+    const received: string[] = [];
+    const unregister = register(THREAD_JUMP_COMMANDS, (command) => {
+      received.push(command);
+    });
+    expect([...getRegisteredHardwareKeyboardCommands()]).toEqual(THREAD_JUMP_COMMANDS);
+
+    expect(dispatchHardwareKeyboardCommand("thread.jump.3")).toBe(true);
+    expect(dispatchHardwareKeyboardCommand("thread.jump.7")).toBe(true);
+    expect(received).toEqual(["thread.jump.3", "thread.jump.7"]);
+
+    unregister();
+    expect(getRegisteredHardwareKeyboardCommands().size).toBe(0);
+    expect(dispatchHardwareKeyboardCommand("thread.jump.3")).toBe(false);
   });
 });
