@@ -47,7 +47,7 @@ export function classifyFatalStartupError(error: unknown): FatalStartupErrorCode
   if (tag === "ConfigError") return "invalid-config";
   // An in-place database restore that stopped part-way and cannot be finished: it fails the same
   // way on every start until someone looks at its journal (`databaseRestoreSwap.ts`).
-  if (tag === "DatabaseRestoreSwapError") return "database-restore-interrupted";
+  if (tag === "DatabaseRestoreInterruptedError") return "database-restore-interrupted";
   // An explicit bootstrap fd without an envelope: the launcher is gone or
   // stalled, and a restart by that same launcher would wait the same way.
   if (tag === "BootstrapEnvelopeUnavailableError") return "bootstrap-envelope-missing";

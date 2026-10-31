@@ -143,8 +143,8 @@ const formatRestore = (result: RestoreResult, file: string) =>
     "  It has no settings, secrets or Hub identity, so pair your devices with it again.",
     "  To make the backup your main database instead, quit Ryco and run:",
     `    ryco db restore ${file} --replace`,
-    "  It keeps the database it replaces and signs every device out (the restored database",
-    "  accepts again what was revoked since the backup was taken).",
+    "  It keeps the database it replaces, signs every device and integration out, and revokes",
+    "  unused pairing links, so nothing revoked since the backup works again.",
   ].join("\n");
 
 const formatReplace = (result: ReplaceResult) =>

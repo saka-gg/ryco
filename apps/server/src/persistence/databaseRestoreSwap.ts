@@ -110,6 +110,17 @@ export class DatabaseRestoreSwapError extends Data.TaggedError("DatabaseRestoreS
   readonly cause?: unknown;
 }> {}
 
+/**
+ * Opening the database found a journal it could not finish: every start fails the same way until
+ * someone looks at it, so startup classifies it as fatal (`database-restore-interrupted`).
+ */
+export class DatabaseRestoreInterruptedError extends Data.TaggedError(
+  "DatabaseRestoreInterruptedError",
+)<{
+  readonly message: string;
+  readonly cause?: unknown;
+}> {}
+
 const swapError = (message: string, cause?: unknown) =>
   new DatabaseRestoreSwapError({ message, ...(cause === undefined ? {} : { cause }) });
 
@@ -188,8 +199,12 @@ const readJournal = async (journalPath: string): Promise<RestoreJournal> => {
   return journal;
 };
 
+/**
+ * Removes the journal, and the staging directory first. A staging directory that cannot be removed
+ * does not fail the restore (the next `--replace` removes leftovers); the journal must go.
+ */
 const removeJournal = async (journalPath: string, stagingDir: string) => {
-  await rm(stagingDir, { recursive: true, force: true });
+  await rm(stagingDir, { recursive: true, force: true }).catch(() => undefined);
   await rm(journalPath, { force: true });
   await syncDirectory(dirname(journalPath));
 };
@@ -197,14 +212,16 @@ const removeJournal = async (journalPath: string, stagingDir: string) => {
 /**
  * Finishes the swap `journal` describes for the database at `dbPath`: see the module comment.
  * Safe to run again at any point, also after it finished (it then only removes the journal).
+ * True when it swapped the restored file in; false when there was nothing left to swap.
  */
 export async function finishDatabaseRestoreSwap(
   journalPath: string,
   dbPath: string,
   journal: RestoreJournal,
-): Promise<void> {
+): Promise<boolean> {
   const paths = restoreSwapPaths(dbPath, journal);
-  if (await pathExists(paths.staged)) {
+  const swapping = await pathExists(paths.staged);
+  if (swapping) {
     await mkdir(paths.aside, { recursive: true, mode: 0o700 });
     for (const move of paths.sideMoves) {
       if (!(await pathExists(move.from))) continue;
@@ -237,6 +254,7 @@ export async function finishDatabaseRestoreSwap(
     await syncDirectory(dirname(paths.target));
   }
   await removeJournal(journalPath, paths.stagingDir);
+  return swapping;
 }
 
 /**
@@ -290,15 +308,15 @@ export const finishInterruptedDatabaseRestore = (
     const finish = Effect.tryPromise({
       try: async () => {
         if (!(await pathExists(journalPath))) return false;
-        await finishDatabaseRestoreSwap(journalPath, dbPath, await readJournal(journalPath));
-        return true;
+        return finishDatabaseRestoreSwap(journalPath, dbPath, await readJournal(journalPath));
       },
       catch: (cause) =>
-        swapError(
-          `A restore of ${dbPath} was interrupted and could not be finished: ${errorText(cause)} ` +
+        new DatabaseRestoreInterruptedError({
+          message:
+            `A restore of ${dbPath} was interrupted and could not be finished: ${errorText(cause)} ` +
             `Its journal is ${journalPath}; nothing was deleted.`,
           cause,
-        ),
+        }),
     }).pipe(Effect.uninterruptible);
     const lease = yield* Effect.serviceOption(DatabaseOwnerLease);
     const finished =
@@ -412,8 +430,6 @@ export const replaceDatabaseWithBackup = Effect.fn("replaceDatabaseWithBackup")(
   readonly nowMs: number;
   /** Who else has these files open (tests); `fileHolders.ts` by default. */
   readonly fileHolders?: ((paths: ReadonlyArray<string>) => Promise<FileHoldersResult>) | undefined;
-  /** Runs between the journal and the swap (tests). */
-  readonly beforeSwap?: (() => Promise<void>) | undefined;
 }) {
   const dbPath = input.live.dbPath;
   const stateDir = dirname(dbPath);
@@ -422,7 +438,7 @@ export const replaceDatabaseWithBackup = Effect.fn("replaceDatabaseWithBackup")(
   // No journal is left now, so no staging directory is in use (this process owns the database).
   yield* Effect.promise(async () => {
     for (const name of await readdir(stateDir).catch(() => [] as string[])) {
-      if (!name.startsWith(STAGING_PREFIX)) continue;
+      if (!STAGING_NAME.test(name)) continue;
       await rm(join(stateDir, name), { recursive: true, force: true }).catch(() => undefined);
     }
   });
@@ -439,40 +455,72 @@ export const replaceDatabaseWithBackup = Effect.fn("replaceDatabaseWithBackup")(
   const removeStaging = Effect.promise(() =>
     rm(paths.stagingDir, { recursive: true, force: true }).catch(() => undefined),
   );
-  const restored = yield* restoreDatabaseBackup({
-    file: input.file,
-    target: { baseDir: paths.stagingDir, dbPath: paths.staged },
-    live: input.live,
-    openSqlite: input.openSqlite,
-    fullCheck: input.fullCheck,
-    staging: true,
-  });
-  if (!restored.opensWithThisBuild) {
-    yield* removeStaging;
-    return yield* refuse(
-      "not-a-ryco-database",
-      `${input.file} holds schema ${restored.schema}, newer than this build supports (${restored.supportedSchema}), so it cannot replace the database in use. Nothing was changed.`,
+  const prepared = yield* Effect.gen(function* () {
+    const restored = yield* restoreDatabaseBackup({
+      file: input.file,
+      target: { baseDir: paths.stagingDir, dbPath: paths.staged },
+      live: input.live,
+      openSqlite: input.openSqlite,
+      fullCheck: input.fullCheck,
+      staging: true,
+    });
+    if (!restored.opensWithThisBuild) {
+      return yield* refuse(
+        "not-a-ryco-database",
+        `${input.file} holds schema ${restored.schema}, newer than this build supports (${restored.supportedSchema}), so it cannot replace the database in use. Nothing was changed.`,
+      );
+    }
+    if (restored.skippedMigrations.length > 0) {
+      return yield* refuse(
+        "not-a-ryco-database",
+        `Another branch or build of Ryco wrote ${input.file}: this build would skip its own migration${restored.skippedMigrations.length > 1 ? "s" : ""} ${restored.skippedMigrations.join(", ")} there. Restore it with the build that wrote it, or into a new directory with --into. Nothing was changed.`,
+      );
+    }
+    const secured = yield* secureRestoredDatabase(
+      input.openSqlite,
+      paths.staged,
+      new Date(input.nowMs).toISOString(),
+    ).pipe(
+      Effect.mapError((error) =>
+        swapError(
+          `Could not secure the restored copy: ${error.message} Nothing was changed.`,
+          error,
+        ),
+      ),
     );
-  }
-  if (restored.skippedMigrations.length > 0) {
-    yield* removeStaging;
-    return yield* refuse(
-      "not-a-ryco-database",
-      `Another branch or build of Ryco wrote ${input.file}: this build would skip its own migration${restored.skippedMigrations.length > 1 ? "s" : ""} ${restored.skippedMigrations.join(", ")} there. Restore it with the build that wrote it, or into a new directory with --into. Nothing was changed.`,
-    );
-  }
+    return { restored, secured };
+    // A refusal, a failure or an interruption while staging leaves no staging directory behind.
+  }).pipe(Effect.onExit((exit) => (exit._tag === "Success" ? Effect.void : removeStaging)));
 
-  const secured = yield* secureRestoredDatabase(
-    input.openSqlite,
-    paths.staged,
-    new Date(input.nowMs).toISOString(),
-  ).pipe(
-    Effect.tapError(() => removeStaging),
-    Effect.mapError((error) =>
-      swapError(`Could not secure the restored copy: ${error.message} Nothing was changed.`, error),
+  // The journal goes first, so a Ryco command that opens the database from here on finds it and
+  // waits for this process's ownership instead of opening the old file. Then, right before the
+  // swap (staging can take minutes), the database is checked again.
+  const signedOut = yield* Effect.promise(() =>
+    pathExists(paths.sideMoves[0]!.from).catch(() => true),
+  );
+  const warnings: string[] = [];
+  yield* Effect.tryPromise({
+    try: () => writeJournal(journalPath, journal),
+    catch: (cause) => swapError(`Could not write ${journalPath}: ${errorText(cause)}`, cause),
+  }).pipe(
+    Effect.tapError(() =>
+      Effect.promise(() => rm(journalPath, { force: true }).catch(() => undefined)).pipe(
+        Effect.andThen(removeStaging),
+      ),
     ),
   );
-  if (liveEntry !== null) {
+  const abandon = Effect.promise(() =>
+    removeJournal(journalPath, paths.stagingDir).catch(() => undefined),
+  );
+  yield* Effect.gen(function* () {
+    const live = yield* Effect.promise(() => lstat(dbPath).catch(() => null));
+    if (live?.isSymbolicLink() === true) {
+      return yield* refuse(
+        "unsafe-target",
+        `${dbPath} became a symbolic link. Nothing was changed.`,
+      );
+    }
+    if (live === null) return;
     yield* Effect.tryPromise({
       try: () => prepareCopyForSwap(paths.staged, dbPath),
       catch: (cause) =>
@@ -480,15 +528,9 @@ export const replaceDatabaseWithBackup = Effect.fn("replaceDatabaseWithBackup")(
           "io",
           `Could not give the restored copy the database's owner and permissions (${errorText(cause)}). Nothing was changed.`,
         ),
-    }).pipe(Effect.tapError(() => removeStaging));
-  }
-
-  // Right before the swap: staging can take minutes, and a process may have opened the file.
-  const warnings: string[] = [];
-  if (liveEntry !== null) {
+    });
     const state = yield* quiesceLiveDatabase(input.openSqlite, dbPath);
     if (state === "busy") {
-      yield* removeStaging;
       return yield* refuse(
         "live-database",
         `Another process is reading ${dbPath} right now (a \`ryco\` command, a backup). Let it finish, then run this again. Nothing was changed.`,
@@ -504,7 +546,6 @@ export const replaceDatabaseWithBackup = Effect.fn("replaceDatabaseWithBackup")(
       input.fileHolders ?? ((files) => findFileHolders({ paths: files })),
     );
     if (holders.kind === "unavailable" || holders.others.length > 0) {
-      yield* removeStaging;
       return yield* refuse(
         "live-database",
         holders.kind === "unavailable"
@@ -512,49 +553,39 @@ export const replaceDatabaseWithBackup = Effect.fn("replaceDatabaseWithBackup")(
           : `${describeFileHolders(holders.others)} still has ${dbPath} open. Close it, then run this again. Nothing was changed.`,
       );
     }
-  }
+  }).pipe(Effect.onExit((exit) => (exit._tag === "Success" ? Effect.void : abandon)));
 
-  const signedOut = yield* Effect.promise(() =>
-    pathExists(paths.sideMoves[0]!.from).catch(() => true),
-  );
-  yield* Effect.gen(function* () {
-    yield* Effect.tryPromise({
-      try: () => writeJournal(journalPath, journal),
-      catch: (cause) => swapError(`Could not write ${journalPath}: ${errorText(cause)}`, cause),
-    }).pipe(Effect.tapError(() => removeStaging));
-    yield* Effect.tryPromise({
-      try: async () => {
-        await input.beforeSwap?.();
-        await finishDatabaseRestoreSwap(journalPath, dbPath, journal);
-      },
-      catch: (cause) => swapError(errorText(cause), cause),
-    }).pipe(
-      Effect.catch((failure) =>
-        Effect.tryPromise({
-          try: () => undoDatabaseRestoreSwap(journalPath, dbPath, journal),
-          catch: (undoCause) =>
-            swapError(
-              `The restore stopped part-way (${failure.message}) and could not be undone (${errorText(undoCause)}). ` +
-                `Start Ryco or run this again to finish it; nothing was deleted, and what was moved is in ${paths.aside}.`,
-              undoCause,
-            ),
-        }).pipe(
-          Effect.flatMap((undone) =>
-            undone === "completed"
-              ? Effect.sync(() => {
-                  warnings.push(`The restore went through, but then: ${failure.message}`);
-                })
-              : Effect.fail(
-                  swapError(
-                    `Could not swap the restored database in: ${failure.message} Nothing was changed.`,
-                    failure.cause,
-                  ),
-                ),
+  yield* Effect.tryPromise({
+    try: () => finishDatabaseRestoreSwap(journalPath, dbPath, journal),
+    catch: (cause) => swapError(errorText(cause), cause),
+  }).pipe(
+    Effect.catch((failure) =>
+      Effect.tryPromise({
+        try: () => undoDatabaseRestoreSwap(journalPath, dbPath, journal),
+        catch: (undoCause) =>
+          swapError(
+            `The restore stopped part-way (${failure.message}) and could not be undone (${errorText(undoCause)}). ` +
+              `Start Ryco or run this again to finish it; nothing was deleted, and what was moved is in ${paths.aside}.`,
+            undoCause,
           ),
+      }).pipe(
+        Effect.flatMap((undone) =>
+          undone === "completed"
+            ? Effect.sync(() => {
+                warnings.push(`The restore went through, but then: ${failure.message}`);
+              })
+            : Effect.fail(
+                swapError(
+                  `Could not swap the restored database in: ${failure.message} Nothing was changed.`,
+                  failure.cause,
+                ),
+              ),
         ),
       ),
-    );
-  }).pipe(Effect.uninterruptible);
+    ),
+    Effect.uninterruptible,
+  );
+  const { restored, secured } = prepared;
   return {
     ...restored,
     path: dbPath,

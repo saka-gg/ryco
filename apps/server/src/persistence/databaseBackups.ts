@@ -54,6 +54,7 @@ import type { SqlError } from "effect/sql/SqlError";
 
 import { syncDirectory, syncFile } from "../fsDurability.ts";
 import { databaseBackupsDirectory, type PremigrationBackupMode } from "./databaseBackupPolicy.ts";
+import { databaseRestoreJournalPath } from "./databaseRestoreJournal.ts";
 import {
   migrationEntries,
   repairedMigrationIds,
@@ -1599,6 +1600,12 @@ export const createManualBackup = Effect.fn("createManualBackup")(function* (inp
   const { dbPath, openSqlite } = input;
   const step = (name: ManualBackupStep) => input.onStep?.(name) ?? Effect.void;
 
+  if (yield* exists(databaseRestoreJournalPath(dbPath)).pipe(Effect.orElseSucceed(() => false))) {
+    return yield* commandError(
+      "live-database",
+      `A restore of ${dbPath} was interrupted. Start Ryco, or run \`ryco db restore <backup> --replace\` again, to finish it before backing up.`,
+    );
+  }
   const database = yield* io("stat", dbPath, () => stat(dbPath)).pipe(Effect.option);
   if (Option.isNone(database) || !database.value.isFile()) {
     return yield* commandError("no-database", `No Ryco database at ${dbPath}.`);

@@ -193,8 +193,8 @@ describe("ryco db", () => {
         restore.output,
         `ryco db restore ${NodePath.join(home.backupsDir, manual!)} --replace`,
       );
-      assert.include(restore.output, "signs every device out");
-      assert.include(restore.output, "revoked since the backup");
+      assert.include(restore.output, "signs every device and integration out");
+      assert.include(restore.output, "nothing revoked since the backup works again");
     }).pipe(Effect.ensuring(home.cleanup), Effect.ensuring(target.cleanup));
   });
 

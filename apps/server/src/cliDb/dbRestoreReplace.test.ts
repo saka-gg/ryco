@@ -25,6 +25,7 @@ import {
   undoDatabaseRestoreSwap,
 } from "../persistence/databaseRestoreSwap.ts";
 import { makeRuntimeSqliteLayer } from "../persistence/Layers/Sqlite.ts";
+import { classifyFatalStartupError } from "../startupFailure.ts";
 import {
   migrationEntries,
   repairedMigrationIds,
@@ -312,6 +313,8 @@ describe("ryco db restore --replace", () => {
       }).pipe(Effect.provide(NodeServices.layer), Effect.flip);
       assert.deepEqual(stagedWhenAsked, [true]);
       assert.include(refused.message, "pid 4242 (sqlite3)");
+      // The journal written before the check went again with the staged copy.
+      assert.isFalse(NodeFS.existsSync(databaseRestoreJournalPath(home.dbPath)));
       // The staged copy is gone again, and nothing else changed.
       assert.deepEqual(
         NodeFS.readdirSync(home.stateDir).filter((name) => name.startsWith(".restore-staging-")),
@@ -319,6 +322,30 @@ describe("ryco db restore --replace", () => {
       );
       assert.deepEqual(notes(home.dbPath), ["kept"]);
     }).pipe(Effect.ensuring(home.cleanup));
+  });
+
+  it.effect("refuses to back up a database whose restore was interrupted", () => {
+    const home = makeHome();
+    return Effect.gen(function* () {
+      yield* buildHome(home);
+      NodeFS.writeFileSync(
+        databaseRestoreJournalPath(home.dbPath),
+        JSON.stringify(planDatabaseRestoreSwap(Date.UTC(2026, 9, 31))),
+      );
+      const refused = yield* runCli(["db", "backup", ...home.here]).pipe(
+        Effect.provide(CliRuntimeLayer),
+        Effect.flip,
+      );
+      assert.instanceOf(refused, DatabaseBackupCommandError);
+      assert.include(refused.message, "was interrupted");
+    }).pipe(Effect.ensuring(home.cleanup));
+  });
+
+  it("does not stop a server start for a restore command's own failure", () => {
+    // Only a journal startup cannot finish is fatal; a refused or failed `--replace` is not.
+    assert.isNull(
+      classifyFatalStartupError(new DatabaseRestoreSwapError({ message: "Nothing was changed." })),
+    );
   });
 
   it.effect("refuses a backup whose ledger would make this build skip its own migrations", () => {

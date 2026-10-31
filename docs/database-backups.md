@@ -224,13 +224,15 @@ or any `ryco serve`): the command takes the database's owner lock
    open, or when that cannot be known (Windows, no `lsof`); restore with `--into` there.
 4. It writes a journal, `<stateDir>/state.sqlite.restore.json`, then moves the signing key and the
    database's `-wal`, `-shm` and `-journal` files into `<stateDir>/replaced-<time>/`, hard-links
-   `state.sqlite` there, and renames the restored file over `state.sqlite`, so the name never goes
-   missing. It then removes the journal and the staging directory, flushing every directory on the
+   `state.sqlite` there (moves it, on a volume without hard links, such as FAT or exFAT), and
+   renames the restored file over `state.sqlite`, so the name never goes missing where links work.
+   The journal is written before the checks of step 3, so a Ryco command started meanwhile waits
+   instead of opening the old file. It then removes the journal and the staging directory, flushing every directory on the
    way. This step cannot be interrupted. Nothing is deleted.
 
 If the command stops part-way anyway (a crash, a power loss), the journal finishes the swap: the
 next start of Ryco, or the next `ryco db restore --replace`, completes it before anything opens
-the database (a start that cannot finish it stops with `database-restore-interrupted` and names
+the database (`ryco doctor` and `ryco db backup` refuse until then) (a start that cannot finish it stops with `database-restore-interrupted` and names
 the journal). A swap that fails while it runs moves back what it moved, and the database stays as
 it was. A run that stopped while staging leaves only its staging directory, which the next
 `--replace` removes. The journal holds only the names of the two directories it uses.

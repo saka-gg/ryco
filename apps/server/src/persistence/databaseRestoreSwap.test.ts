@@ -82,6 +82,18 @@ describe("in-place restore journal", () => {
     }
   });
 
+  it("only removes the journal when the restored file already has its name", async () => {
+    const swap = makeSwap();
+    try {
+      for (const step of steps) step(swap);
+      assert.isFalse(await finishDatabaseRestoreSwap(swap.journalPath, swap.dbPath, swap.journal));
+      assert.equal(read(swap.dbPath), "restored database");
+      assert.isFalse(NodeFS.existsSync(swap.journalPath));
+    } finally {
+      swap.cleanup();
+    }
+  });
+
   it("never leaves the database's name missing while it swaps", async () => {
     const swap = makeSwap();
     try {

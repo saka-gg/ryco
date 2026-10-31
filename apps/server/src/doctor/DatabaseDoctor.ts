@@ -86,6 +86,7 @@ import {
   removePausedServiceMarker,
   writePausedServiceMarker,
 } from "./doctorOwnership.ts";
+import { databaseRestoreJournalPath } from "../persistence/databaseRestoreJournal.ts";
 import { canCheckFileHolders, describeFileHolders, type FileHoldersResult } from "./fileHolders.ts";
 import {
   doctorCopyPath,
@@ -710,6 +711,14 @@ const repairSteps = (
     progress.databaseFile = databaseFile;
     if ((yield* Effect.promise(() => fileSize(databaseFile))) === 0) {
       return yield* refuse(`There is no database at ${databaseFile}.`);
+    }
+    // An in-place restore that stopped part-way must finish first: a compacted copy swapped in
+    // now would be what the restore moves aside, and the restore would then refuse to finish.
+    const restoreJournal = databaseRestoreJournalPath(target.dbPath);
+    if ((yield* Effect.promise(() => fileSize(restoreJournal))) > 0) {
+      return yield* refuse(
+        `A restore of this database was interrupted (${restoreJournal}). Start Ryco, or run \`ryco db restore <backup> --replace\` again, to finish it first.`,
+      );
     }
 
     // 1. Ownership.
