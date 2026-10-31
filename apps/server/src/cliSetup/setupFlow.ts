@@ -15,19 +15,17 @@
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { readFile } from "node:fs/promises";
-import { homedir, networkInterfaces } from "node:os";
+import { homedir } from "node:os";
 import path from "node:path";
 
 import type { HubConnectorStatus, HubEnrollmentCeremonyDetail } from "@ryco/contracts";
 import { DEFAULT_HOSTED_APP_ORIGIN } from "@ryco/shared/hostedApp";
 import { NetService } from "@ryco/shared/Net";
-import { readCachedTailscaleMagicDnsName } from "@ryco/tailscale/endpoints";
 import { Console, Data, Effect, Option } from "effect";
 import { Prompt } from "effect/cli";
 import type { ChildProcessSpawner } from "effect/process";
 import type * as Terminal from "effect/Terminal";
 
-import { resolveServerAdvertisedEndpointsWithTailscale } from "../remote/AdvertisedEndpointRegistry.ts";
 import {
   isEphemeralCliInstall,
   nodeServiceLingerCommand,
@@ -40,7 +38,8 @@ import {
   stopNodeService,
   uninstallNodeService,
 } from "../service/nodeService.ts";
-import { loadTerminalQrCode, resolveHeadlessServeLinks } from "../startupAccess.ts";
+import { loadTerminalQrCode } from "../startupAccess.ts";
+import { discoverPairingLinks, formatPairingQrBlock } from "./pairingQr.ts";
 import {
   detectMachineName,
   detectMissingOsKeyStore,
@@ -632,45 +631,32 @@ const showPairing = (
     const credential = yield* operations
       .createOwnerPairingCredential(15)
       .pipe(Effect.mapError(toSetupError));
-    const port = Number(new URL(origin).port) || 3773;
-    const endpoints = yield* promise(() =>
-      resolveServerAdvertisedEndpointsWithTailscale({
+    const links = yield* promise(() =>
+      discoverPairingLinks({
+        credential,
+        origin,
         host: config.host,
-        port,
-        networkInterfaces: networkInterfaces(),
         tailscaleServeEnabled: config.tailscaleServe === true,
-        ...(config.tailscaleServePort === undefined
-          ? {}
-          : { tailscaleServePort: config.tailscaleServePort }),
-        readMagicDnsName: readCachedTailscaleMagicDnsName,
+        tailscaleServePort: config.tailscaleServePort,
       }),
     );
-    const links = resolveHeadlessServeLinks({
-      endpoints,
-      credential,
-      fallbackConnectionString: origin.replace(/\/$/u, ""),
-    });
     const renderQrCode = yield* loadTerminalQrCode;
     yield* Console.log(
-      [
-        "",
-        "  Scan with the Ryco app or a phone camera, or open a link on the device:",
-        "",
-        renderQrCode(links.pairingUrl),
-        "",
-        `  ${links.pairingUrl}`,
-        ...links.alternativeLinks.map((link) => `  ${dim(`${link.label}:`)} ${link.url}`),
-        "",
-        dim("  One-time link for your own devices, valid for 15 minutes."),
-        ...(config.hub?.enabled
-          ? [
-              dim(
-                "  Devices signed in to your Ryco account find this computer under your machines — no pairing needed.",
-              ),
-            ]
-          : []),
-        "",
-      ].join("\n"),
+      formatPairingQrBlock({
+        links,
+        renderQrCode,
+        heading: "Scan with the Ryco app or a phone camera, or open a link on the device:",
+        footer: [
+          "One-time link for your own devices, valid for 15 minutes.",
+          ...(config.hub?.enabled
+            ? [
+                "Devices signed in to your Ryco account find this computer under your machines — no pairing needed.",
+              ]
+            : []),
+        ],
+        dim,
+        indent: "  ",
+      }),
     );
   });
 

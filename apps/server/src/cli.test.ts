@@ -1825,3 +1825,40 @@ it.layer(NodeServices.layer)("cli service status --ready", (it) => {
     ),
   );
 });
+
+it.layer(NodeServices.layer)("cli auth pairing create --qr", (it) => {
+  it.effect("prints a QR code only for a link another device can reach", () =>
+    Effect.gen(function* () {
+      const baseDir = mkdtempSync(join(tmpdir(), "ryco-cli-pairing-qr-test-"));
+      const create = (...extra: ReadonlyArray<string>) =>
+        captureStdout(runCli(["auth", "pairing", "create", "--base-dir", baseDir, ...extra]));
+
+      const lan = yield* create("--qr", "--base-url", "http://192.168.1.5:3773");
+      const lanText = lan.lines.join("\n");
+      assert.match(lanText, /Pair URL: http:\/\/192\.168\.1\.5:3773\/pair#token=/u);
+      assert.match(lanText, /[█▀▄]/u);
+      assert.match(lanText, /One-time client link, valid for \d+ minutes?\./u);
+
+      const loopback = yield* create("--qr", "--base-url", "http://127.0.0.1:3773");
+      const loopbackText = loopback.lines.join("\n");
+      assert.include(loopbackText, "Only this computer can reach this node.");
+      assert.notMatch(loopbackText, /[█▀▄]/u);
+
+      // No --base-url and no running node of this home.
+      const noNode = yield* create("--qr");
+      assert.include(noNode.lines.join("\n"), "No running node found; pass --base-url");
+
+      const off = yield* create("--no-qr", "--base-url", "http://192.168.1.5:3773");
+      assert.notMatch(off.lines.join("\n"), /[█▀▄]/u);
+
+      const json = yield* create("--json", "--base-url", "http://192.168.1.5:3773");
+      assert.notMatch(json.output, /[█▀▄]/u);
+      const document = JSON.parse(json.output) as { pairUrl?: string; qrUrl?: string | null };
+      assert.match(document.pairUrl ?? "", /^http:\/\/192\.168\.1\.5:3773\/pair#token=/u);
+      assert.equal(document.qrUrl, document.pairUrl);
+
+      const jsonLoopback = yield* create("--json", "--base-url", "http://localhost:3773");
+      assert.equal((JSON.parse(jsonLoopback.output) as { qrUrl?: string | null }).qrUrl, null);
+    }),
+  );
+});

@@ -20,10 +20,12 @@ import {
   type ClientOrchestrationCommand,
 } from "@ryco/contracts";
 import {
+  Clock,
   Config,
   Console,
   type Context,
   Data,
+  DateTime,
   Duration,
   Effect,
   Exit,
@@ -109,6 +111,11 @@ import {
   type SetupContext,
   type SetupOperations,
 } from "./cliSetup/setupFlow.ts";
+import {
+  discoverPairingLinks,
+  formatPairingQrBlock,
+  pairingLinksForBaseUrl,
+} from "./cliSetup/pairingQr.ts";
 import { cliCommandPrefix, dim, isInteractiveTerminal } from "./cliSetup/ui.ts";
 import { makeDbCommand } from "./cliDb/dbCommand.ts";
 import {
@@ -1052,9 +1059,12 @@ const quietly = <A, E, R>(
 ): Effect.Effect<A, E, R> =>
   quiet ? Effect.provideService(effect, References.MinimumLogLevel, "Error") : effect;
 
-const runWithAuthControlPlane = <A, E>(
+const runWithAuthControlPlane = <A, E, R = never>(
   flags: CliAuthLocationFlags,
-  run: (authControlPlane: AuthControlPlaneShape) => Effect.Effect<A, E>,
+  run: (
+    authControlPlane: AuthControlPlaneShape,
+    config: ServerConfigShape,
+  ) => Effect.Effect<A, E, R>,
   options?: {
     readonly quietLogs?: boolean;
   },
@@ -1068,7 +1078,7 @@ const runWithAuthControlPlane = <A, E>(
       const minimumLogLevel = quiet ? "Error" : adminCommandLogLevel(logLevel, config.logLevel);
       return yield* Effect.gen(function* () {
         const authControlPlane = yield* AuthControlPlane;
-        return yield* run(authControlPlane);
+        return yield* run(authControlPlane, config);
       }).pipe(
         Effect.provide(
           Layer.mergeAll(AuthControlPlaneRuntimeLive).pipe(
@@ -1639,18 +1649,28 @@ const tokenOnlyFlag = Flag.Boolean("token-only").pipe(
   Flag.withDefault(false),
 );
 
+const qrFlag = Flag.Boolean("qr").pipe(
+  Flag.withDescription(
+    "Print the pairing link as a QR code (default when the output is a terminal; `--no-qr` turns it off).",
+  ),
+  Flag.optional,
+);
+
+const PAIRING_QR_NO_NODE_NOTE = "No running node found; pass --base-url to print a QR code.";
+
 const pairingCreateCommand = Command.make("create", {
   ...authLocationFlags,
   ttl: ttlFlag,
   label: labelFlag,
   baseUrl: baseUrlFlag,
   json: jsonFlag,
+  qr: qrFlag,
 }).pipe(
   Command.withDescription("Issue a new client pairing token."),
   Command.withHandler((flags) =>
     runWithAuthControlPlane(
       flags,
-      (authControlPlane) =>
+      (authControlPlane, config) =>
         Effect.gen(function* () {
           const issued = yield* authControlPlane.createPairingLink({
             role: "client",
@@ -1658,11 +1678,62 @@ const pairingCreateCommand = Command.make("create", {
             ...(Option.isSome(flags.ttl) ? { ttl: flags.ttl.value } : {}),
             ...(Option.isSome(flags.label) ? { label: flags.label.value } : {}),
           });
-          const output = formatIssuedPairingCredential(issued, {
+          // `--json` never draws a QR; it reports the link a QR would hold instead.
+          const wantsQr = !flags.json && Option.getOrElse(flags.qr, () => isInteractiveTerminal());
+          if (!wantsQr && !flags.json) {
+            yield* Console.log(
+              formatIssuedPairingCredential(issued, {
+                ...(Option.isSome(flags.baseUrl) ? { baseUrl: flags.baseUrl.value } : {}),
+              }),
+            );
+            return;
+          }
+          const origin = Option.isSome(flags.baseUrl)
+            ? null
+            : yield* probeLocalServer(config.serverRuntimeStatePath);
+          const links = Option.isSome(flags.baseUrl)
+            ? pairingLinksForBaseUrl(issued.credential, flags.baseUrl.value)
+            : origin === null
+              ? null
+              : yield* Effect.promise(() =>
+                  discoverPairingLinks({
+                    credential: issued.credential,
+                    origin,
+                    host: config.host,
+                    tailscaleServeEnabled: config.tailscaleServeEnabled,
+                    tailscaleServePort: config.tailscaleServePort,
+                  }),
+                );
+          const summary = formatIssuedPairingCredential(issued, {
             json: flags.json,
-            ...(Option.isSome(flags.baseUrl) ? { baseUrl: flags.baseUrl.value } : {}),
+            ...(links === null ? {} : { pairUrl: links.pairingUrl, qrUrl: links.qrUrl }),
           });
-          yield* Console.log(output);
+          if (flags.json) {
+            yield* Console.log(summary);
+            return;
+          }
+          if (links === null) {
+            yield* Console.log(`${summary}${PAIRING_QR_NO_NODE_NOTE}\n`);
+            return;
+          }
+          const minutes = Math.max(
+            1,
+            Math.round(
+              (DateTime.toEpochMillis(issued.expiresAt) - (yield* Clock.currentTimeMillis)) /
+                60_000,
+            ),
+          );
+          const renderQrCode = yield* loadTerminalQrCode;
+          yield* Console.log(
+            `${summary}${formatPairingQrBlock({
+              links,
+              renderQrCode,
+              footer: [
+                `One-time client link, valid for ${minutes} minute${minutes === 1 ? "" : "s"}.`,
+              ],
+              dim,
+            })}`,
+          );
         }),
       {
         quietLogs: flags.json,
