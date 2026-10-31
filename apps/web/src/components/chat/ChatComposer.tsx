@@ -375,7 +375,7 @@ export interface ChatComposerProps {
   isWorktreeSetupRunning?: boolean;
   environmentUnavailable: {
     readonly label: string;
-    readonly connectionState: "connecting" | "disconnected" | "error";
+    readonly connectionState: "connecting" | "disconnected" | "error" | "switched-off";
   } | null;
 
   // Pending approvals / inputs

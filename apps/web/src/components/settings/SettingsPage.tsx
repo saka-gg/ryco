@@ -44,6 +44,7 @@ import { useAppPreferencesLabel, useDeviceName } from "../../deviceName";
 import { isElectron, isHostedHubMode } from "../../env";
 import { usePrimaryEnvironmentDescriptor } from "../../environments/primary";
 import { useSavedEnvironmentRegistryStore } from "../../environments/runtime";
+import { isSavedEnvironmentSwitchedOff } from "@ryco/client-runtime/connection";
 import { useAppSidebarCollapsed } from "../../hooks/useAppSidebarCollapsed";
 import { useSettingsPageTarget } from "../../hooks/useSettingsPageTarget";
 import { navigateHub } from "../../hostedHub/hubRoutes";
@@ -721,6 +722,8 @@ export function SettingsPage() {
     for (const entry of Object.values(allSavedEnvironments)) {
       if (primaryEnvironment && entry.environmentId === desktopWorkspace.localEnvironmentId)
         continue;
+      // A machine switched off has no settings to edit until it is on again.
+      if (isSavedEnvironmentSwitchedOff(entry)) continue;
       nodeChoices.set(entry.environmentId, entry.label);
     }
     for (const machine of desktopWorkspace.machines) {

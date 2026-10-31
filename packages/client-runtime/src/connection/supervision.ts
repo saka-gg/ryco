@@ -1268,6 +1268,15 @@ export function createEnvironmentConnectionSupervisor<
         connection = await connect(() => state.cancelled, controller.signal);
       } catch (error) {
         if (state.abandonedWith !== null) throw state.abandonedWith;
+        // Switched off while it connected: whatever the attempt hit on its way
+        // out (the switch-off's own cancellation, a dropped tunnel), its
+        // waiters learn the machine is off, not that it failed or was merely
+        // cancelled.
+        if (isSwitchedOff(record.environmentId)) {
+          throw error instanceof SavedEnvironmentSwitchedOffError
+            ? error
+            : new SavedEnvironmentSwitchedOffError(record.environmentId);
+        }
         // A cancelled attempt's failure is not the environment's: a disconnect
         // or a new pairing replaced it, and that owner reports the outcome.
         if (state.cancelled && !(error instanceof SavedEnvironmentConnectionCancelledError)) {
@@ -1277,7 +1286,11 @@ export function createEnvironmentConnectionSupervisor<
         }
         throw error;
       }
-      // Switched off while it connected: what it opened goes at once.
+      // Switched off while it connected: what it opened goes at once. This
+      // fallback only sees a machine that is still off when the attempt lands.
+      // One switched off and on again meanwhile relies on the switch-off having
+      // cancelled the attempt (`state.cancelled`): every switch path does, in
+      // its session teardown (web and mobile `teardownSavedEnvironmentSession`).
       const switchedOff = isSwitchedOff(record.environmentId);
       if (state.cancelled || switchedOff) {
         const removed = await remove(connection.environmentId).catch(() => false);

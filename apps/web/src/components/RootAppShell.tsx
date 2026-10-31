@@ -296,8 +296,12 @@ function RoleAwareProviderUpdateLaunchNotification() {
 }
 
 function HostedStaticEnvironmentBootstrap() {
-  const savedEnvironmentCount = useSavedEnvironmentRegistryStore(
-    (state) => Object.keys(state.byId).length,
+  // The machines switched on: switching one off or on changes it too.
+  const switchedOnEnvironmentKey = useSavedEnvironmentRegistryStore((state) =>
+    Object.values(state.byId)
+      .filter((record) => !isSavedEnvironmentSwitchedOff(record))
+      .map((record) => record.environmentId)
+      .join("\n"),
   );
 
   useEffect(() => {
@@ -318,7 +322,7 @@ function HostedStaticEnvironmentBootstrap() {
     }
 
     useStore.getState().setActiveEnvironmentId(firstSavedEnvironment.environmentId);
-  }, [savedEnvironmentCount]);
+  }, [switchedOnEnvironmentKey]);
 
   return null;
 }

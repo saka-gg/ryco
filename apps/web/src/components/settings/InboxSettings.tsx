@@ -14,6 +14,7 @@ import { useMemo, useState, type ReactNode } from "react";
 
 import { isHostedHubMode } from "../../env";
 import { useSavedEnvironmentRegistryStore } from "../../environments/runtime";
+import { isSavedEnvironmentSwitchedOff } from "@ryco/client-runtime/connection";
 import { usePrimaryEnvironmentDescriptor } from "../../environments/primary";
 import { useEnvironmentSettingsTarget } from "../../hooks/useEnvironmentSettingsTarget";
 import { usePresentationTier } from "../../hooks/usePresentationTier";
@@ -136,6 +137,8 @@ function useAutoSettleRuleNodes(): ReadonlyArray<AutoSettleRuleNode> {
     } else {
       for (const entry of Object.values(savedEnvironments)) {
         if (entry.environmentId === desktopWorkspace.localEnvironmentId) continue;
+        // Left out while switched off, as in the sidebar.
+        if (isSavedEnvironmentSwitchedOff(entry)) continue;
         if (!nodes.has(entry.environmentId)) nodes.set(entry.environmentId, entry.label);
       }
       for (const machine of desktopWorkspace.machines) {

@@ -130,7 +130,7 @@ export interface ComposerPromptShellProps {
   activeProposedPlan: Thread["proposedPlans"][number] | null;
   environmentUnavailable: {
     readonly label: string;
-    readonly connectionState: "connecting" | "disconnected" | "error";
+    readonly connectionState: "connecting" | "disconnected" | "error" | "switched-off";
   } | null;
   phase: SessionPhase;
   /** While a turn runs: the effective Enter action and its alternate shortcut. */
@@ -396,7 +396,9 @@ export const ComposerPromptShell = memo(function ComposerPromptShell(
                       ? `${environmentUnavailable.label} is ${
                           environmentUnavailable.connectionState === "connecting"
                             ? "connecting"
-                            : "disconnected"
+                            : environmentUnavailable.connectionState === "switched-off"
+                              ? "switched off"
+                              : "disconnected"
                         }`
                       : phase === "disconnected"
                         ? "Ask for follow-up changes or attach images"

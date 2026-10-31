@@ -18,7 +18,11 @@ import {
   type EnvironmentId,
 } from "@ryco/contracts";
 import { DateTime } from "effect";
-import { describeHostFreeze, isSavedEnvironmentSwitchedOff } from "@ryco/client-runtime/connection";
+import {
+  describeHostFreeze,
+  isSavedEnvironmentSwitchedOff,
+  SavedEnvironmentSwitchedOffError,
+} from "@ryco/client-runtime/connection";
 
 import { useCopyToClipboard } from "../../hooks/useCopyToClipboard";
 import { cn } from "../../lib/utils";
@@ -2019,6 +2023,8 @@ export function ConnectionsSettings() {
     try {
       await reconnectSavedEnvironment(environmentId);
     } catch (error) {
+      // Switched off while it connected: its row says so.
+      if (error instanceof SavedEnvironmentSwitchedOffError) return;
       const message = error instanceof Error ? error.message : "Failed to connect backend.";
       setSavedBackendError(message);
       toastManager.add(

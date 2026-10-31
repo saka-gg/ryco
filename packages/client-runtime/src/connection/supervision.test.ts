@@ -771,6 +771,31 @@ describe("switched-off saved machines", () => {
     expect(opened.dispose).toHaveBeenCalled();
     stop();
   });
+
+  it("tells a caller waiting on an attempt that its machine was switched off meanwhile", async () => {
+    const records: Array<Record> = [{ environmentId: remote }];
+    let fail!: (error: Error) => void;
+    const connect = (_record: Record, isCancelled: () => boolean) =>
+      new Promise<EnvironmentConnection>((_resolve, reject) => {
+        // The attempt notices its cancellation, as a platform's connect does.
+        fail = (error) =>
+          reject(isCancelled() ? new SavedEnvironmentConnectionCancelledError(remote) : error);
+      });
+    const { supervisor } = makeSupervisor(connect, { records });
+
+    const waiting = supervisor
+      .ensureSavedEnvironmentConnection({ environmentId: remote }, (isCancelled) =>
+        connect({ environmentId: remote }, isCancelled),
+      )
+      .catch((error: unknown) => error);
+    await vi.advanceTimersByTimeAsync(0);
+    // The switch: the record goes off and the session teardown cancels.
+    records[0] = { environmentId: remote, disabledAt: OFF_AT };
+    supervisor.cancelPendingSavedEnvironmentConnection(remote);
+    fail(new Error("tunnel closed"));
+
+    expect(await waiting).toBeInstanceOf(SavedEnvironmentSwitchedOffError);
+  });
 });
 
 describe("thread subscription resume", () => {
