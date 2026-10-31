@@ -55,7 +55,7 @@ import {
   isBuiltInThemeId,
   updateCustomTheme,
 } from "../../themes/registry";
-import { copyThemeToClipboard, downloadTheme, importThemeFromFile } from "../../themes/transport";
+import { copyThemeToClipboard, downloadTheme, importThemesFromFiles } from "../../themes/transport";
 import { isWindowTranslucencySupported } from "../../themes/windowTranslucency";
 import type { ThemeDefinition } from "../../themes/types";
 import {
@@ -303,20 +303,34 @@ export function AppearanceSettingsPanel({
 
   const handleImportChange = useCallback(
     async (event: ChangeEvent<HTMLInputElement>) => {
-      const file = event.target.files?.[0];
+      const files = Array.from(event.target.files ?? []);
       event.target.value = "";
-      if (!file) return;
+      if (files.length === 0) return;
       try {
-        const result = await importThemeFromFile(file, { collision: "rename", activate: true });
-        pickTheme(result.theme.id);
+        // The pick for the mode on screen applies it (`themePickSlot`).
+        const { imported, notices } = await importThemesFromFiles(files, { collision: "rename" });
+        const last = imported.at(-1);
+        if (!last) return;
+        pickTheme(last.theme.id);
         refresh();
+        const renamed = imported.filter((result) => result.action === "renamed");
         toastManager.add({
           type: "success",
-          title: `Imported "${result.theme.name}"`,
-          description:
-            result.action === "renamed"
-              ? `An existing theme used the same id, so it was imported as "${result.theme.id}".`
-              : "Theme imported and activated.",
+          title:
+            imported.length === 1
+              ? `Imported "${last.theme.name}"`
+              : `Imported ${imported.length} themes`,
+          description: [
+            imported.length === 1
+              ? "Theme imported and activated."
+              : `"${last.theme.name}" is active.`,
+            ...(renamed.length > 0
+              ? [
+                  `An existing theme used the same id, so ${renamed.map((result) => `"${result.theme.id}"`).join(", ")} got a new one.`,
+                ]
+              : []),
+            ...notices,
+          ].join(" "),
         });
       } catch (error) {
         toastManager.add({
@@ -375,7 +389,8 @@ export function AppearanceSettingsPanel({
             <input
               ref={fileInputRef}
               type="file"
-              accept=".json,application/json"
+              multiple
+              accept=".json,.jsonc,application/json"
               className="sr-only"
               onChange={handleImportChange}
               aria-hidden
@@ -397,7 +412,7 @@ export function AppearanceSettingsPanel({
               variant="ghost"
               onClick={handleImportClick}
               aria-label="Import a theme from file"
-              title="Import a theme from disk"
+              title="Import a Ryco or VS Code theme from disk"
               className="text-muted-foreground"
             >
               <UploadIcon className="size-3.5" />
