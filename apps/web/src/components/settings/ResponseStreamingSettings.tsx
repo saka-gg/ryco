@@ -1,4 +1,9 @@
-import { DEFAULT_UNIFIED_SETTINGS, type ResponseStreamingMode } from "@ryco/contracts/settings";
+import {
+  DEFAULT_UNIFIED_SETTINGS,
+  type ResponseStreamingMode,
+  type ServerSettings,
+} from "@ryco/contracts/settings";
+import type { NodeSettingsConfig } from "@ryco/client-runtime/state/settings/nodeSettingsFanOut";
 
 import { useAppPreferencesLabel } from "../../deviceName";
 import { isElectron } from "../../env";
@@ -6,6 +11,7 @@ import { useSettings, useUpdateSettings } from "../../hooks/useSettings";
 import { ensureLocalApi, readLocalApi } from "../../localApi";
 import { useServerConfig } from "../../rpc/serverState";
 import { useSettingsTarget } from "../../settingsTarget";
+import { ApplyToAllNodes } from "./ApplyToAllNodes";
 import { SettingResetButton, SettingsRow, SettingsSection } from "./settingsLayout";
 import { settingsScopeLabel } from "./settingsSections.logic";
 import { SettingsSelect, type SettingsSelectOption } from "./SettingsSelect";
@@ -21,6 +27,15 @@ const MODE_DESCRIPTIONS: Record<ResponseStreamingMode, string> = {
   paragraph: "Each paragraph or code block appears once it is finished.",
   turn: "Each message appears once the agent has finished writing it.",
   token: "Text appears token by token. Slower, and long replies are harder to follow.",
+};
+
+const selectStreamingMode = (settings: ServerSettings): ResponseStreamingMode =>
+  settings.responseStreamingMode;
+const nodeKeepsStreamingModes = (config: NodeSettingsConfig): boolean =>
+  config.environment.capabilities.responseStreamingModes === true;
+const formatStreamingMode = (mode: ResponseStreamingMode): string => {
+  const label = MODE_OPTIONS.find((option) => option.value === mode)?.label;
+  return typeof label === "string" ? label : mode;
 };
 
 // An older node reports no mode: it streams whole messages, or tokens if its legacy switch
@@ -69,7 +84,19 @@ export function ResponseStreamingSettings() {
         description={unsupported ? UNSUPPORTED_DESCRIPTION : MODE_DESCRIPTIONS[mode]}
         owner="node"
         scope={nodeScopeLabel}
-        status={unsupported ? UNSUPPORTED_STATUS : undefined}
+        status={
+          unsupported ? (
+            UNSUPPORTED_STATUS
+          ) : supported ? (
+            <ApplyToAllNodes
+              label="response streaming"
+              select={selectStreamingMode}
+              format={formatStreamingMode}
+              patch={{ responseStreamingMode: mode }}
+              supported={nodeKeepsStreamingModes}
+            />
+          ) : undefined
+        }
         resetAction={
           supported && mode !== DEFAULT_UNIFIED_SETTINGS.responseStreamingMode ? (
             <SettingResetButton

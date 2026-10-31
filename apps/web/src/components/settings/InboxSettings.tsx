@@ -1,38 +1,42 @@
 import { useSettingsTarget } from "../../settingsTarget";
-import { EnvironmentId } from "@ryco/contracts";
 import {
   autoSettleRuleScopeNote,
+  nodeAutoSettleRulePatch,
+  nodeOwnsAutoSettleRule,
   readNodeAutoSettleRule,
   type AutoSettleRuleNodeView,
 } from "@ryco/client-runtime/state/settings";
 import {
+  applyNodeSettingsPatch,
+  describeNodeSettingsApplyResult,
+} from "@ryco/client-runtime/state/settings/nodeSettingsFanOut";
+import {
   SIDEBAR_AUTO_SETTLE_DAY_OPTIONS,
+  type ServerSettings,
   type SidebarAutoSettleAfterDays,
 } from "@ryco/contracts/settings";
+import { resolveAutoSettleAfterDays } from "@ryco/shared/threadSettlement";
 import { ArchiveIcon } from "lucide-react";
-import { useMemo, useState, type ReactNode } from "react";
+import { useState, type ReactNode } from "react";
 
-import { isHostedHubMode } from "../../env";
-import { useSavedEnvironmentRegistryStore } from "../../environments/runtime";
-import { isSavedEnvironmentSwitchedOff } from "@ryco/client-runtime/connection";
 import { usePrimaryEnvironmentDescriptor } from "../../environments/primary";
 import { useEnvironmentSettingsTarget } from "../../hooks/useEnvironmentSettingsTarget";
 import { usePresentationTier } from "../../hooks/usePresentationTier";
 import { updateClientAutoSettleAfterDays, useSettings } from "../../hooks/useSettings";
-import { useHostedHubStore } from "../../hostedHub/state";
-import {
-  applyAutoSettleRuleToAllNodes,
-  setAutoSettleRule,
-  type AutoSettleRuleNode,
-} from "../../nodeAutoSettlement";
-import { useDesktopWorkspaceState } from "../../platform/desktopWorkspace";
+import { setAutoSettleRule } from "../../nodeAutoSettlement";
 import { Button } from "../ui/button";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 import { stackedThreadToast, toastManager } from "../ui/toast";
+import { MixedNodesBadge, useNodeSettingsAgreement } from "./ApplyToAllNodes";
+import { readNodeSettingsTarget, useKnownSettingsNodes } from "./nodeSettingsTargets";
 import { SettingsPageContainer, SettingsRow, SettingsSection } from "./settingsLayout";
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : "An unexpected error occurred.";
+}
+
+function autoSettleLabel(value: SidebarAutoSettleAfterDays): string {
+  return value === null ? "Off" : `After ${value} ${value === 1 ? "day" : "days"}`;
 }
 
 const AUTO_SETTLE_DESCRIPTION =
@@ -84,9 +88,7 @@ export function AutoSettleSettingsSection(props: {
               }}
             >
               <SelectTrigger className="w-48" aria-label="Auto-settle inactive tasks">
-                <SelectValue>
-                  {value === null ? "Off" : `After ${value} ${value === 1 ? "day" : "days"}`}
-                </SelectValue>
+                <SelectValue>{autoSettleLabel(value)}</SelectValue>
               </SelectTrigger>
               <SelectPopup align="end" alignItemWithTrigger={false}>
                 <SelectItem hideIndicator value="off">
@@ -116,39 +118,9 @@ export function AutoSettleSettingsSection(props: {
   );
 }
 
-/**
- * Every node this client knows: the primary, then the hosted session's nodes,
- * or the saved environments and the Desktop workspace's machines.
- */
-function useAutoSettleRuleNodes(): ReadonlyArray<AutoSettleRuleNode> {
-  const hosted = isHostedHubMode();
-  const primary = usePrimaryEnvironmentDescriptor();
-  const hostedNodes = useHostedHubStore((state) => state.nodes);
-  const savedEnvironments = useSavedEnvironmentRegistryStore((state) => state.byId);
-  const desktopWorkspace = useDesktopWorkspaceState();
-  return useMemo(() => {
-    const nodes = new Map<EnvironmentId, string>();
-    if (primary) nodes.set(primary.environmentId, primary.label);
-    if (hosted) {
-      for (const node of hostedNodes) {
-        if (node.revokedAt !== null || node.capabilities?.nativeClientRequired === true) continue;
-        if (!nodes.has(node.environmentId)) nodes.set(node.environmentId, node.label);
-      }
-    } else {
-      for (const entry of Object.values(savedEnvironments)) {
-        if (entry.environmentId === desktopWorkspace.localEnvironmentId) continue;
-        // Left out while switched off, as in the sidebar.
-        if (isSavedEnvironmentSwitchedOff(entry)) continue;
-        if (!nodes.has(entry.environmentId)) nodes.set(entry.environmentId, entry.label);
-      }
-      for (const machine of desktopWorkspace.machines) {
-        if (machine.environmentId === desktopWorkspace.localEnvironmentId) continue;
-        if (!nodes.has(machine.environmentId)) nodes.set(machine.environmentId, machine.label);
-      }
-    }
-    return [...nodes].map(([environmentId, label]) => ({ environmentId, label }));
-  }, [desktopWorkspace, hosted, hostedNodes, primary, savedEnvironments]);
-}
+// Module level, so the agreement is not re-read for a new selector on every render.
+const selectAutoSettleRule = (settings: ServerSettings): SidebarAutoSettleAfterDays =>
+  resolveAutoSettleAfterDays(settings.threadAutoSettleAfterDays);
 
 /**
  * The auto-settle rule of the node the settings show (the settings target, or
@@ -163,7 +135,8 @@ function NodeAutoSettleSettings() {
   );
   const node = target ?? primaryTarget;
   const deviceValue = useSettings((settings) => settings.sidebarAutoSettleAfterDays);
-  const knownNodes = useAutoSettleRuleNodes();
+  const knownNodes = useKnownSettingsNodes();
+  const agreement = useNodeSettingsAgreement(selectAutoSettleRule, nodeOwnsAutoSettleRule);
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
   // The web phone tier is frozen: it keeps its device-only control.
@@ -211,8 +184,12 @@ function NodeAutoSettleSettings() {
   const applyToAll = () => {
     setBusy(true);
     setStatus(null);
-    void applyAutoSettleRuleToAllNodes(view?.ownsRule ? view.value : deviceValue, knownNodes)
-      .then(setStatus)
+    void applyNodeSettingsPatch(
+      knownNodes.map(readNodeSettingsTarget),
+      nodeAutoSettleRulePatch(view?.ownsRule ? view.value : deviceValue),
+      { supported: nodeOwnsAutoSettleRule },
+    )
+      .then((result) => setStatus(describeNodeSettingsApplyResult(result)))
       .finally(() => setBusy(false));
   };
 
@@ -232,7 +209,14 @@ function NodeAutoSettleSettings() {
       onChange={change}
       onApplyToAll={knownNodes.length > (view === null ? 0 : 1) ? applyToAll : undefined}
       busy={busy}
-      status={status ? <span role="status">{status}</span> : null}
+      status={
+        status || agreement.kind === "mixed" ? (
+          <>
+            <MixedNodesBadge agreement={agreement} format={autoSettleLabel} />
+            {status ? <span role="status">{status}</span> : null}
+          </>
+        ) : null
+      }
     />
   );
 }

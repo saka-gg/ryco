@@ -17,6 +17,7 @@ import { CliCommandSettings } from "./CliCommandSettings";
 import { UsageLimitSettings } from "./UsageLimitSettings";
 import { UsagePriceSettings } from "./UsagePriceSettings";
 import { ResponseStreamingSettings } from "./ResponseStreamingSettings";
+import { ApplyToAllNodes } from "./ApplyToAllNodes";
 import { ArchiveIcon, ArchiveX, MessageCircleDashedIcon } from "lucide-react";
 import { useCallback, useMemo, useState } from "react";
 import {
@@ -28,7 +29,11 @@ import {
 } from "@ryco/contracts";
 import { scopeThreadRef } from "@ryco/client-runtime/scoped";
 import { CHAT_PROJECT_LABEL } from "@ryco/client-runtime/state/composer";
-import { DEFAULT_UNIFIED_SETTINGS, WorktreeBranchPrefix } from "@ryco/contracts/settings";
+import {
+  DEFAULT_UNIFIED_SETTINGS,
+  type ServerSettings,
+  WorktreeBranchPrefix,
+} from "@ryco/contracts/settings";
 import { APP_BASE_NAME, APP_VERSION } from "../../branding";
 import {
   canCheckForUpdate,
@@ -105,6 +110,11 @@ function AboutVersionTitle() {
 }
 
 const REPOSITORY_URL = "https://github.com/saka-gg/ryco";
+
+const selectBranchChangeTypes = (settings: ServerSettings): boolean =>
+  settings.worktreeBranchChangeTypes;
+const formatBranchChangeTypes = (byType: boolean): string =>
+  byType ? "By change type" : "By prefix";
 
 function openExternalLink(url: string) {
   void ensureLocalApi()
@@ -680,39 +690,47 @@ export function GeneralSettingsPanel() {
                 }
               />
             )}
-
-            {!isPhoneTier && (
-              <SettingsRow
-                title="Name branches by change type"
-                description="Generated worktree branches start with the kind of change, such as fix/ or feat/, instead of the prefix. The prefix still names a new worktree's temporary branch until its first message is named."
-                owner="node"
-                scope={nodeScopeLabel}
-                resetAction={
-                  settings.worktreeBranchChangeTypes !==
-                  DEFAULT_UNIFIED_SETTINGS.worktreeBranchChangeTypes ? (
-                    <SettingResetButton
-                      label="change type branch names"
-                      onClick={() =>
-                        updateSettings({
-                          worktreeBranchChangeTypes:
-                            DEFAULT_UNIFIED_SETTINGS.worktreeBranchChangeTypes,
-                        })
-                      }
-                    />
-                  ) : null
-                }
-                control={
-                  <Switch
-                    checked={settings.worktreeBranchChangeTypes}
-                    onCheckedChange={(checked) =>
-                      updateSettings({ worktreeBranchChangeTypes: Boolean(checked) })
-                    }
-                    aria-label="Name worktree branches by change type"
-                  />
-                }
-              />
-            )}
           </>
+        )}
+
+        {/* Every node has it, also one with project defaults, where a project may override it. */}
+        {!isPhoneTier && (
+          <SettingsRow
+            title="Name branches by change type"
+            description="Generated worktree branches start with the kind of change, such as fix/ or feat/, instead of the prefix. The prefix still names a new worktree's temporary branch until its first message is named."
+            owner="node"
+            scope={nodeScopeLabel}
+            status={
+              <ApplyToAllNodes
+                label="change type branch names"
+                select={selectBranchChangeTypes}
+                format={formatBranchChangeTypes}
+                patch={{ worktreeBranchChangeTypes: settings.worktreeBranchChangeTypes }}
+              />
+            }
+            resetAction={
+              settings.worktreeBranchChangeTypes !==
+              DEFAULT_UNIFIED_SETTINGS.worktreeBranchChangeTypes ? (
+                <SettingResetButton
+                  label="change type branch names"
+                  onClick={() =>
+                    updateSettings({
+                      worktreeBranchChangeTypes: DEFAULT_UNIFIED_SETTINGS.worktreeBranchChangeTypes,
+                    })
+                  }
+                />
+              ) : null
+            }
+            control={
+              <Switch
+                checked={settings.worktreeBranchChangeTypes}
+                onCheckedChange={(checked) =>
+                  updateSettings({ worktreeBranchChangeTypes: Boolean(checked) })
+                }
+                aria-label="Name worktree branches by change type"
+              />
+            }
+          />
         )}
 
         {!isPhoneTier && (

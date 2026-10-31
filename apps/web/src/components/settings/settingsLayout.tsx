@@ -208,7 +208,10 @@ export function SettingsRow({
             </p>
           ) : null}
           {status ? (
-            <div className="mt-1.5 text-xs leading-relaxed text-muted-foreground">{status}</div>
+            // A status that renders nothing (a fan-out control with one node) leaves no gap.
+            <div className="mt-1.5 text-xs leading-relaxed text-muted-foreground empty:hidden">
+              {status}
+            </div>
           ) : null}
         </div>
         {control ? (

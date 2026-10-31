@@ -14,11 +14,14 @@ import {
 } from "@ryco/contracts";
 import { readEffectiveProjectPreferences } from "@ryco/client-runtime/state/settings";
 import {
+  nodeKeepsProjectPreferences,
+  nodePreferencesPatchFor,
   projectPreferenceCanReset,
   projectPreferenceResetValue,
   projectPreferencesWritePatch,
   projectPreferenceSupported,
 } from "@ryco/client-runtime/state/settings/projectPreferenceEditing";
+import type { ServerSettings } from "@ryco/contracts/settings";
 import {
   PROJECT_PREFERENCE_FIELDS,
   readProjectPreferenceText,
@@ -39,9 +42,22 @@ import { ProviderModelPicker } from "../chat/ProviderModelPicker";
 import { TraitsPicker } from "../chat/TraitsPicker";
 import { DraftInput } from "../ui/draft-input";
 import { Button } from "../ui/button";
+import { ApplyToAllNodes } from "./ApplyToAllNodes";
 import { SettingResetButton, SettingsBlock, SettingsNotice, SettingsRow } from "./settingsLayout";
 import { SETTINGS_CONTROL_WIDTH } from "./settingsLayout";
 import { SettingsSelect } from "./SettingsSelect";
+
+// Module level, so each row compares its nodes with one stable selector.
+const SELECT_NODE_PREFERENCE = Object.fromEntries(
+  PROJECT_PREFERENCE_VALUE_KEYS.map((key) => [key, (settings: ServerSettings) => settings[key]]),
+) as Readonly<Record<ProjectPreferenceValueKey, (settings: ServerSettings) => unknown>>;
+
+/** How a node default reads in the "Mixed" list: its option's label, or the text itself. */
+function formatNodePreference(key: ProjectPreferenceValueKey, value: unknown): string {
+  const field = PROJECT_PREFERENCE_FIELDS[key];
+  if (field.kind === "text") return typeof value === "string" && value ? value : field.placeholder;
+  return field.options.find((option) => option.value === value)?.label ?? String(value);
+}
 
 export function ProjectPreferenceSettings({
   projectId,
@@ -212,7 +228,22 @@ function ProjectPreferenceEditor(props: {
         title={field.title}
         owner="node"
         description={field.description}
-        status={source(key)}
+        status={
+          <>
+            {source(key)}
+            {projectId ? null : (
+              // A node default only; a project override never goes to other nodes.
+              <ApplyToAllNodes
+                label={field.resetLabel}
+                select={SELECT_NODE_PREFERENCE[key]}
+                format={(node) => formatNodePreference(key, node)}
+                patch={nodePreferencesPatchFor({ [key]: value })}
+                supported={nodeKeepsProjectPreferences}
+                disabled={blocked || value === undefined}
+              />
+            )}
+          </>
+        }
         resetAction={reset(key, field.resetLabel)}
         control={control}
       />

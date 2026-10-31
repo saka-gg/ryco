@@ -254,6 +254,10 @@
       "types": "./src/state/settings/projectPreferenceEditing.ts",
       "import": "./src/state/settings/projectPreferenceEditing.ts"
     },
+    "./state/settings/nodeSettingsFanOut": {
+      "types": "./src/state/settings/nodeSettingsFanOut.ts",
+      "import": "./src/state/settings/nodeSettingsFanOut.ts"
+    },
     "./state/terminal": {
       "types": "./src/state/terminal/index.ts",
       "import": "./src/state/terminal/index.ts"

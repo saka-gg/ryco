@@ -66,6 +66,8 @@ vi.mock("../../environments/runtime", () => ({
   updateEnvironmentServerSettings: (...args: unknown[]) => harness.update(...args),
 }));
 vi.mock("../../localApi", () => ({ ensureLocalApi: harness.local }));
+// One node here; writing a default to every node is ApplyToAllNodes.browser.tsx's.
+vi.mock("./ApplyToAllNodes", () => ({ ApplyToAllNodes: () => null }));
 
 const FIXTURE_PROJECT_CHOICES = [{ id: "p", title: "Fixture project" }];
 
