@@ -26,6 +26,7 @@
 // is assertable from a node test and the `.tsx` owns only the name-to-component
 // mapping.
 
+import { diagnoseNodeRoute } from "@ryco/client-runtime/connection";
 import type { EnvironmentId } from "@ryco/contracts";
 
 import {
@@ -33,6 +34,7 @@ import {
   describeHostedConnectionPhase,
   HOSTED_CONNECTION_STATUS_INDICATORS,
   hostedBrowserRevalidated,
+  hostedOutageFailure,
   selectedProjectionFields,
   type HostedConnectionGuarantee,
   type HostedConnectionStatusIndicator,
@@ -363,6 +365,44 @@ export function deriveHostedEnvironmentConnectionChip(
   const node = input.nodes.find((candidate) => candidate.environmentId === input.environmentId);
   if (!node) return null;
   return describeHostedEnvironmentConnection(input, recordEnvironmentConnection(input, node));
+}
+
+/**
+ * The desktop badge's route line for one environment: which part of the way to
+ * its node failed ("Can't reach the Hub (DNS)", "Studio is offline since
+ * 14:02"), or null when nothing did. Display only, from the same connection
+ * fields as its chip plus the environment's own session record, which keeps the
+ * failure its transport is waiting out.
+ */
+export function deriveHostedEnvironmentRouteNotice(
+  input: HostedEnvironmentConnectionChipInput & {
+    /** The environment's own session record, whether or not it is the selected one. */
+    readonly ownRecord: HostedEnvironmentSessionRecord | undefined;
+    readonly nowMs: number;
+  },
+): string | null {
+  const selected =
+    input.selectedNode?.environmentId === input.environmentId ? input.selectedNode : null;
+  const node =
+    selected ?? input.nodes.find((candidate) => candidate.environmentId === input.environmentId);
+  if (!node) return null;
+  const connection = selected
+    ? selectedEnvironmentConnection(input, selected)
+    : recordEnvironmentConnection(input, node);
+  return diagnoseNodeRoute({
+    nodeLabel: node.label,
+    via: "hub",
+    status: {
+      browserStatus: connection.browserStatus,
+      sessionStatus: connection.sessionStatus,
+      selectionStatus: connection.selectionStatus,
+      transportStatus: connection.transportStatus,
+    },
+    presence: node.presence,
+    revoked: node.revokedAt !== null,
+    outageFailure: input.ownRecord ? hostedOutageFailure(input.ownRecord) : null,
+    nowMs: input.nowMs,
+  }).headline;
 }
 
 /**

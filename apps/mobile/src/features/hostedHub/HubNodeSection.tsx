@@ -4,7 +4,11 @@ import { useNavigation } from "@react-navigation/native";
 import { Pressable, View } from "react-native";
 
 import type { RelayEffectiveRole, ServerEventLoopStall } from "@ryco/contracts";
-import { describeHostFreeze } from "@ryco/client-runtime/connection";
+import {
+  describeHostFreeze,
+  describeOfflineSince,
+  diagnoseNodeRoute,
+} from "@ryco/client-runtime/connection";
 import { WS_METHODS } from "@ryco/contracts/rpc";
 import type { WorkspaceNativeTrustState } from "@ryco/client-runtime/state/workspace";
 import {
@@ -116,6 +120,11 @@ export interface HubNodeRowModel {
   readonly label: string;
   /** Bounded presence/role summary. Never an id, token, ticket, or raw error. */
   readonly detail: string;
+  /**
+   * The selected node's failing part of the way, when it is not the node being offline (which
+   * `detail` says): "Can't reach the Hub (DNS)", "Studio did not accept this device".
+   */
+  readonly routeNotice: string | null;
   /** Why the node just dropped, when it reported a long freeze (`describeHostFreeze`). */
   readonly freezeNotice: string | null;
   readonly transportLabel: "Hub relay" | "Direct";
@@ -159,10 +168,13 @@ export function canSelectHubNode(state: HostedHubState, node: HostedHubNode): bo
   );
 }
 
-function rowDetail(node: HostedHubNode): string {
+function rowDetail(node: HostedHubNode, nowMs: number | undefined): string {
   const role = ROLE_LABELS[node.effectiveRole];
   if (node.revokedAt !== null) return `Revoked · ${role}`;
-  return `${node.presence.online ? "Online" : "Offline"} · ${role}`;
+  if (node.presence.online) return `Online · ${role}`;
+  const since =
+    nowMs === undefined ? null : describeOfflineSince(node.presence.lastHeartbeatAt, { nowMs });
+  return `${since === null ? "Offline" : `Offline ${since}`} · ${role}`;
 }
 
 function rowTone(node: HostedHubNode): StatusTone {
@@ -267,7 +279,11 @@ export function deriveHubNodeSectionModel(input: {
   const query = input.query?.trim().toLocaleLowerCase() ?? "";
   const rows = state.nodes
     .filter(
-      (node) => !query || `${node.label} ${rowDetail(node)}`.toLocaleLowerCase().includes(query),
+      (node) =>
+        !query ||
+        `${node.label} ${rowDetail(node, input.hostFreeze?.nowMs)}`
+          .toLocaleLowerCase()
+          .includes(query),
     )
     .map((node): HubNodeRowModel => {
       const trust = input.trustByEnvironmentId?.get(node.environmentId);
@@ -344,9 +360,24 @@ export function deriveHubNodeSectionModel(input: {
             : undefined,
         directAccess,
         label: node.label,
-        detail: [trustDetail, rowDetail(node), directDetail]
+        detail: [trustDetail, rowDetail(node, input.hostFreeze?.nowMs), directDetail]
           .filter((part): part is string => part !== null)
           .join(" · "),
+        routeNotice:
+          state.selectedNode?.id === node.id &&
+          !onDirectRoute &&
+          node.presence.online &&
+          node.revokedAt === null
+            ? diagnoseNodeRoute({
+                nodeLabel: node.label,
+                via: "hub",
+                status: statusInput,
+                presence: node.presence,
+                revoked: node.revokedAt !== null,
+                outageFailure: connection?.outageFailure ?? null,
+                nowMs: input.hostFreeze?.nowMs ?? 0,
+              }).headline
+            : null,
         freezeNotice: input.hostFreeze
           ? describeHostFreeze(input.hostFreeze.lastEventLoopStall(node.environmentId), {
               nowMs: input.hostFreeze.nowMs,
@@ -434,6 +465,7 @@ export function HubNodeSectionView(props: { readonly model: HubNodeSectionModel 
               canEditIcon={row.canEditIcon}
               label={row.label}
               detail={row.detail}
+              routeNotice={row.routeNotice}
               freezeNotice={row.freezeNotice}
               transportLabel={row.transportLabel}
               statusTone={row.tone}

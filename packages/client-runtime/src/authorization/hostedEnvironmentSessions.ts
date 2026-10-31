@@ -5,6 +5,7 @@ import type {
   HostedBrowserStatus,
   HostedHubNode,
   HostedRelayFailure,
+  HostedRelayFailureKind,
   HostedRelayTransportStatus,
   HostedRycoSessionStatus,
   HostedSelectionStatus,
@@ -963,4 +964,16 @@ export function resetHostedEnvironmentSessionsForTests(): void {
   sessions?.clear();
   sessions = null;
   configuredPorts = defaultPorts;
+}
+
+/**
+ * The failure a connection is waiting out: its last failure while its transport
+ * is not online. A session record keeps its generation's last failure after it
+ * reconnects, so an online transport means there is none.
+ */
+export function hostedOutageFailure(record: {
+  readonly transportStatus: string;
+  readonly failure: Pick<HostedRelayFailure, "kind"> | null;
+}): HostedRelayFailureKind | null {
+  return record.transportStatus === "online" ? null : (record.failure?.kind ?? null);
 }
