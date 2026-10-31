@@ -179,9 +179,15 @@ export function parseFlavorImportRequest(text: string): FlavorImportRequest | nu
   return { version: 1, requestedAt: record.requestedAt, sourceHomeDir: record.sourceHomeDir };
 }
 
-/** Reads a regular file without following a link at its last component. */
+/**
+ * Reads a regular file without following a link at its last component. Non-blocking, so a FIFO
+ * in its place is refused instead of holding startup until something writes to it.
+ */
 async function readRegularFile(path: string, maxBytes: number): Promise<Buffer | null> {
-  const handle = await open(path, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0));
+  const handle = await open(
+    path,
+    constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0),
+  );
   try {
     const info = await handle.stat();
     if (!info.isFile() || info.size > maxBytes) return null;

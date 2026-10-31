@@ -1,4 +1,5 @@
 // @effect-diagnostics nodeBuiltinImport:off
+import * as ChildProcess from "node:child_process";
 import * as NodeFS from "node:fs";
 import * as NodeOS from "node:os";
 import * as NodePath from "node:path";
@@ -407,7 +408,13 @@ describe("consumeFlavorImport", () => {
 
     write(requestPath(fixture), JSON.stringify({ version: 1, sourceHomeDir: fixture.stableHome }));
     expectRefused(await run(fixture), fixture, FLAVOR_IMPORT_MESSAGES.unreadable);
-  });
+
+    // A FIFO would hold a blocking open until something writes to it: startup must not wait.
+    if (process.platform !== "win32") {
+      ChildProcess.execFileSync("mkfifo", [requestPath(fixture)]);
+      expectRefused(await run(fixture), fixture, FLAVOR_IMPORT_MESSAGES.unreadable);
+    }
+  }, 10_000);
 
   it("refuses a source other than the home the app allows", async () => {
     const fixture = makeFixture();
