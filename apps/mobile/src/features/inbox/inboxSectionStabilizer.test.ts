@@ -138,14 +138,15 @@ describe("inbox row menu", () => {
 
   it("hides a task, and shows one the person hid in the Inbox again", () => {
     const presets = [{ id: "hour", label: "In 1 hour" }];
-    expect(buildInboxRowMenuActions(row("a", { hideActionEnabled: true }), presets).at(-1)).toEqual(
+    // Hide comes right before Copy task ID, which ends the menu.
+    expect(buildInboxRowMenuActions(row("a", { hideActionEnabled: true }), presets).at(-2)).toEqual(
       { id: "hide", title: "Hide task", attributes: { disabled: false } },
     );
     expect(
       buildInboxRowMenuActions(
         row("a", { attentionState: "hidden", hiddenByUser: true, hideActionEnabled: true }),
         presets,
-      ).at(-1),
+      ).at(-2),
     ).toEqual({ id: "unhide", title: "Show in Inbox", attributes: { disabled: false } });
   });
 });

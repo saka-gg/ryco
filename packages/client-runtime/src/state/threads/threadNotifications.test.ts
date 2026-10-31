@@ -266,6 +266,18 @@ describe("quiet completion of hidden and filed threads", () => {
     expect(test.observe(completed(patch), 2)).toBeNull();
   });
 
+  it.each([
+    ["shown in the Inbox again", { hiddenAt: "2026-10-02T09:00:00.000Z" }],
+    ["moved back to Active", { settleWhenIdleAt: "2026-10-02T10:30:00.000Z" }],
+  ] as const)(
+    "never announces a quiet completion later, once the thread is %s",
+    (_label, patch) => {
+      const test = fixture(thread(patch));
+      expect(test.observe(completed(patch), 2)).toBeNull();
+      expect(test.observe(completed(), 3)).toBeNull();
+    },
+  );
+
   it("still announces its requests and failures", () => {
     const patch = { hiddenAt: "2026-10-02T09:00:00.000Z" };
     expect(

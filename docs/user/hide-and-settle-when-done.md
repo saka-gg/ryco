@@ -16,8 +16,9 @@ A hidden thread comes back on its own only while it needs you:
 - it has a plan for you to review, or
 - its run failed after you hid it.
 
-It returns to the shelf once that is dealt with. To keep a thread whose failure you have seen on
-the shelf, hide it again. **Show in Inbox** brings it back for good. Hide has an Undo notice; see
+It returns to the shelf once that is dealt with. A thread back for a failure stays in the Inbox:
+to put it on the shelf again, choose **Show in Inbox**, then **Hide** it again. **Show in Inbox**
+alone brings it back for good. Hide has an Undo notice; see
 [Sidebar Undo](../sidebar-undo.md).
 
 This suits threads you start and check later, such as nightly runs.
