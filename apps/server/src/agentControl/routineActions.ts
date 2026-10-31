@@ -17,7 +17,9 @@ export const isRoutineAgentControlAction = (
     case "sendMessage":
     case "interruptThread":
     case "pullRequestWatch":
-      // The validator checks caller runtime privileges and worktree isolation.
+    case "worktreeHandoff":
+      // The validator checks caller runtime privileges and worktree isolation (and keeps a
+      // handoff to the caller's own chat, out of the shared checkout into a new worktree).
       return true;
     case "updateThread":
       return plan.runtimeMode === undefined && plan.archived !== true;

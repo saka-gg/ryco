@@ -20,6 +20,9 @@ export const agentControlRiskTagsForPlan = (
     case "pullRequestWatch":
       // Reads only; its wakes go through the same idle, scope and permission fences as any.
       return [];
+    case "worktreeHandoff":
+      // Its continuation is the chat's own next turn, queued like any of its follow-ups.
+      return [AGENT_CONTROL_RISK_TAGS.modifiesThreadMetadata];
     case "createThreads": {
       const tags = [
         AGENT_CONTROL_RISK_TAGS.createsThreads,
@@ -106,6 +109,8 @@ export const agentControlPromptSummaryForPlan = (plan: AgentControlActionPlan): 
         ? `Watch ${pullRequest} for thread ${plan.threadId}`
         : `Stop watching ${pullRequest} for thread ${plan.threadId}`;
     }
+    case "worktreeHandoff":
+      return `Move thread ${plan.threadId} into a new worktree on branch ${plan.branch.slice(0, 200)}`;
     case "createThreads": {
       const tasks = plan.entries.filter((entry) => entry.localTaskId !== undefined).length;
       const threads = `Create ${plan.entries.length} thread${plan.entries.length === 1 ? "" : "s"}`;

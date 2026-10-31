@@ -387,6 +387,10 @@ describe("forward compatibility (additive extension)", () => {
     expect(AGENT_CONTROL_ACTION_CAPABILITIES.pullRequestWatch).toBe(
       AGENT_CONTROL_CAPABILITIES.watchPullRequests,
     );
+    // Moving one's own chat into a worktree is workspace management.
+    expect(AGENT_CONTROL_ACTION_CAPABILITIES.worktreeHandoff).toBe(
+      AGENT_CONTROL_CAPABILITIES.manageWorkspaces,
+    );
     expect(Object.keys(AGENT_CONTROL_ACTION_CAPABILITIES).toSorted()).toEqual([
       "automationRun",
       "cancelAutomation",
@@ -416,6 +420,7 @@ describe("forward compatibility (additive extension)", () => {
       "updateProject",
       "updateThread",
       "workspaceLifecycle",
+      "worktreeHandoff",
     ]);
   });
 });
@@ -947,4 +952,27 @@ it("keeps completion return explicitly opt-in and rejects a caller-selected retu
   expect(() =>
     decodePlan({ ...optedIn, entries: [{ ...optedIn.entries[0], returnThreadId: "other" }] }),
   ).toThrow();
+});
+
+describe("AgentControlWorktreeHandoffPlan", () => {
+  const plan = {
+    kind: "worktreeHandoff",
+    threadId: "thread-caller",
+    branch: "feature/handoff",
+    startFromOrigin: false,
+    runSetupScript: true,
+    continuationPrompt: "Run the tests",
+  };
+
+  it("decodes the caller's handoff with its resolved defaults", () => {
+    expect(decodePlan(plan)).toEqual(plan);
+  });
+
+  it("carries no path and no unresolved defaults", () => {
+    // The node chooses the checkout; the agent only names the branch.
+    expect(() => decodePlan({ ...plan, worktreePath: "/elsewhere" })).toThrow();
+    const { runSetupScript: _runSetupScript, ...withoutSetup } = plan;
+    expect(() => decodePlan(withoutSetup)).toThrow();
+    expect(() => decodePlan({ ...plan, continuationPrompt: "x".repeat(120_001) })).toThrow();
+  });
 });

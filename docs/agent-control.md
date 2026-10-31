@@ -110,6 +110,9 @@ called. This matters for clients such as Codex that cache the initial MCP catalo
 - `ryco_watch_command`, `ryco_unwatch_command`, `ryco_list_command_watches`: have Ryco run a shell
   command for the caller's own chat on an interval and wake it only when the output changes (see
   [Command watches](#command-watches)).
+- `ryco_worktree_handoff`, `ryco_worktree_status`: move the caller's own chat out of the project's
+  shared checkout into a new worktree on a new branch and continue there (see
+  [Worktree handoff](#worktree-handoff)).
 - `ryco_html_preview`, `ryco_html_render`: check a self-contained HTML page in Ryco's headless
   browser, then show it inline above the reply as a sandboxed page that follows the user's theme,
   with a card at the end of the reply (see [HTML renders](./user/html-renders.md)). Both need the
@@ -276,6 +279,44 @@ only when its output changes (see [Command watch](./command-watch.md) for the ru
   day. While Agent Control is off, no run starts and no wake is sent.
 - **Visibility.** The command is visible to anyone who may replay the chat's events, as the
   agent's own tool call already is: keep secrets out of it.
+
+## Worktree handoff
+
+An agent that started in the project's shared checkout and finds the work needs its own branch
+calls `ryco_worktree_handoff` with a new `branch`, and optionally `baseRef` (default: the branch
+the shared checkout is on), `startFromOrigin` (fetch the base from origin first; default off),
+`runSetupScript` (default on) and `continuationPrompt` (its next step, up to 120,000 characters).
+`ryco_worktree_status` says whether the chat already works in its own worktree and which branch a
+handoff would start from.
+
+- **Own chat only.** The tools take no thread id. A handoff needs the `workspaces.manage` grant
+  and exact active-turn authority (the status needs the grant). It is a routine request: it runs
+  at once and the tool waits up to 50 seconds for the outcome. Standalone integrations cannot use
+  it, and a delegated chat whose result is still awaited cannot move.
+- **Refusals.** A chat that already has its own worktree, an archived or settled chat, a project
+  that is not a Git repository, a branch name Git rejects, and a branch that exists already.
+- **Same worktree as every other.** The worktree is made like a delegated worktree (path policy,
+  setup ownership, `.worktreeinclude`, submodules) and gets its workspace record. The project's
+  setup script starts in a terminal unless the agent skips it or the user turned setup scripts
+  off. Uncommitted changes in the shared checkout stay there.
+- **Order with the turn.** The chat is re-pointed at the worktree (`thread.meta.update` and
+  `thread.attach-to-worktree`), and the continuation joins the chat's follow-up queue as the
+  agent's. The turn that asked keeps running in the shared checkout, so the agent ends it right
+  after the call; the queue sends the continuation once the chat is idle, and that turn starts in
+  the worktree with the conversation carried over (a resume, or a context handoff for providers
+  that keep conversations per directory). Without a continuation the chat waits there for the
+  next message.
+- **Rollback.** If the chat is archived, settled, moved or deleted while the worktree is made, the
+  worktree and its branch are removed again. Once the chat points at the worktree, nothing
+  removes it: a later failure (queueing the continuation, starting the setup script) is reported
+  in the answer, and a restart after the move completes the request. A crash in the moment
+  between giving the worktree to the chat and moving the chat can leave an unused worktree in
+  the workspace list, and one right after the move can leave the chat unlinked from the
+  worktree's record. The worktree stays when the chat is deleted.
+- **Answer.** The receipt plus `worktreePath`, `branch`, `baseRef`, `startedFromOrigin`,
+  `setupScript` (`started`, `no-script`, `skipped`, `failed`), `continuation` (`queued`,
+  `skipped`, `failed`) and a `note` for the agent. The worktree path is the chat's own new
+  checkout.
 
 ## Tasks
 
