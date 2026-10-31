@@ -27,21 +27,28 @@ import {
   AgentControlWorktreeHandoffPlan,
   rejectExcessProperties,
   type AgentControlMcpControlRequestResult,
-  type AgentControlMcpMutationResult,
+  AgentControlMcpMutationResult,
   type AgentControlProposalId,
   type TurnId,
 } from "@ryco/contracts";
 import { Effect, Option, Schema } from "effect";
 
 import type { ProjectionSnapshotQueryShape } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
-import { isAdoptableBranchName } from "../../orchestration/threadGitMetadata.ts";
+import { computeAgentControlPlanDigest } from "../planDigest.ts";
 import type { AgentControlPolicyShape } from "../Services/AgentControlPolicy.ts";
+import {
+  toAgentControlProposalReceipt,
+  type AgentControlProposalServiceShape,
+} from "../Services/AgentControlProposalService.ts";
 import type {
   AgentControlSessionRecord,
   AgentControlSessionRegistryShape,
-  AgentControlTurnAuthority,
 } from "../Services/AgentControlSessionRegistry.ts";
-import { worksInOwnCheckout, worktreeHandoffBlocker } from "../worktreeHandoffRuns.ts";
+import {
+  worksInOwnCheckout,
+  worktreeHandoffBlocker,
+  worktreeHandoffBranchProblem,
+} from "../worktreeHandoffRuns.ts";
 import type {
   AgentControlMcpToolDescriptor,
   AgentControlMcpToolResult,
@@ -105,6 +112,9 @@ const HandoffInput = Schema.Struct({
 const StatusInput = Schema.Struct({}).pipe(rejectExcessProperties);
 
 const NO_AUTHORITY = "Exact active-turn write authority is unavailable.";
+/** What the agent reads when the outcome is not in yet: the request goes on without it. */
+const TIMED_OUT_NOTE =
+  "The handoff is still running. End your turn now: once it completes, this chat continues in the new worktree from its next turn. Its outcome: ryco_wait_for_control_request with this receipt's proposalId.";
 
 const textResult = (value: unknown): AgentControlMcpToolResult => ({
   content: [{ type: "text", text: JSON.stringify(value) }],
@@ -141,6 +151,8 @@ export interface WorktreeHandoffToolDeps {
     typeof AgentControlMcpControlRequestResult.Encoded,
     { readonly reason: string }
   >;
+  /** Finds the caller's own earlier request of an id, so a replay answers with its receipt. */
+  readonly proposals?: Pick<AgentControlProposalServiceShape, "findByRequest">;
   /** The branch the shared checkout is on (null: detached), when Git can be read here. */
   readonly checkoutBranch?: (
     cwd: string,
@@ -214,34 +226,57 @@ export function withWorktreeHandoffTools(
       return { thread, project, blocker: worktreeHandoffBlocker(thread, project) };
     });
 
-  const submitAndWait = (
+  const planOf = (session: AgentControlSessionRecord, input: typeof HandoffInput.Type) =>
+    ({
+      kind: "worktreeHandoff",
+      threadId: session.threadId,
+      branch: input.branch,
+      ...(input.baseRef === undefined ? {} : { baseRef: input.baseRef }),
+      startFromOrigin: input.startFromOrigin ?? false,
+      runSetupScript: input.runSetupScript ?? true,
+      ...(input.continuationPrompt === undefined
+        ? {}
+        : { continuationPrompt: input.continuationPrompt }),
+    }) satisfies AgentControlWorktreeHandoffPlan;
+
+  /** The caller's earlier request of this id, when it is one: its receipt, not a new request. */
+  const replayOf = (session: AgentControlSessionRecord, input: typeof HandoffInput.Type) =>
+    Effect.gen(function* () {
+      const findByRequest = deps.proposals?.findByRequest;
+      if (findByRequest === undefined) return Option.none();
+      const existing = yield* findByRequest(
+        {
+          kind: "provider-session",
+          threadId: session.threadId,
+          providerInstanceId: session.providerInstanceId,
+        },
+        input.requestId,
+      ).pipe(Effect.mapError(() => new ToolFailure("Control request lookup failed.")));
+      if (Option.isNone(existing)) return Option.none();
+      if (existing.value.planDigest !== computeAgentControlPlanDigest(planOf(session, input))) {
+        return yield* Effect.fail(
+          new ToolFailure("Request ID was already used with a different plan."),
+        );
+      }
+      return Option.some(
+        Schema.encodeSync(AgentControlMcpMutationResult)({
+          receipt: toAgentControlProposalReceipt(existing.value),
+          replayed: true,
+        }),
+      );
+    });
+
+  /** Waits (bounded) for the request's outcome and answers with it. */
+  const settle = (
     session: AgentControlSessionRecord,
-    authority: AgentControlTurnAuthority,
-    input: typeof HandoffInput.Type,
+    submitted: typeof AgentControlMcpMutationResult.Encoded,
   ) =>
     Effect.gen(function* () {
-      const submitted = yield* deps
-        .submitMutation({
-          session,
-          authority,
-          requestId: input.requestId,
-          plan: {
-            kind: "worktreeHandoff",
-            threadId: session.threadId,
-            branch: input.branch,
-            ...(input.baseRef === undefined ? {} : { baseRef: input.baseRef }),
-            startFromOrigin: input.startFromOrigin ?? false,
-            runSetupScript: input.runSetupScript ?? true,
-            ...(input.continuationPrompt === undefined
-              ? {}
-              : { continuationPrompt: input.continuationPrompt }),
-          },
-        })
-        .pipe(Effect.mapError((error) => new ToolFailure(error.reason)));
       // The request stands either way: an unreadable outcome is followed up like a slow one.
       const settled = yield* deps
         .waitForTerminal(session, submitted.receipt.proposalId as AgentControlProposalId)
         .pipe(Effect.orElseSucceed(() => ({ receipt: submitted.receipt, timedOut: true })));
+      const timedOut = settled.timedOut ?? false;
       const completed =
         settled.receipt.result?.outcome === "completed" ? settled.receipt.result : undefined;
       const outcome = completed?.execution?.worktreeHandoff;
@@ -257,9 +292,11 @@ export function withWorktreeHandoffTools(
       return {
         receipt: settled.receipt,
         replayed: submitted.replayed,
-        timedOut: settled.timedOut ?? false,
+        timedOut,
         ...(outcome === undefined
-          ? {}
+          ? timedOut
+            ? { note: TIMED_OUT_NOTE }
+            : {}
           : {
               worktreePath: worktreePath ?? null,
               ...outcome,
@@ -272,11 +309,11 @@ export function withWorktreeHandoffTools(
     Effect.gen(function* () {
       const authority = yield* writeAuthority(session, handoffDescriptor.name);
       const input = yield* decode(HandoffInput, args);
-      if (!isAdoptableBranchName(input.branch)) {
-        return yield* Effect.fail(
-          new ToolFailure(`Git does not accept "${input.branch}" as a branch name.`),
-        );
-      }
+      // A replay answers with the request's receipt, even once the chat has moved.
+      const replay = yield* replayOf(session, input);
+      if (Option.isSome(replay)) return textResult(yield* settle(session, replay.value));
+      const branchProblem = worktreeHandoffBranchProblem(input.branch);
+      if (branchProblem !== null) return yield* Effect.fail(new ToolFailure(branchProblem));
       const { blocker } = yield* ownThread(session);
       if (blocker !== null) return yield* Effect.fail(new ToolFailure(blocker));
       if (inFlight.has(session.threadId)) {
@@ -286,9 +323,18 @@ export function withWorktreeHandoffTools(
       }
       inFlight.add(session.threadId);
       return textResult(
-        yield* submitAndWait(session, authority, input).pipe(
-          Effect.ensuring(Effect.sync(() => inFlight.delete(session.threadId))),
-        ),
+        yield* deps
+          .submitMutation({
+            session,
+            authority,
+            requestId: input.requestId,
+            plan: planOf(session, input),
+          })
+          .pipe(
+            Effect.mapError((error) => new ToolFailure(error.reason)),
+            Effect.flatMap((submitted) => settle(session, submitted)),
+            Effect.ensuring(Effect.sync(() => inFlight.delete(session.threadId))),
+          ),
       );
     });
 

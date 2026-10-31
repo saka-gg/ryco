@@ -39,6 +39,7 @@ import { Cause, Duration, Effect, Layer, Option, Stream } from "effect";
 
 import { ServerConfig } from "../../config.ts";
 import { GitWorkflowService, type GitWorkflowServiceShape } from "../../git/GitWorkflowService.ts";
+import { GitVcsDriver } from "../../vcs/GitVcsDriver.ts";
 import { OrchestrationCommandApplication } from "../../orchestration/Services/OrchestrationCommandApplication.ts";
 import { DeviceService } from "../../device/Services/DeviceService.ts";
 import { OrchestrationEngineService } from "../../orchestration/Services/OrchestrationEngine.ts";
@@ -308,6 +309,8 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
     const engine = yield* OrchestrationEngineService;
     const projections = yield* ProjectionSnapshotQuery;
     const git = yield* GitWorkflowService;
+    // The branch-name fence of a worktree handoff (its remotes, refs it would shadow).
+    const gitDriver = yield* Effect.serviceOption(GitVcsDriver);
     const workspaceLifecycleOption = yield* Effect.serviceOption(WorkspaceLifecycle);
     const workspaceAccess = yield* WorkspaceAccessPolicy;
     const deviceService = yield* Effect.serviceOption(DeviceService);
@@ -794,9 +797,11 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
               projects: readProjectShells(projections),
               loadThread,
               git,
+              gitDriver,
               ids: { commandIdFor, messageIdFor, worktreeIdFor },
               operation: () => operation,
               checkpoint,
+              appendStep,
               dispatch,
               planWorktreeCheckout,
               createOwnedWorktree,
@@ -804,6 +809,8 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
               resolvePreferences: resolveProjectPreferences,
             },
             proposal.plan,
+            // A Stop of the turn that asked (or a newer turn) before the move rolls it back.
+            proposal.principal,
           );
           return operation;
         }
@@ -1969,7 +1976,7 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
     const recoverIncomplete: AgentControlExecutionShape["recoverIncomplete"] = Effect.gen(
       function* () {
         const recoverable = yield* operations.listRecoverable();
-        for (const operation of recoverable) {
+        for (let operation of recoverable) {
           const proposalOption = yield* proposals.getById(operation.proposalId);
           if (Option.isNone(proposalOption)) continue;
           const proposal = proposalOption.value;
@@ -2087,19 +2094,23 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
               continue;
             }
           }
-          // A handoff whose chat already moved keeps the move: the chat works in the worktree.
+          // A handoff that gave its worktree up for the move: finished when the chat points at
+          // the worktree (the move stands), else the worktree is the operation's again and the
+          // compensation below removes it.
           if (
             operation.status === "running" &&
             proposal.plan.kind === "worktreeHandoff" &&
-            operation.state.completedSteps.includes("handoff-thread-moved")
+            operation.state.completedSteps.includes("handoff-bind-started")
           ) {
-            yield* completeRecovered(proposal, operation, {
-              ...operation.state,
-              note:
-                operation.state.note ??
-                "Ryco restarted during the move; this chat works in its new worktree now.",
-            });
-            continue;
+            const resumed = yield* Effect.exit(runAction(proposal, operation));
+            if (resumed._tag === "Success") {
+              yield* completeRecovered(proposal, resumed.value, resumed.value.state);
+              continue;
+            }
+            operation = Option.getOrElse(
+              yield* operations.getByProposalId(proposal.proposalId),
+              () => operation,
+            );
           }
           if (proposal.plan.kind === "workspaceLifecycle") {
             yield* settleProposalFailure(proposal, operation, {

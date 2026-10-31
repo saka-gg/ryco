@@ -342,6 +342,7 @@ const makeAgentControlMcpServer = Effect.gen(function* () {
               timeoutMs: AGENT_CONTROL_MCP_WAIT_TIMEOUT_MS_MAX,
               visible: (proposal) => proposalVisibleToSession(proposal, session),
             }),
+          proposals,
           ...(Option.isSome(git)
             ? { checkoutBranch: (cwd) => git.value.localStatus({ cwd }) }
             : {}),

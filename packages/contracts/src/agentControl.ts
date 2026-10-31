@@ -1009,7 +1009,8 @@ export const AgentControlWorktreeHandoffOutcome = Schema.Struct({
   baseRef: AgentControlGitRefName,
   startedFromOrigin: Schema.Boolean,
   setupScript: Schema.Literals(["started", "no-script", "skipped", "failed"]),
-  continuation: Schema.Literals(["queued", "skipped", "failed"]),
+  /** `held`: queued, with the queue held (the turn that asked was stopped, or Ryco restarted). */
+  continuation: Schema.Literals(["queued", "held", "skipped", "failed"]),
 });
 export type AgentControlWorktreeHandoffOutcome = typeof AgentControlWorktreeHandoffOutcome.Type;
 
@@ -1428,6 +1429,15 @@ export type AgentControlOperationStatus = typeof AgentControlOperationStatus.Typ
 export const AGENT_CONTROL_TERMINAL_OPERATION_STATUSES: ReadonlyArray<AgentControlOperationStatus> =
   ["completed", "failed", "cancelled"];
 
+/** A worktree an operation created and still owns: compensation removes it. */
+export const AgentControlOwnedWorktree = Schema.Struct({
+  worktreeId: WorktreeId,
+  projectId: ProjectId,
+  branch: TrimmedNonEmptyString.check(Schema.isMaxLength(256)),
+  checkoutPath: TrimmedNonEmptyString,
+});
+export type AgentControlOwnedWorktree = typeof AgentControlOwnedWorktree.Type;
+
 /**
  * Resources an operation has created so far. Persisted so restart recovery
  * can prove operation ownership (e.g. of a preflighted worktree) and either
@@ -1444,16 +1454,22 @@ export const AgentControlOperationResources = Schema.Struct({
   threadIds: Schema.Array(ThreadId).pipe(Schema.withDecodingDefault(Effect.succeed([]))),
   ownedThreadIds: Schema.Array(ThreadId).pipe(Schema.withDecodingDefault(Effect.succeed([]))),
   worktreeIds: Schema.Array(WorktreeId).pipe(Schema.withDecodingDefault(Effect.succeed([]))),
-  ownedWorktrees: Schema.Array(
-    Schema.Struct({
-      worktreeId: WorktreeId,
-      projectId: ProjectId,
-      branch: TrimmedNonEmptyString.check(Schema.isMaxLength(256)),
-      checkoutPath: TrimmedNonEmptyString,
-    }),
-  ).pipe(Schema.withDecodingDefault(Effect.succeed([]))),
+  ownedWorktrees: Schema.Array(AgentControlOwnedWorktree).pipe(
+    Schema.withDecodingDefault(Effect.succeed([])),
+  ),
 });
 export type AgentControlOperationResources = typeof AgentControlOperationResources.Type;
+
+/**
+ * The worktree a handoff gave its chat, recorded when the operation gives up owning it: restart
+ * recovery finishes the move when the chat points at it, or takes it back and removes it.
+ */
+export const AgentControlHandoffWorktree = Schema.Struct({
+  ...AgentControlOwnedWorktree.fields,
+  /** The outcome's base (`origin/<base>` when started from origin). */
+  baseRef: AgentControlGitRefName,
+});
+export type AgentControlHandoffWorktree = typeof AgentControlHandoffWorktree.Type;
 
 export const AgentControlOperationState = Schema.Struct({
   completedSteps: Schema.Array(TrimmedNonEmptyString.check(Schema.isMaxLength(128))).pipe(
@@ -1483,6 +1499,7 @@ export const AgentControlOperationState = Schema.Struct({
     }),
   ),
   worktreeHandoff: Schema.optional(AgentControlWorktreeHandoffOutcome),
+  handoffWorktree: Schema.optional(AgentControlHandoffWorktree),
   compensation: Schema.optional(
     Schema.Struct({ attempted: Schema.Boolean, completed: Schema.Boolean }),
   ),

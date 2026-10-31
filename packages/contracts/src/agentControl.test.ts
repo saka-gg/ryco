@@ -8,6 +8,7 @@ import {
   AGENT_CONTROL_PLAN_VERSION,
   AgentControlActionPlan,
   AgentControlCapability,
+  AgentControlExecutionReceipt,
   AgentControlOperation,
   AgentControlOperationState,
   AgentControlPlanDigest,
@@ -974,5 +975,28 @@ describe("AgentControlWorktreeHandoffPlan", () => {
     const { runSetupScript: _runSetupScript, ...withoutSetup } = plan;
     expect(() => decodePlan(withoutSetup)).toThrow();
     expect(() => decodePlan({ ...plan, continuationPrompt: "x".repeat(120_001) })).toThrow();
+  });
+
+  it("keeps the handed-off worktree in the operation state, never in the receipt", () => {
+    const handoffWorktree = {
+      worktreeId: "worktree-1",
+      projectId: "project-1",
+      branch: "feature/handoff",
+      checkoutPath: "/worktrees/project/feature-handoff",
+      baseRef: "origin/main",
+    };
+    const state = Schema.decodeUnknownSync(AgentControlOperationState)({
+      handoffWorktree,
+      worktreeHandoff: {
+        branch: "feature/handoff",
+        baseRef: "origin/main",
+        startedFromOrigin: true,
+        setupScript: "skipped",
+        continuation: "held",
+      },
+    });
+    expect(state.handoffWorktree).toEqual(handoffWorktree);
+    expect(state.worktreeHandoff?.continuation).toBe("held");
+    expect(Object.keys(AgentControlExecutionReceipt.fields)).not.toContain("handoffWorktree");
   });
 });
