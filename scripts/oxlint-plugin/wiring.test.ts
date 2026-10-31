@@ -38,7 +38,12 @@ describe("ryco oxlint plugin wiring", () => {
     const output = `${result.stdout}${result.stderr}`;
 
     expect(output).not.toContain("Failed to parse oxlint configuration file");
-    expect(output).toContain(`${unexplained}:1:1: error ryco(require-suppression-reason)`);
+    // The report format depends on where lint runs (GitHub Actions gets `::error file=...`
+    // annotations), so look for the rule and the file on one line rather than for one layout.
+    const reports = output
+      .split("\n")
+      .filter((line) => line.includes("ryco(require-suppression-reason)"));
+    expect(reports.some((line) => line.includes(`${unexplained}`))).toBe(true);
     expect(output).not.toContain(explained);
     expect(result.status).toBe(1);
   });
