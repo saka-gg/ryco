@@ -36,6 +36,22 @@ ruleTester.run("ryco/no-partial-runtime-mock-in-browser-tests", rule, {
       errors: [{ message: MESSAGE }],
     },
     {
+      name: "reports a factory spreading vi.importActual of the runtime",
+      filename: "/repo/apps/web/src/components/Thing.browser.tsx",
+      code: `vi.mock("../environments/runtime/service", async () => ({ ...(await vi.importActual("../environments/runtime/service")), x: 1 }));`,
+      errors: [{ message: MESSAGE }],
+    },
+    {
+      name: "reports vi.doMock, an import() specifier, a template path and a sibling path",
+      filename: "/repo/apps/web/src/environments/runtime/thing.browser.ts",
+      code: `
+        vi.doMock("~/environmentApi", async (original) => original());
+        vi.mock(import("../../environmentApi"), async (original) => original());
+        vi.mock(\`./service\`, async (original) => original());
+      `,
+      errors: [{ message: MESSAGE }, { message: MESSAGE }, { message: MESSAGE }],
+    },
+    {
       name: "reports the runtime index module",
       filename: "/repo/apps/web/src/Thing.browser.tsx",
       code: `vi.mock("./environments/runtime", (original) => original());`,

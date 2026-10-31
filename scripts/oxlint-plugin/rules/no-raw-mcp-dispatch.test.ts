@@ -35,6 +35,11 @@ ruleTester.run("ryco/no-raw-mcp-dispatch", rule, {
       code: `const result = base.callTool(name, input);`,
     },
     {
+      name: "allows other names from Effect's AI barrel",
+      filename: "/repo/apps/server/src/textGeneration/x.ts",
+      code: `import { Chat } from "effect/ai";`,
+    },
+    {
       name: "ignores tests, which drive the listeners",
       filename: "/repo/apps/server/src/orchestration/listener.test.ts",
       code: `
@@ -61,6 +66,35 @@ ruleTester.run("ryco/no-raw-mcp-dispatch", rule, {
       filename: "/repo/apps/server/src/orchestration/x.ts",
       code: `const result = tools?.callTool("ryco_send_message", {});`,
       errors: [{ message: CALL_TOOL }],
+    },
+    {
+      name: "reports every other spelling of a method: a constant, a handler map key, a list",
+      filename: "/repo/apps/server/src/provider/bridge.ts",
+      code: `
+        const TOOLS_CALL = "tools/call";
+        const handlers = { "tools/list": () => [] };
+        const known = [\`tools/call\`].includes(method);
+      `,
+      errors: [
+        { message: dispatch("tools/call") },
+        { message: dispatch("tools/list") },
+        { message: dispatch("tools/call") },
+      ],
+    },
+    {
+      name: "reports callTool handed on or destructured, not only called",
+      filename: "/repo/apps/server/src/orchestration/x.ts",
+      code: `
+        const { callTool } = tools;
+        const call = tools.callTool;
+      `,
+      errors: [{ message: CALL_TOOL }, { message: CALL_TOOL }],
+    },
+    {
+      name: "reports McpServer from Effect's AI barrel",
+      filename: "/repo/apps/server/src/agentControl/Mcp/server.ts",
+      code: `import { McpServer } from "effect/ai";`,
+      errors: [{ message: IMPORT }],
     },
     {
       name: "reports an MCP server library import",
