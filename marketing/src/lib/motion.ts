@@ -25,7 +25,7 @@ export function useGsapContext(
     if (prefersReducedMotion()) return;
     const ctx = gsap.context(() => setup({ gsap, ScrollTrigger }), scope);
     return () => ctx.revert();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    // eslint-disable-next-line react-hooks/exhaustive-deps -- the caller passes the dependency list, as with useEffect itself
   }, deps);
   return scope;
 }
@@ -85,7 +85,6 @@ export function useTilt(scopeRef: React.RefObject<HTMLElement | null>, selector 
       });
     });
     return () => cleanups.forEach((c) => c());
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scopeRef, selector]);
 }
 

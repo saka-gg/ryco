@@ -145,6 +145,8 @@ const rootConfig = {
       "**/routeTree.gen.ts",
     ],
     plugins: ["eslint", "oxc", "react", "unicorn", "typescript"],
+    // Ryco's own rules, reported as `ryco/<rule>` (scripts/oxlint-plugin).
+    jsPlugins: ["./scripts/oxlint-plugin/index.ts"],
     categories: {
       correctness: "warn",
       suspicious: "warn",
@@ -158,6 +160,7 @@ const rootConfig = {
       "react/no-object-type-as-default-prop": "off",
       "react/no-unstable-nested-components": "off",
       "unicorn/consistent-function-scoping": "off",
+      "ryco/require-suppression-reason": "error",
     },
     overrides: [
       {
