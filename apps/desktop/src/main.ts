@@ -76,6 +76,7 @@ import type {
 import { isRemoteEditorLink } from "@ryco/shared/remoteEditorLink";
 import { AsyncRotatingFileSink, DESKTOP_BACKEND_LOG_FILE_NAME } from "@ryco/shared/logging";
 import { normalizeHubNodeName } from "@ryco/shared/nodeIdentity";
+import { rycoDesktopFlavorIdentity } from "@ryco/shared/desktopFlavor";
 import { readEnv } from "@ryco/shared/runtimeEnv";
 import { parsePersistedServerObservabilitySettings } from "@ryco/shared/serverSettings";
 import {
@@ -138,6 +139,7 @@ import {
 } from "./backendStartup.ts";
 import { pruneStaleDesktopCompileCaches } from "./compileCacheDirectory.ts";
 import { createDesktopWorkspaceActivity } from "./desktopBackgroundSignal.ts";
+import { readDesktopFlavor } from "./desktopFlavor.ts";
 import { resolveDesktopPaths, resolveDesktopUserDataPath } from "./desktopPaths.ts";
 import { registerDeferredIpcHandlers } from "./deferredIpc.ts";
 import {
@@ -162,7 +164,6 @@ import {
   resolveDesktopHubConnectorLaunch,
   resolveDesktopTailscaleServeLaunch,
   setDesktopServerExposurePreference,
-  setDesktopUpdateChannelPreference,
   resolveDefaultDesktopSettings,
   setDesktopHubPreference,
   isDesktopKeepAwakeMode,
@@ -315,7 +316,6 @@ const MENU_ACTION_CHANNEL = "desktop:menu-action";
 const SYSTEM_RESUMED_CHANNEL = "desktop:system-resumed";
 const UPDATE_STATE_CHANNEL = "desktop:update-state";
 const UPDATE_GET_STATE_CHANNEL = "desktop:update-get-state";
-const UPDATE_SET_CHANNEL_CHANNEL = "desktop:update-set-channel";
 const UPDATE_DOWNLOAD_CHANNEL = "desktop:update-download";
 const UPDATE_INSTALL_CHANNEL = "desktop:update-install";
 const UPDATE_CHECK_CHANNEL = "desktop:update-check";
@@ -348,9 +348,15 @@ const CANCEL_HOSTED_GITHUB_CONNECTION_CHANNEL = "desktop:cancel-hosted-github-co
 const isDevelopment = Boolean(process.env.VITE_DEV_SERVER_URL);
 const isDesktopAuthorizationCallbackRelay =
   isDevelopment && process.env.RYCO_DESKTOP_CALLBACK_RELAY === "1";
+/** Ryco or Ryco Nightly (`@ryco/shared/desktopFlavor`): the data home, profile and update channel follow it. */
+const DESKTOP_FLAVOR = readDesktopFlavor({ appPath: app.getAppPath(), isDevelopment });
+const DESKTOP_FLAVOR_IDENTITY = rycoDesktopFlavorIdentity(DESKTOP_FLAVOR);
+/** The one channel this app updates from; it never takes a version outside it, nor a downgrade. */
+const DESKTOP_UPDATE_CHANNEL: DesktopUpdateChannel = DESKTOP_FLAVOR_IDENTITY.updateChannel;
 const DESKTOP_PATHS = resolveDesktopPaths({
-  configuredBaseDir: readEnv("RYCO_HOME"),
+  configuredBaseDir: readEnv(DESKTOP_FLAVOR_IDENTITY.homeEnv),
   isDevelopment,
+  flavor: DESKTOP_FLAVOR,
 });
 const BACKEND_BASE_DIR = DESKTOP_PATHS.backendBaseDir;
 const STATE_DIR = DESKTOP_PATHS.stateDir;
@@ -372,11 +378,16 @@ const DEV_REMOTE_SERVER_ENTRY_PATH = readEnv("RYCO_DEV_REMOTE_SERVER_ENTRY_PATH"
 const desktopAppBranding: DesktopAppBranding = resolveDesktopAppBranding({
   isDevelopment,
   appVersion: app.getVersion(),
+  flavor: DESKTOP_FLAVOR,
 });
 const APP_DISPLAY_NAME = desktopAppBranding.displayName;
-const APP_USER_MODEL_ID = isDevelopment ? "com.sak0a.ryco.dev" : "com.sak0a.ryco";
-const LINUX_DESKTOP_ENTRY_NAME = isDevelopment ? "ryco-dev.desktop" : "ryco.desktop";
-const LINUX_WM_CLASS = isDevelopment ? "ryco-dev" : "ryco";
+const APP_USER_MODEL_ID = isDevelopment
+  ? "com.sak0a.ryco.dev"
+  : DESKTOP_FLAVOR_IDENTITY.appUserModelId;
+const LINUX_DESKTOP_ENTRY_NAME = isDevelopment
+  ? "ryco-dev.desktop"
+  : `${DESKTOP_FLAVOR_IDENTITY.linuxName}.desktop`;
+const LINUX_WM_CLASS = isDevelopment ? "ryco-dev" : DESKTOP_FLAVOR_IDENTITY.linuxName;
 const COMMIT_HASH_PATTERN = /^[0-9a-f]{7,40}$/i;
 const COMMIT_HASH_DISPLAY_LENGTH = 12;
 const LOG_DIR = DESKTOP_PATHS.logDir;
@@ -665,7 +676,7 @@ let desktopServerExposureMode: DesktopServerExposureMode = desktopSettings.serve
 let destructiveMenuIconCache: Electron.NativeImage | null | undefined;
 const expectedBackendExitChildren = new WeakSet<ChildProcess.ChildProcess>();
 const initialUpdateState = (): DesktopUpdateState =>
-  createInitialDesktopUpdateState(app.getVersion(), desktopSettings.updateChannel);
+  createInitialDesktopUpdateState(app.getVersion(), DESKTOP_UPDATE_CHANNEL);
 
 function logTimestamp(): string {
   return new Date().toISOString();
@@ -767,6 +778,7 @@ function backendChildEnv(): NodeJS.ProcessEnv {
     isPackaged: app.isPackaged,
     platform: process.platform,
     resourcesPath: process.resourcesPath,
+    ...(DESKTOP_FLAVOR === "nightly" ? { nightlyHome: BACKEND_BASE_DIR } : {}),
   });
 }
 
@@ -931,7 +943,10 @@ function getDesktopSecretStorage() {
 
 function desktopAuthorizationVariant(): DesktopAuthorizationVariant {
   if (isDevelopment) return "development";
-  return desktopAppBranding.stageLabel === "Nightly" ? "preview" : "production";
+  // Ryco Nightly, and the in-place nightly it replaces, never claim the stable `ryco://` scheme.
+  return DESKTOP_FLAVOR === "nightly" || desktopAppBranding.stageLabel === "Nightly"
+    ? "preview"
+    : "production";
 }
 
 function desktopHostedDeviceLabel(): string {
@@ -2305,7 +2320,7 @@ async function loadDesktopSshEnvironmentBridge(): Promise<DesktopSshEnvironmentB
       return {
         packageSpec: ssh.resolveRemoteRycoCliPackageSpec({
           appVersion: app.getVersion(),
-          updateChannel: desktopSettings.updateChannel,
+          updateChannel: DESKTOP_UPDATE_CHANNEL,
           isDevelopment,
         }),
       };
@@ -2957,9 +2972,11 @@ function applyAutoUpdaterChannel(channel: DesktopUpdateChannel): void {
   const autoUpdater = requireAutoUpdater();
   autoUpdater.channel = channel;
   autoUpdater.allowPrerelease = channel === "nightly";
-  autoUpdater.allowDowngrade = channel === "nightly";
+  // Ryco and Ryco Nightly are separate apps: moving between them means opening the other
+  // app, never installing an older build over a database a newer one already migrated.
+  autoUpdater.allowDowngrade = false;
   console.info(
-    `[desktop-updater] Using update channel '${channel}' (allowPrerelease=${channel === "nightly"}, allowDowngrade=${channel === "nightly"}).`,
+    `[desktop-updater] Using update channel '${channel}' (allowPrerelease=${channel === "nightly"}, allowDowngrade=false).`,
   );
 }
 
@@ -3171,6 +3188,7 @@ function prepareUnsignedMacUpdateInstaller(): {
     scriptPath,
     createUnsignedMacUpdateInstallScript({
       appLabel: APP_DISPLAY_NAME,
+      expectedBundleId: DESKTOP_FLAVOR_IDENTITY.appId,
       updateZipPath: downloadedUpdateFilePath,
       targetAppPath,
       waitPid: process.pid,
@@ -3307,7 +3325,7 @@ function closeRemoteInstallNotification(): void {
  */
 async function configureAutoUpdater(): Promise<void> {
   const enabled = shouldEnableAutoUpdates();
-  setUpdateState(createBaseUpdateState(desktopSettings.updateChannel, enabled));
+  setUpdateState(createBaseUpdateState(DESKTOP_UPDATE_CHANNEL, enabled));
   if (!enabled || isQuitting) {
     return;
   }
@@ -3342,7 +3360,7 @@ async function configureAutoUpdater(): Promise<void> {
 
   autoUpdater.autoDownload = false;
   autoUpdater.autoInstallOnAppQuit = false;
-  applyAutoUpdaterChannel(desktopSettings.updateChannel);
+  applyAutoUpdaterChannel(DESKTOP_UPDATE_CHANNEL);
   let lastLoggedDownloadMilestone = -1;
 
   autoUpdater.on("checking-for-update", () => {
@@ -4935,50 +4953,6 @@ function registerIpcHandlers(): void {
   ipcMain.removeHandler(UPDATE_GET_STATE_CHANNEL);
   ipcMain.handle(UPDATE_GET_STATE_CHANNEL, async () => updateState);
 
-  ipcMain.removeHandler(UPDATE_SET_CHANNEL_CHANNEL);
-  ipcMain.handle(UPDATE_SET_CHANNEL_CHANNEL, async (_event, rawChannel: unknown) => {
-    if (rawChannel !== "latest" && rawChannel !== "nightly") {
-      throw new Error("Invalid desktop update channel input.");
-    }
-    if (
-      updateCheckInFlight ||
-      updateDownloadInFlight ||
-      updateInstallInFlight ||
-      remoteAppInstaller.isActive()
-    ) {
-      throw new Error("Cannot change update tracks while an update action is in progress.");
-    }
-
-    const nextChannel = rawChannel as DesktopUpdateChannel;
-
-    desktopSettings = setDesktopUpdateChannelPreference(desktopSettings, nextChannel);
-    writeDesktopSettings(DESKTOP_SETTINGS_PATH, desktopSettings);
-
-    if (nextChannel === updateState.channel) {
-      return updateState;
-    }
-
-    const enabled = shouldEnableAutoUpdates();
-    downloadedUpdateFilePath = null;
-    setUpdateState(createBaseUpdateState(nextChannel, enabled));
-
-    if (!enabled || !updaterConfigured) {
-      return updateState;
-    }
-
-    applyAutoUpdaterChannel(nextChannel);
-    const autoUpdater = requireAutoUpdater();
-    const allowDowngrade = autoUpdater.allowDowngrade;
-    // An explicit channel switch should allow the immediate nightly->stable rollback path.
-    autoUpdater.allowDowngrade = true;
-    try {
-      await checkForUpdates("channel-change");
-    } finally {
-      autoUpdater.allowDowngrade = allowDowngrade;
-    }
-    return updateState;
-  });
-
   ipcMain.removeHandler(UPDATE_DOWNLOAD_CHANNEL);
   ipcMain.handle(UPDATE_DOWNLOAD_CHANNEL, async () => {
     const result = await downloadAvailableUpdate();
@@ -5437,7 +5411,7 @@ function createWindow(): BrowserWindow {
 // Override Electron's userData path before the `ready` event so that
 // Chromium session data uses a filesystem-friendly directory name.
 // Must be called synchronously at the top level — before `app.whenReady()`.
-app.setPath("userData", resolveDesktopUserDataPath({ isDevelopment }));
+app.setPath("userData", resolveDesktopUserDataPath({ isDevelopment, flavor: DESKTOP_FLAVOR }));
 
 configureAppIdentity();
 
@@ -5705,7 +5679,7 @@ function configureDeferredDesktopIntegration(): void {
       `authorization protocol registration failed message=${sanitizeLogValue(formatErrorMessage(error))}`,
     );
   }
-  setUpdateState(createBaseUpdateState(desktopSettings.updateChannel, shouldEnableAutoUpdates()));
+  setUpdateState(createBaseUpdateState(DESKTOP_UPDATE_CHANNEL, shouldEnableAutoUpdates()));
   setTimeout(() => {
     void ensureAutoUpdaterConfigured().catch((error: unknown) => {
       writeDesktopLogHeader(

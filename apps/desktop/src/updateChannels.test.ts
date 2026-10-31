@@ -1,10 +1,6 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import {
-  doesVersionMatchDesktopUpdateChannel,
-  isNightlyDesktopVersion,
-  resolveDefaultDesktopUpdateChannel,
-} from "./updateChannels.ts";
+import { doesVersionMatchDesktopUpdateChannel, isNightlyDesktopVersion } from "./updateChannels.ts";
 
 describe("isNightlyDesktopVersion", () => {
   it("detects packaged nightly versions", () => {
@@ -13,16 +9,6 @@ describe("isNightlyDesktopVersion", () => {
 
   it("does not flag stable versions as nightly", () => {
     expect(isNightlyDesktopVersion("0.0.17")).toBe(false);
-  });
-});
-
-describe("resolveDefaultDesktopUpdateChannel", () => {
-  it("defaults stable builds to latest", () => {
-    expect(resolveDefaultDesktopUpdateChannel("0.0.17")).toBe("latest");
-  });
-
-  it("defaults nightly builds to nightly", () => {
-    expect(resolveDefaultDesktopUpdateChannel("0.0.17-nightly.20260415.1")).toBe("nightly");
   });
 });
 

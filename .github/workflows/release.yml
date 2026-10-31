@@ -212,6 +212,9 @@ jobs:
       # Shipped web bundles compile every module from source instead of reading
       # React Compiler output from a local transform cache.
       RYCO_REACT_COMPILER_CACHE: "off"
+      # How a nightly is packaged (docs/release.md, "Ryco Nightly"): `legacy` keeps the stable
+      # app's identity (the bridge release), `separate` builds the side-by-side Ryco Nightly app.
+      RYCO_DESKTOP_NIGHTLY_IDENTITY: ${{ vars.RYCO_DESKTOP_NIGHTLY_IDENTITY || 'legacy' }}
     strategy:
       fail-fast: false
       matrix:

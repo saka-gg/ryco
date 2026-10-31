@@ -134,7 +134,8 @@ describe("desktop main bundle splitting", () => {
         specifier.startsWith("node:") ||
           specifier === "electron" ||
           specifier === "@ryco/shared/shellEnvironment" ||
-          specifier === "@ryco/shared/runtimeEnv",
+          specifier === "@ryco/shared/runtimeEnv" ||
+          specifier === "@ryco/shared/desktopFlavor",
         specifier,
       ).toBe(true);
     }

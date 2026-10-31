@@ -48,10 +48,54 @@ and npm trusted publishing retain their existing runners.
 - Publishes the CLI package (`apps/server`, npm package `ryco-cli`) to the `nightly` npm dist-tag using the same nightly version.
 - Does not commit version bumps back to `main`.
 
+## Ryco Nightly
+
+Nightly desktop builds become their own app, **Ryco Nightly**, installed next to Ryco with
+nothing shared. Trying a nightly then never touches the workspace the stable app keeps, and moving back never
+downgrades a binary over a database a newer one migrated.
+
+|                                                    | Ryco                           | Ryco Nightly                                 |
+| -------------------------------------------------- | ------------------------------ | -------------------------------------------- |
+| Bundle id (`appId`; NSIS derives its GUID from it) | `com.laurinfrank.ryco`         | `com.laurinfrank.ryco.nightly`               |
+| Data home                                          | `~/.ryco` (`RYCO_HOME`)        | `~/.ryco-nightly` (`RYCO_NIGHTLY_HOME` only) |
+| Electron profile and single-instance lock          | `ryco`                         | `ryco-nightly`                               |
+| Hosted sign-in callback scheme                     | `ryco://`                      | `ryco-preview://`                            |
+| Update channel                                     | `latest`, stable versions only | `nightly`, nightly versions only             |
+
+- The identity table lives in `packages/shared/src/desktopFlavor.ts`. The build writes the flavor
+  into the packaged `package.json` (`rycoDesktopFlavor`), so the running app cannot lose it.
+- Each app takes only versions of its own channel, and `allowDowngrade` is off for both. There is
+  no update-track switch any more: moving between them means opening the other app.
+- Ryco Nightly is a separate node: its own environment id, Hub enrollment and E2EE keys follow from
+  its own data home. Its backend, MCP bridge and other CLI children get `RYCO_HOME` pinned to that
+  home, so a `RYCO_HOME` exported in a login shell never points it at Ryco's data.
+- The unsigned macOS installer refuses a downloaded bundle whose id differs from the running app's.
+- Features that ship only in Nightly are listed in `NIGHTLY_ONLY_FEATURES`
+  (`packages/shared/src/nightlyFeatures.ts`). The node is authoritative, from its own version.
+- CLI nodes keep the in-place npm `nightly` dist-tag.
+
+### Rolling it out (`RYCO_DESKTOP_NIGHTLY_IDENTITY`)
+
+Before the split, nightly builds used the stable app's identity and data ("Ryco (Nightly)"). The
+release workflow reads the repository variable `RYCO_DESKTOP_NIGHTLY_IDENTITY` to decide how a
+nightly is packaged:
+
+1. `legacy` (the default while the variable is unset): the nightly keeps the stable identity. The
+   first nightly after the split is the **bridge**: it carries the new code, so in-place nightly
+   installs stop following nightlies and move to the next stable release, which installs over them
+   as an ordinary update (a nightly's base is the next stable patch).
+2. `separate`: nightlies build Ryco Nightly. Set the variable once in-place nightly installs have
+   taken the bridge (we suggest waiting about a week).
+
+An in-place install that never took the bridge and meets a `separate` nightly loses no data: a
+signed macOS update fails the code-signature requirement, the unsigned installer refuses the other
+bundle id, Windows installs a second app (new GUID), and `~/.ryco` stays as it was.
+
 ## Desktop auto-update notes
 
 - Runtime updater: `electron-updater` in `apps/desktop/src/main.ts`.
 - Update UX:
+  - Each app follows one channel (see "Ryco Nightly"); there is no update-track switch.
   - Background checks run on startup delay + interval.
   - No automatic download or install.
   - The desktop UI shows a rocket update button when an update is available; click once to download, click again after download to restart/install.

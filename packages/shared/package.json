@@ -377,6 +377,10 @@
       "types": "./src/relayCodec.ts",
       "import": "./src/relayCodec.ts"
     },
+    "./nightlyFeatures": {
+      "types": "./src/nightlyFeatures.ts",
+      "import": "./src/nightlyFeatures.ts"
+    },
     "./nodeIdentity": {
       "types": "./src/nodeIdentity.ts",
       "import": "./src/nodeIdentity.ts"
@@ -520,6 +524,10 @@
     "./cuaDriverProtocol": {
       "types": "./src/cuaDriverProtocol.ts",
       "import": "./src/cuaDriverProtocol.ts"
+    },
+    "./desktopFlavor": {
+      "types": "./src/desktopFlavor.ts",
+      "import": "./src/desktopFlavor.ts"
     },
     "./desktopIdentity": {
       "types": "./src/desktopIdentity.ts",

@@ -91,9 +91,17 @@ export function createDesktopBackendChildEnv(
     readonly isPackaged: boolean;
     readonly platform: NodeJS.Platform;
     readonly resourcesPath: string;
+    /**
+     * Ryco Nightly's data home. The CLI prefers `RYCO_HOME` over the home the
+     * bootstrap envelope names and otherwise falls back to `~/.ryco`, so a
+     * Nightly child pins it here: never the stable app's data, whatever the
+     * login shell exports.
+     */
+    readonly nightlyHome?: string;
   },
 ): NodeJS.ProcessEnv {
   const env = { ...base };
+  if (input.nightlyHome !== undefined) env.RYCO_HOME = input.nightlyHome;
   deleteEnv(env, "RYCO_PORT");
   deleteEnv(env, "RYCO_MODE");
   deleteEnv(env, "RYCO_NO_BROWSER");

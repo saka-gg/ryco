@@ -1,6 +1,10 @@
 import { describe, expect, it } from "vite-plus/test";
 
-import { resolveDesktopPaths, resolveDesktopUserDataPath } from "./desktopPaths.ts";
+import {
+  configuredDesktopBaseDir,
+  resolveDesktopPaths,
+  resolveDesktopUserDataPath,
+} from "./desktopPaths.ts";
 
 describe("desktop paths", () => {
   it("derives the state files from RYCO_HOME or the default home", () => {
@@ -39,5 +43,35 @@ describe("desktop paths", () => {
         homeDir: "/home/me",
       }),
     ).toBe("/cfg/ryco-dev");
+  });
+});
+
+describe("Ryco Nightly paths", () => {
+  it("keeps its data and profile apart from Ryco's", () => {
+    expect(
+      resolveDesktopPaths({
+        configuredBaseDir: undefined,
+        isDevelopment: false,
+        flavor: "nightly",
+        homeDir: "/Users/me",
+      }).stateDir,
+    ).toBe("/Users/me/.ryco-nightly/userdata");
+    expect(
+      resolveDesktopUserDataPath({
+        isDevelopment: false,
+        flavor: "nightly",
+        platform: "darwin",
+        homeDir: "/Users/me",
+      }),
+    ).toBe("/Users/me/Library/Application Support/ryco-nightly");
+  });
+
+  it("moves only with RYCO_NIGHTLY_HOME, never with the stable RYCO_HOME", () => {
+    const env = { RYCO_HOME: "/Users/me/.ryco", RYCO_NIGHTLY_HOME: undefined };
+    expect(configuredDesktopBaseDir("nightly", env)).toBeUndefined();
+    expect(configuredDesktopBaseDir("stable", env)).toBe("/Users/me/.ryco");
+    expect(configuredDesktopBaseDir("nightly", { RYCO_NIGHTLY_HOME: "/srv/nightly" })).toBe(
+      "/srv/nightly",
+    );
   });
 });

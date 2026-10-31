@@ -1,6 +1,8 @@
 import * as OS from "node:os";
 import * as Path from "node:path";
 
+import { type RycoDesktopFlavor, rycoDesktopFlavorIdentity } from "@ryco/shared/desktopFlavor";
+
 import { resolveDesktopDataHomes } from "./desktopDataHomes.ts";
 
 /**
@@ -17,14 +19,30 @@ export interface DesktopPaths {
   readonly logDir: string;
 }
 
+/**
+ * The data home a flavor's own environment variable names, if any. Ryco Nightly
+ * reads only `RYCO_NIGHTLY_HOME`: a `RYCO_HOME` exported in a login shell must
+ * never point it at the stable app's data.
+ */
+export function configuredDesktopBaseDir(
+  flavor: RycoDesktopFlavor,
+  env: NodeJS.ProcessEnv = process.env,
+): string | undefined {
+  return env[rycoDesktopFlavorIdentity(flavor).homeEnv];
+}
+
 export function resolveDesktopPaths(input: {
   readonly configuredBaseDir: string | undefined;
   readonly isDevelopment: boolean;
+  readonly flavor?: RycoDesktopFlavor;
   readonly homeDir?: string;
 }): DesktopPaths {
   const { backendBaseDir, desktopBaseDir } = resolveDesktopDataHomes({
     configuredBaseDir: input.configuredBaseDir,
-    defaultBaseDir: Path.join(input.homeDir ?? OS.homedir(), ".ryco"),
+    defaultBaseDir: Path.join(
+      input.homeDir ?? OS.homedir(),
+      rycoDesktopFlavorIdentity(input.flavor ?? "stable").homeDirectoryName,
+    ),
     isDevelopment: input.isDevelopment,
   });
   const stateDir = Path.join(desktopBaseDir, "userdata");
@@ -48,6 +66,8 @@ export function resolveDesktopPaths(input: {
  */
 export function resolveDesktopUserDataPath(input: {
   readonly isDevelopment: boolean;
+  /** Ryco Nightly gets its own profile, and with it its own single-instance lock. */
+  readonly flavor?: RycoDesktopFlavor;
   readonly platform?: NodeJS.Platform;
   readonly env?: NodeJS.ProcessEnv;
   readonly homeDir?: string;
@@ -62,5 +82,10 @@ export function resolveDesktopUserDataPath(input: {
         ? Path.join(homeDir, "Library", "Application Support")
         : env.XDG_CONFIG_HOME || Path.join(homeDir, ".config");
 
-  return Path.join(appDataBase, input.isDevelopment ? "ryco-dev" : "ryco");
+  return Path.join(
+    appDataBase,
+    input.isDevelopment
+      ? "ryco-dev"
+      : rycoDesktopFlavorIdentity(input.flavor ?? "stable").userDataDirectoryName,
+  );
 }

@@ -16,6 +16,11 @@ export interface UnsignedMacUpdateInstallerDecisionInput {
 
 export interface UnsignedMacUpdateInstallScriptInput {
   readonly appLabel: string;
+  /**
+   * The running app's bundle id. A downloaded bundle with another id (Ryco Nightly
+   * offered to Ryco, or the reverse) is refused instead of replacing this app.
+   */
+  readonly expectedBundleId: string;
   readonly updateZipPath: string;
   readonly targetAppPath: string;
   readonly waitPid: number;
@@ -93,6 +98,7 @@ UPDATE_ZIP=${shellSingleQuote(input.updateZipPath)}
 TARGET_APP=${shellSingleQuote(input.targetAppPath)}
 WAIT_PID=${input.waitPid}
 LOG_PATH=${shellSingleQuote(input.logPath)}
+EXPECTED_BUNDLE_ID=${shellSingleQuote(input.expectedBundleId)}
 
 /bin/mkdir -p "$(/usr/bin/dirname "$LOG_PATH")"
 exec >> "$LOG_PATH" 2>&1
@@ -124,6 +130,12 @@ echo "Extracting update..."
 SOURCE_APP="$(/usr/bin/find "$STAGING_DIR" -maxdepth 2 -name "*.app" -type d -print -quit)"
 if [[ -z "$SOURCE_APP" ]]; then
   echo "Downloaded update did not contain an app bundle."
+  exit 1
+fi
+
+SOURCE_BUNDLE_ID="$(/usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$SOURCE_APP/Contents/Info.plist" 2>/dev/null || true)"
+if [[ "$SOURCE_BUNDLE_ID" != "$EXPECTED_BUNDLE_ID" ]]; then
+  echo "Downloaded update is $SOURCE_BUNDLE_ID, not $EXPECTED_BUNDLE_ID: refusing to replace this app with another one."
   exit 1
 fi
 

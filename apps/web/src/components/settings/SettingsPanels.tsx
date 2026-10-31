@@ -20,7 +20,6 @@ import { ArchiveIcon, ArchiveX, MessageCircleDashedIcon } from "lucide-react";
 import { useCallback, useMemo, useState } from "react";
 import {
   ORCHESTRATION_WS_METHODS,
-  type DesktopUpdateChannel,
   EDITORS,
   type EditorId,
   type EnvironmentId,
@@ -78,6 +77,7 @@ import { LIFECYCLE_RETENTION_COPY } from "@ryco/client-runtime/state/lifecycle";
 import { ProjectFavicon } from "../ProjectFavicon";
 import { RycoLetterMark } from "../RycoLetterMark";
 import { useServerAvailableEditors, useServerObservability } from "../../rpc/serverState";
+import { describeDesktopUpdateTrack } from "./desktopUpdateTrack";
 import { getEditorIcon, getEditorLabel } from "./SettingsPanels.editor";
 import { isNodeSettingsTargetReadOnly, settingsScopeLabel } from "./settingsSections.logic";
 import { useSettingsEditingScope, useSettingsTarget } from "../../settingsTarget";
@@ -142,43 +142,11 @@ function AboutBrandingHeader() {
 
 function AboutVersionSection({ scopeLabel }: { readonly scopeLabel: string }) {
   const updateState = useDesktopUpdateState();
-  const [isChangingUpdateChannel, setIsChangingUpdateChannel] = useState(false);
 
-  const hasDesktopBridge = typeof window !== "undefined" && Boolean(window.desktopBridge);
-  const selectedUpdateChannel = updateState?.channel ?? "latest";
-
-  const handleUpdateChannelChange = useCallback(
-    (channel: DesktopUpdateChannel) => {
-      const bridge = window.desktopBridge;
-      if (
-        !bridge ||
-        typeof bridge.setUpdateChannel !== "function" ||
-        channel === selectedUpdateChannel
-      ) {
-        return;
-      }
-
-      setIsChangingUpdateChannel(true);
-      void bridge
-        .setUpdateChannel(channel)
-        .then((state) => {
-          setDesktopUpdateState(state);
-        })
-        .catch((error: unknown) => {
-          toastManager.add(
-            stackedThreadToast({
-              type: "error",
-              title: "Could not change update track",
-              description: error instanceof Error ? error.message : "Update track change failed.",
-            }),
-          );
-        })
-        .finally(() => {
-          setIsChangingUpdateChannel(false);
-        });
-    },
-    [selectedUpdateChannel],
-  );
+  const updateTrack = describeDesktopUpdateTrack({
+    channel: updateState?.channel ?? "latest",
+    currentVersion: updateState?.currentVersion ?? "",
+  });
 
   const handleButtonClick = useCallback(() => {
     const bridge = window.desktopBridge;
@@ -304,34 +272,9 @@ function AboutVersionSection({ scopeLabel }: { readonly scopeLabel: string }) {
       />
       <SettingsRow
         title="Update track"
-        description="Stable follows full releases. Nightly follows the nightly desktop channel and can switch back to stable immediately."
+        description={updateTrack.description}
         scope={scopeLabel}
-        control={
-          <Select
-            value={selectedUpdateChannel}
-            onValueChange={(value) => {
-              handleUpdateChannelChange(value as DesktopUpdateChannel);
-            }}
-          >
-            <SelectTrigger
-              className="w-full sm:w-40"
-              aria-label="Update track"
-              disabled={!hasDesktopBridge || isChangingUpdateChannel}
-            >
-              <SelectValue>
-                {selectedUpdateChannel === "nightly" ? "Nightly" : "Stable"}
-              </SelectValue>
-            </SelectTrigger>
-            <SelectPopup align="end" alignItemWithTrigger={false}>
-              <SelectItem hideIndicator value="latest">
-                Stable
-              </SelectItem>
-              <SelectItem hideIndicator value="nightly">
-                Nightly
-              </SelectItem>
-            </SelectPopup>
-          </Select>
-        }
+        control={<span className="text-sm text-muted-foreground">{updateTrack.label}</span>}
       />
     </>
   );

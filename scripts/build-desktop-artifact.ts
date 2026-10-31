@@ -20,6 +20,13 @@ import {
 
 import * as NodeRuntime from "@effect/platform-node/NodeRuntime";
 import * as NodeServices from "@effect/platform-node/NodeServices";
+import {
+  isNightlyVersion,
+  releaseChannelForVersion,
+  RYCO_DESKTOP_FLAVOR_METADATA_KEY,
+  type RycoDesktopFlavor,
+  rycoDesktopFlavorIdentity,
+} from "@ryco/shared/desktopFlavor";
 import { readEnv } from "@ryco/shared/runtimeEnv";
 import {
   Config,
@@ -733,7 +740,36 @@ function resolveGitHubPublishConfig(updateChannel: "latest" | "nightly"):
 }
 
 export function resolveDesktopUpdateChannel(version: string): "latest" | "nightly" {
-  return /-nightly\.\d{8}\.\d+$/.test(version) ? "nightly" : "latest";
+  return releaseChannelForVersion(version);
+}
+
+/**
+ * How a nightly version is packaged. `legacy` keeps the stable app's identity (bundle id, data
+ * home, profile), as every nightly before Ryco Nightly did; `separate` builds Ryco Nightly, the
+ * side-by-side app. The first nightly after the split ships `legacy` (the bridge: it carries the
+ * new runtime code, which moves in-place nightly installs back to stable releases), then the
+ * release workflow's `RYCO_DESKTOP_NIGHTLY_IDENTITY` variable flips to `separate`.
+ */
+export type DesktopNightlyIdentityMode = "legacy" | "separate";
+
+export function resolveDesktopNightlyIdentityMode(
+  value: string | undefined,
+): DesktopNightlyIdentityMode {
+  const mode = value?.trim() || "legacy";
+  if (mode !== "legacy" && mode !== "separate") {
+    throw new Error(
+      `RYCO_DESKTOP_NIGHTLY_IDENTITY must be "legacy" or "separate", not ${JSON.stringify(mode)}.`,
+    );
+  }
+  return mode;
+}
+
+/** The app a build makes: Ryco Nightly only for a nightly version built with `separate`. */
+export function resolveDesktopBuildFlavor(
+  version: string,
+  nightlyIdentity: DesktopNightlyIdentityMode,
+): RycoDesktopFlavor {
+  return isNightlyVersion(version) && nightlyIdentity === "separate" ? "nightly" : "stable";
 }
 
 export function resolveDesktopBuildIconAssets(version: string): DesktopBuildIconAssets {
@@ -762,7 +798,13 @@ export function resolveMockUpdateServerUrl(mockUpdateServerPort: number | undefi
   return `http://localhost:${mockUpdateServerPort ?? 3000}`;
 }
 
-export function resolveDesktopProductName(version: string): string {
+export function resolveDesktopProductName(
+  version: string,
+  nightlyIdentity: DesktopNightlyIdentityMode = "legacy",
+): string {
+  if (resolveDesktopBuildFlavor(version, nightlyIdentity) === "nightly") {
+    return rycoDesktopFlavorIdentity("nightly").productName;
+  }
   return resolveDesktopUpdateChannel(version) === "nightly"
     ? "Ryco (Nightly)"
     : (desktopPackageJson.productName ?? "Ryco");
@@ -946,10 +988,15 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
   mockUpdateServerPort: number | undefined,
   macUnsignedInstallAssets: MacUnsignedInstallAssetPaths | undefined,
   localSigningIdentity?: string,
+  nightlyIdentity: DesktopNightlyIdentityMode = "legacy",
 ) {
+  const flavor = rycoDesktopFlavorIdentity(resolveDesktopBuildFlavor(version, nightlyIdentity));
   const buildConfig: Record<string, unknown> = {
-    appId: "com.laurinfrank.ryco",
-    productName: resolveDesktopProductName(version),
+    // NSIS derives the installer GUID from the appId, so Ryco Nightly gets its own entry.
+    appId: flavor.appId,
+    productName: resolveDesktopProductName(version, nightlyIdentity),
+    // Read at runtime (RYCO_DESKTOP_FLAVOR_METADATA_KEY): the packaged app cannot lose its flavor.
+    extraMetadata: { [RYCO_DESKTOP_FLAVOR_METADATA_KEY]: flavor.flavor },
     artifactName: "Ryco-${version}-${arch}.${ext}",
     directories: {
       buildResources: "apps/desktop/resources",
@@ -1075,12 +1122,12 @@ export const createBuildConfig = Effect.fn("createBuildConfig")(function* (
   if (platform === "linux") {
     buildConfig.linux = {
       target: [target],
-      executableName: "ryco",
+      executableName: flavor.linuxName,
       icon: "icons",
       category: "Development",
       desktop: {
         entry: {
-          StartupWMClass: "ryco",
+          StartupWMClass: flavor.linuxName,
         },
       },
     };
@@ -1244,9 +1291,13 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
   );
 
   const appVersion = options.version ?? serverPackageJson.version;
+  const nightlyIdentity = resolveDesktopNightlyIdentityMode(
+    readEnv("RYCO_DESKTOP_NIGHTLY_IDENTITY"),
+  );
+  const buildFlavor = resolveDesktopBuildFlavor(appVersion, nightlyIdentity);
   const iconAssets = resolveDesktopBuildIconAssets(appVersion);
   const webAssetBrand = resolveDesktopWebAssetBrand(appVersion);
-  const productName = resolveDesktopProductName(appVersion);
+  const productName = resolveDesktopProductName(appVersion, nightlyIdentity);
   const commitHash = yield* resolveGitCommitHash(repoRoot);
   const mkdir = options.keepStage ? fs.makeTempDirectory : fs.makeTempDirectoryScoped;
   const stageRoot = yield* mkdir({
@@ -1349,7 +1400,8 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
       "[desktop-artifact] Using the existing local development identity; notarization is not requested.",
     );
   const stagePackageJson: StagePackageJson = {
-    name: "ryco",
+    // Also names electron-updater's cache directory (`<name>-updater`), one per app.
+    name: buildFlavor === "nightly" ? "ryco-nightly" : "ryco",
     version: appVersion,
     buildVersion: appVersion,
     rycoCommitHash: commitHash,
@@ -1366,6 +1418,7 @@ const buildDesktopArtifact = Effect.fn("buildDesktopArtifact")(function* (
       options.mockUpdateServerPort,
       macUnsignedInstallAssets,
       localSigningIdentity,
+      nightlyIdentity,
     ),
     dependencies: stageDependencies,
     devDependencies: {

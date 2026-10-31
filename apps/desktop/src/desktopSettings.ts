@@ -5,12 +5,10 @@ import type {
   DesktopKeepAwakeMode,
   DesktopQuitShortcutMode,
   DesktopServerExposureMode,
-  DesktopUpdateChannel,
 } from "@ryco/contracts";
 import { normalizeHubNodeName } from "@ryco/shared/nodeIdentity";
 
 import { normalizeDesktopBackendPort } from "./backendPort.ts";
-import { resolveDefaultDesktopUpdateChannel } from "./updateChannels.ts";
 
 export interface DesktopSettings {
   readonly quitShortcutMode: DesktopQuitShortcutMode;
@@ -49,8 +47,6 @@ export interface DesktopSettings {
    * in memory this is the only field.
    */
   readonly keepAwakeMode: DesktopKeepAwakeMode;
-  readonly updateChannel: DesktopUpdateChannel;
-  readonly updateChannelConfiguredByUser: boolean;
   /**
    * The port the backend last served on. The renderer's origin (and with it
    * localStorage and the HTTP/V8 caches) follows the port, so the next launch
@@ -127,16 +123,16 @@ export const DEFAULT_DESKTOP_SETTINGS: DesktopSettings = {
   tailscaleServeEnabled: false,
   tailscaleServePort: DEFAULT_TAILSCALE_SERVE_PORT,
   keepAwakeMode: DEFAULT_DESKTOP_KEEP_AWAKE_MODE,
-  updateChannel: "latest",
-  updateChannelConfiguredByUser: false,
   backendPort: null,
 };
 
-export function resolveDefaultDesktopSettings(appVersion: string): DesktopSettings {
-  return {
-    ...DEFAULT_DESKTOP_SETTINGS,
-    updateChannel: resolveDefaultDesktopUpdateChannel(appVersion),
-  };
+/**
+ * The update channel is not a setting: Ryco follows stable releases and Ryco Nightly follows
+ * nightlies (`@ryco/shared/desktopFlavor`). A file from before the split may still carry
+ * `updateChannel`; it is ignored, and dropped on the next write.
+ */
+export function resolveDefaultDesktopSettings(_appVersion: string): DesktopSettings {
+  return { ...DEFAULT_DESKTOP_SETTINGS };
 }
 
 export function setDesktopServerExposurePreference(
@@ -406,17 +402,6 @@ export function isDesktopHostedIdentitySupported(platform: NodeJS.Platform): boo
   return platform === "darwin";
 }
 
-export function setDesktopUpdateChannelPreference(
-  settings: DesktopSettings,
-  requestedChannel: DesktopUpdateChannel,
-): DesktopSettings {
-  return {
-    ...settings,
-    updateChannel: requestedChannel,
-    updateChannelConfiguredByUser: true,
-  };
-}
-
 /** A settings file exists but could not be understood. */
 export class DesktopSettingsReadError extends Error {
   constructor(cause: unknown) {
@@ -451,8 +436,6 @@ export function readDesktopSettings(
       readonly tailscaleServePort?: unknown;
       readonly keepAwakeMode?: unknown;
       readonly keepAwakeWhileReachable?: unknown;
-      readonly updateChannel?: unknown;
-      readonly updateChannelConfiguredByUser?: unknown;
       readonly hubConnectorEnabled?: unknown;
       readonly hubConnectorDisabledByUser?: unknown;
       readonly hubOrigin?: unknown;
@@ -460,14 +443,6 @@ export function readDesktopSettings(
       readonly hubAllowFileSecretStore?: unknown;
       readonly backendPort?: unknown;
     };
-    const parsedUpdateChannel =
-      parsed.updateChannel === "nightly" || parsed.updateChannel === "latest"
-        ? parsed.updateChannel
-        : null;
-    const isLegacySettings = parsed.updateChannelConfiguredByUser === undefined;
-    const updateChannelConfiguredByUser =
-      parsed.updateChannelConfiguredByUser === true ||
-      (isLegacySettings && parsedUpdateChannel === "nightly");
 
     let hubNodeName: string | null = null;
     if (parsed.hubNodeName !== undefined && parsed.hubNodeName !== null) {
@@ -492,11 +467,6 @@ export function readDesktopSettings(
       keepAwakeMode: resolveDesktopKeepAwakeMode(parsed, () =>
         readRememberedDesktopKeepAwakeMode(settingsPath),
       ),
-      updateChannel:
-        updateChannelConfiguredByUser && parsedUpdateChannel !== null
-          ? parsedUpdateChannel
-          : defaultSettings.updateChannel,
-      updateChannelConfiguredByUser,
       hubConnectorEnabled: parsed.hubConnectorEnabled === true,
       hubConnectorDisabledByUser:
         typeof parsed.hubConnectorDisabledByUser === "boolean"

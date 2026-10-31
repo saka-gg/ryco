@@ -23,7 +23,6 @@ import {
   setDesktopKeepAwakeMode,
   setDesktopServerExposurePreference,
   setDesktopTailscaleServePreference,
-  setDesktopUpdateChannelPreference,
   writeDesktopSettings,
 } from "./desktopSettings.ts";
 
@@ -55,15 +54,13 @@ describe("desktopSettings", () => {
     });
   });
 
-  it("defaults packaged nightly builds to the nightly update channel", () => {
+  it("uses the same defaults for every version: the app, not a setting, picks the channel", () => {
     expect(resolveDefaultDesktopSettings("0.0.17-nightly.20260415.1")).toEqual({
       quitShortcutMode: "press-twice",
       serverExposureMode: "local-only",
       tailscaleServeEnabled: false,
       tailscaleServePort: 443,
       keepAwakeMode: "reachable-or-working",
-      updateChannel: "nightly",
-      updateChannelConfiguredByUser: false,
       hubConnectorEnabled: false,
       hubConnectorDisabledByUser: false,
       hubOrigin: DEFAULT_DESKTOP_SETTINGS.hubOrigin,
@@ -82,8 +79,6 @@ describe("desktopSettings", () => {
       tailscaleServeEnabled: true,
       tailscaleServePort: 8443,
       keepAwakeMode: "reachable-or-working",
-      updateChannel: "latest",
-      updateChannelConfiguredByUser: true,
       hubConnectorEnabled: false,
       hubConnectorDisabledByUser: false,
       hubOrigin: DEFAULT_DESKTOP_SETTINGS.hubOrigin,
@@ -98,8 +93,6 @@ describe("desktopSettings", () => {
       tailscaleServeEnabled: true,
       tailscaleServePort: 8443,
       keepAwakeMode: "reachable-or-working",
-      updateChannel: "latest",
-      updateChannelConfiguredByUser: true,
       hubConnectorEnabled: false,
       hubConnectorDisabledByUser: false,
       hubOrigin: DEFAULT_DESKTOP_SETTINGS.hubOrigin,
@@ -118,8 +111,6 @@ describe("desktopSettings", () => {
           tailscaleServeEnabled: false,
           tailscaleServePort: 443,
           keepAwakeMode: "reachable-or-working",
-          updateChannel: "latest",
-          updateChannelConfiguredByUser: false,
           hubConnectorEnabled: false,
           hubConnectorDisabledByUser: false,
           hubOrigin: DEFAULT_DESKTOP_SETTINGS.hubOrigin,
@@ -135,8 +126,6 @@ describe("desktopSettings", () => {
       tailscaleServeEnabled: false,
       tailscaleServePort: 443,
       keepAwakeMode: "reachable-or-working",
-      updateChannel: "latest",
-      updateChannelConfiguredByUser: false,
       hubConnectorEnabled: false,
       hubConnectorDisabledByUser: false,
       hubOrigin: DEFAULT_DESKTOP_SETTINGS.hubOrigin,
@@ -155,8 +144,6 @@ describe("desktopSettings", () => {
           tailscaleServeEnabled: false,
           tailscaleServePort: 443,
           keepAwakeMode: "reachable-or-working",
-          updateChannel: "latest",
-          updateChannelConfiguredByUser: false,
           hubConnectorEnabled: false,
           hubConnectorDisabledByUser: false,
           hubOrigin: DEFAULT_DESKTOP_SETTINGS.hubOrigin,
@@ -172,8 +159,6 @@ describe("desktopSettings", () => {
       tailscaleServeEnabled: true,
       tailscaleServePort: 8443,
       keepAwakeMode: "reachable-or-working",
-      updateChannel: "latest",
-      updateChannelConfiguredByUser: false,
       hubConnectorEnabled: false,
       hubConnectorDisabledByUser: false,
       hubOrigin: DEFAULT_DESKTOP_SETTINGS.hubOrigin,
@@ -192,8 +177,6 @@ describe("desktopSettings", () => {
           tailscaleServeEnabled: false,
           tailscaleServePort: 8443,
           keepAwakeMode: "reachable-or-working",
-          updateChannel: "latest",
-          updateChannelConfiguredByUser: false,
           hubConnectorEnabled: false,
           hubConnectorDisabledByUser: false,
           hubOrigin: DEFAULT_DESKTOP_SETTINGS.hubOrigin,
@@ -209,8 +192,6 @@ describe("desktopSettings", () => {
       tailscaleServeEnabled: true,
       tailscaleServePort: 8443,
       keepAwakeMode: "reachable-or-working",
-      updateChannel: "latest",
-      updateChannelConfiguredByUser: false,
       hubConnectorEnabled: false,
       hubConnectorDisabledByUser: false,
       hubOrigin: DEFAULT_DESKTOP_SETTINGS.hubOrigin,
@@ -330,46 +311,6 @@ describe("desktopSettings", () => {
     ).toBeNull();
   });
 
-  it("persists the requested nightly update channel", () => {
-    expect(
-      setDesktopUpdateChannelPreference(
-        {
-          quitShortcutMode: "press-twice",
-          serverExposureMode: "local-only",
-          tailscaleServeEnabled: false,
-          tailscaleServePort: 443,
-          keepAwakeMode: "reachable-or-working",
-          updateChannel: "latest",
-          updateChannelConfiguredByUser: false,
-          hubConnectorEnabled: false,
-          hubConnectorDisabledByUser: false,
-          hubOrigin: DEFAULT_DESKTOP_SETTINGS.hubOrigin,
-          hubNodeName: null,
-          hubAllowFileSecretStore: false,
-          backendPort: null,
-        },
-        "nightly",
-      ),
-    ).toEqual({
-      quitShortcutMode: "press-twice",
-      serverExposureMode: "local-only",
-      tailscaleServeEnabled: false,
-      tailscaleServePort: 443,
-      keepAwakeMode: "reachable-or-working",
-      updateChannel: "nightly",
-      updateChannelConfiguredByUser: true,
-      hubConnectorEnabled: false,
-      hubConnectorDisabledByUser: false,
-      hubOrigin: DEFAULT_DESKTOP_SETTINGS.hubOrigin,
-      hubNodeName: null,
-      hubAllowFileSecretStore: false,
-      backendPort: null,
-    });
-  });
-
-  // Deliberate change of behaviour: this used to return defaults. Doing so meant
-  // the next write persisted them, silently discarding a configured Hub
-  // connection with no signal to the operator.
   it("surfaces a malformed settings file instead of silently resetting it", () => {
     const settingsPath = makeSettingsPath();
     fs.writeFileSync(settingsPath, "{not-json", "utf8");
@@ -737,91 +678,6 @@ describe("desktopSettings", () => {
     });
   });
 
-  it("falls back to the nightly channel for legacy nightly settings without an update track", () => {
-    const settingsPath = makeSettingsPath();
-    fs.writeFileSync(settingsPath, JSON.stringify({ serverExposureMode: "local-only" }), "utf8");
-
-    expect(readDesktopSettings(settingsPath, "0.0.17-nightly.20260415.1")).toEqual({
-      quitShortcutMode: "press-twice",
-      serverExposureMode: "local-only",
-      tailscaleServeEnabled: false,
-      tailscaleServePort: 443,
-      keepAwakeMode: "reachable-or-working",
-      updateChannel: "nightly",
-      updateChannelConfiguredByUser: false,
-      hubConnectorEnabled: false,
-      hubConnectorDisabledByUser: false,
-      hubOrigin: DEFAULT_DESKTOP_SETTINGS.hubOrigin,
-      hubNodeName: null,
-      hubAllowFileSecretStore: false,
-      backendPort: null,
-    });
-  });
-
-  it("migrates legacy implicit stable settings to nightly when running a nightly build", () => {
-    const settingsPath = makeSettingsPath();
-    fs.writeFileSync(
-      settingsPath,
-      JSON.stringify({
-        quitShortcutMode: "press-twice",
-        serverExposureMode: "local-only",
-        updateChannel: "latest",
-      }),
-      "utf8",
-    );
-
-    expect(readDesktopSettings(settingsPath, "0.0.17-nightly.20260415.1")).toEqual({
-      quitShortcutMode: "press-twice",
-      serverExposureMode: "local-only",
-      tailscaleServeEnabled: false,
-      tailscaleServePort: 443,
-      keepAwakeMode: "reachable-or-working",
-      updateChannel: "nightly",
-      updateChannelConfiguredByUser: false,
-      hubConnectorEnabled: false,
-      hubConnectorDisabledByUser: false,
-      hubOrigin: DEFAULT_DESKTOP_SETTINGS.hubOrigin,
-      hubNodeName: null,
-      hubAllowFileSecretStore: false,
-      backendPort: null,
-    });
-  });
-
-  it("preserves an explicit stable choice on nightly builds", () => {
-    const settingsPath = makeSettingsPath();
-    fs.writeFileSync(
-      settingsPath,
-      JSON.stringify({
-        quitShortcutMode: "press-twice",
-        serverExposureMode: "local-only",
-        updateChannel: "latest",
-        updateChannelConfiguredByUser: true,
-        hubConnectorEnabled: false,
-        hubConnectorDisabledByUser: false,
-        hubOrigin: DEFAULT_DESKTOP_SETTINGS.hubOrigin,
-        hubNodeName: null,
-        hubAllowFileSecretStore: false,
-      }),
-      "utf8",
-    );
-
-    expect(readDesktopSettings(settingsPath, "0.0.17-nightly.20260415.1")).toEqual({
-      quitShortcutMode: "press-twice",
-      serverExposureMode: "local-only",
-      tailscaleServeEnabled: false,
-      tailscaleServePort: 443,
-      keepAwakeMode: "reachable-or-working",
-      updateChannel: "latest",
-      updateChannelConfiguredByUser: true,
-      hubConnectorEnabled: false,
-      hubConnectorDisabledByUser: false,
-      hubOrigin: DEFAULT_DESKTOP_SETTINGS.hubOrigin,
-      hubNodeName: null,
-      hubAllowFileSecretStore: false,
-      backendPort: null,
-    });
-  });
-
   it("falls back to the default Tailscale Serve port when the persisted port is invalid", () => {
     const settingsPath = makeSettingsPath();
     fs.writeFileSync(
@@ -839,8 +695,6 @@ describe("desktopSettings", () => {
       tailscaleServeEnabled: true,
       tailscaleServePort: 443,
       keepAwakeMode: "reachable-or-working",
-      updateChannel: "latest",
-      updateChannelConfiguredByUser: false,
       hubConnectorEnabled: false,
       hubConnectorDisabledByUser: false,
       hubOrigin: DEFAULT_DESKTOP_SETTINGS.hubOrigin,
@@ -876,5 +730,21 @@ describe("desktop backend port persistence", () => {
 
     fs.writeFileSync(settingsPath, JSON.stringify({ backendPort: "7927" }), "utf8");
     expect(readDesktopSettings(settingsPath, "0.0.17").backendPort).toBeNull();
+  });
+});
+
+describe("desktop settings from before Ryco Nightly", () => {
+  it("ignores a stored update track: the app's flavor decides its channel", () => {
+    const settingsPath = makeSettingsPath();
+    fs.writeFileSync(
+      settingsPath,
+      JSON.stringify({ updateChannel: "nightly", updateChannelConfiguredByUser: true }),
+      "utf8",
+    );
+    const settings = readDesktopSettings(settingsPath, "0.1.36");
+    expect(settings).not.toHaveProperty("updateChannel");
+    expect(settings).not.toHaveProperty("updateChannelConfiguredByUser");
+    writeDesktopSettings(settingsPath, settings);
+    expect(fs.readFileSync(settingsPath, "utf8")).not.toContain("updateChannel");
   });
 });
