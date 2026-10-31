@@ -122,6 +122,8 @@ interface HarnessOptions {
   readonly installation?: DetectedNodeInstallation;
   readonly packageVersion?: string;
   readonly registry?: string | null;
+  /** The `nightly` dist-tag; the default answers `registry` for every channel. */
+  readonly nightlyRegistry?: string | null;
   readonly checksEnabled?: boolean;
   readonly runCommand?: NodeUpdateRuntime["runCommand"];
   readonly restartGrace?: Duration.Input;
@@ -168,10 +170,12 @@ const makeHarness = (options: HarnessOptions = {}) =>
               );
         }),
       latestCachePath: path.join(dir, "caches", "_node-latest-release.json"),
-      fetchLatestVersion: () =>
+      fetchLatestVersion: (channel) =>
         Effect.sync(() => {
           fetches.count += 1;
-          return registry.value;
+          return channel === "nightly" && options.nightlyRegistry !== undefined
+            ? options.nightlyRegistry
+            : registry.value;
         }),
       automaticChecksEnabled: Effect.succeed(options.checksEnabled ?? true),
       runCommand: (command) =>
@@ -262,6 +266,46 @@ describe("node self-update (CLI service)", () => {
           snapshotPath: snapshot,
         },
       });
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.live("moves a CLI node to the nightly channel when asked, through the same install", () =>
+    Effect.gen(function* () {
+      const nightly = "0.1.37-nightly.20261101.4";
+      const harness = yield* makeHarness({
+        packageVersion: "0.1.36",
+        registry: "0.1.36",
+        nightlyRegistry: nightly,
+        runCommand: healthy({ value: nightly }),
+      });
+      // Without the channel, the node's own channel has nothing newer.
+      const sameChannel = yield* Effect.flip(
+        harness.service.update({ targetVersion: nightly, requestId: "update-n" }),
+      );
+      expect(sameChannel.reason).toContain("The newest release is 0.1.36 now");
+      const accepted = yield* harness.service.update({
+        targetVersion: nightly,
+        requestId: "update-n",
+        channel: "nightly",
+      });
+      expect(accepted.run).toMatchObject({ status: "preparing", targetVersion: nightly });
+      yield* Deferred.await(harness.restarted).pipe(Effect.timeout("5 seconds"));
+      expect(harness.commands[0]?.args.at(-1)).toBe(`ryco-cli@${nightly}`);
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.live("never moves a nightly node back to an older stable release", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness({
+        packageVersion: "0.1.37-nightly.20261101.4",
+        registry: "0.1.36",
+        nightlyRegistry: "0.1.37-nightly.20261101.4",
+      });
+      const refused = yield* Effect.flip(
+        harness.service.update({ targetVersion: "0.1.36", requestId: "back", channel: "latest" }),
+      );
+      expect(refused.reason).toContain("A channel switch never downgrades");
+      expect(harness.commands).toEqual([]);
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 

@@ -1912,3 +1912,15 @@ it.layer(NodeServices.layer)("cli auth pairing create --qr for a running node", 
     ),
   );
 });
+
+it.layer(NodeServices.layer)("cli update", (it) => {
+  it.effect("needs a running node of this home (or a paired remote)", () =>
+    Effect.gen(function* () {
+      const baseDir = mkdtempSync(join(tmpdir(), "ryco-cli-update-test-"));
+      const error = yield* runCliWithRuntime(["update", "--base-dir", baseDir, "--check"]).pipe(
+        Effect.flip,
+      );
+      assert.include(String((error as Error).message), "The Ryco server is not running");
+    }),
+  );
+});

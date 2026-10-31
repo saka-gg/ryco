@@ -572,9 +572,20 @@ export const makeNodeUpdateService = Effect.fn("makeNodeUpdateService")(function
           if (isActiveNodeUpdateRun(before.run)) {
             return yield* refuse("An update is already running on this node.");
           }
+          const otherChannel =
+            input.channel !== undefined && input.channel !== cliChannel ? input.channel : null;
+          if (otherChannel !== null && desktopApp) {
+            return yield* refuse(
+              "The desktop app follows its own channel: Ryco Nightly is a separate app.",
+            );
+          }
           // The registry again, not the cache: a release published since the client looked
           // must not be installed unseen. The desktop app checks its target itself.
-          const latest = desktopApp ? before.latestVersion : yield* lookupLatest("fresh");
+          const latest = desktopApp
+            ? before.latestVersion
+            : otherChannel === null
+              ? yield* lookupLatest("fresh")
+              : presentText(yield* runtime.fetchLatestVersion(otherChannel));
           if (latest === null) {
             return yield* refuse(
               desktopApp
@@ -588,7 +599,11 @@ export const makeNodeUpdateService = Effect.fn("makeNodeUpdateService")(function
             );
           }
           if (!isNewerNodeRelease(latest, before.currentVersion)) {
-            return yield* refuse(`This node already runs ${before.currentVersion}.`);
+            return yield* refuse(
+              otherChannel === null
+                ? `This node already runs ${before.currentVersion}.`
+                : `The newest ${otherChannel} release, ${latest}, is not newer than ${before.currentVersion}. A channel switch never downgrades: the node moves with that channel's next release.`,
+            );
           }
           const startedAt = yield* nowIso;
           const marker: NodeUpdateMarker = {
