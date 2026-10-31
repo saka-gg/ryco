@@ -6,14 +6,17 @@ import { FakeWebContents, fakeEvent } from "./embeddedBrowser.fixtures.ts";
 import {
   BROWSER_HUMAN_HOLD_MS,
   DIAGNOSTICS_IDLE_QUIESCE_MS,
-  DIALOG_SHIM_MAX_MS,
   EmbeddedTabAutomation,
   FILE_CHOOSER_TTL_MS,
-  MAX_DIALOGS_PER_COMMAND,
-  dialogShimInstall,
-  normalizeDialog,
   type TabPresentation,
 } from "./browserTabAutomation.ts";
+import {
+  DIALOG_SHIM_MAX_MS,
+  MAX_DIALOGS_PER_COMMAND,
+  dialogShimFinish,
+  dialogShimInstall,
+  normalizeDialog,
+} from "./browserDialogs.ts";
 import { DIAGNOSTICS_OUTPUT_MAX_BYTES } from "./browserDiagnostics.ts";
 
 /** This unit's ready step; browser-agent-upload's file chooser interception follows Page.enable. */
@@ -39,13 +42,16 @@ afterEach(() => {
 });
 
 function setup(options: { agentTab?: boolean } = {}) {
+  const agentTab = options.agentTab ?? true;
   let time = 10_000;
   const wc = new FakeWebContents();
   const cdp = new CdpLease(wc as unknown as WebContents);
   const view = { presented: false, focused: false };
   // Like EmbeddedComputerBrowser: agent calls hold the session as "agent" and wait for its ready steps.
   const presentation = {
-    agentTab: options.agentTab ?? true,
+    agentTab,
+    // Like createPage: only the agent's tabs are created with disableDialogs.
+    dialogsDisabled: agentTab,
     presented: vi.fn(() => view.presented),
     focused: vi.fn(() => view.presented && view.focused),
     attach: vi.fn(async (_signal: AbortSignal) => {
@@ -390,6 +396,26 @@ describe("dialog shim", () => {
     expect(dialogShimInstall({}, 0)).toContain('"maxMs":1000');
   });
 
+  it("keeps a paired browser's handle only under its one-off key, which finishing removes", () => {
+    const native = { alert: vi.fn(), confirm: vi.fn(() => true), prompt: vi.fn(() => "native") };
+    const page: Record<string, unknown> = { ...native };
+    const run = (expression: string) => runInNewContext(expression, { window: page, Date });
+    const key = "__rycoDialogsabc";
+    run(`${dialogShimInstall({ dialog: "accept" }, SCOPE_MS, key)}, true`);
+    // Not enumerable: the page's own scans of window do not list it.
+    expect(Object.keys(page)).toEqual(["alert", "confirm", "prompt"]);
+    expect((page.confirm as (message: string) => unknown)("sure?")).toBe(true);
+    expect(native.confirm).not.toHaveBeenCalled();
+    expect(run(dialogShimFinish(key))).toEqual([
+      expect.objectContaining({ kind: "confirm", message: "sure?" }),
+    ]);
+    expect(key in page).toBe(false);
+    expect(page.confirm).toBe(native.confirm);
+    // Finishing twice (or after a navigation) drains nothing.
+    expect(run(dialogShimFinish(key))).toEqual([]);
+    expect(dialogShimInstall({}, SCOPE_MS)).not.toContain("defineProperty");
+  });
+
   it("hands the page its dialogs back before the agent's hold ends", async () => {
     const { wc, cdp, automation, methods } = setup();
     withShim(wc);
@@ -442,8 +468,8 @@ describe("dialog records", () => {
 });
 
 describe("dialog backstop", () => {
-  it("answers dialogs an action opens: alerts accepted, confirm per policy, at most 20 recorded", async () => {
-    const { wc, cdp, automation } = setup();
+  it("answers dialogs an action opens in the user's tab: alerts accepted, confirm per policy, at most 20 recorded", async () => {
+    const { wc, cdp, automation } = setup({ agentTab: false });
     wc.debugger.respond = (method) =>
       method === "Runtime.evaluate" ? { exceptionDetails: { text: "frozen" } } : {};
     cdp.acquire("agent");
@@ -491,31 +517,48 @@ describe("dialog backstop", () => {
     expect(handled.at(-1)?.params).toEqual({ accept: true });
   });
 
-  it("answers a hidden tab's dialog safely between actions and reports it with the next command", async () => {
-    const { wc, cdp, automation } = setup();
+  it("reports the dialogs Electron answered in the agent's tab, shown or hidden, and never answers them over CDP", async () => {
+    const { wc, cdp, view, automation } = setup();
     cdp.acquire("agent");
     await cdp.ready();
+    // Between actions, hidden and then shown in the panel: no box, nothing pending, all reported.
     wc.debugger.message("Page.javascriptDialogOpening", { type: "confirm", message: "leave?" });
+    view.presented = true;
+    wc.debugger.message("Page.javascriptDialogOpening", { type: "alert", message: "shown" });
     await flush();
-    expect(wc.debugger.commands.at(-1)).toEqual({
-      method: "Page.handleJavaScriptDialog",
-      params: { accept: false },
-    });
     expect(automation.pendingDialog()).toBeNull();
     expect(automation.takeBacklog()).toEqual([
       expect.objectContaining({ kind: "confirm", action: "dismissed", during: "background" }),
+      expect.objectContaining({ kind: "alert", action: "accepted", during: "background" }),
     ]);
     expect(automation.takeBacklog()).toEqual([]);
-    // A scoped command reports the backlog too.
+    // During an action the record carries the answer the page really got: Electron cancelled the
+    // confirm, whatever the action's policy says, and a scope reports the backlog too.
     wc.debugger.message("Page.javascriptDialogOpening", { type: "alert", message: "timer" });
-    const scope = await automation.begin({}, signal(), SCOPE_MS);
+    const scope = await automation.begin({ dialog: "accept" }, signal(), SCOPE_MS);
+    wc.debugger.message("Page.javascriptDialogOpening", { type: "confirm", message: "frame" });
+    wc.debugger.message("Page.javascriptDialogOpening", { type: "prompt", message: "name?" });
     expect((await scope.end()).dialogs).toEqual([
-      expect.objectContaining({ kind: "alert", during: "background" }),
+      expect.objectContaining({ kind: "alert", message: "timer", during: "background" }),
+      expect.objectContaining({ kind: "confirm", action: "dismissed", during: "command" }),
+      expect.objectContaining({ kind: "prompt", action: "dismissed", during: "command" }),
+    ]);
+    expect(wc.debugger.commands.map(({ method }) => method)).not.toContain(
+      "Page.handleJavaScriptDialog",
+    );
+    // The user working in it does not change that: the page never waits for an answer.
+    view.focused = true;
+    automation.markHuman();
+    const held = await automation.begin({}, signal(), SCOPE_MS);
+    wc.debugger.message("Page.javascriptDialogOpening", { type: "confirm", message: "theirs" });
+    expect(automation.pendingDialog()).toBeNull();
+    expect((await held.end()).dialogs).toEqual([
+      expect.objectContaining({ message: "theirs", action: "dismissed", during: "background" }),
     ]);
   });
 
-  it("leaves a dialog the user can see to the user and refuses new scopes until it closes", async () => {
-    const { wc, cdp, view, automation } = setup();
+  it("leaves a dialog in the user's tab to the user and refuses new scopes until it closes", async () => {
+    const { wc, cdp, view, automation } = setup({ agentTab: false });
     cdp.acquire("agent");
     await cdp.ready();
     view.presented = true;
@@ -557,7 +600,7 @@ describe("dialog backstop", () => {
   });
 
   it("keeps a dialog the user still has open pending after the session ends", async () => {
-    const { wc, cdp, view, automation } = setup();
+    const { wc, cdp, view, automation } = setup({ agentTab: false });
     let unblock!: () => void;
     wc.mainFrameExecuteJavaScript.mockImplementation(
       () =>
@@ -645,7 +688,7 @@ describe("dialog backstop", () => {
   });
 
   it("sends dialog answers and emulation clears without waiting for ready steps", async () => {
-    const { wc, cdp, automation } = setup();
+    const { wc, cdp, automation } = setup({ agentTab: false });
     let finishNetwork!: () => void;
     wc.debugger.respond = (method) =>
       method === "Network.enable"
@@ -661,6 +704,8 @@ describe("dialog backstop", () => {
       "Page.setInterceptFileChooserDialog",
       "Network.enable",
     ]);
+    // The action's shim install waits for the ready steps; its backstop does not.
+    const begun = automation.begin({}, signal(), SCOPE_MS);
     wc.debugger.message("Page.javascriptDialogOpening", { type: "alert", message: "blocked" });
     automation.recordEmulation({ viewport: { width: 390, height: 844 } });
     automation.clearEmulation();
@@ -675,6 +720,9 @@ describe("dialog backstop", () => {
     ]);
     finishNetwork();
     await ready;
+    expect((await (await begun).end()).dialogs).toEqual([
+      expect.objectContaining({ message: "blocked", action: "accepted" }),
+    ]);
   });
 });
 
@@ -750,8 +798,8 @@ describe("human input", () => {
     expect(automation.humanEpoch).toBe(6);
   });
 
-  it("gives dialogs back to the user as soon as they use the tab during an agent action", async () => {
-    const { wc, cdp, view, automation, methods } = setup();
+  it("gives dialogs back to the user as soon as they use their tab during an agent action", async () => {
+    const { wc, cdp, view, automation, methods } = setup({ agentTab: false });
     withShim(wc);
     cdp.acquire("agent");
     view.presented = true;
@@ -779,7 +827,7 @@ describe("human input", () => {
   });
 
   it("installs no shim while the user works in the tab, so a wait there leaves their dialogs alone", async () => {
-    const { wc, cdp, view, presentation, automation } = setup();
+    const { wc, cdp, view, presentation, automation } = setup({ agentTab: false });
     withShim(wc);
     cdp.acquire("agent");
     await cdp.ready();
