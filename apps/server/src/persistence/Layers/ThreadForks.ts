@@ -1,4 +1,4 @@
-import { ThreadForkKey, ThreadForkResult } from "@ryco/contracts";
+import { ThreadForkKey, ThreadForkOrigin, ThreadForkResult } from "@ryco/contracts";
 import { Effect, Layer, Schema, Struct } from "effect";
 import * as SqlClient from "effect/sql/SqlClient";
 import * as SqlSchema from "effect/sql/SqlSchema";
@@ -33,6 +33,7 @@ const JsonColumns = {
   attachments: Schema.NullOr(Schema.fromJsonString(ThreadForkAttachmentsRecord)),
   result: Schema.NullOr(Schema.fromJsonString(ThreadForkResult)),
   error: Schema.NullOr(Schema.fromJsonString(ThreadForkFailure)),
+  origin: Schema.NullOr(Schema.fromJsonString(ThreadForkOrigin)),
 } as const;
 
 const ThreadForkDbRow = ThreadForkLedgerRow.mapFields(Struct.assign(JsonColumns));
@@ -86,6 +87,7 @@ const makeThreadForkRepository = Effect.gen(function* () {
         attachments_json,
         result_json,
         error_json,
+        origin_json,
         created_at,
         updated_at
       ) VALUES (
@@ -102,6 +104,7 @@ const makeThreadForkRepository = Effect.gen(function* () {
         ${row.attachments},
         ${row.result},
         ${row.error},
+        ${row.origin},
         ${row.createdAt},
         ${row.updatedAt}
       )
@@ -124,6 +127,7 @@ const makeThreadForkRepository = Effect.gen(function* () {
     attachments_json AS "attachments",
     result_json AS "result",
     error_json AS "error",
+    origin_json AS "origin",
     created_at AS "createdAt",
     updated_at AS "updatedAt"
   `;

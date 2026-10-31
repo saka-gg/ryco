@@ -236,6 +236,11 @@
       "import": "./src/threadFork.ts",
       "require": "./src/threadFork.ts"
     },
+    "./thread-fork-carried": {
+      "types": "./src/threadForkCarried.ts",
+      "import": "./src/threadForkCarried.ts",
+      "require": "./src/threadForkCarried.ts"
+    },
     "./usage": {
       "types": "./src/usage.ts",
       "import": "./src/usage.ts",

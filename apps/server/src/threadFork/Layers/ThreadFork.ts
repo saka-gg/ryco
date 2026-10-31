@@ -33,6 +33,7 @@ import {
   type ThreadForkAttemptState,
   type ThreadForkCheckout,
   type ThreadForkCreateCommand,
+  type ThreadForkDestination,
   ThreadForkError,
   type ThreadForkErrorReason,
   type ThreadForkInput,
@@ -68,6 +69,7 @@ import {
   deleteThreadAttachmentFiles,
   materializeInheritedAttachment,
 } from "../../attachmentStore.ts";
+import { canonicalJson, sha256Hex } from "../../canonicalJson.ts";
 import { CheckpointStore } from "../../checkpointing/Services/CheckpointStore.ts";
 import { CHECKPOINT_REFS_PREFIX, forkPinRefs } from "../../checkpointing/Utils.ts";
 import { ServerConfig } from "../../config.ts";
@@ -140,22 +142,13 @@ import {
   pinClaudeForkPlan,
   planForkProvider,
 } from "../forkProvider.ts";
-import {
-  type ClaudeCutoffPin,
-  claudeForkResumeCursor,
-  claudeForkSessionTitle,
-  codexForkResumeCursor,
-  forkClaudeThroughTurn,
-  forkCodexThroughTurn,
+import type {
+  ClaudeCutoffPin,
   NativeForkCleanupError,
-  type NativeForkOutcome,
+  NativeForkOutcome,
   NativeForkUncertain,
-  nativeForkConfigFingerprint,
-  pinClaudeForkCutoff,
-  removeClaudeForkCopy,
-  removeCodexForkCopy,
-  resolveNativeForkStore,
 } from "../nativeFork.ts";
+import { nativeForkConfigFingerprint } from "../nativeForkFingerprint.ts";
 import { ThreadFork, type ThreadForkShape } from "../Services/ThreadFork.ts";
 
 type NativeProviderPlan = Extract<ThreadForkProviderPlan, { readonly kind: "native" }>;
@@ -277,7 +270,21 @@ const NOTICE_MAX_CHARS = 500;
  */
 class ForkRunError extends Data.TaggedError("ForkRunError")<ThreadForkFailure> {}
 
+/** How `carriedFork.ts` names a run failure without importing this module's values. */
+export type ThreadForkRunError = ForkRunError;
+
 const isForkRunError = (value: unknown): value is ForkRunError => value instanceof ForkRunError;
+
+/**
+ * The provider-native fork code (Codex app-server copies, Claude transcript copies) loads with
+ * the first native fork, pin or cleanup; a node that never forks natively never loads it.
+ */
+const loadNativeFork = Effect.promise(() => import("../nativeFork.ts"));
+
+const isNativeForkUncertain = (value: unknown): value is NativeForkUncertain =>
+  typeof value === "object" &&
+  value !== null &&
+  (value as { readonly _tag?: unknown })._tag === "NativeForkUncertain";
 
 const forkError = (reason: ThreadForkErrorReason, message: string, retryable = false) =>
   new ForkRunError({ reason, message, retryable });
@@ -346,7 +353,7 @@ function forkCheckout(
  * created them (a new worktree, a new chat's folder) are placeholders until
  * `finalizeForkPublication` applies the run's actual checkout; nothing is published from a draft.
  */
-function plannedOutcome(
+export function plannedOutcome(
   checkout: ThreadForkCheckoutPlan,
   provider: ThreadForkProviderPlan,
 ): ForkPublicationOutcome {
@@ -392,6 +399,9 @@ function finalPublication(row: ThreadForkLedgerRow): {
   }
   const checkout = forkCheckout(plan.checkout, row.checkout);
   const provider = row.provider;
+  // A carried fork always hands off and names no reason: an older client could not decode one.
+  const handoffReason =
+    provider.kind === "handoff" && row.origin === null ? { handoffReason: provider.reason } : {};
   const linked = new Set(row.attachments?.attachmentIds ?? []);
   const unlinked = new Set(
     plan.attachments.map((copy) => copy.attachmentId).filter((id) => !linked.has(id)),
@@ -411,7 +421,7 @@ function finalPublication(row: ThreadForkLedgerRow): {
       checkout,
       sourceWorktreeId: plan.checkout.kind === "current-checkout" ? plan.checkout.worktreeId : null,
       providerContext: provider.kind === "native" ? "native" : "handoff",
-      ...(provider.kind === "handoff" ? { handoffReason: provider.reason } : {}),
+      ...handoffReason,
       notices,
     },
     plan.notices,
@@ -503,13 +513,14 @@ export const makeThreadFork = (options: ThreadForkTestOptions = {}) =>
         options.native?.pinClaudeCutoff ??
         ((request) =>
           Effect.gen(function* () {
+            const native = yield* loadNativeFork;
             const store = yield* Effect.result(
-              resolveNativeForkStore(request.plan.driver, request.config),
+              native.resolveNativeForkStore(request.plan.driver, request.config),
             );
             if (store._tag === "Failure") {
               return { kind: "refused", detail: store.failure.detail } as const;
             }
-            return yield* pinClaudeForkCutoff({
+            return yield* native.pinClaudeForkCutoff({
               root: store.success.root,
               environment: store.success.environment,
               sourceSessionId: request.plan.sourceNativeId,
@@ -522,8 +533,9 @@ export const makeThreadFork = (options: ThreadForkTestOptions = {}) =>
         options.native?.fork ??
         ((request) =>
           Effect.gen(function* () {
+            const native = yield* loadNativeFork;
             const store = yield* Effect.result(
-              resolveNativeForkStore(request.plan.driver, request.config),
+              native.resolveNativeForkStore(request.plan.driver, request.config),
             );
             if (store._tag === "Failure") {
               return { kind: "refused", detail: store.failure.detail } as const;
@@ -534,7 +546,7 @@ export const makeThreadFork = (options: ThreadForkTestOptions = {}) =>
               if (codex === undefined) {
                 return { kind: "refused", detail: "Codex has no session store." } as const;
               }
-              return yield* forkCodexThroughTurn({
+              return yield* native.forkCodexThroughTurn({
                 layout: codex,
                 environment,
                 binaryPath,
@@ -543,7 +555,7 @@ export const makeThreadFork = (options: ThreadForkTestOptions = {}) =>
                 cwd: request.targetCwd,
               });
             }
-            return yield* forkClaudeThroughTurn({
+            return yield* native.forkClaudeThroughTurn({
               root,
               environment,
               sourceSessionId: plan.sourceNativeId,
@@ -551,45 +563,50 @@ export const makeThreadFork = (options: ThreadForkTestOptions = {}) =>
               targetCwd: request.targetCwd,
               turnId: plan.turnId,
               cutoff: plan.cutoff,
-              title: claudeForkSessionTitle(request.forkThreadId),
+              title: native.claudeForkSessionTitle(request.forkThreadId),
             });
           }).pipe(Effect.provideContext(platform))),
       removeCopy:
         options.native?.removeCopy ??
-        (({ copy, config: instanceConfig, nativeThreadId, plan }) => {
-          if (copy.kind === "claude-file") {
-            return removeClaudeForkCopy({
-              root: copy.root,
-              sessionId: nativeThreadId,
-              file: copy.file,
-            });
-          }
-          const threadId = copy.threadId;
-          return Effect.gen(function* () {
+        (({ copy, config: instanceConfig, nativeThreadId, plan }) =>
+          Effect.gen(function* () {
+            const native = yield* loadNativeFork;
+            if (copy.kind === "claude-file") {
+              return yield* native.removeClaudeForkCopy({
+                root: copy.root,
+                sessionId: nativeThreadId,
+                file: copy.file,
+              });
+            }
+            const threadId = copy.threadId;
             if (instanceConfig === undefined) {
-              return yield* new NativeForkCleanupError({
+              return yield* new native.NativeForkCleanupError({
                 detail: "The provider instance is gone, so its Codex copy cannot be removed.",
               });
             }
-            const store = yield* resolveNativeForkStore(plan.driver, instanceConfig).pipe(
+            const store = yield* native.resolveNativeForkStore(plan.driver, instanceConfig).pipe(
               Effect.mapError(
                 (cause) =>
-                  new NativeForkCleanupError({ detail: "The Codex store is unavailable.", cause }),
+                  new native.NativeForkCleanupError({
+                    detail: "The Codex store is unavailable.",
+                    cause,
+                  }),
               ),
             );
             if (store.codex === undefined) {
-              return yield* new NativeForkCleanupError({ detail: "Codex has no session store." });
+              return yield* new native.NativeForkCleanupError({
+                detail: "Codex has no session store.",
+              });
             }
             // The store root always exists; the fork's own folder may be gone by now.
-            yield* removeCodexForkCopy({
+            yield* native.removeCodexForkCopy({
               layout: store.codex,
               environment: store.environment,
               binaryPath: store.binaryPath,
               cwd: store.root,
               threadId,
             });
-          }).pipe(Effect.provideContext(platform));
-        }),
+          }).pipe(Effect.provideContext(platform))),
     };
 
     const runPoint = (point: ThreadForkRunPoint, row: ThreadForkLedgerRow) =>
@@ -736,8 +753,13 @@ export const makeThreadFork = (options: ThreadForkTestOptions = {}) =>
     // -------------------------------------------------------------------------------------------
     // Acceptance: validates and pins everything, writes the ledger row last.
 
+    /**
+     * Validates the destination and pins what it needs. A carried fork (`carriedFork.ts`) plans
+     * its `new-worktree` (from a fetched branch) through here too; it has no boundary turn, which
+     * only a checkpoint start reads.
+     */
     const planCheckout = (input: {
-      readonly request: ThreadForkInput;
+      readonly destination: ThreadForkDestination;
       readonly identity: ReturnType<typeof threadForkIdentity>;
       readonly settings: ServerSettings;
       readonly project: OrchestrationProjectShell;
@@ -748,11 +770,10 @@ export const makeThreadFork = (options: ThreadForkTestOptions = {}) =>
         readonly worktreePath: string | null;
         readonly branch: string | null;
       };
-      readonly boundary: ForkBoundary;
+      readonly boundary: Pick<ForkBoundary, "turn" | "turnId"> | null;
     }) =>
       Effect.gen(function* () {
-        const { request, identity, project, source } = input;
-        const destination = request.destination;
+        const { destination, identity, project, source } = input;
         const chat = isChatProject(project);
         switch (destination.kind) {
           case "current-checkout": {
@@ -830,7 +851,6 @@ export const makeThreadFork = (options: ThreadForkTestOptions = {}) =>
                 Effect.catchTag("VcsUnsupportedOperationError", () => Effect.succeed(false)),
               );
               if (!isGit) return yield* notGit;
-              const turn = input.boundary.turn;
               if (start.kind === "base-ref") {
                 const baseCommit = yield* checkpoints.resolveCommit({
                   cwd: root,
@@ -844,13 +864,14 @@ export const makeThreadFork = (options: ThreadForkTestOptions = {}) =>
                 }
                 return { baseCommit, checkpointCommit: null, baseRef: start.baseRef };
               }
-              const checkpointRef = turn.checkpointRef;
+              const turn = input.boundary?.turn;
+              const checkpointRef = turn?.checkpointRef ?? null;
               const unavailable = forkError(
                 "checkpoint-unavailable",
                 "This turn has no saved checkpoint that can start a worktree. Start from a branch or commit instead.",
               );
               if (
-                turn.checkpointStatus !== "ready" ||
+                turn?.checkpointStatus !== "ready" ||
                 checkpointRef === null ||
                 !checkpointRef.startsWith(`${CHECKPOINT_REFS_PREFIX}/`)
               ) {
@@ -884,11 +905,13 @@ export const makeThreadFork = (options: ThreadForkTestOptions = {}) =>
               return { baseCommit, checkpointCommit, baseRef: baseCommit };
             }).pipe(Effect.mapError(gitUnreadable));
             const { baseCommit, checkpointCommit, baseRef } = resolved;
-            const turn = input.boundary.turn;
+            const boundary = input.boundary;
             const pins = forkPinRefs(identity.forkThreadId);
             yield* Effect.gen(function* () {
               yield* checkpoints.pinRef({ cwd: root, ref: pins.base, commit: baseCommit });
-              if (checkpointCommit === null || turn.checkpointRef === null) return;
+              if (checkpointCommit === null || boundary === null) return;
+              const checkpointRef = boundary.turn.checkpointRef;
+              if (checkpointRef === null) return;
               yield* checkpoints.pinRef({
                 cwd: root,
                 ref: pins.checkpoint,
@@ -897,13 +920,13 @@ export const makeThreadFork = (options: ThreadForkTestOptions = {}) =>
               // Refs are mutable: make sure the pinned snapshot is still this turn's checkpoint.
               const current = yield* turnRows.getByTurnId({
                 threadId: source.id,
-                turnId: input.boundary.turnId,
+                turnId: boundary.turnId,
               });
               const still =
                 Option.isSome(current) &&
-                current.value.checkpointRef === turn.checkpointRef &&
+                current.value.checkpointRef === checkpointRef &&
                 current.value.checkpointStatus === "ready" &&
-                (yield* checkpoints.resolveCommit({ cwd: root, ref: turn.checkpointRef })) ===
+                (yield* checkpoints.resolveCommit({ cwd: root, ref: checkpointRef })) ===
                   checkpointCommit;
               if (!still) {
                 return yield* forkError(
@@ -1039,7 +1062,7 @@ export const makeThreadFork = (options: ThreadForkTestOptions = {}) =>
         }
         const settings = yield* serverSettings.getSettings;
         const checkout = yield* planCheckout({
-          request,
+          destination: request.destination,
           identity,
           settings,
           project: project.value,
@@ -1125,6 +1148,7 @@ export const makeThreadFork = (options: ThreadForkTestOptions = {}) =>
             attachments: null,
             result: null,
             error: null,
+            origin: null,
             createdAt,
             updatedAt: createdAt,
           } satisfies ThreadForkLedgerRow;
@@ -1654,6 +1678,8 @@ export const makeThreadFork = (options: ThreadForkTestOptions = {}) =>
             "The provider configuration changed after the fork was requested.",
           );
         }
+        // Loaded before the claim, so the recording below never waits on it.
+        const native = yield* loadNativeFork;
         // Claimed before the call: whatever happens next, this key never forks natively again.
         const claimed = yield* advance(row, "provider-forking", {
           provider: {
@@ -1675,7 +1701,7 @@ export const makeThreadFork = (options: ThreadForkTestOptions = {}) =>
               const cause = Cause.squash(outcome.cause);
               // A copy whose id the provider returned is ours even unverified: record it so
               // cleanup can remove it, instead of leaving it behind untraced.
-              const uncertain = Schema.is(NativeForkUncertain)(cause) ? cause : undefined;
+              const uncertain = isNativeForkUncertain(cause) ? cause : undefined;
               const orphan =
                 uncertain?.nativeThreadId !== undefined && uncertain.ownedCopy !== undefined
                   ? { nativeThreadId: uncertain.nativeThreadId, copy: uncertain.ownedCopy }
@@ -1711,8 +1737,8 @@ export const makeThreadFork = (options: ThreadForkTestOptions = {}) =>
                     nativeThreadId: result.nativeThreadId,
                     resumeCursor:
                       plan.driver === "codex"
-                        ? codexForkResumeCursor(result.nativeThreadId)
-                        : claudeForkResumeCursor({
+                        ? native.codexForkResumeCursor(result.nativeThreadId)
+                        : native.claudeForkResumeCursor({
                             forkThreadId: row.forkThreadId,
                             nativeSessionId: result.nativeThreadId,
                             inheritedUserTurnCount: plan.inheritedUserTurnCount,
@@ -2085,12 +2111,15 @@ export const makeThreadFork = (options: ThreadForkTestOptions = {}) =>
         return yield* error;
       });
 
+    /** Records a new key's row (`accept`, or a carried fork's acceptance) under its digest. */
+    type Acceptance = (digest: string) => ReturnType<typeof accept>;
+
     /**
      * One attempt for a key: accept it when new, otherwise answer, retry or resume its row.
      * Answers (a replay, a conflict, a settled failure) never wait for a permit; only work does.
-     * A run the node starts itself settles the fork instead once it `givesUp`.
+     * A run the node starts itself (no `acceptance`) settles the fork instead once it `givesUp`.
      */
-    const attempt = (forkKey: string, request: ThreadForkInput | null, digest: string | null) =>
+    const attempt = (forkKey: string, acceptance: Acceptance | null, digest: string | null) =>
       Effect.gen(function* () {
         const existing = yield* readRow(forkKey);
         if (existing !== undefined && digest !== null && existing.requestDigest !== digest) {
@@ -2118,20 +2147,20 @@ export const makeThreadFork = (options: ThreadForkTestOptions = {}) =>
         }
         // Only a request retries a failed fork; the node's own runs leave it to the client.
         const retry = existing?.phase === "failed" && existing.error?.retryable === true;
-        if (existing?.phase === "failed" && !(retry && request !== null)) {
+        if (existing?.phase === "failed" && !(retry && acceptance !== null)) {
           return yield* errorOf(existing.error ?? failureOf(interruptedRunError()));
         }
         return yield* permits.withPermits(1)(
           Effect.gen(function* () {
             let row = existing;
             if (row === undefined) {
-              if (request === null || digest === null) return yield* interruptedRunError();
-              row = yield* accept(request, digest);
+              if (acceptance === null || digest === null) return yield* interruptedRunError();
+              row = yield* acceptance(digest);
               yield* runPoint("accepted", row);
             } else if (row.phase === "failed") {
               // Fenced on the failure as read: an expiry that settled it meanwhile wins.
               row = yield* advance(row, "accepted", { checkout: null, error: null }, false, true);
-            } else if (request === null && givesUp(row)) {
+            } else if (acceptance === null && givesUp(row)) {
               return yield* settleStalled(row);
             }
             return yield* drive(row);
@@ -2197,7 +2226,7 @@ export const makeThreadFork = (options: ThreadForkTestOptions = {}) =>
      */
     const join = (
       forkKey: string,
-      request: ThreadForkInput | null,
+      acceptance: Acceptance | null,
       digest: string | null,
     ): Effect.Effect<ThreadForkResult, ThreadForkError> =>
       Effect.uninterruptibleMask((restore) =>
@@ -2210,7 +2239,7 @@ export const makeThreadFork = (options: ThreadForkTestOptions = {}) =>
               return restore(
                 Deferred.await(running.outcome).pipe(
                   Effect.ignore,
-                  Effect.andThen(join(forkKey, request, digest)),
+                  Effect.andThen(join(forkKey, acceptance, digest)),
                 ),
               );
             }
@@ -2229,7 +2258,7 @@ export const makeThreadFork = (options: ThreadForkTestOptions = {}) =>
           }
           const outcome = Deferred.makeUnsafe<ThreadForkResult, ThreadForkError>();
           flights.set(forkKey, { digest, outcome });
-          return attempt(forkKey, request, digest).pipe(
+          return attempt(forkKey, acceptance, digest).pipe(
             Effect.catch((error) => reportError(forkKey, error).pipe(Effect.flatMap(Effect.fail))),
             Effect.onExit((exit) =>
               Effect.suspend(() => {
@@ -2259,10 +2288,47 @@ export const makeThreadFork = (options: ThreadForkTestOptions = {}) =>
       );
 
     const fork: ThreadForkShape["fork"] = (input) =>
-      join(input.forkKey, input, threadForkRequestDigest(input));
+      join(input.forkKey, (digest) => accept(input, digest), threadForkRequestDigest(input));
 
     const attemptState: ThreadForkShape["attemptState"] = (forkKey) =>
       flights.has(forkKey) ? Effect.succeed("running") : recordedAttempt(forkKey);
+
+    /**
+     * A fork carried from another node. Its checks, acceptance and publication load with the
+     * first call; this node's own services and helpers are handed over, so the lazy chunk imports
+     * no module of the server's boot path. Refused input never reaches the ledger.
+     */
+    const forkCarried: ThreadForkShape["forkCarried"] = (input) =>
+      Effect.flatMap(
+        Effect.promise(() => import("../carriedFork.ts")),
+        (carried) =>
+          carried.forkCarried(input, {
+            join,
+            attemptState,
+            now,
+            nowIso,
+            forkError,
+            conflictError,
+            planCheckout,
+            deletePinRefs,
+            readRow,
+            ledger,
+            snapshots,
+            serverSettings,
+            chatFolders,
+            gitWorkflow,
+            helpers: {
+              threadForkIdentity,
+              canonicalJson,
+              sha256Hex,
+              deriveProviderInstanceConfigMap,
+              finalizeForkPublication,
+              forkThreadTitle,
+              plannedOutcome,
+              isChatProject,
+            },
+          }),
+      );
 
     /**
      * Retryable failures nobody retried within the retry window: release their pinned commits and
@@ -2311,7 +2377,7 @@ export const makeThreadFork = (options: ThreadForkTestOptions = {}) =>
         ),
       );
 
-    return { fork, attemptState, recover } satisfies ThreadForkShape;
+    return { fork, forkCarried, attemptState, recover } satisfies ThreadForkShape;
   });
 
 /**

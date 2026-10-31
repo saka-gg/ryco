@@ -292,6 +292,27 @@ function forkInheritedHistoryBlocker(command: ThreadForkCreateCommand): string |
   return null;
 }
 
+/**
+ * Why a fork carried from another node (`forked.origin`) cannot be published, or null. Its
+ * source lives on that node: here the source id is a placeholder that must name no thread, and
+ * the carried text arrives only as inherited user and assistant messages (and plans), for a
+ * fresh session to receive by context handoff. No activity and no shared checkout. (Attachments
+ * of inherited messages must be the fork's own copies, `forkInheritedHistoryBlocker`; a carried
+ * fork has none.)
+ */
+function carriedForkBlocker(
+  readModel: OrchestrationReadModel,
+  command: ThreadForkCreateCommand,
+): string | null {
+  return findThreadById(readModel, command.sourceThreadId) !== undefined ||
+    command.forked.providerContext !== "handoff" ||
+    command.activities.length > 0 ||
+    (command.worktreeId !== null && command.newWorktree === null) ||
+    command.messages.some((message) => message.role !== "user" && message.role !== "assistant")
+    ? "A carried fork has no local source, inherits only user and assistant text, has a checkout of its own and continues by handoff."
+    : null;
+}
+
 const STEER_TURN_ENDED_ERROR =
   "The turn finished before this message could be steered. It stays queued and is sent next.";
 
@@ -1085,14 +1106,22 @@ const decideCommand = Effect.fn("decideOrchestrationCommand.command")(function* 
       } = command;
       const reject = (detail: string) =>
         new OrchestrationCommandInvariantError({ commandType: command.type, detail });
-      const source = yield* requireThread({ readModel, command, threadId: sourceThreadId });
+      // A carried fork's source is on another node: nothing of it is looked up here.
+      const carriedBlocker =
+        forked.origin === undefined ? null : carriedForkBlocker(readModel, command);
+      if (carriedBlocker !== null) return yield* reject(carriedBlocker);
+      const source =
+        forked.origin === undefined
+          ? yield* requireThread({ readModel, command, threadId: sourceThreadId })
+          : null;
       // The boundary was pinned when the fork was accepted: the source may have moved to
       // Trash or been archived since, but its history must still exist.
-      if (!isThreadLive(source) && !isThreadTrashed(source)) {
+      if (source !== null && !isThreadLive(source) && !isThreadTrashed(source)) {
         return yield* reject(`Source thread '${sourceThreadId}' was deleted permanently.`);
       }
       // A fork stays in its source's project. Only a chat forks into a new chat.
       if (
+        source !== null &&
         source.projectId !== fields.projectId &&
         !(
           isChatProject(findProjectById(readModel, source.projectId)) &&
@@ -1135,7 +1164,8 @@ const decideCommand = Effect.fn("decideOrchestrationCommand.command")(function* 
       }
       const resolved = resolveChildThreadLineage({
         readModel,
-        parent: source,
+        // A carried fork's source is a placeholder: no thread here, so no lineage of its own.
+        parent: source ?? { id: sourceThreadId, lineage: null },
         childThreadId: fields.threadId,
         link: { relationship: FORKED_THREAD_RELATIONSHIP, sourceMessageId, sourceTurnId },
       });

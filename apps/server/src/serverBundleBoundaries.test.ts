@@ -175,11 +175,11 @@ describe("server boot import boundaries", () => {
     expect(graph.externals.filter((specifier) => PROVIDER_SDKS.test(specifier))).toEqual([]);
     // The OpenCode 2 client loads with the 2.x facade.
     expect(graph.externals.filter((specifier) => specifier.startsWith("@opencode/"))).toEqual([]);
-    // Protocol schemas load with the Codex/ACP features that use them. The error classes are
-    // schema-free (chat forks classify Codex request failures with them).
+    // Protocol schemas load with the Codex/ACP features that use them, and so do the error
+    // classes chat forks classify Codex request failures with (with the native fork code).
     expect(
       graph.files.filter((file) => file.startsWith("packages/effect-codex-app-server/")),
-    ).toEqual(["packages/effect-codex-app-server/src/errors.ts"]);
+    ).toEqual([]);
     expect(graph.files.filter((file) => file.startsWith("packages/effect-acp/"))).toEqual([]);
     // `ryco remote` client stores load with that command only.
     expect(
@@ -248,6 +248,32 @@ describe("server boot import boundaries", () => {
       "packages/shared/src/commandWatch.ts",
       "packages/shared/src/untrustedText.ts",
     ]);
+  });
+
+  it("loads the native fork copies with the first native fork", () => {
+    // Acceptance needs only the configuration fingerprint; the Codex and Claude copy code loads
+    // with the first native fork, pin or cleanup.
+    const graph = staticGraph("src/cliMain.ts");
+    expect(graph.files).toContain("apps/server/src/threadFork/nativeForkFingerprint.ts");
+    expect(graph.files).not.toContain("apps/server/src/threadFork/nativeFork.ts");
+    expect(staticGraph("src/cliMain.ts", { dynamic: true }).files).toContain(
+      "apps/server/src/threadFork/nativeFork.ts",
+    );
+  });
+
+  it("loads the carried fork checks and acceptance with the first carried fork", () => {
+    // The fork service at boot only hands its helpers over and calls import(); the checks, the
+    // acceptance and the shared carried rules load with the first `threads.forkCarried`.
+    const lazy =
+      /(?:apps\/server\/src\/threadFork\/carriedFork|packages\/shared\/src\/carriedFork)\.ts$/u;
+    const graph = staticGraph("src/cliMain.ts");
+    expect(graph.files.filter((file) => lazy.test(file))).toEqual([]);
+    expect(graph.files).toContain("apps/server/src/threadFork/Layers/ThreadFork.ts");
+    expect(
+      staticGraph("src/cliMain.ts", { dynamic: true })
+        .files.filter((file) => lazy.test(file))
+        .toSorted(),
+    ).toEqual(["apps/server/src/threadFork/carriedFork.ts", "packages/shared/src/carriedFork.ts"]);
   });
 
   it("keeps optional feature stacks off the serve path", () => {
@@ -706,6 +732,16 @@ describe.skipIf(!hasCurrentBuild)("built server bundle pull request watches", ()
     expect(boot).toContain("function summarizePullRequestWatches(");
     expect(boot).not.toContain("function decidePullRequestWatch(");
     expect(boot).not.toContain("function renderPullRequestWatchWake(");
+  });
+
+  it("keeps the carried fork checks and acceptance out of the boot chunks", () => {
+    const cliChunk = readFileSync(builtEntry, "utf8").match(/import\("(\.\/cliMain[^"]+)"\)/u)?.[1];
+    const serve = builtStaticClosure(path.resolve(serverRoot, "dist", cliChunk!));
+    for (const chunk of serve.chunks) {
+      expect(readFileSync(chunk, "utf8")).not.toMatch(
+        /^\/\/#region (?:src\/threadFork\/carriedFork|\.\.\/\.\.\/packages\/shared\/src\/carriedFork)\.ts$/mu,
+      );
+    }
   });
 
   it("keeps the command watch runner, rules, SQL and tools out of the boot chunks", () => {

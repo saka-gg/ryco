@@ -14,6 +14,7 @@
  */
 import type {
   ThreadForkAttemptState,
+  ThreadForkCarriedRequest,
   ThreadForkError,
   ThreadForkInput,
   ThreadForkKey,
@@ -30,6 +31,15 @@ export interface ThreadForkShape {
    * caller, so a dropped connection never cuts a fork off halfway.
    */
   readonly fork: (input: ThreadForkInput) => Effect.Effect<ThreadForkResult, ThreadForkError>;
+  /**
+   * Creates (or returns) a fork here from a conversation the client carried from another node
+   * (`threads.forkCarried`). The size, counts and shape of `history` are checked before anything
+   * is read or written; then it is keyed, recorded and run like `fork`, by the same rules. The
+   * carried logic loads with the first call (`threadFork/carriedFork.ts`).
+   */
+  readonly forkCarried: (
+    input: ThreadForkCarriedRequest,
+  ) => Effect.Effect<ThreadForkResult, ThreadForkError>;
   /**
    * What the node holds for a key, for an error reported before `fork` ran (e.g. the startup
    * gate refused it): `running` while an attempt runs here or its row is unfinished, also when

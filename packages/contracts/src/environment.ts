@@ -90,6 +90,11 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
   /** `threads.fork` (chat forking); absent on older servers. */
   threadFork: Schema.optionalKey(Schema.Boolean),
   /**
+   * `threads.forkCarried` (continue a thread from another node here); absent on older servers,
+   * which clients do not offer as a target.
+   */
+  threadForkCarried: Schema.optionalKey(Schema.Boolean),
+  /**
    * `thread.conversation.revert` (rewind the conversation and keep the files); absent on
    * older servers, which offer only the revert that restores files.
    */

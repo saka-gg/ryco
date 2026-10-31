@@ -1,5 +1,5 @@
 /**
- * Durable shapes of the chat fork ledger (`thread_forks`, migration 084).
+ * Durable shapes of the chat fork ledger (`thread_forks`, migrations 084 and 098).
  *
  * A row is written once a fork request is accepted, before any side effect. `plan` pins
  * everything decided at acceptance (boundary, destination, pinned commits, provider strategy,
@@ -32,6 +32,7 @@ import {
   ThreadForkHandoffReason,
   type ThreadForkInput,
   ThreadForkKey,
+  ThreadForkOrigin,
   ThreadForkResult,
   ThreadId,
   TrimmedNonEmptyString,
@@ -315,6 +316,11 @@ export const ThreadForkLedgerRow = Schema.Struct({
   attachments: Schema.NullOr(ThreadForkAttachmentsRecord),
   result: Schema.NullOr(ThreadForkResult),
   error: Schema.NullOr(ThreadForkFailure),
+  /**
+   * A fork carried from another node (`threads.forkCarried`, migration 098): where it came from,
+   * display-only. Null for a fork of a thread on this node.
+   */
+  origin: Schema.NullOr(ThreadForkOrigin),
   createdAt: IsoDateTime,
   updatedAt: IsoDateTime,
 });

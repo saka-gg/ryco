@@ -136,6 +136,7 @@ function ledgerRow(key: string): ThreadForkLedgerRow {
     attachments: null,
     result: null,
     error: null,
+    origin: null,
     createdAt,
     updatedAt: createdAt,
   };
