@@ -6,6 +6,7 @@ import {
   type RefObject,
   useCallback,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
 } from "react";
@@ -136,6 +137,11 @@ export function CommandPaletteVirtualizedResults(props: CommandPaletteVirtualize
     void listRef.current?.scrollToOffset?.({ offset: 0, animated: false });
   }, [listRef, scrollResetKey]);
 
+  const itemCount = useMemo(
+    () => props.rows.filter((row) => row.kind === "item" && row.itemIndex !== null).length,
+    [props.rows],
+  );
+
   return (
     <CommandListVirtualized>
       <LegendList<CommandPaletteRow>
@@ -155,6 +161,7 @@ export function CommandPaletteVirtualizedResults(props: CommandPaletteVirtualize
           ) : (
             <CommandPaletteResultRow
               index={row.itemIndex}
+              setSize={itemCount}
               item={row.item}
               keybindings={props.keybindings}
               isActive={props.highlightedItemValue === row.item.value}
@@ -208,6 +215,8 @@ function DisabledCommandPaletteResultRow(props: {
 function CommandPaletteResultRow(props: {
   /** The item's position among enabled items; set when the list is virtualized. */
   index?: number;
+  /** How many enabled items the virtualized list holds, mounted or not. */
+  setSize?: number;
   item: CommandPaletteActionItem | CommandPaletteSubmenuItem;
   isActive: boolean;
   keybindings: ResolvedKeybindingsConfig;
@@ -220,6 +229,10 @@ function CommandPaletteResultRow(props: {
   return (
     <CommandItem
       {...(props.index === undefined ? {} : { index: props.index })}
+      // A virtualized list mounts only some options: tell assistive technology the whole count.
+      {...(props.index === undefined || props.setSize === undefined
+        ? {}
+        : { "aria-posinset": props.index + 1, "aria-setsize": props.setSize })}
       value={props.item.value}
       className={cn(
         "cursor-pointer gap-2 hover:bg-transparent hover:text-inherit data-highlighted:bg-transparent data-highlighted:text-inherit data-selected:bg-transparent data-selected:text-inherit [&[data-highlighted][data-selected]]:bg-transparent [&[data-highlighted][data-selected]]:text-inherit",

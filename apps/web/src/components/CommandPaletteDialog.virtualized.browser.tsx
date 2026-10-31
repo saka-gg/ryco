@@ -164,12 +164,20 @@ describe("CommandPaletteDialog with thousands of threads", () => {
         activeOption()!.id,
       );
 
+      // Assistive technology hears the whole count, not the mounted window.
+      const setSize = Number(options()[0]!.getAttribute("aria-setsize"));
+      expect(setSize).toBeGreaterThan(COMMAND_PALETTE_VIRTUALIZE_AFTER_ITEMS * 10);
+      expect(options()[0]!.getAttribute("aria-posinset")).toBe("1");
+
       // Scrolling far down brings later rows in, still windowed.
       await scrollListTo(scroller()!.scrollHeight / 2);
       await expect
         .poll(() => options().filter((option) => option.textContent?.startsWith("Thread")).length)
         .toBeGreaterThan(5);
       expect(options().length).toBeLessThan(COMMAND_PALETTE_VIRTUALIZE_AFTER_ITEMS);
+      const later = options().find((option) => option.textContent?.startsWith("Thread"))!;
+      expect(Number(later.getAttribute("aria-posinset"))).toBeGreaterThan(20);
+      expect(Number(later.getAttribute("aria-setsize"))).toBe(setSize);
 
       // Typing on returns a long list to its top, where the new first row is highlighted.
       await page.getByPlaceholder(PLACEHOLDER).fill("th");
