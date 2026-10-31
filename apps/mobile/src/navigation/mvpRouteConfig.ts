@@ -329,6 +329,7 @@ export const MVP_SETTINGS_SHEET_ROUTES = {
     ...SETTINGS_PUSH,
   },
   SettingsAbout: { linking: "about", headerAction: "back", ...SETTINGS_PUSH },
+  SettingsDiagnostics: { linking: "diagnostics", headerAction: "back", ...SETTINGS_PUSH },
 } as const satisfies Record<string, MvpSettingsRouteDescriptor>;
 
 export type MvpSettingsRouteName = keyof typeof MVP_SETTINGS_SHEET_ROUTES;

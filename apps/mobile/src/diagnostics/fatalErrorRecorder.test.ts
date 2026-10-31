@@ -1,0 +1,158 @@
+import { describe, expect, it } from "vite-plus/test";
+
+import {
+  appendFatalErrorRecord,
+  type ErrorUtilsLike,
+  FATAL_ERROR_RECORD_LIMIT,
+  type FatalErrorStore,
+  installFatalErrorRecorder,
+  parseFatalErrorRecords,
+  recordRenderCrash,
+} from "./fatalErrorRecorder";
+
+const NOW = Date.parse("2026-10-31T06:00:00.000Z");
+// Built from parts, so no fixture looks like a real credential.
+const TOKEN = ["not", "a", "real", "token"].join("-");
+
+function memoryStore(initial: string | null = null): FatalErrorStore & { text: string | null } {
+  const store = {
+    text: initial,
+    read: () => store.text,
+    write: (text: string) => {
+      store.text = text;
+    },
+    clear: () => {
+      store.text = null;
+    },
+  };
+  return store;
+}
+
+function fakeErrorUtils() {
+  const calls: Array<{ error: unknown; isFatal: boolean | undefined }> = [];
+  let handler: (error: unknown, isFatal?: boolean) => void = (error, isFatal) =>
+    calls.push({ error, isFatal });
+  const errorUtils: ErrorUtilsLike = {
+    getGlobalHandler: () => handler,
+    setGlobalHandler: (next) => {
+      handler = next;
+    },
+  };
+  return {
+    errorUtils,
+    calls,
+    fire: (error: unknown, isFatal?: boolean) => handler(error, isFatal),
+  };
+}
+
+describe("fatal error recorder", () => {
+  it("writes a fatal error before the previous handler runs, and ignores the rest", () => {
+    const store = memoryStore();
+    const seenByPrevious: Array<{ isFatal: boolean | undefined; stored: string | null }> = [];
+    let handler: (error: unknown, isFatal?: boolean) => void = (_error, isFatal) =>
+      seenByPrevious.push({ isFatal, stored: store.text });
+    installFatalErrorRecorder({
+      errorUtils: {
+        getGlobalHandler: () => handler,
+        setGlobalHandler: (next) => {
+          handler = next;
+        },
+      },
+      store: () => store,
+      now: () => NOW,
+    });
+
+    handler(new TypeError("undefined is not a function"), false);
+    expect(store.text).toBeNull();
+    handler(new TypeError("cannot read property 'id' of undefined"), true);
+    expect(seenByPrevious.map((call) => call.isFatal)).toEqual([false, true]);
+    // The record was on disk when the previous handler (red box, app exit) ran.
+    expect(seenByPrevious[1]?.stored).not.toBeNull();
+    expect(parseFatalErrorRecords(store.text, NOW)).toEqual([
+      expect.objectContaining({
+        at: "2026-10-31T06:00:00.000Z",
+        message: "TypeError: cannot read property 'id' of undefined",
+      }),
+    ]);
+  });
+
+  it("keeps the last ten records of the last seven days, bounded in size", () => {
+    let text: string | null = JSON.stringify([
+      { at: "2026-10-20T00:00:00.000Z", message: "too old", stack: null },
+    ]);
+    for (let index = 0; index < 12; index += 1) {
+      text = appendFatalErrorRecord(text, new Error(`crash ${index}${"x".repeat(2000)}`), NOW);
+    }
+    const records = parseFatalErrorRecords(text, NOW);
+    expect(records).toHaveLength(FATAL_ERROR_RECORD_LIMIT);
+    expect(records[0]?.message.startsWith("Error: crash 2")).toBe(true);
+    expect(records.every((record) => record.message.length <= 1024)).toBe(true);
+    expect(records.some((record) => record.message === "too old")).toBe(false);
+    expect(parseFatalErrorRecords("{not json", NOW)).toEqual([]);
+  });
+
+  it("writes the message and stack already redacted", () => {
+    const error = new Error(
+      `connect wss://node.example/ws?wsToken=${TOKEN} from /Users/Laurin Frank/Code/x.ts`,
+    );
+    error.stack = `Error: ${error.message}\n    at f (C:\\Users\\Laurin\\app\\main.js:1:2)`;
+    const text = appendFatalErrorRecord(null, error, NOW);
+    expect(text).not.toContain(TOKEN);
+    expect(text).not.toContain("Laurin");
+    expect(parseFatalErrorRecords(text, NOW)).toEqual([
+      {
+        at: "2026-10-31T06:00:00.000Z",
+        message: "Error: connect wss://node.example/ws from x.ts",
+        stack: "Error: connect wss://node.example/ws from x.ts\n    at f (main.js:1:2)",
+      },
+    ]);
+  });
+
+  it("records a render crash, then throws the same error on, even if the file fails", () => {
+    const thrownBy = (run: () => void): unknown => {
+      try {
+        run();
+      } catch (thrown) {
+        return thrown;
+      }
+      return undefined;
+    };
+    const store = memoryStore();
+    const error = new TypeError("cannot read property 'id' of undefined");
+    // The same object, so React finds the component stack it captured for it and reports the
+    // error as uncaught (fatal), as it did without the boundary.
+    expect(
+      thrownBy(() =>
+        recordRenderCrash(
+          () => store,
+          error,
+          () => NOW,
+        ),
+      ),
+    ).toBe(error);
+    expect(parseFatalErrorRecords(store.text, NOW)).toEqual([
+      expect.objectContaining({ message: "TypeError: cannot read property 'id' of undefined" }),
+    ]);
+
+    const failing = () => {
+      throw new Error("disk gone");
+    };
+    expect(thrownBy(() => recordRenderCrash(failing, error))).toBe(error);
+  });
+
+  it("never lets a failing file change how the app fails", () => {
+    const { errorUtils, calls, fire } = fakeErrorUtils();
+    installFatalErrorRecorder({
+      errorUtils,
+      store: () => ({
+        read: () => {
+          throw new Error("disk gone");
+        },
+        write: () => undefined,
+        clear: () => undefined,
+      }),
+    });
+    expect(() => fire(new Error("boom"), true)).not.toThrow();
+    expect(calls).toHaveLength(1);
+  });
+});

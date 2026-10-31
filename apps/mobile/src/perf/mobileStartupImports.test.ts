@@ -354,6 +354,18 @@ describe("mobile launch graph boundaries", () => {
     ).toEqual([]);
   });
 
+  it("installs the crash recorder at launch without loading its file store or expo-updates", () => {
+    const reachable = [...staticGraph(LAUNCH_ENTRY).keys()].map(display);
+    expect(reachable).toEqual(
+      expect.arrayContaining([
+        "apps/mobile/src/diagnostics/fatalErrorRecorderEntry.ts",
+        "apps/mobile/src/diagnostics/FatalRenderErrorBoundary.tsx",
+        "apps/mobile/src/diagnostics/crashTextRedaction.ts",
+      ]),
+    );
+    expect(chainsTo(LAUNCH_ENTRY, [/^pkg:expo-file-system$/u, /^pkg:expo-updates$/u])).toEqual([]);
+  });
+
   it("keeps relay E2EE crypto (noble curves/hashes, CBOR) out of the pre-first-frame graph", () => {
     // Measured on the static graph: 75 modules, about 1.5 MiB of source, that a
     // direct-only launch never runs; only the lazily imported hosted runtime
