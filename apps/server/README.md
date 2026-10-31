@@ -108,6 +108,11 @@ A node that runs as a service updates itself from the apps. It checks the new re
 copy of its database before it restarts into it, and rolls back a release that fails to start,
 database included. See [node-updates.md](../../docs/node-updates.md).
 
+From a terminal, `ryco update` runs that same update on this node (or `--remote <name>` on a
+paired one): it shows the versions, asks (or `--yes`), and follows the update through the restart.
+`ryco update --check` only shows where the node stands, and `--channel nightly` moves it to
+nightly builds; a channel switch never installs an older release.
+
 Link the node to your Ryco account so the apps reach it from anywhere through the Hub relay:
 
 ```bash
@@ -164,6 +169,7 @@ ryco config [show | path | edit | set <key> <value> | unset <key>]
 
 ryco service install [serve flags] [cwd]
 ryco service status [--ready] | logs [-f] | restart | stop | start | uninstall
+ryco update [--check] [--channel latest|nightly] [--yes] [--remote <name>] [--json]
 
 ryco hub login | enroll | status | pending | cancel | resume | leave
 

@@ -3991,6 +3991,32 @@ const remoteThreadsCommand = Command.make("threads", {
 // Loads only for `ryco thread` and `ryco remote send`, never on the `serve` path.
 const loadThreadCli = Effect.promise(() => import("./cliThread/threadCommands.ts"));
 
+/**
+ * What reaching this machine's node takes (`ThreadCliLocal`): its address from the runtime file
+ * and its auth control plane, which issues the short-lived owner session.
+ */
+const localNodeAccess = (
+  flags: { readonly baseDir: Option.Option<string>; readonly json: boolean },
+  logLevel: Option.Option<LogLevel.LogLevel>,
+  fileSystem: FileSystem.FileSystem,
+) =>
+  Effect.map(resolveCliAuthConfig(flags, logLevel), (config) => ({
+    readOrigin: readPersistedServerRuntimeState(config.serverRuntimeStatePath).pipe(
+      Effect.map((state) => (Option.isSome(state) ? state.value.origin : null)),
+      Effect.orElseSucceed(() => null),
+      Effect.provideService(FileSystem.FileSystem, fileSystem),
+    ),
+    authControlPlane: AuthControlPlaneRuntimeLive.pipe(
+      Layer.provide(Layer.succeed(ServerConfig, config)),
+      Layer.provide(
+        Layer.succeed(
+          References.MinimumLogLevel,
+          flags.json ? "Error" : adminCommandLogLevel(logLevel, config.logLevel),
+        ),
+      ),
+    ),
+  }));
+
 const runThreadCli = (
   flags: {
     readonly baseDir: Option.Option<string>;
@@ -4009,22 +4035,7 @@ const runThreadCli = (
         json: flags.json,
         remote: flags.remote,
         loadRemote: (name) => loadRemote(flags.baseDir, name),
-        local: Effect.map(resolveCliAuthConfig(flags, logLevel), (config) => ({
-          readOrigin: readPersistedServerRuntimeState(config.serverRuntimeStatePath).pipe(
-            Effect.map((state) => (Option.isSome(state) ? state.value.origin : null)),
-            Effect.orElseSucceed(() => null),
-            Effect.provideService(FileSystem.FileSystem, fileSystem),
-          ),
-          authControlPlane: AuthControlPlaneRuntimeLive.pipe(
-            Layer.provide(Layer.succeed(ServerConfig, config)),
-            Layer.provide(
-              Layer.succeed(
-                References.MinimumLogLevel,
-                flags.json ? "Error" : adminCommandLogLevel(logLevel, config.logLevel),
-              ),
-            ),
-          ),
-        })),
+        local: localNodeAccess(flags, logLevel, fileSystem),
         transcript: { toReadThreadResult, readThreadMessageLimit },
       });
     }),
@@ -4131,6 +4142,83 @@ const threadReadCommand = Command.make("read", {
 }).pipe(
   Command.withDescription("Print a thread's latest messages and its queued follow-ups."),
   Command.withHandler((flags) => runThreadCli(flags, { kind: "read", ...flags })),
+);
+
+const loadNodeUpdateCli = Effect.promise(() => import("./cliNodeUpdate/updateCommand.ts"));
+
+const updateCommand = Command.make("update", {
+  baseDir: baseDirFlag,
+  remote: Flag.String("remote").pipe(
+    Flag.withDescription("Update a paired remote (`ryco remote add`) instead of this node."),
+    Flag.optional,
+  ),
+  channel: Flag.Literals("channel", ["latest", "nightly"]).pipe(
+    Flag.withDescription(
+      "Move the node to this release channel. It never installs an older release than it runs.",
+    ),
+    Flag.optional,
+  ),
+  check: Flag.Boolean("check").pipe(
+    Flag.withDescription("Only show the node's version, the newest release and the last update."),
+    Flag.withDefault(false),
+  ),
+  yes: Flag.Boolean("yes").pipe(
+    Flag.withAlias("y"),
+    Flag.withDescription("Update without asking (needed when the output is not a terminal)."),
+    Flag.withDefault(false),
+  ),
+  json: jsonFlag,
+}).pipe(
+  Command.withDescription(
+    "Update this node, or a paired remote, through its own one-click update: checked against a copy of its database, restarted, and rolled back if the new release fails to start.",
+  ),
+  Command.withHandler((flags) =>
+    quietly(
+      flags.json,
+      Effect.scoped(
+        Effect.gen(function* () {
+          const logLevel = yield* GlobalFlag.LogLevel;
+          const fileSystem = yield* FileSystem.FileSystem;
+          const threadCli = yield* loadThreadCli;
+          const updateCli = yield* loadNodeUpdateCli;
+          const target = Option.isSome(flags.remote)
+            ? threadCli.remoteThreadTarget(yield* loadRemote(flags.baseDir, flags.remote.value))
+            : yield* threadCli.localThreadTarget({
+                local: yield* localNodeAccess(flags, logLevel, fileSystem),
+                timeout: null,
+                // The follow ends within 10 minutes; a session this older CLI cannot revoke
+                // after the node migrated its database expires soon after.
+                sessionTtl: Duration.minutes(30),
+                sessionLabel: "ryco update",
+              });
+          const nodeLabel = Option.isSome(flags.remote) ? `"${flags.remote.value}"` : "this node";
+          if (flags.check) {
+            return yield* updateCli.runUpdateCheck({
+              target,
+              nodeLabel,
+              json: flags.json,
+              channel: Option.getOrNull(flags.channel),
+              fetchLatestOnChannel: updateCli.fetchLatestRycoRelease,
+            });
+          }
+          yield* updateCli.runUpdateCli({
+            target,
+            nodeLabel,
+            channel: Option.getOrNull(flags.channel),
+            yes: flags.yes,
+            json: flags.json,
+            interactive: isInteractiveTerminal(),
+            confirm: (message) =>
+              Prompt.run(Prompt.Confirm({ message, initial: false })).pipe(
+                Effect.catch(() => Effect.succeed(false)),
+              ),
+            fetchLatestOnChannel: updateCli.fetchLatestRycoRelease,
+            requestId: `cli-${crypto.randomUUID()}`,
+          });
+        }),
+      ),
+    ),
+  ),
 );
 
 const threadCommand = Command.make("thread").pipe(
@@ -4624,6 +4712,7 @@ export const cli = Command.make("ryco", { ...sharedServerCommandFlags }).pipe(
     serviceCommand,
     remoteCommand,
     threadCommand,
+    updateCommand,
     makeDbCommand({
       locationFlags: sharedServerLocationFlags,
       jsonFlag,

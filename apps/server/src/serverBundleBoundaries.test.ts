@@ -563,6 +563,8 @@ describe.skipIf(!hasCurrentBuild)("built server bundle", () => {
       // Region markers rolldown leaves in the output name the modules each chunk holds.
       expect(source).not.toMatch(/^\/\/#region src\/computer\/CuaComputerBackend\.ts$/mu);
       expect(source).not.toMatch(/^\/\/#region src\/nodeBrowser\/nodeBrowserRuntime\.ts$/mu);
+      // `ryco update` loads when it runs.
+      expect(source).not.toMatch(/^\/\/#region src\/cliNodeUpdate\/updateCommand\.ts$/mu);
       // The terminal QR encoder loads when a command prints a pairing code.
       expect(source).not.toMatch(/^\/\/#region \.\.\/\.\.\/packages\/shared\/src\/qrCode\.ts$/mu);
       expect(source).not.toMatch(/^\/\/#region src\/hubConnector\/HubIdentityRuntime\.ts$/mu);

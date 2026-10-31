@@ -117,6 +117,13 @@ export const NodeUpdateInput = Schema.Struct({
   targetVersion: TrimmedNonEmptyString,
   /** Client-chosen id echoed in `run.requestId`, including after the restart. */
   requestId: TrimmedNonEmptyString.check(Schema.isMaxLength(128)),
+  /**
+   * Move a CLI node to another release channel (`ryco update --channel nightly`). The target
+   * must still be the newest release on that channel and newer than what the node runs: a
+   * channel switch never downgrades. Absent: the node's own channel. A node from before this
+   * field ignores it and refuses a target from another channel.
+   */
+  channel: Schema.optional(NodeReleaseChannel),
 });
 export type NodeUpdateInput = typeof NodeUpdateInput.Type;
 
