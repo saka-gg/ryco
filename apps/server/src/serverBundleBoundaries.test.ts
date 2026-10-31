@@ -373,13 +373,18 @@ describe("server boot import boundaries", () => {
     expect(reached(/^apps\/server\/src\/orchestration\/serverQueueDrainRuntime\.ts$/u)).toEqual([]);
     // Delegation slots load with the first queue held for one (a capped ryco_create_threads).
     expect(reached(/^apps\/server\/src\/agentControl\/delegationSlotRuntime\.ts$/u)).toEqual([]);
-    // The host-wide provider install lock loads with the first install, or with a session start
-    // that finds the lock folder holds entries; boot carries the facade and its readdir.
-    expect(reached(/^apps\/server\/src\/provider\/providerInstallLock\.ts$/u)).toEqual([]);
+    // The provider update runner loads with the first update, the host-wide provider install
+    // lock with the first install or provider session start; boot carries their facades.
+    expect(
+      reached(
+        /^apps\/server\/src\/provider\/provider(?:InstallLock|MaintenanceRunnerRuntime)\.ts$/u,
+      ),
+    ).toEqual([]);
     expect(graph.files).toContain("apps/server/src/provider/Layers/ProviderInstallLock.ts");
-    expect(staticGraph("src/cliMain.ts", { dynamic: true }).files).toContain(
-      "apps/server/src/provider/providerInstallLock.ts",
-    );
+    expect(graph.files).toContain("apps/server/src/provider/providerMaintenanceRunner.ts");
+    const reachable = staticGraph("src/cliMain.ts", { dynamic: true }).files;
+    expect(reachable).toContain("apps/server/src/provider/providerInstallLock.ts");
+    expect(reachable).toContain("apps/server/src/provider/providerMaintenanceRunnerRuntime.ts");
   });
 
   it("loads the repository clone runner with the first clone", () => {
@@ -625,8 +630,10 @@ describe.skipIf(!hasCurrentBuild)("built server bundle", () => {
       expect(source).not.toMatch(
         /^\/\/#region src\/provider\/signIn\/(?:providerSignInRuntime|codexDeviceCodeSignIn|terminalSignIn|signInCommands|privateDirectory)\.ts$/mu,
       );
-      // Loaded with the first provider install, or a session start that finds lock entries.
-      expect(source).not.toMatch(/^\/\/#region src\/provider\/providerInstallLock\.ts$/mu);
+      // Loaded with the first provider update (the lock also with the first session start).
+      expect(source).not.toMatch(
+        /^\/\/#region src\/provider\/provider(?:InstallLock|MaintenanceRunnerRuntime)\.ts$/mu,
+      );
     }
   });
 });

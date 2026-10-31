@@ -52,7 +52,8 @@ const withFolder = Effect.acquireRelease(
 );
 
 const fs = <A>(run: () => Promise<A>) => Effect.promise(run);
-const names = (directory: string) => fs(() => NodeFs.readdir(directory).then((all) => all.toSorted()));
+const names = (directory: string) =>
+  fs(() => NodeFs.readdir(directory).then((all) => all.toSorted()));
 const read = (file: string) => fs(() => NodeFs.readFile(file, "utf8"));
 const writeAged = (file: string, contents: string) =>
   fs(async () => {
