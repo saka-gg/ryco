@@ -190,6 +190,7 @@ import { isBackendReadinessAborted, waitForHttpReady } from "./backendReadiness.
 import { createBackendRestartBackoff } from "./backendRestartBackoff.ts";
 import { sanitizeLogValue } from "./logValue.ts";
 import {
+  canReplaceDatabaseInPlace,
   DATABASE_LIST_TIMEOUT_MS,
   DATABASE_RESTORE_TIMEOUT_MS,
   pickRestorableBackup,
@@ -3560,8 +3561,12 @@ async function showBackendStartupFailure(
 ): Promise<void> {
   const window = mainWindow ?? BrowserWindow.getAllWindows()[0] ?? null;
   if (window && !window.isDestroyed()) revealWindow(window);
-  // A newer Ryco upgraded the database: offer its newest backup this build opens.
-  const backup = fatalCode === "database-schema-newer" ? await findRestorableBackup() : null;
+  // A newer Ryco upgraded the database: offer its newest backup this build opens, where an
+  // in-place restore can work at all (it needs lsof or /proc to see other processes).
+  const backup =
+    fatalCode === "database-schema-newer" && canReplaceDatabaseInPlace(process.platform)
+      ? await findRestorableBackup()
+      : null;
   const options = {
     type: "error" as const,
     title: `${APP_DISPLAY_NAME} could not start`,
@@ -3588,7 +3593,7 @@ async function showBackendStartupFailure(
       writeDesktopLogHeader("backend start retry requested");
       retry();
     },
-    extra: backup ? () => restoreDatabaseBackup(window, backup, retry) : undefined,
+    extra: backup ? () => restoreDatabaseBackup(window, retry) : undefined,
     quit: () => app.quit(),
   });
 }
@@ -3607,14 +3612,37 @@ function serverCliLaunch(): ServerCliLaunch {
   };
 }
 
-/** The newest backup this build can restore, or null (none, or `db list` failed). */
+/** Runs the server CLI; quitting the app stops it (SIGTERM, so a restore's swap finishes). */
+async function runDatabaseCli(command: ReadonlyArray<string>, timeoutMs: number) {
+  const abort = new AbortController();
+  const stop = () => abort.abort();
+  app.once("before-quit", stop);
+  try {
+    return await runServerCli(serverCliLaunch(), command, timeoutMs, { signal: abort.signal });
+  } finally {
+    app.removeListener("before-quit", stop);
+  }
+}
+
+/** The newest backup this build can restore, or null (none, or `db list` failed). Never rejects. */
 async function findRestorableBackup(): Promise<RestorableBackup | null> {
-  const result = await runServerCli(serverCliLaunch(), ["db", "list"], DATABASE_LIST_TIMEOUT_MS);
-  const backup = result.exitCode === 0 ? pickRestorableBackup(result.stdout) : null;
-  writeDesktopLogHeader(
-    `database backups listed exitCode=${result.exitCode ?? "null"} timedOut=${result.timedOut} restorable=${backup === null ? "none" : sanitizeLogValue(backup.path)}`,
-  );
-  return backup;
+  try {
+    const result = await runDatabaseCli(["db", "list"], DATABASE_LIST_TIMEOUT_MS);
+    const backup = result.exitCode === 0 ? pickRestorableBackup(result.stdout) : null;
+    writeDesktopLogHeader(
+      `database backups listed exitCode=${result.exitCode ?? "null"} timedOut=${result.timedOut} restorable=${backup === null ? "none" : sanitizeLogValue(backup.path)}`,
+    );
+    return backup;
+  } catch (error) {
+    writeDesktopLogHeader(`database backups not listed message=${sanitizeLogValue(String(error))}`);
+    return null;
+  }
+}
+
+/** The journal an interrupted in-place restore leaves next to the backend's database. */
+function databaseRestoreJournalExists(): boolean {
+  const stateDir = Path.join(BACKEND_BASE_DIR, isDevelopment ? "dev" : "userdata");
+  return FS.existsSync(Path.join(stateDir, "state.sqlite.restore.json"));
 }
 
 /**
@@ -3624,9 +3652,20 @@ async function findRestorableBackup(): Promise<RestorableBackup | null> {
  */
 async function restoreDatabaseBackup(
   window: BrowserWindow | null,
-  backup: RestorableBackup,
   retry: () => void,
 ): Promise<boolean> {
+  // Listed again: a backup refused before, or a restore that went through, must not be offered.
+  const backup = await findRestorableBackup();
+  if (backup === null) {
+    await showMessageBoxForWindow(window, {
+      type: "info",
+      title: "No backup to restore",
+      message: "There is no backup this version of Ryco can restore.",
+      buttons: ["OK"],
+      noLink: true,
+    });
+    return false;
+  }
   const takenAt = new Date(backup.createdAt).toLocaleString();
   const confirm = await showMessageBoxForWindow(window, {
     type: "warning",
@@ -3645,8 +3684,7 @@ async function restoreDatabaseBackup(
   if (confirm.response !== 0 || isQuitting) return false;
   writeDesktopLogHeader(`database restore started backup=${sanitizeLogValue(backup.path)}`);
   if (window && !window.isDestroyed()) window.setProgressBar(2);
-  const result = await runServerCli(
-    serverCliLaunch(),
+  const result = await runDatabaseCli(
     ["db", "restore", backup.path, "--replace"],
     DATABASE_RESTORE_TIMEOUT_MS,
   );
@@ -3659,6 +3697,19 @@ async function restoreDatabaseBackup(
   );
   if (isQuitting) return true;
   if (!outcome.ok) {
+    // A restore stopped after its journal finishes on the next start: say so, and start.
+    if (databaseRestoreJournalExists()) {
+      await showMessageBoxForWindow(window, {
+        type: "warning",
+        title: "The restore will finish when Ryco starts",
+        message: "The restore stopped part-way. It finishes when the local server starts.",
+        detail: `${outcome.message}\n\nNothing was deleted. Paired devices and integrations sign out and pair again.`,
+        buttons: ["Start"],
+        noLink: true,
+      });
+      if (!isQuitting) retry();
+      return true;
+    }
     await showMessageBoxForWindow(window, {
       type: "error",
       title: "The backup was not restored",

@@ -4,6 +4,7 @@ import { PassThrough } from "node:stream";
 import { describe, expect, it, vi } from "vite-plus/test";
 
 import {
+  canReplaceDatabaseInPlace,
   pickRestorableBackup,
   readRestoreOutcome,
   runServerCli,
@@ -161,7 +162,7 @@ describe("runServerCli", () => {
   it("collects the output and exit code", async () => {
     const child = fakeChild();
     const spawn = vi.fn(() => child);
-    const result = runServerCli(launch, ["db", "list"], 1_000, spawn as never);
+    const result = runServerCli(launch, ["db", "list"], 1_000, { spawn: spawn as never });
     child.stdout.write('{"backups":[]}\n');
     child.stderr.write("note\n");
     child.emit("close", 0);
@@ -178,24 +179,54 @@ describe("runServerCli", () => {
     );
   });
 
-  it("kills a run that takes too long and reports it", async () => {
+  it("stops a run that takes too long with SIGTERM, then SIGKILL after the grace period", async () => {
     vi.useFakeTimers();
     try {
       const child = fakeChild();
-      child.kill.mockImplementation(() => child.emit("close", null));
-      const result = runServerCli(launch, ["db", "list"], 30_000, (() => child) as never);
+      const result = runServerCli(launch, ["db", "list"], 30_000, {
+        spawn: (() => child) as never,
+        killGraceMs: 5_000,
+      });
       vi.advanceTimersByTime(30_000);
+      // SIGTERM first: a restore's swap cannot be interrupted, so it finishes before exiting.
+      expect(child.kill).toHaveBeenCalledWith("SIGTERM");
+      expect(child.kill).not.toHaveBeenCalledWith("SIGKILL");
+      vi.advanceTimersByTime(5_000);
       expect(child.kill).toHaveBeenCalledWith("SIGKILL");
+      child.emit("close", null);
       expect((await result).timedOut).toBe(true);
     } finally {
       vi.useRealTimers();
     }
   });
 
+  it("stops a run when the app quits", async () => {
+    const child = fakeChild();
+    const abort = new AbortController();
+    const result = runServerCli(launch, ["db", "list"], 30_000, {
+      spawn: (() => child) as never,
+      signal: abort.signal,
+    });
+    abort.abort();
+    expect(child.kill).toHaveBeenCalledWith("SIGTERM");
+    child.emit("close", null);
+    expect((await result).timedOut).toBe(false);
+  });
+
   it("never rejects when the executable cannot start", async () => {
-    const result = await runServerCli(launch, ["db", "list"], 1_000, (() => {
-      throw new Error("spawn ENOENT");
-    }) as never);
+    const result = await runServerCli(launch, ["db", "list"], 1_000, {
+      spawn: (() => {
+        throw new Error("spawn ENOENT");
+      }) as never,
+    });
     expect(result).toEqual({ exitCode: null, stdout: "", stderr: "spawn ENOENT", timedOut: false });
+  });
+});
+
+describe("canReplaceDatabaseInPlace", () => {
+  it("offers an in-place restore only where other processes holding the file can be seen", () => {
+    expect(canReplaceDatabaseInPlace("darwin")).toBe(true);
+    expect(canReplaceDatabaseInPlace("linux")).toBe(true);
+    expect(canReplaceDatabaseInPlace("win32")).toBe(false);
   });
 });

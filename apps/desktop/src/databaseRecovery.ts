@@ -12,12 +12,21 @@
  */
 import * as ChildProcess from "node:child_process";
 
-import { DESKTOP_BACKEND_V8_FLAGS } from "./backendLauncher.ts";
+import { desktopBackendRuntimeArgs } from "./backendLauncher.ts";
 
 /** `db list` reads a directory; it answers in well under a second. */
-export const DATABASE_LIST_TIMEOUT_MS = 30_000;
+export const DATABASE_LIST_TIMEOUT_MS = 10_000;
 /** `db restore` decompresses and checks the whole database: tens of seconds for 10 GB. */
 export const DATABASE_RESTORE_TIMEOUT_MS = 10 * 60_000;
+/**
+ * A run past its bound (or one the app stops on quit) gets SIGTERM first: the restore's swap cannot
+ * be interrupted, so it finishes before the command exits. SIGKILL follows after this long.
+ */
+export const SERVER_CLI_KILL_GRACE_MS = 30_000;
+
+/** Platforms where `db restore --replace` can check for other processes holding the database. */
+export const canReplaceDatabaseInPlace = (platform: NodeJS.Platform): boolean =>
+  platform === "darwin" || platform === "linux";
 
 export interface ServerCliLaunch {
   readonly executable: string;
@@ -36,10 +45,7 @@ export interface ServerCliLaunch {
 /** The arguments that run `command` of the server CLI against the backend's data directory. */
 export function serverCliArgs(launch: ServerCliLaunch, command: ReadonlyArray<string>): string[] {
   return [
-    ...(launch.nodeRuntime ? DESKTOP_BACKEND_V8_FLAGS : []),
-    ...(launch.nodeRuntime && launch.compileCacheHook !== null
-      ? ["--require", launch.compileCacheHook]
-      : []),
+    ...desktopBackendRuntimeArgs(launch),
     launch.backendEntry,
     ...command,
     "--base-dir",
@@ -56,23 +62,43 @@ export interface ServerCliResult {
   readonly timedOut: boolean;
 }
 
-/** Runs the server CLI and collects its output; a run past `timeoutMs` is killed. Never rejects. */
+/**
+ * Runs the server CLI and collects its output. A run past `timeoutMs`, or one `signal` stops, gets
+ * SIGTERM and, {@link SERVER_CLI_KILL_GRACE_MS} later, SIGKILL. Never rejects.
+ */
 export function runServerCli(
   launch: ServerCliLaunch,
   command: ReadonlyArray<string>,
   timeoutMs: number,
-  spawn: typeof ChildProcess.spawn = ChildProcess.spawn,
+  options: {
+    readonly signal?: AbortSignal | undefined;
+    readonly spawn?: typeof ChildProcess.spawn | undefined;
+    readonly killGraceMs?: number | undefined;
+  } = {},
 ): Promise<ServerCliResult> {
+  const spawn = options.spawn ?? ChildProcess.spawn;
   return new Promise((resolve) => {
     let stdout = "";
     let stderr = "";
     let timedOut = false;
     let settled = false;
+    let killTimer: ReturnType<typeof setTimeout> | undefined;
     const settle = (exitCode: number | null) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      if (killTimer !== undefined) clearTimeout(killTimer);
+      options.signal?.removeEventListener("abort", stop);
       resolve({ exitCode, stdout, stderr, timedOut });
+    };
+    const stop = () => {
+      if (settled || killTimer !== undefined) return;
+      child.kill("SIGTERM");
+      killTimer = setTimeout(
+        () => child.kill("SIGKILL"),
+        options.killGraceMs ?? SERVER_CLI_KILL_GRACE_MS,
+      );
+      killTimer.unref?.();
     };
     let child: ChildProcess.ChildProcess;
     try {
@@ -93,8 +119,10 @@ export function runServerCli(
     }
     const timer = setTimeout(() => {
       timedOut = true;
-      child.kill("SIGKILL");
+      stop();
     }, timeoutMs);
+    if (options.signal?.aborted === true) stop();
+    else options.signal?.addEventListener("abort", stop, { once: true });
     child.stdout?.setEncoding("utf8").on("data", (chunk: string) => {
       stdout += chunk;
     });
