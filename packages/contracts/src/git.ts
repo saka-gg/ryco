@@ -607,9 +607,16 @@ export const GitComparisonRef = TrimmedNonEmptyStringSchema.check(
   Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._/-]*$/),
   Schema.isPattern(/^(?!.*\.\.).*$/),
 );
+/**
+ * `mode` picks the left endpoint (the merge-base of `ref` and HEAD, or `ref` itself). The right
+ * endpoint is HEAD, or with `target: "workingTree"` the working files, including staged, unstaged
+ * and untracked changes. Only nodes that advertise `capabilities.workingTreeComparison` honour
+ * `target`; older ones drop the key and echo the selection without it.
+ */
 export const GitComparisonSelection = Schema.Struct({
   ref: GitComparisonRef,
   mode: Schema.Literals(["mergeBase", "direct"]),
+  target: Schema.optionalKey(Schema.Literal("workingTree")),
 });
 export type GitComparisonSelection = typeof GitComparisonSelection.Type;
 export const GitReadComparisonInput = Schema.Struct({
@@ -623,8 +630,11 @@ export const GitComparisonSource = Schema.Struct({
   repositoryPath: TrimmedNonEmptyStringSchema,
   worktreePath: TrimmedNonEmptyStringSchema,
   refOid: TrimmedNonEmptyStringSchema,
+  /** HEAD when the comparison was read; with a working-tree target not the patch's right side. */
   headOid: TrimmedNonEmptyStringSchema,
   baseOid: TrimmedNonEmptyStringSchema,
+  /** Present when the right side is the working files rather than `headOid`. */
+  target: Schema.optionalKey(Schema.Literal("workingTree")),
   revision: TrimmedNonEmptyStringSchema,
 });
 export type GitComparisonSource = typeof GitComparisonSource.Type;

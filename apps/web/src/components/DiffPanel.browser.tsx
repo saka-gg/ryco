@@ -64,6 +64,7 @@ const diffFile = {
   type: "change",
   additionLines: ["const alpha = 1;", "const beta = 2;"],
   deletionLines: ["const oldAlpha = 0;"],
+  hunks: [] as never[],
 };
 
 vi.mock("@pierre/diffs", () => ({

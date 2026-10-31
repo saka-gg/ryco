@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from "vite-plus/test";
 import { page } from "vite-plus/test/browser";
 import { render } from "vitest-browser-react";
 import { createComparisonController } from "@ryco/client-runtime/state/comparison";
-import type { GitReadComparisonResult } from "@ryco/contracts";
+import type { GitComparisonSelection, GitReadComparisonResult } from "@ryco/contracts";
 import { DiffComparisonControls } from "./DiffComparisonControls";
 
 const result = (
@@ -24,11 +24,14 @@ const result = (
   patch: "",
 });
 
-function harness() {
+function harness(options: { workingTreeAvailable?: boolean } = {}) {
   const values = new Map<string, string>();
-  const read = vi.fn(async (selection: { ref: string; mode: "mergeBase" | "direct" }) =>
-    result(selection.ref, selection.mode, "abcdefghij"),
-  );
+  const read = vi.fn(async (selection: GitComparisonSelection) => {
+    const read = result(selection.ref, selection.mode, "abcdefghij");
+    return selection.target
+      ? { ...read, selection, source: { ...read.source, target: selection.target } }
+      : read;
+  });
   const controller = createComparisonController({
     storage: {
       getItem: async (key) => values.get(key) ?? null,
@@ -48,6 +51,7 @@ function harness() {
       <div style={{ width: 650, maxWidth: "100%" }}>
         <DiffComparisonControls
           {...state}
+          workingTreeAvailable={options.workingTreeAvailable ?? false}
           onSelect={controller.setSelection}
           onRefresh={() => {
             void controller.refresh();
@@ -98,6 +102,35 @@ describe("comparison controls", () => {
     await screen.getByRole("button", { name: "Compare", exact: true }).click();
     await expect.element(screen.getByRole("alert")).toBeVisible();
     expect(f.read).not.toHaveBeenCalled();
+    f.controller.dispose();
+    await screen.unmount();
+  });
+  it("compares with the working tree only on nodes that can read it", async () => {
+    await page.viewport(900, 500);
+    const older = harness();
+    const olderScreen = await render(<older.View />);
+    const olderModes = olderScreen.getByRole("combobox", { name: "Comparison mode" });
+    await expect.element(olderModes).toBeVisible();
+    expect(
+      Array.from((olderModes.element() as HTMLSelectElement).options, (option) => option.text),
+    ).toEqual(["Branch changes → HEAD", "Commit to HEAD"]);
+    older.controller.dispose();
+    await olderScreen.unmount();
+
+    const f = harness({ workingTreeAvailable: true });
+    const screen = await render(<f.View />);
+    await screen
+      .getByRole("combobox", { name: "Comparison mode" })
+      .selectOptions("Branch changes → working tree");
+    await screen.getByRole("textbox", { name: "Branch, tag, or commit" }).fill("main");
+    await screen.getByRole("button", { name: "Compare", exact: true }).click();
+    await expect
+      .poll(() => f.read.mock.calls[0]?.[0])
+      .toEqual({ ref: "main", mode: "mergeBase", target: "workingTree" });
+    await expect
+      .element(screen.getByText(/Includes staged, unstaged, and untracked changes/))
+      .toBeVisible();
+    await expect.element(screen.getByText(/working tree \(HEAD 12345678\)/)).toBeVisible();
     f.controller.dispose();
     await screen.unmount();
   });

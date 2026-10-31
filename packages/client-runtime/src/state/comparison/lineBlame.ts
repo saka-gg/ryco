@@ -3,7 +3,7 @@ import type {
   GitReadLineBlameInput,
   GitReadLineBlameResult,
 } from "@ryco/contracts";
-import { comparisonFileKey } from "./index.ts";
+import { comparisonBlameSides, comparisonFileKey } from "./index.ts";
 
 export interface LineBlameTarget {
   side: "base" | "head";
@@ -27,8 +27,10 @@ export function displayedBlameTarget(
   file: BlameFile,
   side: "base" | "head",
   line: number,
+  source?: GitComparisonSource,
 ): LineBlameTarget | null {
   if (!Number.isSafeInteger(line) || line < 1) return null;
+  if (source && !comparisonBlameSides(source).includes(side)) return null;
   const path = side === "base" ? (file.prevName ?? file.name) : file.name;
   if (path === "/dev/null") return null;
   for (const hunk of file.hunks) {
@@ -72,6 +74,8 @@ export function createLineBlameReader(input: {
     },
     read(target: LineBlameTarget): Promise<GitReadLineBlameResult> {
       if (disposed) return Promise.reject(new Error("Comparison changed. Reopen line blame."));
+      if (!comparisonBlameSides(input.source).includes(target.side))
+        return Promise.reject(new Error("Working files have no committed blame."));
       const key = `${comparisonFileKey(input.environmentId, input.source, target.side, target.filePath)}:${target.line}`;
       const cached = cache.get(key);
       if (cached) return cached;

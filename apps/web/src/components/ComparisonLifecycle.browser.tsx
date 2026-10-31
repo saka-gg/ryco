@@ -16,6 +16,9 @@ vi.mock("../environmentApi", () => ({
 vi.mock("../environments/runtime", () => ({
   readEnvironmentConnection: () => null,
   subscribeEnvironmentConnections: () => () => {},
+  // The node's capabilities (whether it compares with the working tree).
+  useSavedEnvironmentRuntimeStore: (select: (state: { byId: object }) => unknown) =>
+    select({ byId: {} }),
 }));
 vi.mock("../platform/kv", () => ({
   webKV: {

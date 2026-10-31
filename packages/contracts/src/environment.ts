@@ -160,6 +160,11 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
    */
   pullRequestOptions: Schema.optionalKey(Schema.Boolean),
   /**
+   * `vcs.readComparison` honours `selection.target: "workingTree"` (a branch or commit compared
+   * with the working files); absent on older servers, which drop the key and compare with HEAD.
+   */
+  workingTreeComparison: Schema.optionalKey(Schema.Boolean),
+  /**
    * `terminal.write` honours `requireIdle` (types only into a shell it verifies idle, else
    * `TerminalBusyError`); absent on older servers, which drop the key and write unguarded.
    */

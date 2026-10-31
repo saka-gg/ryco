@@ -90,6 +90,9 @@ export const VIEW_KEYBINDING_COMMANDS = ["view.close", "view.reopenClosed"] as c
 // Open or minimize the current thread's side chat.
 export const SIDE_CHAT_KEYBINDING_COMMANDS = ["sideChat.toggle"] as const;
 
+// Step through the hunks of the diff panel.
+export const DIFF_HUNK_KEYBINDING_COMMANDS = ["diff.hunk.next", "diff.hunk.previous"] as const;
+
 /**
  * Every built-in command a key can be bound to. Some ship without a default
  * key, so this — not the default keymap — is the list a keybindings editor
@@ -130,6 +133,7 @@ export const STATIC_KEYBINDING_COMMANDS = [
   ...NAVIGATION_KEYBINDING_COMMANDS,
   ...VIEW_KEYBINDING_COMMANDS,
   ...SIDE_CHAT_KEYBINDING_COMMANDS,
+  ...DIFF_HUNK_KEYBINDING_COMMANDS,
 ] as const;
 export type StaticKeybindingCommand = (typeof STATIC_KEYBINDING_COMMANDS)[number];
 

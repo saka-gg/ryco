@@ -72,24 +72,31 @@ export function useDiffFileNavigation(
   }, [enabled, paths, viewportRef]);
 
   const index = paths.length === 0 ? -1 : Math.max(0, paths.indexOf(visiblePath ?? ""));
-  const jump = useCallback(
-    (direction: -1 | 1) => {
-      const target = adjacentDiffFileIndex(paths.length, index, direction);
-      if (target === null) return;
+  /** Scrolls the first file listed under `path` to the top (the file tree's rows). */
+  const reveal = useCallback(
+    (path: string) => {
       const anchor = Array.from(
         viewportRef.current?.querySelectorAll<HTMLElement>("[data-diff-file-path]") ?? [],
-      ).find((element) => element.dataset.diffFilePath === paths[target]);
+      ).find((element) => element.dataset.diffFilePath === path);
       if (!anchor) return;
       // Instant jumps avoid racing a second click against an in-progress smooth scroll.
       anchor.scrollIntoView({ block: "start", behavior: "instant" });
-      setVisiblePath(paths[target]!);
+      setVisiblePath(path);
     },
-    [index, paths, viewportRef],
+    [viewportRef],
+  );
+  const jump = useCallback(
+    (direction: -1 | 1) => {
+      const target = adjacentDiffFileIndex(paths.length, index, direction);
+      if (target !== null) reveal(paths[target]!);
+    },
+    [index, paths, reveal],
   );
   return {
     index,
     path: paths[index] ?? null,
     jump,
+    reveal,
     canPrevious: adjacentDiffFileIndex(paths.length, index, -1) !== null,
     canNext: adjacentDiffFileIndex(paths.length, index, 1) !== null,
   };

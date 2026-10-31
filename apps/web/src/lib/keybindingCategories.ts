@@ -128,6 +128,12 @@ const SIDE_CHAT_COMMAND_META = {
   "sideChat.toggle": { title: "Open or minimize side chat", sortWeight: 1 },
 } satisfies StaticCommandMetaGroup;
 
+// Step through the hunks of the diff panel (Diff, sort weights from 10).
+const DIFF_HUNK_COMMAND_META = {
+  "diff.hunk.next": { title: "Next hunk in the diff", sortWeight: 10 },
+  "diff.hunk.previous": { title: "Previous hunk in the diff", sortWeight: 11 },
+} satisfies StaticCommandMetaGroup;
+
 // Typed over every static command, so a command without a title fails typecheck.
 const STATIC_COMMAND_META: Readonly<Record<StaticKeybindingCommand, StaticCommandMeta>> = {
   ...CORE_COMMAND_META,
@@ -137,6 +143,7 @@ const STATIC_COMMAND_META: Readonly<Record<StaticKeybindingCommand, StaticComman
   ...NAVIGATION_COMMAND_META,
   ...VIEW_COMMAND_META,
   ...SIDE_CHAT_COMMAND_META,
+  ...DIFF_HUNK_COMMAND_META,
 };
 
 function isStaticCommand(command: KeybindingCommand): command is StaticKeybindingCommand {
