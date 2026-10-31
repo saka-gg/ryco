@@ -30,11 +30,15 @@ Desktop pages and sign-in children run sandboxed without Node integration, a Ryc
 
 External browser profile/cookie import and password management are deferred; this feature neither reads installed browser credentials nor imports conversations or cookies.
 
-On web, the browser provides a sandboxed iframe preview and an external-open link. Sites may reject framing, and the sandbox can restrict login/storage-dependent features. Desktop discovery and agent control are unavailable through that fallback. Remote localhost addresses need an explicitly reachable or forwarded URL, or node browser tabs (below), which the Browser panel does not show yet. The frozen phone web surface is unchanged. Locked use remains a future feature.
+On web, without node browser tabs (below), the browser provides a sandboxed iframe preview and an external-open link. Sites may reject framing, and the sandbox can restrict login/storage-dependent features. Desktop discovery and agent control are unavailable through that fallback. Remote localhost addresses need an explicitly reachable or forwarded URL there. The frozen phone web surface is unchanged. Locked use remains a future feature.
 
 ## Node browser tabs
 
-A node can also run browser tabs itself and stream them to its clients, so `localhost` means the node, not the device you are using. The node advertises them as `nodeBrowser` in its server config. This release adds the node side and the client runtime's frame source; the Browser panel will use them in a later release.
+A node can also run browser tabs itself and stream them to its clients, so `localhost` means the node, not the device you are using. The node advertises them as `nodeBrowser` in its server config.
+
+- **Where they show:** the Browser panel shows the node's tabs when the node runs them, your role on it may drive them (operators and owners) and the connection can carry their frames: a direct one (the node's own page, a paired or SSH environment). Otherwise it shows the iframe fallback above. Hub (hosted) connections show the fallback for now; a low-bandwidth view of node tabs over the Hub comes in a later release. Viewers never see node tabs, and the node refuses them anyway.
+- **On desktop:** the desktop app keeps its own tabs for its own backend. For a remote environment whose node runs tabs it offers **Node** and **This computer** at the start of the tab strip, starting on the node. Hub machines the desktop app reaches through its relay show its own tabs only.
+- **Using them:** each project or worktree directory has its own tabs, as on desktop. The page fits the panel (from 320 × 240 up to 3840 × 2160 CSS pixels). Click, drag, scroll, type and paste as in a normal tab; accented and CJK input arrives as text, and the mouse's Back and Forward buttons move the tab's history. Shift+Escape leaves the page. On a touchscreen a tap clicks and a drag scrolls. A page's alert, confirm or prompt shows above the page until you answer it. A crashed page offers **Reload**.
 
 - **Who can use them:** operator sessions only, as for terminals: the owner's own direct sessions and Hub sessions with the operator or owner role. Paired direct clients and Hub viewers get nothing, not even the tab list. The frame socket checks the role itself and closes with code 4403 for anyone else.
 - **The browser:** the same pinned Chrome for Testing headless shell HTML previews use, installed on first use. It is driven over `--remote-debugging-pipe`, never a debugging port. Its profile is `<stateDir>/node-browser/profile` (mode 0700), one profile for the whole node, so tabs share site logins. Chrome's sandbox stays on; only `RYCO_HTML_PREVIEW_NO_SANDBOX=1` turns it off, and a node running as root without it offers no tabs. Set `RYCO_NODE_BROWSER_DISABLED=1` to turn node tabs off.
@@ -72,7 +76,9 @@ bun run --cwd packages/shared test src/browserElementReference.test.ts
 bun run --cwd packages/client-runtime test src/state/composer
 bun run --cwd apps/web test src/browser/browserState.test.ts
 bun run --cwd apps/server test src/nodeBrowser src/htmlRender
-bun run --cwd packages/client-runtime test src/connection/nodeBrowserFrameSource.test.ts
+bun run --cwd packages/client-runtime test src/connection/nodeBrowserFrameSource.test.ts src/nodeBrowser
+bun run --cwd apps/web test src/browser/browserMode.test.ts
+bun run --cwd apps/web test:browser src/browser/NodeBrowserSurface.browser.tsx
 bun run --cwd apps/web test:browser src/browser/BrowserPanel.browser.tsx src/browser/browserElementPickScript.browser.tsx src/components/ChatView.BrowserElements.browser.tsx
 bun run --cwd apps/mobile test src/features/threads/ThreadMessage.test.tsx
 node apps/desktop/scripts/computer-use-smoke.mjs signin

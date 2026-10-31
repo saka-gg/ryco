@@ -126,6 +126,7 @@ import {
   type HostedConnectionFence,
 } from "./hostedEnvironmentConnection";
 import { webFrameScheduler, webSocket } from "../../platform";
+import { directNodeBrowserFrames } from "./nodeBrowserFrames";
 import { DesktopWorkspaceIpcSocketFactory } from "../../platform/desktopWorkspaceSocket";
 /** Desktop-only, and off the boot path: loaded by the first Hub machine connection. */
 const loadDesktopHubLinkedRoutes = () => import("../../platform/desktopHubLinkedRoutes");
@@ -871,7 +872,7 @@ function createPrimaryEnvironmentClient(
   }
   const connectionLabel = knownEnvironment?.label ?? null;
   const authenticatedSocketUrl = async (
-    pathname: "/ws" | "/ws/device" | "/ws/device-frames",
+    pathname: "/ws" | "/ws/device" | "/ws/device-frames" | "/ws/node-browser-frames",
     signal?: AbortSignal,
   ) => {
     const issued = await issuePrimaryWebSocketToken(signal);
@@ -916,13 +917,14 @@ function createPrimaryEnvironmentClient(
           }),
       },
     ),
+    { openNodeBrowserFrameSource: directNodeBrowserFrames(webSocket, authenticatedSocketUrl) },
   );
 }
 
 async function resolveSavedEnvironmentSocketUrl(
   environmentId: EnvironmentId,
   bearerToken: string,
-  pathname: "/ws" | "/ws/device" | "/ws/device-frames",
+  pathname: "/ws" | "/ws/device" | "/ws/device-frames" | "/ws/node-browser-frames",
   signal?: AbortSignal,
 ): Promise<string> {
   const saved = getSavedEnvironmentRecord(environmentId);
@@ -999,7 +1001,7 @@ function createSavedEnvironmentClient(
 ): WsRpcClient {
   useSavedEnvironmentRuntimeStore.getState().ensure(environmentId);
   const socketUrl = async (
-    pathname: "/ws" | "/ws/device" | "/ws/device-frames",
+    pathname: "/ws" | "/ws/device" | "/ws/device-frames" | "/ws/node-browser-frames",
     signal?: AbortSignal,
   ) =>
     resolveSavedEnvironmentSocketUrl(
@@ -1088,6 +1090,7 @@ function createSavedEnvironmentClient(
           }),
       },
     ),
+    { openNodeBrowserFrameSource: directNodeBrowserFrames(webSocket, (path) => socketUrl(path)) },
   );
 }
 
