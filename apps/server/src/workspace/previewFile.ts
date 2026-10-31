@@ -1,13 +1,26 @@
+import { createHash } from "node:crypto";
 import type { BigIntStats } from "node:fs";
 
 import { NotRegularFileError, openRegularFile } from "@ryco/shared/regularFile";
 
 /**
- * Shared by the whole-file previews in `WorkspaceFileSystem` and the chunked
- * read in `previewFileChunk.ts` (loaded on first use), so both keep one set of
- * file rules and refusal strings that clients map.
+ * Shared by the whole-file previews in `WorkspaceFileSystem`, the chunked read
+ * in `previewFileChunk.ts` and the open-file watch in `workspaceFileWatch.ts`
+ * (both loaded on first use), so all keep one set of file rules and refusal
+ * strings that clients map.
  */
 export const FILE_CHANGED_WHILE_READING = "File changed while it was being read. Try again.";
+
+/** The largest file the Files panel previews; content search skips larger ones too. */
+export const WORKSPACE_PREVIEW_MAX_BYTES = 512 * 1024;
+
+/**
+ * A text file's `version`: what `projects.readFile` returns, what a guarded
+ * write must name, and what the open-file watch reports.
+ */
+export function fileVersion(bytes: Uint8Array): string {
+  return `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
+}
 
 export function sameFileState(left: BigIntStats, right: BigIntStats): boolean {
   return (

@@ -24,6 +24,27 @@ Failures pause automatic saving. Typing does not dismiss the error or trigger a 
   uses the existing atomic, version-checked write with the disk encoding and line endings. An
   intervening external edit fails with another conflict. Explorer does not recreate deleted files.
 
+## Changes on disk
+
+On nodes that advertise `projectFileWatch`, File Preview watches the open text file while the
+panel shows it and the page is visible (`projects.subscribeFileChanges`). The node watches the
+file's folder, so an editor's atomic save is seen too, and reports the version `projects.readFile`
+would return for the file's bytes. It never sends the content. When the version differs from the
+one the panel holds, the panel reads the file again:
+
+- A clean editor takes the new text.
+- Unsaved edits get the conflict notice at once, and autosave pauses until **Reload** or
+  **Overwrite**. Before, the conflict appeared only at the next save.
+- A deleted file goes through the usual missing-file handling.
+
+The panel's own saves report the version it already holds, so they cost no extra read. A file that
+becomes a link out of the project reads as deleted. Each connection watches at most 8 files and a
+node at most 256 folders; past that the watch is refused and the panel refreshes as older nodes do.
+While a file is watched its workspace stays held, as it does after any read on that connection.
+Older nodes still refresh an open file only after a turn that changed it.
+
+## Connections
+
 Autosave consults the existing connection and hosted mutation authorities. It does not reconnect,
 restore mutation readiness, or replay writes automatically after a connection change. Native
 mobile and the frozen web phone presentation are unchanged.

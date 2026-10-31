@@ -4404,6 +4404,42 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
+  it.effect("routes websocket rpc projects.subscribeFileChanges", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const workspaceDir = yield* fs.makeTempDirectoryScoped({ prefix: "ryco-ws-project-watch-" });
+      yield* fs.writeFileString(`${workspaceDir}/app.ts`, "const answer = 42;\n");
+
+      yield* buildAppUnderTest();
+
+      const wsUrl = yield* getWsServerUrl("/ws");
+      const [events, outside] = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          Effect.all([
+            client[WS_METHODS.projectsSubscribeFileChanges]({
+              cwd: workspaceDir,
+              relativePath: "app.ts",
+            }).pipe(Stream.take(1), Stream.runCollect),
+            client[WS_METHODS.projectsSubscribeFileChanges]({
+              cwd: workspaceDir,
+              relativePath: "../escape.ts",
+            }).pipe(Stream.runDrain, Effect.flip),
+          ]),
+        ),
+      );
+
+      // The version a read of these bytes returns, and never the content.
+      const read = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          client[WS_METHODS.projectsReadFile]({ cwd: workspaceDir, relativePath: "app.ts" }),
+        ),
+      );
+      assert.deepEqual(Array.from(events), [{ type: "current", version: read.version }]);
+      assertTrue(outside._tag === "ProjectWatchFileError");
+      assert.equal(outside.reason, "outside-root");
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
   it.effect("routes websocket rpc shell.openInEditor", () =>
     Effect.gen(function* () {
       let openedInput: { cwd: string; editor: EditorId } | null = null;

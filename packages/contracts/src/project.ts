@@ -172,6 +172,51 @@ export class ProjectReadFileError extends Schema.TaggedError<ProjectReadFileErro
   },
 ) {}
 
+/** The file `projects.subscribeFileChanges` watches: the same path a `projects.readFile` names. */
+export const ProjectWatchFileInput = ProjectReadFileInput;
+export type ProjectWatchFileInput = typeof ProjectWatchFileInput.Type;
+
+/**
+ * What `projects.subscribeFileChanges` reports about one workspace file. It never carries the
+ * file's content: a client that sees a version it does not hold reads the file again through
+ * `projects.readFile`, with that read's limits and authorization.
+ *
+ * - `current` comes first on every (re)subscription, once the watch is in place, so a read
+ *   made before the watch cannot miss a change. A missing file reports `deleted` instead.
+ * - `changed` follows only when the version, or whether the file exists, changed since.
+ * - `version` is the `version` a `projects.readFile` of these bytes returns (so a client's own
+ *   save reports the version it already holds); null for a file over the preview limit or not
+ *   a regular file.
+ */
+export const ProjectFileChangeEvent = Schema.Union([
+  Schema.Struct({
+    type: Schema.Literals(["current", "changed"]),
+    version: Schema.NullOr(TrimmedNonEmptyString.check(Schema.isMaxLength(128))),
+  }),
+  Schema.Struct({ type: Schema.Literal("deleted") }),
+]);
+export type ProjectFileChangeEvent = typeof ProjectFileChangeEvent.Type;
+
+/**
+ * `outside-root`: the path leaves the project root. `unavailable`: the file's folder cannot be
+ * watched now (it is missing, or its watch stopped), and a later try may work. `limit`: the
+ * connection or the node already watches as many files as it may.
+ */
+export const ProjectWatchFileFailureReason = Schema.Literals([
+  "outside-root",
+  "unavailable",
+  "limit",
+]);
+export type ProjectWatchFileFailureReason = typeof ProjectWatchFileFailureReason.Type;
+
+export class ProjectWatchFileError extends Schema.TaggedError<ProjectWatchFileError>()(
+  "ProjectWatchFileError",
+  {
+    message: TrimmedNonEmptyString,
+    reason: ProjectWatchFileFailureReason,
+  },
+) {}
+
 export const ProjectReadFileBinaryInput = Schema.Struct({
   cwd: TrimmedNonEmptyString,
   relativePath: TrimmedNonEmptyString.check(Schema.isMaxLength(PROJECT_WRITE_FILE_PATH_MAX_LENGTH)),

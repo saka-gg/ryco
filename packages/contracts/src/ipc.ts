@@ -190,6 +190,8 @@ import type {
   ProjectReadFileBinaryResult,
   ProjectReadFileChunkInput,
   ProjectReadFileChunkResult,
+  ProjectFileChangeEvent,
+  ProjectWatchFileInput,
   ProjectReadFileInput,
   ProjectReadFileResult,
   ProjectStageFileReferenceInput,
@@ -1482,6 +1484,20 @@ export interface EnvironmentApi {
      * advertises `projectReadFileChunk`.
      */
     readFileChunk?: (input: ProjectReadFileChunkInput) => Promise<ProjectReadFileChunkResult>;
+    /**
+     * Notices when one file changes on disk (`projects.subscribeFileChanges`), never its
+     * content. Optional so test fakes need not supply it; clients call it only when the node's
+     * config advertises `projectFileWatch`. `onError`: the stream stopped for good, after
+     * `classifyFailure` saw the failure.
+     */
+    subscribeFileChanges?: (
+      input: ProjectWatchFileInput,
+      callback: (event: ProjectFileChangeEvent) => void,
+      options?: {
+        onError?: () => void;
+        classifyFailure?: (error: unknown) => "unsupported" | "response-too-large" | "failed";
+      },
+    ) => () => void;
     searchEntries: (input: ProjectSearchEntriesInput) => Promise<ProjectSearchEntriesResult>;
     /**
      * Only for nodes that advertise `projectContentSearch`. Aborting `signal` withdraws the

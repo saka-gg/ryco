@@ -301,6 +301,9 @@ import {
   ProjectStageFileReferenceError,
   ProjectStageFileReferenceInput,
   ProjectStageFileReferenceResult,
+  ProjectWatchFileError,
+  ProjectWatchFileInput,
+  ProjectFileChangeEvent,
   ProjectWriteFileError,
   ProjectWriteFileInput,
   ProjectWriteFileResult,
@@ -474,6 +477,7 @@ export const WS_METHODS = {
   projectsReadFileBinary: "projects.readFileBinary",
   projectsReadFileChunk: "projects.readFileChunk",
   projectsWriteFile: "projects.writeFile",
+  projectsSubscribeFileChanges: "projects.subscribeFileChanges",
   projectsStageFileReference: "projects.stageFileReference",
 
   // Chat attachment methods
@@ -1828,6 +1832,14 @@ export const WsProjectsWriteFileRpc = Rpc.make(WS_METHODS.projectsWriteFile, {
   error: Schema.Union([ProjectWriteFileError, AuthRpcError]),
 });
 
+/** Only on nodes that advertise `projectFileWatch`; see `ProjectFileChangeEvent`. */
+export const WsProjectsSubscribeFileChangesRpc = Rpc.make(WS_METHODS.projectsSubscribeFileChanges, {
+  payload: ProjectWatchFileInput,
+  success: ProjectFileChangeEvent,
+  error: Schema.Union([ProjectWatchFileError, AuthRpcError]),
+  stream: true,
+});
+
 export const WsProjectsStageFileReferenceRpc = Rpc.make(WS_METHODS.projectsStageFileReference, {
   payload: ProjectStageFileReferenceInput,
   success: ProjectStageFileReferenceResult,
@@ -2748,6 +2760,7 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   | typeof WsProjectsReadFileBinaryRpc
   | typeof WsProjectsReadFileChunkRpc
   | typeof WsProjectsWriteFileRpc
+  | typeof WsProjectsSubscribeFileChangesRpc
   | typeof WsProjectsStageFileReferenceRpc
   | typeof WsChatAttachmentsCreateFileUploadRpc
   | typeof WsChatAttachmentsReadChunkRpc
@@ -2981,6 +2994,7 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   WsProjectsReadFileBinaryRpc,
   WsProjectsReadFileChunkRpc,
   WsProjectsWriteFileRpc,
+  WsProjectsSubscribeFileChangesRpc,
   WsProjectsStageFileReferenceRpc,
   WsChatAttachmentsCreateFileUploadRpc,
   WsChatAttachmentsReadChunkRpc,

@@ -4,7 +4,7 @@ import {
   storagePathBlocker,
   canonicalStoragePath,
 } from "../../storage/lifecycle.ts";
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { constants as NodeFsConstants, type BigIntStats } from "node:fs";
 import * as NodeFs from "node:fs/promises";
 import * as NodePath from "node:path";
@@ -30,13 +30,14 @@ import { WorkspacePathOutsideRootError, WorkspacePaths } from "../Services/Works
 import { detectRasterImageMimeType } from "../../imageMime.ts";
 import {
   FILE_CHANGED_WHILE_READING,
+  fileVersion,
   openPreviewFile,
   sameFileState,
   tooLargeToPreview,
+  WORKSPACE_PREVIEW_MAX_BYTES,
 } from "../previewFile.ts";
 
-/** The largest file the Files panel previews; content search skips larger ones too. */
-export const WORKSPACE_PREVIEW_MAX_BYTES = 512 * 1024;
+export { WORKSPACE_PREVIEW_MAX_BYTES };
 const WORKSPACE_PREVIEW_TEXT_DECODER = new TextDecoder("utf-8", { fatal: true });
 const UTF8_BOM = Buffer.from([0xef, 0xbb, 0xbf]);
 const STAGED_FILE_ROOT = ".ryco/attachments";
@@ -44,10 +45,6 @@ const UNSAFE_PATH_SEGMENT_CHARS = new Set(["<", ">", ":", '"', "/", "\\", "|", "
 
 export function isLikelyBinaryPreview(bytes: Uint8Array): boolean {
   return bytes.subarray(0, Math.min(bytes.length, 8_192)).includes(0);
-}
-
-function fileVersion(bytes: Uint8Array): string {
-  return `sha256:${createHash("sha256").update(bytes).digest("hex")}`;
 }
 
 function decodePreviewContents(bytes: Uint8Array): string | null {
@@ -450,17 +447,24 @@ export const makeWorkspaceFileSystem = Effect.gen(function* () {
     return { realWorkspaceRoot, realTargetPath };
   });
 
+  const resolveTarget: WorkspaceFileSystemShape["resolveTarget"] = Effect.fn(
+    "WorkspaceFileSystem.resolveTarget",
+  )(function* (input) {
+    const target = yield* workspacePaths.resolveRelativePathWithinRoot({
+      workspaceRoot: input.cwd,
+      relativePath: input.relativePath,
+    });
+    const { realTargetPath } = yield* ensureResolvedPathStaysWithinWorkspace(
+      input,
+      target.absolutePath,
+    );
+    return { ...target, realPath: realTargetPath };
+  });
+
   const readFile: WorkspaceFileSystemShape["readFile"] = Effect.fn("WorkspaceFileSystem.readFile")(
     function* (input) {
-      const target = yield* workspacePaths.resolveRelativePathWithinRoot({
-        workspaceRoot: input.cwd,
-        relativePath: input.relativePath,
-      });
-
-      const { realTargetPath } = yield* ensureResolvedPathStaysWithinWorkspace(
-        input,
-        target.absolutePath,
-      );
+      const target = yield* resolveTarget(input);
+      const realTargetPath = target.realPath;
       const { bytes } = yield* Effect.tryPromise({
         try: () => readStableFileBytes(realTargetPath, WORKSPACE_PREVIEW_MAX_BYTES),
         catch: toWorkspaceFileSystemError(input, "workspaceFileSystem.readFile"),
@@ -499,15 +503,8 @@ export const makeWorkspaceFileSystem = Effect.gen(function* () {
   const readFileBinary: WorkspaceFileSystemShape["readFileBinary"] = Effect.fn(
     "WorkspaceFileSystem.readFileBinary",
   )(function* (input) {
-    const target = yield* workspacePaths.resolveRelativePathWithinRoot({
-      workspaceRoot: input.cwd,
-      relativePath: input.relativePath,
-    });
-
-    const { realTargetPath } = yield* ensureResolvedPathStaysWithinWorkspace(
-      input,
-      target.absolutePath,
-    );
+    const target = yield* resolveTarget(input);
+    const realTargetPath = target.realPath;
     const { bytes } = yield* Effect.tryPromise({
       try: () => readStableFileBytes(realTargetPath, PROJECT_READ_FILE_BINARY_MAX_BYTES),
       catch: toWorkspaceFileSystemError(input, "workspaceFileSystem.readFileBinary"),
@@ -533,15 +530,8 @@ export const makeWorkspaceFileSystem = Effect.gen(function* () {
   const readFileChunk: WorkspaceFileSystemShape["readFileChunk"] = Effect.fn(
     "WorkspaceFileSystem.readFileChunk",
   )(function* (input) {
-    const target = yield* workspacePaths.resolveRelativePathWithinRoot({
-      workspaceRoot: input.cwd,
-      relativePath: input.relativePath,
-    });
-
-    const { realTargetPath } = yield* ensureResolvedPathStaysWithinWorkspace(
-      input,
-      target.absolutePath,
-    );
+    const target = yield* resolveTarget(input);
+    const realTargetPath = target.realPath;
     const chunk = yield* Effect.tryPromise({
       try: async () => {
         // Loaded on the first chunked preview, outside the server's boot chunks.
@@ -564,15 +554,8 @@ export const makeWorkspaceFileSystem = Effect.gen(function* () {
   const writeFile: WorkspaceFileSystemShape["writeFile"] = Effect.fn(
     "WorkspaceFileSystem.writeFile",
   )(function* (input) {
-    const target = yield* workspacePaths.resolveRelativePathWithinRoot({
-      workspaceRoot: input.cwd,
-      relativePath: input.relativePath,
-    });
-
-    const { realTargetPath } = yield* ensureResolvedPathStaysWithinWorkspace(
-      input,
-      target.absolutePath,
-    );
+    const target = yield* resolveTarget(input);
+    const realTargetPath = target.realPath;
     yield* assertStorageWritable(realTargetPath);
     const guarded = input.expectedVersion !== undefined;
     if (
@@ -696,6 +679,7 @@ export const makeWorkspaceFileSystem = Effect.gen(function* () {
   });
 
   return {
+    resolveTarget,
     readFile,
     readFileBinary,
     readFileChunk,

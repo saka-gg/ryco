@@ -10,6 +10,7 @@ import type {
   LocalApi,
   OpinionatedPluginCheckInput,
   OpinionatedPluginInstallInput,
+  ProjectFileChangeEvent,
   ProviderSignInWireEvent,
   ServerSettingsPatch,
 } from "@ryco/contracts";
@@ -184,6 +185,12 @@ export interface WsRpcClient {
       options?: { readonly signal?: AbortSignal | undefined },
     ) => ReturnType<RpcUnaryMethod<typeof WS_METHODS.projectsSearchContent>>;
     readonly writeFile: RpcUnaryMethod<typeof WS_METHODS.projectsWriteFile>;
+    /** Only for nodes that advertise `projectFileWatch`; `watchProjectFile` shares and retries it. */
+    readonly subscribeFileChanges: (
+      input: RpcInput<typeof WS_METHODS.projectsSubscribeFileChanges>,
+      listener: (event: ProjectFileChangeEvent) => void,
+      options?: StreamSubscriptionOptions,
+    ) => () => void;
     readonly stageFileReference: RpcUnaryMethod<typeof WS_METHODS.projectsStageFileReference>;
     readonly initializeGit: RpcUnaryMethod<typeof WS_METHODS.projectsInitializeGit>;
     readonly promoteChatPreview: RpcUnaryMethod<typeof WS_METHODS.projectsPromoteChatPreview>;
@@ -698,6 +705,12 @@ export function createWsRpcClient(transport: WsTransport, device?: DeviceRpcClie
       },
       writeFile: (input) =>
         transport.request((client) => client[WS_METHODS.projectsWriteFile](input)),
+      subscribeFileChanges: (input, listener, options) =>
+        transport.subscribe(
+          (client) => client[WS_METHODS.projectsSubscribeFileChanges](input),
+          listener,
+          transportSubscribeOptions(options, WS_METHODS.projectsSubscribeFileChanges),
+        ),
       stageFileReference: (input) =>
         transport.request((client) => client[WS_METHODS.projectsStageFileReference](input)),
       initializeGit: (input) =>

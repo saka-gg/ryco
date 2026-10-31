@@ -139,6 +139,15 @@ export function selectServerReadsFileChunks(config: ServerConfig | null): boolea
 }
 
 /**
+ * Whether the environment's live server config says it serves
+ * `projects.subscribeFileChanges`, read like `selectServerReadsFileChunks`.
+ * Without it, an open file is read again only after a turn that changed it.
+ */
+export function selectServerWatchesFiles(config: ServerConfig | null): boolean {
+  return config?.environment.capabilities.projectFileWatch === true;
+}
+
+/**
  * How an image preview gets its bytes. Raster images go through the binary
  * read (magic-byte sniffed, 4 MiB cap); SVG is text, so it renders from the
  * regular text read.

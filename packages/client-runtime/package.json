@@ -42,6 +42,10 @@
       "types": "./src/rpc/workspaceFileRead.ts",
       "import": "./src/rpc/workspaceFileRead.ts"
     },
+    "./rpc/projectFileWatch": {
+      "types": "./src/rpc/projectFileWatch.ts",
+      "import": "./src/rpc/projectFileWatch.ts"
+    },
     "./connection": {
       "types": "./src/connection/index.ts",
       "import": "./src/connection/index.ts"

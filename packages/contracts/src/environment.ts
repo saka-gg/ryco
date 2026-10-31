@@ -115,6 +115,12 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
   /** `projects.readFileChunk` (PDF and image previews in bounded chunks); absent on older servers. */
   projectReadFileChunk: Schema.optionalKey(Schema.Boolean),
   /**
+   * `projects.subscribeFileChanges` (notices when an open file changes on disk, never its
+   * content); absent on older servers, whose clients reread an open file only after a turn that
+   * changed it.
+   */
+  projectFileWatch: Schema.optionalKey(Schema.Boolean),
+  /**
    * CLIProxyAPI hub settings and reads (`server.readCliProxyHubs` / `server.testCliProxyHub`);
    * absent on older servers, which drop `cliProxyHubs` from settings patches.
    */
