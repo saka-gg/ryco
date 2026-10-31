@@ -438,6 +438,10 @@
       "types": "./src/delegationSlot.ts",
       "import": "./src/delegationSlot.ts"
     },
+    "./sharedClock": {
+      "types": "./src/sharedClock.ts",
+      "import": "./src/sharedClock.ts"
+    },
     "./interThreadMessage": {
       "types": "./src/interThreadMessage.ts",
       "import": "./src/interThreadMessage.ts"

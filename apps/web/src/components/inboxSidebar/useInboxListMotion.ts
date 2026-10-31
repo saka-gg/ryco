@@ -12,6 +12,7 @@ import {
 } from "react";
 
 import { readMotionDurationMs } from "../../lib/perf/motion";
+import { visibleSecondTicker } from "../../lib/perf/ticker";
 
 /** Row shells carry this attribute; the hook positions and animates them. */
 export const INBOX_ROW_KEY_ATTRIBUTE = "data-inbox-row-key";
@@ -242,39 +243,11 @@ export function useInboxListMotion(input: {
   return { listRef, highlightRef, gateRef, onPointerMove, onPointerLeave };
 }
 
-/*
- * A single one-second clock shared by every running row, alive only while a
- * running row is mounted.
- */
-const clockListeners = new Set<() => void>();
-let clockTimer: ReturnType<typeof setInterval> | null = null;
-let clockNow = Date.now();
-
-function subscribeClock(listener: () => void) {
-  clockListeners.add(listener);
-  if (clockTimer === null) {
-    clockNow = Date.now();
-    clockTimer = setInterval(() => {
-      clockNow = Date.now();
-      for (const notify of clockListeners) notify();
-    }, 1000);
-  }
-  return () => {
-    clockListeners.delete(listener);
-    if (clockListeners.size === 0 && clockTimer !== null) {
-      clearInterval(clockTimer);
-      clockTimer = null;
-    }
-  };
-}
-
-// Between ticks the snapshot is the last tick; with no clock running, a fresh
-// second (stable within the second, as useSyncExternalStore requires).
-const readClock = () => {
-  if (clockTimer === null) clockNow = Math.floor(Date.now() / 1000) * 1000;
-  return clockNow;
-};
-
+/** The shared second clock (paused while the page is hidden), for every running row's time. */
 export function useInboxClock(): number {
-  return useSyncExternalStore(subscribeClock, readClock, readClock);
+  return useSyncExternalStore(
+    visibleSecondTicker.subscribe,
+    visibleSecondTicker.read,
+    visibleSecondTicker.read,
+  );
 }

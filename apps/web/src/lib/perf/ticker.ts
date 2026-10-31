@@ -1,4 +1,4 @@
-type VisibleTickerListener = (nowMs: number) => void;
+import { createSharedClock, type SharedClock } from "@ryco/shared/sharedClock";
 
 interface VisibleTickerWindow {
   setInterval(callback: () => void, delayMs: number): unknown;
@@ -18,9 +18,8 @@ export interface VisibleTickerOptions {
   now?: (() => number) | undefined;
 }
 
-export interface VisibleTicker {
-  subscribe(listener: VisibleTickerListener): () => void;
-}
+/** The shared clock (`@ryco/shared/sharedClock`), paused while the page is hidden. */
+export type VisibleTicker = SharedClock;
 
 function getDefaultWindowTarget(): VisibleTickerWindow | null {
   return typeof window === "undefined" ? null : window;
@@ -34,82 +33,26 @@ export function createVisibleTicker({
   intervalMs,
   windowTarget = getDefaultWindowTarget(),
   documentTarget = getDefaultDocumentTarget(),
-  now = Date.now,
+  now,
 }: VisibleTickerOptions): VisibleTicker {
-  const listeners = new Set<VisibleTickerListener>();
-  let intervalId: unknown = null;
-  let listeningForVisibility = false;
-
-  const isVisible = () => documentTarget?.visibilityState !== "hidden";
-
-  const emit = () => {
-    const nowMs = now();
-    for (const listener of listeners) {
-      listener(nowMs);
-    }
-  };
-
-  const stopInterval = () => {
-    if (intervalId === null || !windowTarget) {
-      return;
-    }
-    windowTarget.clearInterval(intervalId);
-    intervalId = null;
-  };
-
-  const startInterval = () => {
-    if (intervalId !== null || !windowTarget || listeners.size === 0 || !isVisible()) {
-      return;
-    }
-    intervalId = windowTarget.setInterval(emit, intervalMs);
-  };
-
-  const handleVisibilityChange = () => {
-    if (!isVisible()) {
-      stopInterval();
-      return;
-    }
-    emit();
-    startInterval();
-  };
-
-  const ensureVisibilityListener = () => {
-    if (listeningForVisibility || !documentTarget) {
-      return;
-    }
-    documentTarget.addEventListener("visibilitychange", handleVisibilityChange);
-    listeningForVisibility = true;
-  };
-
-  const cleanupVisibilityListener = () => {
-    if (!listeningForVisibility || !documentTarget) {
-      return;
-    }
-    documentTarget.removeEventListener("visibilitychange", handleVisibilityChange);
-    listeningForVisibility = false;
-  };
-
-  return {
-    subscribe(listener) {
-      listeners.add(listener);
-      ensureVisibilityListener();
-      listener(now());
-      startInterval();
-
-      let unsubscribed = false;
-      return () => {
-        if (unsubscribed) {
-          return;
+  return createSharedClock({
+    intervalMs,
+    // Unset, the clock reads `Date.now()` at each tick (so a test's fake clock applies).
+    ...(now ? { now } : {}),
+    // Without a window (SSR, tests) nothing ticks: the timer stays unset.
+    setInterval: (tick, delayMs) => windowTarget?.setInterval(tick, delayMs) ?? null,
+    clearInterval: (id) => windowTarget?.clearInterval(id),
+    visibility: documentTarget
+      ? {
+          isVisible: () => documentTarget.visibilityState !== "hidden",
+          subscribe: (onChange) => {
+            documentTarget.addEventListener("visibilitychange", onChange);
+            return () => documentTarget.removeEventListener("visibilitychange", onChange);
+          },
         }
-        unsubscribed = true;
-        listeners.delete(listener);
-        if (listeners.size === 0) {
-          stopInterval();
-          cleanupVisibilityListener();
-        }
-      };
-    },
-  };
+      : null,
+  });
 }
 
+/** Web's once-a-second clock for every elapsed-time label. */
 export const visibleSecondTicker = createVisibleTicker({ intervalMs: 1000 });

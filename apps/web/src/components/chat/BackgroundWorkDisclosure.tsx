@@ -2,6 +2,8 @@ import { ChevronDownIcon } from "lucide-react";
 import { memo, useEffect, useId, useRef, useState } from "react";
 import type { BackgroundTask, BackgroundWork } from "@ryco/shared/backgroundWork";
 
+import { visibleSecondTicker } from "../../lib/perf/ticker";
+
 function elapsed(task: BackgroundTask, connected: boolean): string {
   const start = task.activeSince ? Date.parse(task.activeSince) : NaN;
   const end = connected && task.status !== "idle" ? Date.now() : Date.parse(task.updatedAt);
@@ -127,8 +129,8 @@ export function BackgroundWorkDisclosure(props: {
   useEffect(() => {
     if (!open || !props.connected || !props.work.tasks.some((task) => task.activeSince !== null))
       return;
-    const tick = () => {
-      if (document.hidden) return;
+    // The shared second clock: one timer for every elapsed label, paused while the page is hidden.
+    return visibleSecondTicker.subscribe(() => {
       const rows = new Map(props.work.tasks.map((task) => [task.id, task]));
       for (const node of listRef.current?.querySelectorAll<HTMLElement>(
         "[data-background-elapsed]",
@@ -136,10 +138,7 @@ export function BackgroundWorkDisclosure(props: {
         const task = rows.get(node.dataset.backgroundElapsed ?? "");
         if (task) node.textContent = elapsed(task, true);
       }
-    };
-    tick();
-    const timer = window.setInterval(tick, 1000);
-    return () => window.clearInterval(timer);
+    });
   }, [open, props.connected, props.work.tasks]);
   return (
     <section
