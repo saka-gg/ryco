@@ -29,17 +29,22 @@ export function formatIssuedPairingCredential(
   options?: {
     readonly json?: boolean;
     readonly baseUrl?: string;
+    /** A link already built for this credential (it wins over `baseUrl`). */
+    readonly pairUrl?: string;
+    /** What a QR code of `pairUrl` would hold; null when only this computer can reach it. */
+    readonly qrUrl?: string | null;
   },
 ): string {
   const pairUrl =
-    options?.baseUrl != null && options.baseUrl.length > 0
+    options?.pairUrl ??
+    (options?.baseUrl != null && options.baseUrl.length > 0
       ? (() => {
           const url = new URL("/pair", options.baseUrl);
           url.searchParams.delete("token");
           url.hash = new URLSearchParams([["token", credential.credential]]).toString();
           return url.toString();
         })()
-      : undefined;
+      : undefined);
 
   if (options?.json) {
     return `${JSON.stringify(
@@ -50,6 +55,7 @@ export function formatIssuedPairingCredential(
         role: credential.role,
         expiresAt: toIsoString(credential.expiresAt),
         ...(pairUrl ? { pairUrl } : {}),
+        ...(options.qrUrl === undefined ? {} : { qrUrl: options.qrUrl }),
       },
       null,
       2,

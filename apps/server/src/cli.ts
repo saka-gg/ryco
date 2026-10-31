@@ -20,10 +20,12 @@ import {
   type ClientOrchestrationCommand,
 } from "@ryco/contracts";
 import {
+  Clock,
   Config,
   Console,
   type Context,
   Data,
+  DateTime,
   Duration,
   Effect,
   Exit,
@@ -109,6 +111,11 @@ import {
   type SetupContext,
   type SetupOperations,
 } from "./cliSetup/setupFlow.ts";
+import {
+  discoverPairingLinks,
+  formatPairingQrBlock,
+  pairingLinksForBaseUrl,
+} from "./cliSetup/pairingQr.ts";
 import { cliCommandPrefix, dim, isInteractiveTerminal } from "./cliSetup/ui.ts";
 import { makeDbCommand } from "./cliDb/dbCommand.ts";
 import {
@@ -152,6 +159,7 @@ import { RepositoryIdentityResolverLive } from "./project/Layers/RepositoryIdent
 import {
   clearPersistedServerRuntimeStateIfStale,
   isPersistedServerRunning,
+  type PersistedServerRuntimeState,
   readPersistedServerRuntimeState,
 } from "./serverRuntimeState.ts";
 import { WorkspacePaths } from "./workspace/Services/WorkspacePaths.ts";
@@ -1052,9 +1060,12 @@ const quietly = <A, E, R>(
 ): Effect.Effect<A, E, R> =>
   quiet ? Effect.provideService(effect, References.MinimumLogLevel, "Error") : effect;
 
-const runWithAuthControlPlane = <A, E>(
+const runWithAuthControlPlane = <A, E, R = never>(
   flags: CliAuthLocationFlags,
-  run: (authControlPlane: AuthControlPlaneShape) => Effect.Effect<A, E>,
+  run: (
+    authControlPlane: AuthControlPlaneShape,
+    config: ServerConfigShape,
+  ) => Effect.Effect<A, E, R>,
   options?: {
     readonly quietLogs?: boolean;
   },
@@ -1068,7 +1079,7 @@ const runWithAuthControlPlane = <A, E>(
       const minimumLogLevel = quiet ? "Error" : adminCommandLogLevel(logLevel, config.logLevel);
       return yield* Effect.gen(function* () {
         const authControlPlane = yield* AuthControlPlane;
-        return yield* run(authControlPlane);
+        return yield* run(authControlPlane, config);
       }).pipe(
         Effect.provide(
           Layer.mergeAll(AuthControlPlaneRuntimeLive).pipe(
@@ -1639,18 +1650,28 @@ const tokenOnlyFlag = Flag.Boolean("token-only").pipe(
   Flag.withDefault(false),
 );
 
+const qrFlag = Flag.Boolean("qr").pipe(
+  Flag.withDescription(
+    "Print the pairing link as a QR code (default when the output is a terminal, never with --json; `--no-qr` turns it off).",
+  ),
+  Flag.optional,
+);
+
+const PAIRING_QR_NO_NODE_NOTE = "No running node found; pass --base-url to print a QR code.";
+
 const pairingCreateCommand = Command.make("create", {
   ...authLocationFlags,
   ttl: ttlFlag,
   label: labelFlag,
   baseUrl: baseUrlFlag,
   json: jsonFlag,
+  qr: qrFlag,
 }).pipe(
   Command.withDescription("Issue a new client pairing token."),
   Command.withHandler((flags) =>
     runWithAuthControlPlane(
       flags,
-      (authControlPlane) =>
+      (authControlPlane, config) =>
         Effect.gen(function* () {
           const issued = yield* authControlPlane.createPairingLink({
             role: "client",
@@ -1658,11 +1679,73 @@ const pairingCreateCommand = Command.make("create", {
             ...(Option.isSome(flags.ttl) ? { ttl: flags.ttl.value } : {}),
             ...(Option.isSome(flags.label) ? { label: flags.label.value } : {}),
           });
-          const output = formatIssuedPairingCredential(issued, {
-            json: flags.json,
-            ...(Option.isSome(flags.baseUrl) ? { baseUrl: flags.baseUrl.value } : {}),
+          // `--json` never draws a QR and never looks for the node: with `--base-url` it reports
+          // the link a QR would hold, as before plus `qrUrl`.
+          const wantsQr = !flags.json && Option.getOrElse(flags.qr, () => isInteractiveTerminal());
+          if (!wantsQr) {
+            yield* Console.log(
+              formatIssuedPairingCredential(issued, {
+                json: flags.json,
+                ...(Option.isSome(flags.baseUrl)
+                  ? (() => {
+                      const links = pairingLinksForBaseUrl(issued.credential, flags.baseUrl.value);
+                      return { pairUrl: links.pairingUrl, qrUrl: links.qrUrl };
+                    })()
+                  : {}),
+              }),
+            );
+            return;
+          }
+          const runtime = Option.isSome(flags.baseUrl)
+            ? null
+            : yield* probeLocalServerRuntime(config.serverRuntimeStatePath);
+          // The node's own bind host (its runtime file) and its saved Tailscale Serve settings:
+          // the QR must hold an address that node really listens on.
+          const savedNode =
+            runtime === null
+              ? null
+              : yield* Effect.promise(() => readNodeConfig(nodeConfigPath(config.stateDir)));
+          const links = Option.isSome(flags.baseUrl)
+            ? pairingLinksForBaseUrl(issued.credential, flags.baseUrl.value)
+            : runtime === null
+              ? null
+              : yield* Effect.promise(() =>
+                  discoverPairingLinks({
+                    credential: issued.credential,
+                    origin: runtime.origin,
+                    host: runtime.host,
+                    tailscaleServeEnabled:
+                      config.tailscaleServeEnabled || savedNode?.tailscaleServe === true,
+                    tailscaleServePort: savedNode?.tailscaleServePort ?? config.tailscaleServePort,
+                  }),
+                ).pipe(Effect.orElseSucceed(() => null));
+          const summary = formatIssuedPairingCredential(issued, {
+            ...(links === null ? {} : { pairUrl: links.pairingUrl }),
           });
-          yield* Console.log(output);
+          if (links === null) {
+            yield* Console.log(`${summary}${PAIRING_QR_NO_NODE_NOTE}\n`);
+            return;
+          }
+          const minutes = Math.max(
+            1,
+            Math.round(
+              (DateTime.toEpochMillis(issued.expiresAt) - (yield* Clock.currentTimeMillis)) /
+                60_000,
+            ),
+          );
+          const renderQrCode = yield* loadTerminalQrCode;
+          yield* Console.log(
+            `${summary}${formatPairingQrBlock({
+              links,
+              renderQrCode,
+              footer: [
+                `One-time client link, valid for ${minutes} minute${minutes === 1 ? "" : "s"}.`,
+              ],
+              // The summary above already printed it as "Pair URL".
+              showPairingUrl: false,
+              dim,
+            })}`,
+          );
         }),
       {
         quietLogs: flags.json,
@@ -4126,20 +4209,26 @@ const resolveSetupContext = (baseDir: Option.Option<string>) =>
   });
 
 /** The running node's origin, when a server recorded one and actually answers there. */
-const probeLocalServer = (serverRuntimeStatePath: string) =>
+/** The runtime file of this home's node, when that node answers. */
+const probeLocalServerRuntime = (serverRuntimeStatePath: string) =>
   readPersistedServerRuntimeState(serverRuntimeStatePath).pipe(
     Effect.flatMap((state) =>
       Option.isNone(state)
-        ? Effect.succeed<string | null>(null)
+        ? Effect.succeed<PersistedServerRuntimeState | null>(null)
         : Effect.tryPromise(async () => {
             const response = await fetch(
               new URL("/.well-known/ryco/environment", state.value.origin),
               { signal: AbortSignal.timeout(1_500) },
             );
-            return response.ok ? state.value.origin : null;
+            return response.ok ? state.value : null;
           }),
     ),
     Effect.orElseSucceed(() => null),
+  );
+
+const probeLocalServer = (serverRuntimeStatePath: string) =>
+  probeLocalServerRuntime(serverRuntimeStatePath).pipe(
+    Effect.map((state) => state?.origin ?? null),
   );
 
 const emptyServerFlags = (baseDir: Option.Option<string>): CliServerFlags => ({

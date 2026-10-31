@@ -25,6 +25,8 @@ export interface HeadlessServeAccessInfo {
    */
   readonly token?: string;
   readonly pairingUrl?: string;
+  /** What the QR code holds: `pairingUrl`, or null when only this computer can reach it. */
+  readonly qrUrl?: string | null;
   /** Minutes until the one-time token expires, when known. */
   readonly tokenExpiresInMinutes?: number;
   /** Further ways to reach this server, beyond `pairingUrl`. */
@@ -47,6 +49,38 @@ export const isLoopbackHost = (host: string | undefined): boolean => {
     host === "[::1]" ||
     host.startsWith("127.")
   );
+};
+
+/**
+ * Printed instead of a QR code when the only pairing link is a loopback address: a
+ * phone scanning it would reach itself, not this node.
+ */
+export const LOOPBACK_ONLY_PAIRING_NOTE =
+  "Only this computer can reach this node. Turn on network access or Tailscale Serve to pair another device.";
+
+/**
+ * A host a phone scanning a QR code cannot reach this node at: loopback in any spelling the URL
+ * parser leaves (127/8, `::1`, IPv4-mapped `::ffff:7f..`, `localhost` and its subdomains, with or
+ * without a trailing dot) and the unspecified addresses.
+ */
+const isUnreachableFromAnotherDevice = (hostname: string): boolean => {
+  const host = hostname.toLowerCase().replace(/\.$/u, "");
+  return (
+    isLoopbackHost(host) ||
+    host.endsWith(".localhost") ||
+    isWildcardHost(host) ||
+    /^\[::ffff:7f[0-9a-f]{2}:[0-9a-f]{1,4}\]$/u.test(host) ||
+    /^\[::ffff:127\./u.test(host)
+  );
+};
+
+/** A pairing link worth drawing as a QR code: one another device can reach. */
+export const pairingQrUrl = (pairingUrl: string): string | null => {
+  try {
+    return isUnreachableFromAnotherDevice(new URL(pairingUrl).hostname) ? null : pairingUrl;
+  } catch {
+    return null;
+  }
 };
 
 export const isWildcardHost = (host: string | undefined): boolean =>
@@ -187,7 +221,11 @@ export const formatHeadlessServeOutput = (
           `Hub relay: enabled via ${accessInfo.hubOrigin}. Link this node to your account with \`ryco hub login\` (or \`ryco hub enroll\`); check it with \`ryco hub status\`.`,
         ]),
     "",
-    renderQrCode(accessInfo.pairingUrl),
+    ...(accessInfo.qrUrl === undefined
+      ? [renderQrCode(accessInfo.pairingUrl)]
+      : accessInfo.qrUrl === null
+        ? [LOOPBACK_ONLY_PAIRING_NOTE]
+        : [renderQrCode(accessInfo.qrUrl)]),
     "",
   ].join("\n");
 };
@@ -209,6 +247,8 @@ export const resolveHeadlessServeLinks = (input: {
 }): {
   readonly connectionString: string;
   readonly pairingUrl: string;
+  /** `pairingUrl` unless it is a loopback address (the fallback, or a loopback `--base-url`). */
+  readonly qrUrl: string | null;
   readonly alternativeLinks: ReadonlyArray<HeadlessServeAccessLink>;
 } => {
   const reachable = input.endpoints.filter(
@@ -237,9 +277,11 @@ export const resolveHeadlessServeLinks = (input: {
       });
     }
   }
+  const pairingUrl = buildPairingUrl(connectionString, input.credential);
   return {
     connectionString,
-    pairingUrl: buildPairingUrl(connectionString, input.credential),
+    pairingUrl,
+    qrUrl: pairingQrUrl(pairingUrl),
     alternativeLinks,
   };
 };
