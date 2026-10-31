@@ -420,7 +420,8 @@ export const makeCommandWatchRuntime = (
       revision: watch.revision + 1,
     });
 
-    const agentControlOn = policy === undefined ? Effect.succeed(true) : policy.isEnabled;
+    // Watches exist only through Agent Control: a node without its policy runs none (fails closed).
+    const agentControlOn = policy === undefined ? Effect.succeed(false) : policy.isEnabled;
 
     /**
      * Why the chat cannot take a wake now, or null: Agent Control off (it is the user's kill

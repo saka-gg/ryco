@@ -134,13 +134,10 @@ async function createHarness(
         };
       }),
     ),
-    ...(options.agentControlEnabled === undefined
-      ? []
-      : [
-          Layer.succeed(AgentControlPolicy, {
-            isEnabled: Effect.sync(options.agentControlEnabled),
-          } as never),
-        ]),
+    // Agent Control is on unless a test switches it; without a policy the runtime runs nothing.
+    Layer.succeed(AgentControlPolicy, {
+      isEnabled: Effect.sync(options.agentControlEnabled ?? (() => true)),
+    } as never),
   );
   const layer = fakes.pipe(
     Layer.provideMerge(engineLayer),
