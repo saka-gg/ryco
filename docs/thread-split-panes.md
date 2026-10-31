@@ -8,7 +8,9 @@ All threads in a layout belong to the same environment. Existing connection,
 subscription and mutation-readiness policies remain authoritative.
 
 Click into a pane or choose its title to activate it. The route identifies the
-focused thread. Only that pane installs global interaction listeners; other
+focused thread. The [chat tabs](user/chat-tabs.md) show in the focused pane's
+header: a tab of a chat in the split focuses its pane, any other tab opens its
+chat on its own and leaves the layout unchanged. Only that pane installs global interaction listeners; other
 views continue rendering through the existing conversation/runtime stores.
 A first click activates an inactive pane and restores focus to the intended
 control after navigation succeeds; it does not replay a button action. Keyboard

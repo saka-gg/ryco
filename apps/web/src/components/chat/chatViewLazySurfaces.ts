@@ -60,3 +60,12 @@ export const LazyPullRequestThreadDialog: PreloadableLazyComponent<
 > = preloadableLazy(() =>
   import("../PullRequestThreadDialog").then((module) => module.PullRequestThreadDialog),
 );
+
+/**
+ * The open chat tabs in the chat header (desktop and web, with the Open chat tabs setting on). It
+ * carries the drag-and-drop sortable preset, so it loads right after the header's first frame;
+ * until then the header shows the chat's title.
+ */
+export const LazyOpenChatTabStrip = preloadableLazy(() =>
+  import("./OpenChatTabStrip").then((module) => module.OpenChatTabStrip),
+);

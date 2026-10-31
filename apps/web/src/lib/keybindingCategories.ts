@@ -20,6 +20,7 @@ export const KEYBINDING_CATEGORIES = {
   editor: { id: "editor", label: "Editor", sortWeight: 80 },
   modelPicker: { id: "modelPicker", label: "Model picker", sortWeight: 90 },
   thread: { id: "thread", label: "Threads", sortWeight: 100 },
+  threadTab: { id: "threadTab", label: "Chat tabs", sortWeight: 103 },
   view: { id: "view", label: "Tabs and panes", sortWeight: 104 },
   pane: { id: "pane", label: "Split view", sortWeight: 105 },
   pullRequests: { id: "pullRequests", label: "Pull requests", sortWeight: 107 },
@@ -134,6 +135,12 @@ const DIFF_HUNK_COMMAND_META = {
   "diff.hunk.previous": { title: "Previous hunk in the diff", sortWeight: 11 },
 } satisfies StaticCommandMetaGroup;
 
+// The next or previous open chat tab in the chat header.
+const THREAD_TAB_COMMAND_META = {
+  "threadTab.next": { title: "Next chat tab", sortWeight: 1 },
+  "threadTab.previous": { title: "Previous chat tab", sortWeight: 2 },
+} satisfies StaticCommandMetaGroup;
+
 // Typed over every static command, so a command without a title fails typecheck.
 const STATIC_COMMAND_META: Readonly<Record<StaticKeybindingCommand, StaticCommandMeta>> = {
   ...CORE_COMMAND_META,
@@ -144,6 +151,7 @@ const STATIC_COMMAND_META: Readonly<Record<StaticKeybindingCommand, StaticComman
   ...VIEW_COMMAND_META,
   ...SIDE_CHAT_COMMAND_META,
   ...DIFF_HUNK_COMMAND_META,
+  ...THREAD_TAB_COMMAND_META,
 };
 
 function isStaticCommand(command: KeybindingCommand): command is StaticKeybindingCommand {

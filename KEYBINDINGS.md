@@ -261,6 +261,18 @@ browser tab keeps `mod+w` and `mod+shift+t` for itself and never passes them to 
 
 This default lives in the app, not on the node, so older apps have no key for it.
 
+#### Chat tabs
+
+- `threadTab.next` / `threadTab.previous`: show the next or previous open chat tab in the chat
+  header, wrapping at either end like a browser. On macOS they default to `mod+ctrl+arrowright` /
+  `mod+ctrl+arrowleft` (⌃⌘→ / ⌃⌘←), which also work from the terminal; elsewhere to
+  `ctrl+pagedown` / `ctrl+pageup` outside the terminal. A regular browser tab on Windows and Linux
+  keeps Ctrl+PageUp/PageDown for its own tabs, so there bind other keys or use the desktop app.
+  They also work while you type in the composer. With the tabs turned off (Settings > Appearance >
+  Open chat tabs) or no other tab open, the keys do nothing.
+
+These defaults live in the app, not on the node, so older apps have no keys for them.
+
 #### Scripts
 
 - `projectScript.{environment}/{project}/{id}.run`: a locally assigned script shortcut. The app constructs these scoped IDs; legacy `script.{id}.run` rules are supported only through explicit import.
@@ -304,6 +316,7 @@ Currently available context keys:
 - `modelPickerOpen` — the model picker dialog is open
 - `commandPaletteOpen` — the command palette is open
 - `composerFocus` — the message composer (main chat input) is focused
+- `isMac` — the app runs on macOS, for defaults that need another chord there
 
 Enter in the focused composer is reserved. The **Send shortcut** setting (Settings > General >
 Composer controls) decides when it sends: `enter` always, `mod+enter` for multiline prompts, or

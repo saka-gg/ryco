@@ -78,6 +78,16 @@ const DIFF_HUNK_DEFAULT_KEYBINDINGS: readonly KeybindingRule[] = [
   { key: "alt+arrowup", command: "diff.hunk.previous", when: "!terminalFocus" },
 ];
 
+// The next or previous open chat tab, Synara's keys: Cmd+Ctrl+Left/Right on macOS, which no
+// text field, terminal or system chord uses (so they also work from the terminal), and
+// Ctrl+PageUp/PageDown elsewhere, left to a focused terminal.
+const THREAD_TAB_DEFAULT_KEYBINDINGS: readonly KeybindingRule[] = [
+  { key: "mod+ctrl+arrowright", command: "threadTab.next", when: "isMac" },
+  { key: "mod+ctrl+arrowleft", command: "threadTab.previous", when: "isMac" },
+  { key: "ctrl+pagedown", command: "threadTab.next", when: "!terminalFocus && !isMac" },
+  { key: "ctrl+pageup", command: "threadTab.previous", when: "!terminalFocus && !isMac" },
+];
+
 export const CLIENT_ONLY_DEFAULT_KEYBINDINGS: readonly KeybindingRule[] = [
   ...CORE_CLIENT_DEFAULT_KEYBINDINGS,
   ...FILE_SEARCH_DEFAULT_KEYBINDINGS,
@@ -87,6 +97,7 @@ export const CLIENT_ONLY_DEFAULT_KEYBINDINGS: readonly KeybindingRule[] = [
   ...VIEW_DEFAULT_KEYBINDINGS,
   ...SIDE_CHAT_DEFAULT_KEYBINDINGS,
   ...DIFF_HUNK_DEFAULT_KEYBINDINGS,
+  ...THREAD_TAB_DEFAULT_KEYBINDINGS,
 ];
 
 /** The node's rules minus the superseded ones, in node order, then the client-only rules. */

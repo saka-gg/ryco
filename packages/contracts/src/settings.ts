@@ -145,6 +145,8 @@ export const ClientSettingsSchema = Schema.Struct({
   // restart continuation still leaves such threads for a person to resume.
   claudeResumeReview: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   chatWidth: ChatWidth.pipe(Schema.withDecodingDefault(Effect.succeed(DEFAULT_CHAT_WIDTH))),
+  // Desktop and web: open chats as closable, reorderable tabs in the chat header.
+  openChatTabs: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   // Model favorites. Historically keyed by provider kind, now
   // widened to `ProviderInstanceId` so users can favorite a specific model
   // on a custom provider instance (e.g. "Codex Personal · gpt-5") without
@@ -1205,6 +1207,7 @@ export const ClientSettingsPatch = Schema.Struct({
   sendShortcut: Schema.optionalKey(SendShortcut),
   claudeResumeReview: Schema.optionalKey(Schema.Boolean),
   chatWidth: Schema.optionalKey(ChatWidth),
+  openChatTabs: Schema.optionalKey(Schema.Boolean),
   favorites: Schema.optionalKey(Schema.Array(ModelFavorite)),
   providerModelPreferences: Schema.optionalKey(
     Schema.Record(

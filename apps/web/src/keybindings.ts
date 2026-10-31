@@ -30,6 +30,8 @@ export interface ShortcutMatchContext {
   modelPickerOpen: boolean;
   commandPaletteOpen: boolean;
   composerFocus: boolean;
+  /** The platform is macOS, for defaults that need another chord there (`threadTab.next`). */
+  isMac: boolean;
   [key: string]: boolean;
 }
 
@@ -286,6 +288,7 @@ function resolveContext(options: ShortcutMatchOptions | undefined): ShortcutMatc
     commandPaletteOpen: false,
     composerFocus: false,
     ...options?.context,
+    isMac: isMacPlatform(resolvePlatform(options)),
   };
 }
 
@@ -393,6 +396,8 @@ function formatShortcutKeyLabel(key: string): string {
   if (key === "arrowdown") return "Down";
   if (key === "arrowleft") return "Left";
   if (key === "arrowright") return "Right";
+  if (key === "pageup") return "PageUp";
+  if (key === "pagedown") return "PageDown";
   return key.slice(0, 1).toUpperCase() + key.slice(1);
 }
 
