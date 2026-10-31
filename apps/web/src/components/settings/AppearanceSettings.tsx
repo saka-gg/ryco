@@ -25,6 +25,7 @@ import { COLOR_MODE_OPTIONS, useTheme } from "../../hooks/useTheme";
 import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 import { cn } from "../../lib/utils";
 import {
+  APPEARANCE_CONTRAST_OPTIONS,
   APPEARANCE_PREFERENCES_STORAGE_KEY,
   FONT_FAMILY_MONO_OPTIONS,
   FONT_FAMILY_SANS_OPTIONS,
@@ -655,6 +656,37 @@ export function AppearanceSettingsPanel({
             options={FONT_SIZE_OPTIONS}
             value={appearancePreferences.fontSizeBase}
             onChange={(value) => handleAppearancePreferenceChange("fontSizeBase", value)}
+          />
+        </SettingsRow>
+        <SettingsRow
+          title="Contrast"
+          description="Make text and borders stronger, or softer, than the theme draws them."
+          resetAction={
+            hasAppearancePreferenceOverride("contrast") ? (
+              <SettingResetButton
+                label="contrast"
+                onClick={() => handleAppearancePreferenceReset("contrast")}
+              />
+            ) : null
+          }
+          control={
+            <SliderPreferenceValue
+              options={APPEARANCE_CONTRAST_OPTIONS}
+              value={appearancePreferences.contrast}
+              preview={
+                <span className="flex h-8 min-w-12 items-center justify-center gap-1.5 rounded-md border border-border bg-background px-2 shadow-xs/5">
+                  <span className="font-semibold text-foreground">Aa</span>
+                  <span className="text-muted-foreground">Aa</span>
+                </span>
+              }
+            />
+          }
+        >
+          <AppearancePreferenceSlider
+            ariaLabel="Contrast"
+            options={APPEARANCE_CONTRAST_OPTIONS}
+            value={appearancePreferences.contrast}
+            onChange={(value) => handleAppearancePreferenceChange("contrast", value)}
           />
         </SettingsRow>
       </SettingsSection>

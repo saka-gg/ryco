@@ -13,6 +13,7 @@ vi.mock("../lib/presentationTier", () => ({
 }));
 
 import {
+  APPEARANCE_CONTRAST_OPTIONS,
   APPEARANCE_PREFERENCES_STORAGE_KEY,
   APPEARANCE_PREFERENCES_STYLE_ELEMENT_ID,
   DEFAULT_APPEARANCE_PREFERENCES,
@@ -22,11 +23,13 @@ import {
   SURFACE_TRANSPARENCY_OPTIONS,
   applyAppearancePreferencesToDocument,
   buildAppearancePreferencesCss,
+  buildContrastCssRule,
   getAppearancePreferences,
   getEffectiveSurfaceTransparency,
   getRequestedWindowTranslucencyScope,
   hasAppearancePreferenceOverride,
   isSurfaceTransparencyReducedBySystem,
+  isValidPreferenceValue,
   normalizePrimaryColor,
   resetAppearancePreference,
   setAppearancePreference,
@@ -702,5 +705,47 @@ describe("surface step regression", () => {
         expect(css, `step "${step}"`).toContain(declaration);
       }
     }
+  });
+});
+
+describe("contrast", () => {
+  it("writes nothing at the theme's own contrast", () => {
+    expect(buildContrastCssRule(100)).toBe("");
+  });
+
+  it("pushes text away from its surface above 100 % and toward it below", () => {
+    const stronger = buildContrastCssRule(150);
+    expect(stronger).toContain("--appearance-contrast-base: 100%;");
+    expect(stronger).toContain("--appearance-contrast-boost: 50%;");
+    expect(stronger).toContain("--appearance-contrast-border-boost: 12.5%;");
+    expect(stronger).toMatch(/--color-foreground: color-mix\(in oklab,/u);
+    expect(stronger).toMatch(
+      /--color-muted-foreground: color-mix\(in oklab, color-mix\(in oklab, var\(--muted-foreground\)/u,
+    );
+    expect(stronger).toContain(":root.dark { --appearance-contrast-target: white; }");
+    expect(buildContrastCssRule(60)).toContain("--appearance-contrast-base: 60%;");
+  });
+
+  it("covers the active sidebar row, and moves each border toward its own text", () => {
+    const rule = buildContrastCssRule(150);
+    expect(rule).toContain(
+      "--color-sidebar-accent-foreground: color-mix(in oklab, color-mix(in oklab, var(--sidebar-accent-foreground) var(--appearance-contrast-base), var(--sidebar)),",
+    );
+    expect(rule).toMatch(
+      /--color-border: [^;]*var\(--foreground\) var\(--appearance-contrast-border-boost\)\);/u,
+    );
+    expect(rule).toMatch(
+      /--color-sidebar-border: [^;]*var\(--sidebar-foreground\) var\(--appearance-contrast-border-boost\)\);/u,
+    );
+  });
+
+  it("accepts only the slider's stops, every 10 % from 50 to 200", () => {
+    expect(isValidPreferenceValue("contrast", "150")).toBe(true);
+    for (const value of ["40", "210", "1e2", "150.5", "", "55", "199"]) {
+      expect(isValidPreferenceValue("contrast", value), value).toBe(false);
+    }
+    expect(APPEARANCE_CONTRAST_OPTIONS.map((option) => option.value)).toEqual(
+      Array.from({ length: 16 }, (_, index) => String(50 + index * 10)),
+    );
   });
 });

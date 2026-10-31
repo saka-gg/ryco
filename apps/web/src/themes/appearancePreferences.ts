@@ -27,6 +27,7 @@ export const APPEARANCE_PREFERENCE_KEYS = [
   "windowTranslucency",
   "windowTranslucencyOpacity",
   "windowTranslucencyBlur",
+  "contrast",
 ] as const;
 
 export type AppearancePreferenceKey = (typeof APPEARANCE_PREFERENCE_KEYS)[number];
@@ -214,6 +215,72 @@ export const PRIMARY_COLOR_OPTIONS = [
   { value: "#a855f7", label: "Violet", description: "Sharp" },
 ] as const satisfies ReadonlyArray<AppearancePreferenceOption>;
 
+/** Text and border contrast, in percent of the theme's own (T3 Code's range and step). */
+export const APPEARANCE_CONTRAST_MIN = 50;
+export const APPEARANCE_CONTRAST_MAX = 200;
+export const APPEARANCE_CONTRAST_STEP = 10;
+export const APPEARANCE_CONTRAST_DEFAULT = 100;
+
+/** The contrast slider's stops; below 100 % softer than the theme, above it stronger. */
+export const APPEARANCE_CONTRAST_OPTIONS: ReadonlyArray<AppearancePreferenceOption> = Array.from(
+  {
+    length: (APPEARANCE_CONTRAST_MAX - APPEARANCE_CONTRAST_MIN) / APPEARANCE_CONTRAST_STEP + 1,
+  },
+  (_, index) => {
+    const percent = APPEARANCE_CONTRAST_MIN + index * APPEARANCE_CONTRAST_STEP;
+    return {
+      value: String(percent),
+      label: `${percent} %`,
+      description:
+        percent === APPEARANCE_CONTRAST_DEFAULT
+          ? "As the theme draws it"
+          : percent < APPEARANCE_CONTRAST_DEFAULT
+            ? "Softer: text can fall below the usual readability level"
+            : "Stronger text and borders",
+    };
+  },
+);
+
+/** Text tokens, each mixed toward the surface it sits on below 100 % and away from it above. */
+const CONTRAST_TEXT_TOKENS = [
+  ["foreground", "background"],
+  ["card-foreground", "card"],
+  ["popover-foreground", "popover"],
+  ["secondary-foreground", "secondary"],
+  ["muted-foreground", "background"],
+  ["accent-foreground", "accent"],
+  ["sidebar-foreground", "sidebar"],
+  // The active and hovered sidebar row: its tint is translucent over the sidebar.
+  ["sidebar-accent-foreground", "sidebar"],
+] as const;
+/** Border tokens, each faded toward transparent below 100 % and toward its own text above. */
+const CONTRAST_BORDER_TOKENS = [
+  ["border", "foreground"],
+  ["input", "foreground"],
+  ["sidebar-border", "sidebar-foreground"],
+] as const;
+
+/**
+ * Port of T3 Code's appearance contrast (6e9c57f7ba): below 100 % text fades toward its surface
+ * and borders toward transparent; above it, text moves toward black (light) or white (dark) and
+ * borders toward the foreground. It overrides Tailwind's `--color-*` utilities from this
+ * unlayered sheet, which wins over the `@theme` layer; at 100 % it writes nothing.
+ */
+export function buildContrastCssRule(contrast: number): string {
+  if (contrast === APPEARANCE_CONTRAST_DEFAULT) return "";
+  const base = Math.min(contrast, 100);
+  const boost = Math.max(contrast - 100, 0);
+  const text = CONTRAST_TEXT_TOKENS.map(
+    ([token, surface]) =>
+      `--color-${token}: color-mix(in oklab, color-mix(in oklab, var(--${token}) var(--appearance-contrast-base), var(--${surface})), var(--appearance-contrast-target) var(--appearance-contrast-boost));`,
+  ).join(" ");
+  const borders = CONTRAST_BORDER_TOKENS.map(
+    ([token, text]) =>
+      `--color-${token}: color-mix(in srgb, color-mix(in srgb, var(--${token}) var(--appearance-contrast-base), transparent), var(--${text}) var(--appearance-contrast-border-boost));`,
+  ).join(" ");
+  return ` :root { --appearance-contrast-base: ${base}%; --appearance-contrast-boost: ${boost}%; --appearance-contrast-border-boost: ${boost / 4}%; --appearance-contrast-target: black; ${text} ${borders} } :root.dark { --appearance-contrast-target: white; }`;
+}
+
 export const DEFAULT_APPEARANCE_PREFERENCES: AppearancePreferences = {
   fontFamilySans: FONT_FAMILY_SANS_OPTIONS[0].value,
   fontFamilyMono: FONT_FAMILY_MONO_OPTIONS[0].value,
@@ -228,6 +295,7 @@ export const DEFAULT_APPEARANCE_PREFERENCES: AppearancePreferences = {
   windowTranslucency: "off",
   windowTranslucencyOpacity: "80",
   windowTranslucencyBlur: String(DESKTOP_WINDOW_BLUR_RADIUS_MAX),
+  contrast: String(APPEARANCE_CONTRAST_DEFAULT),
 };
 
 const RADIUS_TOKEN_OFFSETS_PX = {
@@ -241,7 +309,9 @@ const RADIUS_TOKEN_OFFSETS_PX = {
 } as const;
 
 /** Integer-valued keys, stored as decimal strings and validated against a range. */
-const NUMERIC_RANGES: Partial<Record<AppearancePreferenceKey, { min: number; max: number }>> = {
+const NUMERIC_RANGES: Partial<
+  Record<AppearancePreferenceKey, { min: number; max: number; step?: number }>
+> = {
   windowTranslucencyOpacity: {
     min: WINDOW_TRANSLUCENCY_OPACITY_MIN,
     max: WINDOW_TRANSLUCENCY_OPACITY_MAX,
@@ -249,6 +319,12 @@ const NUMERIC_RANGES: Partial<Record<AppearancePreferenceKey, { min: number; max
   windowTranslucencyBlur: {
     min: DESKTOP_WINDOW_BLUR_RADIUS_MIN,
     max: DESKTOP_WINDOW_BLUR_RADIUS_MAX,
+  },
+  // Only the slider's stops, so a stored value always matches where the slider sits.
+  contrast: {
+    min: APPEARANCE_CONTRAST_MIN,
+    max: APPEARANCE_CONTRAST_MAX,
+    step: APPEARANCE_CONTRAST_STEP,
   },
 };
 
@@ -343,7 +419,11 @@ export function isValidPreferenceValue(
   if (range) {
     const number = Number(value);
     return (
-      /^\d+$/.test(value) && Number.isInteger(number) && number >= range.min && number <= range.max
+      /^\d+$/.test(value) &&
+      Number.isInteger(number) &&
+      number >= range.min &&
+      number <= range.max &&
+      (number - range.min) % (range.step ?? 1) === 0
     );
   }
   return OPTION_VALUES[key]?.has(value) ?? false;
@@ -433,7 +513,7 @@ export function resetAppearancePreference(key: AppearancePreferenceKey): void {
 /** The stylesheet text {@link applyAppearancePreferencesToDocument} writes. */
 export function buildAppearancePreferencesCss(): string {
   const preferences = getEffectiveAppearancePreferences();
-  return `:root { --font-family-sans: ${preferences.fontFamilySans}; --font-family-mono: ${preferences.fontFamilyMono}; --font-size-base: ${preferences.fontSizeBase}; ${buildRadiusCssVariables(preferences.radius)} ${buildSurfaceTransparencyCssVariables(preferences.surfaceTransparency)} ${buildMotionCssVariables(isReducedMotionEffective())} ${buildDockDensityCssVariables(preferences.dockDensity)} ${buildWindowTranslucencyCssVariables(Number(preferences.windowTranslucencyOpacity))} }${buildPrimaryColorCssRule(preferences)}`;
+  return `:root { --font-family-sans: ${preferences.fontFamilySans}; --font-family-mono: ${preferences.fontFamilyMono}; --font-size-base: ${preferences.fontSizeBase}; ${buildRadiusCssVariables(preferences.radius)} ${buildSurfaceTransparencyCssVariables(preferences.surfaceTransparency)} ${buildMotionCssVariables(isReducedMotionEffective())} ${buildDockDensityCssVariables(preferences.dockDensity)} ${buildWindowTranslucencyCssVariables(Number(preferences.windowTranslucencyOpacity))} }${buildPrimaryColorCssRule(preferences)}${buildContrastCssRule(Number(preferences.contrast))}`;
 }
 
 /**
