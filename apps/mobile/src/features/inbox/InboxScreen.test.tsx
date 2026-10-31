@@ -28,6 +28,11 @@ vi.mock("../../state/sidebarUndo", () => ({
   },
 }));
 vi.mock("../../lib/ids", () => ({ newCommandId: () => "command" }));
+const copied = vi.hoisted(() => [] as Array<{ value: string; target?: string }>);
+vi.mock("../../lib/copyTextWithHaptic", () => ({
+  copyTextWithHaptic: (value: string, options: { target?: string } = {}) =>
+    copied.push({ value, ...(options.target === undefined ? {} : { target: options.target }) }),
+}));
 vi.mock("../../components/AppText", () => ({ AppText: "Text" }));
 vi.mock("../../components/AppSymbol", () => ({ SymbolView: "SymbolView" }));
 vi.mock("../../components/EmptyState", () => ({ EmptyState: "EmptyState" }));
@@ -118,7 +123,15 @@ describe("inbox snooze menu", () => {
   it("offers three hours and a custom time after the presets", () => {
     const ids = menu().actions.map((action) => action.id);
     expect(ids.slice(0, 3)).toEqual(["settle", "hour", "three-hours"]);
-    expect(ids.at(-1)).toBe("snooze-custom");
+    expect(ids.at(-2)).toBe("snooze-custom");
+    expect(ids.at(-1)).toBe("copy-id");
+  });
+
+  it("copies the task's ID from the menu", () => {
+    copied.length = 0;
+    menu().onPressAction({ nativeEvent: { event: "copy-id" } });
+    expect(copied).toEqual([{ value: "task", target: "task ID" }]);
+    expect(rpc.dispatch).not.toHaveBeenCalled();
   });
 
   it("snoozes until the custom time the sheet returns", async () => {

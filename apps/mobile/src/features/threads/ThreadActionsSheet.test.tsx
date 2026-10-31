@@ -45,6 +45,11 @@ vi.mock("react-native", () => ({
 vi.mock("../../components/AppText", () => ({ AppText: "Text" }));
 vi.mock("../../components/AppSymbol", () => ({ SymbolView: "SymbolView" }));
 vi.mock("../../components/DeviceIcon", () => ({ DeviceIcon: "DeviceIcon" }));
+const copied = vi.hoisted(() => [] as Array<{ value: string; target?: string }>);
+vi.mock("../../lib/copyTextWithHaptic", () => ({
+  copyTextWithHaptic: (value: string, options: { target?: string } = {}) =>
+    copied.push({ value, ...(options.target === undefined ? {} : { target: options.target }) }),
+}));
 vi.mock("../../components/ErrorBanner", () => ({ ErrorBanner: "ErrorBanner" }));
 vi.mock("../../lib/useThemeColor", () => ({ useThemeColor: () => "#888888" }));
 vi.mock("../../connection/environmentApi", () => ({
@@ -100,12 +105,15 @@ function watchSummary(
 }
 
 function headerModel(input: {
+  readonly pullRequestUrl?: string;
   readonly watches?: ThreadPullRequestWatchShell;
   readonly prState?: "open" | "merged";
   readonly available?: boolean;
 }): ThreadHeaderModel {
   return buildThreadHeaderModel({
+    pullRequestUrl: input.pullRequestUrl,
     thread: {
+      id: threadId,
       title: "Fix CI",
       archivedAt: null,
       latestTurn: null,
@@ -372,10 +380,10 @@ describe("thread actions sheet pull request watch", () => {
 });
 
 describe("task sheet pull request row", () => {
-  function sheetRows(onOpenPullRequest?: () => void) {
+  function sheetRows(onOpenPullRequest?: () => void, model: ThreadHeaderModel = headerModel({})) {
     const sheet = ThreadActionsSheet({
       visible: true,
-      model: headerModel({}),
+      model,
       environmentId,
       threadId,
       mutationReady: true,
@@ -400,6 +408,27 @@ describe("task sheet pull request row", () => {
     );
     press(row);
     expect(opened).toEqual(["open"]);
+  });
+
+  it("copies the task's ID, and the pull request link when one is known", () => {
+    copied.length = 0;
+    const row = (rows: ReturnType<typeof sheetRows>, label: string) =>
+      rows.find((element) => element.props.label === label);
+    press(row(sheetRows(), "Copy task ID"));
+    expect(copied).toEqual([{ value: threadId, target: "task ID" }]);
+    expect(row(sheetRows(), "Copy link to pull request")).toBeUndefined();
+
+    copied.length = 0;
+    const withLink = sheetRows(
+      undefined,
+      headerModel({ pullRequestUrl: "https://github.com/saka-gg/ryco/pull/42" }),
+    );
+    press(row(withLink, "Copy link to pull request"));
+    press(row(withLink, "Copy task ID"));
+    expect(copied).toEqual([
+      { value: "https://github.com/saka-gg/ryco/pull/42", target: "pull request link" },
+      { value: threadId, target: "task ID" },
+    ]);
   });
 
   it("is absent without a project to read it through", () => {

@@ -116,6 +116,7 @@ import {
   deriveUndoTurnCountByTurnId,
   isArchivedThreadStub,
   readThreadForkApi,
+  resolveThreadWorkspacePullRequestLink,
   CONTINUE_AFTER_FAILURE_PROMPT,
   failedTurnNotice,
   restartInterruptionNotice,
@@ -945,6 +946,10 @@ export function ThreadDetailScreen(props: {
             thread,
             project,
             worktree,
+            pullRequestUrl:
+              sidebarThread && !isArchivedThreadStub(sidebarThread)
+                ? resolveThreadWorkspacePullRequestLink(sidebarThread, worktree ?? null)?.url
+                : null,
             nodeLabel,
             hasPendingApproval: pendingApprovals.length > 0,
             hasPendingUserInput: pendingUserInputs.length > 0,
@@ -978,6 +983,7 @@ export function ThreadDetailScreen(props: {
       pullRequestWatchAvailable,
       pullRequestWatches,
       settlementEntry,
+      sidebarThread,
       thread,
       worktree,
     ],

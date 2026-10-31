@@ -40,6 +40,9 @@ export function snoozeMenuPresetsFromKey(key: string): ReadonlyArray<InboxSnooze
   });
 }
 
+/** Copies the task's ID (`resolveThreadReferenceCopyTarget`'s fallback, as web's Copy Thread ID). */
+export const COPY_TASK_ID_ACTION_ID = "copy-id";
+
 /** The menu action that asks for a date and time or a duration (`CustomSnoozeSheet`). */
 export const CUSTOM_SNOOZE_ACTION_ID = "snooze-custom";
 
@@ -69,6 +72,12 @@ export function buildInboxRowMenuActions(
     id: row.attentionState === "settled" ? "unsettle" : "settle",
     title: row.attentionState === "settled" ? "Move to Active" : "Settle task",
     attributes: { disabled: !row.mutationEnabled || !row.canSettle },
+  });
+  // Reads nothing from the node, so it works offline too.
+  actions.push({
+    id: COPY_TASK_ID_ACTION_ID,
+    title: "Copy task ID",
+    attributes: { disabled: false },
   });
   return actions;
 }
