@@ -78,6 +78,15 @@ export interface GitActionPostPushEvent {
   readonly pullRequestNumber: number | null;
 }
 
+/** The Create PR dialog's choices; nodes advertise `pullRequestOptions` before taking them. */
+export interface GitPullRequestOptions {
+  title?: string;
+  body?: string;
+  draft?: boolean;
+  /** Open the pull request from committed work and leave uncommitted changes out. */
+  allowDirtyWorkingTree?: boolean;
+}
+
 interface PendingDefaultBranchAction {
   action: DefaultBranchConfirmableAction;
   branchName: string;
@@ -85,6 +94,7 @@ interface PendingDefaultBranchAction {
   commitMessage?: string;
   onConfirmed?: () => void;
   filePaths?: string[];
+  pullRequest?: GitPullRequestOptions;
 }
 
 interface ActiveGitActionProgress {
@@ -105,6 +115,7 @@ interface RunGitStackedActionArgs {
   commitMessage?: string;
   featureBranch?: boolean;
   filePaths?: string[];
+  pullRequest?: GitPullRequestOptions;
   worktreeId?: WorktreeId | null;
   onProgress?: (event: GitActionProgressEvent) => void;
   onRecoveryState?: (state: GitActionRecoveryState) => void;
@@ -120,6 +131,7 @@ export interface RunGitActionWithToastInput {
   statusOverride?: VcsStatusResult | null;
   featureBranch?: boolean;
   filePaths?: string[];
+  pullRequest?: GitPullRequestOptions;
 }
 
 function formatElapsedDescription(startedAtMs: number | null): string | undefined {
@@ -375,6 +387,7 @@ export function useGitActionRunner({
       commitMessage,
       featureBranch,
       filePaths,
+      pullRequest,
       worktreeId,
       onProgress,
       onRecoveryState,
@@ -391,6 +404,10 @@ export function useGitActionRunner({
           ...(commitMessage ? { commitMessage } : {}),
           ...(featureBranch ? { featureBranch: true } : {}),
           ...(filePaths && filePaths.length > 0 ? { filePaths } : {}),
+          ...(pullRequest?.title ? { prTitle: pullRequest.title } : {}),
+          ...(pullRequest?.body ? { prBody: pullRequest.body } : {}),
+          ...(pullRequest?.draft ? { prDraft: true } : {}),
+          ...(pullRequest?.allowDirtyWorkingTree ? { allowDirtyWorkingTree: true } : {}),
         },
         {
           // A dropped connection no longer fails the action: the node keeps it
@@ -481,6 +498,7 @@ export function useGitActionRunner({
       statusOverride,
       featureBranch = false,
       filePaths,
+      pullRequest,
     }: RunGitActionWithToastInput) => {
       const actionStatus = statusOverride ?? gitStatusForActions;
       const actionBranch = actionStatus?.refName ?? null;
@@ -510,6 +528,7 @@ export function useGitActionRunner({
           ...(commitMessage ? { commitMessage } : {}),
           ...(onConfirmed ? { onConfirmed } : {}),
           ...(filePaths ? { filePaths } : {}),
+          ...(pullRequest ? { pullRequest } : {}),
         });
         return;
       }
@@ -524,6 +543,7 @@ export function useGitActionRunner({
         shouldPushBeforePr:
           action === "create_pr" &&
           (!actionStatus?.hasUpstream || (actionStatus?.aheadCount ?? 0) > 0),
+        hasCustomPullRequestText: !!pullRequest?.title && !!pullRequest.body,
       });
       const actionThreadKey = activeThreadRef ? scopedThreadKey(activeThreadRef) : null;
       const actionId = randomUUID();
@@ -628,6 +648,7 @@ export function useGitActionRunner({
         ...(commitMessage ? { commitMessage } : {}),
         ...(featureBranch ? { featureBranch } : {}),
         ...(filePaths ? { filePaths } : {}),
+        ...(pullRequest ? { pullRequest } : {}),
         onProgress: applyProgressEvent,
         onRecoveryState: reporter.onRecoveryState,
       });
@@ -700,26 +721,30 @@ export function useGitActionRunner({
 
   const continuePendingDefaultBranchAction = useEvent(() => {
     if (!pendingDefaultBranchAction) return;
-    const { action, commitMessage, onConfirmed, filePaths } = pendingDefaultBranchAction;
+    const { action, commitMessage, onConfirmed, filePaths, pullRequest } =
+      pendingDefaultBranchAction;
     setPendingDefaultBranchAction(null);
     void runGitActionWithToast({
       action,
       ...(commitMessage ? { commitMessage } : {}),
       ...(onConfirmed ? { onConfirmed } : {}),
       ...(filePaths ? { filePaths } : {}),
+      ...(pullRequest ? { pullRequest } : {}),
       skipDefaultBranchPrompt: true,
     });
   });
 
   const checkoutFeatureBranchAndContinuePendingAction = useEvent(() => {
     if (!pendingDefaultBranchAction) return;
-    const { action, commitMessage, onConfirmed, filePaths } = pendingDefaultBranchAction;
+    const { action, commitMessage, onConfirmed, filePaths, pullRequest } =
+      pendingDefaultBranchAction;
     setPendingDefaultBranchAction(null);
     void runGitActionWithToast({
       action,
       ...(commitMessage ? { commitMessage } : {}),
       ...(onConfirmed ? { onConfirmed } : {}),
       ...(filePaths ? { filePaths } : {}),
+      ...(pullRequest ? { pullRequest } : {}),
       featureBranch: true,
       skipDefaultBranchPrompt: true,
     });

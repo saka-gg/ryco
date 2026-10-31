@@ -159,6 +159,19 @@ export const GitRunStackedActionInput = Schema.Struct({
     Schema.Array(TrimmedNonEmptyStringSchema).check(Schema.isMinLength(1)),
   ),
   stagedOnly: Schema.optional(GitStagedOnlyCommit),
+  /**
+   * Pull request text for `create_pr` / `commit_push_pr`; a missing one is generated. Servers
+   * without `capabilities.pullRequestOptions` drop these keys and generate both.
+   */
+  prTitle: Schema.optional(TrimmedNonEmptyStringSchema.check(Schema.isMaxLength(300))),
+  prBody: Schema.optional(TrimmedNonEmptyStringSchema.check(Schema.isMaxLength(60_000))),
+  /** Open the pull request as a draft; a host that has no drafts fails instead. */
+  prDraft: Schema.optional(Schema.Boolean),
+  /**
+   * `create_pr` with uncommitted changes the user chose to leave out: the pull request takes
+   * the committed work only, instead of failing "Commit local changes before creating a PR."
+   */
+  allowDirtyWorkingTree: Schema.optional(Schema.Boolean),
 }).check(
   Schema.makeFilter((input) =>
     input.stagedOnly === undefined || input.filePaths === undefined

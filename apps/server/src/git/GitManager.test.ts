@@ -697,6 +697,7 @@ function createGitHubCliWithFakeGh(scenario: FakeGhScenario = {}): {
                 input.title,
                 "--body-file",
                 input.bodyFile,
+                ...(input.draft ? ["--draft"] : []),
               ],
             }),
           ),
@@ -819,6 +820,10 @@ function runStackedAction(
     filePaths?: readonly string[];
     stagedOnly?: { readonly expectedRevision: string };
     linkedIssueNumbers?: readonly number[];
+    prTitle?: string;
+    prBody?: string;
+    prDraft?: boolean;
+    allowDirtyWorkingTree?: boolean;
   },
   options?: Parameters<GitManagerShape["runStackedAction"]>[1],
 ) {
@@ -4320,6 +4325,132 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
       expect(result.pr.status).toBe("created");
       expect(createdPrBodies).toHaveLength(1);
       expect(createdPrBodies[0]).toContain("Fixes #123");
+    }),
+  );
+
+  const pushedFeatureBranch = (branch: string) =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("ryco-git-manager-");
+      yield* initRepo(repoDir);
+      yield* runGit(repoDir, ["checkout", "-b", branch]);
+      const remoteDir = yield* createBareRemote();
+      yield* runGit(repoDir, ["remote", "add", "origin", remoteDir]);
+      fs.writeFileSync(path.join(repoDir, "changes.txt"), "change\n");
+      yield* runGit(repoDir, ["add", "changes.txt"]);
+      yield* runGit(repoDir, ["commit", "-m", "Feature commit"]);
+      yield* runGit(repoDir, ["push", "-u", "origin", branch]);
+      yield* runGit(repoDir, ["config", `branch.${branch}.gh-merge-base`, "main"]);
+      return repoDir;
+    });
+  const createdPrList = (branch: string) =>
+    JSON.stringify([
+      {
+        number: 90,
+        title: "Created",
+        url: "https://github.com/pingdotgg/codething-mvp/pull/90",
+        baseRefName: "main",
+        headRefName: branch,
+      },
+    ]);
+
+  it.effect("opens a draft PR with the user's title and body without generating text", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* pushedFeatureBranch("feature-own-text");
+      let generated = 0;
+      const { manager, ghCalls, createdPrBodies } = yield* makeManager({
+        ghScenario: { prListSequence: ["[]", createdPrList("feature-own-text")] },
+        textGeneration: {
+          generatePrContent: () => {
+            generated += 1;
+            return Effect.succeed({ title: "Generated title", body: "Generated body" });
+          },
+        },
+      });
+      const stages: string[] = [];
+      const result = yield* runStackedAction(
+        manager,
+        {
+          cwd: repoDir,
+          action: "create_pr",
+          prTitle: "My own title",
+          prBody: "My own body",
+          prDraft: true,
+          linkedIssueNumbers: [7],
+        },
+        {
+          progressReporter: {
+            publish: (event) =>
+              Effect.sync(() => {
+                if (event.kind === "phase_started") stages.push(event.label);
+              }),
+          },
+        },
+      );
+
+      expect(result.pr.status).toBe("created");
+      expect(generated).toBe(0);
+      expect(stages.some((label) => label.startsWith("Generating"))).toBe(false);
+      const create = ghCalls.find((call) => call.startsWith("pr create "));
+      expect(create).toContain("--title My own title");
+      expect(create?.endsWith("--draft")).toBe(true);
+      expect(createdPrBodies).toEqual([expect.stringContaining("My own body")]);
+      expect(createdPrBodies[0]).toContain("Fixes #7");
+    }),
+  );
+
+  it.effect("generates only the PR text the user left empty and opens it ready", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* pushedFeatureBranch("feature-own-title");
+      let generated = 0;
+      const { manager, ghCalls, createdPrBodies } = yield* makeManager({
+        ghScenario: { prListSequence: ["[]", createdPrList("feature-own-title")] },
+        textGeneration: {
+          generatePrContent: () => {
+            generated += 1;
+            return Effect.succeed({ title: "Generated title", body: "Generated body" });
+          },
+        },
+      });
+      const result = yield* runStackedAction(manager, {
+        cwd: repoDir,
+        action: "create_pr",
+        prTitle: "My own title",
+      });
+
+      expect(result.pr.status).toBe("created");
+      expect(generated).toBe(1);
+      const create = ghCalls.find((call) => call.startsWith("pr create "));
+      expect(create).toContain("--title My own title");
+      expect(create).not.toContain("--draft");
+      expect(createdPrBodies).toEqual(["Generated body"]);
+    }),
+  );
+
+  it.effect("creates a PR from committed work and leaves local changes out when asked", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* pushedFeatureBranch("feature-dirty-pr");
+      fs.writeFileSync(path.join(repoDir, "changes.txt"), "local edit\n");
+      const { manager, ghCalls } = yield* makeManager({
+        ghScenario: { prListSequence: ["[]", createdPrList("feature-dirty-pr")] },
+      });
+
+      const refused = yield* runStackedAction(manager, {
+        cwd: repoDir,
+        action: "create_pr",
+      }).pipe(Effect.flip);
+      expect(refused.message).toContain("Commit local changes before creating a PR.");
+
+      const result = yield* runStackedAction(manager, {
+        cwd: repoDir,
+        action: "create_pr",
+        allowDirtyWorkingTree: true,
+      });
+      expect(result.commit.status).toBe("skipped_not_requested");
+      expect(result.pr.status).toBe("created");
+      expect(ghCalls.some((call) => call.startsWith("pr create "))).toBe(true);
+      expect(fs.readFileSync(path.join(repoDir, "changes.txt"), "utf8")).toBe("local edit\n");
+      const status = yield* runGit(repoDir, ["status", "--porcelain"]);
+      expect(status.stdout).toContain("changes.txt");
     }),
   );
 
