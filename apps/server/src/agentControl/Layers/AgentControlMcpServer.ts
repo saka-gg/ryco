@@ -43,7 +43,9 @@ import {
   AGENT_CONTROL_CAPABILITIES,
   AGENT_CONTROL_COMMAND_WATCH_MCP_TOOLS,
   AGENT_CONTROL_LINK_PULL_REQUEST_TOOL,
+  AGENT_CONTROL_MCP_WAIT_TIMEOUT_MS_MAX,
   AGENT_CONTROL_QUEUE_MCP_TOOLS,
+  AGENT_CONTROL_WORKTREE_MCP_TOOLS,
 } from "@ryco/contracts";
 import { Effect, Exit, Layer, Option, Scope, Stream } from "effect";
 import { ServerConfig } from "../../config.ts";
@@ -57,6 +59,8 @@ import { OrchestrationEngineService } from "../../orchestration/Services/Orchest
 import * as Semaphore from "effect/Semaphore";
 
 import { ProjectionSnapshotQuery } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
+import { GitWorkflowService } from "../../git/GitWorkflowService.ts";
+import { waitForControlRequestReceipt } from "../Mcp/proposalReads.ts";
 import { DeviceService } from "../../device/Services/DeviceService.ts";
 import { ProviderRegistry } from "../../provider/Services/ProviderRegistry.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
@@ -65,6 +69,8 @@ import { makeAgentControlMcpListener } from "../Mcp/listener.ts";
 import {
   AGENT_CONTROL_DEVICE_IMAGE_MAX_BASE64_CHARS,
   makeAgentControlMcpTools,
+  proposalVisibleToSession,
+  replayedAgentControlMutation,
   submitAgentControlMutation,
   withCompleteAgentControlCatalog,
 } from "../Mcp/tools.ts";
@@ -111,6 +117,7 @@ const makeAgentControlMcpServer = Effect.gen(function* () {
   const cliProxy = yield* Effect.serviceOption(CliProxyService);
   const commandWatches = yield* Effect.serviceOption(CommandWatchService);
   const pullRequestWatch = yield* Effect.serviceOption(PullRequestWatchService);
+  const git = yield* Effect.serviceOption(GitWorkflowService);
   const toolDeps = {
     policy,
     proposals,
@@ -309,7 +316,42 @@ const makeAgentControlMcpServer = Effect.gen(function* () {
           ),
       })
     : deviceTools;
-  const tools = withCompleteAgentControlCatalog(watchTools);
+  // An agent's move of its own chat into a new worktree. Its module loads the first time a
+  // session that may manage workspaces lists or calls tools, never at boot.
+  const handoffTools = withLazyAgentControlTools(watchTools, {
+    names: Object.values(AGENT_CONTROL_WORKTREE_MCP_TOOLS),
+    writeNames: [AGENT_CONTROL_WORKTREE_MCP_TOOLS.handoff],
+    mayUse: (session) =>
+      session.grantedCapabilities.includes(AGENT_CONTROL_CAPABILITIES.manageWorkspaces),
+    load: () =>
+      import("../Mcp/worktreeHandoffTools.ts").then((module) =>
+        module.withWorktreeHandoffTools(watchTools, {
+          policy,
+          registry,
+          projections,
+          submitMutation: (input) =>
+            submitAgentControlMutation(
+              { proposals, ...(Option.isSome(validator) ? { validator: validator.value } : {}) },
+              input,
+            ),
+          waitForTerminal: (session, proposalId) =>
+            waitForControlRequestReceipt({
+              proposals,
+              proposalEvents,
+              proposalId,
+              waitFor: "terminal",
+              timeoutMs: AGENT_CONTROL_MCP_WAIT_TIMEOUT_MS_MAX,
+              visible: (proposal) => proposalVisibleToSession(proposal, session),
+            }),
+          replay: (session, requestId, plan) =>
+            replayedAgentControlMutation(proposals, session, requestId, plan),
+          ...(Option.isSome(git)
+            ? { checkoutBranch: (cwd) => git.value.localStatus({ cwd }) }
+            : {}),
+        }),
+      ),
+  });
+  const tools = withCompleteAgentControlCatalog(handoffTools);
 
   // Start/stop transitions are serialized so a rapid settings flip cannot
   // interleave a start with a teardown. `shuttingDown` latches inside the

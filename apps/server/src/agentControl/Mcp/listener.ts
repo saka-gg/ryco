@@ -67,6 +67,7 @@ export const AGENT_CONTROL_MCP_INITIALIZE_INSTRUCTIONS =
   "Ryco wakes you with the results (use ryco_task_status instead of polling). " +
   "After opening a pull request, link it to this chat with ryco_link_pull_request. " +
   "To follow a pull request's checks and reviews, call ryco_watch_pull_request instead of polling. " +
+  "To move this chat out of the shared checkout into a new worktree and continue there, call ryco_worktree_handoff last in your turn. " +
   "When available, ryco_computer and ryco_browser execute under separate opt-in desktop/app permissions; " +
   "these tools act directly and require an exact active turn. " +
   "When available, ryco_attach_file directly delivers a workspace file to this thread's timeline under exact active-turn authority. " +

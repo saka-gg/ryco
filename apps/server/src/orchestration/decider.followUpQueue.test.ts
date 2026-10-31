@@ -1067,6 +1067,49 @@ describe("follow-up queue decider: holds other commands record", () => {
     ]);
   });
 
+  it("an add for a turn a Stop ended while the queue was empty holds it as that Stop would", async () => {
+    // The Stop found nothing to hold; the add that comes after it still must not start a turn.
+    const { model: stopped } = await apply(modelWith(running), interrupt(true));
+    expect(queueOf(stopped)).toBeUndefined();
+    const guarded = (messageId: string, turnId: TurnId = runningTurn) =>
+      addCommand(messageId, { holdIfTurnInterrupted: turnId, author: "agent" } as Partial<
+        Extract<OrchestrationCommand, { type: "thread.queue.add" }>
+      >);
+
+    const { events, model } = await apply(stopped, guarded("continuation"));
+    expect(types(events)).toEqual(["thread.queue-entry-added", "thread.queue-held"]);
+    expect(queueOf(model)?.hold).toEqual({
+      reason: "interrupted",
+      detail: null,
+      causeKeys: [`interrupt:${runningTurn}`],
+      heldAt: at(1),
+    });
+
+    // Merged with a hold the add carries, in the same event.
+    const both = await decide(
+      stopped,
+      addCommand("both", {
+        holdIfTurnInterrupted: runningTurn,
+        hold: { reason: "paused", detail: "Wait.", causeKeys: ["paused:other"] },
+      } as Partial<Extract<OrchestrationCommand, { type: "thread.queue.add" }>>),
+    );
+    expect(types(both)).toEqual(["thread.queue-entry-added", "thread.queue-held"]);
+    const bothHold = (both[1] as Extract<OrchestrationEvent, { type: "thread.queue-held" }>).payload
+      .hold;
+    expect(bothHold.causeKeys).toEqual(["paused:other", `interrupt:${runningTurn}`]);
+    // The higher-ranked reason shows, as when the two holds come one after the other.
+    expect(bothHold.reason).toBe("paused");
+
+    // The turn still runs, another turn was stopped, or nothing asks: queued as usual.
+    expect(types(await decide(modelWith(running), guarded("running")))).toEqual([
+      "thread.queue-entry-added",
+    ]);
+    expect(types(await decide(stopped, guarded("other", TurnId.make("turn-other"))))).toEqual([
+      "thread.queue-entry-added",
+    ]);
+    expect(types(await decide(stopped, addCommand("plain")))).toEqual(["thread.queue-entry-added"]);
+  });
+
   it("a usage limit holds the queue until it clears, unless the head targets another instance", async () => {
     const limited = {
       latestTurn: { ...running.latestTurn, state: "error" as const, completedAt: at(1) },

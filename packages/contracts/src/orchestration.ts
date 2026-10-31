@@ -2514,6 +2514,12 @@ export const ThreadQueueAddCommand = Schema.Struct({
   queuedBy: Schema.optional(ThreadId),
   /** Server-only: normalization found `entry.messageId` already a message of the thread. */
   alreadySent: Schema.optional(Schema.Literal(true)),
+  /**
+   * Server-only: also holds the queue as a Stop of this turn does (`interrupt:<turnId>`) when it
+   * is the thread's latest turn and ended interrupted. Decided with the add, so a Stop that lands
+   * after the caller's own read of the thread is never lost (a Stop holds only a non-empty queue).
+   */
+  holdIfTurnInterrupted: Schema.optional(TurnId),
 });
 export type ThreadQueueAddCommand = typeof ThreadQueueAddCommand.Type;
 const ClientThreadQueueAddCommand = Schema.Struct({

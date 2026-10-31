@@ -646,6 +646,22 @@ describe.skipIf(!hasCurrentBuild)("built server bundle", () => {
     }
   });
 
+  it("loads the worktree handoff runner and its tools after the server serves", () => {
+    // The executor and the MCP server hold only an import() and the deps they pass in.
+    const lazy =
+      /apps\/server\/src\/(?:agentControl\/(?:worktreeHandoffRuns|Mcp\/worktreeHandoffTools)|orchestration\/threadGitMetadata)\.ts$/u;
+    expect(staticGraph("src/cliMain.ts").files.filter((file) => lazy.test(file))).toEqual([]);
+    expect(
+      staticGraph("src/cliMain.ts", { dynamic: true })
+        .files.filter((file) => lazy.test(file))
+        .toSorted(),
+    ).toEqual([
+      "apps/server/src/agentControl/Mcp/worktreeHandoffTools.ts",
+      "apps/server/src/agentControl/worktreeHandoffRuns.ts",
+      "apps/server/src/orchestration/threadGitMetadata.ts",
+    ]);
+  });
+
   it("keeps the boot chunks within budget", () => {
     const cliChunk = readFileSync(builtEntry, "utf8").match(/import\("(\.\/cliMain[^"]+)"\)/u)?.[1];
     const serve = builtStaticClosure(path.resolve(serverRoot, "dist", cliChunk!));
