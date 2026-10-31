@@ -63,6 +63,7 @@ import {
 import { type CodexResumeCursor, CodexResumeCursorSchema } from "../codexResumeCursor.ts";
 import { classifyCodexStderrLine } from "../codexStderr.ts";
 import { type AgentProcessPriorityShape, spawnAgentProcess } from "../agentProcessPriority.ts";
+import { withThreadAttribution } from "../../localServers/threadAttributionEnv.ts";
 
 const PROVIDER = ProviderDriverKind.make("codex");
 
@@ -1407,8 +1408,10 @@ export const makeCodexSessionRuntime = (
     // `child_process.spawn`; `expandHomePath` lets a configured
     // `CODEX_HOME=~/.codex_work` reach codex as an absolute path.
     const resolvedHomePath = options.homePath ? expandHomePath(options.homePath) : undefined;
+    // Codex and every command it runs carry the thread's id, so the servers it leaves running
+    // stay listed under this thread (`localServers/threadAttributionEnv.ts`).
     const env = {
-      ...(options.environment ?? process.env),
+      ...withThreadAttribution(options.environment, options.threadId),
       ...(resolvedHomePath ? { CODEX_HOME: resolvedHomePath } : {}),
     };
     const child = yield* spawnAgentProcess(

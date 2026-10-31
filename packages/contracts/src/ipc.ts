@@ -105,6 +105,12 @@ import type { ExternalIdentitySummary } from "./hostedIdentity.ts";
 import type { RelayEffectiveRole } from "./relay.ts";
 import type { ThreadForkInput, ThreadForkResult } from "./threadFork.ts";
 import type {
+  ThreadLocalServerList,
+  ThreadStopLocalServerInput,
+  ThreadStopLocalServerResult,
+  ThreadSubscribeLocalServersInput,
+} from "./threadLocalServers.ts";
+import type {
   ComputerUseState,
   ComputerUsePolicy,
   ComputerUsePairing,
@@ -1637,6 +1643,18 @@ export interface EnvironmentApi {
     setManualPosition: (input: ThreadsSetManualPositionInput) => Promise<EmptyRpcResult>;
     /** Optional so clients can feature-detect against older environments. */
     fork?: (input: ThreadForkInput) => Promise<ThreadForkResult>;
+    /**
+     * The servers a thread started (`threads.subscribeLocalServers`), current list first. Clients
+     * call it only when the node's config advertises `threadLocalServers`; `watchThreadLocalServers`
+     * shares one subscription per thread. `onError`: the stream stopped for good.
+     */
+    subscribeLocalServers?: (
+      input: ThreadSubscribeLocalServersInput,
+      callback: (list: ThreadLocalServerList) => void,
+      options?: { onError?: () => void },
+    ) => () => void;
+    /** Only for nodes that advertise `threadLocalServerStop`. */
+    stopLocalServer?: (input: ThreadStopLocalServerInput) => Promise<ThreadStopLocalServerResult>;
   };
   orchestration: {
     dispatchCommand: (command: ClientOrchestrationCommand) => Promise<{ sequence: number }>;

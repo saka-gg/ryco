@@ -26,6 +26,7 @@ import {
   WsServerSubscribeLocalTaskChangesRpc,
   WsServerSubscribeNodeUpdateRpc,
   WsSubscribeAuthAccessRpc,
+  WsThreadsSubscribeLocalServersRpc,
   WsSubscribeDeviceEventsRpc,
   WsSubscribeServerConfigRpc,
   WsSubscribeServerLifecycleRpc,
@@ -326,6 +327,9 @@ const strictStreams = [
   WsSubscribeServerLifecycleRpc,
   WsSubscribeVcsStatusRpc,
   WsSubscribeWorktreeSetupRpc,
+  // Optional: an older client whose decode fails stops listing the thread's servers, as on a
+  // node without them.
+  WsThreadsSubscribeLocalServersRpc,
 ];
 
 describe("streams a node sends a client", () => {

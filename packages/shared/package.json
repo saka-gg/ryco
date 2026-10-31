@@ -324,6 +324,10 @@
       "types": "./src/String.ts",
       "import": "./src/String.ts"
     },
+    "./displayText": {
+      "types": "./src/displayText.ts",
+      "import": "./src/displayText.ts"
+    },
     "./projectScripts": {
       "types": "./src/projectScripts.ts",
       "import": "./src/projectScripts.ts"

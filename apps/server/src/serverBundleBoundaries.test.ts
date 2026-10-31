@@ -383,6 +383,21 @@ describe("server boot import boundaries", () => {
     expect(staticGraph("src/cliMain.ts", { dynamic: true }).files).toContain(watch);
   });
 
+  it("loads the thread local server monitor with its first subscription or stop", () => {
+    // `threads.subscribeLocalServers` and `threads.stopLocalServer` import it with import(); the
+    // spawn sites load only the marker helper.
+    const monitor = [
+      "apps/server/src/localServers/threadLocalServerMonitor.ts",
+      "apps/server/src/localServers/localServerScan.ts",
+      "apps/server/src/localServers/localServerTitles.ts",
+    ];
+    const boot = staticGraph("src/cliMain.ts").files;
+    expect(monitor.filter((file) => boot.includes(file))).toEqual([]);
+    expect(boot).toContain("apps/server/src/localServers/threadAttributionEnv.ts");
+    const reachable = staticGraph("src/cliMain.ts", { dynamic: true }).files;
+    expect(monitor.filter((file) => reachable.includes(file))).toEqual(monitor);
+  });
+
   it("loads the agents' usage limits read and its limit presentation on the first call", () => {
     const usageLimits = [
       "apps/server/src/agentControl/Mcp/usageLimits.ts",
@@ -563,6 +578,10 @@ describe.skipIf(!hasCurrentBuild)("built server bundle", () => {
       expect(source).not.toMatch(/^\/\/#region src\/workspace\/previewFileChunk\.ts$/mu);
       // Loaded with the first open-file watch.
       expect(source).not.toMatch(/^\/\/#region src\/workspace\/workspaceFileWatch\.ts$/mu);
+      // Loaded with the first thread local server subscription or stop.
+      expect(source).not.toMatch(
+        /^\/\/#region src\/localServers\/(?:threadLocalServerMonitor|localServerScan|localServerTitles)\.ts$/mu,
+      );
       // Loaded once an OpenCode server is detected as 2.x.
       expect(source).not.toMatch(/^\/\/#region .*@opencode\//mu);
       expect(source).not.toMatch(/^\/\/#region src\/provider\/openCodeV2\w*\.ts$/mu);

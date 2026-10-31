@@ -45,6 +45,14 @@ import {
 } from "./sessionImport.ts";
 import { ThreadForkError, ThreadForkInput, ThreadForkResult } from "./threadFork.ts";
 import {
+  ThreadLocalServerList,
+  ThreadLocalServersError,
+  ThreadStopLocalServerError,
+  ThreadStopLocalServerInput,
+  ThreadStopLocalServerResult,
+  ThreadSubscribeLocalServersInput,
+} from "./threadLocalServers.ts";
+import {
   ProviderSignInError,
   ProviderSignInInput,
   ProviderSignInRespondInput,
@@ -548,6 +556,8 @@ export const WS_METHODS = {
   threadsSetManualBucket: "threads.setManualBucket",
   threadsSetManualPosition: "threads.setManualPosition",
   threadsFork: "threads.fork",
+  threadsSubscribeLocalServers: "threads.subscribeLocalServers",
+  threadsStopLocalServer: "threads.stopLocalServer",
   worktreesSetManualPosition: "worktrees.setManualPosition",
   projectsInitializeGit: "projects.initializeGit",
   projectsPromoteChatPreview: "projects.promoteChatPreview",
@@ -2129,6 +2139,21 @@ export const WsThreadsForkRpc = Rpc.make(WS_METHODS.threadsFork, {
   error: Schema.Union([ThreadForkError, AuthRpcError]),
 });
 
+/** Only on nodes that advertise `threadLocalServers`; see `ThreadLocalServerList`. */
+export const WsThreadsSubscribeLocalServersRpc = Rpc.make(WS_METHODS.threadsSubscribeLocalServers, {
+  payload: ThreadSubscribeLocalServersInput,
+  success: ThreadLocalServerList,
+  error: Schema.Union([ThreadLocalServersError, AuthRpcError]),
+  stream: true,
+});
+
+/** Only on nodes that advertise `threadLocalServerStop`. */
+export const WsThreadsStopLocalServerRpc = Rpc.make(WS_METHODS.threadsStopLocalServer, {
+  payload: ThreadStopLocalServerInput,
+  success: ThreadStopLocalServerResult,
+  error: Schema.Union([ThreadStopLocalServerError, AuthRpcError]),
+});
+
 export const WsSearchThreadMessagesRpc = Rpc.make(WS_METHODS.searchThreadMessages, {
   payload: SearchThreadMessagesInput,
   success: SearchThreadMessagesResult,
@@ -2832,6 +2857,8 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   | typeof WsLifecycleSummarizeChangesRpc
   | typeof WsThreadsSetManualBucketRpc
   | typeof WsThreadsForkRpc
+  | typeof WsThreadsSubscribeLocalServersRpc
+  | typeof WsThreadsStopLocalServerRpc
   | typeof WsThreadsSetManualPositionRpc
   | typeof WsSearchThreadMessagesRpc
   | typeof WsWorktreesSetManualPositionRpc
@@ -3071,6 +3098,8 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   WsLifecycleSummarizeChangesRpc,
   WsThreadsSetManualBucketRpc,
   WsThreadsForkRpc,
+  WsThreadsSubscribeLocalServersRpc,
+  WsThreadsStopLocalServerRpc,
   WsThreadsSetManualPositionRpc,
   WsSearchThreadMessagesRpc,
   WsWorktreesSetManualPositionRpc,

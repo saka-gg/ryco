@@ -21,6 +21,7 @@ import type * as EffectAcpSchema from "effect-acp/schema";
 import type * as EffectAcpProtocol from "effect-acp/protocol";
 
 import { type AgentProcessPriorityShape, spawnAgentProcess } from "../agentProcessPriority.ts";
+import { withThreadAttribution } from "../../localServers/threadAttributionEnv.ts";
 import { providerStartupPhaseTimeoutDetail } from "../providerOperationPolicy.ts";
 import {
   collectSessionConfigOptionValues,
@@ -112,6 +113,12 @@ export interface AcpSpawnInput {
 
 export interface AcpSessionRuntimeOptions {
   readonly spawn: AcpSpawnInput;
+  /**
+   * The thread a session runs for: the agent and every job it starts carry its id, so the servers
+   * it leaves running stay listed under the thread (`localServers/threadAttributionEnv.ts`).
+   * Unset for probes and text generation, which start nothing that outlives them.
+   */
+  readonly threadId?: string;
   readonly cwd: string;
   readonly resumeSessionId?: string;
   readonly clientCapabilities?: EffectAcpSchema.InitializeRequest["clientCapabilities"];
@@ -339,7 +346,16 @@ const makeAcpSessionRuntime = (
       options.processPriority,
       ChildProcess.make(options.spawn.command, [...options.spawn.args], {
         ...(options.spawn.cwd ? { cwd: options.spawn.cwd } : {}),
-        ...(options.spawn.env ? { env: { ...process.env, ...options.spawn.env } } : {}),
+        ...(options.threadId !== undefined
+          ? {
+              env: withThreadAttribution(
+                options.spawn.env ? { ...process.env, ...options.spawn.env } : process.env,
+                options.threadId,
+              ),
+            }
+          : options.spawn.env
+            ? { env: { ...process.env, ...options.spawn.env } }
+            : {}),
         shell: options.spawn.shell ?? process.platform === "win32",
       }),
     ).pipe(

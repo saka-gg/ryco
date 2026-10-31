@@ -46,6 +46,8 @@ function IconAccessory(props: {
       );
     case "changes":
       return <CrownBadge value={summary.changes.count} />;
+    case "servers":
+      return <CrownBadge value={summary.servers.count} />;
     case "notes":
       return <CrownBadge value={summary.notes.filled ? "•" : ""} variant="note" />;
     default:

@@ -223,6 +223,7 @@ import {
 } from "../claudeSubagentMessages.ts";
 import { type EventNdjsonLogger, makeEventNdjsonLogger } from "./EventNdjsonLogger.ts";
 import { requireRuntimeSessionId, stampRuntimeEvent } from "../runtimeSession.ts";
+import { withThreadAttribution } from "../../localServers/threadAttributionEnv.ts";
 import { providerThreadSnapshotFromTurnIds } from "../providerThreadSnapshot.ts";
 import {
   AGENT_CONTROL_INTERNAL_SERVER_NAME,
@@ -6461,10 +6462,13 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
           }
         : {}),
     };
+    // Claude Code and every job it starts carry the thread's id, so the servers it leaves running
+    // stay listed under this thread (`localServers/threadAttributionEnv.ts`).
+    const sessionEnvironment = withThreadAttribution(claudeEnvironment, threadId);
     // Only when agent priority changes the argv; otherwise the SDK spawns Claude Code itself.
     const claudeCodeSpawn = yield* prepareClaudeCodeSpawn(options?.processPriority, {
       binaryPath: claudeBinaryPath,
-      env: claudeEnvironment,
+      env: sessionEnvironment,
       cwd: input.cwd,
     });
     const queryOptions: ClaudeQueryOptions = {
@@ -6501,7 +6505,7 @@ export const makeClaudeAdapter = Effect.fn("makeClaudeAdapter")(function* (
       canUseTool,
       hooks: { PreToolUse: [{ hooks: [subagentMessageHook] }] },
       ...(Object.keys(mcpServers).length > 0 ? { mcpServers } : {}),
-      env: claudeEnvironment,
+      env: sessionEnvironment,
       ...(input.cwd ? { additionalDirectories: [input.cwd] } : {}),
       ...(Object.keys(extraArgs).length > 0 ? { extraArgs } : {}),
     };

@@ -69,6 +69,13 @@ describe("makeCodexSessionRuntime agent priority", () => {
     }),
   );
 
+  it.effect("marks codex app-server with its thread, so the jobs it runs carry it", () =>
+    Effect.gen(function* () {
+      const { spawned } = yield* startRuntime(undefined);
+      expect(spawned[0]!.options.env?.RYCO_THREAD_ID).toBe("thread-codex-priority");
+    }),
+  );
+
   it.effect("spawns codex app-server unchanged without a priority", () =>
     Effect.gen(function* () {
       const { spawned } = yield* startRuntime(undefined);
