@@ -1,18 +1,22 @@
 import { assert, describe, it } from "@effect/vitest";
-import { Effect, Option, Ref } from "effect";
+import { Deferred, Effect, Fiber, Option, Ref } from "effect";
 import { TestClock } from "effect/testing";
 
 import type { ProviderInstallLockRuntime } from "../provider/providerInstallLock.ts";
 import { ProviderInstallLockError } from "../provider/providerInstallLock.ts";
 import { makeClientInteraction } from "./ClientInteraction.ts";
+import { makeRestartSensitiveWork } from "./restartSensitiveWork.ts";
 import { makeUpdateWindow } from "./updateWindow.ts";
 
 /**
  * A window over in-memory sources: work, the install locks held on the machine, other processes'
- * busy markers, and real client reports.
+ * busy markers, real client reports, terminals and a real restart-sensitive work counter.
  */
 const setup = Effect.gen(function* () {
   const interruptible = yield* Ref.make<Effect.Effect<boolean>>(Effect.succeed(false));
+  const restartInterruptible = yield* Ref.make<Effect.Effect<boolean>>(Effect.succeed(false));
+  const busyTerminals = yield* Ref.make<Effect.Effect<boolean>>(Effect.succeed(false));
+  const restartSensitiveWork = makeRestartSensitiveWork();
   const held = yield* Ref.make<Effect.Effect<ReadonlyArray<string>, ProviderInstallLockError>>(
     Effect.succeed([]),
   );
@@ -28,9 +32,14 @@ const setup = Effect.gen(function* () {
     othersBusy: Effect.flatten(Ref.get(othersBusy)),
   } as unknown as ProviderInstallLockRuntime;
   const window = makeUpdateWindow({
-    agentWork: { interruptible: Effect.flatten(Ref.get(interruptible)) },
+    agentWork: {
+      interruptible: Effect.flatten(Ref.get(interruptible)),
+      restartInterruptible: Effect.flatten(Ref.get(restartInterruptible)),
+    },
     clientInteraction,
     installLock: { lock: Effect.succeed(lock) },
+    busyTerminals: Effect.flatten(Ref.get(busyTerminals)),
+    restartSensitiveWork,
   });
   // Quiet since the server started.
   yield* TestClock.adjust("10 minutes");
@@ -42,8 +51,14 @@ const setup = Effect.gen(function* () {
       Ref.set(held, value),
     setOthersBusy: (value: Effect.Effect<boolean, ProviderInstallLockError>) =>
       Ref.set(othersBusy, value),
+    setRestartInterruptible: (value: Effect.Effect<boolean>) =>
+      Ref.set(restartInterruptible, value),
+    setBusyTerminals: (value: Effect.Effect<boolean>) => Ref.set(busyTerminals, value),
+    restartSensitiveWork,
   };
 });
+
+const restart = { restart: true } as const;
 
 describe("updateWindow", () => {
   it.effect("is open when nobody uses a client, nothing runs and no install is held", () =>
@@ -114,4 +129,80 @@ describe("updateWindow", () => {
       assert.isFalse(yield* window.isOpen());
     }),
   );
+
+  describe("before a restart", () => {
+    it.effect("is open when nobody used a client for 5 minutes and nothing would be cut off", () =>
+      Effect.gen(function* () {
+        const { window, note } = yield* setup;
+        assert.isTrue(yield* window.isOpen(restart));
+        yield* note;
+        yield* TestClock.adjust("2 minutes");
+        // Quiet enough for an install, not for a restart, which disconnects every client.
+        assert.isTrue(yield* window.isOpen());
+        yield* TestClock.adjust("179 seconds");
+        assert.isFalse(yield* window.isOpen(restart));
+        assert.deepStrictEqual(
+          yield* window.runIfOpen(Effect.succeed("restarted"), restart),
+          Option.none(),
+        );
+        yield* TestClock.adjust("1 second");
+        assert.isTrue(yield* window.isOpen(restart));
+        assert.deepStrictEqual(
+          yield* window.runIfOpen(Effect.succeed("restarted"), restart),
+          Option.some("restarted"),
+        );
+      }),
+    );
+
+    it.effect("is closed while a thread would be continued after the restart", () =>
+      Effect.gen(function* () {
+        const { window, setRestartInterruptible } = yield* setup;
+        // A session with an active turn but no running status, say: an install would not cut
+        // it off, a restart would.
+        yield* setRestartInterruptible(Effect.succeed(true));
+        assert.isTrue(yield* window.isOpen());
+        assert.isFalse(yield* window.isOpen(restart));
+      }),
+    );
+
+    it.effect("is closed while a terminal runs a command", () =>
+      Effect.gen(function* () {
+        const { window, setBusyTerminals } = yield* setup;
+        yield* setBusyTerminals(Effect.succeed(true));
+        assert.isTrue(yield* window.isOpen());
+        assert.isFalse(yield* window.isOpen(restart));
+        yield* setBusyTerminals(Effect.die(new Error("diagnostics unavailable")));
+        assert.isFalse(yield* window.isOpen(restart));
+      }),
+    );
+
+    it.effect("is closed while a clone, checkout or cleanup runs", () =>
+      Effect.gen(function* () {
+        const { window, restartSensitiveWork } = yield* setup;
+        const release = yield* Deferred.make<void>();
+        const clone = yield* restartSensitiveWork
+          .track(Deferred.await(release))
+          .pipe(Effect.forkChild({ startImmediately: true }));
+        assert.strictEqual(yield* restartSensitiveWork.count, 1);
+        assert.isTrue(yield* window.isOpen());
+        assert.isFalse(yield* window.isOpen(restart));
+        yield* Deferred.succeed(release, undefined);
+        yield* Fiber.join(clone);
+        assert.strictEqual(yield* restartSensitiveWork.count, 0);
+        assert.isTrue(yield* window.isOpen(restart));
+      }),
+    );
+
+    it.effect("stays closed for everything an install waits for", () =>
+      Effect.gen(function* () {
+        const { window, setInterruptible, setHeld } = yield* setup;
+        yield* setInterruptible(Effect.succeed(true));
+        assert.isFalse(yield* window.isOpen(restart));
+        yield* setInterruptible(Effect.succeed(false));
+        yield* setHeld(Effect.succeed(["npm-global"]));
+        assert.isFalse(yield* window.isOpen(restart));
+        assert.isTrue(yield* window.isOpen({ ...restart, heldLockKey: "npm-global" }));
+      }),
+    );
+  });
 });

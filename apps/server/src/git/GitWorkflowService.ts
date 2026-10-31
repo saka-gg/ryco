@@ -58,6 +58,7 @@ import {
   type GitWorktreeCreationContext,
   type GitVcsDriverShape,
 } from "../vcs/GitVcsDriver.ts";
+import { RestartSensitiveWork } from "../updates/restartSensitiveWork.ts";
 import { VcsDriverRegistry } from "../vcs/VcsDriverRegistry.ts";
 
 export interface GitWorkflowServiceShape {
@@ -212,6 +213,8 @@ export const make = Effect.fn("makeGitWorkflowService")(function* () {
   const registry = yield* VcsDriverRegistry;
   const git = yield* GitVcsDriver;
   const gitManager = yield* GitManager;
+  // A restart in the middle would leave a half-made or half-removed checkout behind.
+  const restartWork = yield* RestartSensitiveWork;
 
   const ensureGit = Effect.fn("GitWorkflowService.ensureGit")(function* (
     operation: string,
@@ -454,10 +457,12 @@ export const make = Effect.fn("makeGitWorkflowService")(function* () {
     createWorktree: (input) =>
       ensureGitCommand("GitWorkflowService.createWorktree", input.cwd).pipe(
         Effect.andThen(git.createWorktree(input)),
+        restartWork.track,
       ),
     prefetchWorktreeBase: (input) =>
       ensureGitCommand("GitWorkflowService.prefetchWorktreeBase", input.cwd).pipe(
         Effect.andThen(git.prefetchWorktreeBase(input)),
+        restartWork.track,
       ),
     isAncestorCommit: (input) =>
       ensureGitCommand("GitWorkflowService.isAncestorCommit", input.cwd).pipe(
@@ -466,6 +471,7 @@ export const make = Effect.fn("makeGitWorkflowService")(function* () {
     removeWorktree: (input) =>
       ensureGitCommand("GitWorkflowService.removeWorktree", input.cwd).pipe(
         Effect.andThen(git.removeWorktree(input)),
+        restartWork.track,
       ),
     listWorktreePaths: (cwd) => {
       const empty: readonly string[] = [];

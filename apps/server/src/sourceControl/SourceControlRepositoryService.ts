@@ -17,6 +17,7 @@ import {
 } from "@ryco/contracts";
 
 import { ServerConfig } from "../config.ts";
+import { RestartSensitiveWork } from "../updates/restartSensitiveWork.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import { WorkspaceAccessPolicy } from "../workspace/Services/WorkspaceAccessPolicy.ts";
 import type * as SourceControlProvider from "./SourceControlProvider.ts";
@@ -231,6 +232,7 @@ export const make = Effect.fn("makeSourceControlRepositoryService")(function* ()
   const path = yield* Path.Path;
   const providers = yield* SourceControlProviderRegistry.SourceControlProviderRegistry;
   const workspaceAccessPolicy = yield* WorkspaceAccessPolicy;
+  const restartWork = yield* RestartSensitiveWork;
   // Clones outlive the request that started them (see gitCloneRun.ts); they live as long as
   // this service, and the registry is built with the first clone.
   const serviceScope = yield* Effect.scope;
@@ -530,6 +532,8 @@ export const make = Effect.fn("makeSourceControlRepositoryService")(function* ()
             remoteUrl: cloneRemoteUrl,
             repository,
           })),
+          // The clone runs detached for as long as this, so a restart waits for all of it.
+          restartWork.track,
         ),
     });
   });

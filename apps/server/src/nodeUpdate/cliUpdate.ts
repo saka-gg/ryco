@@ -11,9 +11,11 @@
  * 4. Hands the restart to the service manager.
  *
  * A failed install, check, snapshot or marker reinstalls the previous release, and the node
- * keeps running without a restart. After the restart, the boot guard (bootGuard.ts) rolls back
- * a release that keeps failing to start, and the release confirms the update once it is ready
- * ({@link awaitNodeReadyAfterUpdate}).
+ * keeps running without a restart. So does an unattended update whose quiet moment ended while
+ * the release installed: it is postponed. After the restart, the boot guard (bootGuard.ts) rolls
+ * back a release that keeps failing to start, and the release confirms the update once it is
+ * ready ({@link awaitNodeReadyAfterUpdate}); after an unattended update it exits when it is not
+ * ready in time, so the boot guard counts that start too ({@link awaitNodeReadyOrExit}).
  *
  * Loaded with the first update, and by a process restarted into one (NodeUpdateService.ts), so
  * no other boot pays for it. What it needs from the server is passed in, so loading it splits
@@ -22,7 +24,7 @@
  * @module nodeUpdate/cliUpdate
  */
 import type { HubConnectorStatus, NodeUpdateRun } from "@ryco/contracts";
-import { Cause, Duration, Effect, FileSystem, Path, Result } from "effect";
+import { Cause, Duration, Effect, FileSystem, Option, Path, Result } from "effect";
 
 import type { HubConnectorServiceShape } from "../hubConnector/HubConnectorService.ts";
 import type { ServerRuntimeStartupError } from "../serverRuntimeStartup.ts";
@@ -39,7 +41,11 @@ import {
   outputReportsVersion,
   recordNodeUpdateCommand,
 } from "./processes.ts";
-import { NODE_UPDATE_PREFLIGHT_PASSED, NODE_UPDATE_PREFLIGHT_STARTED } from "./updateProtocol.ts";
+import {
+  NODE_UPDATE_AUTO_SKIP_FILE_NAME,
+  NODE_UPDATE_PREFLIGHT_PASSED,
+  NODE_UPDATE_PREFLIGHT_STARTED,
+} from "./updateProtocol.ts";
 
 export { makeNodeUpdateCommandRunner, restartThroughServiceManager } from "./processes.ts";
 
@@ -91,8 +97,14 @@ export interface CliNodeUpdateInput {
     message: string,
     output: string | null,
   ) => Effect.Effect<void>;
+  readonly finishPostponed: (run: NodeUpdateRun, message: string) => Effect.Effect<void>;
   readonly restartDelay: Duration.Input;
   readonly restartGrace: Duration.Input;
+  /**
+   * An unattended update: asked once the release is installed and checked, right before the
+   * snapshot and the restart. `false` puts the previous release back and postpones the update.
+   */
+  readonly beforeRestart?: Effect.Effect<boolean>;
 }
 
 export const runCliNodeUpdate = Effect.fn("runCliNodeUpdate")(function* (
@@ -102,15 +114,17 @@ export const runCliNodeUpdate = Effect.fn("runCliNodeUpdate")(function* (
   const fileSystem = yield* FileSystem.FileSystem;
   const path = yield* Path.Path;
 
-  const reinstall = (version: string) =>
+  const reinstallOutcome = (version: string) =>
     Effect.gen(function* () {
       const command = nodeInstallCommand(detected, version, runtime.execPath);
-      if (command === null) return `${version} could not be reinstalled.`;
+      if (command === null) return { ok: false, message: `${version} could not be reinstalled.` };
       const result = yield* runtime.runCommand(command);
       return commandSucceeded(result)
-        ? `Reinstalled ${version}.`
-        : `Reinstalling ${version} failed too; update it on that machine.`;
+        ? { ok: true, message: `Reinstalled ${version}.` }
+        : { ok: false, message: `Reinstalling ${version} failed too; update it on that machine.` };
     });
+  const reinstall = (version: string) =>
+    Effect.map(reinstallOutcome(version), (outcome) => outcome.message);
 
   const removeDatabaseCopy = (filePath: string) =>
     Effect.forEach(
@@ -187,7 +201,8 @@ export const runCliNodeUpdate = Effect.fn("runCliNodeUpdate")(function* (
   /**
    * The database right before the restart, as `pre-<fromVersion>.sqlite` in the update
    * directory. Everything else there goes first (an older snapshot, a database an earlier
-   * rollback set aside), so one snapshot is kept at most.
+   * rollback set aside), so one snapshot is kept at most; only the releases unattended updates
+   * skip stay.
    */
   const snapshotDatabase = (fromVersion: string) =>
     Effect.gen(function* () {
@@ -196,7 +211,7 @@ export const runCliNodeUpdate = Effect.fn("runCliNodeUpdate")(function* (
         .readDirectory(directory)
         .pipe(Effect.orElseSucceed((): ReadonlyArray<string> => []));
       yield* Effect.forEach(
-        entries,
+        entries.filter((entry) => entry !== NODE_UPDATE_AUTO_SKIP_FILE_NAME),
         (entry) =>
           fileSystem
             .remove(path.join(directory, entry), { recursive: true, force: true })
@@ -235,6 +250,20 @@ export const runCliNodeUpdate = Effect.fn("runCliNodeUpdate")(function* (
   if (!checked.ok) {
     const rollback = yield* reinstall(marker.fromVersion);
     return yield* finishFailed(run, `${checked.reason} ${rollback}`, checked.output);
+  }
+
+  // The install and the check took a while: someone may have started using the node meanwhile.
+  if (input.beforeRestart !== undefined && !(yield* input.beforeRestart)) {
+    const rollback = yield* reinstallOutcome(marker.fromVersion);
+    const reason = `Someone started using this node before it could restart into ${target}.`;
+    // Only a node back on its previous release can wait; otherwise the files on disk are not
+    // the release that runs, and that is a failure.
+    return yield* rollback.ok
+      ? input.finishPostponed(
+          run,
+          `${reason} ${rollback.message} It updates once the node is quiet again.`,
+        )
+      : finishFailed(run, `${reason} ${rollback.message}`, null);
   }
 
   // Taken last, so it misses only the writes of the next few seconds; the boot guard restores
@@ -313,6 +342,11 @@ export interface NodeBootReadiness {
   > | null;
 }
 
+/** How long a release an unattended update restarted into may take to get ready. */
+export const UNATTENDED_BOOT_READY_TIMEOUT = Duration.minutes(10);
+/** The exit code of a release that did not get ready in time after an unattended update. */
+export const NODE_NOT_READY_EXIT_CODE = 1;
+
 /**
  * Waits until a node restarted into an update is ready: its runtime is built (migrations ran),
  * the router serves (the caller runs once it does), and, when the Hub connector is enabled, the
@@ -341,4 +375,36 @@ export const awaitNodeReadyAfterUpdate = (readiness: NodeBootReadiness) =>
       Effect.timeoutOption(NODE_BOOT_HUB_WAIT),
       Effect.ignoreCause({ log: false }),
     );
+  });
+
+/**
+ * {@link awaitNodeReadyAfterUpdate} for a release an unattended update restarted into: when it is
+ * not ready {@link UNATTENDED_BOOT_READY_TIMEOUT} after it started serving, or its startup failed,
+ * it calls `exitProcess` with {@link NODE_NOT_READY_EXIT_CODE} and never returns. The service
+ * manager starts it again, the boot guard counts that start as a failed attempt, and after
+ * `NODE_UPDATE_MAX_BOOT_ATTEMPTS` the previous release goes back. Nobody watches an update
+ * nobody asked for, so a release that hangs must not wait for a person to restart it.
+ *
+ * Port of the service launcher's readiness bound in T3 Code's unmerged pingdotgg/t3code#17586
+ * (`PREPARED_TIMEOUT_MS`, 10 minutes).
+ */
+export const awaitNodeReadyOrExit = (
+  readiness: NodeBootReadiness,
+  exitProcess: (code: number) => Effect.Effect<void>,
+) =>
+  Effect.gen(function* () {
+    const ready = yield* awaitNodeReadyAfterUpdate(readiness).pipe(
+      Effect.timeoutOption(UNATTENDED_BOOT_READY_TIMEOUT),
+      Effect.map(Option.isSome),
+      Effect.catchCause((cause) =>
+        Cause.hasInterruptsOnly(cause) ? Effect.failCause(cause) : Effect.succeed(false),
+      ),
+    );
+    if (ready) return;
+    yield* Effect.logError(
+      "Ryco did not get ready after an automatic update; exiting so the service manager starts it again",
+      { timeoutMinutes: Duration.toMinutes(UNATTENDED_BOOT_READY_TIMEOUT) },
+    );
+    yield* exitProcess(NODE_NOT_READY_EXIT_CODE);
+    return yield* Effect.never;
   });

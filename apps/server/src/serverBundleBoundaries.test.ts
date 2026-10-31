@@ -443,16 +443,20 @@ describe("server boot import boundaries", () => {
     ]) {
       expect(loadable).toContain(file);
     }
-    // Unattended updates: boot holds the interaction clock (the RPC writes it) and the launcher,
-    // which loads the window and the updater only once a node's owner turns them on.
+    // Unattended updates: boot holds the interaction clock (the RPC writes it), the counter that
+    // clones, checkouts and storage cleanup write, and the launcher, which loads the window and the
+    // updaters only once a node's owner turns them on.
     expect(reached(/^apps\/server\/src\/updates\//u).toSorted()).toEqual([
       "apps/server/src/updates/ClientInteraction.ts",
+      "apps/server/src/updates/restartSensitiveWork.ts",
       "apps/server/src/updates/unattendedUpdatesLauncher.ts",
     ]);
     expect(reachable).toEqual(
       expect.arrayContaining([
         "apps/server/src/updates/unattendedUpdates.ts",
         "apps/server/src/updates/providerAutoUpdater.ts",
+        "apps/server/src/updates/nodeAutoUpdater.ts",
+        "apps/server/src/updates/nodeAutoSkip.ts",
         "apps/server/src/updates/updateWindow.ts",
       ]),
     );
@@ -725,7 +729,7 @@ describe.skipIf(!hasCurrentBuild)("built server bundle", () => {
       );
       // Loaded once a node's owner turns on automatic updates.
       expect(source).not.toMatch(
-        /^\/\/#region src\/updates\/(?:unattendedUpdates|providerAutoUpdater|updateWindow)\.ts$/mu,
+        /^\/\/#region src\/updates\/(?:unattendedUpdates|providerAutoUpdater|nodeAutoUpdater|nodeAutoSkip|updateWindow)\.ts$/mu,
       );
       // Loaded with Forgejo's pull request page API.
       expect(source).not.toMatch(

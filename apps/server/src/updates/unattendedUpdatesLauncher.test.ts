@@ -1,15 +1,17 @@
 import { assert, describe, it } from "@effect/vitest";
 import { DEFAULT_SERVER_SETTINGS, type ServerSettings } from "@ryco/contracts";
-import { Effect, Layer, PubSub, Stream } from "effect";
+import { Effect, FileSystem, Layer, Path, PubSub, Stream } from "effect";
 import { HttpClient } from "effect/http";
 import { TestClock } from "effect/testing";
 
 import { ServerConfig, type ServerConfigShape } from "../config.ts";
+import { NodeUpdateService } from "../nodeUpdate/NodeUpdateService.ts";
 import { AgentWorkActivity } from "../orchestration/AgentWorkActivity.ts";
 import { ProviderMaintenanceRunner } from "../provider/providerMaintenanceRunner.ts";
 import { ProviderInstallLock } from "../provider/Services/ProviderInstallLock.ts";
 import { ProviderRegistry } from "../provider/Services/ProviderRegistry.ts";
 import { ServerSettingsService, type ServerSettingsShape } from "../serverSettings.ts";
+import { TerminalManager } from "../terminal/Services/Manager.ts";
 import { ClientInteraction } from "./ClientInteraction.ts";
 import type * as UnattendedUpdates from "./unattendedUpdates.ts";
 import { LOAD_RETRY_INTERVAL, makeUnattendedUpdatesLauncher } from "./unattendedUpdatesLauncher.ts";
@@ -69,7 +71,10 @@ const launch = (options: {
       makeUnattendedUpdatesLauncher(load).pipe(
         Layer.provide(
           Layer.mergeAll(
-            Layer.succeed(ServerConfig, { devUrl: undefined } as unknown as ServerConfigShape),
+            Layer.succeed(ServerConfig, {
+              devUrl: undefined,
+              stateDir: "/state",
+            } as unknown as ServerConfigShape),
             Layer.succeed(ServerSettingsService, serverSettings),
             Layer.succeed(ProviderRegistry, {} as never),
             Layer.succeed(ProviderMaintenanceRunner, {} as never),
@@ -77,6 +82,10 @@ const launch = (options: {
             Layer.succeed(ClientInteraction, {} as never),
             Layer.succeed(AgentWorkActivity, {} as never),
             Layer.succeed(HttpClient.HttpClient, {} as never),
+            Layer.succeed(NodeUpdateService, {} as never),
+            Layer.succeed(TerminalManager, { listDiagnostics: Effect.succeed([]) } as never),
+            Layer.succeed(FileSystem.FileSystem, {} as never),
+            Layer.succeed(Path.Path, { join: (...parts: string[]) => parts.join("/") } as never),
           ),
         ),
       ),

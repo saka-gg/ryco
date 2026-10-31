@@ -180,8 +180,9 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
    */
   agentProcessPriority: Schema.optionalKey(Schema.Boolean),
   /**
-   * The node honours `automaticUpdates` (unattended provider CLI updates in a quiet window) and
-   * answers `server.noteClientInteraction`; absent on older servers, which drop the key.
+   * The node honours `automaticUpdates` (unattended provider CLI updates in a quiet window, and a
+   * CLI service node's own updates) and answers `server.noteClientInteraction`; absent on older
+   * servers, which drop the key.
    */
   automaticUpdates: Schema.optionalKey(Schema.Boolean),
   /**

@@ -130,7 +130,7 @@ export const agentControlPromptSummaryForPlan = (plan: AgentControlActionPlan): 
       return `Unlink project ${plan.expected.title}; workspace files will be retained`;
     case "changeSettings":
       return plan.change.kind === "providerUpdateChecks" && plan.change.startsAutomaticUpdates
-        ? "Turn on provider update checks; this node's automatic provider updates would start installing CLI updates"
+        ? "Turn on provider update checks; this node's automatic updates would start installing CLI updates (and, on a CLI service node, Ryco's own releases)"
         : `Change ${plan.change.kind}`;
     case "createAutomation":
       return `Create automation ${plan.automationId}${automationTargetSummary(plan.definition.execution)}; each run requires separate approval`;

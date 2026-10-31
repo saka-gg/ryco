@@ -21,6 +21,11 @@ import { writeSync } from "node:fs";
 export const NODE_UPDATE_MARKER_FILE_NAME = "node-update.json";
 /** In the state directory: the snapshot before a restart, the preflight copy, a failed database. */
 export const NODE_UPDATE_DIRECTORY_NAME = "node-update";
+/**
+ * In the update directory: the releases the node's own unattended updates no longer try
+ * (`nodeAutoSkip.ts`). The only file there an update keeps.
+ */
+export const NODE_UPDATE_AUTO_SKIP_FILE_NAME = "auto-skip.json";
 /** Nobody waits for the answer to an older update, and nothing rolls it back. */
 export const NODE_UPDATE_MARKER_MAX_AGE_MS = 24 * 60 * 60 * 1_000;
 /** The contract's bound on `run.output`. */

@@ -26,7 +26,9 @@ import type {
   OrchestrationEvent,
   OrchestrationReadModel,
   OrchestrationSession,
+  ThreadId,
 } from "@ryco/contracts";
+import { deriveBackgroundWork } from "@ryco/shared/backgroundWork";
 import { derivePendingThreadRequestState } from "@ryco/shared/threadActivity";
 import {
   Cause,
@@ -44,6 +46,7 @@ import {
 
 import { ServerRuntimeStartup } from "../serverRuntimeStartup.ts";
 import { OrchestrationEngineService } from "./Services/OrchestrationEngine.ts";
+import { restartCandidateShape } from "./restartContinuationPolicy.ts";
 import { ThreadBackgroundLivenessService } from "./ThreadBackgroundLiveness.ts";
 import { findThreadInArray } from "./threadIndex.ts";
 
@@ -122,6 +125,32 @@ export function hasInterruptibleWork(readModel: Pick<OrchestrationReadModel, "th
   });
 }
 
+const NOTHING_LIVE: ReadonlySet<ThreadId> = new Set<ThreadId>();
+const BACKGROUND_WORK_HINT = { hasBackgroundWork: true, recordedAt: "" } as const;
+
+/**
+ * Any thread the next start would offer to continue (`RestartContinuation`'s capture, the same
+ * `restartCandidateShape` with no session live yet): a session left starting or running, or with
+ * an active turn whatever its status, and a settled thread whose current runtime still has
+ * background tasks that the shutdown would record (`liveBackgroundThreadIds`, the liveness
+ * registry). An unattended restart waits until there is none (`updateWindow.ts`), so it never
+ * makes RestartContinuation start a turn nobody asked for.
+ */
+export function hasRestartContinuationCandidate(
+  readModel: Pick<OrchestrationReadModel, "threads">,
+  liveBackgroundThreadIds: ReadonlySet<string>,
+): boolean {
+  return readModel.threads.some((thread) => {
+    const hint = liveBackgroundThreadIds.has(thread.id) ? BACKGROUND_WORK_HINT : undefined;
+    const shape = restartCandidateShape(thread, NOTHING_LIVE, hint);
+    if (shape === null) return false;
+    if (shape.kind === "in-flight") return true;
+    // As capture: a background-only thread counts only with tasks of its current runtime.
+    const work = deriveBackgroundWork(thread.activities, thread.session?.runtimeSessionId);
+    return work.tasks.length > 0 || work.detailsOmitted;
+  });
+}
+
 /**
  * The domain events that can change what the two predicates above answer: `thread.session-set`
  * is the only writer of a thread's session, and deletion, trash and restore change `deletedAt`.
@@ -189,6 +218,12 @@ export interface AgentWorkActivityShape {
    * interrupt.
    */
   readonly interruptible: Effect.Effect<boolean>;
+  /**
+   * {@link interruptible}, or a thread the next start would offer to continue
+   * ({@link hasRestartContinuationCandidate}): what a restart of this server must wait for. True
+   * whenever `interruptible` is, and when the read fails.
+   */
+  readonly restartInterruptible: Effect.Effect<boolean>;
 }
 
 export class AgentWorkActivity extends Context.Service<AgentWorkActivity, AgentWorkActivityShape>()(
@@ -346,9 +381,19 @@ export const makeAgentWorkActivity = Effect.gen(function* () {
       Cause.hasInterruptsOnly(cause) ? Effect.failCause(cause) : Effect.succeed(true),
     ),
   );
+  const restartInterruptible = Effect.gen(function* () {
+    if (readModel === undefined || (yield* interruptible)) return true;
+    const model = yield* readModel();
+    return hasRestartContinuationCandidate(model, new Set(liveness.listLiveThreadIds()));
+  }).pipe(
+    Effect.catchCause((cause) =>
+      Cause.hasInterruptsOnly(cause) ? Effect.failCause(cause) : Effect.succeed(true),
+    ),
+  );
   return {
     current: SubscriptionRef.get(published).pipe(Effect.map((state) => state ?? IDLE_AGENT_WORK)),
     interruptible,
+    restartInterruptible,
     changes: SubscriptionRef.changes(published).pipe(
       Stream.filter((state): state is AgentWorkState => state !== null),
     ),

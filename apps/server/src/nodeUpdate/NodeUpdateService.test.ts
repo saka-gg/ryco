@@ -5,13 +5,20 @@ import type {
   DesktopAppUpdateRequestFrame,
   DesktopAppUpdateSnapshot,
 } from "@ryco/shared/desktopResourceTelemetry";
-import { Deferred, Duration, Effect, FileSystem, Option, Path, Stream } from "effect";
+import { Deferred, Duration, Effect, Fiber, FileSystem, Option, Path, Stream } from "effect";
 
 import type { DesktopAppUpdateBridge } from "../desktopAppUpdateBridge.ts";
 import type { DetectedNodeInstallation } from "./installation.ts";
 import { type NodeUpdateMarker, readNodeUpdateMarker, writeNodeUpdateMarker } from "./marker.ts";
-import { makeNodeUpdateService, type NodeUpdateRuntime } from "./NodeUpdateService.ts";
 import {
+  confirmNodeUpdateAfterServe,
+  makeNodeUpdateService,
+  NodeUpdateService,
+  type NodeUpdateRuntime,
+  type NodeUpdateServiceShape,
+} from "./NodeUpdateService.ts";
+import {
+  NODE_UPDATE_AUTO_SKIP_FILE_NAME,
   NODE_UPDATE_PREFLIGHT_ARG,
   NODE_UPDATE_PREFLIGHT_PASSED,
   NODE_UPDATE_PREFLIGHT_STARTED,
@@ -519,6 +526,69 @@ describe("node self-update (CLI service)", () => {
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 
+  const unattended = (beforeRestart: Effect.Effect<boolean>) => ({ unattended: { beforeRestart } });
+
+  it.live("records an update the node runs on its own in the marker", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness();
+      const asked: Array<number> = [];
+      const accepted = yield* harness.service.update(
+        { ...update, requestId: "auto-1" },
+        unattended(Effect.sync(() => asked.push(harness.copies.length)).pipe(Effect.as(true))),
+      );
+      yield* Deferred.await(harness.restarted).pipe(Effect.timeout("5 seconds"));
+      // Asked once, after the preflight's copy and before the snapshot.
+      expect(asked).toEqual([1]);
+      const marker = Option.getOrThrow(yield* readNodeUpdateMarker(harness.markerPath));
+      expect(marker).toMatchObject({
+        requestId: "auto-1",
+        targetVersion: "0.1.36",
+        startedAt: accepted.run.startedAt,
+        unattended: true,
+      });
+      expect(marker.rollback).toBeDefined();
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.live("puts the previous release back when the node got busy before the restart", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness();
+      yield* harness.service.update(update, unattended(Effect.succeed(false)));
+      const state = yield* harness.waitFor((value) => value.run.status === "postponed");
+      expect(state.run.message).toBe(
+        "Someone started using this node before it could restart into 0.1.36. Reinstalled 0.1.35. It updates once the node is quiet again.",
+      );
+      expect(harness.commands.map((command) => command.args.at(-1))).toEqual([
+        "ryco-cli@0.1.36",
+        `${harness.updateDirectory}/preflight.sqlite`,
+        "ryco-cli@0.1.35",
+      ]);
+      expect(harness.restarts).toEqual([]);
+      expect(Option.isNone(yield* readNodeUpdateMarker(harness.markerPath))).toBe(true);
+      // Postponed is settled: a person can update now.
+      expect(state.canUpdate).toBe(true);
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.live("keeps the releases unattended updates skip through the snapshot cleanup", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const dir = yield* fs.makeTempDirectoryScoped({ prefix: "node-update-" });
+      yield* fs.makeDirectory(`${dir}/node-update`, { recursive: true });
+      const skipFile = `${dir}/node-update/${NODE_UPDATE_AUTO_SKIP_FILE_NAME}`;
+      yield* fs.writeFileString(skipFile, '{"versions":["0.1.34"]}\n');
+      yield* fs.writeFileString(`${dir}/node-update/pre-0.1.34.sqlite`, "older snapshot");
+      const harness = yield* makeHarness({ dir });
+      yield* harness.service.update(update);
+      yield* Deferred.await(harness.restarted).pipe(Effect.timeout("5 seconds"));
+      expect((yield* fs.readDirectory(harness.updateDirectory)).toSorted()).toEqual([
+        NODE_UPDATE_AUTO_SKIP_FILE_NAME,
+        "pre-0.1.35.sqlite",
+      ]);
+      expect(yield* fs.readFileString(skipFile)).toBe('{"versions":["0.1.34"]}\n');
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
   it.live("reports a restart that never came", () =>
     Effect.gen(function* () {
       const harness = yield* makeHarness({ restartGrace: Duration.millis(20) });
@@ -634,6 +704,44 @@ describe("node update after a restart", () => {
         output: "added 1 package",
       });
       expect(Option.isNone(yield* readNodeUpdateMarker(harness.markerPath))).toBe(true);
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.live("exits a release that does not get ready only after an update nobody asked for", () =>
+    Effect.gen(function* () {
+      const restartedInto = (extra: Partial<NodeUpdateMarker>) =>
+        makeHarness({
+          packageVersion: "0.1.36",
+          marker: { ...marker, rollback, bootAttempts: 1, ...extra },
+        });
+      // Its startup failed: it will not get ready.
+      const readiness = {
+        commandReady: Effect.die(new Error("migration failed")),
+        hubConnector: null,
+      };
+      const confirm = (service: NodeUpdateServiceShape) =>
+        Effect.gen(function* () {
+          const exited = yield* Deferred.make<number>();
+          const fiber = yield* confirmNodeUpdateAfterServe(readiness, (code) =>
+            Deferred.succeed(exited, code),
+          ).pipe(Effect.provideService(NodeUpdateService, service), Effect.forkScoped);
+          return { exited, fiber };
+        });
+
+      const automatic = yield* restartedInto({ unattended: true });
+      expect(yield* automatic.service.awaitsUnattendedBootReady).toBe(true);
+      const watched = yield* confirm(automatic.service);
+      expect(yield* Deferred.await(watched.exited).pipe(Effect.timeout("5 seconds"))).toBe(1);
+      // Never confirmed: the boot guard keeps counting.
+      expect((yield* automatic.service.current).run.status).toBe("restarting");
+      expect(Option.isSome(yield* readNodeUpdateMarker(automatic.markerPath))).toBe(true);
+
+      const manual = yield* restartedInto({});
+      expect(yield* manual.service.awaitsBootReady).toBe(true);
+      expect(yield* manual.service.awaitsUnattendedBootReady).toBe(false);
+      const left = yield* confirm(manual.service);
+      yield* Fiber.join(left.fiber).pipe(Effect.timeout("5 seconds"));
+      expect(yield* Deferred.isDone(left.exited)).toBe(false);
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 
@@ -787,6 +895,19 @@ describe("node self-update (desktop app)", () => {
       );
       expect((yield* harness.service.current).run.status).toBe("failed");
       expect(Option.isNone(yield* readNodeUpdateMarker(harness.markerPath))).toBe(true);
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.live("refuses to update the desktop app unattended", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness({ installation: desktopApp });
+      harness.desktop.report(desktopSnapshot());
+      yield* harness.waitFor((state) => state.canUpdate);
+      const refused = yield* Effect.flip(
+        harness.service.update(update, { unattended: { beforeRestart: Effect.succeed(true) } }),
+      );
+      expect(refused.reason).toBe("The desktop app does not update itself unattended.");
+      expect(harness.desktop.requests).toEqual([]);
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 

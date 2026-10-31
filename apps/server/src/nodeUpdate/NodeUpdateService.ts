@@ -96,12 +96,17 @@ export interface NodeUpdateServiceShape {
   /** Looks for the newest release now: the npm registry, or the desktop app's feed. */
   readonly check: Effect.Effect<NodeUpdateState, NodeUpdateError>;
   /** Starts installing `targetVersion` and answers once it is under way. */
-  readonly update: (input: NodeUpdateInput) => Effect.Effect<NodeUpdateState, NodeUpdateError>;
+  readonly update: (
+    input: NodeUpdateInput,
+    options?: NodeUpdateOptions,
+  ) => Effect.Effect<NodeUpdateState, NodeUpdateError>;
   /**
    * Whether this process was restarted into an update it has yet to confirm. The server then
    * waits until it is ready (`confirmNodeUpdateAfterServe`) and calls {@link confirmBootReady}.
    */
   readonly awaitsBootReady: Effect.Effect<boolean>;
+  /** {@link awaitsBootReady}, for an update the node ran on its own (the marker's `unattended`). */
+  readonly awaitsUnattendedBootReady: Effect.Effect<boolean>;
   /** This process is ready: the update it was restarted into succeeded. */
   readonly confirmBootReady: Effect.Effect<void>;
 }
@@ -109,6 +114,17 @@ export interface NodeUpdateServiceShape {
 export class NodeUpdateService extends Context.Service<NodeUpdateService, NodeUpdateServiceShape>()(
   "ryco/nodeUpdate/NodeUpdateService",
 ) {}
+
+/** Server-side only, never on the wire: what a client's update cannot ask for. */
+export interface NodeUpdateOptions {
+  /**
+   * Nobody asked for this update: the node updates itself (`nodeAutoUpdater.ts`). The marker
+   * records it, and once the release is installed and checked the restart happens only if
+   * `beforeRestart` still answers true; otherwise the previous release goes back and the run is
+   * `postponed`. CLI nodes only.
+   */
+  readonly unattended?: { readonly beforeRestart: Effect.Effect<boolean> };
+}
 
 /** What the service needs from the process and the machine; tests replace each part. */
 export interface NodeUpdateRuntime {
@@ -285,6 +301,10 @@ export const makeNodeUpdateService = Effect.fn("makeNodeUpdateService")(function
     Effect.flatMap(nowIso, (finishedAt) =>
       setRun({ ...run, status: "failed", finishedAt, message, output }),
     );
+  const finishPostponed = (run: NodeUpdateRun, message: string) =>
+    Effect.flatMap(nowIso, (finishedAt) =>
+      setRun({ ...run, status: "postponed", finishedAt, message, output: null }),
+    );
 
   // ── Newest release (CLI nodes) ────────────────────────────────────────────
 
@@ -424,6 +444,7 @@ export const makeNodeUpdateService = Effect.fn("makeNodeUpdateService")(function
 
   const bootReady = yield* Deferred.make<void>();
   let bootConfirmationPending = false;
+  let bootConfirmationUnattended = false;
 
   /**
    * Once the server is ready: records `readyAt`, so the boot guard stops counting starts even
@@ -469,6 +490,7 @@ export const makeNodeUpdateService = Effect.fn("makeNodeUpdateService")(function
       ) {
         // Still `restarting` until the node is ready, which also keeps another update out.
         bootConfirmationPending = true;
+        bootConfirmationUnattended = marker.value.unattended === true;
         const pending: NodeUpdateRun = {
           ...IDLE_NODE_UPDATE_RUN,
           status: "restarting",
@@ -497,6 +519,10 @@ export const makeNodeUpdateService = Effect.fn("makeNodeUpdateService")(function
   );
 
   const awaitsBootReady = Effect.map(settleBootMarker, () => bootConfirmationPending);
+  const awaitsUnattendedBootReady = Effect.map(
+    settleBootMarker,
+    () => bootConfirmationPending && bootConfirmationUnattended,
+  );
   const confirmBootReady = Deferred.succeed(bootReady, undefined).pipe(Effect.asVoid);
 
   yield* Effect.gen(function* () {
@@ -516,6 +542,7 @@ export const makeNodeUpdateService = Effect.fn("makeNodeUpdateService")(function
     detected: DetectedNodeInstallation,
     run: NodeUpdateRun,
     marker: NodeUpdateMarker,
+    options: NodeUpdateOptions | undefined,
   ) =>
     Effect.tryPromise(() => import("./cliUpdate.ts")).pipe(
       Effect.flatMap(({ runCliNodeUpdate }) =>
@@ -527,8 +554,10 @@ export const makeNodeUpdateService = Effect.fn("makeNodeUpdateService")(function
             marker,
             setRun,
             finishFailed,
+            finishPostponed,
             restartDelay,
             restartGrace,
+            ...(options?.unattended ? { beforeRestart: options.unattended.beforeRestart } : {}),
           }),
         ),
       ),
@@ -558,11 +587,14 @@ export const makeNodeUpdateService = Effect.fn("makeNodeUpdateService")(function
       return yield* refuse(DESKTOP_NOT_CONNECTED);
     });
 
-  const update = (input: NodeUpdateInput) =>
+  const update = (input: NodeUpdateInput, options?: NodeUpdateOptions) =>
     Effect.gen(function* () {
       yield* settleBootMarker;
       const detected = yield* installation;
       const desktopApp = detected.kind === "desktop-app";
+      if (desktopApp && options?.unattended) {
+        return yield* refuse("The desktop app does not update itself unattended.");
+      }
       return yield* admission.withPermit(
         Effect.gen(function* () {
           const before = yield* current;
@@ -611,6 +643,7 @@ export const makeNodeUpdateService = Effect.fn("makeNodeUpdateService")(function
             fromVersion: before.currentVersion,
             targetVersion: latest,
             startedAt,
+            ...(options?.unattended ? { unattended: true } : {}),
           };
           const run: NodeUpdateRun = {
             ...IDLE_NODE_UPDATE_RUN,
@@ -624,7 +657,7 @@ export const makeNodeUpdateService = Effect.fn("makeNodeUpdateService")(function
             yield* startDesktopUpdate(run, marker);
           } else {
             yield* setRun(run);
-            yield* Effect.forkIn(runCliUpdate(detected, run, marker), scope);
+            yield* Effect.forkIn(runCliUpdate(detected, run, marker, options), scope);
           }
           return yield* current;
         }),
@@ -663,21 +696,35 @@ export const makeNodeUpdateService = Effect.fn("makeNodeUpdateService")(function
     check,
     update,
     awaitsBootReady,
+    awaitsUnattendedBootReady,
     confirmBootReady,
   } satisfies NodeUpdateServiceShape;
 });
 
+const exitThisProcess = (code: number) =>
+  Effect.sync(() => {
+    process.exit(code);
+  });
+
 /**
  * Run once request handlers are attached (server.ts), in the background: confirms the update
  * this process was restarted into, if any, once the node is ready (cliUpdate.ts, loaded only
- * then).
+ * then). After an update the node ran on its own, a release that is not ready in time exits
+ * (`awaitNodeReadyOrExit`), so its service manager starts it again and the boot guard counts it.
  */
-export const confirmNodeUpdateAfterServe = (readiness: NodeBootReadiness) =>
+export const confirmNodeUpdateAfterServe = (
+  readiness: NodeBootReadiness,
+  exitProcess: (code: number) => Effect.Effect<void> = exitThisProcess,
+) =>
   Effect.gen(function* () {
     const nodeUpdate = yield* NodeUpdateService;
     if (!(yield* nodeUpdate.awaitsBootReady)) return;
-    const { awaitNodeReadyAfterUpdate } = yield* Effect.promise(() => import("./cliUpdate.ts"));
-    yield* awaitNodeReadyAfterUpdate(readiness);
+    const { awaitNodeReadyAfterUpdate, awaitNodeReadyOrExit } = yield* Effect.promise(
+      () => import("./cliUpdate.ts"),
+    );
+    yield* (yield* nodeUpdate.awaitsUnattendedBootReady)
+      ? awaitNodeReadyOrExit(readiness, exitProcess)
+      : awaitNodeReadyAfterUpdate(readiness);
     yield* nodeUpdate.confirmBootReady;
   }).pipe(Effect.ignoreCause({ log: true }));
 
