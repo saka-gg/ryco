@@ -45,3 +45,23 @@ describe("resolveDesktopAppBranding", () => {
     });
   });
 });
+
+describe("Ryco Nightly branding", () => {
+  it("names the separate app like its bundle", () => {
+    expect(
+      resolveDesktopAppBranding({
+        isDevelopment: false,
+        appVersion: "0.1.38-nightly.20261101.4",
+        flavor: "nightly",
+      }),
+    ).toEqual({ baseName: "Ryco", stageLabel: "Nightly", displayName: "Ryco Nightly" });
+    // The in-place nightly keeps its old name until it moves to stable.
+    expect(
+      resolveDesktopAppBranding({
+        isDevelopment: false,
+        appVersion: "0.1.37-nightly.20261031.2",
+        flavor: "stable",
+      }).displayName,
+    ).toBe("Ryco (Nightly)");
+  });
+});

@@ -1142,7 +1142,6 @@ export interface DesktopBridge {
   /** The machine woke from sleep or the screen was unlocked; live sockets may be dead. */
   onSystemResume?: (listener: () => void) => () => void;
   getUpdateState: () => Promise<DesktopUpdateState>;
-  setUpdateChannel: (channel: DesktopUpdateChannel) => Promise<DesktopUpdateState>;
   checkForUpdate: () => Promise<DesktopUpdateCheckResult>;
   downloadUpdate: () => Promise<DesktopUpdateActionResult>;
   installUpdate: () => Promise<DesktopUpdateActionResult>;

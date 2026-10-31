@@ -22,13 +22,19 @@ import {
   resolveDesktopCompileCacheDir,
   shouldUseDesktopCompileCache,
 } from "./compileCacheDirectory.ts";
-import { resolveDesktopPaths, resolveDesktopUserDataPath } from "./desktopPaths.ts";
+import { readDesktopFlavor } from "./desktopFlavor.ts";
+import {
+  configuredDesktopBaseDir,
+  resolveDesktopPaths,
+  resolveDesktopUserDataPath,
+} from "./desktopPaths.ts";
 import { externalBridgeLaunchArgs } from "./externalBridgeLaunch.ts";
 
 // Electron's performance origin is process start, so this is the time Electron
 // itself took before any Ryco code ran.
 const entryStartedAtMs = performance.now();
 const isDevelopment = Boolean(process.env.VITE_DEV_SERVER_URL);
+const desktopFlavor = readDesktopFlavor({ appPath: app.getAppPath(), isPackaged: app.isPackaged });
 const compileCacheHook = resolve(__dirname, "compileCache.cjs");
 
 /** Enable the V8 compile cache here and, through the environment, in Node-mode children. */
@@ -36,7 +42,7 @@ function enableDesktopCompileCache(): string | null {
   if (!shouldUseDesktopCompileCache({ isPackaged: app.isPackaged, env: process.env })) return null;
   try {
     const directory = resolveDesktopCompileCacheDir(
-      resolveDesktopUserDataPath({ isDevelopment }),
+      resolveDesktopUserDataPath({ isDevelopment, flavor: desktopFlavor }),
       app.getVersion(),
     );
     process.env[DESKTOP_COMPILE_CACHE_DIR_ENV] = directory;
@@ -47,13 +53,25 @@ function enableDesktopCompileCache(): string | null {
   }
 }
 
+/** For Ryco Nightly, the home every CLI child pins (`createDesktopBackendChildEnv`). */
+function nightlyHomeEnv(): { readonly nightlyHome?: string } {
+  if (desktopFlavor !== "nightly") return {};
+  return {
+    nightlyHome: resolveDesktopPaths({
+      configuredBaseDir: configuredDesktopBaseDir(desktopFlavor),
+      isDevelopment: false,
+      flavor: desktopFlavor,
+    }).backendBaseDir,
+  };
+}
+
 /**
  * Take the single-instance lock before anything expensive. It is keyed by the
  * userData directory, so that is set first. A refused second instance exits
  * here, without loading the main bundle or starting a backend.
  */
 function claimPrimaryInstance(): boolean {
-  app.setPath("userData", resolveDesktopUserDataPath({ isDevelopment }));
+  app.setPath("userData", resolveDesktopUserDataPath({ isDevelopment, flavor: desktopFlavor }));
   if (app.requestSingleInstanceLock()) return true;
   app.exit(0);
   return false;
@@ -66,8 +84,9 @@ function claimPrimaryInstance(): boolean {
 function applyCachedShellEnvironment(): boolean {
   try {
     const { shellEnvironmentCachePath } = resolveDesktopPaths({
-      configuredBaseDir: process.env.RYCO_HOME,
+      configuredBaseDir: configuredDesktopBaseDir(desktopFlavor),
       isDevelopment: false,
+      flavor: desktopFlavor,
     });
     const cached = readShellEnvironmentCache(shellEnvironmentCachePath, {
       currentShell: process.env.SHELL ?? null,
@@ -110,6 +129,7 @@ function startEarlyBackend(input: {
         isPackaged: true,
         platform: process.platform,
         resourcesPath: process.resourcesPath,
+        ...nightlyHomeEnv(),
       }),
     });
     return { ...launched, executable, args };
@@ -130,11 +150,17 @@ if (bridgeArgs !== null) {
   // forwarding process must stay headless too, not just its Node-mode child.
   app.dock?.hide();
   const compileCacheDir = enableDesktopCompileCache();
+  const { nightlyHome } = nightlyHomeEnv();
   const bridge = spawn(
     process.execPath,
     compileCacheDir === null ? bridgeArgs : ["--require", compileCacheHook, ...bridgeArgs],
     {
-      env: { ...process.env, ELECTRON_RUN_AS_NODE: "1" },
+      env: {
+        ...process.env,
+        // The MCP bridge runs the bundled CLI, which must reach this app's own node.
+        ...(nightlyHome === undefined ? {} : { RYCO_HOME: nightlyHome }),
+        ELECTRON_RUN_AS_NODE: "1",
+      },
       stdio: "inherit",
     },
   );

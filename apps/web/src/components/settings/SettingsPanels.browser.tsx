@@ -389,7 +389,6 @@ const createDesktopBridgeStub = (overrides?: {
   readonly serverExposureState?: Awaited<ReturnType<DesktopBridge["getServerExposureState"]>>;
   readonly advertisedEndpoints?: Awaited<ReturnType<DesktopBridge["getAdvertisedEndpoints"]>>;
   readonly setServerExposureMode?: DesktopBridge["setServerExposureMode"];
-  readonly setUpdateChannel?: DesktopBridge["setUpdateChannel"];
   readonly getHubLaunchConfig?: DesktopBridge["getHubLaunchConfig"];
   readonly setHubLaunchConfig?: DesktopBridge["setHubLaunchConfig"];
   readonly restartApp?: NonNullable<DesktopBridge["restartApp"]>;
@@ -549,12 +548,6 @@ const createDesktopBridgeStub = (overrides?: {
     openExternal: overrides?.openExternal ?? vi.fn().mockResolvedValue(true),
     onMenuAction: () => () => {},
     getUpdateState: vi.fn().mockResolvedValue(idleUpdateState),
-    setUpdateChannel:
-      overrides?.setUpdateChannel ??
-      vi.fn().mockImplementation(async (channel: DesktopUpdateChannel) => ({
-        ...idleUpdateState,
-        channel,
-      })),
     checkForUpdate: vi.fn().mockResolvedValue({ checked: false, state: idleUpdateState }),
     downloadUpdate: vi.fn().mockResolvedValue({
       accepted: false,

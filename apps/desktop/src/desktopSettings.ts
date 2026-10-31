@@ -5,12 +5,11 @@ import type {
   DesktopKeepAwakeMode,
   DesktopQuitShortcutMode,
   DesktopServerExposureMode,
-  DesktopUpdateChannel,
 } from "@ryco/contracts";
+import { type RycoDesktopFlavor, rycoDesktopFlavorIdentity } from "@ryco/shared/desktopFlavor";
 import { normalizeHubNodeName } from "@ryco/shared/nodeIdentity";
 
 import { normalizeDesktopBackendPort } from "./backendPort.ts";
-import { resolveDefaultDesktopUpdateChannel } from "./updateChannels.ts";
 
 export interface DesktopSettings {
   readonly quitShortcutMode: DesktopQuitShortcutMode;
@@ -49,8 +48,6 @@ export interface DesktopSettings {
    * in memory this is the only field.
    */
   readonly keepAwakeMode: DesktopKeepAwakeMode;
-  readonly updateChannel: DesktopUpdateChannel;
-  readonly updateChannelConfiguredByUser: boolean;
   /**
    * The port the backend last served on. The renderer's origin (and with it
    * localStorage and the HTTP/V8 caches) follows the port, so the next launch
@@ -127,15 +124,21 @@ export const DEFAULT_DESKTOP_SETTINGS: DesktopSettings = {
   tailscaleServeEnabled: false,
   tailscaleServePort: DEFAULT_TAILSCALE_SERVE_PORT,
   keepAwakeMode: DEFAULT_DESKTOP_KEEP_AWAKE_MODE,
-  updateChannel: "latest",
-  updateChannelConfiguredByUser: false,
   backendPort: null,
 };
 
-export function resolveDefaultDesktopSettings(appVersion: string): DesktopSettings {
+/**
+ * The update channel is not a setting: Ryco follows stable releases and Ryco Nightly follows
+ * nightlies (`@ryco/shared/desktopFlavor`). A file from before the split may still carry
+ * `updateChannel`; it is ignored, and dropped on the next write.
+ */
+export function resolveDefaultDesktopSettings(
+  _appVersion: string,
+  flavor: RycoDesktopFlavor = "stable",
+): DesktopSettings {
   return {
     ...DEFAULT_DESKTOP_SETTINGS,
-    updateChannel: resolveDefaultDesktopUpdateChannel(appVersion),
+    tailscaleServePort: rycoDesktopFlavorIdentity(flavor).defaultTailscaleServePort,
   };
 }
 
@@ -262,10 +265,13 @@ export function setDesktopKeepAwakeMode(
   return settings.keepAwakeMode === mode ? settings : { ...settings, keepAwakeMode: mode };
 }
 
-export function normalizeTailscaleServePort(value: unknown): number {
+export function normalizeTailscaleServePort(
+  value: unknown,
+  fallback: number = DEFAULT_TAILSCALE_SERVE_PORT,
+): number {
   return typeof value === "number" && Number.isInteger(value) && value >= 1 && value <= 65_535
     ? value
-    : DEFAULT_TAILSCALE_SERVE_PORT;
+    : fallback;
 }
 
 export function setDesktopHubPreference(
@@ -339,10 +345,12 @@ export interface DesktopHubConnectorLaunch {
  */
 export function resolveDesktopHubConnectorLaunch(
   settings: DesktopSettings,
+  /** The node name when the user chose none (Ryco Nightly: `<host> Nightly`). */
+  defaultNodeName: string | null = null,
 ): DesktopHubConnectorLaunch {
   const shared = {
     origin: settings.hubOrigin,
-    nodeName: settings.hubNodeName,
+    nodeName: settings.hubNodeName ?? defaultNodeName,
     allowFileSecretStore: settings.hubAllowFileSecretStore,
   };
   if (settings.hubOrigin === null) return { ...shared, enabled: false, standby: false };
@@ -406,17 +414,6 @@ export function isDesktopHostedIdentitySupported(platform: NodeJS.Platform): boo
   return platform === "darwin";
 }
 
-export function setDesktopUpdateChannelPreference(
-  settings: DesktopSettings,
-  requestedChannel: DesktopUpdateChannel,
-): DesktopSettings {
-  return {
-    ...settings,
-    updateChannel: requestedChannel,
-    updateChannelConfiguredByUser: true,
-  };
-}
-
 /** A settings file exists but could not be understood. */
 export class DesktopSettingsReadError extends Error {
   constructor(cause: unknown) {
@@ -435,8 +432,9 @@ export function readDesktopSettings(
      */
     readonly hasRetainedHubSession: () => boolean;
   },
+  flavor: RycoDesktopFlavor = "stable",
 ): DesktopSettings {
-  const defaultSettings = resolveDefaultDesktopSettings(appVersion);
+  const defaultSettings = resolveDefaultDesktopSettings(appVersion, flavor);
 
   try {
     if (!FS.existsSync(settingsPath)) {
@@ -451,8 +449,6 @@ export function readDesktopSettings(
       readonly tailscaleServePort?: unknown;
       readonly keepAwakeMode?: unknown;
       readonly keepAwakeWhileReachable?: unknown;
-      readonly updateChannel?: unknown;
-      readonly updateChannelConfiguredByUser?: unknown;
       readonly hubConnectorEnabled?: unknown;
       readonly hubConnectorDisabledByUser?: unknown;
       readonly hubOrigin?: unknown;
@@ -460,14 +456,6 @@ export function readDesktopSettings(
       readonly hubAllowFileSecretStore?: unknown;
       readonly backendPort?: unknown;
     };
-    const parsedUpdateChannel =
-      parsed.updateChannel === "nightly" || parsed.updateChannel === "latest"
-        ? parsed.updateChannel
-        : null;
-    const isLegacySettings = parsed.updateChannelConfiguredByUser === undefined;
-    const updateChannelConfiguredByUser =
-      parsed.updateChannelConfiguredByUser === true ||
-      (isLegacySettings && parsedUpdateChannel === "nightly");
 
     let hubNodeName: string | null = null;
     if (parsed.hubNodeName !== undefined && parsed.hubNodeName !== null) {
@@ -488,15 +476,13 @@ export function readDesktopSettings(
       serverExposureMode:
         parsed.serverExposureMode === "network-accessible" ? "network-accessible" : "local-only",
       tailscaleServeEnabled: parsed.tailscaleServeEnabled === true,
-      tailscaleServePort: normalizeTailscaleServePort(parsed.tailscaleServePort),
+      tailscaleServePort: normalizeTailscaleServePort(
+        parsed.tailscaleServePort,
+        defaultSettings.tailscaleServePort,
+      ),
       keepAwakeMode: resolveDesktopKeepAwakeMode(parsed, () =>
         readRememberedDesktopKeepAwakeMode(settingsPath),
       ),
-      updateChannel:
-        updateChannelConfiguredByUser && parsedUpdateChannel !== null
-          ? parsedUpdateChannel
-          : defaultSettings.updateChannel,
-      updateChannelConfiguredByUser,
       hubConnectorEnabled: parsed.hubConnectorEnabled === true,
       hubConnectorDisabledByUser:
         typeof parsed.hubConnectorDisabledByUser === "boolean"

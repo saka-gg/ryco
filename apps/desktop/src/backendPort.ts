@@ -116,9 +116,13 @@ export function resolveDesktopPersistedBackendPort(input: {
 export function resolveDesktopBackendStartPort(input: {
   readonly persistedPort: number | null;
   readonly hasPriorRendererState: boolean;
+  /** This app's own default (Ryco Nightly starts elsewhere, so both can run at once). */
+  readonly defaultPort?: number;
 }): number {
   if (input.persistedPort !== null) return input.persistedPort;
-  return input.hasPriorRendererState ? LEGACY_DESKTOP_BACKEND_PORT : DEFAULT_DESKTOP_BACKEND_PORT;
+  return input.hasPriorRendererState
+    ? LEGACY_DESKTOP_BACKEND_PORT
+    : (input.defaultPort ?? DEFAULT_DESKTOP_BACKEND_PORT);
 }
 
 /**

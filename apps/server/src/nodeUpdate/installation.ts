@@ -15,6 +15,7 @@ import type {
   NodeServiceManager,
   NodeUpdateAvailability,
 } from "@ryco/contracts";
+import { releaseChannelForVersion } from "@ryco/shared/desktopFlavor";
 import { Duration, Effect, FileSystem, Option, Path, Schema } from "effect";
 
 import { compareCliVersions, isParseableCliVersion } from "../provider/cliVersion.ts";
@@ -130,7 +131,7 @@ export function detectNodeInstallation(probe: NodeInstallationProbe): DetectedNo
 
 /** npm dist-tags double as release channels: a nightly build tracks `nightly`. */
 export function nodeReleaseChannel(version: string): NodeReleaseChannel {
-  return version.includes("-nightly.") ? "nightly" : "latest";
+  return releaseChannelForVersion(version);
 }
 
 /** Whether `candidate` is a newer release than `current` (prerelease order included). */

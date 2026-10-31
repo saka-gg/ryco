@@ -79,6 +79,19 @@ describe("createDesktopBackendChildEnv", () => {
     resourcesPath: "/Applications/Ryco.app/Contents/Resources",
   };
 
+  it("pins Ryco Nightly's children to its own home, whatever the shell exports", () => {
+    const env = createDesktopBackendChildEnv(
+      { PATH: "/usr/bin", RYCO_HOME: "/Users/me/.ryco" },
+      { ...packaged, nightlyHome: "/Users/me/.ryco-nightly" },
+    );
+    expect(env.RYCO_HOME).toBe("/Users/me/.ryco-nightly");
+    // Ryco itself keeps today's behaviour: the bootstrap envelope names the home.
+    expect(
+      createDesktopBackendChildEnv({ PATH: "/usr/bin", RYCO_HOME: "/srv/ryco" }, packaged)
+        .RYCO_HOME,
+    ).toBe("/srv/ryco");
+  });
+
   it("keeps desktop-owned settings out of the inherited environment", () => {
     const env = createDesktopBackendChildEnv(
       {

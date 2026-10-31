@@ -1,18 +1,18 @@
 import type { DesktopUpdateChannel } from "@ryco/contracts";
-
-const NIGHTLY_VERSION_PATTERN = /-nightly\.\d{8}\.\d+$/;
+import { isNightlyVersion, releaseChannelForVersion } from "@ryco/shared/desktopFlavor";
 
 export function isNightlyDesktopVersion(version: string): boolean {
-  return NIGHTLY_VERSION_PATTERN.test(version);
+  return isNightlyVersion(version);
 }
 
-export function resolveDefaultDesktopUpdateChannel(appVersion: string): DesktopUpdateChannel {
-  return isNightlyDesktopVersion(appVersion) ? "nightly" : "latest";
-}
-
+/**
+ * Whether an offered update belongs to the channel this app follows. electron-updater's GitHub
+ * provider can fall back to another channel's manifest; a version outside the app's own lane
+ * would swap Ryco for Ryco Nightly (or back), so it is never offered.
+ */
 export function doesVersionMatchDesktopUpdateChannel(
   version: string,
   channel: DesktopUpdateChannel,
 ): boolean {
-  return resolveDefaultDesktopUpdateChannel(version) === channel;
+  return releaseChannelForVersion(version) === channel;
 }
