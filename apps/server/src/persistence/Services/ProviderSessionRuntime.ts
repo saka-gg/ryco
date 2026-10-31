@@ -81,6 +81,16 @@ export interface ProviderSessionRuntimeRepositoryShape {
   >;
 
   /**
+   * List the rows whose session may still hold a provider process (status other than
+   * `stopped`), in ascending last-seen order. Work that runs periodically or at shutdown
+   * reads these instead of every thread the node has ever run.
+   */
+  readonly listActive: () => Effect.Effect<
+    ReadonlyArray<ProviderSessionRuntime>,
+    ProviderSessionRuntimeRepositoryError
+  >;
+
+  /**
    * Delete provider runtime state by canonical thread id.
    */
   readonly deleteByThreadId: (

@@ -2504,7 +2504,6 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
   });
 
   const runStopAll = Effect.fn("runStopAll")(function* () {
-    const threadIds = yield* directory.listThreadIds();
     const currentAdapters = yield* getAdapterEntries;
     const activeSessions = yield* Effect.forEach(currentAdapters, ([instanceId, adapter]) =>
       adapter.listSessions().pipe(
@@ -2528,7 +2527,9 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
       discard: true,
     });
     yield* Effect.sync(() => runtimeActivity.clear());
-    const bindings = yield* directory.listBindings().pipe(Effect.orElseSucceed(() => []));
+    // Only bindings that are not stopped yet: rewriting every stopped one made shutdown grow
+    // with the node's history and replaced their last runtime event with this one.
+    const bindings = yield* directory.listActiveBindings().pipe(Effect.orElseSucceed(() => []));
     yield* Effect.forEach(bindings, (binding) => {
       const providerInstanceId = dieOnMissingBindingInstanceId("ProviderService.stopAll", binding);
       return directory.upsert({
@@ -2548,7 +2549,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     // flushes within ANALYTICS_SHUTDOWN_FLUSH_TIMEOUT, so a slow network cannot
     // hold up provider shutdown.
     yield* analytics.record("provider.sessions.stopped_all", {
-      sessionCount: threadIds.length,
+      sessionCount: bindings.length,
     });
   });
 

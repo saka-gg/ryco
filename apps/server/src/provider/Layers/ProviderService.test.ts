@@ -468,6 +468,91 @@ it.effect("ProviderServiceLive catches stopAll failures during shutdown", () =>
   }),
 );
 
+it.effect("ProviderServiceLive stops only the active bindings at shutdown", () =>
+  Effect.gen(function* () {
+    const codex = makeFakeCodexAdapter();
+    const registry = makeAdapterRegistryMock({ [CODEX_DRIVER]: codex.adapter });
+    // The database outlives the service's scope, so shutdown's writes can be read back.
+    const outerScope = yield* Scope.make();
+    const sqlContext = yield* Layer.build(SqlitePersistenceMemory).pipe(Scope.provide(outerScope));
+    const runtimeRepositoryLayer = ProviderSessionRuntimeRepositoryLive.pipe(
+      Layer.provide(Layer.succeedContext(sqlContext)),
+    );
+    const directoryLayer = ProviderSessionDirectoryLive.pipe(Layer.provide(runtimeRepositoryLayer));
+    const providerLayer = Layer.mergeAll(
+      makeProviderServiceLive().pipe(
+        Layer.provide(Layer.succeed(ProviderAdapterRegistry, registry)),
+        Layer.provide(directoryLayer),
+        Layer.provide(defaultServerSettingsLayer),
+        Layer.provideMerge(AnalyticsService.layerTest),
+        Layer.provide(Layer.succeed(ProviderEventLoggers, NoOpProviderEventLoggers)),
+      ),
+      runtimeRepositoryLayer,
+      NodeServices.layer,
+    );
+    const scope = yield* Scope.make();
+    const runtimeServices = yield* Layer.build(providerLayer).pipe(Scope.provide(scope));
+    const repository = yield* ProviderSessionRuntimeRepository.pipe(
+      Effect.provide(runtimeServices),
+    );
+    const stoppedPayload = {
+      activeTurnId: null,
+      lastRuntimeEvent: "session.exited",
+      lastRuntimeEventAt: "2026-01-02T00:00:00.000Z",
+    };
+    yield* repository.upsert({
+      threadId: ThreadId.make("thread-stopped"),
+      providerName: "codex",
+      providerInstanceId: codexInstanceId,
+      adapterKey: "codex",
+      runtimeMode: "full-access",
+      status: "stopped",
+      lastSeenAt: "2026-01-02T00:00:00.000Z",
+      resumeCursor: { opaque: "resume-stopped" },
+      runtimePayload: stoppedPayload,
+    });
+    yield* repository.upsert({
+      threadId: ThreadId.make("thread-running"),
+      providerName: "codex",
+      providerInstanceId: codexInstanceId,
+      adapterKey: "codex",
+      runtimeMode: "full-access",
+      status: "running",
+      lastSeenAt: "2026-01-03T00:00:00.000Z",
+      resumeCursor: { opaque: "resume-running" },
+      runtimePayload: { activeTurnId: "turn-1" },
+    });
+
+    yield* Scope.close(scope, Exit.void);
+
+    const after = yield* ProviderSessionRuntimeRepository.pipe(
+      Effect.provide(runtimeRepositoryLayer),
+    );
+    const stopped = yield* after.getByThreadId({ threadId: ThreadId.make("thread-stopped") });
+    const running = yield* after.getByThreadId({ threadId: ThreadId.make("thread-running") });
+    yield* Scope.close(outerScope, Exit.void);
+
+    // An already-stopped binding keeps its own last event and last-seen time.
+    assert.deepStrictEqual(
+      Option.map(stopped, (row) => row.runtimePayload),
+      Option.some(stoppedPayload),
+    );
+    assert.deepStrictEqual(
+      Option.map(stopped, (row) => row.lastSeenAt),
+      Option.some("2026-01-02T00:00:00.000Z"),
+    );
+    // The active one is stopped, its turn cleared, and its resume cursor kept.
+    assert.equal(Option.getOrUndefined(running)?.status, "stopped");
+    assert.deepStrictEqual(Option.getOrUndefined(running)?.resumeCursor, {
+      opaque: "resume-running",
+    });
+    assert.include(Option.getOrUndefined(running)?.runtimePayload as Record<string, unknown>, {
+      activeTurnId: null,
+      lastRuntimeEvent: "provider.stopAll",
+    });
+  }),
+);
+
 it.live("ProviderServiceLive stops every provider in parallel during shutdown", () =>
   Effect.gen(function* () {
     const codex = makeFakeCodexAdapter();

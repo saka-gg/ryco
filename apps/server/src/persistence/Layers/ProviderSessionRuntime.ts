@@ -123,6 +123,28 @@ const makeProviderSessionRuntimeRepository = Effect.gen(function* () {
       `,
   });
 
+  const listActiveRuntimeRows = SqlSchema.findAll({
+    Request: Schema.Void,
+    Result: ProviderSessionRuntimeDbRowSchema,
+    execute: () =>
+      sql`
+        SELECT
+          thread_id AS "threadId",
+          provider_name AS "providerName",
+          provider_instance_id AS "providerInstanceId",
+          runtime_session_id AS "runtimeSessionId",
+          adapter_key AS "adapterKey",
+          runtime_mode AS "runtimeMode",
+          status,
+          last_seen_at AS "lastSeenAt",
+          resume_cursor_json AS "resumeCursor",
+          runtime_payload_json AS "runtimePayload"
+        FROM provider_session_runtime
+        WHERE status != 'stopped'
+        ORDER BY last_seen_at ASC, thread_id ASC
+      `,
+  });
+
   const deleteRuntimeByThreadId = SqlSchema.void({
     Request: DeleteRuntimeRequestSchema,
     execute: ({ threadId }) =>
@@ -166,6 +188,19 @@ const makeProviderSessionRuntimeRepository = Effect.gen(function* () {
       ),
     );
 
+  const decodeRows = (
+    rows: ReadonlyArray<typeof ProviderSessionRuntimeDbRowSchema.Type>,
+    operation: string,
+  ) =>
+    Effect.forEach(
+      rows,
+      (row) =>
+        decodeRuntime(row).pipe(
+          Effect.mapError(toPersistenceDecodeError(`${operation}:rowToRuntime`)),
+        ),
+      { concurrency: "unbounded" },
+    );
+
   const list: ProviderSessionRuntimeRepositoryShape["list"] = () =>
     listRuntimeRows(undefined).pipe(
       Effect.mapError(
@@ -174,18 +209,18 @@ const makeProviderSessionRuntimeRepository = Effect.gen(function* () {
           "ProviderSessionRuntimeRepository.list:decodeRows",
         ),
       ),
-      Effect.flatMap((rows) =>
-        Effect.forEach(
-          rows,
-          (row) =>
-            decodeRuntime(row).pipe(
-              Effect.mapError(
-                toPersistenceDecodeError("ProviderSessionRuntimeRepository.list:rowToRuntime"),
-              ),
-            ),
-          { concurrency: "unbounded" },
+      Effect.flatMap((rows) => decodeRows(rows, "ProviderSessionRuntimeRepository.list")),
+    );
+
+  const listActive: ProviderSessionRuntimeRepositoryShape["listActive"] = () =>
+    listActiveRuntimeRows(undefined).pipe(
+      Effect.mapError(
+        toPersistenceSqlOrDecodeError(
+          "ProviderSessionRuntimeRepository.listActive:query",
+          "ProviderSessionRuntimeRepository.listActive:decodeRows",
         ),
       ),
+      Effect.flatMap((rows) => decodeRows(rows, "ProviderSessionRuntimeRepository.listActive")),
     );
 
   const deleteByThreadId: ProviderSessionRuntimeRepositoryShape["deleteByThreadId"] = (input) =>
@@ -199,6 +234,7 @@ const makeProviderSessionRuntimeRepository = Effect.gen(function* () {
     upsert,
     getByThreadId,
     list,
+    listActive,
     deleteByThreadId,
   } satisfies ProviderSessionRuntimeRepositoryShape;
 });
