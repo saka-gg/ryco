@@ -499,8 +499,11 @@ describe.skipIf(!hasCurrentBuild)("built server bundle", () => {
     // for code that every boot needs. 6.91 MB in October 2026; the database owner lock,
     // event-loop stall monitor, WAL checkpoint worker and database maintenance that every
     // server starts add about 0.14 MB (their backup, doctor, trace, OTLP and heap-snapshot
-    // code loads through import()).
-    expect(bytes).toBeLessThan(7_100_000);
+    // code loads through import()). 7.101 MB at the end of October 2026: the in-place
+    // restore's startup check (1.3 KB) and the sidebar rows' fingerprint revalidation
+    // (1.7 KB: the repository list cache's change record, the row read path and the
+    // status poll's rule) passed 7.1 MB.
+    expect(bytes).toBeLessThan(7_105_000);
     for (const chunk of serve.chunks) {
       const source = readFileSync(chunk, "utf8");
       // Region markers rolldown leaves in the output name the modules each chunk holds.
