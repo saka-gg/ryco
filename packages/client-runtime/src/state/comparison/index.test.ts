@@ -1,6 +1,11 @@
 import { describe, expect, it, vi } from "vite-plus/test";
 import type { GitReadComparisonResult } from "@ryco/contracts";
-import { comparisonFileKey, comparisonStorageKey, createComparisonController } from "./index.ts";
+import {
+  comparisonBlameSides,
+  comparisonFileKey,
+  comparisonStorageKey,
+  createComparisonController,
+} from "./index.ts";
 
 const result = (ref: string, oid = ref): GitReadComparisonResult => ({
   selection: { ref, mode: "direct" },
@@ -99,5 +104,44 @@ describe("comparison state", () => {
     expect(key).not.toBe(
       comparisonFileKey("a", { ...source, revision: "changed" }, "base", "file.ts"),
     );
+  });
+  it("refuses a HEAD comparison that an older node returned for working files", async () => {
+    const f = setup(
+      vi.fn(async (selection: { ref: string; target?: "workingTree" }) => ({
+        ...result(selection.ref),
+        // An older node drops `target` from the echoed selection.
+        selection: { ref: selection.ref, mode: "direct" as const },
+      })),
+    );
+    f.controller.setSelection({ ref: "main", mode: "direct", target: "workingTree" });
+    await f.controller.refresh();
+    expect(f.controller.getSnapshot()).toMatchObject({
+      data: null,
+      selection: { ref: "main", target: "workingTree" },
+      error: expect.stringContaining("cannot compare with the working files"),
+    });
+    f.controller.setSelection({ ref: "main", mode: "direct" });
+    await f.controller.refresh();
+    expect(f.controller.getSnapshot().data?.patch).toBe("main");
+    const saved = createComparisonController({
+      storage: f.storage,
+      storageKey: "repo",
+      read: f.read,
+    });
+    f.controller.setSelection({ ref: "main", mode: "mergeBase", target: "workingTree" });
+    await Promise.resolve();
+    await Promise.resolve();
+    await saved.hydrate();
+    expect(saved.getSnapshot().selection).toEqual({
+      ref: "main",
+      mode: "mergeBase",
+      target: "workingTree",
+    });
+  });
+  it("blames only the base side of a working-tree comparison", () => {
+    expect(comparisonBlameSides(result("main").source)).toEqual(["base", "head"]);
+    expect(comparisonBlameSides({ ...result("main").source, target: "workingTree" })).toEqual([
+      "base",
+    ]);
   });
 });

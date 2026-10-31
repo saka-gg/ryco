@@ -99,6 +99,10 @@ Invalid imports are rejected without changing local preferences. The same shared
 - `workspace.terminal`: open the thread terminal view
 - `workspace.simulator`: open the thread iOS Simulator view
 - `diff.toggle`: toggle the diff panel
+- `diff.hunk.next` / `diff.hunk.previous`: jump to the next or previous hunk of the diff panel while
+  focus is inside it. They default to `alt+arrowdown` and `alt+arrowup` outside the terminal. A
+  text field in the panel keeps those keys for moving the caret. The defaults live in the app, not
+  on the node, so older apps have no key for them.
 
 #### Palette and sidebar
 

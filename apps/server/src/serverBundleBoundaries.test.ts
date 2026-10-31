@@ -184,6 +184,13 @@ describe("server boot import boundaries", () => {
     ).toEqual([]);
   });
 
+  it("loads the working-tree comparison with its first read", () => {
+    // GitComparison imports it with import(): committed comparisons never build its scratch index.
+    const target = "apps/server/src/vcs/GitWorkingTreeComparison.ts";
+    expect(staticGraph("src/cliMain.ts").files).not.toContain(target);
+    expect(staticGraph("src/cliMain.ts", { dynamic: true }).files).toContain(target);
+  });
+
   it("loads the pull request watch fingerprint with the GitHub client", () => {
     // Its query, decoder and batching board ride with GitHubCli, which loads on first GitHub
     // use; the row reads that stand on it load with the first row read.

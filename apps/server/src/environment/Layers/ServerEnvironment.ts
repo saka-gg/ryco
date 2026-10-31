@@ -125,6 +125,7 @@ export const makeServerEnvironment = Effect.fn("makeServerEnvironment")(function
       cliProxyCloudflareAccess: true,
       stagedOnlyCommit: true,
       pullRequestOptions: true,
+      workingTreeComparison: true,
       agentProcessPriority: true,
       usagePriceOverrides: true,
       serverFollowUpQueue: true,

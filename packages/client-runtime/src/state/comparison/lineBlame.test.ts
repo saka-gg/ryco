@@ -51,6 +51,18 @@ describe("displayed blame policy", () => {
     expect(displayedBlameTarget({ ...file, hunks: [] }, "base", 1)).toBeNull();
   });
 });
+describe("working-tree comparisons", () => {
+  it("attribute base lines only, never working-file lines", async () => {
+    const workingTree = { ...source, target: "workingTree" as const };
+    expect(displayedBlameTarget(file, "base", 22, workingTree)?.filePath).toBe("old.ts");
+    expect(displayedBlameTarget(file, "head", 35, workingTree)).toBeNull();
+    expect(displayedBlameTarget(file, "head", 35, source)?.filePath).toBe("new.ts");
+    const read = vi.fn().mockResolvedValue(result);
+    const reader = createLineBlameReader({ environmentId: "one", source: workingTree, read });
+    await expect(reader.read({ side: "head", filePath: "new.ts", line: 35 })).rejects.toThrow();
+    expect(read).not.toHaveBeenCalled();
+  });
+});
 describe("blame reader", () => {
   it("uses frozen endpoints and deduplicates exact line requests", async () => {
     const read = vi.fn().mockResolvedValue(result);
