@@ -71,6 +71,21 @@ const MIN_THREAD_WINDOW_ITEMS = 10;
 const THREAD_WINDOW_RETRY_BASE_MS = 1_000;
 const THREAD_WINDOW_RETRY_MAX_MS = 30_000;
 const BROWSER_RESUME_RECONNECT_COOLDOWN_MS = 2_000;
+/**
+ * A page or window that comes back into view does not reconnect a socket only because its last
+ * pong is old. While hidden, the RPC pinger ran about once a minute (Chrome's intensive timer
+ * throttling), so the pong is always old there, yet the socket is alive: Effect 4.0.5 sends a
+ * ping on a late tick before it can declare silence. The pinger's first visible tick (every 8 s)
+ * pings, so a socket that answered nothing within this window after the page came back, and did
+ * not reconnect by itself meanwhile, is reconnected. A connection with no answer for
+ * {@link VIEW_RESUME_SILENT_MS} is reconnected at once: hidden, it still pings about once a
+ * minute, so that long a silence means the machine slept or the page was frozen. Waking from
+ * sleep where it is signalled (desktop, phone), a page restored from the back/forward cache,
+ * coming online and network changes reconnect at once, as before.
+ */
+export const VIEW_RESUME_HEARTBEAT_GRACE_MS = 12_000;
+export const VIEW_RESUME_SILENT_MS = 3 * 60_000;
+const VIEW_RESUME_REASONS: ReadonlySet<string> = new Set(["visibilitychange", "pageshow"]);
 const SAVED_ENVIRONMENT_STARTUP_DELAY_MS = 2500;
 const SAVED_ENVIRONMENT_CONNECT_CONCURRENCY = 2;
 /**
@@ -457,6 +472,7 @@ export function createEnvironmentConnectionSupervisor<
     stop: () => void;
   } | null = null;
   let lastBrowserResumeReconnectAt = Number.NEGATIVE_INFINITY;
+  let viewResumeCheckTimeoutId: ReturnType<typeof setTimeout> | null = null;
   let lastNetworkChangeReconnectAt = Number.NEGATIVE_INFINITY;
   const savedRetries = new Map<
     EnvironmentId,
@@ -1507,10 +1523,52 @@ export function createEnvironmentConnectionSupervisor<
       });
     });
   };
+  const cancelViewResumeCheck = () => {
+    if (viewResumeCheckTimeoutId !== null) input.clearTimeout(viewResumeCheckTimeoutId);
+    viewResumeCheckTimeoutId = null;
+  };
+  /**
+   * After the page came back into view, reconnects the connections it already had that have not
+   * answered a heartbeat since and did not reconnect by themselves (see
+   * {@link VIEW_RESUME_HEARTBEAT_GRACE_MS}); one silent for {@link VIEW_RESUME_SILENT_MS} is
+   * reconnected at once. Connections made meanwhile are left alone: their pinger has not run yet.
+   */
+  const checkHeartbeatsAfterViewResume = (reason: string) => {
+    cancelViewResumeCheck();
+    const resumedAt = input.now();
+    const stale = [...connections.values()].filter(
+      (connection) => !connection.client.isHeartbeatFresh(),
+    );
+    const resumed: EnvironmentConnection[] = [];
+    for (const connection of stale) {
+      if (connection.client.isHeartbeatFresh(VIEW_RESUME_SILENT_MS)) {
+        resumed.push(connection);
+      } else {
+        lastBrowserResumeReconnectAt = resumedAt;
+        reconnectLogged(connection, reason);
+      }
+    }
+    if (resumed.length === 0) return;
+    viewResumeCheckTimeoutId = input.setTimeout(() => {
+      viewResumeCheckTimeoutId = null;
+      for (const connection of resumed) {
+        if (connections.get(connection.environmentId) !== connection) continue;
+        if (connection.client.isHeartbeatFresh(VIEW_RESUME_HEARTBEAT_GRACE_MS)) continue;
+        if (connection.client.hasReopenedSince?.(resumedAt) === true) continue;
+        lastBrowserResumeReconnectAt = input.now();
+        reconnectLogged(connection, reason);
+      }
+    }, VIEW_RESUME_HEARTBEAT_GRACE_MS);
+  };
   const reconnectAfterResume = (reason: string) => {
     const now = input.now();
     if (now - lastBrowserResumeReconnectAt < BROWSER_RESUME_RECONNECT_COOLDOWN_MS) return;
     retrySavedEnvironmentsNow();
+    if (VIEW_RESUME_REASONS.has(reason)) {
+      checkHeartbeatsAfterViewResume(reason);
+      return;
+    }
+    cancelViewResumeCheck();
     for (const connection of connections.values()) {
       if (connection.client.isHeartbeatFresh()) continue;
       lastBrowserResumeReconnectAt = now;
@@ -1537,6 +1595,7 @@ export function createEnvironmentConnectionSupervisor<
     activeService = null;
     requestSavedSyncForRetry = null;
     clearAllSavedRetries();
+    cancelViewResumeCheck();
   };
   const requestProviderInvalidation = () => {
     activeService?.throttle.maybeExecute();
