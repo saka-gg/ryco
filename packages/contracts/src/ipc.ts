@@ -479,6 +479,12 @@ export interface PersistedSavedEnvironmentRecord {
   lastConnectedAt: string | null;
   desktopSsh?: DesktopSshEnvironmentTarget;
   hubLink?: SavedEnvironmentHubLink;
+  /**
+   * When the user switched the machine off (ISO time). A switched-off machine
+   * stays saved with its credential but never connects until switched on.
+   * Absent means on, so an app that predates the field keeps it on.
+   */
+  disabledAt?: string;
 }
 
 export type DesktopServerExposureMode = "local-only" | "network-accessible";

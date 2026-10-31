@@ -1,6 +1,7 @@
 "use client";
 
 import { useAppKeybindings } from "../appKeybindings";
+import { isSavedEnvironmentSwitchedOff } from "@ryco/client-runtime/connection";
 
 import { usePresentationTier } from "../hooks/usePresentationTier";
 import { useSettingsPageTarget } from "../hooks/useSettingsPageTarget";
@@ -597,6 +598,7 @@ function OpenCommandPaletteDialog() {
 
     for (const record of Object.values(savedEnvironmentRegistry)) {
       if (
+        isSavedEnvironmentSwitchedOff(record) ||
         seenEnvironmentIds.has(record.environmentId) ||
         isLocalHubAlias(
           record.environmentId,

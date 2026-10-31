@@ -24,6 +24,11 @@ vi.mock("@tanstack/react-router", async (importOriginal) => ({
   useRouter: () => routerStub,
 }));
 
+// The saved-machine switch reaches the real runtime the mock below stands in for.
+vi.mock("../../../environments/runtime/savedEnvironmentSwitch", () => ({
+  setSavedEnvironmentEnabled: vi.fn(),
+}));
+
 vi.mock("../../../environments/runtime", () => {
   const primaryConnection = {
     kind: "primary" as const,

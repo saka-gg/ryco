@@ -3,6 +3,7 @@ import {
   clearProjectIconCache,
   type SavedEnvironmentRecord,
 } from "@ryco/client-runtime/connection";
+import { switchSavedEnvironment } from "@ryco/client-runtime/connection/savedEnvironmentSwitch";
 
 import { useStore } from "../state/threadsRuntime";
 import { clearProjectFilesStateForEnvironment } from "../rpc/projectFilesAtoms";
@@ -141,14 +142,24 @@ export function createEnvironmentActions(deps: EnvironmentActionsDeps) {
     await registry.driver.supervisor.remove(environmentId).catch(() => false);
   }
 
-  async function removeSavedEnvironment(environmentId: EnvironmentId): Promise<void> {
+  /**
+   * Ends what the app holds of a node while it is in use: its connection (or
+   * the attempt making one), thread subscriptions, live state and threads.
+   * The record, credential, trust and stored snapshot are the caller's.
+   */
+  async function teardownSavedEnvironmentSession(environmentId: EnvironmentId): Promise<void> {
+    registry.driver.supervisor.cancelPendingSavedEnvironmentConnection(environmentId);
     await registry.driver.supervisor.remove(environmentId).catch(() => false);
     registry.driver.supervisor.disposeThreadDetailSubscriptionsForEnvironment(environmentId);
-    registry.catalog.registryStore.getState().remove(environmentId);
     registry.catalog.runtimeStore.getState().clear(environmentId);
+    useStore.getState().removeEnvironmentState(environmentId);
+  }
+
+  async function removeSavedEnvironment(environmentId: EnvironmentId): Promise<void> {
+    registry.catalog.registryStore.getState().remove(environmentId);
+    await teardownSavedEnvironmentSession(environmentId);
     // The remembered session answer (role, expiry) goes with the credential.
     registry.driver.forgetSessionHint(environmentId);
-    useStore.getState().removeEnvironmentState(environmentId);
     // Forgetting a node also forgets its persisted snapshot — cached content
     // must not outlive the environment it belongs to (wave 2, plan step 5).
     purgeEnvironmentSnapshot(environmentId);
@@ -170,6 +181,23 @@ export function createEnvironmentActions(deps: EnvironmentActionsDeps) {
     await trustStore.forgetEnvironment(environmentId);
   }
 
+  /**
+   * Switches a node paired directly on or off (the shared catalog switch, as
+   * on web and desktop). Off lasts across syncs, resumes and launches, and
+   * ends its session; its threads leave the app until it is on again. The
+   * record, credential, trust, stored snapshot and artwork stay, so switching
+   * on needs no new pairing: the supervisor's next sync connects it. A direct
+   * connection never carries push alerts (only Hub channels register them),
+   * so there is no push registration to retire here.
+   */
+  async function setSavedEnvironmentEnabled(
+    environmentId: EnvironmentId,
+    enabled: boolean,
+  ): Promise<void> {
+    switchSavedEnvironment(registry.catalog.registryStore, environmentId, enabled);
+    if (!enabled) await teardownSavedEnvironmentSession(environmentId);
+  }
+
   function renameSavedEnvironment(environmentId: EnvironmentId, label: string): void {
     registry.catalog.registryStore.getState().rename(environmentId, label);
   }
@@ -180,6 +208,7 @@ export function createEnvironmentActions(deps: EnvironmentActionsDeps) {
     disconnectSavedEnvironment,
     removeSavedEnvironment,
     renameSavedEnvironment,
+    setSavedEnvironmentEnabled,
   };
 }
 

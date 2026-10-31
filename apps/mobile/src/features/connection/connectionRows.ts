@@ -1,5 +1,6 @@
 import {
   DEFAULT_SAVED_ENVIRONMENT_RUNTIME_STATE,
+  isSavedEnvironmentSwitchedOff,
   type SavedEnvironmentRecord,
   type SavedEnvironmentRuntimeState,
 } from "@ryco/client-runtime/connection";
@@ -8,7 +9,7 @@ import type { EnvironmentId } from "@ryco/contracts";
 
 import type { StatusTone } from "../../components/StatusPill";
 import { wsUiStateForEnvironment } from "../../rpc/wsConnectionState";
-import { connectionToneForEnvironment } from "./connectionTone";
+import { connectionToneForEnvironment, resolveConnectionTone } from "./connectionTone";
 
 // Never carries a bearer token: rows hold label/url/state only (§3-25 secret
 // boundary).
@@ -17,6 +18,8 @@ export interface ConnectionRow {
   readonly runtime: SavedEnvironmentRuntimeState;
   readonly tone: StatusTone;
   readonly statusLabel: string;
+  /** The user switched the node off: it stays listed, dimmed, and never connects. */
+  readonly switchedOff: boolean;
 }
 
 /**
@@ -50,12 +53,23 @@ export function deriveConnectionRows(input: {
     .map((record): ConnectionRow => {
       const runtime =
         input.runtimeById[record.environmentId] ?? DEFAULT_SAVED_ENVIRONMENT_RUNTIME_STATE;
+      if (isSavedEnvironmentSwitchedOff(record)) {
+        // What it last reported no longer applies: it is not connected at all.
+        const tone = resolveConnectionTone("switched-off");
+        return {
+          record,
+          runtime: DEFAULT_SAVED_ENVIRONMENT_RUNTIME_STATE,
+          tone,
+          statusLabel: tone.label,
+          switchedOff: true,
+        };
+      }
       const tone = connectionToneForEnvironment(
         runtime.connectionState,
         savedEnvironmentUiState(input.statuses, record.environmentId),
       );
       const statusLabel = runtime.authState === "requires-auth" ? "Needs re-pair" : tone.label;
-      return { record, runtime, tone, statusLabel };
+      return { record, runtime, tone, statusLabel, switchedOff: false };
     })
     .toSorted((left, right) =>
       left.record.label.localeCompare(right.record.label, undefined, { sensitivity: "base" }),

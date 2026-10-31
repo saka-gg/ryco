@@ -6,6 +6,7 @@ import {
   buildNodeSections,
   canSelectHubNode,
   directConnectActionLabel,
+  directNodeActions,
   directRoleLabel,
   directTransportLabel,
 } from "./nodesModel";
@@ -126,5 +127,37 @@ describe("directConnectActionLabel", () => {
     expect(directConnectActionLabel({ connectionState: "connected", needsRepair: false })).toBe(
       "Use",
     );
+  });
+});
+
+describe("directNodeActions", () => {
+  it("offers a switched-off machine only switching on, renaming and forgetting", () => {
+    expect(
+      directNodeActions({
+        connectionState: "disconnected",
+        needsRepair: true,
+        selected: false,
+        switchedOff: true,
+      }),
+    ).toEqual(["switch-on", "rename", "forget"]);
+  });
+
+  it("offers a machine that is on its connection actions and the off switch", () => {
+    expect(
+      directNodeActions({
+        connectionState: "disconnected",
+        needsRepair: true,
+        selected: false,
+        switchedOff: false,
+      }),
+    ).toEqual(["re-pair", "connect", "switch-off", "rename", "forget"]);
+    expect(
+      directNodeActions({
+        connectionState: "connected",
+        needsRepair: false,
+        selected: true,
+        switchedOff: false,
+      }),
+    ).toEqual(["disconnect", "switch-off", "rename", "forget"]);
   });
 });

@@ -70,6 +70,10 @@
       "types": "./src/connection/hubLinkedRoutes.ts",
       "import": "./src/connection/hubLinkedRoutes.ts"
     },
+    "./connection/savedEnvironmentSwitch": {
+      "types": "./src/connection/savedEnvironmentSwitch.ts",
+      "import": "./src/connection/savedEnvironmentSwitch.ts"
+    },
     "./authorization": {
       "types": "./src/authorization/index.ts",
       "import": "./src/authorization/index.ts"

@@ -18,7 +18,11 @@ import {
   type EnvironmentId,
 } from "@ryco/contracts";
 import { DateTime } from "effect";
-import { describeHostFreeze } from "@ryco/client-runtime/connection";
+import {
+  describeHostFreeze,
+  isSavedEnvironmentSwitchedOff,
+  SavedEnvironmentSwitchedOffError,
+} from "@ryco/client-runtime/connection";
 
 import { useCopyToClipboard } from "../../hooks/useCopyToClipboard";
 import { cn } from "../../lib/utils";
@@ -108,6 +112,7 @@ import {
   reconnectSavedEnvironment,
   removeSavedEnvironment,
 } from "~/environments/runtime";
+import { setSavedEnvironmentEnabled } from "~/environments/runtime/savedEnvironmentSwitch";
 import { useUiStateStore } from "~/uiStateStore";
 import { resolveServerConfigVersionMismatch } from "~/versionSkew";
 import { useServerConfig } from "~/rpc/serverState";
@@ -187,6 +192,10 @@ function getSavedBackendStatusTooltip(
   nowMs: number,
 ) {
   const connectionState = runtime?.connectionState ?? "disconnected";
+
+  if (isSavedEnvironmentSwitchedOff(record)) {
+    return "Switched off. It stays paired, and this app does not connect to it until you switch it on.";
+  }
 
   if (savedBackendNeedsRepair(runtime, record)) {
     return runtime?.lastError ?? "This environment no longer accepts its saved pairing.";
@@ -1357,10 +1366,12 @@ type SavedBackendListRowProps = {
   reconnectingEnvironmentId: EnvironmentId | null;
   disconnectingEnvironmentId: EnvironmentId | null;
   removingEnvironmentId: EnvironmentId | null;
+  switchingEnvironmentId: EnvironmentId | null;
   onConnect: (environmentId: EnvironmentId) => void;
   onDisconnect: (environmentId: EnvironmentId) => void;
   onRepair: (environmentId: EnvironmentId) => void;
   onRemove: (environmentId: EnvironmentId) => void;
+  onSetEnabled: (environmentId: EnvironmentId, enabled: boolean) => void;
 };
 
 function SavedBackendListRow({
@@ -1368,10 +1379,12 @@ function SavedBackendListRow({
   reconnectingEnvironmentId,
   disconnectingEnvironmentId,
   removingEnvironmentId,
+  switchingEnvironmentId,
   onConnect,
   onDisconnect,
   onRepair,
   onRemove,
+  onSetEnabled,
 }: SavedBackendListRowProps) {
   const nowMs = useRelativeTimeTick(1_000);
   const record = useSavedEnvironmentRegistryStore((state) => state.byId[environmentId] ?? null);
@@ -1381,12 +1394,16 @@ function SavedBackendListRow({
     return null;
   }
 
-  const connectionState = runtime?.connectionState ?? "disconnected";
+  // Switched off: listed, dimmed, and never connected until switched on.
+  const switchedOff = isSavedEnvironmentSwitchedOff(record);
+  const connectionState = switchedOff
+    ? "disconnected"
+    : (runtime?.connectionState ?? "disconnected");
   const isConnected = connectionState === "connected";
   const isConnecting =
     connectionState === "connecting" || reconnectingEnvironmentId === environmentId;
   const isDisconnecting = disconnectingEnvironmentId === environmentId;
-  const needsRepair = !isConnecting && savedBackendNeedsRepair(runtime, record);
+  const needsRepair = !switchedOff && !isConnecting && savedBackendNeedsRepair(runtime, record);
   const stateDotClassName =
     connectionState === "connected"
       ? "bg-success"
@@ -1399,10 +1416,15 @@ function SavedBackendListRow({
   const descriptorLabel = runtime?.descriptor?.label ?? null;
   const displayLabel = descriptorLabel ?? record.label;
   const statusTooltip = getSavedBackendStatusTooltip(runtime, record, nowMs);
-  const versionMismatch = resolveServerConfigVersionMismatch(runtime?.serverConfig);
+  const versionMismatch = switchedOff
+    ? null
+    : resolveServerConfigVersionMismatch(runtime?.serverConfig);
   // Why it just dropped, when it froze: shown for five minutes after the stall.
-  const freezeNotice = describeHostFreeze(runtime?.serverConfig?.lastEventLoopStall, { nowMs });
+  const freezeNotice = switchedOff
+    ? null
+    : describeHostFreeze(runtime?.serverConfig?.lastEventLoopStall, { nowMs });
   const metadataBits = [
+    switchedOff ? "Switched off" : null,
     record.desktopSsh ? `SSH ${formatDesktopSshTarget(record.desktopSsh)}` : null,
     roleLabel,
     record.lastConnectedAt
@@ -1411,9 +1433,9 @@ function SavedBackendListRow({
   ].filter((value): value is string => value !== null);
 
   return (
-    <div className={ITEM_ROW_CLASSNAME}>
+    <div className={ITEM_ROW_CLASSNAME} data-switched-off={switchedOff ? "" : undefined}>
       <div className={ITEM_ROW_INNER_CLASSNAME}>
-        <div className="min-w-0 flex-1 space-y-1">
+        <div className={cn("min-w-0 flex-1 space-y-1", switchedOff && "opacity-60")}>
           <div className="flex min-h-5 items-center gap-1.5">
             <ConnectionStatusDot
               tooltipText={statusTooltip}
@@ -1444,26 +1466,34 @@ function SavedBackendListRow({
           ) : null}
         </div>
         <div className="flex w-full shrink-0 items-center gap-2 sm:w-auto sm:justify-end">
+          <Switch
+            checked={!switchedOff}
+            disabled={switchingEnvironmentId === environmentId}
+            onCheckedChange={(checked) => onSetEnabled(environmentId, checked)}
+            aria-label={`Use ${displayLabel}`}
+          />
           {needsRepair ? (
             <Button size="xs" variant="outline" onClick={() => onRepair(environmentId)}>
               Re-pair
             </Button>
           ) : null}
-          <Button
-            size="xs"
-            variant="outline"
-            disabled={isConnected ? isDisconnecting : isConnecting}
-            onClick={() =>
-              void (isConnected ? onDisconnect(environmentId) : onConnect(environmentId))
-            }
-          >
-            {savedBackendConnectionActionLabel({
-              isConnected,
-              isConnecting,
-              isDisconnecting,
-              needsRepair,
-            })}
-          </Button>
+          {switchedOff ? null : (
+            <Button
+              size="xs"
+              variant="outline"
+              disabled={isConnected ? isDisconnecting : isConnecting}
+              onClick={() =>
+                void (isConnected ? onDisconnect(environmentId) : onConnect(environmentId))
+              }
+            >
+              {savedBackendConnectionActionLabel({
+                isConnected,
+                isConnecting,
+                isDisconnecting,
+                needsRepair,
+              })}
+            </Button>
+          )}
           <Button
             size="xs"
             variant="destructive-outline"
@@ -1613,6 +1643,8 @@ export function ConnectionsSettings() {
   const [disconnectingSavedEnvironmentId, setDisconnectingSavedEnvironmentId] =
     useState<EnvironmentId | null>(null);
   const [removingSavedEnvironmentId, setRemovingSavedEnvironmentId] =
+    useState<EnvironmentId | null>(null);
+  const [switchingSavedEnvironmentId, setSwitchingSavedEnvironmentId] =
     useState<EnvironmentId | null>(null);
   const [isUpdatingDesktopServerExposure, setIsUpdatingDesktopServerExposure] = useState(false);
   const [isDesktopServerExposureDialogOpen, setIsDesktopServerExposureDialogOpen] = useState(false);
@@ -1991,6 +2023,8 @@ export function ConnectionsSettings() {
     try {
       await reconnectSavedEnvironment(environmentId);
     } catch (error) {
+      // Switched off while it connected: its row says so.
+      if (error instanceof SavedEnvironmentSwitchedOffError) return;
       const message = error instanceof Error ? error.message : "Failed to connect backend.";
       setSavedBackendError(message);
       toastManager.add(
@@ -2036,6 +2070,32 @@ export function ConnectionsSettings() {
       setDisconnectingSavedEnvironmentId(null);
     }
   }, []);
+
+  const handleSetSavedBackendEnabled = useCallback(
+    async (environmentId: EnvironmentId, enabled: boolean) => {
+      setSwitchingSavedEnvironmentId(environmentId);
+      setSavedBackendError(null);
+      try {
+        await setSavedEnvironmentEnabled(environmentId, enabled);
+      } catch (error) {
+        const message =
+          error instanceof Error
+            ? error.message
+            : `Failed to switch the environment ${enabled ? "on" : "off"}.`;
+        setSavedBackendError(message);
+        toastManager.add(
+          stackedThreadToast({
+            type: "error",
+            title: enabled ? "Could not switch environment on" : "Could not switch environment off",
+            description: message,
+          }),
+        );
+      } finally {
+        setSwitchingSavedEnvironmentId(null);
+      }
+    },
+    [],
+  );
 
   const handleRemoveSavedBackend = useCallback(async (environmentId: EnvironmentId) => {
     setRemovingSavedEnvironmentId(environmentId);
@@ -2973,10 +3033,12 @@ export function ConnectionsSettings() {
             reconnectingEnvironmentId={reconnectingSavedEnvironmentId}
             disconnectingEnvironmentId={disconnectingSavedEnvironmentId}
             removingEnvironmentId={removingSavedEnvironmentId}
+            switchingEnvironmentId={switchingSavedEnvironmentId}
             onConnect={handleConnectSavedBackend}
             onDisconnect={handleDisconnectSavedBackend}
             onRepair={handleRepairSavedBackend}
             onRemove={handleRemoveSavedBackend}
+            onSetEnabled={handleSetSavedBackendEnabled}
           />
         ))}
 

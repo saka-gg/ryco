@@ -44,7 +44,11 @@ import {
 import { useNewThreadHandler } from "../hooks/useHandleNewThread";
 import { flushPreviewFiles, hasUnsavedPreviewFiles } from "./previewFileSessions";
 import type { BackgroundTask } from "@ryco/shared/backgroundWork";
-import { isThreadHistoryAnchorMissing } from "@ryco/client-runtime/connection";
+import {
+  isSavedEnvironmentSwitchedOff,
+  isThreadHistoryAnchorMissing,
+  SavedEnvironmentSwitchedOffError,
+} from "@ryco/client-runtime/connection";
 import {
   deriveThreadBackgroundWork,
   keptChangesRestoreNote,
@@ -235,6 +239,7 @@ import {
   ChevronDownIcon,
   CircleAlertIcon,
   LoaderCircleIcon,
+  PowerOffIcon,
   TriangleAlertIcon,
   WifiOffIcon,
 } from "lucide-react";
@@ -447,6 +452,7 @@ import {
   PullRequestDialogState,
   reconcileMountedTerminalThreadIds,
   resolveHeaderLiveAgentCount,
+  resolveSavedEnvironmentUnavailableState,
   resolveSendEnvMode,
   resolveChatSendWorktreePlan,
   resolveThreadVisit,
@@ -634,12 +640,6 @@ function stabilizeProviderStatusesSnapshot(
   cache.snapshot = snapshot;
   return snapshot;
 }
-
-type EnvironmentUnavailableState = {
-  readonly environmentId: EnvironmentId;
-  readonly label: string;
-  readonly connectionState: "connecting" | "disconnected" | "error";
-};
 
 type ChatViewProps =
   | {
@@ -1753,8 +1753,13 @@ export default function ChatView(props: ChatViewProps) {
     ? (activeSavedEnvironmentRuntime?.connectionState ?? "disconnected")
     : "connected";
   const sideChatConnection = useWsConnectionStatusForEnvironment(environmentId);
+  // A draft can outlive its machine being switched off: it then says so.
+  const activeSavedEnvironmentSwitchedOff = isSavedEnvironmentSwitchedOff(
+    activeSavedEnvironmentRecord,
+  );
   const activeEnvironmentUnavailable =
-    activeSavedEnvironmentRecord !== null && activeSavedEnvironmentConnectionState !== "connected";
+    activeSavedEnvironmentRecord !== null &&
+    (activeSavedEnvironmentSwitchedOff || activeSavedEnvironmentConnectionState !== "connected");
   const activeSavedEnvironmentId = activeSavedEnvironmentRecord?.environmentId ?? null;
   const activeEnvironmentUnavailableLabel = activeSavedEnvironmentRecord
     ? resolveEnvironmentOptionLabel({
@@ -1764,30 +1769,21 @@ export default function ChatView(props: ChatViewProps) {
         savedLabel: activeSavedEnvironmentRecord.label,
       })
     : null;
-  const activeEnvironmentUnavailableState = useMemo<EnvironmentUnavailableState | null>(() => {
-    if (
-      !activeEnvironmentUnavailable ||
-      !activeEnvironmentUnavailableLabel ||
-      !activeSavedEnvironmentId
-    ) {
-      return null;
-    }
-
-    return {
-      environmentId: activeSavedEnvironmentId,
-      label: activeEnvironmentUnavailableLabel,
-      connectionState:
-        activeSavedEnvironmentConnectionState === "connecting" ||
-        activeSavedEnvironmentConnectionState === "error"
-          ? activeSavedEnvironmentConnectionState
-          : "disconnected",
-    };
-  }, [
-    activeEnvironmentUnavailable,
-    activeEnvironmentUnavailableLabel,
-    activeSavedEnvironmentConnectionState,
-    activeSavedEnvironmentId,
-  ]);
+  const activeEnvironmentUnavailableState = useMemo(
+    () =>
+      resolveSavedEnvironmentUnavailableState({
+        environmentId: activeSavedEnvironmentId,
+        label: activeEnvironmentUnavailableLabel,
+        switchedOff: activeSavedEnvironmentSwitchedOff,
+        connectionState: activeSavedEnvironmentConnectionState,
+      }),
+    [
+      activeEnvironmentUnavailableLabel,
+      activeSavedEnvironmentConnectionState,
+      activeSavedEnvironmentId,
+      activeSavedEnvironmentSwitchedOff,
+    ],
+  );
   const [reconnectingEnvironmentId, setReconnectingEnvironmentId] = useState<EnvironmentId | null>(
     null,
   );
@@ -1802,6 +1798,8 @@ export default function ChatView(props: ChatViewProps) {
           description: `${label} is ready.`,
         });
       } catch (error) {
+        // Switched off meanwhile: the banner says so and offers Switch on.
+        if (error instanceof SavedEnvironmentSwitchedOffError) return;
         toastManager.add(
           stackedThreadToast({
             type: "error",
@@ -1815,6 +1813,25 @@ export default function ChatView(props: ChatViewProps) {
     },
     [],
   );
+  const handleSwitchOnActiveEnvironment = useCallback(async (environmentId: EnvironmentId) => {
+    setReconnectingEnvironmentId(environmentId);
+    try {
+      // Loaded on use: only Settings and this banner switch machines.
+      const { setSavedEnvironmentEnabled } =
+        await import("~/environments/runtime/savedEnvironmentSwitch");
+      await setSavedEnvironmentEnabled(environmentId, true);
+    } catch (error) {
+      toastManager.add(
+        stackedThreadToast({
+          type: "error",
+          title: "Could not switch environment on",
+          description: error instanceof Error ? error.message : "Failed to switch it on.",
+        }),
+      );
+    } finally {
+      setReconnectingEnvironmentId(null);
+    }
+  }, []);
   const projectGroupingSettings = useProjectGroupingSettings();
   const desktopExecutionMachines = useMemo(
     () =>
@@ -1920,7 +1937,9 @@ export default function ChatView(props: ChatViewProps) {
             },
           ]
         : []),
-      ...Object.values(savedEnvironmentRegistry).map((record) => {
+      ...Object.values(savedEnvironmentRegistry).flatMap((record) => {
+        // A machine switched off is not offered: it would only ever be unreachable.
+        if (isSavedEnvironmentSwitchedOff(record)) return [];
         const runtime = savedEnvironmentRuntimeById[record.environmentId];
         return {
           environmentId: record.environmentId,
@@ -2265,7 +2284,35 @@ export default function ChatView(props: ChatViewProps) {
         description: dispatchCapability.reason ?? "Commands are unavailable on this connection.",
       });
     }
-    if (activeEnvironmentUnavailableState) {
+    if (activeEnvironmentUnavailableState?.connectionState === "switched-off") {
+      const switchingOn =
+        reconnectingEnvironmentId === activeEnvironmentUnavailableState.environmentId;
+      items.push({
+        id: `environment-unavailable:${activeEnvironmentUnavailableState.environmentId}`,
+        variant: "warning",
+        icon: <PowerOffIcon />,
+        title: <>{activeEnvironmentUnavailableState.label} is switched off</>,
+        description: "Switch it on to send messages or run actions.",
+        actions: (
+          <>
+            <Button
+              size="xs"
+              disabled={switchingOn}
+              onClick={() =>
+                void handleSwitchOnActiveEnvironment(
+                  activeEnvironmentUnavailableState.environmentId,
+                )
+              }
+            >
+              {switchingOn ? "Switching on..." : "Switch on"}
+            </Button>
+            <Button size="xs" variant="outline" onClick={() => openSettings("connections")}>
+              Connections
+            </Button>
+          </>
+        ),
+      });
+    } else if (activeEnvironmentUnavailableState) {
       items.push({
         id: `environment-unavailable:${activeEnvironmentUnavailableState.environmentId}`,
         variant:
@@ -2343,6 +2390,7 @@ export default function ChatView(props: ChatViewProps) {
     hostedDeliveryNotice,
     activeEnvironmentUnavailableState,
     handleReconnectActiveEnvironment,
+    handleSwitchOnActiveEnvironment,
     openSettings,
     reconnectingEnvironmentId,
     restartInterruptionBannerItem,

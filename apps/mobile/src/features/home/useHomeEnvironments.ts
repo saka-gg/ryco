@@ -91,15 +91,18 @@ export function useHomeEnvironments(options?: {
       buildHomeEnvironments({
         reportedThreadCapabilities,
         shellSettlementRules,
-        direct: directRows.map((row) => ({
-          environmentId: row.record.environmentId,
-          label: row.record.label,
-          connectionState: row.runtime.connectionState,
-          role: row.runtime.role,
-          descriptorCapabilities: row.runtime.descriptor?.capabilities ?? null,
-          shellCurrent: shellCurrentByEnvironmentId[row.record.environmentId] === true,
-          apiAvailable: environmentsWithApi.has(row.record.environmentId),
-        })),
+        // A node switched off takes no part in the workspace until it is on.
+        direct: directRows
+          .filter((row) => !row.switchedOff)
+          .map((row) => ({
+            environmentId: row.record.environmentId,
+            label: row.record.label,
+            connectionState: row.runtime.connectionState,
+            role: row.runtime.role,
+            descriptorCapabilities: row.runtime.descriptor?.capabilities ?? null,
+            shellCurrent: shellCurrentByEnvironmentId[row.record.environmentId] === true,
+            apiAvailable: environmentsWithApi.has(row.record.environmentId),
+          })),
         hosted: hosted.selectedNodes
           .filter((connection) => eligibleHostedEnvironmentIds.has(connection.environmentId))
           .map((connection) => ({

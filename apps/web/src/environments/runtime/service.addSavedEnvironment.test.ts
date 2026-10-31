@@ -1611,7 +1611,8 @@ describe("addSavedEnvironment", () => {
         httpBaseUrl: "http://127.0.0.1:3774/",
       }),
     );
-    expect(mockSetSavedEnvironmentRegistry).toHaveBeenCalledWith([originalRecord]);
+    // The address goes back into the live record, and nothing else changes.
+    expect(mockPersistSavedEnvironmentRecord).toHaveBeenLastCalledWith(originalRecord);
     expect(mockSavedRecords).toEqual([originalRecord]);
     expect(mockBootstrapSshBearerSession).not.toHaveBeenCalled();
 

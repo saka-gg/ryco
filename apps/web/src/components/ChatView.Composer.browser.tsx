@@ -31,6 +31,11 @@ import {
   readEnvironmentApi,
 } from "../environmentApi";
 import { useMessageQueueStore } from "../messageQueueStore";
+import { useSavedEnvironmentRegistryStore } from "../environments/runtime";
+import {
+  readPrimaryEnvironmentDescriptor,
+  writePrimaryEnvironmentDescriptor,
+} from "../environments/primary";
 import { selectThreadByRef, useStore } from "../store";
 import { useUiStateStore } from "../uiStateStore";
 import { useTierOverrideStore } from "../tierOverrideStore";
@@ -52,6 +57,7 @@ import {
   PHONE_VIEWPORT,
   PROJECT_DRAFT_KEY,
   PROJECT_ID,
+  REMOTE_ENVIRONMENT_ID,
   THREAD_ID,
   THREAD_KEY,
   THREAD_REF,
@@ -165,6 +171,56 @@ function pressComposerEnter(
 
 describe("ChatView Composer (full app)", () => {
   setupChatViewBrowserSuite();
+
+  it("offers Switch on, not Reconnect, when a draft's machine is switched off", async () => {
+    // A draft outlives its machine being switched off (its threads go).
+    setDraftThreadWithoutWorktree();
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot: createDraftOnlySnapshot(),
+    });
+    const previousPrimaryDescriptor = readPrimaryEnvironmentDescriptor();
+
+    try {
+      await waitForComposerEditor();
+      // Re-point the primary so the thread's own environment is a saved
+      // machine, and switch that machine off.
+      expect(previousPrimaryDescriptor).not.toBeNull();
+      writePrimaryEnvironmentDescriptor({
+        ...previousPrimaryDescriptor!,
+        environmentId: REMOTE_ENVIRONMENT_ID,
+      });
+      useSavedEnvironmentRegistryStore.getState().upsert({
+        environmentId: LOCAL_ENVIRONMENT_ID,
+        label: "Workstation",
+        httpBaseUrl: "https://workstation.example.test",
+        wsBaseUrl: "wss://workstation.example.test/ws",
+        createdAt: NOW_ISO,
+        lastConnectedAt: NOW_ISO,
+        disabledAt: NOW_ISO,
+      });
+
+      const banner = page.getByRole("alert").filter({ hasText: "Workstation is switched off" });
+      await expect.element(banner).toBeInTheDocument();
+      // The composer says so too.
+      await expect
+        .element(page.getByText("Workstation is switched off").nth(1))
+        .toBeInTheDocument();
+      await expect
+        .element(page.getByRole("button", { name: "Reconnect", exact: true }))
+        .not.toBeInTheDocument();
+      await page.getByRole("button", { name: "Switch on", exact: true }).click();
+      await vi.waitFor(() => {
+        expect(useSavedEnvironmentRegistryStore.getState().byId[LOCAL_ENVIRONMENT_ID]).toEqual(
+          expect.not.objectContaining({ disabledAt: expect.anything() }),
+        );
+      });
+      await expect.element(banner).not.toBeInTheDocument();
+    } finally {
+      writePrimaryEnvironmentDescriptor(previousPrimaryDescriptor);
+      await mounted.cleanup();
+    }
+  });
 
   it("stashes globally, preserves contexts/model state, merges on keyboard restore, and deletes from the picker", async () => {
     const terminalContext = createTerminalContext({
