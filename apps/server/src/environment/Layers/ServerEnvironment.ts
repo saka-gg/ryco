@@ -106,6 +106,7 @@ export const makeServerEnvironment = Effect.fn("makeServerEnvironment")(function
       threadSettlement: true,
       nodeAutoSettlement: true,
       threadSnooze: true,
+      threadTriage: true,
       storageManagement: true,
       threadSidebarUndo: true,
       projectIcons: true,

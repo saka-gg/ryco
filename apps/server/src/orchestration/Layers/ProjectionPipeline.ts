@@ -132,6 +132,9 @@ export const ORCHESTRATION_EVENT_PROJECTORS = {
   "thread.unsnoozed": [ORCHESTRATION_PROJECTOR_NAMES.threads],
   "thread.settled": [ORCHESTRATION_PROJECTOR_NAMES.threads],
   "thread.unsettled": [ORCHESTRATION_PROJECTOR_NAMES.threads],
+  "thread.settle-deferred": [ORCHESTRATION_PROJECTOR_NAMES.threads],
+  "thread.hidden": [ORCHESTRATION_PROJECTOR_NAMES.threads],
+  "thread.unhidden": [ORCHESTRATION_PROJECTOR_NAMES.threads],
   "thread.usage-limit-set": [ORCHESTRATION_PROJECTOR_NAMES.threads],
   "thread.usage-limit-cleared": [ORCHESTRATION_PROJECTOR_NAMES.threads],
   "thread.goal-updated": [ORCHESTRATION_PROJECTOR_NAMES.threads],
@@ -918,6 +921,7 @@ export const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationP
           yield* projectionThreadRepository.upsert({
             ...existingRow.value,
             archivedAt: event.payload.archivedAt,
+            settleWhenIdleAt: null,
             updatedAt: event.payload.updatedAt,
           });
           return;
@@ -949,6 +953,7 @@ export const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationP
             ...existingRow.value,
             settledOverride: "active",
             settledAt: null,
+            settleWhenIdleAt: null,
             snoozedUntil: event.payload.snoozedUntil,
             snoozedAt: event.payload.snoozedAt,
             updatedAt: event.payload.updatedAt,
@@ -987,7 +992,41 @@ export const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationP
             settledOverride: "settled",
             snoozedUntil: null,
             snoozedAt: null,
+            settleWhenIdleAt: null,
             settledAt: event.payload.settledAt,
+            updatedAt: event.payload.updatedAt,
+          });
+          return;
+        }
+
+        case "thread.settle-deferred": {
+          const existingRow = yield* projectionThreadRepository.getById({
+            threadId: event.payload.threadId,
+          });
+          if (Option.isNone(existingRow)) {
+            return;
+          }
+          yield* projectionThreadRepository.upsert({
+            ...existingRow.value,
+            settleWhenIdleAt: event.payload.settleWhenIdleAt,
+            snoozedUntil: null,
+            snoozedAt: null,
+            updatedAt: event.payload.updatedAt,
+          });
+          return;
+        }
+
+        case "thread.hidden":
+        case "thread.unhidden": {
+          const existingRow = yield* projectionThreadRepository.getById({
+            threadId: event.payload.threadId,
+          });
+          if (Option.isNone(existingRow)) {
+            return;
+          }
+          yield* projectionThreadRepository.upsert({
+            ...existingRow.value,
+            hiddenAt: event.type === "thread.hidden" ? event.payload.hiddenAt : null,
             updatedAt: event.payload.updatedAt,
           });
           return;
@@ -1004,6 +1043,7 @@ export const makeOrchestrationProjectionPipeline = Effect.fn("makeOrchestrationP
             ...existingRow.value,
             settledOverride: event.payload.reason === "user" ? "active" : null,
             settledAt: null,
+            settleWhenIdleAt: null,
             updatedAt: event.payload.updatedAt,
             ...event.payload.restoredSidebarState,
           });

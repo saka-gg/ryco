@@ -135,8 +135,8 @@ describe("inbox snooze menu", () => {
   it("offers three hours and a custom time after the presets", () => {
     const ids = menu().actions.map((action) => action.id);
     expect(ids.slice(0, 3)).toEqual(["settle", "hour", "three-hours"]);
-    expect(ids.at(-2)).toBe("snooze-custom");
-    expect(ids.at(-1)).toBe("copy-id");
+    // Custom… closes the snooze choices; Hide follows them and Copy task ID ends the menu.
+    expect(ids.slice(-3)).toEqual(["snooze-custom", "hide", "copy-id"]);
   });
 
   it("copies the task's ID from the menu", () => {

@@ -182,6 +182,10 @@ export interface Thread {
   settledAt?: string | null | undefined;
   snoozedUntil?: string | null | undefined;
   snoozedAt?: string | null | undefined;
+  /** On the Hidden shelf since; absent from older servers. */
+  hiddenAt?: string | null | undefined;
+  /** Settled while working: the node settles it when the work ends. Absent from older servers. */
+  settleWhenIdleAt?: string | null | undefined;
   /** Provider usage limit that stopped the thread; absent on older servers. */
   usageLimit?: ThreadUsageLimit | null | undefined;
   updatedAt?: string | undefined;
@@ -218,6 +222,10 @@ export interface ThreadShell {
   settledAt?: string | null | undefined;
   snoozedUntil?: string | null | undefined;
   snoozedAt?: string | null | undefined;
+  /** On the Hidden shelf since; absent from older servers. */
+  hiddenAt?: string | null | undefined;
+  /** Settled while working: the node settles it when the work ends. Absent from older servers. */
+  settleWhenIdleAt?: string | null | undefined;
   /** Provider usage limit that stopped the thread; absent on older servers. */
   usageLimit?: ThreadUsageLimit | null | undefined;
   updatedAt?: string | undefined;
@@ -322,6 +330,10 @@ export interface SidebarThreadSummary {
   settledAt?: string | null | undefined;
   snoozedUntil?: string | null | undefined;
   snoozedAt?: string | null | undefined;
+  /** On the Hidden shelf since; absent from older servers. */
+  hiddenAt?: string | null | undefined;
+  /** Settled while working: the node settles it when the work ends. Absent from older servers. */
+  settleWhenIdleAt?: string | null | undefined;
   /** Provider usage limit that stopped the thread; absent on older servers. */
   usageLimit?: ThreadUsageLimit | null | undefined;
   updatedAt?: string | undefined;

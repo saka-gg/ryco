@@ -234,3 +234,37 @@ describe("pull request watches and sidebar undo", () => {
     expect(woken.restore(f.undo, f.model(next))).toBeNull();
   });
 });
+
+describe("Hide and sidebar undo", () => {
+  function hideFixture(previousHiddenAt: string | null) {
+    const f = fixture("hidden-thread");
+    const before = { ...f.before, hiddenAt: previousHiddenAt };
+    const after = { ...f.before, hiddenAt: "2026-09-30T00:00:00.000Z" };
+    const command = {
+      type: "thread.hide",
+      threadId: f.before.id,
+      commandId: CommandId.make("hide"),
+    } satisfies OrchestrationCommand;
+    const undo = { ...f.undo, undoCommandId: command.commandId };
+    return { ...f, before, after, command, undo };
+  }
+
+  it("unhides a thread on Undo", () => {
+    const receipts = createSidebarUndoReceipts();
+    const f = hideFixture(null);
+    receipts.record(f.command, f.model(f.before), f.model(f.after));
+    const events = receipts.restore(f.undo, f.model(f.after));
+    expect(events?.map((event) => event.type)).toEqual(["thread.unhidden"]);
+  });
+
+  it("puts back the earlier shelf time when Undo follows a second Hide", () => {
+    const receipts = createSidebarUndoReceipts();
+    const f = hideFixture("2026-09-01T00:00:00.000Z");
+    receipts.record(f.command, f.model(f.before), f.model(f.after));
+    const [event] = receipts.restore(f.undo, f.model(f.after)) ?? [];
+    expect(event).toMatchObject({
+      type: "thread.hidden",
+      payload: { hiddenAt: "2026-09-01T00:00:00.000Z" },
+    });
+  });
+});

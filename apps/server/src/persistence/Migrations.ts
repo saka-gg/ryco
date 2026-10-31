@@ -152,6 +152,9 @@ import Migration0095, {
 import Migration0096 from "./Migrations/096_AuthAccessLinkAccount.ts";
 import Migration0097 from "./Migrations/097_CommandWatches.ts";
 import Migration0098 from "./Migrations/098_ThreadForkOrigin.ts";
+import Migration0099, {
+  ensureProjectionThreadTriageColumns,
+} from "./Migrations/099_ProjectionThreadTriage.ts";
 
 /**
  * Migration loader with all migrations defined inline.
@@ -261,6 +264,7 @@ export const migrationEntries = [
   [96, "AuthAccessLinkAccount", Migration0096],
   [97, "CommandWatches", Migration0097],
   [98, "ThreadForkOrigin", Migration0098],
+  [99, "ProjectionThreadTriage", Migration0099],
 ] as const;
 
 export const makeMigrationLoader = (throughId?: number) =>
@@ -661,6 +665,16 @@ export const repairThreadFollowUpQueueTables = Effect.fn("repairThreadFollowUpQu
   },
 );
 
+// The Hidden shelf and settle-when-idle columns: run 097 again as a repair when a later id was
+// recorded first (parallel branches claim the same next id).
+export const repairProjectionThreadTriageColumns = Effect.fn("repairProjectionThreadTriageColumns")(
+  function* () {
+    if (yield* ensureProjectionThreadTriageColumns) {
+      yield* Effect.log("Repaired projection_threads triage columns");
+    }
+  },
+);
+
 // Unlike schema checks, the summary backfill scans the entire activity history.
 // Track its successful compatibility repair separately from the divergent
 // numerical migration ledger, and commit the marker with the repaired data.
@@ -854,6 +868,11 @@ const compatibilityRepairs = [
   { key: "command-watches", since: 97, run: () => Migration0097 },
   // 098 again when another branch recorded 098 (or a later id) first; it is idempotent.
   { key: "thread-fork-origin", since: 98, run: () => Migration0098 },
+  {
+    key: "projection-thread-triage",
+    since: 99,
+    run: () => repairProjectionThreadTriageColumns(),
+  },
 ] as const;
 
 export type CompatibilityRepairKey = (typeof compatibilityRepairs)[number]["key"];

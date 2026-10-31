@@ -528,6 +528,91 @@ describe("Inbox sidebar rendering and settlement", () => {
     }
   });
 
+  it("keeps hidden threads in a collapsed Hidden section and hides a thread from its menu", async () => {
+    // Desktop: the frozen phone tier offers no Hide.
+    await page.viewport(1_280, 800);
+    const dispatchCommand = vi.fn(async (_command: unknown) => undefined);
+    __setEnvironmentApiOverrideForTests(ENVIRONMENT_ID, {
+      orchestration: { dispatchCommand },
+    } as unknown as EnvironmentApi);
+    const base = {
+      environmentId: ENVIRONMENT_ID,
+      projectId: PROJECT_ID,
+      interactionMode: "default" as const,
+      session: null,
+      createdAt: "2026-09-01T00:00:00.000Z",
+      archivedAt: null,
+      latestTurn: null,
+      branch: "main",
+      worktreePath: null,
+      latestUserMessageAt: null,
+      hasPendingApprovals: false,
+      hasPendingUserInput: false,
+      hasActionableProposedPlan: false,
+    };
+    const props: InboxSidebarProps = {
+      projects: [],
+      worktrees: [],
+      environments: [
+        {
+          environmentId: ENVIRONMENT_ID,
+          label: "This device",
+          connectionState: "connected",
+          stale: false,
+          role: "owner",
+          trust: "not-required",
+          deliveryUnknown: false,
+          threadSettlementSupported: true,
+          threadSnoozeSupported: true,
+          threadTriageSupported: true,
+          mutationReady: true,
+          shellCurrent: true,
+        },
+      ],
+      threads: [
+        {
+          ...base,
+          id: ThreadId.make("nightly"),
+          title: "Nightly run",
+          hiddenAt: "2026-09-01T01:00:00.000Z",
+        },
+        { ...base, id: ThreadId.make("visible"), title: "Visible task" },
+      ],
+      deliveryUnknownThreadKeys: new Set(),
+      localQueuedThreadKeys: new Set(),
+      activeThreadKey: null,
+      autoSettleAfterDays: null,
+      pinnedThreadKeys: new Set(),
+      onOpenThread: vi.fn(),
+    };
+    const mounted = await render(<InboxSidebar {...props} />);
+    try {
+      const hiddenHeader = page.getByRole("button", { name: /Hidden/ });
+      await expect.element(hiddenHeader).toHaveAttribute("aria-expanded", "false");
+      expect(document.body.textContent).not.toContain("Nightly run");
+      await hiddenHeader.click();
+      await expect.element(page.getByText("Nightly run")).toBeVisible();
+
+      await page.getByRole("button", { name: "Thread actions for Visible task" }).click();
+      await page.getByRole("menuitem", { name: "Hide until needed" }).click();
+      await vi.waitFor(() => expect(dispatchCommand).toHaveBeenCalledTimes(1));
+      expect(dispatchCommand.mock.calls[0]![0]).toMatchObject({
+        type: "thread.hide",
+        threadId: ThreadId.make("visible"),
+      });
+
+      await page.getByRole("button", { name: "Thread actions for Nightly run" }).click();
+      await page.getByRole("menuitem", { name: "Show in Inbox" }).click();
+      await vi.waitFor(() => expect(dispatchCommand).toHaveBeenCalledTimes(2));
+      expect(dispatchCommand.mock.calls[1]![0]).toMatchObject({
+        type: "thread.unhide",
+        threadId: ThreadId.make("nightly"),
+      });
+    } finally {
+      await mounted.unmount();
+    }
+  });
+
   it("says what each state needs on line 2 and keeps resting rows to one line", async () => {
     const base = {
       environmentId: ENVIRONMENT_ID,

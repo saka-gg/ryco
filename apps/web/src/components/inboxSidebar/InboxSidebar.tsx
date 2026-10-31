@@ -115,6 +115,7 @@ export function InboxSidebar(props: InboxSidebarProps) {
   );
   const [snoozedOpen, setSnoozedOpen] = useState(false);
   const [settledOpen, setSettledOpen] = useState(false);
+  const [hiddenOpen, setHiddenOpen] = useState(false);
   const [settlementNowMs, setSettlementNowMs] = useState(() => Date.now());
   // The web phone tier is frozen (AGENTS.md): no delegated folding, row selection
   // or Settle finished there.
@@ -241,8 +242,8 @@ export function InboxSidebar(props: InboxSidebarProps) {
     query.trim().length > 0 || environmentId !== null || project !== null || status !== "all";
   const hasNoProjects = props.projects.length === 0;
   const isExpanded = (key: string) =>
-    (key !== "settled" && key !== "snoozed") ||
-    (key === "snoozed" ? snoozedOpen : settledOpen) ||
+    (key !== "settled" && key !== "snoozed" && key !== "hidden") ||
+    (key === "snoozed" ? snoozedOpen : key === "hidden" ? hiddenOpen : settledOpen) ||
     status === key ||
     query.trim().length > 0;
   // A host stays open while one of its folded children is the open thread or
@@ -359,7 +360,10 @@ export function InboxSidebar(props: InboxSidebarProps) {
                 data-visible="false"
               />
               {sections.map((section) => {
-                const collapsible = section.key === "settled" || section.key === "snoozed";
+                const collapsible =
+                  section.key === "settled" ||
+                  section.key === "snoozed" ||
+                  section.key === "hidden";
                 const expanded = isExpanded(section.key);
                 return (
                   <section
@@ -374,7 +378,9 @@ export function InboxSidebar(props: InboxSidebarProps) {
                         onClick={() =>
                           section.key === "snoozed"
                             ? setSnoozedOpen((open) => !open)
-                            : setSettledOpen((open) => !open)
+                            : section.key === "hidden"
+                              ? setHiddenOpen((open) => !open)
+                              : setSettledOpen((open) => !open)
                         }
                         type="button"
                       >

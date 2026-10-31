@@ -61,6 +61,12 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
   projectPreferences: Schema.optionalKey(Schema.Boolean),
   threadSidebarUndo: Schema.optional(Schema.Boolean),
   threadSnooze: Schema.optional(Schema.Boolean),
+  /**
+   * Thread triage: the Hidden shelf (`thread.hide`, `thread.unhide`) and settling a working
+   * thread, which the node settles once its work ends. Absent on older servers, which reject
+   * `thread.settle` while a turn runs.
+   */
+  threadTriage: Schema.optionalKey(Schema.Boolean),
   threadSettlement: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   /**
    * The node keeps the automatic settlement rule (`threadAutoSettleAfterDays`) and

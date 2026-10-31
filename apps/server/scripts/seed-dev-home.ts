@@ -422,7 +422,7 @@ const prune = (
       CREATE TEMP TABLE seed_families AS
         SELECT roots.thread_id, roots.root_id, thread.updated_at,
           COALESCE(thread.deleted_at IS NULL AND thread.trashed_at IS NULL AND thread.archived_at IS NULL
-            AND thread.usage_limit_json IS NULL
+            AND thread.usage_limit_json IS NULL AND thread.settle_when_idle_at IS NULL
             AND thread.pending_approval_count = 0 AND thread.pending_user_input_count = 0
             AND thread.project_id IN (SELECT project_id FROM seed_kept_projects)
             AND NOT EXISTS (SELECT 1 FROM projection_thread_sessions session

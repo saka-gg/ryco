@@ -120,6 +120,8 @@ export interface WorkspaceThreadMetadata {
   readonly settledAt?: string | null;
   readonly snoozedUntil?: string | null;
   readonly snoozedAt?: string | null;
+  readonly hiddenAt?: string | null;
+  readonly settleWhenIdleAt?: string | null;
   readonly modelSelection: ModelSelection | null;
   readonly providerDriver: ProviderDriverKind | null;
   readonly branch: string | null;

@@ -205,6 +205,7 @@ import { OrchestrationLayerLive } from "./orchestration/runtimeLayer.ts";
 import { OrchestrationCommandApplicationLive } from "./orchestration/Layers/OrchestrationCommandApplication.ts";
 import { UsageLimitRecoveryLive } from "./orchestration/Layers/UsageLimitRecovery.ts";
 import { GoalContinuationLive } from "./orchestration/Layers/GoalContinuation.ts";
+import { SettleWhenIdleLive } from "./orchestration/Layers/SettleWhenIdle.ts";
 import {
   clearPersistedServerRuntimeState,
   makePersistedServerRuntimeState,
@@ -726,6 +727,8 @@ const RuntimeServicesLive = Layer.mergeAll(
     Layer.provideMerge(ServerRuntimeStartupLive),
     Layer.provideMerge(OrchestrationCommandApplicationLive),
   ),
+  // Settles a thread the person settled while it worked, once the work ends (loads lazily).
+  SettleWhenIdleLive.pipe(Layer.provideMerge(ServerRuntimeStartupLive)),
   // Each thread's queued follow-ups, sent behind the same wake fence (its runtime loads lazily).
   ServerQueueDrainLive.pipe(
     Layer.provideMerge(ServerRuntimeStartupLive),

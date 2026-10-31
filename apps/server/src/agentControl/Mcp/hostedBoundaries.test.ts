@@ -85,6 +85,7 @@ describe("pre-auth server environment descriptor", () => {
       "threadSettlement",
       "threadSidebarUndo",
       "threadSnooze",
+      "threadTriage",
       "usageLimitRecovery",
       "usagePriceOverrides",
       "workingTreeComparison",

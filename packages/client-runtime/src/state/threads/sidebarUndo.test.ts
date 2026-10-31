@@ -57,7 +57,7 @@ function setup() {
 beforeEach(() => vi.useFakeTimers());
 afterEach(() => vi.useRealTimers());
 describe("sidebar undo history", () => {
-  it.each(["archive", "settle", "snooze"] as const)(
+  it.each(["archive", "settle", "snooze", "hide"] as const)(
     "offers immediate %s undo bound to its owning command and node",
     async (action) => {
       const s = setup();

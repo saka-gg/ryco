@@ -265,6 +265,8 @@ const checks: Record<CompatibilityRepairKey, (c: SchemaCatalog) => RepairApplied
     c.has("index", "idx_projection_thread_command_watches_active"),
   // The column only, on the table 084 creates.
   "thread-fork-origin": (c) => columnsUnlessAbsent(c, "thread_forks", ["origin_json"]),
+  "projection-thread-triage": (c) =>
+    columnsUnlessAbsent(c, "projection_threads", ["hidden_at", "settle_when_idle_at"]),
 };
 
 /** Of `keys`, the repairs whose effect this database already has, read without writing. */

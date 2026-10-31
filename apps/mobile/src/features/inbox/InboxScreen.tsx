@@ -107,6 +107,27 @@ function dispatchRowMenuAction(row: InboxThreadRow, event: string): void {
     })();
     return;
   }
+  if (event === "hide" || event === "unhide") {
+    if (!row.hideActionEnabled) return;
+    void (async () => {
+      try {
+        await sidebarUndo.dispatch(
+          { environmentId: row.environmentId, threadId: row.threadId },
+          {
+            type: event === "hide" ? "thread.hide" : "thread.unhide",
+            threadId: row.threadId,
+            commandId: newCommandId(),
+          },
+        );
+      } catch (error) {
+        Alert.alert(
+          "Could not update task",
+          error instanceof Error ? error.message : "The request failed.",
+        );
+      }
+    })();
+    return;
+  }
   if (event === CUSTOM_SNOOZE_ACTION_ID) {
     if (!row.canSnooze) return;
     void requestCustomSnooze().then((until) => {
@@ -198,6 +219,7 @@ export const InboxScreen = memo(function InboxScreen(props: {
   const { nowMs, onOpenThread, onScrollOffset } = props;
   const [snoozedOpen, setSnoozedOpen] = useState(false);
   const [settledOpen, setSettledOpen] = useState(false);
+  const [hiddenOpen, setHiddenOpen] = useState(false);
   const [settledVisibleCount, setSettledVisibleCount] = useState(MOBILE_SETTLED_PAGE_SIZE);
   const data = useMemo(
     () =>
@@ -205,9 +227,10 @@ export const InboxScreen = memo(function InboxScreen(props: {
         sections: props.sections,
         settledOpen,
         snoozedOpen,
+        hiddenOpen,
         settledVisibleCount,
       }),
-    [props.sections, settledOpen, settledVisibleCount, snoozedOpen],
+    [props.sections, settledOpen, settledVisibleCount, snoozedOpen, hiddenOpen],
   );
   // Command-1…9 open the first nine thread rows as this list shows them now.
   const jumpToThread = useCallback(
@@ -233,7 +256,11 @@ export const InboxScreen = memo(function InboxScreen(props: {
   const renderItem = useCallback(
     ({ item }: LegendListRenderItemProps<InboxListItem>) => {
       if (item.kind === "section") {
-        if (item.sectionKey === "settled" || item.sectionKey === "snoozed") {
+        if (
+          item.sectionKey === "settled" ||
+          item.sectionKey === "snoozed" ||
+          item.sectionKey === "hidden"
+        ) {
           return (
             <Pressable
               accessibilityRole="button"
@@ -243,7 +270,9 @@ export const InboxScreen = memo(function InboxScreen(props: {
               onPress={() =>
                 item.sectionKey === "snoozed"
                   ? setSnoozedOpen((open) => !open)
-                  : setSettledOpen((open) => !open)
+                  : item.sectionKey === "hidden"
+                    ? setHiddenOpen((open) => !open)
+                    : setSettledOpen((open) => !open)
               }
             >
               <SymbolView

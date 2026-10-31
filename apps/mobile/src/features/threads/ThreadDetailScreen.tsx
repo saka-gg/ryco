@@ -921,6 +921,7 @@ export function ThreadDetailScreen(props: {
     settlementModel?.active[0] ??
     settlementModel?.settled[0] ??
     settlementModel?.snoozed[0] ??
+    settlementModel?.hidden[0] ??
     null;
   const cachedView = useMemo(
     () =>
@@ -969,10 +970,11 @@ export function ThreadDetailScreen(props: {
               ? {
                   settlement: {
                     attentionState:
-                      settlementEntry.lifecycle.classification === "snoozed"
-                        ? "active"
-                        : settlementEntry.lifecycle.classification,
-                    canSettle: settlementEntry.lifecycle.eligibility.canSettle,
+                      settlementEntry.lifecycle.classification === "settled" ? "settled" : "active",
+                    // A working task files: the node settles it when the work ends.
+                    canSettle:
+                      settlementEntry.lifecycle.eligibility.canSettle ||
+                      settlementEntry.lifecycle.settleFiles === true,
                     settlementBlocker: settlementEntry.lifecycle.settlementBlocker,
                     mutationEnabled: settlementEntry.mutationEnabled,
                     mutationBlocker: settlementEntry.mutationBlocker,

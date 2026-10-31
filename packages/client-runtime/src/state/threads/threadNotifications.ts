@@ -62,12 +62,23 @@ function describe(
       ? JSON.stringify([thread.latestTurn!.turnId, terminal])
       : null;
   const suppressed = thread.archivedAt !== null || isSnoozed(thread, nowMs);
+  // A hidden thread, and one settled while it worked, finish quietly (T3 Code #21105, #18606);
+  // their requests and failures still alert.
+  const quietCompletion =
+    thread.hiddenAt != null ||
+    thread.settleWhenIdleAt != null ||
+    thread.settledOverride === "settled";
   let kind: ThreadNotificationKind | null = null;
+  // A completion that finished quietly is seen: it never alerts later, when the thread comes back.
+  let quiet = false;
   if (!suppressed) {
     if (activity === "approval" || activity === "input" || activity === "plan-ready")
       kind = activity;
     else if (activity === "idle" && thread.latestTurn?.completedAt) {
-      if (terminal === "completed") kind = "completed";
+      if (terminal === "completed") {
+        if (quietCompletion) quiet = true;
+        else kind = "completed";
+      }
       if (terminal === "error") kind = "failed";
       // Ended before it finished: the provider exited or aborted it, or someone
       // pressed Stop. The shell does not say which; the alert policy decides.
@@ -78,6 +89,7 @@ function describe(
     kind,
     terminalKey,
     suppressed,
+    quiet,
     fingerprint: JSON.stringify([kind, thread.latestTurn?.turnId ?? null]),
   };
 }
@@ -171,7 +183,11 @@ export function createThreadNotificationProjector(input: ThreadNotificationProje
       state.threads.set(thread.id, {
         fingerprint: next.fingerprint,
         terminalSeen:
-          !previous || next.suppressed || terminalNotification || next.kind === "plan-ready"
+          !previous ||
+          next.suppressed ||
+          next.quiet ||
+          terminalNotification ||
+          next.kind === "plan-ready"
             ? next.terminalKey
             : previous.terminalSeen,
         notificationId,

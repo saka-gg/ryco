@@ -14,6 +14,8 @@ import {
   buildThreadInbox,
   createThreadWorktreeResolver,
   deriveThreadSnoozeEligibility,
+  isThreadOnHiddenShelf,
+  resolveThreadHideAvailability,
   resolveThreadLifecycleAvailability,
   resolveThreadReferenceCopyTarget,
   resolveThreadWorkspacePullRequestLink,
@@ -1115,6 +1117,23 @@ describe("thread lifecycle availability", () => {
     });
   });
 
+  it("files a working thread on a node that supports it, instead of holding settle", () => {
+    expect(availabilityOf(running, { threadTriageSupported: true }).settle).toEqual({
+      enabled: true,
+      blocker: null,
+      settled: false,
+    });
+    // An older node rejects a settle while a turn runs.
+    expect(availabilityOf(running, { threadTriageSupported: false }).settle.blocker).toBe(
+      "session-running",
+    );
+    // Requests waiting on the person still hold it.
+    expect(
+      availabilityOf({ ...running, hasPendingApprovals: true }, { threadTriageSupported: true })
+        .settle.blocker,
+    ).toBe("pending-approval");
+  });
+
   it("archives on a node without settlement or snooze", () => {
     expect(
       availabilityOf(idle(), { threadSettlementSupported: false, threadSnoozeSupported: false }),
@@ -1218,5 +1237,132 @@ describe("resolveThreadReferenceCopyTarget", () => {
       });
     expect(copyTarget(null)).toEqual({ kind: "pull-request", value: url });
     expect(copyTarget("2026-07-31T02:00:00.000Z")).toEqual({ kind: "thread", value: threadId });
+  });
+});
+
+describe("the Hidden shelf and filed threads", () => {
+  const hiddenAt = "2026-07-31T11:00:00.000Z";
+  const completedTurn = {
+    turnId: TurnId.make("turn-1"),
+    state: "completed" as const,
+    requestedAt: "2026-07-31T10:00:00.000Z",
+    startedAt: "2026-07-31T10:00:00.000Z",
+    completedAt: "2026-07-31T10:05:00.000Z",
+    assistantMessageId: null,
+  };
+  const failedAt = (completedAt: string) =>
+    ({
+      latestTurn: { ...completedTurn, state: "error" as const, completedAt },
+      session: {
+        provider: ProviderDriverKind.make("codex"),
+        status: "error",
+        orchestrationStatus: "error",
+        createdAt: "2026-07-31T10:00:00.000Z",
+        updatedAt: completedAt,
+        lastError: "boom",
+      },
+    }) satisfies Partial<SidebarThreadSummary>;
+  const runningTurn = {
+    session: {
+      provider: ProviderDriverKind.make("codex"),
+      status: "running",
+      orchestrationStatus: "running",
+      activeTurnId: TurnId.make("turn-2"),
+      createdAt: "2026-07-31T11:30:00.000Z",
+      updatedAt: "2026-07-31T11:30:00.000Z",
+    },
+    latestTurn: {
+      ...completedTurn,
+      turnId: TurnId.make("turn-2"),
+      state: "running" as const,
+      completedAt: null,
+    },
+  } satisfies Partial<SidebarThreadSummary>;
+  const hidden = (overrides: Partial<SidebarThreadSummary> = {}) =>
+    makeThread(environmentA, "thread-hidden", {
+      hiddenAt,
+      latestUserMessageAt: "2026-07-31T10:00:00.000Z",
+      latestTurn: completedTurn,
+      ...overrides,
+    });
+
+  it("keeps a hidden thread on the shelf while it works and after it finishes", () => {
+    expect(isThreadOnHiddenShelf(hidden())).toBe(true);
+    expect(isThreadOnHiddenShelf(hidden(runningTurn))).toBe(true);
+    expect(isThreadOnHiddenShelf(hidden({ hiddenAt: null }))).toBe(false);
+    const inbox = buildThreadInbox(baseInput({ threads: [hidden(), hidden(runningTurn)] }));
+    expect(inbox.active).toEqual([]);
+    expect(inbox.hidden.map((entry) => entry.lifecycle.classification)).toEqual([
+      "hidden",
+      "hidden",
+    ]);
+  });
+
+  it("brings a hidden thread back while it needs the person", () => {
+    expect(isThreadOnHiddenShelf(hidden({ hasPendingApprovals: true }))).toBe(false);
+    expect(isThreadOnHiddenShelf(hidden({ hasPendingUserInput: true }))).toBe(false);
+    expect(
+      isThreadOnHiddenShelf(hidden({ interactionMode: "plan", hasActionableProposedPlan: true })),
+    ).toBe(false);
+    const inbox = buildThreadInbox(baseInput({ threads: [hidden({ hasPendingApprovals: true })] }));
+    expect(inbox.hidden).toEqual([]);
+    expect(inbox.active).toHaveLength(1);
+  });
+
+  it("shows a failure since it was hidden, until it is hidden again", () => {
+    expect(isThreadOnHiddenShelf(hidden(failedAt("2026-07-31T11:30:00.000Z")))).toBe(false);
+    // Hidden again after the failure: back on the shelf.
+    expect(
+      isThreadOnHiddenShelf(
+        hidden({ ...failedAt("2026-07-31T11:30:00.000Z"), hiddenAt: "2026-07-31T11:45:00.000Z" }),
+      ),
+    ).toBe(true);
+  });
+
+  it("offers Hide on a node with triage, and Unhide for a thread the person hid", () => {
+    const entryOf = (
+      thread: SidebarThreadSummary,
+      environment: Partial<ThreadInboxEnvironment>,
+    ) => {
+      const inbox = buildThreadInbox(
+        baseInput({
+          threads: [thread],
+          environments: [makeEnvironment(environmentA, environment)],
+        }),
+      );
+      return [...inbox.active, ...inbox.hidden][0]!;
+    };
+    const visible = makeThread(environmentA, "thread-visible");
+    expect(
+      resolveThreadHideAvailability(entryOf(visible, { threadTriageSupported: true })),
+    ).toEqual({ enabled: true, blocker: null, hidden: false });
+    expect(
+      resolveThreadHideAvailability(entryOf(hidden(), { threadTriageSupported: true })).hidden,
+    ).toBe(true);
+    expect(
+      resolveThreadHideAvailability(entryOf(visible, { threadTriageSupported: false })).blocker,
+    ).toBe("unsupported");
+  });
+
+  it("lists a filed thread as settled while it works, at its filing time", () => {
+    const filed = makeThread(environmentA, "thread-filed", {
+      ...runningTurn,
+      latestUserMessageAt: "2026-07-31T11:29:00.000Z",
+      settleWhenIdleAt: "2026-07-31T11:40:00.000Z",
+    });
+    const inbox = buildThreadInbox(baseInput({ threads: [filed] }));
+    expect(inbox.active).toEqual([]);
+    expect(inbox.settled).toHaveLength(1);
+    expect(inbox.settled[0]!.lifecycle).toMatchObject({
+      classification: "settled",
+      filed: true,
+      effectiveSettlementTimestamp: "2026-07-31T11:40:00.000Z",
+    });
+    // A request for the person brings it back to Active.
+    const asking = buildThreadInbox(
+      baseInput({ threads: [{ ...filed, hasPendingApprovals: true }] }),
+    );
+    expect(asking.settled).toEqual([]);
+    expect(asking.active).toHaveLength(1);
   });
 });
