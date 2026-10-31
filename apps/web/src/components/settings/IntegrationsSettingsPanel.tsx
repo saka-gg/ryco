@@ -1,6 +1,6 @@
 import { isElectron, isHostedHubMode } from "../../env";
 import { useSettingsTarget, useSettingsEditingScope } from "../../settingsTarget";
-import { WS_METHODS } from "@ryco/contracts";
+import { WS_METHODS, type ServerSettingsPatch, type UnifiedSettings } from "@ryco/contracts";
 
 import { useHostedRpcCapability } from "../../hostedHub/capabilities";
 import { hostedCapabilityCopy } from "../../hostedHub/switchTarget";
@@ -79,8 +79,7 @@ function ComputerUseSection() {
 }
 
 function NodeIntegrationsSettingsPanel() {
-  const agentControl = useSettings((settings) => settings.agentControl);
-  const enabled = agentControl.enabled;
+  const enabled = useSettings((settings) => settings.agentControl.enabled);
   const { updateSettings } = useUpdateSettings();
   const target = useSettingsTarget();
   const settingsCapability = useHostedRpcCapability(
@@ -113,7 +112,7 @@ function NodeIntegrationsSettingsPanel() {
               checked={enabled}
               disabled={!settingsCapability.allowed}
               onCheckedChange={(checked) =>
-                updateSettings({ agentControl: { ...agentControl, enabled: Boolean(checked) } })
+                updateSettings(agentControlPatch({ enabled: Boolean(checked) }))
               }
               aria-label="Enable Agent Control"
             />
@@ -165,6 +164,15 @@ function NodeIntegrationsSettingsPanel() {
   );
 }
 
+/**
+ * An Agent Control settings change carrying only the fields it changes. The node, and the
+ * optimistic local copy, merge settings patches deeply, so a device with stale settings never
+ * sends back an old `enabled` or limit; the hook's patch type is shallow, hence the cast.
+ */
+const agentControlPatch = (
+  change: NonNullable<ServerSettingsPatch["agentControl"]>,
+): Partial<UnifiedSettings> => ({ agentControl: change }) as unknown as Partial<UnifiedSettings>;
+
 const NO_LIMIT = "none";
 const DEPTH_OPTIONS: ReadonlyArray<SettingsSelectOption<string>> = [
   { value: NO_LIMIT, label: "No limit" },
@@ -198,11 +206,10 @@ function DelegationLimitsSection({
   disabled: boolean;
   disabledReason: string | null | undefined;
 }) {
-  const agentControl = useSettings((settings) => settings.agentControl);
-  const limits = agentControl.delegation;
+  const limits = useSettings((settings) => settings.agentControl.delegation);
   const { updateSettings } = useUpdateSettings();
   const setLimits = (next: Partial<typeof limits>) =>
-    updateSettings({ agentControl: { ...agentControl, delegation: { ...limits, ...next } } });
+    updateSettings(agentControlPatch({ delegation: next }));
   const status =
     disabled && disabledReason ? (
       <span className="text-destructive-foreground">{disabledReason}</span>

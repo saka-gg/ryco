@@ -199,9 +199,7 @@ describe("IntegrationsSettingsPanel", () => {
 
     await toggle.click();
 
-    expect(harness.updateSettings).toHaveBeenCalledWith({
-      agentControl: { enabled: true, delegation: { maxDepth: null, maxTasksPerTree: null } },
-    });
+    expect(harness.updateSettings).toHaveBeenCalledWith({ agentControl: { enabled: true } });
   });
 
   it("keeps the toggle disabled when Settings writes are unavailable", async () => {
@@ -231,14 +229,15 @@ describe("IntegrationsSettingsPanel", () => {
 
     await page.getByLabelText("How deep tasks can go").click();
     await page.getByRole("option", { name: "1 level: tasks can't delegate" }).click();
+    // Only the changed limit: a stale device never sends back `enabled` or the other limit.
     expect(harness.updateSettings).toHaveBeenCalledWith({
-      agentControl: { enabled: true, delegation: { maxDepth: 1, maxTasksPerTree: 50 } },
+      agentControl: { delegation: { maxDepth: 1 } },
     });
 
     await page.getByLabelText("Tasks per chat").click();
     await page.getByRole("option", { name: "250 tasks" }).click();
     expect(harness.updateSettings).toHaveBeenLastCalledWith({
-      agentControl: { enabled: true, delegation: { maxDepth: null, maxTasksPerTree: 250 } },
+      agentControl: { delegation: { maxTasksPerTree: 250 } },
     });
   });
 

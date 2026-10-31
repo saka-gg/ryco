@@ -516,6 +516,9 @@ describe.skipIf(!hasCurrentBuild)("built server bundle", () => {
       expect(source).not.toMatch(
         /^\/\/#region src\/sourceControl\/ForgejoPullRequestPageApi\.ts$/mu,
       );
+      // Loaded the first time a person sets a delegation limit.
+      expect(source).not.toMatch(/^\/\/#region src\/agentControl\/delegationLimitCheck\.ts$/mu);
+      expect(source).not.toMatch(/^\/\/#region src\/persistence\/delegationTreeQueries\.ts$/mu);
       // Loaded when the external Agent Control integration first starts.
       expect(source).not.toMatch(/^\/\/#region src\/agentControl\/ExternalMcp\/tools\.ts$/mu);
       expect(source).not.toMatch(/^\/\/#region src\/agentControl\/ExternalMcp\/listener\.ts$/mu);

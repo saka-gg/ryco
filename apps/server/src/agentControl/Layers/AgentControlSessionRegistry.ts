@@ -19,8 +19,6 @@ import {
 import { AgentControlPolicy } from "../Services/AgentControlPolicy.ts";
 import { AGENT_CONTROL_CAPABILITIES } from "@ryco/contracts";
 import * as SqlClient from "effect/sql/SqlClient";
-import { mayDelegateAtDepth } from "../../orchestration/delegationLimits.ts";
-import { readDelegationTree } from "../../persistence/delegationTreeQueries.ts";
 
 /**
  * Internal provider-session bearer format: a recognizable prefix plus 32
@@ -120,12 +118,13 @@ const makeAgentControlSessionRegistry = Effect.gen(function* () {
         return input.capabilities;
       const limits = yield* policy.delegationLimits;
       if (limits.maxDepth === null) return input.capabilities;
-      const tree = Option.isNone(sql)
-        ? null
-        : yield* readDelegationTree(sql.value, input.threadId).pipe(
-            Effect.catch(() => Effect.succeed(null)),
+      const mayDelegate = Option.isNone(sql)
+        ? false
+        : yield* Effect.promise(() => import("../delegationLimitCheck.ts")).pipe(
+            Effect.flatMap((check) => check.readMayDelegate(sql.value, limits, input.threadId)),
+            Effect.catch(() => Effect.succeed(false)),
           );
-      return tree !== null && mayDelegateAtDepth(limits, tree.depth)
+      return mayDelegate
         ? input.capabilities
         : input.capabilities.filter(
             (capability) => capability !== AGENT_CONTROL_CAPABILITIES.createThreads,

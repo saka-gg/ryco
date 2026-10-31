@@ -618,8 +618,8 @@ const DelegationMaxTasks = Schema.Int.check(
  * itself; its tasks are depth 1, their tasks depth 2, and so on. `null` is no limit.
  *
  * - `maxDepth`: the deepest a task may sit. A chat at that depth gets no delegation tools.
- * - `maxTasksPerTree`: how many tasks one tree may create in all, counting finished, archived
- *   and deleted ones.
+ * - `maxTasksPerTree`: how many tasks one tree may create in all, counting finished and archived
+ *   ones; a task the person deletes no longer counts.
  */
 export const AgentControlDelegationLimits = Schema.Struct({
   maxDepth: Schema.NullOr(DelegationMaxDepth).pipe(

@@ -52,11 +52,7 @@ import { resolveThreadArtifacts } from "../artifactHandoff.ts";
 import { LocalTaskService, type LocalTaskServiceShape } from "../../tasks/LocalTaskService.ts";
 import * as SqlClient from "effect/sql/SqlClient";
 import { ServerSettingsService } from "../../serverSettings.ts";
-import {
-  delegationLimitRefusal,
-  hasDelegationLimits,
-} from "../../orchestration/delegationLimits.ts";
-import { readDelegationTree } from "../../persistence/delegationTreeQueries.ts";
+import { hasDelegationLimits } from "../../orchestration/delegationLimits.ts";
 import {
   CompletionReturnRepository,
   isPendingCompletionReturn,
@@ -1549,15 +1545,8 @@ const makeAgentControlActionValidator = Effect.gen(function* () {
             Effect.gen(function* () {
               const limits = (yield* settings.value.getSettings).agentControl.delegation;
               if (!hasDelegationLimits(limits)) return null;
-              const tree = yield* readDelegationTree(sql.value, input.callerThreadId);
-              if (tree === null)
-                return "Delegation limit: this chat's place in its tree is unknown.";
-              return delegationLimitRefusal({
-                limits,
-                callerDepth: tree.depth,
-                treeTasks: tree.treeTasks,
-                newTasks: input.newTasks,
-              });
+              const check = yield* Effect.promise(() => import("../delegationLimitCheck.ts"));
+              return yield* check.readDelegationLimitRefusal(sql.value, limits, input);
             }).pipe(
               // Fails closed: unreadable limits or lineage never let a request through.
               Effect.mapError(

@@ -1,8 +1,8 @@
 import { ThreadId } from "@ryco/contracts";
 import { assert, describe, it } from "vitest";
 
+import { delegationLimitRefusal } from "../agentControl/delegationLimitCheck.ts";
 import {
-  delegationLimitRefusal,
   delegationPosition,
   delegationTreeTaskCount,
   mayDelegateAtDepth,
