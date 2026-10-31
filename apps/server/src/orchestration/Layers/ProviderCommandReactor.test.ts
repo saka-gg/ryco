@@ -5626,7 +5626,7 @@ describe("ProviderCommandReactor", () => {
     return { ...harness, respond, activity, identity };
   }
 
-  async function prepareQuestion() {
+  async function prepareQuestion(options: { readonly nonBlocking?: boolean } = {}) {
     const harness = await createHarness();
     const createdAt = new Date().toISOString();
     const threadId = ThreadId.make("thread-1");
@@ -5662,6 +5662,7 @@ describe("ProviderCommandReactor", () => {
             requestId: "question-safety",
             requestKind: "command",
             runtimeSessionId: "question-runtime-1",
+            ...(options.nonBlocking ? { nonBlocking: true } : {}),
           },
           turnId: null,
           createdAt,
@@ -5673,7 +5674,11 @@ describe("ProviderCommandReactor", () => {
       requestEventId: EventId.make("question-safety-request"),
       runtimeSessionId: RuntimeSessionId.make("question-runtime-1"),
     };
-    const respond = (id: string, answer = "Yes", userInputIdentity = identity) =>
+    const respondWith = (
+      id: string,
+      answers: Record<string, unknown>,
+      userInputIdentity = identity,
+    ) =>
       Effect.runPromise(
         harness.engine.dispatch({
           type: "thread.user-input.respond",
@@ -5681,10 +5686,12 @@ describe("ProviderCommandReactor", () => {
           threadId,
           requestId: asApprovalRequestId("question-safety"),
           userInputIdentity,
-          answers: { answer },
+          answers,
           createdAt,
         }),
       );
+    const respond = (id: string, answer = "Yes", userInputIdentity = identity) =>
+      respondWith(id, { answer }, userInputIdentity);
     const activity = (id: string, kind: string, payload: Record<string, unknown>) =>
       Effect.runPromise(
         harness.engine.dispatch({
@@ -5707,8 +5714,61 @@ describe("ProviderCommandReactor", () => {
           createdAt: new Date().toISOString(),
         }),
       );
-    return { ...harness, respond, activity, identity };
+    return { ...harness, respond, respondWith, activity, identity, threadId };
   }
+
+  it("optional question: a dismissal is settled by the node, never sent, even once the session stopped", async () => {
+    const harness = await prepareQuestion({ nonBlocking: true });
+    const createdAt = new Date().toISOString();
+    await Effect.runPromise(
+      harness.engine.dispatch({
+        type: "thread.session.set",
+        commandId: CommandId.make("question-safety-session-stopped"),
+        threadId: harness.threadId,
+        session: {
+          threadId: harness.threadId,
+          status: "stopped",
+          providerName: "codex",
+          runtimeSessionId: RuntimeSessionId.make("question-runtime-1"),
+          runtimeMode: "approval-required",
+          activeTurnId: null,
+          lastError: null,
+          updatedAt: createdAt,
+        },
+        createdAt,
+      }),
+    );
+    await harness.respondWith("optional-dismiss", {});
+    await harness.drain();
+    expect(harness.respondToUserInput).not.toHaveBeenCalled();
+    expect(Option.getOrUndefined(await harness.readQuestion("question-safety"))).toMatchObject({
+      isPending: false,
+      responseState: "settled",
+    });
+  });
+
+  it("optional question: a steer that found its turn over leaves it open, to be sent as a message", async () => {
+    const harness = await prepareQuestion({ nonBlocking: true });
+    harness.respondToUserInput.mockImplementationOnce(() =>
+      Effect.fail(
+        new ProviderAdapterRequestError({
+          provider: ProviderDriverKind.make("codex"),
+          method: "respondToUserInput",
+          detail: "Unknown pending user-input request: question-safety",
+        }),
+      ),
+    );
+    await harness.respondWith("optional-late-steer", { "0": "Engineers" });
+    await harness.drain();
+    expect(Option.getOrUndefined(await harness.readQuestion("question-safety"))).toMatchObject({
+      isPending: true,
+      responseState: "retryable",
+    });
+    const failure = (await harness.readModel()).threads[0]?.activities.find(
+      (activity) => activity.kind === "provider.user-input.respond.failed",
+    );
+    expect((failure?.payload as { detail?: string }).detail).toContain("turn ended");
+  });
 
   it("question safety: proven validation failure permits correction before delivery", async () => {
     const harness = await prepareQuestion();

@@ -98,11 +98,38 @@ export function capThreadActivitiesPreservingMilestones<
     ? undefined
     : backgroundWorkCheckpoint(activities.slice(0, -limit));
   const recentIds = new Set(recent.map((activity) => activity.id));
+  const openQuestions = openOptionalQuestionActivityIds(activities);
   const preserved = activities.filter(
-    (activity) => isThreadActivityMilestone(activity) && !recentIds.has(activity.id),
+    (activity) =>
+      (isThreadActivityMilestone(activity) || openQuestions.has(activity.id)) &&
+      !recentIds.has(activity.id),
   );
 
   return [...preserved, ...(checkpoint ? [checkpoint] : []), ...recent];
+}
+
+/**
+ * The `user-input.requested` activities of optional questions nobody answered or dismissed
+ * yet, and the node did not clear. They stay answerable after their turn (an answer then starts
+ * the next turn), so the activity cap keeps them however much came after. Input in order.
+ */
+function openOptionalQuestionActivityIds(
+  activities: ReadonlyArray<Pick<OrchestrationThreadActivity, "id" | "kind" | "payload">>,
+): Set<string> {
+  const open = new Map<string, string>();
+  for (const { id, kind, payload } of activities) {
+    const requestId = activityRequestId(payload);
+    if (requestId === null) continue;
+    const fields = payload as { nonBlocking?: unknown; responseState?: unknown };
+    if (kind === "user-input.requested" && fields.nonBlocking === true) open.set(requestId, id);
+    else if (
+      kind === "user-input.requested" ||
+      kind === "user-input.resolved" ||
+      (kind === "provider.user-input.respond.failed" && fields.responseState === "invalidated")
+    )
+      open.delete(requestId);
+  }
+  return new Set(open.values());
 }
 
 /**

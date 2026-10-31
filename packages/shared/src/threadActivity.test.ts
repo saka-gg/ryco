@@ -136,6 +136,44 @@ describe("threadActivity", () => {
     ]);
   });
 
+  it("keeps open optional questions past the cap, however much came after them", () => {
+    const asked = (id: string, nonBlocking = true) =>
+      activity(`asked:${id}`, "user-input.requested", {
+        requestId: id,
+        ...(nonBlocking ? { nonBlocking: true } : {}),
+      });
+    const result = capThreadActivitiesPreservingMilestones(
+      [
+        asked("open"),
+        asked("retryable"),
+        activity("retry", "provider.user-input.respond.failed", {
+          requestId: "retryable",
+          responseState: "retryable",
+          detail: "This question's turn ended before the answer reached it.",
+        }),
+        asked("answered"),
+        activity("answer", "user-input.resolved", { requestId: "answered" }),
+        asked("cleared"),
+        activity("clear", "provider.user-input.respond.failed", {
+          requestId: "cleared",
+          responseState: "invalidated",
+          detail: "Stale pending user-input request: cleared.",
+        }),
+        asked("blocking", false),
+        activity("recent-tool-1"),
+        activity("recent-tool-2"),
+      ],
+      2,
+    );
+
+    expect(result.map((entry) => entry.id)).toEqual([
+      "asked:open",
+      "asked:retryable",
+      "recent-tool-1",
+      "recent-tool-2",
+    ]);
+  });
+
   it("preserves older terminal handoffs alongside compaction milestones", () => {
     const result = capThreadActivitiesPreservingMilestones(
       [

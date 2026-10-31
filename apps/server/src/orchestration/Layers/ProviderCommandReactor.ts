@@ -2865,9 +2865,10 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
         : { userInputIdentity: identity }
       : {};
     const key = { threadId: event.payload.threadId, requestId: event.payload.requestId };
+    const question = isApproval ? Option.none() : yield* questions.getByRequestId(key);
     const claim = isApproval
       ? yield* approvals.getByRequestId(key)
-      : Option.map(yield* questions.getByRequestId(key), questionAsCallback);
+      : Option.map(question, questionAsCallback);
     if (
       Option.isNone(claim) ||
       claim.value.status !== "pending" ||
@@ -2875,6 +2876,40 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
       !matchesApprovalAttempt(claim.value, identity, event.commandId)
     )
       return;
+    const optional = Option.isSome(question) && question.value.nonBlocking === true;
+    const settle = (summary: string) =>
+      orchestrationEngine.dispatch({
+        type: "thread.activity.append",
+        commandId: serverCommandId(`${kind}-settled`),
+        threadId: key.threadId,
+        activity: {
+          id: EventId.make(`${kind}-settled:${event.commandId}`),
+          kind: `${kind}.resolved`,
+          tone: "info",
+          summary,
+          payload: {
+            requestId: key.requestId,
+            ...identityPayload,
+            runtimeSessionId: identity?.runtimeSessionId,
+            responseAttemptId: event.commandId,
+            ...(event.type === "thread.approval-response-requested"
+              ? { decision: event.payload.decision }
+              : { answers: event.payload.answers }),
+          },
+          turnId: null,
+          createdAt: new Date().toISOString(),
+        },
+        createdAt: new Date().toISOString(),
+      });
+    // Dismissing an optional question sends the agent nothing: the node settles it itself,
+    // during its turn or after it, whatever became of the session.
+    if (
+      optional &&
+      event.type === "thread.user-input-response-requested" &&
+      Object.keys(event.payload.answers).length === 0
+    ) {
+      return yield* settle("Question dismissed");
+    }
     const fail = (detail: string, responseState: ApprovalResponseState) =>
       appendProviderFailureActivity({
         ...key,
@@ -2887,13 +2922,18 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
         ...(event.commandId ? { responseAttemptId: event.commandId } : {}),
         responseState,
       });
+    // An optional question's steer that never went out leaves the question open: once its
+    // turn ended, the answer is sent again as a new message, which starts the next turn.
+    const failNotSent = optional
+      ? fail("The turn ended before this answer reached it. Send it again.", "retryable")
+      : fail(stalePendingRequestDetail(kind, key.requestId), "invalidated");
     const thread = yield* resolveThread(key.threadId);
     if (
       !thread?.session ||
       thread.session.status === "stopped" ||
       thread.session.runtimeSessionId !== identity?.runtimeSessionId
     ) {
-      return yield* fail(stalePendingRequestDetail(kind, key.requestId), "invalidated");
+      return yield* failNotSent;
     }
     const runtime = identity?.runtimeSessionId
       ? { expectedRuntimeSessionId: identity.runtimeSessionId }
@@ -2913,6 +2953,20 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
     yield* respond.pipe(
       Effect.matchCauseEffect({
         onFailure: (cause) => {
+          // The process-local authority no longer holds an optional question once its turn
+          // ended: nothing was sent, so its answer may go again, as a new message.
+          if (
+            optional &&
+            (isUnknownPendingUserInputRequestError(cause) ||
+              cause.reasons.some(
+                (reason) =>
+                  Cause.isFailReason(reason) &&
+                  (Schema.is(ProviderSessionNotFoundError)(reason.error) ||
+                    Schema.is(ProviderAdapterSessionNotFoundError)(reason.error)),
+              ))
+          ) {
+            return failNotSent;
+          }
           const stale =
             (isApproval
               ? isUnknownPendingApprovalRequestError(cause)
@@ -2947,30 +3001,7 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
             ),
           );
         },
-        onSuccess: () =>
-          orchestrationEngine.dispatch({
-            type: "thread.activity.append",
-            commandId: serverCommandId(`${kind}-settled`),
-            threadId: key.threadId,
-            activity: {
-              id: EventId.make(`${kind}-settled:${event.commandId}`),
-              kind: `${kind}.resolved`,
-              tone: "info",
-              summary: `${label} response delivered`,
-              payload: {
-                requestId: key.requestId,
-                ...identityPayload,
-                runtimeSessionId: identity?.runtimeSessionId,
-                responseAttemptId: event.commandId,
-                ...(event.type === "thread.approval-response-requested"
-                  ? { decision: event.payload.decision }
-                  : { answers: event.payload.answers }),
-              },
-              turnId: null,
-              createdAt: new Date().toISOString(),
-            },
-            createdAt: new Date().toISOString(),
-          }),
+        onSuccess: () => settle(`${label} response delivered`),
       }),
     );
   });
