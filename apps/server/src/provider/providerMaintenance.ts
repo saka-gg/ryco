@@ -30,6 +30,12 @@ import { ServerSettingsService } from "../serverSettings.ts";
 import { quoteShellWord } from "../shellQuote.ts";
 import { collectUint8StreamText } from "../stream/collectUint8StreamText.ts";
 import { compareCliVersions, satisfiesCliVersionRange } from "./cliVersion.ts";
+import {
+  BUN_GLOBAL_INSTALL_LOCK_KEY,
+  normalizeCommandPath,
+  npmGlobalInstallLockKey,
+  PNPM_GLOBAL_INSTALL_LOCK_KEY,
+} from "./installLockKeys.ts";
 
 const LATEST_VERSION_CACHE_TTL_MS = 60 * 60 * 1_000;
 /**
@@ -273,7 +279,7 @@ export function resolveLatestProviderUpdateAction(
   const update = capabilities.update;
   const packageName = capabilities.packageName;
   if (
-    update?.lockKey !== "pnpm-global" ||
+    update?.lockKey !== PNPM_GLOBAL_INSTALL_LOCK_KEY ||
     !packageName ||
     latestVersion === null ||
     !PINNABLE_VERSION.test(latestVersion)
@@ -287,9 +293,7 @@ export function hasPathSeparator(value: string): boolean {
   return value.includes("/") || value.includes("\\");
 }
 
-export function normalizeCommandPath(commandPath: string): string {
-  return commandPath.replaceAll("\\", "/").toLowerCase();
-}
+export { normalizeCommandPath };
 
 /** Lower-cases ASCII only, so indexes stay valid in the original string. */
 function asciiLowerCase(value: string): string {
@@ -642,7 +646,7 @@ const resolvePnpmGlobalProviderMaintenance = Effect.fn("resolvePnpmGlobalProvide
       packageName,
       updateExecutable: "pnpm",
       updateArgs: ["add", "-g", ...allowBuild, `${packageName}@latest`],
-      updateLockKey: "pnpm-global",
+      updateLockKey: PNPM_GLOBAL_INSTALL_LOCK_KEY,
       platform: context.platform,
       lookupLatestVersion: resolvePnpmGlobalLatestVersion(packageName, context).pipe(
         Effect.provideContext(services),
@@ -896,7 +900,7 @@ export const resolvePackageManagedProviderMaintenance = Effect.fn(
       packageName,
       updateExecutable: "bun",
       updateArgs: ["i", "-g", `${packageName}@latest`],
-      updateLockKey: "bun-global",
+      updateLockKey: BUN_GLOBAL_INSTALL_LOCK_KEY,
       platform: context.platform,
     });
   }
@@ -948,7 +952,7 @@ export const resolvePackageManagedProviderMaintenance = Effect.fn(
         `--allow-scripts=${packageName}`,
         `${packageName}@latest`,
       ],
-      updateLockKey: `npm-global:${normalizeCommandPath(npmPrefix)}`,
+      updateLockKey: npmGlobalInstallLockKey(npmPrefix),
       platform: context.platform,
     });
   }

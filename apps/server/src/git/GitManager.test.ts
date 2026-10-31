@@ -69,6 +69,7 @@ import {
 } from "../sourceControl/forgeRateLimit.ts";
 import { pausedUntilOf } from "../sourceControl/lastGoodWhilePaused.ts";
 import { inBackgroundProcessLane } from "../processGovernor.ts";
+import { makeRestartSensitiveWork, RestartSensitiveWork } from "../updates/restartSensitiveWork.ts";
 import * as VcsDriverRegistry from "../vcs/VcsDriverRegistry.ts";
 import { makeGitManager, type MakeGitManagerOptions } from "./GitManager.ts";
 import { ServerConfig } from "../config.ts";
@@ -1071,6 +1072,41 @@ const GitManagerTestLayer = GitVcsDriver.layer.pipe(
 );
 
 it.layer(GitManagerTestLayer)("GitManager", (it) => {
+  it.effect("counts a pull request checkout as work a restart waits for", () =>
+    Effect.gen(function* () {
+      const fixture = yield* makePreferencePullRequestFixture();
+      const restartWork = makeRestartSensitiveWork();
+      // Its fetches and its worktree run past the counted git workflow; the setup script starts
+      // once they are done, still inside the checkout.
+      const countedAtSetup: Array<number> = [];
+      const { manager } = yield* makeManager({
+        ghScenario: fixture.ghScenario,
+        project: fixture.project,
+        settingsPatch: { runSetupScript: true },
+        setupScriptRunner: {
+          runForThread: () =>
+            restartWork.count.pipe(
+              Effect.map((count) => {
+                countedAtSetup.push(count);
+                return { status: "no-script" as const };
+              }),
+            ),
+        },
+      }).pipe(Effect.provideService(RestartSensitiveWork, restartWork));
+      const result = yield* preparePullRequestThread(manager, {
+        cwd: fixture.repoDir,
+        reference: "991",
+        mode: "worktree",
+        worktreesDir: fixture.worktreesDir,
+        threadId: asThreadId("pr-restart-work"),
+        projectId: fixture.project.id,
+      });
+      expect(result.worktreePath).not.toBeNull();
+      expect(countedAtSetup).toEqual([1]);
+      expect(yield* restartWork.count).toBe(0);
+    }),
+  );
+
   it.effect(
     "PR preferences: resolved project submodule policy survives by-root and explicit creation",
     () =>

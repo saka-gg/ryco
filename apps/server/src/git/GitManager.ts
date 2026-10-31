@@ -94,6 +94,7 @@ import {
 } from "../sourceControl/repositoryListCache.ts";
 import { inBackgroundProcessLane } from "../processGovernor.ts";
 import { makeCheckoutGenerations } from "./checkoutGenerations.ts";
+import { RestartSensitiveWork } from "../updates/restartSensitiveWork.ts";
 import { readCheckoutHead } from "../vcs/gitCheckoutHead.ts";
 import type { ChangeRequest, PullRequestState, SourceControlProviderError } from "@ryco/contracts";
 
@@ -805,6 +806,8 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* (
 
   const sourceControlProvider = (cwd: string) => sourceControlProviders.resolve({ cwd });
   const serverSettingsService = yield* ServerSettingsService;
+  // A pull request checkout (its fetches, its worktree) cut off by a restart is left half made.
+  const restartWork = yield* RestartSensitiveWork;
 
   const createProgressEmitter = (
     input: { cwd: string; action: GitStackedAction },
@@ -2523,7 +2526,7 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* (
         worktreePath: worktree.worktree.path,
         submoduleInitialization: worktree.submoduleInitialization,
       };
-    }).pipe(Effect.ensuring(invalidateStatus(input.cwd)));
+    }).pipe(restartWork.track, Effect.ensuring(invalidateStatus(input.cwd)));
   });
 
   const runFeatureBranchStep = Effect.fn("runFeatureBranchStep")(function* (

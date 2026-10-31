@@ -16,7 +16,7 @@ describe("nodeAutoSkip", () => {
   it.live("records releases across restarts, and takes one off again", () =>
     Effect.gen(function* () {
       const { fileSystem, filePath, list } = yield* setup;
-      expect(yield* list.has("0.1.36")).toBe(false);
+      expect(yield* list.status("0.1.36")).toBe("allowed");
       yield* list.add("0.1.36");
       yield* list.add("0.1.36");
       yield* list.add("0.1.37");
@@ -27,10 +27,10 @@ describe("nodeAutoSkip", () => {
         fileSystem,
         path: yield* Path.Path,
       });
-      expect(yield* reopened.has("0.1.36")).toBe(true);
+      expect(yield* reopened.status("0.1.36")).toBe("skipped");
       yield* reopened.remove("0.1.36");
-      expect(yield* list.has("0.1.36")).toBe(false);
-      expect(yield* list.has("0.1.37")).toBe(true);
+      expect(yield* list.status("0.1.36")).toBe("allowed");
+      expect(yield* list.status("0.1.37")).toBe("skipped");
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
 
@@ -40,8 +40,8 @@ describe("nodeAutoSkip", () => {
       for (let index = 0; index <= NODE_AUTO_SKIP_MAX_VERSIONS; index += 1) {
         yield* list.add(`0.2.${index}`);
       }
-      expect(yield* list.has("0.2.0")).toBe(false);
-      expect(yield* list.has(`0.2.${NODE_AUTO_SKIP_MAX_VERSIONS}`)).toBe(true);
+      expect(yield* list.status("0.2.0")).toBe("allowed");
+      expect(yield* list.status(`0.2.${NODE_AUTO_SKIP_MAX_VERSIONS}`)).toBe("skipped");
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
 
@@ -50,15 +50,15 @@ describe("nodeAutoSkip", () => {
       const { fileSystem, filePath, list } = yield* setup;
       // A folder where the file belongs: it exists but cannot be read as a file.
       yield* fileSystem.makeDirectory(filePath, { recursive: true });
-      expect(yield* list.has("0.1.36")).toBe(true);
+      expect(yield* list.status("0.1.36")).toBe("unreadable");
       const refused = yield* Effect.flip(list.add("0.1.36"));
       expect(refused._tag).toBe("NodeAutoSkipError");
       yield* fileSystem.remove(filePath, { recursive: true });
 
       yield* fileSystem.writeFileString(filePath, "{not json");
-      expect(yield* list.has("0.1.36")).toBe(false);
+      expect(yield* list.status("0.1.36")).toBe("allowed");
       yield* list.add("0.1.36");
-      expect(yield* list.has("0.1.36")).toBe(true);
+      expect(yield* list.status("0.1.36")).toBe("skipped");
     }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
 });

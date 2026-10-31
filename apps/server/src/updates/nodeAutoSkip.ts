@@ -10,8 +10,9 @@
  *
  * One JSON file in the update directory (`<stateDir>/node-update/auto-skip.json`, which every
  * update keeps), written through a temp file and a rename. A missing file skips nothing; a file
- * that cannot be read skips everything until it can (fail closed); one that does not decode is
- * logged and starts over, so a damaged file cannot stop unattended updates for good.
+ * that cannot be read skips everything until it can (fail closed), which the updater tells the
+ * owner; one that does not decode is logged and starts over, so a damaged file cannot stop
+ * unattended updates for good.
  *
  * @module nodeAutoSkip
  */
@@ -34,9 +35,14 @@ export class NodeAutoSkipError extends Data.TaggedError("NodeAutoSkipError")<{
   readonly cause?: unknown;
 }> {}
 
+/**
+ * What the list says about a release: `skipped` and `unreadable` both keep unattended updates
+ * away from it; `unreadable` keeps them away from every release.
+ */
+export type NodeAutoSkipStatus = "allowed" | "skipped" | "unreadable";
+
 export interface NodeAutoSkipList {
-  /** Whether unattended updates leave `version` alone; true when the file cannot be read. */
-  readonly has: (version: string) => Effect.Effect<boolean>;
+  readonly status: (version: string) => Effect.Effect<NodeAutoSkipStatus>;
   /** Records `version`; fails when it cannot, and then nothing may be installed unattended. */
   readonly add: (version: string) => Effect.Effect<void, NodeAutoSkipError>;
   /** Takes `version` off again; best effort. */
@@ -84,9 +90,12 @@ export function makeNodeAutoSkipList(input: {
     );
 
   return {
-    has: (version) =>
+    status: (version) =>
       Effect.map(read, (versions) =>
-        Option.match(versions, { onNone: () => true, onSome: (list) => list.includes(version) }),
+        Option.match(versions, {
+          onNone: (): NodeAutoSkipStatus => "unreadable",
+          onSome: (list) => (list.includes(version) ? "skipped" : "allowed"),
+        }),
       ),
     add: (version) =>
       Effect.gen(function* () {

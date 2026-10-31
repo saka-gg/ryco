@@ -19,6 +19,11 @@ import { releaseChannelForVersion } from "@ryco/shared/desktopFlavor";
 import { Duration, Effect, FileSystem, Option, Path, Schema } from "effect";
 
 import { compareCliVersions, isParseableCliVersion } from "../provider/cliVersion.ts";
+import {
+  BUN_GLOBAL_INSTALL_LOCK_KEY,
+  npmGlobalInstallLockKey,
+  PNPM_GLOBAL_INSTALL_LOCK_KEY,
+} from "../provider/installLockKeys.ts";
 import { isEphemeralCliInstall } from "../service/nodeService.ts";
 import { nodeServiceManagerOfProcess } from "../service/nodeServiceManager.ts";
 
@@ -170,6 +175,25 @@ export function globalInstallCommandLine(kind: NodeInstallationKind, spec: strin
       return `bun add -g ${target}`;
     case "pnpm-global":
       return `pnpm add -g ${target}`;
+    default:
+      return null;
+  }
+}
+
+/**
+ * The host-wide install lock key of the installation this process runs from: the key a provider
+ * CLI update in the same global install takes (`installLockKeys.ts`), `null` for every other kind.
+ */
+export function nodeInstallLockKey(installation: DetectedNodeInstallation): string | null {
+  switch (installation.kind) {
+    case "npm-global":
+      return installation.npmPrefix === null
+        ? null
+        : npmGlobalInstallLockKey(installation.npmPrefix);
+    case "bun-global":
+      return BUN_GLOBAL_INSTALL_LOCK_KEY;
+    case "pnpm-global":
+      return PNPM_GLOBAL_INSTALL_LOCK_KEY;
     default:
       return null;
   }

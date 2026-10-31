@@ -120,7 +120,7 @@ export function AutomaticUpdatesSettings({
   return (
     <SettingsSection
       title="Update automatically"
-      description="Install provider CLI updates on their own once nobody has used Ryco for 2 minutes and no agent on this computer is working. Only versions this Ryco release has checked and rates supported, at least 2 days after their release, one at a time. A CLI service node also updates Ryco itself, 2 days after a release, and restarts only once nobody has used it for 5 minutes and no agent, terminal command, clone or cleanup is running. Other updates still wait for you."
+      description="Install provider CLI updates on their own once nobody has used Ryco for 2 minutes and no agent on this computer is working. Only versions this Ryco release has checked and rates supported, at least 2 days after their release, one at a time. A CLI service node installed with npm or pnpm also updates Ryco itself, 2 days after a release, and restarts only once nobody has used it for 5 minutes and no agent, terminal command, clone or cleanup is running. Other updates still wait for you."
     >
       {rows.map((row) => (
         <AutomaticUpdatesRow

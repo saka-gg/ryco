@@ -9,21 +9,31 @@ import { Duration, Effect, Stream, SubscriptionRef } from "effect";
 import { TestClock } from "effect/testing";
 
 import type { DetectedNodeInstallation } from "../nodeUpdate/installation.ts";
-import { nodeReleaseChannel } from "../nodeUpdate/installation.ts";
+import { nodeInstallLockKey, nodeReleaseChannel } from "../nodeUpdate/installation.ts";
 import {
   deriveNodeUpdateState,
   IDLE_NODE_UPDATE_RUN,
   isActiveNodeUpdateRun,
   type NodeUpdateOptions,
 } from "../nodeUpdate/NodeUpdateService.ts";
+import {
+  npmGlobalInstallLockKey,
+  PNPM_GLOBAL_INSTALL_LOCK_KEY,
+} from "../provider/installLockKeys.ts";
 import type { ProviderInstallLockRuntime } from "../provider/providerInstallLock.ts";
+import { MINIMUM_RELEASE_AGE } from "../provider/providerReleaseAge.ts";
 import { makeClientInteraction } from "./ClientInteraction.ts";
 import type { NodeAutoSkipList } from "./nodeAutoSkip.ts";
 import {
   FIRST_PASS_DELAY,
   makeNodeAutoUpdater,
-  NODE_SELF_UPDATE_LOCK_KEY,
+  MAX_POSTPONEMENTS,
   POSTPONED_RETRY_AFTER,
+  POSTPONED_RETRY_MAX,
+  postponedRetryAfter,
+  REFUSED_RETRY_AFTER,
+  skippedReleaseNote,
+  UNREADABLE_SKIP_LIST_NOTE,
 } from "./nodeAutoUpdater.ts";
 import { makeRestartSensitiveWork } from "./restartSensitiveWork.ts";
 import { makeUpdateWindow } from "./updateWindow.ts";
@@ -41,6 +51,7 @@ const installation = (
   pinnedRelease: false,
 });
 const serviceNpm = installation("npm-global");
+const NPM_LOCK_KEY = npmGlobalInstallLockKey("/opt/homebrew");
 
 /** Published three days before the test clock's start: old enough. */
 const OLD_RELEASE = -Duration.toMillis(Duration.hours(72));
@@ -66,6 +77,8 @@ const setup = (
     readonly publishedAt?: Readonly<Record<string, number | null>>;
     readonly scenario?: UpdateScenario;
     readonly run?: NodeUpdateRun;
+    /** The skip list's file cannot be read. */
+    readonly unreadable?: boolean;
   } = {},
 ) =>
   Effect.gen(function* () {
@@ -95,7 +108,10 @@ const setup = (
     };
     const skipped = new Set(options.skipped ?? []);
     const skipList: NodeAutoSkipList = {
-      has: (version) => Effect.sync(() => skipped.has(version)),
+      status: (version) =>
+        Effect.sync(() =>
+          options.unreadable ? "unreadable" : skipped.has(version) ? "skipped" : "allowed",
+        ),
       add: (version) =>
         Effect.sync(() => {
           skipped.add(version);
@@ -111,13 +127,22 @@ const setup = (
       );
     const scenario = options.scenario ?? defaultScenario;
     const clientInteraction = yield* makeClientInteraction;
+    // How many passes hold the install lock now, and the installer pids recorded with it.
+    const lockState = { held: 0, pids: [] as Array<number> };
+    const notes: Array<string | null> = [];
     const lock = {
       tryRun: (
         lockKey: string,
-        run: (record: () => Effect.Effect<void>) => Effect.Effect<unknown>,
+        run: (record: (pid: number) => Effect.Effect<void>) => Effect.Effect<unknown>,
       ) =>
-        Effect.sync(() => calls.lockKeys.push(lockKey)).pipe(
-          Effect.andThen(Effect.asSome(run(() => Effect.void))),
+        Effect.sync(() => {
+          calls.lockKeys.push(lockKey);
+          lockState.held += 1;
+        }).pipe(
+          Effect.andThen(
+            Effect.asSome(run((pid) => Effect.sync(() => void lockState.pids.push(pid)))),
+          ),
+          Effect.ensuring(Effect.sync(() => void (lockState.held -= 1))),
         ),
       anyHeld: Effect.succeed(false),
       anyHeldExcept: () => Effect.succeed(false),
@@ -156,6 +181,8 @@ const setup = (
             yield* SubscriptionRef.set(runRef, { ...preparing, status });
             return toState(yield* SubscriptionRef.get(runRef));
           }),
+        installLockKey: Effect.succeed(nodeInstallLockKey(options.detected ?? serviceNpm)),
+        setAutomaticUpdateNote: (note) => Effect.sync(() => void notes.push(note)),
       },
       installLock: { lock: Effect.succeed(lock) },
       skipped: skipList,
@@ -171,8 +198,14 @@ const setup = (
       calls,
       skipped,
       fiber,
+      lockState,
+      /** The note the owner sees now. */
+      ownerNote: () => notes.at(-1) ?? null,
       note: clientInteraction.note("session"),
       resetRun: SubscriptionRef.set(runRef, IDLE_NODE_UPDATE_RUN),
+      /** Ends the current run with `status`, as the service would. */
+      settleRun: (status: NodeUpdateRun["status"]) =>
+        SubscriptionRef.update(runRef, (run) => ({ ...run, status })),
     };
   });
 
@@ -185,6 +218,8 @@ describe("nodeAutoUpdater", () => {
         installation("source-checkout"),
         installation("unknown"),
         installation("npm-global", null),
+        // bun cannot hold back brand-new dependency releases while it installs.
+        installation("bun-global"),
       ]) {
         const { calls, fiber } = yield* setup({ detected });
         yield* TestClock.adjust("3 hours");
@@ -197,7 +232,7 @@ describe("nodeAutoUpdater", () => {
 
   it.effect("updates through NodeUpdateService once nobody used a client for 5 minutes", () =>
     Effect.gen(function* () {
-      const { calls, note } = yield* setup({ detected: installation("bun-global", "systemd") });
+      const { calls, note } = yield* setup({ detected: installation("pnpm-global", "systemd") });
       yield* note;
       yield* TestClock.adjust(FIRST_PASS_DELAY);
       // Asked the registry, but 2 quiet minutes are not enough for a restart.
@@ -211,8 +246,10 @@ describe("nodeAutoUpdater", () => {
       assert.strictEqual(call!.input.targetVersion, "0.1.36");
       assert.match(call!.input.requestId, /^auto-[0-9a-f-]{36}$/u);
       assert.isUndefined(call!.input.channel);
-      assert.isDefined(call!.options?.unattended);
-      assert.deepStrictEqual(calls.lockKeys, [NODE_SELF_UPDATE_LOCK_KEY]);
+      // Dependencies published in the last 48 hours stay out of the install too.
+      assert.strictEqual(call!.options?.unattended?.minimumReleaseAge, MINIMUM_RELEASE_AGE);
+      // The installation's own key, the one a provider CLI update with pnpm takes.
+      assert.deepStrictEqual(calls.lockKeys, [PNPM_GLOBAL_INSTALL_LOCK_KEY]);
     }),
   );
 
@@ -252,32 +289,105 @@ describe("nodeAutoUpdater", () => {
       yield* TestClock.adjust("5 minutes");
       assert.strictEqual(failed.calls.updates.length, 1);
       assert.isTrue(failed.skipped.has("0.1.36"));
+      assert.strictEqual(failed.ownerNote(), skippedReleaseNote("0.1.36"));
       yield* failed.resetRun;
       yield* TestClock.adjust("3 days");
       assert.strictEqual(failed.calls.updates.length, 1);
 
-      // Recorded before: a rollback after a restart, or a crash during the update.
+      // Recorded before: a rollback after a restart, or a crash during the update. The owner
+      // sees why the node leaves it alone.
       const skipped = yield* setup({ skipped: ["0.1.36"] });
       yield* TestClock.adjust("3 days");
       assert.deepStrictEqual(skipped.calls.updates, []);
+      assert.strictEqual(skipped.ownerNote(), skippedReleaseNote("0.1.36"));
+      assert.match(skipped.ownerNote()!, /^Automatic update: /u);
     }),
   );
 
-  it.effect("tries again after an update that was refused before it started", () =>
+  it.effect("tries again an hour after an update that was refused before it started", () =>
     Effect.gen(function* () {
       let refusals = 1;
-      const { calls, skipped } = yield* setup({
+      const reason =
+        "pnpm 10.15.1 cannot hold back brand-new dependency releases, so this node does not update itself. pnpm 10.16 or later can.";
+      const { calls, skipped, ownerNote } = yield* setup({
         scenario: () =>
           refusals-- > 0
-            ? Effect.fail(new NodeUpdateError({ reason: "An update is already running." }))
+            ? Effect.fail(new NodeUpdateError({ reason }))
             : Effect.succeed("restarting"),
       });
       yield* TestClock.adjust("5 minutes");
       assert.strictEqual(calls.updates.length, 1);
       assert.isFalse(skipped.has("0.1.36"));
+      assert.strictEqual(ownerNote(), `Automatic update: Ryco 0.1.36 did not install: ${reason}`);
+      yield* TestClock.adjust(Duration.subtract(REFUSED_RETRY_AFTER, Duration.minutes(1)));
+      assert.strictEqual(calls.updates.length, 1);
       yield* TestClock.adjust("1 minute");
       assert.strictEqual(calls.updates.length, 2);
       assert.isTrue(skipped.has("0.1.36"));
+      assert.isNull(ownerNote());
+    }),
+  );
+
+  it.effect("backs off each postponement of a release, and leaves it alone after five", () =>
+    Effect.gen(function* () {
+      const { calls, skipped, resetRun, ownerNote } = yield* setup({
+        scenario: () => Effect.succeed("postponed"),
+      });
+      yield* TestClock.adjust("5 minutes");
+      assert.strictEqual(calls.updates.length, 1);
+      // 1, 2, 4, 8 hours between the tries, and never more than a day.
+      for (let postponements = 1; postponements < MAX_POSTPONEMENTS; postponements += 1) {
+        assert.isFalse(skipped.has("0.1.36"), `after ${postponements}`);
+        yield* resetRun;
+        const wait = postponedRetryAfter(postponements);
+        assert.deepStrictEqual(
+          wait,
+          Duration.times(POSTPONED_RETRY_AFTER, 2 ** (postponements - 1)),
+        );
+        yield* TestClock.adjust(Duration.subtract(wait, Duration.minutes(1)));
+        assert.strictEqual(calls.updates.length, postponements, `waits ${postponements}`);
+        yield* TestClock.adjust("1 minute");
+        assert.strictEqual(calls.updates.length, postponements + 1, `tries ${postponements}`);
+      }
+      // The fifth postponement: skipped like a failed update, and the owner sees why.
+      assert.isTrue(skipped.has("0.1.36"));
+      assert.strictEqual(ownerNote(), skippedReleaseNote("0.1.36"));
+      yield* resetRun;
+      yield* TestClock.adjust("3 days");
+      assert.strictEqual(calls.updates.length, MAX_POSTPONEMENTS);
+      assert.deepStrictEqual(postponedRetryAfter(9), POSTPONED_RETRY_MAX);
+    }),
+  );
+
+  it.effect("keeps the install lock until the run is over, however long it takes", () =>
+    Effect.gen(function* () {
+      const { calls, skipped, lockState, settleRun } = yield* setup({
+        // Installed, being checked: the run is still under way.
+        scenario: () => Effect.succeed("verifying"),
+      });
+      yield* TestClock.adjust("5 minutes");
+      assert.strictEqual(calls.updates.length, 1);
+      yield* TestClock.adjust("3 hours");
+      // Not counted as failed, and the lock not let go of in the middle of the run.
+      assert.strictEqual(lockState.held, 1);
+      assert.strictEqual(calls.updates.length, 1);
+      // The run records its installers with the lock this pass holds.
+      yield* calls.updates[0]!.options!.unattended!.recordInstallerPid(4242);
+      assert.deepStrictEqual(lockState.pids, [4242]);
+      yield* settleRun("postponed");
+      yield* TestClock.adjust("1 minute");
+      assert.strictEqual(lockState.held, 0);
+      assert.isFalse(skipped.has("0.1.36"));
+      assert.deepStrictEqual(calls.lockKeys, [NPM_LOCK_KEY]);
+    }),
+  );
+
+  it.effect("tells the owner when it cannot read its list of releases to leave alone", () =>
+    Effect.gen(function* () {
+      const { calls, ownerNote } = yield* setup({ unreadable: true });
+      yield* TestClock.adjust("3 hours");
+      assert.deepStrictEqual(calls.updates, []);
+      assert.strictEqual(ownerNote(), UNREADABLE_SKIP_LIST_NOTE);
     }),
   );
 

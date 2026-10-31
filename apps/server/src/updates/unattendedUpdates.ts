@@ -42,7 +42,10 @@ export interface UnattendedUpdatesSources extends Omit<ProviderAutoUpdaterSource
   readonly restartSensitiveWork: Pick<RestartSensitiveWorkShape, "count">;
   /** This node's own release and update. */
   readonly node: {
-    readonly update: Pick<NodeUpdateServiceShape, "current" | "check" | "update" | "changes">;
+    readonly update: Pick<
+      NodeUpdateServiceShape,
+      "current" | "check" | "update" | "changes" | "installLockKey" | "setAutomaticUpdateNote"
+    >;
     /** The npm package Ryco's releases are published as. */
     readonly packageName: string;
     /** `<stateDir>/node-update/auto-skip.json`. */

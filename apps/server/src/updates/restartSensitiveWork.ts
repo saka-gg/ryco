@@ -1,10 +1,11 @@
 /**
  * RestartSensitiveWork - work a restart of this server would cut off and leave half done.
  *
- * Repository clones, worktree checkouts (creating, fetching their base, removing them) and storage
- * cleanup count themselves here while they run, however they end. An unattended restart (a CLI
- * node updating itself, `nodeAutoUpdater.ts`) waits until nothing is counted
- * (`updateWindow.ts`); terminals and agent work have their own checks there.
+ * Repository clones, worktree checkouts (creating, fetching their base, removing them), pull
+ * request checkouts (their fetches and worktree), workspace lifecycle actions (checkout removal,
+ * branch deletion) and storage cleanup count themselves here while they run, however they end. An
+ * unattended restart (a CLI node updating itself, `nodeAutoUpdater.ts`) waits until nothing is
+ * counted (`updateWindow.ts`); terminals and agent work have their own checks there.
  *
  * One counter serves the process: a Reference's default is made once, so every service reads and
  * writes the same one without layer wiring. Tests provide their own.
