@@ -64,6 +64,7 @@ import {
 import { resolveWorktreeSubmodules } from "../project/worktreeSubmodules.ts";
 import { makeWorkspaceAccessPolicy } from "../workspace/Layers/WorkspaceAccessPolicy.ts";
 import { WorkspaceAccessPolicy } from "../workspace/Services/WorkspaceAccessPolicy.ts";
+import { resolveGitExecutable } from "./gitExecutable.ts";
 import { readGitStagedIndex } from "./GitIndexReview.ts";
 import { decodeJsonResult } from "@ryco/shared/schemaJson";
 
@@ -1047,22 +1048,24 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
           Effect.provideService(FileSystem.FileSystem, fileSystem),
           Effect.mapError(toGitCommandError(commandInput, "failed to create trace2 monitor.")),
         );
+        const env = {
+          ...process.env,
+          // Force English locale so stderr parsing (e.g. "not a git repository")
+          // is deterministic across user systems. We only ever parse git's output
+          // programmatically — we never display it to the user — so localization
+          // is a liability, not a feature.
+          LC_ALL: "C",
+          LANG: "C",
+          ...(input.readOnly ? GitVcsDriver.READ_ONLY_GIT_ENV : {}),
+          ...input.env,
+          ...trace2Monitor.env,
+        };
+        const git = yield* Effect.promise(() => resolveGitExecutable(env));
         const child = yield* commandSpawner
           .spawn(
-            ChildProcess.make("git", commandInput.args, {
+            ChildProcess.make(git.command, commandInput.args, {
               cwd: commandInput.cwd,
-              env: {
-                ...process.env,
-                // Force English locale so stderr parsing (e.g. "not a git repository")
-                // is deterministic across user systems. We only ever parse git's output
-                // programmatically — we never display it to the user — so localization
-                // is a liability, not a feature.
-                LC_ALL: "C",
-                LANG: "C",
-                ...(input.readOnly ? GitVcsDriver.READ_ONLY_GIT_ENV : {}),
-                ...input.env,
-                ...trace2Monitor.env,
-              },
+              env: { ...env, ...git.env },
             }),
           )
           .pipe(Effect.mapError(toGitCommandError(commandInput, "failed to spawn.")));
