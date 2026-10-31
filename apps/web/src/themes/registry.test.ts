@@ -2,6 +2,7 @@ import { afterEach, beforeEach, describe, expect, it } from "vite-plus/test";
 
 import { BUILT_IN_THEMES, DEFAULT_THEME, DEFAULT_THEME_ID } from "./builtin";
 import {
+  ACTIVE_DARK_THEME_STORAGE_KEY,
   ACTIVE_THEME_STORAGE_KEY,
   CUSTOM_THEMES_STORAGE_KEY,
   THEME_STYLE_ELEMENT_ID,
@@ -9,9 +10,12 @@ import {
   applyThemeToDocument,
   deleteCustomTheme,
   duplicateTheme,
+  buildThemeDocumentCss,
   findTheme,
   generateCustomThemeId,
+  getActiveDarkThemeId,
   getActiveThemeId,
+  getActiveThemePair,
   getAllThemes,
   getCustomThemes,
   getThemeListSnapshot,
@@ -23,7 +27,12 @@ import {
   materializeTokens,
   parseLength,
   resolveTokens,
+  setActiveDarkThemeId,
   setActiveThemeId,
+  shownThemeId,
+  themeEditSlot,
+  themePairWith,
+  themePickSlot,
   themeTokensToStyle,
   tokensToCss,
   updateCustomTheme,
@@ -679,5 +688,86 @@ describe("applyThemeToDocument", () => {
     const style = appended.find((node) => node.id === THEME_STYLE_ELEMENT_ID);
     expect(style?.textContent).toContain("color-mix(in srgb, #ff0000 50%, transparent)");
     expect(style?.textContent).not.toContain("--alpha(");
+  });
+});
+
+describe("a separate dark mode palette", () => {
+  beforeEach(installLocalStorage);
+  afterEach(uninstallLocalStorage);
+
+  const lightRule = (css: string) => css.slice(0, css.indexOf(":root.dark"));
+  const darkRule = (css: string) => css.slice(css.indexOf(":root.dark"));
+
+  it("writes light mode from one theme and dark mode from another", () => {
+    const nord = findTheme("nord");
+    const dracula = findTheme("dracula");
+    const css = buildThemeDocumentCss(nord, dracula) ?? "";
+    expect(lightRule(css)).toContain(`--background: ${resolveTokens(nord, "light").background}`);
+    expect(darkRule(css)).toContain(`--background: ${resolveTokens(dracula, "dark").background}`);
+    expect(darkRule(css)).not.toContain(`--background: ${resolveTokens(nord, "dark").background};`);
+    // The default theme as the light half still needs a sheet for a themed dark half.
+    expect(buildThemeDocumentCss(DEFAULT_THEME, dracula)).not.toBeNull();
+    expect(buildThemeDocumentCss(DEFAULT_THEME, DEFAULT_THEME)).toBeNull();
+  });
+
+  it("reads an absent or unknown pick as the active theme for both modes", () => {
+    setActiveThemeId("nord");
+    expect(getActiveDarkThemeId()).toBeNull();
+    expect(getActiveThemePair()).toEqual({ light: findTheme("nord"), dark: findTheme("nord") });
+    localStorage.setItem(ACTIVE_DARK_THEME_STORAGE_KEY, "no-such-theme");
+    expect(getActiveDarkThemeId()).toBeNull();
+    setActiveDarkThemeId("dracula");
+    expect(getActiveThemePair()).toEqual({ light: findTheme("nord"), dark: findTheme("dracula") });
+    setActiveDarkThemeId(null);
+    expect(localStorage.getItem(ACTIVE_DARK_THEME_STORAGE_KEY)).toBeNull();
+  });
+
+  it("drops the dark pick when its custom theme is deleted", () => {
+    const custom: ThemeDefinition = {
+      id: generateCustomThemeId("Night"),
+      name: "Night",
+      builtIn: false,
+      dark: { background: "#000000" },
+    };
+    addCustomTheme(custom);
+    setActiveDarkThemeId(custom.id);
+    expect(getActiveDarkThemeId()).toBe(custom.id);
+    deleteCustomTheme(custom.id);
+    expect(getActiveDarkThemeId()).toBeNull();
+    expect(localStorage.getItem(ACTIVE_DARK_THEME_STORAGE_KEY)).toBeNull();
+  });
+});
+
+describe("which pick a theme choice sets", () => {
+  beforeEach(installLocalStorage);
+  const light = { resolvedTheme: "light" as const, activeThemeId: "nord", darkThemeId: "dracula" };
+  const dark = { ...light, resolvedTheme: "dark" as const };
+
+  it("sets the pick of the mode on screen, or both without a dark pick", () => {
+    expect(themePickSlot({ ...dark, darkThemeId: null })).toBe("both");
+    expect(themePickSlot(dark)).toBe("dark");
+    expect(themePickSlot(light)).toBe("light");
+    expect(shownThemeId(dark)).toBe("dracula");
+    expect(shownThemeId(light)).toBe("nord");
+    expect(shownThemeId({ ...dark, darkThemeId: null })).toBe("nord");
+  });
+
+  it("edits a theme in the pick it stands in", () => {
+    expect(themeEditSlot("dracula", light)).toBe("dark");
+    expect(themeEditSlot("nord", dark)).toBe("light");
+    expect(themeEditSlot("other", dark)).toBe("dark");
+    expect(themeEditSlot("other", light)).toBe("light");
+    expect(themeEditSlot("dracula", { ...dark, darkThemeId: null })).toBe("both");
+  });
+
+  it("previews a draft in its own pick only", () => {
+    localStorage.setItem(ACTIVE_THEME_STORAGE_KEY, "nord");
+    localStorage.setItem(ACTIVE_DARK_THEME_STORAGE_KEY, "dracula");
+    const draft: ThemeDefinition = { id: "draft", name: "Draft", builtIn: false };
+    expect(themePairWith(draft, "dark")).toEqual({ light: findTheme("nord"), dark: draft });
+    expect(themePairWith(draft, "light")).toEqual({ light: draft, dark: findTheme("dracula") });
+    expect(themePairWith(draft, "both")).toEqual({ light: draft, dark: draft });
+    localStorage.removeItem(ACTIVE_DARK_THEME_STORAGE_KEY);
+    localStorage.removeItem(ACTIVE_THEME_STORAGE_KEY);
   });
 });

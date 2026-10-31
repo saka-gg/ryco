@@ -10,6 +10,7 @@ import {
   APPEARANCE_PREFERENCES_STORAGE_KEY,
 } from "./appearancePreferences";
 import {
+  ACTIVE_DARK_THEME_STORAGE_KEY,
   ACTIVE_THEME_STORAGE_KEY,
   DEFAULT_THEME,
   THEME_STYLE_ELEMENT_ID,
@@ -51,6 +52,7 @@ describe("theme controller", () => {
   afterEach(() => {
     localStorage.removeItem("ryco:theme");
     localStorage.removeItem(ACTIVE_THEME_STORAGE_KEY);
+    localStorage.removeItem(ACTIVE_DARK_THEME_STORAGE_KEY);
     localStorage.removeItem(APPEARANCE_PREFERENCES_STORAGE_KEY);
     applyThemeToDocument(DEFAULT_THEME);
     document.documentElement.classList.remove("dark");
@@ -186,5 +188,31 @@ describe("theme controller", () => {
 
     expect(document.documentElement.classList.contains("dark")).toBe(true);
     await nextFrames(3);
+  });
+
+  it("shows dark mode's own palette, and follows another tab's pick", async () => {
+    localStorage.setItem("ryco:theme", "dark");
+    localStorage.setItem(ACTIVE_THEME_STORAGE_KEY, "nord");
+    localStorage.setItem(ACTIVE_DARK_THEME_STORAGE_KEY, "dracula");
+    __resetThemeControllerForTests();
+    render(<ThemeConsumer index={1} />);
+    const background = () =>
+      getComputedStyle(document.documentElement).getPropertyValue("--background").trim();
+    const probe = document.createElement("div");
+    probe.style.color = findTheme("dracula").dark?.background ?? "";
+    document.body.append(probe);
+    const expected = getComputedStyle(probe).color;
+    probe.style.color = background();
+    expect(getComputedStyle(probe).color).toBe(expected);
+
+    // Another tab goes back to "Same as light".
+    localStorage.removeItem(ACTIVE_DARK_THEME_STORAGE_KEY);
+    window.dispatchEvent(new StorageEvent("storage", { key: ACTIVE_DARK_THEME_STORAGE_KEY }));
+    await nextFrames();
+    probe.style.color = findTheme("nord").dark?.background ?? "";
+    const nordDark = getComputedStyle(probe).color;
+    probe.style.color = background();
+    expect(getComputedStyle(probe).color).toBe(nordDark);
+    probe.remove();
   });
 });

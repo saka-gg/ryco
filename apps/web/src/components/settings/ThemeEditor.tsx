@@ -13,7 +13,9 @@ import {
   materializeTokenValue,
   parseLength,
   SUPPORTED_LENGTH_UNITS,
+  themePairWith,
   type SupportedLengthUnit,
+  type ThemePickSlot,
 } from "../../themes/registry";
 import {
   getTokenKind,
@@ -176,6 +178,8 @@ export type ThemeEditorProps = {
   onSave: () => void;
   onCancel: () => void;
   resolvedVariant: ThemeVariant;
+  /** The pick the draft stands in while it is edited; the other mode keeps its own palette. */
+  slot?: ThemePickSlot;
 };
 
 export function ThemeEditor({
@@ -185,6 +189,7 @@ export function ThemeEditor({
   onSave,
   onCancel,
   resolvedVariant,
+  slot = "both",
 }: ThemeEditorProps) {
   const [mode, setMode] = useState<Mode>("form");
   const [variant, setVariant] = useState<ThemeVariant>(resolvedVariant);
@@ -195,8 +200,10 @@ export function ThemeEditor({
   const dirty = useMemo(() => JSON.stringify(source) !== JSON.stringify(draft), [source, draft]);
 
   useEffect(() => {
-    applyThemeToDocument(draft);
-  }, [draft, resolvedVariant]);
+    // The draft replaces only the pick it stands in; the other mode keeps its own.
+    const pair = themePairWith(draft, slot);
+    applyThemeToDocument(pair.light, pair.dark);
+  }, [draft, resolvedVariant, slot]);
 
   useEffect(() => {
     if (mode === "form") setJsonText(JSON.stringify(draft, null, 2));

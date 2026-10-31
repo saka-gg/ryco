@@ -18,6 +18,11 @@ function makeInput(overrides: Partial<AppearancePaletteInput> = {}): AppearanceP
     resolvedTheme: "dark",
     setActiveTheme: vi.fn(),
     setTheme: vi.fn(),
+    darkThemeId: null,
+    setDarkTheme: vi.fn(),
+    shownThemeId: overrides.shownThemeId ?? overrides.activeThemeId ?? "nord",
+    pickTheme: vi.fn(),
+    setThemeInSlot: vi.fn(),
     ...overrides,
   };
 }
@@ -38,6 +43,17 @@ describe("buildAppearancePaletteItems", () => {
     expect(items.filter((item) => item.titleTrailingContent).map((item) => item.value)).toEqual([
       "theme:nord",
     ]);
+  });
+
+  it("marks the theme the mode on screen shows", () => {
+    const [changeTheme] = buildAppearancePaletteItems(
+      makeInput({ activeThemeId: "nord", darkThemeId: "dracula", shownThemeId: "dracula" }),
+    );
+    expect(
+      pageItems(changeTheme)
+        .filter((item) => item.titleTrailingContent)
+        .map((item) => item.value),
+    ).toEqual(["theme:dracula"]);
   });
 
   it("marks the current color mode", () => {
@@ -61,7 +77,9 @@ describe("buildAppearancePaletteItems", () => {
       }
     }
 
-    expect(input.setActiveTheme).toHaveBeenCalledExactlyOnceWith("custom-sunset");
+    // A choice sets the pick for the mode on screen (`pickTheme`).
+    expect(input.pickTheme).toHaveBeenCalledExactlyOnceWith("custom-sunset");
+    expect(input.setActiveTheme).not.toHaveBeenCalled();
     expect(input.setTheme).toHaveBeenCalledExactlyOnceWith("light");
   });
 
