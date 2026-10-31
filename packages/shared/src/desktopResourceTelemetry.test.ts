@@ -2,7 +2,9 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   createTelemetryLineReader,
   DESKTOP_TELEMETRY_MAX_BYTES,
+  desktopAppAutomaticUpdateMode,
   parseDesktopAgentWorkFrame,
+  parseDesktopAppUpdateRequestFrame,
   parseDesktopBackendLifecycleFrame,
   parseDesktopResourceTelemetry,
 } from "./desktopResourceTelemetry.ts";
@@ -164,5 +166,46 @@ describe("private desktop telemetry protocol", () => {
     expect(
       parseDesktopBackendLifecycleFrame({ type: "agent-work", working: true, keepAwake: true }),
     ).toBeNull();
+  });
+
+  it("round-trips the app update policy frame and rejects malformed ones", () => {
+    for (const automatic of [true, false]) {
+      const frame = { type: "app-update-policy", automatic } as const;
+      // The backend writes JSON lines; the app parses them back.
+      expect(parseDesktopAppUpdateRequestFrame(JSON.parse(JSON.stringify(frame)))).toEqual(frame);
+    }
+    expect(
+      parseDesktopAppUpdateRequestFrame({ type: "app-update-policy", automatic: true, x: 1 }),
+    ).toEqual({ type: "app-update-policy", automatic: true });
+    for (const malformed of [
+      { type: "app-update-policy" },
+      { type: "app-update-policy", automatic: "true" },
+      { type: "app-update-policy", automatic: 1 },
+      { type: "app-update-policy", automatic: null },
+    ]) {
+      expect(parseDesktopAppUpdateRequestFrame(malformed)).toBeNull();
+    }
+    expect(
+      parseDesktopBackendLifecycleFrame({ type: "app-update-policy", automatic: true }),
+    ).toBeNull();
+  });
+
+  it("installs at quit only where the platform's updater can do it unattended", () => {
+    expect(desktopAppAutomaticUpdateMode({ platform: "darwin", appImage: undefined })).toBe(
+      "restart",
+    );
+    // An AppImage path in the environment changes nothing on macOS.
+    expect(desktopAppAutomaticUpdateMode({ platform: "darwin", appImage: "/x.AppImage" })).toBe(
+      "restart",
+    );
+    expect(desktopAppAutomaticUpdateMode({ platform: "win32", appImage: undefined })).toBe(
+      "install-on-quit",
+    );
+    expect(desktopAppAutomaticUpdateMode({ platform: "linux", appImage: "/x.AppImage" })).toBe(
+      "install-on-quit",
+    );
+    expect(desktopAppAutomaticUpdateMode({ platform: "linux", appImage: undefined })).toBeNull();
+    expect(desktopAppAutomaticUpdateMode({ platform: "linux", appImage: "" })).toBeNull();
+    expect(desktopAppAutomaticUpdateMode({ platform: "freebsd", appImage: undefined })).toBeNull();
   });
 });

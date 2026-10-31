@@ -73,6 +73,8 @@ it.layer(NodeServices.layer)("ServerEnvironmentLive", (it) => {
       expect(second.capabilities.localTasks).toBe(true);
       expect(second.capabilities.nodeSelfUpdate).toBe(true);
       expect(second.capabilities.automaticUpdates).toBe(true);
+      // Not a desktop app's backend.
+      expect(second.capabilities.desktopAppUpdates).toBeUndefined();
       expect(second.capabilities.terminalWriteRequireIdle).toBe(true);
       expect(second.capabilities.threadFork).toBe(true);
       expect(second.capabilities.threadBranchAdoption).toBe(true);
@@ -86,6 +88,45 @@ it.layer(NodeServices.layer)("ServerEnvironmentLive", (it) => {
       expect(second.capabilities.cliProxyCloudflareAccess).toBe(true);
       expect(second.capabilities.stagedOnlyCommit).toBe(true);
       expect(second.capabilities.recoverableGitActions).toBe(true);
+    }),
+  );
+
+  it.effect("says what a packaged desktop app does with its own updates", () =>
+    Effect.gen(function* () {
+      const fileSystem = yield* FileSystem.FileSystem;
+      const baseDir = yield* fileSystem.makeTempDirectoryScoped({
+        prefix: "ryco-server-environment-desktop-test-",
+      });
+      const serverConfig = yield* makeServerConfig(baseDir);
+      yield* fileSystem.makeDirectory(nodePath.dirname(serverConfig.environmentIdPath), {
+        recursive: true,
+      });
+      const describe = (config: ServerConfigShape) =>
+        Effect.gen(function* () {
+          const serverEnvironment = yield* ServerEnvironment;
+          return yield* serverEnvironment.getDescriptor;
+        }).pipe(
+          Effect.provide(
+            ServerEnvironmentLive.pipe(Layer.provide(Layer.succeed(ServerConfig, config))),
+          ),
+        );
+
+      const desktop = yield* describe({ ...serverConfig, mode: "desktop" });
+      const expected =
+        process.platform === "darwin"
+          ? "restart"
+          : process.platform === "win32" ||
+              (process.platform === "linux" && Boolean(process.env.APPIMAGE))
+            ? "install-on-quit"
+            : undefined;
+      expect(desktop.capabilities.desktopAppUpdates).toBe(expected);
+      // Development builds never update themselves.
+      const development = yield* describe({
+        ...serverConfig,
+        mode: "desktop",
+        devUrl: new URL("http://127.0.0.1:5733"),
+      });
+      expect(development.capabilities.desktopAppUpdates).toBeUndefined();
     }),
   );
 

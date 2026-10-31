@@ -149,6 +149,7 @@ import { HeapSnapshotLive } from "./observability/HeapSnapshotSignal.ts";
 import { makeAgentWorkHoldLayer, ProviderBusyMarkerLive } from "./agentWorkHold.ts";
 import { AgentWorkActivityLive } from "./orchestration/AgentWorkActivity.ts";
 import { ClientInteractionLive } from "./updates/ClientInteraction.ts";
+import { DesktopAppUpdatePolicyLive } from "./updates/desktopAppUpdatePolicy.ts";
 import { UnattendedUpdatesLauncherLive } from "./updates/unattendedUpdatesLauncher.ts";
 import { StartupStallMonitorLive, trackStartupLayer } from "./startupStallMonitor.ts";
 import {
@@ -946,6 +947,9 @@ export const makeServerLayer = Layer.unwrap(
         ProviderBusyMarkerLive,
         UnattendedUpdatesLauncherLive,
       ).pipe(Layer.provide(AgentWorkActivityLive)),
+      // The desktop app downloads and installs its own updates unattended only while this
+      // node's owner has automatic updates on; it hears that from its own backend alone.
+      config.mode === "desktop" ? DesktopAppUpdatePolicyLive : Layer.empty,
     );
 
     // Shutdown runs these stages in reverse build order; the markers log how

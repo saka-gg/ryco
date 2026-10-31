@@ -12,6 +12,7 @@ import {
 import { Switch } from "../ui/switch";
 import { toastManager } from "../ui/toast";
 import {
+  automaticUpdatesDesktopNote,
   automaticUpdatesSwitch,
   automaticUpdatesView,
   type AutomaticUpdatesView,
@@ -63,6 +64,15 @@ function AutomaticUpdatesRow({
   view: Exclude<AutomaticUpdatesView, "hidden">;
 }) {
   const [saving, setSaving] = useState(false);
+  const readDesktopNote = useCallback(
+    () => automaticUpdatesDesktopNote(readNodeServerConfig(environmentId)),
+    [environmentId],
+  );
+  const desktopNote = useSyncExternalStore(
+    subscribeEnvironmentServerConfigs,
+    readDesktopNote,
+    readDesktopNote,
+  );
   const save = (automaticUpdates: boolean) => {
     setSaving(true);
     void updateEnvironmentServerSettings(environmentId, { automaticUpdates })
@@ -80,6 +90,7 @@ function AutomaticUpdatesRow({
   return (
     <SettingsRow
       title={label}
+      description={desktopNote ?? undefined}
       status={
         checksOff
           ? checked

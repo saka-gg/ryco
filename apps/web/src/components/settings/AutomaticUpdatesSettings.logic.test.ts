@@ -1,7 +1,11 @@
 import { DEFAULT_SERVER_SETTINGS, type ServerConfig } from "@ryco/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
-import { automaticUpdatesSwitch, automaticUpdatesView } from "./AutomaticUpdatesSettings.logic";
+import {
+  automaticUpdatesDesktopNote,
+  automaticUpdatesSwitch,
+  automaticUpdatesView,
+} from "./AutomaticUpdatesSettings.logic";
 
 function config(input: {
   readonly capability?: boolean;
@@ -78,5 +82,32 @@ describe("automaticUpdatesSwitch", () => {
       checksOff: true,
       canChange: false,
     });
+  });
+});
+
+describe("automaticUpdatesDesktopNote", () => {
+  const desktop = (desktopAppUpdates?: "install-on-quit" | "restart") =>
+    ({
+      environment: {
+        capabilities: {
+          automaticUpdates: true,
+          ...(desktopAppUpdates === undefined ? {} : { desktopAppUpdates }),
+        },
+      },
+      settings: DEFAULT_SERVER_SETTINGS,
+    }) as unknown as ServerConfig;
+
+  it("says what the desktop app does with its own updates on each platform", () => {
+    expect(automaticUpdatesDesktopNote(desktop("install-on-quit"))).toBe(
+      "This desktop app also downloads its own updates in the background and installs one when you quit it. It never restarts by itself.",
+    );
+    expect(automaticUpdatesDesktopNote(desktop("restart"))).toBe(
+      "This desktop app also downloads its own updates in the background. On macOS one installs only when you choose Restart.",
+    );
+  });
+
+  it("says nothing for CLI nodes, older desktop apps and unknown nodes", () => {
+    expect(automaticUpdatesDesktopNote(desktop())).toBeNull();
+    expect(automaticUpdatesDesktopNote(null)).toBeNull();
   });
 });

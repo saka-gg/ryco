@@ -205,6 +205,10 @@ export function parseDesktopAgentWorkFrame(value: unknown): DesktopAgentWorkFram
  * - `app-update-check`: check the update feed now.
  * - `app-update-install`: download `targetVersion` if needed, count down, then relaunch
  *   into it. `requestId` comes back in `remoteInstall` so the client can match the result.
+ * - `app-update-policy`: whether the node's owner turned on automatic updates (and update
+ *   checks) on this backend; sent when the backend starts and on every change. With it on, the
+ *   app downloads updates its own checks find and, where {@link desktopAppAutomaticUpdateMode}
+ *   allows, installs them when it quits. The app takes it only from the backend it launched.
  */
 export type DesktopAppUpdateRequestFrame =
   | { readonly type: "app-update-check" }
@@ -212,7 +216,37 @@ export type DesktopAppUpdateRequestFrame =
       readonly type: "app-update-install";
       readonly requestId: string;
       readonly targetVersion: string;
-    };
+    }
+  | { readonly type: "app-update-policy"; readonly automatic: boolean };
+
+/**
+ * What the desktop app does with its own updates while automatic updates are on:
+ * - `install-on-quit` (Windows NSIS, Linux AppImage): downloads them in the background and
+ *   installs a downloaded one when it quits normally, without starting again.
+ * - `restart` (macOS): downloads them in the background and installs one only when the person
+ *   chooses Restart. Squirrel.Mac stages an update for quit irreversibly, and the installer for
+ *   unsigned builds replaces the app bundle, so nothing installs at quit there.
+ *
+ * `null` where the app cannot update itself (Linux outside the AppImage).
+ */
+export type DesktopAppAutomaticUpdateMode = "install-on-quit" | "restart";
+
+export function desktopAppAutomaticUpdateMode(input: {
+  readonly platform: string;
+  /** `process.env.APPIMAGE`: set when the app runs from its AppImage. */
+  readonly appImage: string | undefined;
+}): DesktopAppAutomaticUpdateMode | null {
+  switch (input.platform) {
+    case "darwin":
+      return "restart";
+    case "win32":
+      return "install-on-quit";
+    case "linux":
+      return input.appImage ? "install-on-quit" : null;
+    default:
+      return null;
+  }
+}
 
 /**
  * The desktop updater's state as the backend reports it to clients. The app sends one
@@ -261,6 +295,11 @@ export function parseDesktopAppUpdateRequestFrame(
 ): DesktopAppUpdateRequestFrame | null {
   if (!record(value)) return null;
   if (value.type === "app-update-check") return { type: "app-update-check" };
+  if (value.type === "app-update-policy") {
+    return typeof value.automatic === "boolean"
+      ? { type: "app-update-policy", automatic: value.automatic }
+      : null;
+  }
   if (
     value.type === "app-update-install" &&
     boundedText(value.requestId) &&

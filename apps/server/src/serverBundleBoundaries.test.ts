@@ -444,10 +444,12 @@ describe("server boot import boundaries", () => {
       expect(loadable).toContain(file);
     }
     // Unattended updates: boot holds the interaction clock (the RPC writes it), the counter that
-    // clones, checkouts and storage cleanup write, and the launcher, which loads the window and the
-    // updaters only once a node's owner turns them on.
+    // clones, checkouts and storage cleanup write, the launcher, which loads the window and the
+    // updaters only once a node's owner turns them on, and the small reporter that tells a
+    // desktop app the setting from the start.
     expect(reached(/^apps\/server\/src\/updates\//u).toSorted()).toEqual([
       "apps/server/src/updates/ClientInteraction.ts",
+      "apps/server/src/updates/desktopAppUpdatePolicy.ts",
       "apps/server/src/updates/restartSensitiveWork.ts",
       "apps/server/src/updates/unattendedUpdatesLauncher.ts",
     ]);

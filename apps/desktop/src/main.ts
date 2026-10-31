@@ -71,9 +71,10 @@ import {
 import type { AppUpdater, UpdateDownloadedEvent } from "electron-updater";
 
 import type { ContextMenuItem } from "@ryco/contracts";
-import type {
-  DesktopAppUpdateRequestFrame,
-  DesktopBackendLifecycleFrame,
+import {
+  desktopAppAutomaticUpdateMode,
+  type DesktopAppUpdateRequestFrame,
+  type DesktopBackendLifecycleFrame,
 } from "@ryco/shared/desktopResourceTelemetry";
 import { isRemoteEditorLink } from "@ryco/shared/remoteEditorLink";
 import { AsyncRotatingFileSink, DESKTOP_BACKEND_LOG_FILE_NAME } from "@ryco/shared/logging";
@@ -235,6 +236,13 @@ import { createStartupTiming, formatStartupTimingEntry } from "./startupTiming.t
 import { waitForBackendStartupReady } from "./backendStartupReadiness.ts";
 import { getAutoUpdateDisabledReason, shouldBroadcastDownloadProgress } from "./updateState.ts";
 import { doesVersionMatchDesktopUpdateChannel } from "./updateChannels.ts";
+import { AutomaticAppUpdates } from "./automaticAppUpdates.ts";
+import {
+  DESKTOP_UPDATE_INSTALL_RECORD_FILE,
+  removeDesktopUpdateInstallRecord,
+  settleDesktopUpdateInstallRecord,
+  writeDesktopUpdateInstallRecord,
+} from "./updateInstallRecord.ts";
 import {
   createRemoteAppInstaller,
   parseRemoteInstallResponse,
@@ -442,6 +450,7 @@ const COMPILE_CACHE_HOOK_PATH = Path.join(__dirname, "compileCache.cjs");
 const RENDERER_CACHE_VERSION_FILE = "renderer-cache-version";
 const AUTO_UPDATE_POLL_INTERVAL_MS = 4 * 60 * 60 * 1000;
 const UNSIGNED_MAC_UPDATE_INSTALLER_DIR = Path.join(STATE_DIR, "update-installers");
+const UPDATE_INSTALL_RECORD_PATH = Path.join(STATE_DIR, DESKTOP_UPDATE_INSTALL_RECORD_FILE);
 const UNSIGNED_MAC_UPDATE_INSTALLER_LOG_PATH = Path.join(LOG_DIR, "unsigned-mac-update.log");
 const NATIVE_SECURITY_DIR = Path.join(STATE_DIR, "native-security");
 
@@ -1669,6 +1678,8 @@ function relaunchDesktopApp(reason: string): void {
     desktopWindowState.flushAll();
     isQuitting = true;
     clearUpdatePollTimer();
+    // app.exit() still emits "quit", where an armed update would install under the new app.
+    automaticAppUpdates.relaunching();
     cancelBackendReadinessWait();
     void stopBackendAndWaitForExit()
       .catch((error) => {
@@ -2300,7 +2311,23 @@ function loadElectronUpdater(): typeof import("electron-updater") {
   return require("electron-updater") as typeof import("electron-updater");
 }
 let updateState: DesktopUpdateState = initialUpdateState();
+// The version the last run installed an update from, once this run settled its install record.
+let updatedFromVersion: string | null = null;
 let downloadedUpdateFilePath: string | null = null;
+// Unattended updates, while the node's owner has them on (the backend's `app-update-policy`).
+const automaticAppUpdates = new AutomaticAppUpdates({
+  mode: desktopAppAutomaticUpdateMode({
+    platform: process.platform,
+    appImage: process.env.APPIMAGE,
+  }),
+  state: () => updateState,
+  check: (reason) => checkForUpdatesOrJoin(reason),
+  download: () => downloadAvailableUpdateOrJoin(),
+  setInstallOnQuit: (armed) => {
+    if (loadedAutoUpdater !== null) loadedAutoUpdater.autoInstallOnAppQuit = armed;
+  },
+  log: (line) => console.info(`[desktop-updater] ${line}`),
+});
 let macCodeSignatureKindCache: MacCodeSignatureKind | null = null;
 // The running check and download, so a remote install can wait for their outcome.
 let updateCheckTask: Promise<boolean> | null = null;
@@ -3012,6 +3039,7 @@ function createBaseUpdateState(
     ...createInitialDesktopUpdateState(app.getVersion(), channel),
     enabled,
     status: enabled ? "idle" : "disabled",
+    updatedFromVersion,
   };
 }
 
@@ -3102,13 +3130,21 @@ async function downloadAvailableUpdate(): Promise<{
   accepted: boolean;
   completed: boolean;
 }> {
-  if (!updaterConfigured || updateDownloadInFlight || updateState.status !== "available") {
+  if (
+    isQuitting ||
+    !updaterConfigured ||
+    updateDownloadInFlight ||
+    updateState.status !== "available"
+  ) {
     return { accepted: false, completed: false };
   }
   downloadedUpdateFilePath = null;
   updateDownloadInFlight = true;
+  const version = updateState.availableVersion;
+  // Before the download: electron-updater adds its quit installer when it completes, if armed.
+  automaticAppUpdates.downloadStarting(version);
   setUpdateState(reduceDesktopUpdateStateOnDownloadStart(updateState));
-  const task = runUpdateDownload();
+  const task = runUpdateDownload(version);
   updateDownloadTask = task;
   return task;
 }
@@ -3122,7 +3158,9 @@ async function downloadAvailableUpdateOrJoin(): Promise<void> {
   await downloadAvailableUpdate();
 }
 
-async function runUpdateDownload(): Promise<{ accepted: boolean; completed: boolean }> {
+async function runUpdateDownload(
+  version: string | null,
+): Promise<{ accepted: boolean; completed: boolean }> {
   const autoUpdater = requireAutoUpdater();
   console.info("[desktop-updater] Downloading update...");
   const cancellation = new (loadElectronUpdater().CancellationToken)();
@@ -3145,6 +3183,7 @@ async function runUpdateDownload(): Promise<{ accepted: boolean; completed: bool
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : String(error);
     downloadedUpdateFilePath = null;
+    automaticAppUpdates.downloadFailed(version);
     setUpdateState(reduceDesktopUpdateStateOnDownloadFailure(updateState, message));
     console.error(`[desktop-updater] Failed to download update: ${message}`);
     return { accepted: true, completed: false };
@@ -3262,6 +3301,24 @@ function launchUnsignedMacUpdateInstaller(input: {
   );
 }
 
+/** Records the install about to run, so the next launch can tell whether it took effect. */
+function recordUpdateInstall(targetVersion: string | null): void {
+  if (targetVersion === null) return;
+  const fromVersion = app.getVersion();
+  if (targetVersion === fromVersion) return;
+  if (
+    !writeDesktopUpdateInstallRecord(UPDATE_INSTALL_RECORD_PATH, { fromVersion, targetVersion })
+  ) {
+    console.warn(`[desktop-updater] Could not record the install of ${targetVersion}.`);
+  }
+}
+
+/** An install did not start: no install at quit, and never in the background again. */
+function noteUpdateInstallFailed(): void {
+  removeDesktopUpdateInstallRecord(UPDATE_INSTALL_RECORD_PATH);
+  automaticAppUpdates.installFailed(updateState.downloadedVersion);
+}
+
 async function installDownloadedUpdate(): Promise<{
   accepted: boolean;
   completed: boolean;
@@ -3281,6 +3338,7 @@ async function installDownloadedUpdate(): Promise<{
       : null;
 
     await stopBackendAndWaitForExit();
+    recordUpdateInstall(updateState.downloadedVersion);
     if (unsignedMacInstallPlan) {
       launchUnsignedMacUpdateInstaller(unsignedMacInstallPlan);
       for (const win of BrowserWindow.getAllWindows()) {
@@ -3306,6 +3364,7 @@ async function installDownloadedUpdate(): Promise<{
     const message = formatErrorMessage(error);
     updateInstallInFlight = false;
     isQuitting = false;
+    noteUpdateInstallFailed();
     setUpdateState(reduceDesktopUpdateStateOnInstallFailure(updateState, message));
     remoteAppInstaller.installFailed(message);
     console.error(`[desktop-updater] Failed to install update: ${message}`);
@@ -3313,11 +3372,17 @@ async function installDownloadedUpdate(): Promise<{
   }
 }
 
-/** A client's update request, relayed by a backend over its pipe. */
+/** A client's update request or the automatic update policy, from a backend over its pipe. */
 function handleAppUpdateRequest(
   frame: DesktopAppUpdateRequestFrame,
   pipe: DesktopBackendPipe,
+  child: object,
 ): void {
+  if (frame.type === "app-update-policy") {
+    // A hint from the backend this app launched; a replaced generation's report is dropped.
+    automaticAppUpdates.report(child, frame.automatic);
+    return;
+  }
   if (frame.type === "app-update-install") {
     console.info(
       `[desktop-updater] Install of ${frame.targetVersion} requested from another device (request ${frame.requestId}).`,
@@ -3366,12 +3431,30 @@ function closeRemoteInstallNotification(): void {
 }
 
 /**
+ * Settles the install record the last run left: "Updated to X" when its update took effect; when
+ * it did not, that version is never installed again in the background.
+ */
+function settleLastUpdateInstall(): void {
+  const outcome = settleDesktopUpdateInstallRecord(UPDATE_INSTALL_RECORD_PATH, app.getVersion());
+  if (outcome.kind === "updated") {
+    updatedFromVersion = outcome.fromVersion;
+    console.info(`[desktop-updater] Updated from ${outcome.fromVersion} to ${outcome.version}.`);
+  } else if (outcome.kind === "not-applied") {
+    automaticAppUpdates.installFailed(outcome.version);
+    console.warn(
+      `[desktop-updater] The install of ${outcome.version} did not apply; it waits for Restart.`,
+    );
+  }
+}
+
+/**
  * Load and configure electron-updater. Deferred until after startup (the first
  * check runs 15 s later anyway); anything that needs it earlier awaits
  * {@link ensureAutoUpdaterConfigured}.
  */
 async function configureAutoUpdater(): Promise<void> {
   const enabled = shouldEnableAutoUpdates();
+  if (enabled) settleLastUpdateInstall();
   setUpdateState(createBaseUpdateState(DESKTOP_UPDATE_CHANNEL, enabled));
   if (!enabled || isQuitting) {
     return;
@@ -3406,7 +3489,14 @@ async function configureAutoUpdater(): Promise<void> {
   updaterConfigured = true;
 
   autoUpdater.autoDownload = false;
+  // Armed only while the node's owner has automatic updates on (automaticAppUpdates).
   autoUpdater.autoInstallOnAppQuit = false;
+  // Added before any download, so it runs before the quit installer electron-updater adds once
+  // a download completes armed. A relaunch or a failed exit installs nothing.
+  app.once("quit", (_event, exitCode) => {
+    if (exitCode !== 0 || updateInstallInFlight) return;
+    recordUpdateInstall(automaticAppUpdates.quitInstallVersion());
+  });
   applyAutoUpdaterChannel(DESKTOP_UPDATE_CHANNEL);
   let lastLoggedDownloadMilestone = -1;
 
@@ -3453,6 +3543,7 @@ async function configureAutoUpdater(): Promise<void> {
     if (updateInstallInFlight) {
       updateInstallInFlight = false;
       isQuitting = false;
+      noteUpdateInstallFailed();
       setUpdateState(reduceDesktopUpdateStateOnInstallFailure(updateState, message));
       remoteAppInstaller.installFailed(message);
       console.error(`[desktop-updater] Updater error: ${message}`);
@@ -3487,6 +3578,8 @@ async function configureAutoUpdater(): Promise<void> {
   });
   autoUpdater.on("update-downloaded", (info: UpdateDownloadedEvent) => {
     downloadedUpdateFilePath = info.downloadedFile;
+    // Read before electron-updater adds its quit installer, which it does only if armed now.
+    automaticAppUpdates.downloaded(autoUpdater.autoInstallOnAppQuit);
     setUpdateState(reduceDesktopUpdateStateOnDownloadComplete(updateState, info.version));
     console.info(
       `[desktop-updater] Update downloaded: ${info.version} file=${info.downloadedFile}`,
@@ -3495,14 +3588,15 @@ async function configureAutoUpdater(): Promise<void> {
 
   clearUpdatePollTimer();
 
+  // With automatic updates on, these checks also download what they find.
   updateStartupTimer = setTimeout(() => {
     updateStartupTimer = null;
-    void checkForUpdates("startup");
+    void automaticAppUpdates.runScheduledCheck("startup");
   }, AUTO_UPDATE_STARTUP_DELAY_MS);
   updateStartupTimer.unref();
 
   updatePollTimer = setInterval(() => {
-    void checkForUpdates("poll");
+    void automaticAppUpdates.runScheduledCheck("poll");
   }, AUTO_UPDATE_POLL_INTERVAL_MS);
   updatePollTimer.unref();
 }
@@ -3969,7 +4063,7 @@ function startBackend(): void {
   if (telemetryPipe instanceof Duplex) {
     const backendPipe = attachDesktopResourceTelemetry(telemetryPipe, {
       onLifecycleFrame: (frame) => handleBackendFrame(readiness, frame),
-      onAppUpdateRequest: (frame) => handleAppUpdateRequest(frame, backendPipe),
+      onAppUpdateRequest: (frame) => handleAppUpdateRequest(frame, backendPipe, child),
       appUpdateState: () => updateState,
       onAgentWork: (frame) => backendAgentWork.report(child, frame.keepAwake),
     });
@@ -4000,6 +4094,7 @@ function startBackend(): void {
   backendReadiness = readiness;
   backendProcess = child;
   backendAgentWork.begin(child);
+  automaticAppUpdates.begin(child);
   let backendSessionClosed = false;
   const closeBackendSession = (details: string) => {
     if (backendSessionClosed) return;
@@ -4032,6 +4127,8 @@ function startBackend(): void {
     }
     // Work it reported keeps the machine awake while its successor starts, unless Ryco quits.
     backendAgentWork.end(child, { holdIfWorking: !isQuitting });
+    // Its policy ends with it (until the next backend reports), unless the quit stopped it.
+    automaticAppUpdates.end(child, { quitting: isQuitting });
     if (backendControlToken === childControlToken) backendControlToken = "";
     if (!isQuitting && !wasExpected) outputCapture.recordUnexpectedExit(details);
     closeBackendSession(`pid=${child.pid ?? "unknown"} ${details}`);

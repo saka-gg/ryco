@@ -161,7 +161,7 @@ export function RootAppShell({ authGateState }: RootAppShellProps) {
           <EventRouter hosted={authGateState.status === "hosted-hub"} />
         ) : null}
         {primaryEnvironmentAuthenticated ? <RoleAwareProviderUpdateLaunchNotification /> : null}
-        {isElectron ? <DeferredRemoteInstallCountdown /> : null}
+        {isElectron ? <DeferredDesktopUpdateNotices /> : null}
         {isElectron && primaryEnvironmentAuthenticated ? <DeferredRunningThreadKeepAlive /> : null}
         {recoveryOwner ? <WebSocketConnectionCoordinator recoveryOwner={recoveryOwner} /> : null}
         <ShellIdlePreloads authGateStatus={authGateState.status} />
@@ -340,9 +340,10 @@ function AuthenticatedTracingBootstrap() {
   return null;
 }
 
-// Only desktop apps get update requests from other devices; the web build never loads it.
-const LazyRemoteInstallCountdown = preloadableLazy(() =>
-  import("../updates/RemoteInstallCountdown").then((module) => module.RemoteInstallCountdown),
+// Only desktop apps update themselves or get update requests from other devices; the web build
+// never loads these.
+const LazyDesktopUpdateNotices = preloadableLazy(() =>
+  import("../updates/DesktopUpdateNotices").then((module) => module.DesktopUpdateNotices),
 );
 
 const LazyRunningThreadKeepAlive = preloadableLazy(() =>
@@ -357,11 +358,11 @@ function DeferredRunningThreadKeepAlive() {
   return ready ? <LazyRunningThreadKeepAlive /> : null;
 }
 
-function DeferredRemoteInstallCountdown() {
-  const ready = useLazyComponentReady(LazyRemoteInstallCountdown, true, {
-    onLoadError: (error) => console.warn("Remote install countdown failed to load.", error),
+function DeferredDesktopUpdateNotices() {
+  const ready = useLazyComponentReady(LazyDesktopUpdateNotices, true, {
+    onLoadError: (error) => console.warn("Desktop update notices failed to load.", error),
   });
-  return ready ? <LazyRemoteInstallCountdown /> : null;
+  return ready ? <LazyDesktopUpdateNotices /> : null;
 }
 
 function EnvironmentConnectionManagerBootstrap() {

@@ -404,6 +404,11 @@ export interface DesktopUpdateState {
   canRetry: boolean;
   /** Absent or `null` unless another device asked this app to update. */
   remoteInstall?: DesktopRemoteInstallState | null;
+  /**
+   * The version this app ran before an update it installed took effect, on the first launch
+   * after it (`currentVersion` is the one it updated to). Absent or `null` otherwise.
+   */
+  updatedFromVersion?: string | null;
 }
 
 export interface DesktopUpdateActionResult {

@@ -71,17 +71,28 @@ describe("Settings → Updates", () => {
   });
 
   it("lets each node's owner turn on automatic provider updates", async () => {
-    const nodeConfig = (settings: Partial<ServerConfig["settings"]>, supported = true) =>
+    const nodeConfig = (
+      settings: Partial<ServerConfig["settings"]>,
+      supported = true,
+      desktopAppUpdates?: "install-on-quit" | "restart",
+    ) =>
       ({
-        environment: { capabilities: supported ? { automaticUpdates: true } : {} },
+        environment: {
+          capabilities: supported
+            ? { automaticUpdates: true, ...(desktopAppUpdates ? { desktopAppUpdates } : {}) }
+            : {},
+        },
         settings: { ...DEFAULT_SERVER_SETTINGS, ...settings },
       }) as unknown as ServerConfig;
     writeEnvironmentServerConfig(M4_ID, nodeConfig({ automaticUpdates: true }));
     writeEnvironmentServerConfig(
       THIS_MAC_ID,
-      nodeConfig({ automaticUpdates: true, enableProviderUpdateChecks: false }),
+      nodeConfig({ automaticUpdates: true, enableProviderUpdateChecks: false }, true, "restart"),
     );
-    writeEnvironmentServerConfig(LINUX_ID, nodeConfig({ enableProviderUpdateChecks: false }));
+    writeEnvironmentServerConfig(
+      LINUX_ID,
+      nodeConfig({ enableProviderUpdateChecks: false }, true, "install-on-quit"),
+    );
     // Too old to update unattended: no switch at all.
     writeEnvironmentServerConfig(OFFLINE_ID, nodeConfig({}, false));
     setController();
@@ -112,6 +123,22 @@ describe("Settings → Updates", () => {
       )
       .toBeVisible();
     expect(toggle("Studio PC").elements()).toHaveLength(0);
+    // Desktop app nodes say what the app does with its own updates; CLI nodes say nothing.
+    await expect
+      .element(
+        page.getByText(
+          "This desktop app also downloads its own updates in the background. On macOS one installs only when you choose Restart.",
+        ),
+      )
+      .toBeVisible();
+    await expect
+      .element(
+        page.getByText(
+          "This desktop app also downloads its own updates in the background and installs one when you quit it. It never restarts by itself.",
+        ),
+      )
+      .toBeVisible();
+    expect(page.getByText(/^This desktop app also downloads/).elements()).toHaveLength(2);
   });
 
   it("lists every device and updates one, all, or checks again", async () => {
