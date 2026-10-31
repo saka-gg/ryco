@@ -4,7 +4,10 @@
  *
  * Codes go first, then sessions. Redeeming a code is two steps (the code is consumed, then its
  * session is issued), so a code consumed just before the codes went can still turn into a
- * session after the sessions went: a second sweep of the sessions a few seconds later ends it. A
+ * session after the sessions went: a second sweep of the sessions a few seconds later ends it.
+ * Callers run that sweep only where the device cannot rightly link again within those seconds
+ * (a revoked node or enrollment, withdrawn or narrowed access), never after a channel close that
+ * may mean a role change. A
  * failed attempt is retried a bounded number of times before it is logged and left to the next
  * trigger.
  *
