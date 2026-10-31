@@ -107,6 +107,7 @@ import {
   ProviderAdapterRegistry,
   type ProviderInstanceRoutingInfo,
 } from "../Services/ProviderAdapterRegistry.ts";
+import { ProviderInstallLock } from "../Services/ProviderInstallLock.ts";
 import {
   ProviderService,
   type ProviderFreshSessionStartInput,
@@ -400,6 +401,8 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
 
   const registry = yield* ProviderAdapterRegistry;
   const directory = yield* ProviderSessionDirectory;
+  // The host-wide provider install lock; harnesses without one start sessions without waiting.
+  const installLock = Option.getOrUndefined(yield* Effect.serviceOption(ProviderInstallLock));
   const runtimeEventPubSub = yield* PubSub.bounded<ProviderRuntimeEvent>(4_096);
   const recentRuntimeEvents = yield* Ref.make<ReadonlyArray<ProviderRuntimeEventSummary>>([]);
   const staleSessionBindings = yield* Ref.make(new Map<string, ProviderRuntimeBinding>());
@@ -444,6 +447,13 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
     Effect.flatMap(getSessionStartLock(threadId), (semaphore) => semaphore.withPermit(effect));
 
   const serviceScope = yield* Effect.scope;
+
+  /**
+   * Holds a provider process launch while a Ryco process on this host installs that instance's
+   * CLI. Runs before the start deadline: an install takes minutes.
+   */
+  const awaitProviderInstall = (instanceId: ProviderInstanceId, provider: ProviderDriverKind) =>
+    installLock ? installLock.beforeLaunch(instanceId, provider) : Effect.void;
 
   // Every provider call below is bounded through runDetachedWithDeadline, which
   // forks the call into this layer scope so a deadline holds even when the
@@ -1244,8 +1254,14 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
             return yield* resolveRoutableSessionUnlocked(input);
           }
           const instanceId = binding.providerInstanceId;
+          // A live session launches nothing, so a turn to it never waits for an install, even one
+          // of another CLI that shares its installer.
+          const live = yield* resolveRoutableSessionUnlocked({ ...input, allowRecovery: false });
+          if (live.isActive) return live;
           const label = yield* operationLabel(instanceId);
           const timeoutMs = timeouts.sessionStartMs(binding.provider);
+          // A recovery launches the provider again.
+          yield* awaitProviderInstall(instanceId, binding.provider);
           return yield* runDetachedWithDeadline(
             withSessionStartLock(input.threadId, resolveRoutableSessionUnlocked(input)),
             {
@@ -1631,6 +1647,7 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
         }),
       );
       const label = instanceInfo.displayName ?? String(resolvedInstanceId);
+      yield* awaitProviderInstall(resolvedInstanceId, instanceInfo.driverKind);
       // The lock wait, admission and adapter start share one deadline. The lock and
       // the admission permit are taken inside the detached fiber and released only
       // when it exits, so "one adapter start per thread at a time" still holds.
@@ -2523,6 +2540,8 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
           turns: input.numTurns,
         });
       });
+      // The rollback may recover the session, which launches the provider again.
+      yield* awaitProviderInstall(instanceId, binding.provider);
       yield* runDetachedWithDeadline(withSessionStartLock(input.threadId, rollbackLocked), {
         scope: serviceScope,
         timeoutMs,

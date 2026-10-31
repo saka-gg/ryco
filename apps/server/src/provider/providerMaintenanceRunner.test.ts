@@ -1,3 +1,8 @@
+import { spawnSync } from "node:child_process";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
+
 import { afterEach, describe, it, assert } from "@effect/vitest";
 import {
   ProviderDriverKind,
@@ -6,11 +11,25 @@ import {
   type ServerProviderUpdateState,
 } from "@ryco/contracts";
 import { ServerProviderUpdateError } from "@ryco/contracts";
-import { Cause, Effect, Exit, Fiber, Layer, Ref, Schema, Sink, Stream } from "effect";
+import {
+  Cause,
+  Deferred,
+  Effect,
+  Exit,
+  Fiber,
+  Layer,
+  Option,
+  Ref,
+  Schema,
+  Sink,
+  Stream,
+} from "effect";
 import { HttpClient, HttpClientResponse } from "effect/http";
 import { ChildProcessSpawner } from "effect/process";
 
 import { ProviderRegistry, type ProviderRegistryShape } from "./Services/ProviderRegistry.ts";
+import { makeProviderInstallLockLive } from "./Layers/ProviderInstallLock.ts";
+import { makeProviderInstallLock } from "./providerInstallLock.ts";
 import * as ProviderMaintenanceRunner from "./providerMaintenanceRunner.ts";
 import { ServerSettingsService } from "../serverSettings.ts";
 import {
@@ -28,6 +47,9 @@ const CODEX_INSTANCE_ID = ProviderInstanceId.make("codex");
 const CURSOR_INSTANCE_ID = ProviderInstanceId.make("cursor");
 const OPENCODE_INSTANCE_ID = ProviderInstanceId.make("opencode");
 const encoder = new TextEncoder();
+// The installer's pid goes into the host install lock, which stays held while it lives: the
+// stand-in installers carry the pid of a process that already exited.
+const EXITED_PID = spawnSync(process.execPath, ["-e", ""]).pid!;
 
 afterEach(() => {
   clearLatestProviderVersionCacheForTests();
@@ -101,7 +123,7 @@ function mockHandle(result: {
   readonly exitCode?: Effect.Effect<ChildProcessSpawner.ExitCode>;
 }) {
   return ChildProcessSpawner.makeHandle({
-    pid: ChildProcessSpawner.ProcessId(1),
+    pid: ChildProcessSpawner.ProcessId(EXITED_PID),
     exitCode: result.exitCode ?? Effect.succeed(ChildProcessSpawner.ExitCode(result.code ?? 0)),
     isRunning: Effect.succeed(false),
     kill: () => Effect.void,
@@ -193,22 +215,32 @@ function makeRegistry(
   });
 }
 
+/** A host install lock folder of the test's own: never the host's shared one. */
+const tempInstallLockDirectory = Effect.acquireRelease(
+  Effect.promise(() => mkdtemp(path.join(tmpdir(), "ryco-install-lock-"))),
+  (directory) => Effect.promise(() => rm(directory, { recursive: true, force: true })),
+);
+
 /** `manifestLayer` is an optional `ModelManifest` stub; without it the runner rates against the
  * bundled policies and the code-owned floors. */
 const makeTestRunner = (
   registry: ProviderRegistryShape,
   manifestLayer?: Layer.Layer<ModelManifest>,
-) => {
-  const runnerLayer = ProviderMaintenanceRunner.layer.pipe(
-    Layer.provide(Layer.succeed(ProviderRegistry, registry)),
-    Layer.provide(ServerSettingsService.layerTest()),
-  );
-  return Effect.service(ProviderMaintenanceRunner.ProviderMaintenanceRunner).pipe(
-    Effect.provide(
-      manifestLayer === undefined ? runnerLayer : runnerLayer.pipe(Layer.provide(manifestLayer)),
-    ),
-  );
-};
+  options?: { readonly installLockDirectory?: string },
+) =>
+  Effect.gen(function* () {
+    const installLockDirectory = options?.installLockDirectory ?? (yield* tempInstallLockDirectory);
+    const runnerLayer = ProviderMaintenanceRunner.layer.pipe(
+      Layer.provide(makeProviderInstallLockLive(installLockDirectory)),
+      Layer.provide(Layer.succeed(ProviderRegistry, registry)),
+      Layer.provide(ServerSettingsService.layerTest()),
+    );
+    return yield* Effect.service(ProviderMaintenanceRunner.ProviderMaintenanceRunner).pipe(
+      Effect.provide(
+        manifestLayer === undefined ? runnerLayer : runnerLayer.pipe(Layer.provide(manifestLayer)),
+      ),
+    );
+  });
 
 const manifestWithPolicies = (compatibility: ReadonlyArray<unknown>): ModelManifestData => ({
   ...BUNDLED_MODEL_MANIFEST,
@@ -596,6 +628,64 @@ describe("providerMaintenanceRunner", () => {
                 ),
               };
             }
+            return { stdout: "updated" };
+          }),
+        ),
+      ),
+    );
+  });
+
+  it.live("waits while another Ryco on this machine holds the install lock, then runs", () => {
+    const calls: Array<string> = [];
+    return Effect.gen(function* () {
+      const installLockDirectory = yield* tempInstallLockDirectory;
+      // Another Ryco process on this host: its own lock on the same folder.
+      const otherRyco = makeProviderInstallLock({ directory: installLockDirectory });
+      const holding = yield* Deferred.make<void>();
+      const releaseOther = yield* Deferred.make<void>();
+      const other = yield* otherRyco
+        .tryRun("cursor-agent", () =>
+          Deferred.succeed(holding, undefined).pipe(Effect.andThen(Deferred.await(releaseOther))),
+        )
+        .pipe(Effect.forkScoped);
+      yield* Deferred.await(holding);
+
+      const { registry, updateStatesRef } = yield* makeRegistry(baseCursorProvider);
+      const updater = yield* makeTestRunner(registry, undefined, { installLockDirectory });
+      const update = yield* updater.updateProvider(CURSOR_DRIVER).pipe(Effect.forkScoped);
+
+      const waitingMessage = "Another Ryco on this machine is updating this CLI.";
+      const sawWaiting = Ref.get(updateStatesRef).pipe(
+        Effect.map((states) => states.some((state) => state.message === waitingMessage)),
+      );
+      for (let attempt = 0; attempt < 200 && !(yield* sawWaiting); attempt += 1) {
+        yield* Effect.sleep("10 millis");
+      }
+      // Still held a while later: queued, and nothing ran.
+      yield* Effect.sleep("1500 millis");
+      const queued = (yield* Ref.get(updateStatesRef)).at(-1);
+      assert.strictEqual(queued?.status, "queued");
+      assert.strictEqual(queued?.message, waitingMessage);
+      assert.deepStrictEqual(calls, []);
+
+      yield* Deferred.succeed(releaseOther, undefined);
+      assert.isTrue(Option.isSome(yield* Fiber.join(other)));
+      const result = yield* Fiber.join(update);
+
+      assert.deepStrictEqual(calls, ["agent update"]);
+      assert.strictEqual(result.providers[0]?.updateState?.status, "succeeded");
+      assert.deepStrictEqual(
+        (yield* Ref.get(updateStatesRef)).map((state) => state.status),
+        ["queued", "queued", "running", "succeeded"],
+      );
+      // The runner released the lock it took.
+      assert.isFalse(yield* otherRyco.isHeld("cursor-agent"));
+    }).pipe(
+      Effect.provide(
+        Layer.mergeAll(
+          latestVersionHttpClient("0.0.0"),
+          mockSpawnerLayer((command, args) => {
+            calls.push([command, ...args].join(" "));
             return { stdout: "updated" };
           }),
         ),
