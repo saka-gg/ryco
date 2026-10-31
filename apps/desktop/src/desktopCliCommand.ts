@@ -21,6 +21,8 @@ const MAX_LAUNCHER_BYTES = 16 * 1024;
 const SERVER_ENTRY = "apps/server/dist/bin.mjs";
 
 const MOVED = "Ryco has moved or been removed. Open it once to update this command.";
+const AS_ROOT =
+  "Run ryco without sudo: as root it would leave files in your Ryco data that Ryco can't open.";
 
 export interface DesktopCliCommandEnvironment {
   readonly platform: NodeJS.Platform;
@@ -77,6 +79,11 @@ export function renderDesktopCliLauncher(input: {
       ? 'export RYCO_HOME="$home"'
       : 'export RYCO_HOME="${RYCO_HOME:-$home}"',
     'export RYCO_DESKTOP_CLI="$home"',
+    // Under sudo it would leave root-owned files in the user's data, which Ryco then can't open.
+    'if [ "$(id -u)" = 0 ] && [ "$(ls -nd "$RYCO_HOME" 2>/dev/null | awk \'{print $3}\')" != 0 ]; then',
+    `  echo "${AS_ROOT}" >&2`,
+    "  exit 1",
+    "fi",
     "export ELECTRON_RUN_AS_NODE=1",
     `app=${shellWord(target.kind === "appimage" ? target.appImage : target.executable)}`,
     'if [ ! -x "$app" ]; then',
@@ -312,19 +319,21 @@ export async function installDesktopCliCommand(
   const name = desktopCliCommandName(environment.flavor);
   const launcher = await writeDesktopCliLauncher(environment);
   const existing = await installedAt(environment);
-  if (existing !== null) {
-    const target = await FS.readlink(existing).catch(() => null);
-    if (target === launcher) return readDesktopCliCommandState(environment);
-    // Ours, but for an older home or path: replace it.
-    await FS.rm(existing).catch(() => {
-      throw new Error(`Could not replace ${existing}.`);
-    });
+  if (existing !== null && (await FS.readlink(existing).catch(() => null)) === launcher) {
+    return readDesktopCliCommandState(environment);
   }
+  // Refused before anything changes: a refused install keeps the command it had.
   const first = await firstOnPath(environment);
   if (first !== null && !(await runsOurLauncher(first, launcher))) {
     throw new Error(
       `Another ${name} at ${first} runs first in a new terminal. Remove it, or run the launcher directly at ${launcher}.`,
     );
+  }
+  if (existing !== null) {
+    // Ours, but for an older home or path: replace it.
+    await FS.rm(existing).catch(() => {
+      throw new Error(`Could not replace ${existing}.`);
+    });
   }
   const onPath = pathEntries(environment.path);
   const candidates = linkDirectories(environment);

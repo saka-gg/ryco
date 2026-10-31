@@ -1,4 +1,5 @@
 import { spawn as spawnChild } from "node:child_process";
+import { realpathSync } from "node:fs";
 import NodePath from "node:path";
 
 import { DEFAULT_HOSTED_APP_ORIGIN } from "@ryco/shared/hostedApp";
@@ -938,12 +939,22 @@ class DesktopOwnedNodeError extends Data.TaggedError("DesktopOwnedNodeError")<{
  * second node, or a service, for that home would fight the app over its data.
  * Returns the refusal, or `null` when `baseDir` is not the desktop app's home.
  */
+/** The folder's real path, so another spelling of it (a link, letter case on APFS) is the same. */
+const canonicalPath = (path: string) => {
+  const resolved = NodePath.resolve(path);
+  try {
+    return realpathSync.native(resolved);
+  } catch {
+    return resolved;
+  }
+};
+
 export const desktopOwnedNodeRefusal = (
   env: Readonly<Record<string, string | undefined>>,
   baseDir: string,
 ): string | null => {
   const desktopHome = env[DESKTOP_CLI_HOME_ENV]?.trim();
-  if (!desktopHome || NodePath.resolve(desktopHome) !== NodePath.resolve(baseDir)) return null;
+  if (!desktopHome || canonicalPath(desktopHome) !== canonicalPath(baseDir)) return null;
   return `Ryco Desktop runs the node for ${baseDir}. Open Ryco to start it; \`ryco --help\` lists the commands that work with it.`;
 };
 

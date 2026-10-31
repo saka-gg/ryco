@@ -1,5 +1,12 @@
 import * as NodeHttp from "node:http";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -1937,6 +1944,13 @@ it.layer(NodeServices.layer)("cli under Ryco Desktop's ryco command", (it) => {
     assert.isNull(desktopOwnedNodeRefusal(env, join(tmpdir(), "another-home")));
     assert.isNull(desktopOwnedNodeRefusal({}, home));
     assert.isNull(desktopOwnedNodeRefusal({ RYCO_DESKTOP_CLI: " " }, home));
+
+    // Another spelling of the same folder is the same home.
+    const real = mkdtempSync(join(tmpdir(), "ryco-desktop-real-home-"));
+    const link = `${real}-link`;
+    symlinkSync(real, link);
+    assert.isNotNull(desktopOwnedNodeRefusal({ RYCO_DESKTOP_CLI: real }, link));
+    assert.isNotNull(desktopOwnedNodeRefusal({ RYCO_DESKTOP_CLI: link }, real));
   });
 
   it.effect("still runs admin commands against the desktop app's home", () =>

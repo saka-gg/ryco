@@ -95,6 +95,27 @@ describe("renderDesktopCliLauncher", () => {
     );
   });
 
+  it("refuses to run as root for a data home root does not own", () => {
+    const root = tempRoot();
+    writeExecutable(Path.join(root, "app"), REPORTER);
+    FS.mkdirSync(`${root}/home`, { recursive: true });
+    const launcher = writeLauncher(root, {
+      kind: "direct",
+      executable: Path.join(root, "app"),
+      entry: "/bin.mjs",
+    });
+    // `sudo` stands in as an `id` that answers 0; the home belongs to this (non-root) user.
+    writeExecutable(Path.join(root, "fakebin", "id"), "#!/bin/sh\necho 0\n");
+    const asRoot = ChildProcess.spawnSync(launcher, ["auth", "pairing", "list"], {
+      encoding: "utf8",
+      env: { PATH: `${root}/fakebin:${process.env.PATH}` },
+    });
+    expect(asRoot.status).toBe(1);
+    expect(asRoot.stderr).toContain("Run ryco without sudo");
+    expect(asRoot.stdout).toBe("");
+    expect(run(launcher, ["auth"]).status).toBe(3);
+  });
+
   it("says the app moved instead of running something else", () => {
     const root = tempRoot();
     const launcher = writeLauncher(root, {
@@ -200,6 +221,21 @@ describe("installing the ryco command", () => {
     expect(state.commandName).toBe("ryco-nightly");
     expect(state.installedPath).toBe(Path.join(localBin, "ryco-nightly"));
     expect(FS.existsSync(Path.join(localBin, "ryco"))).toBe(false);
+  });
+
+  it("keeps the command it had when an install is refused", async () => {
+    const { root, localBin, homeDirectory, environment } = setup();
+    // Linked for another copy of the app: ours, but pointing elsewhere.
+    FS.mkdirSync(localBin, { recursive: true });
+    const older = Path.join(homeDirectory, "old-home", "bin", "ryco");
+    writeExecutable(older, `#!/bin/sh\n# ${DESKTOP_CLI_MARKER}\n`);
+    FS.symlinkSync(older, Path.join(localBin, "ryco"));
+    const npmBin = Path.join(root, "npm", "bin");
+    writeExecutable(Path.join(npmBin, "ryco"), "#!/bin/sh\necho npm\n");
+    await expect(
+      installDesktopCliCommand({ ...environment, path: `${npmBin}:${environment.path}` }),
+    ).rejects.toThrow("runs first in a new terminal");
+    expect(FS.readlinkSync(Path.join(localBin, "ryco"))).toBe(older);
   });
 
   it("refuses to install behind another ryco a new terminal runs first", async () => {
