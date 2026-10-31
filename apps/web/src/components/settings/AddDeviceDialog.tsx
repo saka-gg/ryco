@@ -123,7 +123,9 @@ function AddDeviceDialogContent({
   // revoked. Folded in during render (`observeAccess` returns `shown` itself
   // when nothing changed), so a new code also meets a listing it is already in.
   const shown =
-    storedShown === null ? null : observeAccess(storedShown, { pairingLinks, clientSessions });
+    storedShown === null
+      ? null
+      : observeAccess(storedShown, { pairingLinks, clientSessions, nowMs });
   if (shown !== storedShown) setShown(shown);
   const view = resolveAddDeviceView({ shown, reachable, clientSessions, nowMs });
 

@@ -14,6 +14,9 @@ describe("pairingQrUrl", () => {
       "[::ffff:127.0.0.1]",
       "0.0.0.0",
       "[::]",
+      // IPv4-mapped 0.0.0.0, and the old IPv4-compatible loopback.
+      "[::ffff:0:0]",
+      "[::7f00:1]",
     ]) {
       expect(pairingQrUrl(`http://${host}:3773/pair#token=PAIRCODE`), host).toBeNull();
     }

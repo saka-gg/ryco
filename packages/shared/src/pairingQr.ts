@@ -42,7 +42,10 @@ export function isHostUnreachableFromAnotherDevice(hostname: string): boolean {
     host.endsWith(".localhost") ||
     isWildcardHost(host) ||
     /^\[::ffff:7f[0-9a-f]{2}:[0-9a-f]{1,4}\]$/u.test(host) ||
-    host.startsWith("[::ffff:127.")
+    host.startsWith("[::ffff:127.") ||
+    // IPv4-mapped 0.0.0.0, and the old IPv4-compatible loopback.
+    host === "[::ffff:0:0]" ||
+    /^\[::7f[0-9a-f]{2}:[0-9a-f]{1,4}\]$/u.test(host)
   );
 }
 

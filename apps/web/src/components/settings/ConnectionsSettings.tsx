@@ -1034,24 +1034,24 @@ function PhonePairingLinkAction() {
   const [pairingLabel, setPairingLabel] = useState("");
   const [isCreatingPairingLink, setIsCreatingPairingLink] = useState(false);
 
-  const handleCreatePairingLink = useCallback(async () => {
+  const handleCreatePairingLink = useCallback(() => {
     setIsCreatingPairingLink(true);
-    try {
-      await createServerPairingCredential(pairingLabel);
-      setPairingLabel("");
-      setDialogOpen(false);
-    } catch (error) {
-      const message = error instanceof Error ? error.message : "Failed to create pairing URL.";
-      toastManager.add(
-        stackedThreadToast({
-          type: "error",
-          title: "Could not create pairing URL",
-          description: message,
-        }),
-      );
-    } finally {
-      setIsCreatingPairingLink(false);
-    }
+    void createServerPairingCredential(pairingLabel)
+      .then(() => {
+        setPairingLabel("");
+        setDialogOpen(false);
+      })
+      .catch((error: unknown) => {
+        const message = error instanceof Error ? error.message : "Failed to create pairing URL.";
+        toastManager.add(
+          stackedThreadToast({
+            type: "error",
+            title: "Could not create pairing URL",
+            description: message,
+          }),
+        );
+      })
+      .finally(() => setIsCreatingPairingLink(false));
   }, [pairingLabel]);
 
   if (!isPhoneTier) return null;
@@ -1103,7 +1103,7 @@ function PhonePairingLinkAction() {
           >
             Cancel
           </Button>
-          <Button disabled={isCreatingPairingLink} onClick={() => void handleCreatePairingLink()}>
+          <Button disabled={isCreatingPairingLink} onClick={handleCreatePairingLink}>
             {isCreatingPairingLink ? "Creating…" : "Create link"}
           </Button>
         </DialogFooter>

@@ -107,13 +107,21 @@ export function observeAccess(
   access: {
     readonly pairingLinks: ReadonlyArray<ServerPairingLinkRecord>;
     readonly clientSessions: ReadonlyArray<ServerClientSessionRecord>;
+    /** When the listing was read; now when omitted. */
+    readonly nowMs?: number;
   },
 ): ShownCode {
   let next = shown;
   const listed = access.pairingLinks.find((link) => link.id === shown.code.id);
   if (listed) {
     if (next.createdAt === null) next = { ...next, createdAt: listed.createdAt };
-  } else if (next.createdAt !== null && !next.removed) {
+  } else if (
+    next.createdAt !== null &&
+    !next.removed &&
+    // The node lists only unexpired codes: one that left the list after its expiry expired,
+    // and was neither redeemed nor withdrawn (nothing joined through it).
+    nowMsOf(access) < parseMs(next.code.expiresAt)
+  ) {
     next = { ...next, removed: true };
   }
   if (next.removed && next.joinedSessionId === null && next.createdAt !== null) {
@@ -123,17 +131,21 @@ export function observeAccess(
   return next;
 }
 
+const nowMsOf = (access: { readonly nowMs?: number }) => access.nowMs ?? Date.now();
+
 /** Whether the shown code can still pair a device. */
 export function isCodeLive(shown: ShownCode, nowMs: number): boolean {
   return !shown.removed && nowMs < parseMs(shown.code.expiresAt);
 }
 
 /**
- * The only code "New code" may revoke: the one on screen, and only while it is
- * live. An expired, redeemed or withdrawn code is already unusable.
+ * The only code "New code" may revoke: the one on screen, unless the node already removed it.
+ * Not judged by this device's clock: a clock running ahead would call a code expired that the
+ * node still accepts. The node's revoke touches that one code only, and nothing when it is used
+ * or expired.
  */
-export function codeToRevokeOnNewCode(shown: ShownCode | null, nowMs: number): string | null {
-  return shown !== null && isCodeLive(shown, nowMs) ? shown.code.id : null;
+export function codeToRevokeOnNewCode(shown: ShownCode | null, _nowMs: number): string | null {
+  return shown !== null && !shown.removed ? shown.code.id : null;
 }
 
 export type ReplaceCodeResult =

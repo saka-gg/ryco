@@ -72,7 +72,11 @@ const owner = session({
 
 /** The code as the dialog holds it after the listing showed it. */
 function listedShown(entry: AddDeviceCode = code()): ShownCode {
-  return observeAccess(showCode(entry), { pairingLinks: [listed(entry)], clientSessions: [owner] });
+  return observeAccess(showCode(entry), {
+    pairingLinks: [listed(entry)],
+    clientSessions: [owner],
+    nowMs: CREATED_MS,
+  });
 }
 
 /** Fake operations that record every call: the only reach the dialog has. */
@@ -129,6 +133,7 @@ describe("resolveAddDeviceView", () => {
     const shown = observeAccess(listedShown(), {
       pairingLinks: [],
       clientSessions: [owner, phone],
+      nowMs: CREATED_MS,
     });
 
     expect(shown).toMatchObject({ removed: true, joinedSessionId: "phone" });
@@ -159,7 +164,11 @@ describe("resolveAddDeviceView", () => {
   });
 
   it("shows withdrawn when the code left the listing with no new session", () => {
-    const shown = observeAccess(listedShown(), { pairingLinks: [], clientSessions: [owner] });
+    const shown = observeAccess(listedShown(), {
+      pairingLinks: [],
+      clientSessions: [owner],
+      nowMs: CREATED_MS,
+    });
 
     expect(
       resolveAddDeviceView({ shown, reachable: true, clientSessions: [owner], nowMs: CREATED_MS }),
@@ -171,8 +180,13 @@ describe("resolveAddDeviceView", () => {
     const joined = observeAccess(listedShown(), {
       pairingLinks: [],
       clientSessions: [owner, phone],
+      nowMs: CREATED_MS,
     });
-    const afterRevoke = observeAccess(joined, { pairingLinks: [], clientSessions: [owner] });
+    const afterRevoke = observeAccess(joined, {
+      pairingLinks: [],
+      clientSessions: [owner],
+      nowMs: CREATED_MS,
+    });
 
     expect(afterRevoke.joinedSessionId).toBe("phone");
     expect(
@@ -187,7 +201,11 @@ describe("resolveAddDeviceView", () => {
 
   it("does not call a code removed before the listing ever showed it", () => {
     // The mint response can arrive before the access stream lists the link.
-    const shown = observeAccess(showCode(code()), { pairingLinks: [], clientSessions: [owner] });
+    const shown = observeAccess(showCode(code()), {
+      pairingLinks: [],
+      clientSessions: [owner],
+      nowMs: CREATED_MS,
+    });
     expect(shown.removed).toBe(false);
     expect(
       resolveAddDeviceView({ shown, reachable: true, clientSessions: [owner], nowMs: CREATED_MS }),
@@ -203,7 +221,11 @@ describe("resolveAddDeviceView", () => {
   it("returns the same object when the listing brings nothing new", () => {
     const shown = listedShown();
     expect(
-      observeAccess(shown, { pairingLinks: [listed(shown.code)], clientSessions: [owner] }),
+      observeAccess(shown, {
+        pairingLinks: [listed(shown.code)],
+        clientSessions: [owner],
+        nowMs: CREATED_MS,
+      }),
     ).toBe(shown);
   });
 });
@@ -225,11 +247,31 @@ describe("New code", () => {
       nowMs: CREATED_MS + FIVE_MINUTES_MS,
       label: null,
     });
-    expect(expired.calls).toEqual([{ name: "createCode", arg: null }]);
+    // Not judged by this device's clock: the node may still accept a code this clock calls
+    // expired, and its revoke does nothing to an expired one.
+    expect(expired.calls).toEqual([
+      { name: "revokeCode", arg: "link-1" },
+      { name: "createCode", arg: null },
+    ]);
 
-    const removed = observeAccess(shown, { pairingLinks: [], clientSessions: [owner] });
+    const removed = observeAccess(shown, {
+      pairingLinks: [],
+      clientSessions: [owner],
+      nowMs: CREATED_MS,
+    });
     expect(codeToRevokeOnNewCode(removed, CREATED_MS)).toBeNull();
     expect(codeToRevokeOnNewCode(null, CREATED_MS)).toBeNull();
+  });
+
+  it("never reads a code that left the list after its expiry as withdrawn or joined", () => {
+    const shown = listedShown();
+    const afterExpiry = observeAccess(shown, {
+      pairingLinks: [],
+      clientSessions: [owner],
+      nowMs: CREATED_MS + FIVE_MINUTES_MS + 1,
+    });
+    expect(afterExpiry.removed).toBe(false);
+    expect(afterExpiry.joinedSessionId).toBeNull();
   });
 
   it("keeps the old code and mints nothing when the revoke fails", async () => {
@@ -252,8 +294,16 @@ describe("New code", () => {
 
     const phone = session({ sessionId: "phone" });
     const live = listedShown();
-    const joined = observeAccess(live, { pairingLinks: [], clientSessions: [owner, phone] });
-    const withdrawn = observeAccess(live, { pairingLinks: [], clientSessions: [owner] });
+    const joined = observeAccess(live, {
+      pairingLinks: [],
+      clientSessions: [owner, phone],
+      nowMs: CREATED_MS,
+    });
+    const withdrawn = observeAccess(live, {
+      pairingLinks: [],
+      clientSessions: [owner],
+      nowMs: CREATED_MS,
+    });
     for (const shown of [null, live, joined, withdrawn]) {
       for (const nowMs of [CREATED_MS, CREATED_MS + FIVE_MINUTES_MS]) {
         await replaceCode({ operations, shown, nowMs, label: null });
@@ -261,7 +311,8 @@ describe("New code", () => {
     }
 
     const revoked = calls.filter((call) => call.name === "revokeCode").map((call) => call.arg);
-    expect(revoked).toEqual(["link-1"]);
+    // Only the code on screen, at either clock reading: never a session.
+    expect(revoked).toEqual(["link-1", "link-1"]);
     expect(revoked).not.toContain("phone");
     expect(revoked).not.toContain("owner");
   });
