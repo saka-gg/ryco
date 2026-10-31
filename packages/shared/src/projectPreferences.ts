@@ -1,5 +1,6 @@
 import {
   PROJECT_PREFERENCE_VALUES,
+  type PreferenceSource,
   type ProjectPreferenceValueKey,
   type ServerSettings,
 } from "@ryco/contracts/settings";
@@ -115,4 +116,32 @@ export function readProjectPreferenceText<K extends ProjectPreferenceValueKey>(
   return Schema.is(PROJECT_PREFERENCE_VALUES.fields[key])(value)
     ? (value as ServerSettings[K])
     : null;
+}
+
+/** How a value of the setting reads: its option's label, or the text itself (empty shows the placeholder). */
+export function projectPreferenceValueLabel(
+  key: ProjectPreferenceValueKey,
+  value: unknown,
+): string {
+  const field = PROJECT_PREFERENCE_FIELDS[key];
+  if (field.kind === "text") return typeof value === "string" && value ? value : field.placeholder;
+  return field.options.find((option) => option.value === value)?.label ?? String(value);
+}
+
+/**
+ * Where a preference's value comes from, in the words every settings surface uses: a project's
+ * own override, or the defaults it inherits. `nodeNoun` names the node those defaults belong to
+ * the way the surface does: "device" in the web and desktop app, "node" on the phone, which is a
+ * device itself. Undefined while the node's answer loads.
+ */
+export function projectPreferenceSourceLabel(
+  source: PreferenceSource | undefined,
+  scope: { readonly projectId?: string | null | undefined; readonly nodeNoun: "device" | "node" },
+): string {
+  if (source === undefined) return "Loading…";
+  if (source === "project" || source === "legacy-project") return "Overridden for this project";
+  if (scope.projectId)
+    return `Inherited from ${source === "builtin" ? "Ryco" : scope.nodeNoun} defaults`;
+  if (source === "builtin") return "Ryco default";
+  return scope.nodeNoun === "device" ? "Device default" : "Node default";
 }

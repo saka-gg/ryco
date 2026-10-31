@@ -13,6 +13,7 @@ import { readRpcClient, updateEnvironmentServerSettings } from "../../connection
 import { useEnvironmentServerConfigs } from "../../state/environmentServerConfigs";
 import { SettingsRow } from "./components/SettingsRow";
 import { SettingsSection } from "./components/SettingsSection";
+import { canChangeNodeSettings } from "./nodeSettingsTargets";
 
 export function NodeStorageSettings() {
   const nodes = useHomeEnvironments();
@@ -23,11 +24,7 @@ export function NodeStorageSettings() {
           key={node.environmentId}
           environmentId={node.environmentId}
           label={node.label}
-          ready={
-            node.mutationReady === true &&
-            node.role === "owner" &&
-            node.connectionState === "connected"
-          }
+          ready={canChangeNodeSettings(node)}
         />
       ))}
     </>

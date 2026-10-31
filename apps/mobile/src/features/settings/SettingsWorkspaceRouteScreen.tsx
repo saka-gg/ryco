@@ -1,15 +1,10 @@
 import {
-  WORKTREE_SUBMODULE_OPTIONS,
-  selectWorktreeSubmodules,
-} from "@ryco/shared/worktreeSubmodules";
-import { useStore } from "../../state/threadsRuntime";
-import { useEnvironmentServerConfigs } from "../../state/environmentServerConfigs";
-import {
   isClaudeResumeReviewEnabled,
   updatePreferences,
   useIsPreferencesHydrated,
   usePreferences,
 } from "../../state/preferencesStore";
+import { NodeNewTaskDefaults } from "./NodeNewTaskDefaults";
 import { NodeStorageSettings } from "./NodeStorageSettings";
 import { NodeUpdatesSettings } from "./updates/NodeUpdatesSettings";
 import { useNavigation } from "@react-navigation/native";
@@ -22,12 +17,6 @@ import { openMachinesFromSettings } from "./openMachinesFromSettings";
 
 export function SettingsWorkspaceRouteScreen() {
   const navigation = useNavigation();
-  const environmentId = useStore((state) => state.activeEnvironmentId);
-  const configs = useEnvironmentServerConfigs();
-  const config = environmentId ? configs.get(environmentId) : undefined;
-  const supported = config?.environment.capabilities.worktreeSubmoduleSettings === true;
-  const settings = supported ? config?.settings : undefined;
-  const submoduleMode = settings ? selectWorktreeSubmodules({ settings }).mode : undefined;
   const preferences = usePreferences();
   const preferencesHydrated = useIsPreferencesHydrated();
 
@@ -49,23 +38,8 @@ export function SettingsWorkspaceRouteScreen() {
 
       <NodeStorageSettings />
       <NodeUpdatesSettings />
-
-      <SettingsSection title="New tasks">
-        <SettingsRow first label="Provider and model" value="Project default" />
-        <SettingsRow label="Runtime mode" value="Thread default" />
-        <SettingsRow
-          label="Worktree submodules"
-          value={
-            WORKTREE_SUBMODULE_OPTIONS.find((option) => option.value === submoduleMode)?.label ??
-            (config ? "Update this machine" : "Connect a machine")
-          }
-          detail={
-            config && !supported
-              ? "This node does not support configurable submodules."
-              : "Node default. New worktrees also honor project overrides and repository configuration."
-          }
-        />
-      </SettingsSection>
+      {/* Runtime mode is execution authority: chosen per task, never a default edited here. */}
+      <NodeNewTaskDefaults />
 
       {/* Device-local. Shown once preferences load: a switch flipped before then would
           save over the preferences this device already keeps. */}

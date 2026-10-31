@@ -2,7 +2,12 @@ import { PROJECT_PREFERENCE_VALUE_KEYS, PROJECT_PREFERENCE_VALUES } from "@ryco/
 import { Schema } from "effect";
 import { describe, expect, it } from "vite-plus/test";
 
-import { PROJECT_PREFERENCE_FIELDS, readProjectPreferenceText } from "./projectPreferences.ts";
+import {
+  PROJECT_PREFERENCE_FIELDS,
+  projectPreferenceSourceLabel,
+  projectPreferenceValueLabel,
+  readProjectPreferenceText,
+} from "./projectPreferences.ts";
 
 describe("project preference fields", () => {
   it("presents every registry key, in registry order", () => {
@@ -32,5 +37,36 @@ describe("project preference fields", () => {
     expect(readProjectPreferenceText("worktreeBranchPrefix", "")).toBe("");
     for (const input of ["team/", "a..b", "a".repeat(129)])
       expect(readProjectPreferenceText("worktreeBranchPrefix", input)).toBeNull();
+  });
+
+  it("reads a value as its option's label, or the text with the placeholder for none", () => {
+    expect(projectPreferenceValueLabel("defaultThreadEnvMode", "worktree")).toBe("New worktree");
+    expect(projectPreferenceValueLabel("runSetupScript", false)).toBe("Skip setup");
+    expect(projectPreferenceValueLabel("worktreeBranchPrefix", "team")).toBe("team");
+    expect(projectPreferenceValueLabel("worktreeBranchPrefix", "")).toBe("No prefix");
+  });
+});
+
+describe("project preference sources", () => {
+  it("words each source the same on every surface, naming the node as the surface does", () => {
+    const device = { nodeNoun: "device" } as const;
+    const node = { nodeNoun: "node" } as const;
+    expect(projectPreferenceSourceLabel(undefined, device)).toBe("Loading…");
+    for (const source of ["project", "legacy-project"] as const)
+      expect(projectPreferenceSourceLabel(source, { ...node, projectId: "p" })).toBe(
+        "Overridden for this project",
+      );
+    expect(projectPreferenceSourceLabel("node", { ...device, projectId: "p" })).toBe(
+      "Inherited from device defaults",
+    );
+    expect(projectPreferenceSourceLabel("node", { ...node, projectId: "p" })).toBe(
+      "Inherited from node defaults",
+    );
+    expect(projectPreferenceSourceLabel("builtin", { ...node, projectId: "p" })).toBe(
+      "Inherited from Ryco defaults",
+    );
+    expect(projectPreferenceSourceLabel("node", device)).toBe("Device default");
+    expect(projectPreferenceSourceLabel("node", node)).toBe("Node default");
+    expect(projectPreferenceSourceLabel("builtin", node)).toBe("Ryco default");
   });
 });
