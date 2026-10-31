@@ -171,7 +171,8 @@ it("records a direct socket's own addresses, TLS state and forwarding headers", 
   ).toEqual({
     kind: "direct",
     remote: "loopback",
-    local: "loopback",
+    remoteAddress: "127.0.0.1",
+    localAddress: "127.0.0.1",
     tls: false,
     forwarding: {
       forwardedFor: "100.64.0.9",
@@ -186,18 +187,34 @@ it("records a direct socket's own addresses, TLS state and forwarding headers", 
   expect(tls).toMatchObject({
     kind: "direct",
     remote: "other",
-    local: undefined,
+    remoteAddress: "192.168.1.20",
+    localAddress: undefined,
     tls: true,
     forwarding: { forwarded: "for=a, for=b" },
   });
-  // Addresses are recorded by kind: IPv4-mapped loopback, Tailscale over IPv4 and IPv6.
-  const kinds = (remoteAddress: string, localAddress: string) => {
+  // The peer's address is recorded by kind too: IPv4-mapped loopback, Tailscale over IPv4 and
+  // IPv6. The node's own end stays as the runtime reports it, for the lazy classification.
+  const recorded = (remoteAddress: string, localAddress: string) => {
     const connection = directConnectionOf(upgrade(remoteAddress, {}, { localAddress })).connection;
-    return connection?.kind === "direct" ? [connection.remote, connection.local] : undefined;
+    return connection?.kind === "direct"
+      ? [connection.remote, connection.remoteAddress, connection.localAddress]
+      : undefined;
   };
-  expect(kinds("::ffff:127.0.0.1", "::ffff:127.0.0.1")).toEqual(["loopback", "loopback"]);
-  expect(kinds("::ffff:100.101.102.103", "100.64.0.7")).toEqual(["tailscale", "tailscale"]);
-  expect(kinds("fd7a:115c:a1e0::5", "192.168.1.10")).toEqual(["tailscale", "other"]);
+  expect(recorded("::ffff:127.0.0.1", "::ffff:127.0.0.1")).toEqual([
+    "loopback",
+    "::ffff:127.0.0.1",
+    "::ffff:127.0.0.1",
+  ]);
+  expect(recorded("::ffff:100.101.102.103", "100.64.0.7")).toEqual([
+    "tailscale",
+    "::ffff:100.101.102.103",
+    "100.64.0.7",
+  ]);
+  expect(recorded("fd7a:115c:a1e0::5", "192.168.1.10")).toEqual([
+    "tailscale",
+    "fd7a:115c:a1e0::5",
+    "192.168.1.10",
+  ]);
 });
 
 it("reads a relay channel's encryption per request, and none by default", () => {

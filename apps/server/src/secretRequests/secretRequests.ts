@@ -57,7 +57,7 @@ import type { ProjectionSnapshotQueryShape } from "../orchestration/Services/Pro
 import type { findThreadInArray } from "../orchestration/threadIndex.ts";
 import type { WorkspaceAccessPolicyShape } from "../workspace/Services/WorkspaceAccessPolicy.ts";
 import type { RpcConnectionFacts } from "../ws/RpcPrincipal.ts";
-import { isEncryptedConnectionPath, rpcConnectionPath } from "../ws/rpcConnectionPath.ts";
+import { isEncryptedConnectionPath, readRpcConnectionPath } from "../ws/rpcConnectionPath.ts";
 import {
   DotenvSinkError,
   LEFTOVER_TEMPORARY_MIN_AGE_MS,
@@ -75,6 +75,13 @@ export interface SecretRequestDeps {
   readonly workspaceAccess?: Pick<WorkspaceAccessPolicyShape, "assertExistingPath"> | undefined;
   /** Passed in from the boot path, so this lazily loaded module does not split it out. */
   readonly findThreadInArray: typeof findThreadInArray;
+  /**
+   * This machine's own Tailscale addresses, as Tailscale reports them (`undefined` when it
+   * cannot say): a direct answer from a Tailscale-range peer is taken only on one of them. From
+   * the boot path too (the endpoint registry's service), so this module does not split the
+   * Tailscale package out of boot. Only answers read it.
+   */
+  readonly readNodeTailscaleAddresses?: Effect.Effect<ReadonlyArray<string> | undefined>;
 }
 
 const failWith = (reason: SecretRequestFailureReason) =>
@@ -486,7 +493,7 @@ export const currentSecretRequest = (
  * closes the request (decline). Every failure is a fixed reason; the value appears in none.
  *
  * A value is taken only from a connection the node itself saw as encrypted, or as never on a
- * network in the clear (`rpcConnectionPath`), and refused before anything reads it: it is not
+ * network in the clear (`readRpcConnectionPath`), and refused before anything reads it: it is not
  * checked, written or recorded. A decline carries no value and is taken from any connection, so
  * a request can always be closed.
  */
@@ -499,11 +506,12 @@ export const answerSecretRequest = (
     input.threadId,
     input.requestId,
     Effect.gen(function* () {
-      if (
-        input.answer.type === "provide" &&
-        !isEncryptedConnectionPath(rpcConnectionPath(connection))
-      ) {
-        return yield* failWith("unencrypted-connection");
+      if (input.answer.type === "provide") {
+        const path = yield* readRpcConnectionPath(
+          connection,
+          deps.readNodeTailscaleAddresses ?? Effect.succeed(undefined),
+        );
+        if (!isEncryptedConnectionPath(path)) return yield* failWith("unencrypted-connection");
       }
       const thread = yield* readThread(deps, input.threadId);
       if (thread === undefined) return yield* failWith("not-found");

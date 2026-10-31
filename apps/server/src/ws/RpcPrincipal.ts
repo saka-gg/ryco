@@ -61,8 +61,13 @@ export type RpcConnectionFacts =
       readonly kind: "direct";
       /** What the peer's socket address is. */
       readonly remote: RpcSocketAddressKind;
-      /** What the node's own end of the socket is; absent when the runtime does not say. */
-      readonly local: RpcSocketAddressKind | undefined;
+      /** The peer's socket address, as the runtime reports it. */
+      readonly remoteAddress: string;
+      /**
+       * The node's own end of the socket, as the runtime reports it; absent when it does not
+       * say. Compared with the peer's address and the node's own Tailscale addresses when read.
+       */
+      readonly localAddress: string | undefined;
       /** The socket itself is TLS. */
       readonly tls: boolean;
       /**
@@ -221,8 +226,8 @@ export const directConnectionOf = (
     connection: {
       kind: "direct",
       remote: socketAddressKind(remoteAddress),
-      local:
-        socket?.localAddress === undefined ? undefined : socketAddressKind(socket.localAddress),
+      remoteAddress,
+      localAddress: socket?.localAddress,
       tls: socket?.encrypted === true,
       forwarding: {
         forwardedFor: headerText(headers["x-forwarded-for"]),

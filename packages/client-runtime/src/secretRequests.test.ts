@@ -71,7 +71,7 @@ describe("secret request cards", () => {
     expect(
       secretRequestFailureText(new SecretRequestError({ reason: "unencrypted-connection" })),
     ).toBe(
-      "Secrets can only be sent over an encrypted connection. Open Ryco on the computer it runs on, or connect over HTTPS or Tailscale.",
+      "Secrets need an end-to-end encrypted connection: update the app, open Ryco on the computer it runs on, or connect to that computer over HTTPS or Tailscale.",
     );
     // A transport or encoding error could describe the payload: generic copy instead.
     const leaky = new Error(`Expected a string, got "${VALUE}"`);

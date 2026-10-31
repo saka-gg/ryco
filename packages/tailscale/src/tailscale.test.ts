@@ -92,6 +92,7 @@ describe("tailscale", () => {
       assert.deepEqual(status, {
         magicDnsName: "desktop.tail.ts.net",
         tailnetIpv4Addresses: ["100.100.100.100"],
+        tailnetAddresses: ["100.100.100.100", "fd7a:115c:a1e0::1"],
       });
     }),
   );
@@ -123,6 +124,7 @@ describe("tailscale", () => {
       assert.deepEqual(status, {
         magicDnsName: "desktop.tail.ts.net",
         tailnetIpv4Addresses: ["100.90.1.2"],
+        tailnetAddresses: ["100.90.1.2"],
       });
     });
   });

@@ -1,8 +1,10 @@
+import { Effect } from "effect";
 import { describe, expect, it } from "vite-plus/test";
 
 import { directConnectionOf, type RpcConnectionFacts } from "./RpcPrincipal.ts";
 import {
   isEncryptedConnectionPath,
+  readRpcConnectionPath,
   rpcConnectionPath,
   type RpcConnectionPath,
 } from "./rpcConnectionPath.ts";
@@ -41,6 +43,9 @@ const direct = (
   if (connection === undefined) throw new Error("no connection facts");
   return connection;
 };
+
+/** This node's own Tailscale addresses, as `tailscale status` lists them. */
+const NODE_TAILSCALE = ["100.64.0.7", "fd7a:115c:a1e0::1"];
 
 const relay = (encrypted: boolean): RpcConnectionFacts => ({
   kind: "relay",
@@ -93,6 +98,24 @@ describe("rpcConnectionPath", () => {
       ],
       ["plain ws:// from the internet", direct("203.0.113.9"), "direct-plain"],
       [
+        "this machine on its own LAN address",
+        direct("192.168.1.10", { localAddress: "192.168.1.10" }),
+        "direct-loopback",
+      ],
+      [
+        "this machine on its own address, IPv4-mapped",
+        direct("::ffff:192.168.1.10", { localAddress: "192.168.1.10" }),
+        "direct-loopback",
+      ],
+      [
+        "a proxy on this machine's LAN address relaying plain HTTP",
+        direct("192.168.1.10", {
+          localAddress: "192.168.1.10",
+          forwarding: { forwardedFor: "192.168.1.20", forwardedProto: "http" },
+        }),
+        "direct-plain",
+      ],
+      [
         "a local proxy relaying plain HTTP",
         direct("127.0.0.1", {
           forwarding: { forwardedFor: "192.168.1.20", forwardedProto: "http" },
@@ -112,7 +135,7 @@ describe("rpcConnectionPath", () => {
       ["no facts", undefined, "unknown"],
     ];
     for (const [name, facts, expected] of cases) {
-      expect(rpcConnectionPath(facts), name).toBe(expected);
+      expect(rpcConnectionPath(facts, NODE_TAILSCALE), name).toBe(expected);
     }
   });
 
@@ -168,14 +191,62 @@ describe("rpcConnectionPath", () => {
     ).toBe("direct-tls");
   });
 
-  it("needs both ends on Tailscale addresses, not a carrier-grade NAT source alone", () => {
-    expect(rpcConnectionPath(direct("100.101.102.103", { localAddress: "192.168.1.10" }))).toBe(
-      "direct-plain",
-    );
-    expect(rpcConnectionPath(direct("100.101.102.103"))).toBe("direct-plain");
-    expect(rpcConnectionPath(direct("192.168.1.20", { localAddress: "100.64.0.7" }))).toBe(
-      "direct-plain",
-    );
+  it("needs the node's own Tailscale address as the local end, not the range alone", () => {
+    expect(
+      rpcConnectionPath(
+        direct("100.101.102.103", { localAddress: "192.168.1.10" }),
+        NODE_TAILSCALE,
+      ),
+    ).toBe("direct-plain");
+    expect(rpcConnectionPath(direct("100.101.102.103"), NODE_TAILSCALE)).toBe("direct-plain");
+    expect(
+      rpcConnectionPath(direct("192.168.1.20", { localAddress: "100.64.0.7" }), NODE_TAILSCALE),
+    ).toBe("direct-plain");
+    // A pod network numbered in 100.64.0.0/10 (kops, EKS) carries plain ws:// between pods.
+    expect(
+      rpcConnectionPath(direct("100.96.1.2", { localAddress: "100.96.1.3" }), NODE_TAILSCALE),
+    ).toBe("direct-plain");
+    // Unknown node addresses fail closed; none (Tailscale off) too.
+    const tailscale = direct("100.101.102.103", { localAddress: "100.64.0.7" });
+    expect(rpcConnectionPath(tailscale)).toBe("direct-plain");
+    expect(rpcConnectionPath(tailscale, [])).toBe("direct-plain");
+    expect(rpcConnectionPath(tailscale, NODE_TAILSCALE)).toBe("direct-tailscale");
+  });
+
+  it("never reads a wildcard address as this machine", () => {
+    expect(rpcConnectionPath(direct("0.0.0.0", { localAddress: "0.0.0.0" }))).toBe("direct-plain");
+    expect(rpcConnectionPath(direct("::", { localAddress: "::" }))).toBe("direct-plain");
+  });
+
+  it("reads the node's Tailscale addresses only for a Tailscale peer, and fails closed", async () => {
+    const tailscale = direct("100.101.102.103", { localAddress: "100.64.0.7" });
+    let reads = 0;
+    const reader = (addresses: ReadonlyArray<string> | undefined) =>
+      Effect.sync(() => {
+        reads += 1;
+        return addresses;
+      });
+    const read = (
+      facts: RpcConnectionFacts | undefined,
+      from: Effect.Effect<ReadonlyArray<string> | undefined>,
+    ) => Effect.runPromise(readRpcConnectionPath(facts, from));
+
+    expect(await read(tailscale, reader(NODE_TAILSCALE))).toBe("direct-tailscale");
+    expect(await read(tailscale, reader(undefined))).toBe("direct-plain");
+    expect(await read(tailscale, Effect.die(new Error("no tailscale CLI")))).toBe("direct-plain");
+    expect(reads).toBe(2);
+    for (const facts of [
+      relay(true),
+      direct("127.0.0.1"),
+      direct("192.168.1.20", { localAddress: "192.168.1.10" }),
+      direct("100.101.102.103", { localAddress: "100.64.0.7", tls: true }),
+      direct("100.101.102.103", { localAddress: "100.101.102.103" }),
+      direct("100.101.102.103"),
+      undefined,
+    ]) {
+      await read(facts, reader(NODE_TAILSCALE));
+    }
+    expect(reads).toBe(2);
   });
 
   it("counts only encrypted or on-machine paths as fit for a secret", () => {

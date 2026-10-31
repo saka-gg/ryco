@@ -170,7 +170,7 @@ describe("the card's send", () => {
     expect(unencrypted).toEqual({
       kind: "failed",
       error:
-        "Secrets can only be sent over an encrypted connection. Open Ryco on the computer it runs on, or connect over HTTPS or Tailscale.",
+        "Secrets need an end-to-end encrypted connection: update the app, open Ryco on the computer it runs on, or connect to that computer over HTTPS or Tailscale.",
     });
 
     // No connection: finding the API throws, and the transport's text is never shown.

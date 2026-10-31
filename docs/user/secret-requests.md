@@ -75,8 +75,10 @@ saves it only when that connection is encrypted, or never left the node's comput
 
 - through your Ryco account, when the relay channel is end-to-end encrypted (the iPhone app, and
   the web app's encrypted web channel);
-- on the node's own computer (the desktop app, or a browser at `localhost`);
-- over HTTPS (Tailscale Serve, say) or a Tailscale address.
+- on the node's own computer (the desktop app, or a browser at `localhost` or at the computer's
+  own address);
+- over HTTPS (Tailscale Serve, say) or one of the node's Tailscale addresses. The node asks
+  `tailscale status` for them, so it needs the `tailscale` command; without it, use HTTPS.
 
 Anything else is refused, and the card says so: a relay channel without end-to-end encryption (a
 node's default `compatibility` policy still accepts them, for older apps), or a plain `http://`
@@ -85,3 +87,9 @@ an encrypted connection. Declining works over every connection.
 
 The node can only refuse a value it has received: by then it has crossed that connection. If you
 saved a secret over a plain `http://` address on a network you do not trust, replace the secret.
+
+If you put your own reverse proxy in front of the node, it must set the protocol header itself,
+replacing whatever the browser sent. With nginx: `proxy_set_header X-Forwarded-Proto $scheme;`.
+Otherwise a browser on plain `http://` could claim HTTPS. And through a Tailscale subnet router,
+the node sees the router's Tailscale address, not the device behind it: the hop from that device
+to the router is only as safe as the network it crosses.

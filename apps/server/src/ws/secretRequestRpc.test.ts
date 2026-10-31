@@ -41,11 +41,18 @@ const relayOwner = (encrypted: boolean, role: "owner" | "viewer" = "owner") =>
  * The handler with the principal's own context: the owner check, the connection the principal
  * recorded, and an engine that knows no thread, so an answer the channel admits ends `not-found`.
  */
-const answer = (principal: RpcPrincipal, type: "provide" | "decline") => {
+const answer = (
+  principal: RpcPrincipal,
+  type: "provide" | "decline",
+  readNodeTailscaleAddresses: Effect.Effect<ReadonlyArray<string> | undefined> = Effect.succeed([
+    "100.100.1.2",
+  ]),
+) => {
   const ctx = {
     ownerEffect: <A, E, R>(method: string, effect: Effect.Effect<A, E, R>) =>
       authorizeRpcPrincipal(principal, "owner", method).pipe(Effect.andThen(effect)),
     connection: principal.connection,
+    readNodeTailscaleAddresses,
     orchestrationEngine: {
       getReadModel: () => Effect.succeed({ threads: [] }),
       dispatch: () => Effect.die("unused"),
@@ -105,6 +112,25 @@ describe("secrets.answerRequest over each connection", () => {
     ],
   ] as const)("takes a value over %s only when encrypted", async (_name, principal, expected) => {
     expect(await answer(principal, "provide")).toBe(expected);
+  });
+
+  it("takes a value from a Tailscale-range peer only on the node's own Tailscale address", async () => {
+    // A pod network numbered in 100.64.0.0/10 is plain ws:// between pods.
+    expect(await answer(directOwner("100.96.1.2", {}, "100.96.1.3"), "provide")).toBe(
+      "unencrypted-connection",
+    );
+    // A node that cannot read its Tailscale addresses refuses.
+    expect(
+      await answer(
+        directOwner("100.64.0.9", {}, "100.100.1.2"),
+        "provide",
+        Effect.succeed(undefined),
+      ),
+    ).toBe("unencrypted-connection");
+    // A browser on this machine opening its LAN address is this machine.
+    expect(await answer(directOwner("192.168.1.10", {}, "192.168.1.10"), "provide")).toBe(
+      "not-found",
+    );
   });
 
   it("takes a decline over any connection", async () => {

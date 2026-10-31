@@ -39,7 +39,7 @@ const FAILURE_MESSAGES: Record<SecretRequestFailureReason, string> = {
   "write-failed": "Could not write the file.",
   "record-failed": "The file was written, but the request could not be updated. Try again.",
   "unencrypted-connection":
-    "Secrets can only be sent over an encrypted connection. Open Ryco on the computer it runs on, or connect over HTTPS or Tailscale.",
+    "Secrets need an end-to-end encrypted connection: update the app, open Ryco on the computer it runs on, or connect to that computer over HTTPS or Tailscale.",
 };
 
 /** The words for a refusal, for the card and the agent. Fixed per reason: never the value. */

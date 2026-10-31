@@ -1518,6 +1518,8 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
       loadServerConfig,
       streamChatsConfigSnapshots,
       loadAdvertisedEndpoints,
+      /** This machine's own Tailscale addresses (`tailscale status`), for the secret answer. */
+      readNodeTailscaleAddresses: advertisedEndpointRegistry.tailscaleAddresses,
       issueLinkedDirectAccessForChannel,
       loadDiagnosticsMetrics,
       loadDiagnosticsSnapshot,

@@ -386,12 +386,17 @@ app, not the frozen web phone tier), and the node writes `KEY='value'` into that
   client's claim (`RpcPrincipal.connection`, classified by `ws/rpcConnectionPath.ts`):
   - **Taken:** a relay channel in `e2ee` mode, on every tier (native IK, and web NX, whose records
     are sealed between the browser and the node, so the Hub relays ciphertext; the Hub still
-    serves the web code, which no transport check can lift); a loopback peer without forwarding
-    headers (the desktop app, a browser on the node, an SSH port forward); a TLS socket, or a
-    loopback peer whose forwarding headers say HTTPS (`X-Forwarded-Proto` or `Forwarded`
-    `proto`, the last entry of each, every one present saying `https`), such as Tailscale Serve;
-    a socket whose two ends are both Tailscale addresses (`100.64.0.0/10` or
-    `fd7a:115c:a1e0::/48`; both ends, because a carrier-grade NAT source alone is not WireGuard).
+    serves the web code, which no transport check can lift); a peer on this machine without
+    forwarding headers: a loopback peer, or one whose address is the node's own end of the socket
+    (the desktop app, a browser on the node, also at the node's LAN address, an SSH port
+    forward); a TLS socket, or a peer on this machine whose forwarding headers say HTTPS
+    (`X-Forwarded-Proto` or `Forwarded` `proto`, the last entry of each, every one present saying
+    `https`), such as Tailscale Serve; a peer in Tailscale's range (`100.64.0.0/10` or
+    `fd7a:115c:a1e0::/48`) that reached the node on one of the node's own Tailscale addresses, as
+    `tailscale status` lists them (read with the answer, cached for a minute). The range alone is
+    not enough: carrier-grade NAT and some cluster pod networks (kops, EKS) are numbered in it
+    too. When the node cannot read its Tailscale addresses (no `tailscale` CLI on its `PATH`),
+    a Tailscale peer is refused.
   - **Refused** with `SecretRequestError` `unencrypted-connection`, before the value is checked,
     written or recorded: a relay channel in `legacy` mode (or still negotiating, or closed), plain
     `ws://` from another machine, a loopback proxy that names a plain protocol or none, and a
@@ -400,9 +405,14 @@ app, not the frozen web phone tier), and the node writes `KEY='value'` into that
     closed.
   - Not covered: the value has already crossed the connection when the node refuses it (the card
     cannot see the connection's state before it sends); a local proxy that passes a client's own
-    `X-Forwarded-Proto` through untouched, or a plain TCP forwarder on the node (`socat`, say),
-    looks like the case it imitates; Tailscale Serve over plain HTTP is refused (Ryco sets Serve
-    up over HTTPS).
+    `X-Forwarded-Proto` or `Forwarded` through untouched (one that sets only `X-Forwarded-For`,
+    say), or a plain TCP forwarder on the node (`socat`, say), looks like the case it imitates;
+    Tailscale Serve over plain HTTP is refused (Ryco sets Serve up over HTTPS); a Tailscale
+    subnet router that masquerades (SNAT, its default) makes a client on its remote LAN look like
+    a Tailscale peer, though the hop from that client to the router was plain.
+  - A reverse proxy in front of the node must set the protocol header itself, overwriting
+    whatever the client sent. With nginx: `proxy_set_header X-Forwarded-Proto $scheme;` (and no
+    `Forwarded` passed through). Tailscale Serve already does.
 - **Who else can read it.** Operators of a shared node can read the saved file with
   `projects.readFile`. Older clients and the web phone tier show the thread as waiting but have
   no card, so they can neither answer nor decline; the request then waits for its 24 hours.

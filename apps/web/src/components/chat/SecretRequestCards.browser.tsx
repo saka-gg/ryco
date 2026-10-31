@@ -178,7 +178,7 @@ describe("SecretRequestCards", () => {
     await expect
       .element(page.getByRole("alert"))
       .toHaveTextContent(
-        "Secrets can only be sent over an encrypted connection. Open Ryco on the computer it runs on, or connect over HTTPS or Tailscale.",
+        "Secrets need an end-to-end encrypted connection: update the app, open Ryco on the computer it runs on, or connect to that computer over HTTPS or Tailscale.",
       );
     expect(refusing.sent).toHaveLength(1);
     expect(host.querySelector('[role="alert"]')?.textContent).not.toContain(VALUE);

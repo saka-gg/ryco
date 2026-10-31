@@ -30,6 +30,7 @@ export const makeSecretRequestHandlers = (ctx: WsRpcContext) =>
                   projections: ctx.projectionSnapshotQuery,
                   workspaceAccess: ctx.workspaceAccessPolicy,
                   findThreadInArray,
+                  readNodeTailscaleAddresses: ctx.readNodeTailscaleAddresses,
                 },
                 input,
                 ctx.connection,

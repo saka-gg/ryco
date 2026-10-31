@@ -67,7 +67,8 @@ const NO_FORWARDING = {
 const LOOPBACK: RpcConnectionFacts = {
   kind: "direct",
   remote: "loopback",
-  local: "loopback",
+  remoteAddress: "127.0.0.1",
+  localAddress: "127.0.0.1",
   tls: false,
   forwarding: NO_FORWARDING,
 };
@@ -321,16 +322,19 @@ layer("secret requests", (it) => {
         const lan: RpcConnectionFacts = {
           ...LOOPBACK,
           remote: "other",
-          local: "other",
+          remoteAddress: "192.168.1.20",
+          localAddress: "192.168.1.10",
         };
         // Refused on a relay channel without E2EE, on plain ws:// from another machine, with
-        // forged forwarding headers from that machine, and without any facts at all.
+        // forged forwarding headers from that machine, on a pod network numbered in Tailscale's
+        // range when the node cannot name its own Tailscale addresses, and without any facts.
         for (const connection of [
           relay(false),
           lan,
           { ...lan, forwarding: { ...NO_FORWARDING, forwardedProto: "https" } },
+          { ...lan, remote: "tailscale", remoteAddress: "100.96.1.2", localAddress: "100.96.1.3" },
           undefined,
-        ]) {
+        ] satisfies ReadonlyArray<RpcConnectionFacts | undefined>) {
           const refused = yield* Effect.flip(provide(connection));
           assert.strictEqual(refused.reason, "unencrypted-connection");
         }
