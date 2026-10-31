@@ -12,7 +12,7 @@
  * @module nodeBrowserViewerSocket
  */
 import { isNodeBrowserFrameAck } from "@ryco/shared/nodeBrowserFrame";
-import { Effect, Queue, type Scope } from "effect";
+import { Deferred, Effect, Queue, type Scope } from "effect";
 import { Socket } from "effect/socket";
 
 /** A viewer whose connection holds more than this unsent is dropped. */
@@ -42,9 +42,46 @@ export interface ViewerSocket {
   readonly cut: Effect.Effect<void>;
 }
 
+// More acknowledgements than frames on the wire are meaningless; extras are dropped.
+const ACK_QUEUE_LIMIT = 16;
+
+/** What the viewer sends, read from the moment its socket opens. */
+export interface ViewerClient {
+  readonly acks: Queue.Dequeue<void>;
+  /** Succeeds once the viewer's socket closed, however it closed. */
+  readonly left: Effect.Effect<void>;
+}
+
+/**
+ * Reads the viewer's socket for the life of the scope, from the start, so a
+ * viewer that leaves is noticed even while nothing is sent to it yet (its
+ * tab still attaching, say). Only acknowledgements are kept; anything else
+ * is ignored, never dispatched.
+ */
+export const readViewerClient = (
+  pull: ViewerSocket["pull"],
+): Effect.Effect<ViewerClient, never, Scope.Scope> =>
+  Effect.gen(function* () {
+    const acks = yield* Queue.dropping<void>(ACK_QUEUE_LIMIT);
+    const left = yield* Deferred.make<void>();
+    yield* Effect.forkScoped(
+      Effect.forever(
+        Effect.flatMap(pull, (chunks) =>
+          Effect.sync(() => {
+            for (const chunk of chunks) {
+              if (isNodeBrowserFrameAck(chunk)) Queue.offerUnsafe(acks, undefined);
+            }
+          }),
+        ),
+      ).pipe(Effect.ensuring(Deferred.succeed(left, undefined))),
+    );
+    return { acks, left: Deferred.await(left) };
+  });
+
 /** Serves `output` until the viewer leaves, a `close` arrives, or the viewer falls too far behind. */
 export const serveViewerSocket = (
   socket: ViewerSocket,
+  client: ViewerClient,
   output: Queue.Dequeue<ViewerOutput>,
 ): Effect.Effect<void, Socket.SocketError, Scope.Scope> =>
   Effect.gen(function* () {
@@ -76,19 +113,18 @@ export const serveViewerSocket = (
         return release(superseded?.ack ?? null);
       }),
     );
-    // The viewer may send only acknowledgements; anything else is ignored.
-    const receive = (chunk: string | Uint8Array) => {
-      if (!isNodeBrowserFrameAck(chunk)) return Effect.void;
+    const receive = Effect.flatMap(Queue.take(client.acks), () => {
       const acked = inFlight;
       const next = pending;
       inFlight = null;
       pending = null;
       return Effect.andThen(release(acked), next ? sendFrame(next) : Effect.void);
-    };
-    const receiveAll = socket.pull.pipe(
-      Effect.flatMap((chunks) => Effect.forEach(chunks, receive, { discard: true })),
-    );
-    return yield* Effect.raceFirst(Effect.forever(sendOutput), Effect.forever(receiveAll)).pipe(
+    });
+    // The first to end, however it ends, ends the socket.
+    return yield* Effect.raceFirst(
+      Effect.raceFirst(Effect.forever(sendOutput), Effect.forever(receive)),
+      client.left,
+    ).pipe(
       // Whatever was never acknowledged still releases Chromium, after this socket is gone.
       Effect.ensuring(
         Effect.suspend(() =>

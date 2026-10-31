@@ -4,6 +4,7 @@ import { describe, expect, it } from "vitest";
 import {
   NODE_BROWSER_INPUT_BATCH_LIMIT,
   NODE_BROWSER_TEXT_LIMIT,
+  NodeBrowserCapability,
   NodeBrowserCommand,
   NodeBrowserInputRequest,
   NodeBrowserReadRequest,
@@ -48,6 +49,15 @@ describe("node browser contracts", () => {
     };
     expect(accepts(NodeBrowserInputRequest, { tabId: "t-1", events: [mouse] })).toBe(false);
     expect(accepts(NodeBrowserInputRequest, { tabId: "../etc", events: [] })).toBe(false);
+  });
+
+  it("decodes an unavailability reason a newer node adds", () => {
+    expect(
+      accepts(NodeBrowserCapability, { available: false, reason: "host-setup-required" }),
+    ).toBe(true);
+    expect(accepts(NodeBrowserCapability, { available: false, reason: "x".repeat(65) })).toBe(
+      false,
+    );
   });
 
   it("bounds stills and viewport sizes", () => {

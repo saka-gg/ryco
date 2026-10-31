@@ -5,9 +5,18 @@ import { Socket } from "effect/socket";
 
 import {
   MAX_SOCKET_BUFFER_BYTES,
+  readViewerClient,
   serveViewerSocket,
   type ViewerOutput,
 } from "./nodeBrowserViewerSocket.ts";
+
+const serve = (
+  socket: Parameters<typeof serveViewerSocket>[0],
+  output: Queue.Dequeue<ViewerOutput>,
+) =>
+  Effect.flatMap(readViewerClient(socket.pull), (client) =>
+    serveViewerSocket(socket, client, output),
+  );
 
 /** A socket whose client messages the test sends, recording what the viewer was sent. */
 const makeSocket = Effect.gen(function* () {
@@ -53,7 +62,7 @@ describe("node browser viewer socket", () => {
       const { socket, send, written } = yield* makeSocket;
       const output = yield* Queue.unbounded<ViewerOutput>();
       const acked: Array<number> = [];
-      const serving = yield* Effect.forkScoped(serveViewerSocket(socket, output));
+      const serving = yield* Effect.forkScoped(serve(socket, output));
 
       yield* Queue.offer(output, frame(1, acked));
       yield* Queue.offer(output, frame(2, acked));
@@ -81,7 +90,7 @@ describe("node browser viewer socket", () => {
       const { socket, send, written } = yield* makeSocket;
       const output = yield* Queue.unbounded<ViewerOutput>();
       const acked: Array<number> = [];
-      yield* Effect.forkScoped(serveViewerSocket(socket, output));
+      yield* Effect.forkScoped(serve(socket, output));
       yield* Queue.offer(output, frame(1, acked));
       yield* Queue.offer(output, frame(2, acked));
       for (const message of [
@@ -110,9 +119,7 @@ describe("node browser viewer socket", () => {
       setBuffered(MAX_SOCKET_BUFFER_BYTES - 1_000);
       const ended = yield* Deferred.make<void>();
       yield* Effect.forkScoped(
-        serveViewerSocket(socket, output).pipe(
-          Effect.onExit(() => Deferred.succeed(ended, undefined)),
-        ),
+        serve(socket, output).pipe(Effect.onExit(() => Deferred.succeed(ended, undefined))),
       );
       yield* Queue.offer(output, frame(1, acked, 2_000));
       yield* Deferred.await(ended).pipe(Effect.timeout("1 second"));
@@ -130,9 +137,7 @@ describe("node browser viewer socket", () => {
       const output = yield* Queue.unbounded<ViewerOutput>();
       const ended = yield* Deferred.make<void>();
       yield* Effect.forkScoped(
-        serveViewerSocket(socket, output).pipe(
-          Effect.onExit(() => Deferred.succeed(ended, undefined)),
-        ),
+        serve(socket, output).pipe(Effect.onExit(() => Deferred.succeed(ended, undefined))),
       );
       yield* Queue.offer(output, { _tag: "close", code: 1012, reason: "browser restarted" });
       yield* Deferred.await(ended).pipe(Effect.timeout("1 second"));

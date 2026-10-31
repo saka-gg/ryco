@@ -67,6 +67,12 @@ export interface CdpPipeBrowser<E> {
    * small JSON halves is never copied. `parts` gets the command's id.
    */
   readonly postParts: (parts: (id: number) => ReadonlyArray<Uint8Array>) => Effect.Effect<void>;
+  /**
+   * Fails every command still waiting on the session: Chrome never answers a
+   * session whose target closed. Done on its own when the session detaches or
+   * its page crashes.
+   */
+  readonly failSession: (sessionId: string) => Effect.Effect<void>;
   /** Fails with the reason once the browser has exited on its own. */
   readonly exited: Effect.Effect<never, E>;
 }
@@ -82,6 +88,7 @@ const CdpMessage = Schema.fromJsonString(
   }),
 );
 const decodeCdpMessage = Schema.decodeUnknownOption(CdpMessage);
+const decodeDetached = Schema.decodeUnknownOption(Schema.Struct({ sessionId: Schema.String }));
 const encodeCdpCommand = Schema.encodeSync(Schema.fromJsonString(Schema.Unknown));
 const textEncoder = new TextEncoder();
 const STDERR_TAIL_CHARS = 4_096;
@@ -124,7 +131,11 @@ export const launchCdpPipeBrowser = Effect.fnUntraced(function* <E>(
 
   const pending = new Map<
     number,
-    { readonly method: string; readonly reply: Deferred.Deferred<unknown, E> }
+    {
+      readonly method: string;
+      readonly sessionId: string | undefined;
+      readonly reply: Deferred.Deferred<unknown, E>;
+    }
   >();
   const exited = yield* Deferred.make<never, E>();
   let disconnected: E | undefined;
@@ -140,6 +151,21 @@ export const launchCdpPipeBrowser = Effect.fnUntraced(function* <E>(
 
   const postParts = (parts: (id: number) => ReadonlyArray<Uint8Array>) =>
     Queue.offerAll(outgoing, parts(++nextId)).pipe(Effect.asVoid);
+
+  const failSession = (sessionId: string) =>
+    Effect.suspend(() => {
+      const waiting = [...pending].filter(([, waiter]) => waiter.sessionId === sessionId);
+      for (const [id] of waiting) pending.delete(id);
+      return Effect.forEach(
+        waiting,
+        ([, waiter]) =>
+          Deferred.fail(
+            waiter.reply,
+            options.failure({ reason: `${waiter.method} ended with its session` }),
+          ),
+        { discard: true },
+      );
+    });
 
   const receive = (raw: string) => {
     if (options.skipEvent && !raw.startsWith('{"id":') && options.skipEvent(raw)) {
@@ -157,13 +183,18 @@ export const launchCdpPipeBrowser = Effect.fnUntraced(function* <E>(
           )
         : Deferred.succeed(waiter.reply, message.result);
     }
-    return message?.method
-      ? options.onEvent({
-          method: message.method,
-          sessionId: message.sessionId,
-          params: message.params,
-        })
-      : Effect.void;
+    if (!message?.method) return Effect.void;
+    const event = { method: message.method, sessionId: message.sessionId, params: message.params };
+    // A session that is gone, or whose page crashed, answers nothing more.
+    const ended =
+      event.method === "Target.detachedFromTarget"
+        ? Option.getOrUndefined(decodeDetached(event.params))?.sessionId
+        : event.method === "Inspector.targetCrashed"
+          ? event.sessionId
+          : undefined;
+    return ended === undefined
+      ? options.onEvent(event)
+      : Effect.andThen(failSession(ended), options.onEvent(event));
   };
 
   /** A message past its limit, known only by its start and end. */
@@ -225,9 +256,12 @@ export const launchCdpPipeBrowser = Effect.fnUntraced(function* <E>(
       if (disconnected !== undefined) return yield* Effect.fail(disconnected);
       const id = ++nextId;
       const reply = yield* Deferred.make<unknown, E>();
-      pending.set(id, { method, reply });
+      pending.set(id, { method, sessionId, reply });
       yield* Queue.offer(outgoing, command(id, method, params, sessionId));
-      const value = yield* Deferred.await(reply);
+      // A caller that stops waiting (a timeout) leaves nothing behind.
+      const value = yield* Deferred.await(reply).pipe(
+        Effect.ensuring(Effect.sync(() => pending.delete(id))),
+      );
       return yield* Schema.decodeUnknownEffect(result)(value).pipe(
         Effect.mapError((cause) =>
           options.failure({ reason: `${method} returned an unexpected result`, cause }),
@@ -239,6 +273,7 @@ export const launchCdpPipeBrowser = Effect.fnUntraced(function* <E>(
     send,
     post,
     postParts,
+    failSession,
     exited: Deferred.await(exited),
   } satisfies CdpPipeBrowser<E>;
 });

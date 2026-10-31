@@ -72,20 +72,26 @@ export const NodeBrowserTab = Schema.Struct({
 });
 export type NodeBrowserTab = typeof NodeBrowserTab.Type;
 
-export const NodeBrowserUnavailableReason = Schema.Literals([
+/** Why a node cannot run tabs, as this build knows the reasons. */
+export const NODE_BROWSER_UNAVAILABLE_REASONS = [
   "unsupported-platform",
   "root-without-sandbox",
   "sandbox-blocked",
   "installing",
   "disabled",
   "crashed",
-]);
-export type NodeBrowserUnavailableReason = typeof NodeBrowserUnavailableReason.Type;
+] as const;
+export type NodeBrowserUnavailableReason = (typeof NODE_BROWSER_UNAVAILABLE_REASONS)[number];
 
 /** Published as `ServerConfig.nodeBrowser`; absent on nodes without the feature. */
 export const NodeBrowserCapability = Schema.Struct({
   available: Schema.Boolean,
-  reason: Schema.optionalKey(NodeBrowserUnavailableReason),
+  /**
+   * One of `NODE_BROWSER_UNAVAILABLE_REASONS`, as a plain string: a reason a
+   * newer node adds must not fail an older client's server config. One it
+   * does not know still means unavailable.
+   */
+  reason: Schema.optionalKey(text(64)),
 });
 export type NodeBrowserCapability = typeof NodeBrowserCapability.Type;
 

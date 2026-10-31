@@ -6,7 +6,7 @@ import {
   NODE_BROWSER_FRAME_ACK,
   NODE_BROWSER_FRAME_CLOSE,
 } from "@ryco/shared/nodeBrowserFrame";
-import { Deferred, Effect, Layer, Queue, Schedule, Schema, Stream } from "effect";
+import { Deferred, Effect, Exit, Layer, Queue, Schedule, Schema, Stream } from "effect";
 import { Socket } from "effect/socket";
 import { TestClock } from "effect/testing";
 
@@ -28,9 +28,20 @@ interface Command {
   readonly sessionId: string | undefined;
 }
 
-/** A scripted Chrome: records every command and answers the ones the runtime awaits. */
+/**
+ * A scripted Chrome: records every command and answers the ones the runtime
+ * awaits, except those in `hang` (never answered, like a page whose main thread
+ * is busy) and `fail` (answered with an error). `failSession` fails a
+ * session's unanswered commands, as the pipe does.
+ */
 const makeFakeChrome = () => {
   const commands: Array<Command> = [];
+  const hang = new Set<string>();
+  const fail = new Set<string>();
+  const waiting: Array<{
+    readonly sessionId: string | undefined;
+    readonly reply: Deferred.Deferred<unknown, NodeBrowserCdpError>;
+  }> = [];
   let hooks: NodeBrowserLaunchInput | undefined;
   let launches = 0;
   let stopped = 0;
@@ -75,17 +86,38 @@ const makeFakeChrome = () => {
           sessionId?: string,
         ) =>
           record(method, params, sessionId).pipe(
-            Effect.andThen(Schema.decodeUnknownEffect(result)(reply(method))),
-            Effect.mapError((cause) => new NodeBrowserCdpError({ reason: "bad reply", cause })),
+            Effect.andThen(
+              hang.has(method)
+                ? Effect.flatMap(Deferred.make<unknown, NodeBrowserCdpError>(), (pending) => {
+                    waiting.push({ sessionId, reply: pending });
+                    return Deferred.await(pending);
+                  })
+                : fail.has(method)
+                  ? Effect.fail(new NodeBrowserCdpError({ reason: `${method} failed` }))
+                  : Effect.succeed(reply(method)),
+            ),
+            Effect.flatMap((value) =>
+              Schema.decodeUnknownEffect(result)(value).pipe(
+                Effect.mapError((cause) => new NodeBrowserCdpError({ reason: "bad reply", cause })),
+              ),
+            ),
           ),
         post: record,
         postParts: () => Effect.void,
+        failSession: (sessionId: string) =>
+          Effect.forEach(
+            waiting.filter((entry) => entry.sessionId === sessionId),
+            (entry) => Deferred.fail(entry.reply, new NodeBrowserCdpError({ reason: "ended" })),
+            { discard: true },
+          ),
         exited: Effect.never,
       } satisfies NodeBrowserCdp;
     });
   return {
     launch,
     commands,
+    hang,
+    fail,
     launches: () => launches,
     stopped: () => stopped,
     hooks: () => hooks!,
@@ -131,6 +163,7 @@ const settle = Effect.forEach(Array.from({ length: 20 }), () => Effect.yieldNow,
 /** A frame socket driven by the test. */
 const makeViewer = Effect.gen(function* () {
   const incoming = yield* Queue.unbounded<string>();
+  const left = yield* Deferred.make<void>();
   const written: Array<Uint8Array | Socket.CloseEvent> = [];
   return {
     socket: {
@@ -138,11 +171,21 @@ const makeViewer = Effect.gen(function* () {
         Effect.sync(() => {
           written.push(chunk);
         }),
-      pull: Effect.map(Queue.take(incoming), (message) => [message]),
+      // Fails once the viewer leaves, as a closed socket's reader does.
+      pull: Effect.raceFirst(
+        Effect.map(Queue.take(incoming), (message) => [message]),
+        Effect.andThen(
+          Deferred.await(left),
+          Effect.fail(
+            new Socket.SocketError({ reason: new Socket.SocketCloseError({ code: 1001 }) }),
+          ),
+        ),
+      ),
       bufferedBytes: () => 0,
       cut: Effect.void,
     },
     ack: Queue.offer(incoming, NODE_BROWSER_FRAME_ACK),
+    leave: Deferred.succeed(left, undefined),
     written,
     closes: () =>
       written.flatMap((chunk) => (chunk instanceof Socket.CloseEvent ? [chunk.code] : [])),
@@ -229,6 +272,9 @@ describe("node browser runtime", () => {
       expect(chrome.sent("Browser.setDownloadBehavior")[0]?.params).toEqual({ behavior: "deny" });
       expect(chrome.sent("Page.setInterceptFileChooserDialog", "S1")[0]?.params).toEqual({
         enabled: true,
+      });
+      expect(chrome.sent("Network.setBypassServiceWorker", "S1")[0]?.params).toEqual({
+        bypass: true,
       });
       const identity = chrome.sent("Emulation.setUserAgentOverride", "S1")[0]?.params;
       expect(identity?.userAgent).toBe("Mozilla/5.0 (Macintosh) Chrome/154.0.0.0 Safari/537.36");
@@ -590,6 +636,149 @@ describe("node browser runtime", () => {
   );
 });
 
+describe("node browser runtime with a page that does not answer", () => {
+  it.effect("fails a still within its bound", () =>
+    Effect.gen(function* () {
+      const { chrome, runtime } = yield* makeRuntime;
+      const tab = yield* openTab(runtime);
+      chrome.hang.add("Page.getLayoutMetrics");
+      const still = yield* Effect.forkChild(
+        runtime.read({ type: "still", tabId: tab.id, maxWidth: 640, maxHeight: 480, quality: 50 }),
+      );
+      yield* TestClock.adjust("9 seconds");
+      expect(still.pollUnsafe()).toBeUndefined();
+      yield* TestClock.adjust("1 second");
+      yield* settle;
+      const exit = still.pollUnsafe();
+      expect(exit && Exit.isFailure(exit)).toBe(true);
+    }).pipe(Effect.scoped, Effect.provide(TestLayer)),
+  );
+
+  it.effect("ends a suspended tab's capture at once and frees the tab for the next one", () =>
+    Effect.gen(function* () {
+      const { chrome, runtime } = yield* makeRuntime;
+      const first = yield* openTab(runtime);
+      chrome.hang.add("Page.getLayoutMetrics");
+      const still = yield* Effect.forkChild(
+        runtime.read({
+          type: "still",
+          tabId: first.id,
+          maxWidth: 640,
+          maxHeight: 480,
+          quality: 50,
+        }),
+      );
+      yield* settle;
+      // Six more tabs suspend the least recently used one nobody watches: the first.
+      for (let index = 0; index < 6; index += 1) yield* openTab(runtime);
+      yield* settle;
+      const exit = still.pollUnsafe();
+      expect(exit && Exit.isFailure(exit)).toBe(true);
+      chrome.hang.delete("Page.getLayoutMetrics");
+      const next = yield* runtime
+        .read({ type: "still", tabId: first.id, maxWidth: 640, maxHeight: 480, quality: 50 })
+        .pipe(Effect.timeout("1 second"));
+      expect(next.type).toBe("still");
+    }).pipe(Effect.scoped, Effect.provide(TestLayer)),
+  );
+
+  it.effect("serves a viewer at once although its first still never comes", () =>
+    Effect.gen(function* () {
+      const { chrome, runtime } = yield* makeRuntime;
+      const tab = yield* openTab(runtime);
+      chrome.hang.add("Page.getLayoutMetrics");
+      const viewer = yield* makeViewer;
+      yield* Effect.forkScoped(runtime.serveViewer(viewer.socket, frameParams(tab.id)));
+      yield* settle;
+      yield* chrome.hooks().onEvent(screencastFrame("S2", 1));
+      yield* settle;
+      expect(viewer.frames().map((frame) => frame.seq)).toEqual([0]);
+    }).pipe(Effect.scoped, Effect.provide(TestLayer)),
+  );
+
+  it.effect("ends a viewer that leaves while its tab is still attaching", () =>
+    Effect.gen(function* () {
+      const { chrome, runtime } = yield* makeRuntime;
+      const tab = yield* openTab(runtime);
+      chrome.hang.add("Target.attachToTarget");
+      const viewer = yield* makeViewer;
+      const served = yield* Effect.forkChild(
+        Effect.scoped(runtime.serveViewer(viewer.socket, frameParams(tab.id))),
+      );
+      yield* settle;
+      expect(served.pollUnsafe()).toBeUndefined();
+      yield* viewer.leave;
+      yield* settle;
+      expect(served.pollUnsafe()).toBeDefined();
+      // Its place is free again: four more viewers fit.
+      chrome.hang.delete("Target.attachToTarget");
+      for (let index = 0; index < 4; index += 1) {
+        const other = yield* makeViewer;
+        yield* Effect.forkScoped(runtime.serveViewer(other.socket, frameParams(tab.id)));
+        yield* settle;
+        expect(other.closes()).toEqual([]);
+      }
+    }).pipe(Effect.scoped, Effect.provide(TestLayer)),
+  );
+
+  it.effect("stops an input batch at the first event the page does not take", () =>
+    Effect.gen(function* () {
+      const { chrome, runtime } = yield* makeRuntime;
+      const tab = yield* openTab(runtime);
+      chrome.hang.add("Input.dispatchMouseEvent");
+      chrome.clear();
+      const click = (action: "down" | "up"): NodeBrowserInputEvent => ({
+        type: "mouse",
+        action,
+        x: 1,
+        y: 1,
+        button: "left",
+        buttons: action === "down" ? 1 : 0,
+        clickCount: 1,
+        modifiers: 0,
+      });
+      const batch = yield* Effect.forkChild(
+        runtime.input({ tabId: tab.id, events: [click("down"), click("up"), click("down")] }),
+      );
+      yield* TestClock.adjust("5 seconds");
+      yield* settle;
+      expect(batch.pollUnsafe()).toBeDefined();
+      expect(chrome.sent("Input.dispatchMouseEvent")).toHaveLength(1);
+    }).pipe(Effect.scoped, Effect.provide(TestLayer)),
+  );
+
+  it.effect("closes a page that fails its setup, so none outlives the caps", () =>
+    Effect.gen(function* () {
+      const { chrome, runtime } = yield* makeRuntime;
+      const tab = yield* openTab(runtime);
+      yield* chrome
+        .hooks()
+        .onEvent({ method: "Inspector.targetCrashed", sessionId: "S1", params: {} });
+      chrome.fail.add("Emulation.setDeviceMetricsOverride");
+      chrome.clear();
+      const error = yield* Effect.flip(runtime.command({ type: "wake", tabId: tab.id }));
+      expect(error.code).toBe("failed");
+      expect(chrome.sent("Target.closeTarget").map((command) => command.params)).toEqual([
+        { targetId: "T2" },
+      ]);
+      // The failed page's session is forgotten too.
+      yield* chrome.hooks().onEvent({
+        method: "Page.javascriptDialogOpening",
+        sessionId: "S2",
+        params: { type: "alert", message: "late" },
+      });
+      const listed = yield* runtime.read({ type: "list" });
+      expect(listed.type === "list" && listed.tabs[0]).toMatchObject({
+        state: "crashed",
+        dialog: null,
+      });
+      chrome.fail.delete("Emulation.setDeviceMetricsOverride");
+      const woken = yield* runtime.command({ type: "wake", tabId: tab.id });
+      expect(woken.tab?.state).toBe("live");
+    }).pipe(Effect.scoped, Effect.provide(TestLayer)),
+  );
+});
+
 // Real-browser checks run only when this names a chrome-headless-shell, for
 // example one Ryco installed under <baseDir>/tools/chrome-headless-shell.
 const liveBrowser = process.env.RYCO_TEST_HEADLESS_SHELL;
@@ -619,6 +808,64 @@ describe.skipIf(liveBrowser === undefined)("node browser runtime with a real bro
       return server;
     }),
     (server) => Effect.promise(() => new Promise<void>((resolve) => server.close(() => resolve()))),
+  );
+
+  it.live(
+    "never lets one app's service worker answer for the pages after it",
+    () =>
+      Effect.gen(function* () {
+        let workerFetched = false;
+        const server = yield* Effect.acquireRelease(
+          Effect.promise(async () => {
+            const { createServer } = await import("node:http");
+            const listening = createServer((request, response) => {
+              if (request.url === "/sw.js") {
+                workerFetched = true;
+                response.setHeader("content-type", "text/javascript");
+                response.end(
+                  "self.addEventListener('install', () => self.skipWaiting());" +
+                    "self.addEventListener('activate', (event) => event.waitUntil(self.clients.claim()));" +
+                    "self.addEventListener('fetch', (event) => { if (event.request.mode === 'navigate') " +
+                    "event.respondWith(new Response('<title>worker</title>', { headers: { 'content-type': 'text/html' } })); });",
+                );
+                return;
+              }
+              response.setHeader("content-type", "text/html");
+              response.end(
+                "<title>server</title><script>navigator.serviceWorker.register('/sw.js')</script>",
+              );
+            });
+            await new Promise<void>((resolve) => listening.listen(0, "127.0.0.1", resolve));
+            return listening;
+          }),
+          (listening) =>
+            Effect.promise(() => new Promise<void>((resolve) => listening.close(() => resolve()))),
+        );
+        const address = server.address();
+        const port = typeof address === "object" && address ? address.port : 0;
+        const runtime = yield* makeNodeBrowserRuntime({
+          baseCapability: { available: true },
+          noSandbox: false,
+        });
+        const opened = yield* runtime.command({
+          type: "open",
+          scope: "/work/app",
+          url: `127.0.0.1:${port}`,
+        });
+        const title = Effect.map(runtime.read({ type: "list" }), (listed) =>
+          listed.type === "list" ? listed.tabs[0]?.title : undefined,
+        );
+        yield* Effect.repeat(title, {
+          until: (value) => value === "server" && workerFetched,
+          schedule: Schedule.spaced("50 millis"),
+        }).pipe(Effect.timeout("10 seconds"));
+        // Long enough for the worker to install, activate and claim the page.
+        yield* Effect.sleep("1500 millis");
+        yield* runtime.command({ type: "reload", tabId: opened.tab!.id });
+        yield* Effect.sleep("1500 millis");
+        expect(yield* title).toBe("server");
+      }).pipe(Effect.scoped, Effect.provide(LiveLayer)),
+    30_000,
   );
 
   it.live(

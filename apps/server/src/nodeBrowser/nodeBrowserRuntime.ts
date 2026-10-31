@@ -72,7 +72,11 @@ import {
 } from "../htmlRender/cdpPipeBrowser.ts";
 import { PreviewBrowser, type PreviewBrowserError } from "../htmlRender/PreviewBrowser.ts";
 import type { NodeBrowserRuntime } from "./NodeBrowser.ts";
-import { serveViewerSocket, type ViewerOutput } from "./nodeBrowserViewerSocket.ts";
+import {
+  readViewerClient,
+  serveViewerSocket,
+  type ViewerOutput,
+} from "./nodeBrowserViewerSocket.ts";
 
 export const NODE_BROWSER_LIVE_TAB_LIMIT = 6;
 export const NODE_BROWSER_VIEWERS_PER_TAB = 4;
@@ -101,6 +105,11 @@ const VIEWER_OUTPUT_LIMIT = 8;
 export const INPUT_RELEASE_WATCHDOG_MS = 10_000;
 const INPUT_TIMEOUT = "5 seconds";
 const NAVIGATION_TIMEOUT = "15 seconds";
+/**
+ * How long any other command may take. A page whose main thread is busy, or
+ * whose target just closed, never answers some of them.
+ */
+export const COMMAND_TIMEOUT = "10 seconds";
 const MAX_URL_CHARS = 8_192;
 const MAX_TITLE_CHARS = 512;
 // A screencast frame is a JPEG of up to 3840 x 2160 in base64; other events
@@ -420,7 +429,10 @@ type SessionOwner =
   | { readonly kind: "viewer"; readonly tab: Tab; readonly viewer: Viewer };
 
 interface Running {
+  /** Every command bounded by `COMMAND_TIMEOUT`. */
   readonly cdp: NodeBrowserCdp;
+  /** Without that bound, for navigations, which have their own. */
+  readonly raw: NodeBrowserCdp;
   readonly scope: Scope.Closeable;
   readonly identity: ReturnType<typeof chromeIdentity>;
 }
@@ -438,6 +450,24 @@ const installError = (error: PreviewBrowserError) =>
     : error._tag === "PreviewBrowserUnsupportedError"
       ? rpcError("unavailable", "Node browser tabs are not available on this platform.")
       : rpcError("failed", "Ryco could not install the browser for node tabs.", true);
+
+/** The pipe with every command bounded: one that is not answered in time fails. */
+const bounded = (cdp: NodeBrowserCdp): NodeBrowserCdp => ({
+  ...cdp,
+  send: <A>(
+    method: string,
+    params: Record<string, unknown>,
+    result: Schema.Decoder<A>,
+    sessionId?: string,
+  ) =>
+    cdp.send(method, params, result, sessionId).pipe(
+      Effect.timeoutOrElse({
+        duration: COMMAND_TIMEOUT,
+        orElse: () =>
+          Effect.fail(new NodeBrowserCdpError({ reason: `${method} was not answered in time` })),
+      }),
+    ),
+});
 
 const SANDBOX_FAILURE =
   /No usable sandbox|Running as root without --no-sandbox|Failed to move to new namespace/iu;
@@ -714,10 +744,13 @@ export const makeNodeBrowserRuntime = Effect.fn("NodeBrowser.makeRuntime")(funct
     state: "suspended" | "crashed",
     close: { code: number; reason: string },
   ) => {
-    if (tab.page) sessions.delete(tab.page.sessionId);
-    for (const viewer of tab.viewers) {
-      if (viewer.sessionId !== null) sessions.delete(viewer.sessionId);
-      viewer.sessionId = null;
+    const ended = [tab.page?.sessionId, ...[...tab.viewers].map((viewer) => viewer.sessionId)];
+    for (const viewer of tab.viewers) viewer.sessionId = null;
+    for (const sessionId of ended) {
+      if (sessionId == null) continue;
+      sessions.delete(sessionId);
+      // Chrome never answers a closed page: its captures and attaches fail now, freeing their locks.
+      if (running) runFork(running.cdp.failSession(sessionId));
     }
     closeViewers(tab, close.code, close.reason);
     tab.page = null;
@@ -881,19 +914,21 @@ export const makeNodeBrowserRuntime = Effect.fn("NodeBrowser.makeRuntime")(funct
       .pipe(Effect.ignore);
     const scope = yield* Scope.fork(runtimeScope);
     const started = yield* Effect.gen(function* () {
-      const cdp = yield* launch({
+      const raw = yield* launch({
         executable,
         args: nodeBrowserArguments({ noSandbox: options.noSandbox, profileDirectory }),
         onEvent,
         onOversizedEvent,
         onExit,
       });
+      const cdp = bounded(raw);
       // Nothing downloads to the node.
       yield* cdp.send("Browser.setDownloadBehavior", { behavior: "deny" }, Ignored);
       yield* cdp.send("Target.setDiscoverTargets", { discover: true }, Ignored);
       const { userAgent } = yield* cdp.send("Browser.getVersion", {}, Version);
       return {
         cdp,
+        raw,
         scope,
         identity: chromeIdentity(userAgent, {
           platform: process.platform,
@@ -922,27 +957,48 @@ export const makeNodeBrowserRuntime = Effect.fn("NodeBrowser.makeRuntime")(funct
         { url: "about:blank" },
         TargetCreated,
       );
-      const { sessionId } = yield* cdp.send(
-        "Target.attachToTarget",
-        { targetId, flatten: true },
-        Attached,
+      // A page that fails its setup is closed and forgotten, so none outlives the caps.
+      yield* Effect.gen(function* () {
+        const { sessionId } = yield* cdp.send(
+          "Target.attachToTarget",
+          { targetId, flatten: true },
+          Attached,
+        );
+        tab.page = { targetId, sessionId };
+        sessions.set(sessionId, { kind: "page", tab });
+        const setup: ReadonlyArray<readonly [string, Record<string, unknown>]> = [
+          ["Page.enable", {}],
+          ["Inspector.enable", {}],
+          // The page's file pickers never open; uploads are not part of node tabs yet.
+          ["Page.setInterceptFileChooserDialog", { enabled: true }],
+          // Service workers never answer for a page: in the node-wide profile, one an app on
+          // localhost:3000 installed would otherwise serve every later app on that port, for every
+          // operator. Bypassing them needs the Network domain on; its events carry no bodies.
+          [
+            "Network.enable",
+            { maxTotalBufferSize: 0, maxResourceBufferSize: 0, maxPostDataSize: 0 },
+          ],
+          ["Network.setBypassServiceWorker", { bypass: true }],
+          ...(browser.identity
+            ? [["Emulation.setUserAgentOverride", browser.identity] as const]
+            : []),
+          [
+            "Emulation.setDeviceMetricsOverride",
+            { ...tab.viewport, deviceScaleFactor: RENDER_SCALE, mobile: false },
+          ],
+        ];
+        for (const [method, params] of setup) yield* cdp.send(method, params, Ignored, sessionId);
+      }).pipe(
+        Effect.onError(() =>
+          Effect.suspend(() => {
+            if (tab.page?.targetId === targetId) {
+              sessions.delete(tab.page.sessionId);
+              tab.page = null;
+            }
+            return cdp.post("Target.closeTarget", { targetId });
+          }),
+        ),
       );
-      tab.page = { targetId, sessionId };
-      sessions.set(sessionId, { kind: "page", tab });
-      const setup: ReadonlyArray<readonly [string, Record<string, unknown>]> = [
-        ["Page.enable", {}],
-        ["Inspector.enable", {}],
-        // The page's file pickers never open; uploads are not part of node tabs yet.
-        ["Page.setInterceptFileChooserDialog", { enabled: true }],
-        ...(browser.identity
-          ? [["Emulation.setUserAgentOverride", browser.identity] as const]
-          : []),
-        [
-          "Emulation.setDeviceMetricsOverride",
-          { ...tab.viewport, deviceScaleFactor: RENDER_SCALE, mobile: false },
-        ],
-      ];
-      for (const [method, params] of setup) yield* cdp.send(method, params, Ignored, sessionId);
       tab.state = "live";
       tab.error = null;
       markUsed(tab);
@@ -1002,7 +1058,7 @@ export const makeNodeBrowserRuntime = Effect.fn("NodeBrowser.makeRuntime")(funct
   const navigate = (tab: Tab, url: string) =>
     Effect.gen(function* () {
       const page = tab.page;
-      const cdp = running?.cdp;
+      const cdp = running?.raw;
       if (!page || !cdp) return;
       tab.loading = true;
       tab.error = null;
@@ -1215,11 +1271,15 @@ export const makeNodeBrowserRuntime = Effect.fn("NodeBrowser.makeRuntime")(funct
     cdp: NodeBrowserCdp,
     sessionId: string,
     event: NodeBrowserInputEvent,
-  ) => {
+  ): Effect.Effect<boolean> => {
+    // Whether the page took the event in time; a busy page ends the batch.
     const send = (method: string, params: Record<string, unknown>) =>
       cdp
         .send(method, params, Ignored, sessionId)
-        .pipe(Effect.timeout(INPUT_TIMEOUT), Effect.ignore);
+        .pipe(
+          Effect.timeout(INPUT_TIMEOUT),
+          Effect.match({ onFailure: () => false, onSuccess: () => true }),
+        );
     switch (event.type) {
       case "mouse": {
         const x = clamp(event.x, tab.viewport.width);
@@ -1280,7 +1340,7 @@ export const makeNodeBrowserRuntime = Effect.fn("NodeBrowser.makeRuntime")(funct
       case "text":
         return send("Input.insertText", { text: event.text });
       case "release":
-        return releaseHeld(tab);
+        return Effect.as(releaseHeld(tab), true);
     }
   };
 
@@ -1295,8 +1355,9 @@ export const makeNodeBrowserRuntime = Effect.fn("NodeBrowser.makeRuntime")(funct
           const page = tab.page;
           const cdp = running?.cdp;
           if (!page || !cdp) return;
+          // Stopped at the first event the page did not take: the rest would wait as long.
           for (const event of coalesceInput(request.events)) {
-            yield* dispatch(tab, cdp, page.sessionId, event);
+            if (!(yield* dispatch(tab, cdp, page.sessionId, event))) break;
           }
         }),
       );
@@ -1425,6 +1486,7 @@ export const makeNodeBrowserRuntime = Effect.fn("NodeBrowser.makeRuntime")(funct
           if (sessionId === null) return;
           sessions.delete(sessionId);
           if (!running) return;
+          yield* running.cdp.failSession(sessionId);
           yield* running.cdp.post("Page.stopScreencast", {}, sessionId);
           yield* running.cdp.post("Target.detachFromTarget", { sessionId });
         }),
@@ -1461,22 +1523,30 @@ export const makeNodeBrowserRuntime = Effect.fn("NodeBrowser.makeRuntime")(funct
           reason: "not running",
         } as const;
       }
-      yield* startScreencast(viewer, tab, 1);
-      // An idle page never repaints for a new screencast, so the viewer starts from a still.
-      if (!viewer.started) yield* pushStill(viewer, tab);
+      // In the background, so the viewer is served at once whatever the page is doing. An idle
+      // page never repaints for a new screencast, so the viewer starts from a still.
+      yield* Effect.forkScoped(
+        Effect.andThen(
+          startScreencast(viewer, tab, 1),
+          Effect.suspend(() => (viewer.started ? Effect.void : pushStill(viewer, tab))),
+        ),
+      );
       return { _tag: "attached", viewer } as const;
     });
 
   const serveViewer: NodeBrowserRuntime["serveViewer"] = (socket, params) =>
     Effect.gen(function* () {
+      const client = yield* readViewerClient(socket.pull);
       const request = viewerRequestFrom(params);
+      // A viewer that leaves while its tab is still attaching ends it there.
       const attached = request
-        ? yield* attachViewer(request)
+        ? yield* Effect.raceFirst(attachViewer(request), Effect.as(client.left, LEFT))
         : ({ _tag: "close", ...GONE } as const);
+      if (attached._tag === "left") return;
       if (attached._tag === "close") {
         return yield* socket.write(new Socket.CloseEvent(attached.code, attached.reason));
       }
-      return yield* serveViewerSocket(socket, attached.viewer.output);
+      return yield* serveViewerSocket(socket, client, attached.viewer.output);
     }).pipe(Effect.ignore);
 
   // ── Idle ──
@@ -1524,3 +1594,4 @@ export const makeNodeBrowserRuntime = Effect.fn("NodeBrowser.makeRuntime")(funct
 });
 
 const GONE = { code: NODE_BROWSER_FRAME_CLOSE.tabGone, reason: "tab gone" } as const;
+const LEFT = { _tag: "left" } as const;
