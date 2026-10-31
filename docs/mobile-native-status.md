@@ -49,6 +49,13 @@ work is load-bearing.
   re-hydrates it from the node's bounded snapshot rather than replaying buffered output. A mounted
   terminal counts toward the hosted warm set as a mounted thread view does. Terminal content is
   memory-only on the device.
+- The agent's device (`threads/:environmentId/:threadId/device`): while a thread's agent has an iOS
+  simulator or Android emulator attached, a pill above the composer names it and opens a
+  full-screen viewer. Frames are paced PNG screenshots over the connection's main socket, through
+  the sampler and one-preview lease web's hosted preview uses (`@ryco/client-runtime/state/device`),
+  paused when the screen or app is not in front. The node's owner can tap, swipe and press Home
+  (the node's device input rule and the shared mutation readiness); everyone else watches. A
+  grabber at the top hides the controls; shake-to-show needs a motion sensor module and a new build.
 - Since 2026-08-16: Expo/React Native upgrades, deterministic-clock E2EE pairing tests, queued
   messages steering into active turns (`8244e7b92`), and the shared Agent Control queue state
   with proposal approval surfaces (`caf8af36c`, `022d2430c`).
@@ -131,6 +138,7 @@ only shell metadata. It is separate from the hosted browser client's opt-in stor
 | Live Activity            | Not on `main`      | Native lifecycle, Hub push-token support, device QA — under the contentless-push constraint above.                                                                      |
 | Tablet inspector         | Files and terminal | The split layout is shared by workspace tools; review and source control are not in it yet. Home surfaces are width-neutral single columns.                             |
 | Find in files            | Web only           | The node's `projects.searchContent` and the client runtime's `createWorkspaceContentSearch` are shared; a native screen remains.                                        |
+| Agent's device viewer    | Built, no QA yet   | Live H.264 video instead of paced screenshots on direct routes, shake to show controls (a native sensor module), keyboard input, and the node-browser viewer.           |
 | Android                  | Unqualified        | Exercise image/SVG/HTML preview, WebView isolation, navigation, native modules, and relay lifecycle on Android.                                                         |
 | Store distribution       | Not complete       | Apple Developer/App Store Connect/TestFlight work remains separate from simulator and Personal Team development.                                                        |
 

@@ -35,6 +35,7 @@ describe("MVP route config", () => {
         "ThreadReview",
         "ThreadReviewComment",
         "ThreadTerminal",
+        "ThreadDevice",
       ].toSorted(),
     );
     // Deferred routes must be absent from the tree.
@@ -125,6 +126,7 @@ describe("MVP route config", () => {
       "ThreadReviewComment",
       "NewTask",
       "SettingsSheet",
+      "ThreadDevice",
     ] as const) {
       expect(overlays.has(overlay)).toBe(true);
     }

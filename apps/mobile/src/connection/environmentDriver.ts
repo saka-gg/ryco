@@ -21,7 +21,7 @@ import { createKnownEnvironment } from "@ryco/client-runtime/knownEnvironment";
 import { WS_URL_PROVIDER_TIMEOUT_MS } from "@ryco/client-runtime/rpc";
 import { scopeThreadRef } from "@ryco/client-runtime/scoped";
 
-import { createWsRpcClient, type WsRpcClient } from "../rpc/wsRpcClient";
+import { createDeviceRpcClient, createWsRpcClient, type WsRpcClient } from "../rpc/wsRpcClient";
 import { WsTransport } from "../rpc/wsTransport";
 import {
   hasUnsentThreadWork,
@@ -296,50 +296,53 @@ export function createMobileEnvironmentDriver(
     },
   ): WsRpcClient {
     catalog.runtimeStore.getState().ensure(environmentId);
+    const transport = new WsTransport(
+      async (signal) => {
+        const record = catalog.get(environmentId);
+        if (!record) throw new Error(`Saved environment ${environmentId} not found.`);
+        // The bearer is re-read on every attempt, never carried over from the
+        // pre-connect session check: a concurrent renewal may have superseded
+        // it, and the node revokes the whole pairing when it is shown a
+        // superseded bearer.
+        return remoteApi.resolveRemoteWebSocketConnectionUrl({
+          wsBaseUrl: record.wsBaseUrl,
+          httpBaseUrl: record.httpBaseUrl,
+          bearerToken: await savedSessionRenewal.readBearerToken(environmentId),
+          ...(signal === undefined ? {} : { signal }),
+        });
+      },
+      {
+        getConnectionLabel: () => catalog.get(environmentId)?.label ?? null,
+        getEnvironmentId: () => environmentId,
+        persistentReconnect: true,
+        // A token request that never answers would otherwise hold this
+        // attempt until a resume or online event; the deadline aborts it and
+        // lets the reconnect schedule try again. Direct connections only —
+        // the hosted relay owns its own attempt lifecycle.
+        urlProviderTimeoutMs: WS_URL_PROVIDER_TIMEOUT_MS,
+        // A rejected bearer is not an outage the backoff can wait out.
+        isTerminalUrlError: isSavedEnvironmentCredentialRejection,
+        onTerminalUrlError: owner.onCredentialRejected,
+        onAttempt: () => {
+          if (owner.speaksForEnvironment()) setRuntimeConnecting(environmentId);
+        },
+        onOpen: () => {
+          if (owner.speaksForEnvironment()) setRuntimeConnected(environmentId);
+        },
+        onError: (message) => {
+          if (owner.speaksForEnvironment()) setRuntimeError(environmentId, new Error(message));
+        },
+        onClose: (details, context) => {
+          if (!context.intentional && owner.speaksForEnvironment()) {
+            setRuntimeDisconnected(environmentId, details.reason);
+          }
+        },
+      },
+    );
+    // Device previews and input share the application socket, as on the hosted relay.
     return createWsRpcClient(
-      new WsTransport(
-        async (signal) => {
-          const record = catalog.get(environmentId);
-          if (!record) throw new Error(`Saved environment ${environmentId} not found.`);
-          // The bearer is re-read on every attempt, never carried over from the
-          // pre-connect session check: a concurrent renewal may have superseded
-          // it, and the node revokes the whole pairing when it is shown a
-          // superseded bearer.
-          return remoteApi.resolveRemoteWebSocketConnectionUrl({
-            wsBaseUrl: record.wsBaseUrl,
-            httpBaseUrl: record.httpBaseUrl,
-            bearerToken: await savedSessionRenewal.readBearerToken(environmentId),
-            ...(signal === undefined ? {} : { signal }),
-          });
-        },
-        {
-          getConnectionLabel: () => catalog.get(environmentId)?.label ?? null,
-          getEnvironmentId: () => environmentId,
-          persistentReconnect: true,
-          // A token request that never answers would otherwise hold this
-          // attempt until a resume or online event; the deadline aborts it and
-          // lets the reconnect schedule try again. Direct connections only —
-          // the hosted relay owns its own attempt lifecycle.
-          urlProviderTimeoutMs: WS_URL_PROVIDER_TIMEOUT_MS,
-          // A rejected bearer is not an outage the backoff can wait out.
-          isTerminalUrlError: isSavedEnvironmentCredentialRejection,
-          onTerminalUrlError: owner.onCredentialRejected,
-          onAttempt: () => {
-            if (owner.speaksForEnvironment()) setRuntimeConnecting(environmentId);
-          },
-          onOpen: () => {
-            if (owner.speaksForEnvironment()) setRuntimeConnected(environmentId);
-          },
-          onError: (message) => {
-            if (owner.speaksForEnvironment()) setRuntimeError(environmentId, new Error(message));
-          },
-          onClose: (details, context) => {
-            if (!context.intentional && owner.speaksForEnvironment()) {
-              setRuntimeDisconnected(environmentId, details.reason);
-            }
-          },
-        },
-      ),
+      transport,
+      createDeviceRpcClient(transport, { manageTransport: false }),
     );
   }
 

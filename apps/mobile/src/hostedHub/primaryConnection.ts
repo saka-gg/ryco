@@ -24,7 +24,11 @@ import {
   hostedDispatchLineage,
   type HostedDirectSocket,
 } from "@ryco/client-runtime/relay";
-import { bindHostedGitActionDelivery, createWsRpcClient } from "@ryco/client-runtime/rpc";
+import {
+  bindHostedGitActionDelivery,
+  createDeviceRpcClient,
+  createWsRpcClient,
+} from "@ryco/client-runtime/rpc";
 
 import { WsTransport } from "../rpc/wsTransport";
 import { readMobileHostedConnectionCoordinator } from "../connection/hostedConnectionCoordinator";
@@ -153,14 +157,14 @@ export function createHostedEnvironmentConnection(
   });
   // The connection's Git action recovery answers for its actions' delivery.
   const gitActionDelivery = bindHostedGitActionDelivery(markUncertain);
+  const transport = new WsTransport(() => attemptFactory.nextUrl(), {
+    ...attemptFactory.lifecycleHandlers(dispatchReplay, gitActionDelivery),
+    getConnectionLabel: () => node.label,
+    getEnvironmentId: () => environmentId,
+  });
+  // Device previews and input borrow the relay socket; its lifecycle owner manages it.
   const client = dispatchReplay.wrap(
-    createWsRpcClient(
-      new WsTransport(() => attemptFactory.nextUrl(), {
-        ...attemptFactory.lifecycleHandlers(dispatchReplay, gitActionDelivery),
-        getConnectionLabel: () => node.label,
-        getEnvironmentId: () => environmentId,
-      }),
-    ),
+    createWsRpcClient(transport, createDeviceRpcClient(transport, { manageTransport: false })),
   );
 
   // The node is reached only through the relay, so the "target" is the Hub's

@@ -7,7 +7,7 @@ import {
   readHostedPreviewLeaseHolder,
   resetHostedPreviewLeaseForTests,
   subscribeHostedPreviewLease,
-} from "./hostedPreviewLease";
+} from "./previewLease.ts";
 
 afterEach(() => {
   resetHostedPreviewLeaseForTests();

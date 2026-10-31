@@ -258,6 +258,18 @@
       "types": "./src/state/files/index.ts",
       "import": "./src/state/files/index.ts"
     },
+    "./state/device/previewSampler": {
+      "types": "./src/state/device/previewSampler.ts",
+      "import": "./src/state/device/previewSampler.ts"
+    },
+    "./state/device/previewLease": {
+      "types": "./src/state/device/previewLease.ts",
+      "import": "./src/state/device/previewLease.ts"
+    },
+    "./state/device/devicePoint": {
+      "types": "./src/state/device/devicePoint.ts",
+      "import": "./src/state/device/devicePoint.ts"
+    },
     "./state/device": {
       "types": "./src/state/device/index.ts",
       "import": "./src/state/device/index.ts"

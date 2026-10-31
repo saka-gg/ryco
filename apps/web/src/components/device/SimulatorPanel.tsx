@@ -52,6 +52,7 @@ import {
 } from "./deviceFrameGate";
 import { useDeviceVideoStream } from "./useDeviceVideoStream";
 import { useDeviceScreenshotStream } from "./useDeviceScreenshotStream";
+import { devicePointSize } from "@ryco/client-runtime/state/device/devicePoint";
 
 import { useHostedRpcCapability } from "../../hostedHub/capabilities";
 import { useHostedWorkspaceState } from "../../hostedHub/hostedConnectionCoordinator";
@@ -326,27 +327,19 @@ export default function SimulatorPanel(props: {
       const canvas = canvasRef.current;
       if (!canvas || !dimensions) return null;
       const rect = canvas.getBoundingClientRect();
-      const scale = attached?.geometry?.scale ?? (dimensions.width > 1_400 ? 2 : 3);
       return canvasPointToDevicePoint(
         {
           frameWidth: dimensions.width,
           frameHeight: dimensions.height,
           displayWidth: rect.width,
           displayHeight: rect.height,
-          pointWidth:
-            attached?.platform === "android-emulator"
-              ? dimensions.width
-              : (attached?.geometry?.pointWidth ?? dimensions.width / scale),
-          pointHeight:
-            attached?.platform === "android-emulator"
-              ? dimensions.height
-              : (attached?.geometry?.pointHeight ?? dimensions.height / scale),
+          ...devicePointSize(attached, dimensions.width, dimensions.height),
         },
         event.clientX - rect.left,
         event.clientY - rect.top,
       );
     },
-    [attached?.geometry, attached?.platform, dimensions],
+    [attached, dimensions],
   );
   const pointerDown = useCallback(
     (event: PointerEvent<HTMLCanvasElement>) => {

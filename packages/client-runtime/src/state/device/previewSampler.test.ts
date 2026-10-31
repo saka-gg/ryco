@@ -1,10 +1,7 @@
 import type { DeviceScreenshotResult } from "@ryco/contracts";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
-import {
-  readHostedPreviewLeaseHolder,
-  resetHostedPreviewLeaseForTests,
-} from "./hostedPreviewLease";
+import { readHostedPreviewLeaseHolder, resetHostedPreviewLeaseForTests } from "./previewLease.ts";
 import {
   createHostedPreviewSampler,
   HOSTED_PREVIEW_IDLE_PAUSE_MS,
@@ -12,7 +9,7 @@ import {
   hostedScreenshotLoad,
   type HostedPreviewSampler,
   type HostedPreviewStatus,
-} from "./useDeviceScreenshotStream";
+} from "./previewSampler.ts";
 
 describe("hosted screenshot fallback backpressure", () => {
   it("keeps tiny responses at the 750ms floor", () => {

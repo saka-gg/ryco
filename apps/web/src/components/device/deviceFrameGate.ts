@@ -70,38 +70,10 @@ export function stepDeviceFrameGate(
   };
 }
 
-export interface DevicePoint {
-  readonly x: number;
-  readonly y: number;
-}
-
-export function canvasPointToDevicePoint(
-  input: {
-    readonly frameWidth: number;
-    readonly frameHeight: number;
-    readonly displayWidth: number;
-    readonly displayHeight: number;
-    readonly pointWidth: number;
-    readonly pointHeight: number;
-  },
-  canvasX: number,
-  canvasY: number,
-): DevicePoint | null {
-  const scale = Math.min(
-    input.displayWidth / input.frameWidth,
-    input.displayHeight / input.frameHeight,
-  );
-  if (!Number.isFinite(scale) || scale <= 0) return null;
-  const width = input.frameWidth * scale;
-  const height = input.frameHeight * scale;
-  const x = canvasX - (input.displayWidth - width) / 2;
-  const y = canvasY - (input.displayHeight - height) / 2;
-  if (x < 0 || y < 0 || x > width || y > height) return null;
-  return {
-    x: Math.round((x / width) * input.pointWidth),
-    y: Math.round((y / height) * input.pointHeight),
-  };
-}
+export {
+  canvasPointToDevicePoint,
+  type DevicePoint,
+} from "@ryco/client-runtime/state/device/devicePoint";
 
 export function deviceHidUsageForKey(key: string): number | null {
   const named: Readonly<Record<string, number>> = {
