@@ -253,6 +253,24 @@ reads it from the original's node and sends it to the other node, which creates 
 nodes never talk to each other, and the other node is not told how to reach the original's node.
 Both threads stay live afterwards; nothing moves.
 
+In the web and desktop apps, **Fork from here** shows **Continue on: This machine / Another
+machine** when another connected machine can take the fork. **Another machine** lists the machines
+that:
+
+- are connected, and where you may fork (operator or owner; on a hosted connection, once that
+  machine's own session is ready for changes);
+- run a Ryco that supports it;
+- have exactly one copy of the same project (the same repository and folder in it), or chats for a
+  chat without a project.
+
+A machine without an enabled provider of the same kind as the thread's is listed but cannot be
+picked. The dialog says which branch the other machine starts from and offers **Push** while the
+branch has commits that are not pushed (or is not on `origin` yet). **Archive the original
+afterwards** (off by default) archives the original on this machine, as you would yourself, once the
+other machine has created the fork. **Fork** reads the conversation from this machine, sends it to
+the other one, and opens the fork there; **Retry** sends the same request under the same key. The
+native mobile app does not offer it yet.
+
 What travels: the messages you and the agent wrote up to and including the picked reply, with their
 times and turns, proposed plans, which turns were interrupted or failed, the original's title, the
 name of its machine, and its model by provider kind. What stays on the original's machine:
@@ -299,3 +317,6 @@ carried conversation before it answers, a retry with the same key and conversati
 fork, and the same key with a different conversation is refused. Once the fork is created (or stops
 for good), the node drops the carried conversation from its record of the request; the fork's own
 thread keeps it.
+
+Your app only knows how a thread's latest turn ended (and, for a fork, how the turns it inherited
+ended); an older turn that was interrupted on the original's machine arrives as completed.

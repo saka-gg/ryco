@@ -420,6 +420,8 @@ export interface WsRpcClient {
     readonly searchMessages: RpcUnaryMethod<typeof WS_METHODS.searchThreadMessages>;
     /** Idempotent per `forkKey`; never retried here (see `runThreadFork`). */
     readonly fork: RpcUnaryMethod<typeof WS_METHODS.threadsFork>;
+    /** Idempotent per `forkKey`; never retried here (see `runCarriedFork`). */
+    readonly forkCarried: RpcUnaryMethod<typeof WS_METHODS.threadsForkCarried>;
     /** Only for nodes that advertise `threadLocalServers`; `watchThreadLocalServers` shares it. */
     readonly subscribeLocalServers: (
       input: RpcInput<typeof WS_METHODS.threadsSubscribeLocalServers>,
@@ -1061,6 +1063,8 @@ export function createWsRpcClient(
       searchMessages: (input) =>
         transport.request((client) => client[WS_METHODS.searchThreadMessages](input)),
       fork: (input) => transport.request((client) => client[WS_METHODS.threadsFork](input)),
+      forkCarried: (input) =>
+        transport.request((client) => client[WS_METHODS.threadsForkCarried](input)),
       subscribeLocalServers: (input, listener, options) =>
         transport.subscribe(
           (client) => client[WS_METHODS.threadsSubscribeLocalServers](input),
