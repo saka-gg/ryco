@@ -141,10 +141,7 @@ import { ContextHandoffCoordinator } from "../Services/ContextHandoffCoordinator
 import { CheckpointReactor } from "../Services/CheckpointReactor.ts";
 import { ProviderRuntimeIngestionService } from "../Services/ProviderRuntimeIngestion.ts";
 import { ThreadBackgroundLivenessService } from "../ThreadBackgroundLiveness.ts";
-import {
-  make as makeThreadSessionModelSelections,
-  ThreadSessionModelSelectionsService,
-} from "../ThreadSessionModelSelections.ts";
+import { ThreadSessionModelSelectionsService } from "../ThreadSessionModelSelections.ts";
 import {
   makeResumeFallbackRequestedActivity,
   type ResumeFallbackReason,
@@ -516,12 +513,8 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
       ),
     );
 
-  // What each session runs, shared with the engine's background-work check on turn starts. A
-  // reactor built without it (tests, tools) keeps its own record.
-  const threadModelSelections = Option.getOrElse(
-    yield* Effect.serviceOption(ThreadSessionModelSelectionsService),
-    makeThreadSessionModelSelections,
-  );
+  // What each session runs, shared with the engine's background-work check on turn starts.
+  const threadModelSelections = yield* ThreadSessionModelSelectionsService;
   // Optional: without it a turn that names no selection never counts as stopping background work.
   const backgroundLiveness = yield* Effect.serviceOption(ThreadBackgroundLivenessService);
   /** `threadId:runtimeSessionId` of runtimes that reported no goal, and whether goals are native there. */
@@ -2413,19 +2406,25 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
     }
 
     // The thread's stored selection is the chat's: clients store a pick when it is made, and
-    // the session takes it at its next turn. A turn's own selection becomes the chat's only for
-    // a send that differs from it (an older client stores a pick only by sending it), never for
-    // a person's queued follow-up (it keeps the model it was queued with for its own turn), and
-    // never over a pick stored while this turn started.
+    // the session takes it at its next turn. A turn's own selection becomes the chat's when it
+    // differs (an older client stores a pick only by sending it, or by queueing it), but never
+    // over a pick stored since the turn was started: since this turn started for a send, since
+    // the entry was queued for a person's queued follow-up (`queuedOverModelSelection`; absent
+    // on entries queued before it was recorded, which then keep the chat's pick). Server wakes
+    // name no selection, so they never change the chat's.
     const acceptedModelSelection = event.payload.modelSelection;
+    const startedOverModelSelection =
+      serverWakeSource(event.payload.delegationReturnGuard) === "follow-up-queue"
+        ? event.payload.queuedOverModelSelection
+        : thread.modelSelection;
     const commitAcceptedModelSelection =
       acceptedModelSelection !== undefined &&
-      serverWakeSource(event.payload.delegationReturnGuard) !== "follow-up-queue" &&
+      startedOverModelSelection !== undefined &&
       !Equal.equals(thread.modelSelection, acceptedModelSelection)
         ? resolveThread(threadId).pipe(
             Effect.flatMap((current) =>
               current !== undefined &&
-              sameModelSelection(current.modelSelection, thread.modelSelection)
+              sameModelSelection(current.modelSelection, startedOverModelSelection)
                 ? orchestrationEngine.dispatch({
                     type: "thread.meta.update",
                     commandId: serverCommandId("accepted-model-selection"),
@@ -3113,6 +3112,8 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
       return yield* providerEffectIntents.settle({ sequence: event.sequence });
     }
 
+    // A stopped session runs nothing: the next turn starts one on the chat's stored selection.
+    threadModelSelections.forget(threadId);
     const now = input.at === "now" ? new Date().toISOString() : event.payload.createdAt;
     if (Option.isNone(outOfBand) && thread.session && thread.session.status !== "stopped") {
       // Bounded inside ProviderService; a timed-out stop is retried by the reaper.

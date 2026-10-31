@@ -67,6 +67,7 @@ import { OrchestrationProjectionPipelineLive } from "../src/orchestration/Layers
 import { ProjectAvatarStore } from "../src/project/Services/ProjectAvatarStore.ts";
 import { OrchestrationProjectionSnapshotQueryLive } from "../src/orchestration/Layers/ProjectionSnapshotQuery.ts";
 import * as ThreadBackgroundLiveness from "../src/orchestration/ThreadBackgroundLiveness.ts";
+import * as ThreadSessionModelSelections from "../src/orchestration/ThreadSessionModelSelections.ts";
 import { RuntimeReceiptBusTest } from "../src/orchestration/Layers/RuntimeReceiptBus.ts";
 import { OrchestrationReactorLive } from "../src/orchestration/Layers/OrchestrationReactor.ts";
 import { ProviderCommandReactorLive } from "../src/orchestration/Layers/ProviderCommandReactor.ts";
@@ -417,7 +418,10 @@ export const makeOrchestrationIntegrationHarness = (
       checkpointStoreLayer,
       providerLayer,
       RuntimeReceiptBusTest,
-    ).pipe(Layer.provideMerge(ThreadBackgroundLiveness.layer));
+    ).pipe(
+      Layer.provideMerge(ThreadBackgroundLiveness.layer),
+      Layer.provideMerge(ThreadSessionModelSelections.layer),
+    );
     const serverSettingsLayer = ServerSettingsService.layerTest();
     const runtimeIngestionLayer = ProviderRuntimeIngestionLive.pipe(
       Layer.provideMerge(runtimeServicesLayer),

@@ -917,6 +917,61 @@ describe("follow-up queue decider: dispatch", () => {
     expect(watchWake.detail).toContain("pull request update");
   });
 
+  it("remembers the chat's selection a person's entry was queued over, and hands it to its turn", async () => {
+    const chat = baseThread.modelSelection;
+    const model = await queued(["a"]);
+    expect(queueOf(model)?.entries[0]?.queuedOverModelSelection).toEqual(chat);
+    const claude = { instanceId: CLAUDE, model: "sonnet" };
+    // Edited to another model while the chat holds another pick: queued over that pick now.
+    const picked = { instanceId: CODEX, model: "gpt-5.5" };
+    const { model: repicked } = await apply(model, {
+      type: "thread.meta.update",
+      commandId: nextCommandId("pick"),
+      threadId,
+      modelSelection: picked,
+    });
+    const editTo = (modelSelection: typeof claude, revision: number): OrchestrationCommand => ({
+      type: "thread.queue.edit",
+      commandId: nextCommandId("edit"),
+      threadId,
+      messageId: MessageId.make("a"),
+      expectedRevision: revision,
+      text: "edited",
+      attachments: [],
+      modelSelection,
+      runtimeMode: "approval-required",
+      interactionMode: "plan",
+      createdAt: at(3),
+    });
+    const { model: edited } = await apply(repicked, editTo(claude, 1));
+    expect(queueOf(edited)?.entries[0]?.queuedOverModelSelection).toEqual(picked);
+    // A text-only edit keeps what the model was queued over.
+    const { model: textOnly } = await apply(
+      await apply(edited, {
+        type: "thread.meta.update",
+        commandId: nextCommandId("pick-again"),
+        threadId,
+        modelSelection: chat,
+      }).then((result) => result.model),
+      editTo(claude, 2),
+    );
+    expect(queueOf(textOnly)?.entries[0]?.queuedOverModelSelection).toEqual(picked);
+    const events = await decide(
+      textOnly,
+      dispatch({ messageId: MessageId.make("a"), revision: 3 }, { modelSelection: claude }),
+    );
+    const start = events.find((event) => event.type === "thread.turn-start-requested");
+    expect(start?.payload).toMatchObject({ queuedOverModelSelection: picked });
+    // An agent's entry records none: it runs on the chat's own selection.
+    const { model: agentQueued } = await apply(
+      modelWith(),
+      addCommand("b", { author: "agent" } as Partial<
+        Extract<OrchestrationCommand, { type: "thread.queue.add" }>
+      >),
+    );
+    expect(queueOf(agentQueued)?.entries[0]).not.toHaveProperty("queuedOverModelSelection");
+  });
+
   it("an older client's own send of a queued id takes it out of the queue", async () => {
     const model = await queued(["a"]);
     const { events, model: next } = await apply(model, {

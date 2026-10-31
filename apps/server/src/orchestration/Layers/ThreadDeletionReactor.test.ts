@@ -33,6 +33,10 @@ import {
 } from "../Services/OrchestrationEngine.ts";
 import { ThreadDeletionReactor } from "../Services/ThreadDeletionReactor.ts";
 import {
+  make as makeThreadSessionModelSelections,
+  ThreadSessionModelSelectionsService,
+} from "../ThreadSessionModelSelections.ts";
+import {
   logCleanupCauseUnlessInterrupted,
   ThreadDeletionReactorLive,
 } from "./ThreadDeletionReactor.ts";
@@ -143,7 +147,11 @@ describe("ThreadDeletionReactor recreation fence", () => {
             },
           } satisfies OrchestrationEvent;
 
+          const sessionModelSelections = makeThreadSessionModelSelections();
           const layer = ThreadDeletionReactorLive.pipe(
+            Layer.provide(
+              Layer.succeed(ThreadSessionModelSelectionsService, sessionModelSelections),
+            ),
             Layer.provide(
               Layer.succeed(ProviderService, {
                 stopSession: ({
@@ -230,7 +238,11 @@ describe("ThreadDeletionReactor trash versus permanent deletion", () => {
             payload: { threadId, deletedAt: now },
           } satisfies OrchestrationEvent;
 
+          const sessionModelSelections = makeThreadSessionModelSelections();
           const layer = ThreadDeletionReactorLive.pipe(
+            Layer.provide(
+              Layer.succeed(ThreadSessionModelSelectionsService, sessionModelSelections),
+            ),
             Layer.provide(
               Layer.succeed(ProviderService, {
                 stopSession: ({
@@ -260,13 +272,19 @@ describe("ThreadDeletionReactor trash versus permanent deletion", () => {
           yield* Effect.gen(function* () {
             const reactor = yield* ThreadDeletionReactor;
             yield* reactor.start();
+            // What the session ran is forgotten with it, so the record never outgrows the threads.
+            const ran = { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.5" };
+            sessionModelSelections.set(threadId, ran);
             yield* PubSub.publish(events, trashed);
             yield* reactor.drainThrough(trashed.sequence).pipe(Effect.timeout("1 second"));
             expect(stops).toEqual([threadId]);
             expect(closes).toEqual([{ threadId, deleteHistory: false }]);
+            expect(sessionModelSelections.get(threadId)).toBeUndefined();
+            sessionModelSelections.set(threadId, ran);
             yield* PubSub.publish(events, deleted);
             yield* reactor.drainThrough(deleted.sequence).pipe(Effect.timeout("1 second"));
             expect(closes.at(-1)).toEqual({ threadId, deleteHistory: true });
+            expect(sessionModelSelections.get(threadId)).toBeUndefined();
           }).pipe(Effect.provide(layer));
         }),
       ),
@@ -361,7 +379,11 @@ describe("ThreadDeletionReactor chat projects", () => {
         Effect.gen(function* () {
           const events = yield* PubSub.unbounded<OrchestrationEvent>();
           const dispatched: OrchestrationCommand[] = [];
+          const sessionModelSelections = makeThreadSessionModelSelections();
           const layer = ThreadDeletionReactorLive.pipe(
+            Layer.provide(
+              Layer.succeed(ThreadSessionModelSelectionsService, sessionModelSelections),
+            ),
             Layer.provide(
               Layer.succeed(ProviderService, {
                 stopSession: () => Effect.void,

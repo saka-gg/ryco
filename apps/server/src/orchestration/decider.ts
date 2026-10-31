@@ -790,7 +790,8 @@ const withWatchWake = Effect.fnUntraced(function* (
         text: wake.text,
         attachments: [],
       },
-      modelSelection: thread.modelSelection,
+      // No model: the chat's stored pick applies where the session can take it
+      // (`threadContinuation.ts`).
       runtimeMode: thread.runtimeMode,
       interactionMode: thread.interactionMode,
       ...(thread.tokenMode === undefined ? {} : { tokenMode: thread.tokenMode }),
@@ -2445,6 +2446,9 @@ const decideCommand = Effect.fn("decideOrchestrationCommand.command")(function* 
           messageId: command.message.messageId,
           ...(command.delegationReturnGuard
             ? { delegationReturnGuard: command.delegationReturnGuard }
+            : {}),
+          ...(queueDispatch?.queuedOverModelSelection !== undefined
+            ? { queuedOverModelSelection: queueDispatch.queuedOverModelSelection }
             : {}),
           ...(command.computerUse ? { computerUse: command.computerUse } : {}),
           ...(command.modelSelection !== undefined

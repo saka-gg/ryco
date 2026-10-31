@@ -71,6 +71,12 @@ client's own pick that is still being written wins over a change that arrives me
 session applies a stored pick at its next turn and never restarts or interrupts a running one.
 A pick of another provider is a handoff and stays in the composer until it is sent. Nodes
 without the `liveThreadModelSelection` capability keep a pick in the composer until it is sent.
+Turns the node starts by itself (goal continuations, usage-limit resumes, delegated results,
+watch updates, an agent's or an automation's queued follow-up) name no model: they take the
+stored pick only where the session can, and keep the session's model when it cannot switch
+models or when a restart would end its background work. A person's queued follow-up runs with
+the model it was queued with, and that model becomes the chat's only while nobody stored another
+pick since it was queued (an older client stores a pick only by sending or queueing it).
 New-chat defaults (the last model per provider) stay in each client for now.
 
 ## Project inheritance

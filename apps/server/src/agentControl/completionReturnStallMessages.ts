@@ -101,7 +101,8 @@ export function buildStallNoticeCommand(input: {
       text: renderStallWake(input.section),
       attachments: [],
     },
-    modelSelection: input.parent.modelSelection,
+    // No model: the chat's stored pick applies where the session can take it
+    // (`threadContinuation.ts`).
     runtimeMode: input.parent.runtimeMode,
     interactionMode: input.parent.interactionMode,
     ...(input.parent.tokenMode === undefined ? {} : { tokenMode: input.parent.tokenMode }),

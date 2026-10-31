@@ -1210,6 +1210,13 @@ export const QueuedFollowUp = Schema.Struct({
    * the `ryco_queue_*` tools. Absent on entries queued before it was recorded.
    */
   queuedBy: Schema.optional(ThreadId),
+  /**
+   * Server-only, a person's entry: the chat's stored model selection when the entry got its model
+   * (queued, or edited to another model). Its turn makes the entry's model the chat's only while
+   * the chat still has this one, so a pick stored since (on any device) is kept. Absent on
+   * entries queued before it was recorded.
+   */
+  queuedOverModelSelection: Schema.optional(ModelSelection),
 });
 export type QueuedFollowUp = typeof QueuedFollowUp.Type;
 
@@ -3742,6 +3749,8 @@ export type ThreadContextHandoffRequestedPayload = typeof ThreadContextHandoffRe
 
 export const ThreadTurnStartRequestedPayload = Schema.Struct({
   delegationReturnGuard: Schema.optional(DelegationReturnGuard),
+  /** A person's queued follow-up: its `QueuedFollowUp.queuedOverModelSelection`. */
+  queuedOverModelSelection: Schema.optional(ModelSelection),
   computerUse: Schema.optionalKey(ComputerTurnIntent),
   // Decode historical records without enabling recall or persisting rendered text.
   projectMemory: Schema.optional(Schema.Unknown),
