@@ -74,6 +74,7 @@ const LAZY_FROM_MAIN = [
   "./tailscaleEndpointProvider.ts",
   "./bundledGuide.ts",
   "./desktopCliCommand.ts",
+  "./nightlyHandoff.ts",
   // Computer use: started during bootstrap, after Electron is ready.
   "./computerUse/desktopStack.ts",
   "./computerUse/runtime.ts",

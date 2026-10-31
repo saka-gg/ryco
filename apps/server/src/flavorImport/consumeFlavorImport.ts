@@ -43,6 +43,7 @@ import {
   FLAVOR_IMPORT_REQUEST_FILE_NAME,
   FLAVOR_IMPORT_REQUEST_MAX_AGE_MS,
   FLAVOR_IMPORT_RESULT_FILE_NAME,
+  FLAVOR_IMPORT_TOKEN_PATTERN,
   type FlavorImportRequest,
   type FlavorImportResult,
 } from "@ryco/shared/flavorImport";
@@ -102,6 +103,8 @@ export const FLAVOR_IMPORT_MESSAGES = {
   unreadable: "The copy request could not be read. Ask Ryco to copy your data again.",
   notAllowed: "The copy request names a folder that is not Ryco's data folder.",
   ownHome: "The copy request points at Ryco Nightly's own data.",
+  otherLaunch:
+    "The copy request was made while Ryco Nightly was already open. Quit Ryco Nightly, then copy again from Ryco.",
   noDatabase: "Ryco's data folder has no database to copy.",
   newer: "Ryco is newer than this Ryco Nightly. Update Ryco Nightly, then copy again.",
   restoreInterrupted:
@@ -119,6 +122,8 @@ export interface FlavorImportInput {
   readonly dbPath: string;
   /** The only Ryco data home this app may copy from (the desktop envelope's `flavorImport`). */
   readonly allowedSourceHome: string;
+  /** The token this launch of Ryco Nightly carried; only a request with it is taken. */
+  readonly requestToken: string;
   /** The newest migration this build knows; a newer database is refused. */
   readonly supportedMigrationId: number;
   /** Opens a SQLite connection for the live copy (`makeRuntimeSqliteLayer`). */
@@ -198,11 +203,18 @@ export function parseFlavorImportRequest(text: string): FlavorImportRequest | nu
     typeof record.requestedAt !== "string" ||
     !Number.isFinite(Date.parse(record.requestedAt)) ||
     typeof record.sourceHomeDir !== "string" ||
-    !Path.isAbsolute(record.sourceHomeDir)
+    !Path.isAbsolute(record.sourceHomeDir) ||
+    typeof record.token !== "string" ||
+    !FLAVOR_IMPORT_TOKEN_PATTERN.test(record.token)
   ) {
     return null;
   }
-  return { version: 1, requestedAt: record.requestedAt, sourceHomeDir: record.sourceHomeDir };
+  return {
+    version: 1,
+    requestedAt: record.requestedAt,
+    sourceHomeDir: record.sourceHomeDir,
+    token: record.token,
+  };
 }
 
 /**
@@ -555,6 +567,12 @@ const consumeRequest = (input: FlavorImportInput, markerPath: string) =>
       yield* writeResult(input.baseDir, { ok: false, error: FLAVOR_IMPORT_MESSAGES.unreadable });
       return { _tag: "Refused", error: FLAVOR_IMPORT_MESSAGES.unreadable } as const;
     }
+    // Only the request of this launch: one written while Nightly was already open never
+    // reached a launch, and must not replace what Nightly gathers until its next start.
+    if (request.token !== input.requestToken) {
+      yield* writeResult(input.baseDir, { ok: false, error: FLAVOR_IMPORT_MESSAGES.otherLaunch });
+      return { _tag: "Refused", error: FLAVOR_IMPORT_MESSAGES.otherLaunch } as const;
+    }
     const age = (input.now ?? Date.now)() - Date.parse(request.requestedAt);
     if (age > FLAVOR_IMPORT_REQUEST_MAX_AGE_MS || age < -REQUEST_FUTURE_TOLERANCE_MS) {
       return { _tag: "Stale" } as const;
@@ -641,6 +659,7 @@ export const runFlavorImport = (
         stateDir: config.stateDir,
         dbPath: config.dbPath,
         allowedSourceHome: config.flavorImport.allowedSourceHome,
+        requestToken: config.flavorImport.requestToken,
         supportedMigrationId: SUPPORTED_MIGRATION_ID,
         openSqlite: makeRuntimeSqliteLayer,
         migratedCopy: makePrivateSqliteCopyLive,

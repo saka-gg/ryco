@@ -80,6 +80,18 @@ downgrades a binary over a database a newer one migrated.
 
 ### Copying Ryco's data into Ryco Nightly
 
+In the app: **Settings → General → About → Ryco Nightly**. On Ryco (macOS) it finds Ryco Nightly in
+`/Applications` or `~/Applications` (only a real bundle whose `Info.plist` names
+`com.laurinfrank.ryco.nightly`), and offers **Open Ryco Nightly** and **Copy my data and open**
+(refused while Nightly's node runs or when the two data folders overlap, after a confirmation).
+Before opening, Ryco checks Nightly's code signature: signed by Ryco's own team and as
+`com.laurinfrank.ryco.nightly` (a development build of Ryco, unsigned itself, skips this). Ryco
+opens Nightly through macOS (`open -a … --env …`) with the login session's environment plus only
+`RYCO_STABLE_HOME`, `RYCO_STABLE_EXECUTABLE`, `RYCO_NIGHTLY_HOME` when Ryco has one, and for a copy
+`RYCO_FLAVOR_IMPORT_TOKEN`. Without Ryco Nightly installed, **Get Ryco Nightly** opens the
+releases page; installing it from inside the app is a later step. On Ryco Nightly, **Switch back to
+Ryco** opens Ryco the same way and copies nothing back, and the row says how the last copy went.
+
 Ryco can ask Ryco Nightly for a copy of its data. Ryco writes `import-requested.json` into
 Nightly's home; Nightly's backend takes the copy on its next start, before it opens its database,
 and reports the outcome in `import-result.json` beside it (`packages/shared/src/flavorImport.ts`,
@@ -88,6 +100,9 @@ and reports the outcome in `import-result.json` beside it (`packages/shared/src/
 - Nightly copies only from the home Ryco handed over when it opened Nightly (`RYCO_STABLE_HOME`),
   else `~/.ryco`, and never from its own. Links are refused, and a request older than an hour is
   dropped without copying.
+- Nightly takes only the request of the launch that opened it: the request and the launch carry the
+  same one-time token, which Nightly's desktop app takes out of its environment at start and hands
+  to its backend. A request written while Nightly was already open is refused, never taken later.
 - It copies the database (a live `VACUUM INTO`, as `ryco db backup` takes it), `settings.json`,
   `keybindings.json`, `attachments/` and `task-files/`, and nothing else: never the node identity,
   environment id, Hub state, secrets, saved connections, logs, backups or runtime files. Nightly

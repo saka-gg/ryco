@@ -34,7 +34,10 @@ describe("runRequestedFlavorImport", () => {
         stateDir: join(baseDir, "userdata"),
         dbPath: join(baseDir, "userdata", "state.sqlite"),
       };
-      const allowed = { ...config, flavorImport: { allowedSourceHome: join(baseDir, "stable") } };
+      const allowed = {
+        ...config,
+        flavorImport: { allowedSourceHome: join(baseDir, "stable"), requestToken: "launch-token" },
+      };
 
       // Every start without a request, and every start of a backend Ryco Nightly did not launch,
       // pays one check at most and loads nothing.

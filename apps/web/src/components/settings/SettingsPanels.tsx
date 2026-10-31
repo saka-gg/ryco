@@ -84,6 +84,7 @@ import { ProjectFavicon } from "../ProjectFavicon";
 import { RycoLetterMark } from "../RycoLetterMark";
 import { useServerAvailableEditors, useServerObservability } from "../../rpc/serverState";
 import { describeDesktopUpdateTrack } from "./desktopUpdateTrack";
+import { NightlyAppSettings } from "./NightlyAppSettings";
 import { getEditorIcon, getEditorLabel } from "./SettingsPanels.editor";
 import { isNodeSettingsTargetReadOnly, settingsScopeLabel } from "./settingsSections.logic";
 import { useSettingsEditingScope, useSettingsTarget } from "../../settingsTarget";
@@ -902,6 +903,9 @@ export function GeneralSettingsPanel() {
             owner="client"
             scope={localScopeLabel}
           />
+        )}
+        {isElectron && !isPhoneTier && editingScope !== "node" && (
+          <NightlyAppSettings scope={deviceScopeLabel} />
         )}
         <SettingsRow
           title="Diagnostics"

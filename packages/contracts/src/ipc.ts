@@ -821,6 +821,24 @@ export interface DesktopCliCommandState {
   readonly launcherPath: string | null;
 }
 
+/** Ryco and Ryco Nightly, as each app sees the other (`nightlyHandoff.ts`). */
+export interface DesktopNightlyState {
+  /** Which app this is. */
+  readonly flavor: "stable" | "nightly";
+  /** The other app is installed where this one looks for it (macOS Applications folders). */
+  readonly otherAppInstalled: boolean;
+  /** Ryco: Ryco Nightly's node is running now, so it cannot take a copy until it quits. */
+  readonly nightlyRunning: boolean;
+  /** Ryco Nightly: how the last copy of Ryco's data went; null when none was asked for. */
+  readonly lastImport: {
+    readonly completedAt: string;
+    readonly ok: boolean;
+    readonly error?: string;
+  } | null;
+  /** Where both apps are downloaded. */
+  readonly releasesUrl: string;
+}
+
 /**
  * What a chat that quitting would stop is doing. Only `working` chats can be continued after a
  * restart: chats waiting for a person are never continued.
@@ -882,6 +900,14 @@ export interface DesktopBridge {
     getState(): Promise<DesktopCliCommandState>;
     install(): Promise<DesktopCliCommandState>;
     uninstall(): Promise<DesktopCliCommandState>;
+  };
+  /** Try Ryco Nightly from Ryco, and switch back. Absent in desktop builds that predate it. */
+  nightly?: {
+    getState(): Promise<DesktopNightlyState>;
+    /** Ryco only. With `copyData`, Ryco Nightly takes a copy of Ryco's data when it starts. */
+    open(input: { readonly copyData: boolean }): Promise<void>;
+    /** Ryco Nightly only. Opens Ryco; nothing is copied back. */
+    switchBack(): Promise<void>;
   };
   quitShortcut?: {
     getMode(): Promise<DesktopQuitShortcutMode>;
