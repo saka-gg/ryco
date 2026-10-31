@@ -1254,6 +1254,10 @@ const makeProviderService = Effect.fn("makeProviderService")(function* (
             return yield* resolveRoutableSessionUnlocked(input);
           }
           const instanceId = binding.providerInstanceId;
+          // A live session launches nothing, so a turn to it never waits for an install, even one
+          // of another CLI that shares its installer.
+          const live = yield* resolveRoutableSessionUnlocked({ ...input, allowRecovery: false });
+          if (live.isActive) return live;
           const label = yield* operationLabel(instanceId);
           const timeoutMs = timeouts.sessionStartMs(binding.provider);
           // A recovery launches the provider again.

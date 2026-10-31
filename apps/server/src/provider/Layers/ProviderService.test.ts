@@ -2972,6 +2972,58 @@ it.live("ProviderServiceLive holds a session start while this CLI is installed o
   }).pipe(Effect.provide(NodeServices.layer)),
 );
 
+it.live(
+  "ProviderServiceLive sends a turn to a live session while its CLI's installer is busy",
+  () =>
+    Effect.gen(function* () {
+      const codex = makeFakeCodexAdapter();
+      const registry = makeAdapterRegistryMock({ [CODEX_DRIVER]: codex.adapter });
+      const runtimeRepositoryLayer = ProviderSessionRuntimeRepositoryLive.pipe(
+        Layer.provide(SqlitePersistenceMemory),
+      );
+      const directoryLayer = ProviderSessionDirectoryLive.pipe(
+        Layer.provide(runtimeRepositoryLayer),
+      );
+      const installDone = yield* Deferred.make<void>();
+      let installing = false;
+      let waits = 0;
+      // Another Ryco on this host starts installing a CLI that shares Codex's installer.
+      const installLockLayer = Layer.mock(ProviderInstallLock)({
+        beforeLaunch: () =>
+          installing
+            ? Effect.sync(() => (waits += 1)).pipe(Effect.andThen(Deferred.await(installDone)))
+            : Effect.void,
+      });
+      const providerLayer = makeProviderServiceLive().pipe(
+        Layer.provide(Layer.succeed(ProviderAdapterRegistry, registry)),
+        Layer.provide(directoryLayer),
+        Layer.provide(defaultServerSettingsLayer),
+        Layer.provide(AnalyticsService.layerTest),
+        Layer.provide(Layer.succeed(ProviderEventLoggers, NoOpProviderEventLoggers)),
+        Layer.provide(installLockLayer),
+      );
+
+      yield* Effect.gen(function* () {
+        const provider = yield* ProviderService;
+        const threadId = asThreadId("thread-turn-during-install");
+        yield* provider.startSession(threadId, {
+          provider: CODEX_DRIVER,
+          providerInstanceId: codexInstanceId,
+          threadId,
+          runtimeMode: "full-access",
+        });
+        installing = true;
+        // A live session launches nothing: the turn goes through without waiting.
+        yield* provider
+          .sendTurn({ threadId, input: "still working", attachments: [] })
+          .pipe(Effect.timeout("5 seconds"));
+        assert.equal(codex.sendTurn.mock.calls.length, 1);
+        assert.equal(waits, 0);
+        yield* Deferred.succeed(installDone, undefined);
+      }).pipe(Effect.provide(providerLayer));
+    }).pipe(Effect.provide(NodeServices.layer)),
+);
+
 it.live("ProviderServiceLive fails a same-instance fresh replacement when stop times out", () =>
   Effect.gen(function* () {
     const codex = makeFakeCodexAdapter();
