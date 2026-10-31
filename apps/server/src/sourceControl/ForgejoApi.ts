@@ -46,12 +46,7 @@ import { forgeHttpFailureFields } from "./forgeHttpRateLimit.ts";
 import * as ForgejoIssues from "./forgejoIssues.ts";
 import { forgejoWorkInProgressTitle } from "./forgejoPullRequestMutations.ts";
 import * as ForgejoPullRequests from "./forgejoPullRequests.ts";
-import {
-  forgejoPullRequestIndex,
-  makeForgejoPullRequestPageApi,
-  type ForgejoPageHttp,
-  type ForgejoRequestSpec,
-} from "./ForgejoPullRequestPageApi.ts";
+import type { ForgejoPageHttp, ForgejoRequestSpec } from "./ForgejoPullRequestPageApi.ts";
 import * as SourceControlProvider from "./SourceControlProvider.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import * as VcsDriverRegistry from "../vcs/VcsDriverRegistry.ts";
@@ -551,7 +546,7 @@ function providerInfoForInstance(instance: ForgejoInstanceConfig): SourceControl
   };
 }
 
-const normalizeChangeRequestId = forgejoPullRequestIndex;
+const normalizeChangeRequestId = ForgejoPullRequests.forgejoPullRequestIndex;
 
 function normalizeIssueId(reference: string): string {
   const trimmed = reference.trim().replace(/^#/, "");
@@ -1038,14 +1033,22 @@ export const make = Effect.fn("makeForgejoApi")(function* () {
       ForgejoCurrentUserSchema,
     );
 
-  const page = makeForgejoPullRequestPageApi({
-    http: pageHttp,
-    resolveRepository: (request) =>
-      resolveRepository({
-        cwd: request.cwd,
-        ...(request.context ? { context: request.context } : {}),
-      }),
-  });
+  // The pull request page reads and writes (diffs, activity, reviews, merges) load on first
+  // use, so a server that never opens a Forgejo pull request never loads them.
+  const page = yield* Effect.cached(
+    Effect.promise(() => import("./ForgejoPullRequestPageApi.ts")).pipe(
+      Effect.map((module) =>
+        module.makeForgejoPullRequestPageApi({
+          http: pageHttp,
+          resolveRepository: (request) =>
+            resolveRepository({
+              cwd: request.cwd,
+              ...(request.context ? { context: request.context } : {}),
+            }),
+        }),
+      ),
+    ),
+  );
 
   return ForgejoApi.of({
     probeAuth: Effect.gen(function* () {
@@ -1119,8 +1122,8 @@ export const make = Effect.fn("makeForgejoApi")(function* () {
               !pageList
                 ? Effect.succeed(list)
                 : input.readiness === false
-                  ? page.rememberRows(input, list)
-                  : page.withRowReadiness(input, list),
+                  ? page.pipe(Effect.flatMap((api) => api.rememberRows(input, list)))
+                  : page.pipe(Effect.flatMap((api) => api.withRowReadiness(input, list))),
             ),
           ),
         ),
@@ -1198,7 +1201,8 @@ export const make = Effect.fn("makeForgejoApi")(function* () {
           ),
           ForgejoPullRequests.ForgejoPullRequestSchema,
         );
-        if (input.draft === true) yield* page.verifyCreatedDraft("createPullRequest", created);
+        if (input.draft === true)
+          yield* (yield* page).verifyCreatedDraft("createPullRequest", created);
       }),
     getDefaultBranch: (input) =>
       getRepository(input).pipe(
@@ -1393,9 +1397,12 @@ export const make = Effect.fn("makeForgejoApi")(function* () {
         ),
       ),
     searchPullRequests: (input) =>
-      page
-        .searchPullRequests({ ...input, limit: clampLimit(input.limit) })
-        .pipe(Effect.catch((err) => (err.status === 404 ? Effect.succeed([]) : Effect.fail(err)))),
+      page.pipe(
+        Effect.flatMap((api) =>
+          api.searchPullRequests({ ...input, limit: clampLimit(input.limit) }),
+        ),
+        Effect.catch((err) => (err.status === 404 ? Effect.succeed([]) : Effect.fail(err))),
+      ),
     getPullRequestDetail: (input) => {
       const referenceId = normalizeChangeRequestId(input.reference);
       return resolveRepository({
@@ -1463,25 +1470,39 @@ export const make = Effect.fn("makeForgejoApi")(function* () {
             { concurrency: "unbounded" },
           ).pipe(
             Effect.map(ForgejoPullRequests.normalizeForgejoPullRequestDetail),
-            Effect.flatMap((detail) => page.withDetailReadiness(input, detail)),
+            Effect.flatMap((detail) =>
+              page.pipe(Effect.flatMap((api) => api.withDetailReadiness(input, detail))),
+            ),
           );
         }),
       );
     },
-    getPullRequestDiff: (input) => page.getPullRequestDiff(input),
+    getPullRequestDiff: (input) =>
+      page.pipe(Effect.flatMap((api) => api.getPullRequestDiff(input))),
     listInvolvedPullRequests: (input) =>
-      page.listInvolvedPullRequests({ ...input, limit: clampLimit(input.limit) }),
-    getPullRequestActivity: (input) => page.getPullRequestActivity(input),
-    getPullRequestFileContents: (input) => page.getPullRequestFileContents(input),
-    addPullRequestComment: (input) => page.addPullRequestComment(input),
-    togglePullRequestCommentReaction: (input) => page.togglePullRequestCommentReaction(input),
-    updatePullRequestComment: (input) => page.updatePullRequestComment(input),
-    submitPullRequestReview: (input) => page.submitPullRequestReview(input),
-    replyToPullRequestReviewThread: (input) => page.replyToPullRequestReviewThread(input),
-    updatePullRequest: (input) => page.updatePullRequest(input),
-    mergePullRequest: (input) => page.mergePullRequest(input),
-    listLabels: (input) => page.listLabels(input),
-    listAssignees: (input) => page.listAssignees(input),
+      page.pipe(
+        Effect.flatMap((api) =>
+          api.listInvolvedPullRequests({ ...input, limit: clampLimit(input.limit) }),
+        ),
+      ),
+    getPullRequestActivity: (input) =>
+      page.pipe(Effect.flatMap((api) => api.getPullRequestActivity(input))),
+    getPullRequestFileContents: (input) =>
+      page.pipe(Effect.flatMap((api) => api.getPullRequestFileContents(input))),
+    addPullRequestComment: (input) =>
+      page.pipe(Effect.flatMap((api) => api.addPullRequestComment(input))),
+    togglePullRequestCommentReaction: (input) =>
+      page.pipe(Effect.flatMap((api) => api.togglePullRequestCommentReaction(input))),
+    updatePullRequestComment: (input) =>
+      page.pipe(Effect.flatMap((api) => api.updatePullRequestComment(input))),
+    submitPullRequestReview: (input) =>
+      page.pipe(Effect.flatMap((api) => api.submitPullRequestReview(input))),
+    replyToPullRequestReviewThread: (input) =>
+      page.pipe(Effect.flatMap((api) => api.replyToPullRequestReviewThread(input))),
+    updatePullRequest: (input) => page.pipe(Effect.flatMap((api) => api.updatePullRequest(input))),
+    mergePullRequest: (input) => page.pipe(Effect.flatMap((api) => api.mergePullRequest(input))),
+    listLabels: (input) => page.pipe(Effect.flatMap((api) => api.listLabels(input))),
+    listAssignees: (input) => page.pipe(Effect.flatMap((api) => api.listAssignees(input))),
   });
 });
 

@@ -454,3 +454,10 @@ export function decodeForgejoPullRequestDetailJson(
     }),
   );
 }
+
+/** The pull request number in a reference (`42`, `#42`, or a pull request URL). */
+export function forgejoPullRequestIndex(reference: string): string {
+  const trimmed = reference.trim().replace(/^#/, "");
+  const urlMatch = /(?:pulls?|pull-requests?|pullrequests?|pr)\/(\d+)(?:\D.*)?$/iu.exec(trimmed);
+  return urlMatch?.[1] ?? trimmed;
+}
