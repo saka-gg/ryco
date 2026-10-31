@@ -159,6 +159,32 @@ export function cliProxyAccountDisplayName(account: CliProxyAccount): {
   return { value, sensitive: EMAIL_PATTERN.test(value) };
 }
 
+/**
+ * A hub account's name where no email may ever appear: the phone's Limits list and, later, Home
+ * and Lock Screen widgets. Its label or credential file name when that names no email, else
+ * `Account N`, N being its 1-based position in the list shown. Any `@` counts as email-like, so
+ * a partial address (`alice@work`) is never shown either.
+ */
+export function cliProxyAccountPublicName(account: CliProxyAccount, position: number): string {
+  const name = cliProxyAccountDisplayName(account);
+  return name.sensitive || name.value.includes("@") ? `Account ${position}` : name.value;
+}
+
+/** Why a hub account shows no usage windows, or null when it shows them. */
+export function cliProxyQuotaNote(account: CliProxyAccount): string | null {
+  const { quota } = account;
+  switch (quota.status) {
+    case "ok":
+      return quota.windows.length === 0 ? "No usage windows reported." : null;
+    case "unsupported":
+      return `${cliProxyProviderLabel(account.provider)} has no quota API Ryco reads; request counts only.`;
+    case "skipped":
+      return "Disabled on the hub, so its quota is not read.";
+    case "failed":
+      return quota.message ?? "The quota could not be read.";
+  }
+}
+
 /** A hub snapshot as one connected environment reported it. */
 export interface CliProxyEnvironmentHub {
   readonly environmentId: string;
