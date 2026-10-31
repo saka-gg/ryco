@@ -24,6 +24,7 @@ import type {
   OrchestrationReadModel,
   OrchestrationSession,
 } from "@ryco/contracts";
+import { derivePendingThreadRequestState } from "@ryco/shared/threadActivity";
 import {
   Cause,
   Clock,
@@ -97,6 +98,27 @@ export function hasLiveBackgroundWork(
   });
 }
 
+const isRequestActivity = (activity: { readonly kind: string }) =>
+  activity.kind === "approval.requested" || activity.kind === "user-input.requested";
+
+/**
+ * Work an update or restart would interrupt beyond running turns: a thread whose provider session
+ * is starting, or that waits on an approval or a (blocking) question. The server mirror of the
+ * client's `INTERRUPTIBLE` rule (`@ryco/client-runtime` `interruptibleTurns.ts`: working,
+ * approval, input, connecting); running turns and background work are `keepAwake`'s. Archived,
+ * deleted and trashed threads never count, as on the client.
+ */
+export function hasInterruptibleWork(readModel: Pick<OrchestrationReadModel, "threads">): boolean {
+  return readModel.threads.some((thread) => {
+    if (thread.deletedAt !== null || thread.archivedAt !== null) return false;
+    if (thread.session?.status === "starting") return true;
+    // Most threads never asked anything: a scan, before sorting a log that has requests.
+    if (!thread.activities.some(isRequestActivity)) return false;
+    const pending = derivePendingThreadRequestState(thread.activities);
+    return pending.hasPendingApprovals || pending.hasPendingUserInput;
+  });
+}
+
 /**
  * The domain events that can change what the two predicates above answer: `thread.session-set`
  * is the only writer of a thread's session, and deletion, trash and restore change `deletedAt`.
@@ -154,6 +176,13 @@ export interface AgentWorkActivityShape {
    * emitted before the first report, so a consumer never acts on a placeholder.
    */
   readonly changes: Stream.Stream<AgentWorkState>;
+  /**
+   * Whether an update or restart would interrupt something now: `keepAwake` (work, or work that
+   * stopped less than {@link AGENT_WORK_RELEASE_DEBOUNCE_MS} ago) or {@link hasInterruptibleWork}.
+   * True before the first report and when the engine keeps no in-memory model: whoever cannot tell
+   * must not interrupt. A failed read fails.
+   */
+  readonly interruptible: Effect.Effect<boolean>;
 }
 
 export class AgentWorkActivity extends Context.Service<AgentWorkActivity, AgentWorkActivityShape>()(
@@ -287,8 +316,16 @@ export const makeAgentWorkActivity = Effect.gen(function* () {
     ),
   );
 
+  const readModel = engine.getReadModel;
   return {
     current: SubscriptionRef.get(published).pipe(Effect.map((state) => state ?? IDLE_AGENT_WORK)),
+    interruptible: SubscriptionRef.get(published).pipe(
+      Effect.flatMap((state) =>
+        state === null || state.keepAwake || readModel === undefined
+          ? Effect.succeed(true)
+          : readModel().pipe(Effect.map(hasInterruptibleWork)),
+      ),
+    ),
     changes: SubscriptionRef.changes(published).pipe(
       Stream.filter((state): state is AgentWorkState => state !== null),
     ),

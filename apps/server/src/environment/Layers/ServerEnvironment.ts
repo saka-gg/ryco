@@ -128,6 +128,7 @@ export const makeServerEnvironment = Effect.fn("makeServerEnvironment")(function
       pullRequestOptions: true,
       workingTreeComparison: true,
       agentProcessPriority: true,
+      automaticUpdates: true,
       usagePriceOverrides: true,
       serverFollowUpQueue: true,
       fileAttachments: { maxUploadBytes: PROVIDER_SEND_TURN_MAX_FILE_BYTES },

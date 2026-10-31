@@ -1,6 +1,15 @@
 import "../../index.css";
 
-import type { EnvironmentId, NodeUpdateState } from "@ryco/contracts";
+import {
+  resetEnvironmentServerConfigsForTests,
+  writeEnvironmentServerConfig,
+} from "@ryco/client-runtime/rpc";
+import {
+  DEFAULT_SERVER_SETTINGS,
+  type EnvironmentId,
+  type NodeUpdateState,
+  type ServerConfig,
+} from "@ryco/contracts";
 import { page } from "vite-plus/test/browser";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import { render } from "vitest-browser-react";
@@ -22,6 +31,9 @@ import {
   EMPTY_PLAN,
   FULL_PLAN,
   LINUX_DEVICE,
+  LINUX_ID,
+  OFFLINE_ID,
+  THIS_MAC_ID,
   M4_DEVICE,
   M4_ID,
   runDevice,
@@ -54,7 +66,37 @@ describe("Settings → Updates", () => {
     await mounted?.unmount();
     mounted = null;
     mock.nodeUpdates.clear();
+    resetEnvironmentServerConfigsForTests();
     document.body.innerHTML = "";
+  });
+
+  it("lets each node's owner turn on automatic provider updates", async () => {
+    const nodeConfig = (settings: Partial<ServerConfig["settings"]>, supported = true) =>
+      ({
+        environment: { capabilities: supported ? { automaticUpdates: true } : {} },
+        settings: { ...DEFAULT_SERVER_SETTINGS, ...settings },
+      }) as unknown as ServerConfig;
+    writeEnvironmentServerConfig(M4_ID, nodeConfig({ automaticUpdates: true }));
+    writeEnvironmentServerConfig(THIS_MAC_ID, nodeConfig({}));
+    writeEnvironmentServerConfig(LINUX_ID, nodeConfig({ enableProviderUpdateChecks: false }));
+    // Too old to update unattended: no switch at all.
+    writeEnvironmentServerConfig(OFFLINE_ID, nodeConfig({}, false));
+    setController();
+    mounted = await render(<UpdatesSettings />);
+
+    const toggle = (name: string) =>
+      page.getByRole("switch", { name: `Update ${name} automatically`, exact: true });
+    await expect.element(toggle("MacBook Pro M4")).toBeChecked();
+    await expect.element(toggle("This Mac")).not.toBeChecked();
+    await expect.element(toggle("This Mac")).toBeEnabled();
+    // Unattended updates need provider update checks.
+    await expect.element(toggle("Linux box")).toBeDisabled();
+    await expect
+      .element(
+        page.getByText("Turn on provider update checks for this node first (General settings)."),
+      )
+      .toBeVisible();
+    expect(toggle("Studio PC").elements()).toHaveLength(0);
   });
 
   it("lists every device and updates one, all, or checks again", async () => {

@@ -72,6 +72,7 @@ it.layer(NodeServices.layer)("ServerEnvironmentLive", (it) => {
       expect(second.capabilities.worktreeNotes).toBe(true);
       expect(second.capabilities.localTasks).toBe(true);
       expect(second.capabilities.nodeSelfUpdate).toBe(true);
+      expect(second.capabilities.automaticUpdates).toBe(true);
       expect(second.capabilities.terminalWriteRequireIdle).toBe(true);
       expect(second.capabilities.threadFork).toBe(true);
       expect(second.capabilities.threadBranchAdoption).toBe(true);

@@ -5,6 +5,7 @@ import { LocalTaskService } from "../tasks/LocalTaskService.ts";
 import { PullRequestWatchService } from "../sourceControl/PullRequestWatchService.ts";
 import { WorktreeNotesService } from "../notes/WorktreeNotesService.ts";
 import { NodeUpdateService } from "../nodeUpdate/NodeUpdateService.ts";
+import { ClientInteraction } from "../updates/ClientInteraction.ts";
 import { ProviderSignIn } from "../provider/signIn/ProviderSignIn.ts";
 import { NodeBrowser } from "../nodeBrowser/NodeBrowser.ts";
 import { NodePushRegistry } from "../push/NodePushRegistry.ts";
@@ -284,6 +285,7 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
     const worktreeNotesService = yield* Effect.serviceOption(WorktreeNotesService);
     // Optional for the route-test reason above; production provides it with the runtime.
     const nodeUpdate = yield* Effect.serviceOption(NodeUpdateService);
+    const clientInteraction = yield* Effect.serviceOption(ClientInteraction);
     const providerSignIn = yield* Effect.serviceOption(ProviderSignIn);
     const nodeBrowser = yield* Effect.serviceOption(NodeBrowser);
     const nodePushRegistry = yield* Effect.serviceOption(NodePushRegistry);
@@ -1450,6 +1452,7 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
       pullRequestWatch,
       worktreeNotesService,
       nodeUpdate,
+      clientInteraction,
       providerSignIn,
       nodeBrowser,
       nodePushRegistry,

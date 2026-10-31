@@ -76,6 +76,7 @@ describe("DesktopAgentWorkFramesLive", () => {
               Layer.succeed(AgentWorkActivity, {
                 current: SubscriptionRef.get(ref),
                 changes: SubscriptionRef.changes(ref),
+                interruptible: Effect.succeed(false),
               }),
             ),
           ),

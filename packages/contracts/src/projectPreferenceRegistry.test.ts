@@ -52,6 +52,7 @@ const NEVER_PROJECT_PREFERENCES = [
   "providerInstances",
   "lowerAgentProcessPriority",
   "continueThreadsAfterRestart",
+  "automaticUpdates",
   "worktreeRoot",
   "projectWorktreeRoots",
   "addProjectBaseDirectory",

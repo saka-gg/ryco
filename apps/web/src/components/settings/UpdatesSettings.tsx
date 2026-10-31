@@ -16,6 +16,7 @@ import {
   type UpdateEverythingDeviceEntry,
   type UpdateResultTone,
 } from "../updates/updateEverything.logic";
+import { AutomaticUpdatesSettings } from "./AutomaticUpdatesSettings";
 import {
   SETTINGS_CARD_RADIUS_CLASS,
   SettingsCard,
@@ -145,6 +146,7 @@ export function UpdatesSettings() {
           </div>
         )}
       </SettingsSection>
+      <AutomaticUpdatesSettings entries={entries} />
     </SettingsPageContainer>
   );
 }

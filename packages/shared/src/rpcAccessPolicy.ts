@@ -193,6 +193,10 @@ export const RPC_ACCESS_POLICY = {
   [WS_METHODS.providerSignInStart]: "owner",
   [WS_METHODS.providerSignInRespond]: "owner",
   [WS_METHODS.serverUpdateProvider]: "owner",
+  // Anyone using a client of the node counts as someone an unattended update must not disturb.
+  // It only delays updates (a node-side timestamp, rate-limited per session); it never starts,
+  // allows or reads one.
+  [WS_METHODS.serverNoteClientInteraction]: "viewer",
   [WS_METHODS.serverSubscribeNodeUpdate]: "viewer",
   [WS_METHODS.serverCheckNodeUpdate]: "owner",
   [WS_METHODS.serverUpdateNode]: "owner",
@@ -495,6 +499,8 @@ export const RPC_DELIVERY_EFFECT_POLICY = {
   [WS_METHODS.providerSignInStart]: "mutation",
   [WS_METHODS.providerSignInRespond]: "mutation",
   [WS_METHODS.serverUpdateProvider]: "mutation",
+  // Sets the node's last-interaction time to now: losing or repeating one is harmless.
+  [WS_METHODS.serverNoteClientInteraction]: "read",
   [WS_METHODS.serverSubscribeNodeUpdate]: "read",
   // Asks the registry (or the desktop updater) again; it changes nothing on the node.
   [WS_METHODS.serverCheckNodeUpdate]: "read",

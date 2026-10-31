@@ -55,6 +55,15 @@ describe("shared RPC access policy", () => {
     expect(rpcDeliveryEffectFor(WS_METHODS.providerSignInStart)).toBe("mutation");
     expect(rpcDeliveryEffectFor(WS_METHODS.providerSignInRespond)).toBe("mutation");
   });
+  it("lets any role report client use, which only delays unattended updates", () => {
+    for (const role of ["viewer", "operator", "owner"] as const) {
+      expect(hostedRoleAllows(role, WS_METHODS.serverNoteClientInteraction)).toBe(true);
+    }
+    expect(hostedRoleAllows("owner", WS_METHODS.serverNoteClientInteraction, false)).toBe(false);
+    expect(rpcDeliveryEffectFor(WS_METHODS.serverNoteClientInteraction)).toBe("read");
+    // Whether a node updates unattended is a node setting only its owner may change.
+    expect(rpcAccessFor(WS_METHODS.serverUpdateSettings)).toBe("owner");
+  });
   it("classifies every current and legacy RPC method", () => {
     expect(new Set(Object.keys(RPC_ACCESS_POLICY))).toEqual(
       new Set([

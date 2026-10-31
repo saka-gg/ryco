@@ -147,6 +147,8 @@ import { SleepInhibitorLive } from "./service/sleepInhibitor.ts";
 import { EventLoopMonitorLive } from "./observability/EventLoopMonitor.ts";
 import { HeapSnapshotLive } from "./observability/HeapSnapshotSignal.ts";
 import { makeAgentWorkHoldLayer } from "./agentWorkHold.ts";
+import { ClientInteractionLive } from "./updates/ClientInteraction.ts";
+import { UnattendedUpdatesLauncherLive } from "./updates/unattendedUpdatesLauncher.ts";
 import { StartupStallMonitorLive, trackStartupLayer } from "./startupStallMonitor.ts";
 import {
   authBearerBootstrapRouteLayer,
@@ -678,6 +680,9 @@ const RuntimeServicesLive = Layer.mergeAll(
   // The node's own release and one-click update: one state for every connection, and the
   // boot report of an update that restarted this process.
   NodeUpdateServiceLive,
+  // When a person last used a client: every connection reports into one, unattended updates
+  // wait on it.
+  ClientInteractionLive,
   // Provider sign-in flows: shared by every owner connection, ended with the server.
   ProviderSignInLive,
   // Node browser tabs: one browser for every connection and frame socket, ended with the
@@ -934,6 +939,8 @@ export const makeServerLayer = Layer.unwrap(
       // Agent work for sleep holds: Desktop main holds the machine awake from it in desktop
       // mode, and a headless node without --prevent-sleep holds it itself.
       makeAgentWorkHoldLayer(config),
+      // Unattended provider updates, loaded only once a node's owner turns them on.
+      UnattendedUpdatesLauncherLive,
     );
 
     // Shutdown runs these stages in reverse build order; the markers log how

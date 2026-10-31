@@ -190,6 +190,10 @@
       "types": "./src/updates/view.ts",
       "import": "./src/updates/view.ts"
     },
+    "./updates/clientInteraction": {
+      "types": "./src/updates/clientInteraction.ts",
+      "import": "./src/updates/clientInteraction.ts"
+    },
     "./state/orchestration": {
       "types": "./src/state/orchestration/index.ts",
       "import": "./src/state/orchestration/index.ts"

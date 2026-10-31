@@ -616,6 +616,7 @@ export const WS_METHODS = {
   providerPrewarmSession: "provider.prewarmSession",
   providerReadProjectCommands: "provider.readProjectCommands",
   serverUpdateProvider: "server.updateProvider",
+  serverNoteClientInteraction: "server.noteClientInteraction",
   serverSubscribeNodeUpdate: "server.subscribeNodeUpdate",
   serverCheckNodeUpdate: "server.checkNodeUpdate",
   serverUpdateNode: "server.updateNode",
@@ -1136,6 +1137,18 @@ export const WsServerUpdateProviderRpc = Rpc.make(WS_METHODS.serverUpdateProvide
   payload: ServerProviderUpdateInput,
   success: ServerProviderUpdatedPayload,
   error: Schema.Union([ServerProviderUpdateError, AuthRpcError]),
+});
+
+/**
+ * A person is using a client of this node (input in the app). Clients send it at most every 30 s
+ * while there is input, and only to nodes with `automaticUpdates` on; the node keeps the newest
+ * time (at most one per 15 s per session) so unattended updates wait for a quiet window. It can
+ * only delay an update, never start or allow one.
+ */
+export const WsServerNoteClientInteractionRpc = Rpc.make(WS_METHODS.serverNoteClientInteraction, {
+  payload: Schema.Struct({}),
+  success: EmptyRpcResult,
+  error: AuthRpcError,
 });
 
 export const WsServerSubscribeNodeUpdateRpc = Rpc.make(WS_METHODS.serverSubscribeNodeUpdate, {
@@ -2751,6 +2764,7 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   | typeof WsProviderPrewarmSessionRpc
   | typeof WsProviderReadProjectCommandsRpc
   | typeof WsServerUpdateProviderRpc
+  | typeof WsServerNoteClientInteractionRpc
   | typeof WsServerSubscribeNodeUpdateRpc
   | typeof WsServerCheckNodeUpdateRpc
   | typeof WsServerUpdateNodeRpc
@@ -2993,6 +3007,7 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   WsProviderPrewarmSessionRpc,
   WsProviderReadProjectCommandsRpc,
   WsServerUpdateProviderRpc,
+  WsServerNoteClientInteractionRpc,
   WsServerSubscribeNodeUpdateRpc,
   WsServerCheckNodeUpdateRpc,
   WsServerUpdateNodeRpc,

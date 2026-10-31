@@ -32,6 +32,10 @@ import {
   type ProviderMaintenanceResolutionContext,
 } from "./providerMaintenance.ts";
 import {
+  isSelfUpdatingProviderLockKey,
+  resolvePinnedProviderUpdateAction,
+} from "./providerUpdatePinning.ts";
+import {
   codexHomeFromStandaloneCommandPath,
   makeCodexMaintenanceResolver,
 } from "./Drivers/CodexDriver.ts";
@@ -341,6 +345,70 @@ describe("providerMaintenance", () => {
         "1.1.0",
       ),
     ).toBe("npm install -g @example/package-tool@latest");
+  });
+
+  it("pins every unattended install that names a package to the version it rated", () => {
+    const capabilities = (executable: string, args: ReadonlyArray<string>, lockKey: string) =>
+      makeProviderMaintenanceCapabilities({
+        provider: driver("packageTool"),
+        packageName: "@example/package-tool",
+        updateExecutable: executable,
+        updateArgs: args,
+        updateLockKey: lockKey,
+      });
+    const pinned = (input: ProviderMaintenanceCapabilities, version = "1.1.0") =>
+      resolvePinnedProviderUpdateAction(input, version);
+    const spec = "@example/package-tool@latest";
+
+    expect(
+      pinned(
+        capabilities(
+          "npm",
+          ["install", "-g", "--prefix", "/opt/node", spec],
+          "npm-global:/opt/node",
+        ),
+      )?.args,
+    ).toEqual(["install", "-g", "--prefix", "/opt/node", "@example/package-tool@1.1.0"]);
+    expect(pinned(capabilities("bun", ["i", "-g", spec], "bun-global"))?.command).toBe(
+      "bun i -g @example/package-tool@1.1.0",
+    );
+    expect(pinned(capabilities("yarn", ["global", "add", spec], "yarn-global"))?.args).toEqual([
+      "global",
+      "add",
+      "@example/package-tool@1.1.0",
+    ]);
+    expect(pinned(capabilities("volta", ["install", spec], "volta"))?.args).toEqual([
+      "install",
+      "@example/package-tool@1.1.0",
+    ]);
+    expect(pinned(capabilities("pnpm", ["add", "-g", spec], "pnpm-global"))?.args).toEqual([
+      "add",
+      "-g",
+      "@example/package-tool@1.1.0",
+    ]);
+    // Nothing names a version to replace, or the version is not a plain release: no unattended
+    // install at all.
+    expect(
+      pinned(capabilities("vp", ["i", "-g", "@example/package-tool"], "vite-plus-global")),
+    ).toBeNull();
+    expect(pinned(capabilities("agent", ["update"], "cursor-agent"))).toBeNull();
+    expect(pinned(capabilities("npm", ["install", "-g", spec], "npm-global"), "1.1.0-beta.1")).toBe(
+      null,
+    );
+    // Homebrew and a provider's own updater take no version and run as they are.
+    const brew = capabilities("brew", ["upgrade", "package-tool"], "homebrew");
+    expect(pinned(brew)).toEqual(brew.update);
+    const native = capabilities("/home/me/.local/bin/tool", ["update"], "packageTool-native");
+    expect(pinned(native)).toEqual(native.update);
+  });
+
+  it("treats only Homebrew and provider-native lock keys as self-updating", () => {
+    expect(isSelfUpdatingProviderLockKey("homebrew")).toBe(true);
+    expect(isSelfUpdatingProviderLockKey("claudeAgent-native")).toBe(true);
+    // A path is never a provider: an npm prefix named like a native key stays pinned.
+    expect(isSelfUpdatingProviderLockKey("npm-global:/opt/tool-native")).toBe(false);
+    expect(isSelfUpdatingProviderLockKey("homebrew-extra")).toBe(false);
+    expect(isSelfUpdatingProviderLockKey("cursor-agent")).toBe(false);
   });
 
   it.effect("keeps update commands owned by static provider maintenance capabilities", () =>

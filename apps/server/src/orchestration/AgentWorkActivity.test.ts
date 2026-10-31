@@ -16,6 +16,7 @@ import {
   AGENT_WORK_RECONCILE_INTERVAL_MS,
   AGENT_WORK_RELEASE_DEBOUNCE_MS,
   type AgentWorkState,
+  hasInterruptibleWork,
   hasLiveBackgroundWork,
   hasRunningTurn,
   isAgentWorkTrigger,
@@ -47,13 +48,35 @@ const session = (
 
 const thread = (
   id: string,
-  options: { session?: OrchestrationSession | null; deletedAt?: string | null } = {},
+  options: {
+    session?: OrchestrationSession | null;
+    deletedAt?: string | null;
+    archivedAt?: string | null;
+    activities?: ReadonlyArray<unknown>;
+  } = {},
 ): OrchestrationThread =>
   ({
     id,
     deletedAt: options.deletedAt ?? null,
+    archivedAt: options.archivedAt ?? null,
     session: options.session ?? null,
+    activities: options.activities ?? [],
   }) as unknown as OrchestrationThread;
+
+/** A request the provider raised, as the thread's activity log records it. */
+const requested = (
+  kind: "approval.requested" | "user-input.requested",
+  requestId: string,
+  payload: Record<string, unknown> = {},
+) => ({
+  id: `activity-${requestId}`,
+  kind,
+  tone: "info",
+  summary: kind,
+  turnId: "turn-1",
+  payload: { requestId, ...payload },
+  createdAt: "2026-10-24T10:00:00.000Z",
+});
 
 const running = (id = "thread", runtimeSessionId?: string) =>
   thread(id, { session: session("running", "turn-1", runtimeSessionId) });
@@ -185,6 +208,63 @@ describe("agent work predicates", () => {
     assert.isFalse(hasLiveBackgroundWork({ threads: [idle("other")] }, liveness));
   });
 
+  it("counts what an update would interrupt beyond running turns: the client's INTERRUPTIBLE", () => {
+    const waiting = session("ready", null);
+    // Connecting: the provider session is starting.
+    assert.isTrue(
+      hasInterruptibleWork({ threads: [thread("a", { session: session("starting", null) })] }),
+    );
+    // Waiting on an approval or a question, whatever the session says.
+    assert.isTrue(
+      hasInterruptibleWork({
+        threads: [
+          thread("a", { session: waiting, activities: [requested("approval.requested", "r1")] }),
+        ],
+      }),
+    );
+    assert.isTrue(
+      hasInterruptibleWork({
+        threads: [thread("a", { activities: [requested("user-input.requested", "r2")] })],
+      }),
+    );
+    // A question that does not block the turn, and an answered approval, wait on nobody.
+    assert.isFalse(
+      hasInterruptibleWork({
+        threads: [
+          thread("a", {
+            activities: [requested("user-input.requested", "r3", { nonBlocking: true })],
+          }),
+          thread("b", {
+            activities: [
+              requested("approval.requested", "r4"),
+              {
+                ...requested("approval.requested", "r4"),
+                id: "resolved",
+                kind: "approval.resolved",
+              },
+            ],
+          }),
+        ],
+      }),
+    );
+    // Idle, archived and deleted threads never count, as on the client.
+    assert.isFalse(hasInterruptibleWork({ threads: [idle("a"), thread("b")] }));
+    assert.isFalse(
+      hasInterruptibleWork({
+        threads: [
+          thread("archived", {
+            session: session("starting", null),
+            archivedAt: "2026-10-24T10:00:00.000Z",
+          }),
+          thread("deleted", {
+            activities: [requested("approval.requested", "r5")],
+            deletedAt: "2026-10-24T10:00:00.000Z",
+          }),
+        ],
+      }),
+    );
+  });
+
   it("wakes only on the events that change sessions or deletion", () => {
     for (const type of [
       "thread.session-set",
@@ -266,6 +346,32 @@ describe("agent work predicates", () => {
 });
 
 describe("AgentWorkActivity", () => {
+  it.effect("is interruptible until the first report and while work or its tail lasts", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const harness = yield* makeHarness();
+        // Before the startup command gate opens nothing is known: never interrupt.
+        assert.isTrue(yield* harness.activity.interruptible);
+        yield* harness.openGate;
+        assert.isFalse(yield* harness.activity.interruptible);
+
+        harness.setThreads([running()]);
+        yield* harness.publish("thread.session-set");
+        assert.isTrue(yield* harness.activity.interruptible);
+        harness.setThreads([idle()]);
+        yield* harness.publish("thread.session-set");
+        yield* harness.advance(AGENT_WORK_RELEASE_DEBOUNCE_MS - 1);
+        assert.isTrue(yield* harness.activity.interruptible);
+        yield* harness.advance(1);
+        assert.isFalse(yield* harness.activity.interruptible);
+
+        // A session starting needs no domain event to count: it is read at the call.
+        harness.setThreads([thread("thread", { session: session("starting", null) })]);
+        assert.isTrue(yield* harness.activity.interruptible);
+      }),
+    ),
+  );
+
   it.effect("reports nothing until the startup command gate opens", () =>
     Effect.scoped(
       Effect.gen(function* () {

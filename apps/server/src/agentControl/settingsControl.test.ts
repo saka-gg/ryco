@@ -72,4 +72,21 @@ describe("Agent Control settings allowlist", () => {
     }
     expect(() => decodeChange({ kind: "continueThreadsAfterRestart", value: true })).toThrow();
   });
+
+  // An agent must never let its own CLI be replaced unattended. Asserted by behaviour, like the
+  // setting above, so exposing it under another alias kind still fails.
+  it("neither reads nor changes automatic updates", () => {
+    const enabled = { ...DEFAULT_SERVER_SETTINGS, automaticUpdates: true };
+    const disabled = { ...DEFAULT_SERVER_SETTINGS, automaticUpdates: false };
+    expect(agentControlSettingsSummary(enabled)).toEqual(agentControlSettingsSummary(disabled));
+    for (const kind of CHANGE_KINDS) {
+      for (const value of [true, false]) {
+        const change = decodeChange({ kind, value });
+        expect(agentControlSettingsPlan(enabled, change)).toEqual(
+          agentControlSettingsPlan(disabled, change),
+        );
+      }
+    }
+    expect(() => decodeChange({ kind: "automaticUpdates", value: true })).toThrow();
+  });
 });

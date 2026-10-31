@@ -1,6 +1,7 @@
 import { makeLocalTaskHandlers } from "./localTaskRpc.ts";
 import { makeNotesHandlers } from "./notesRpc.ts";
 import { makeNodeUpdateHandlers } from "./nodeUpdateRpc.ts";
+import { makeClientInteractionHandlers } from "./clientInteractionRpc.ts";
 import { makeProviderSignInHandlers } from "./providerSignInRpc.ts";
 import { makeNodeBrowserHandlers } from "./nodeBrowserRpc.ts";
 import { makePushHandlers } from "./pushRpc.ts";
@@ -63,6 +64,7 @@ type WsRpcHandlerMap = ReturnType<typeof makeAgentControlHandlers> &
   ReturnType<typeof makeLocalTaskHandlers> &
   ReturnType<typeof makeNotesHandlers> &
   ReturnType<typeof makeNodeUpdateHandlers> &
+  ReturnType<typeof makeClientInteractionHandlers> &
   ReturnType<typeof makeGitHandlers> &
   ReturnType<typeof makeTerminalHandlers> &
   ReturnType<typeof makeNodeBrowserHandlers>;
@@ -104,6 +106,7 @@ const makeWsRpcHandlers = (
       ...makeLocalTaskHandlers(ctx),
       ...makeNotesHandlers(ctx),
       ...makeNodeUpdateHandlers(ctx),
+      ...makeClientInteractionHandlers(ctx),
       ...makePushHandlers(ctx),
       ...makeGitHandlers(ctx),
       ...makeTerminalHandlers(ctx),
