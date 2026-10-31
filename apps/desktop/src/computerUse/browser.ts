@@ -520,6 +520,7 @@ export class BrowserComputerDriver {
     }
     const tab = textArg(args, "tab");
     const tabs = await transport.tabs(context.signal);
+    this.forgetClosedTabDialogs(browser, tabs);
     const target = tabs.find((item) => item.id === tab);
     if (!target) throw new Error("Tab is no longer available. List tabs again.");
     if (target.url !== "about:blank") browserUrl(target.url);
@@ -622,6 +623,15 @@ export class BrowserComputerDriver {
       } catch {
         // The bracket's end only lifts the transport's own restrictions; the action's outcome stands.
       }
+    }
+  }
+
+  /** Kept records of tabs the browser no longer lists (the user closed them, a session ended). */
+  private forgetClosedTabDialogs(browser: ComputerBrowser, tabs: readonly BrowserTab[]): void {
+    if (this.pageDialogs.size === 0) return;
+    const open = new Set(tabs.map((item) => `${browser}:${item.id}`));
+    for (const key of this.pageDialogs.keys()) {
+      if (key.startsWith(`${browser}:`) && !open.has(key)) this.pageDialogs.delete(key);
     }
   }
 

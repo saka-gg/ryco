@@ -402,7 +402,7 @@ describe("dialog shim", () => {
     const run = (expression: string) => runInNewContext(expression, { window: page, Date });
     const key = "__rycoDialogsabc";
     run(`${dialogShimInstall({ dialog: "accept" }, SCOPE_MS, key)}, true`);
-    // Not enumerable: the page's own scans of window do not list it.
+    // Not enumerable: Object.keys and for-in skip it (getOwnPropertyNames still lists it).
     expect(Object.keys(page)).toEqual(["alert", "confirm", "prompt"]);
     expect((page.confirm as (message: string) => unknown)("sure?")).toBe(true);
     expect(native.confirm).not.toHaveBeenCalled();

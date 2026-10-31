@@ -165,38 +165,48 @@ export async function beginPageDialogScope(
   signal: AbortSignal,
 ): Promise<BrowserCommandScope> {
   const key = `__rycoDialogs${crypto.randomUUID().replaceAll("-", "")}`;
-  let installed = false;
   try {
-    const response = (await evaluate(
+    await evaluate(
       {
         expression: `${dialogShimInstall(policy, maxMs, key)}, true`,
         returnByValue: true,
         silent: true,
       },
       signal,
-    )) as { exceptionDetails?: unknown } | undefined;
-    installed = !response?.exceptionDetails;
+    );
   } catch {
     // A page that froze alert, or a document going away: the action runs without the shim.
   }
   let ended = false;
   return {
     end: async () => {
-      if (!installed || ended) return { dialogs: [] };
+      if (ended) return { dialogs: [] };
       ended = true;
-      try {
-        // Never on the action's signal: a stopped or aborted action still gets its page back (the
-        // shim also expires on its own).
-        const response = (await evaluate(
-          { expression: dialogShimFinish(key), returnByValue: true, silent: true },
-          AbortSignal.timeout(DIALOG_SHIM_CLEANUP_TIMEOUT_MS),
-        )) as { result?: { value?: unknown }; exceptionDetails?: unknown } | undefined;
-        return {
-          dialogs: response?.exceptionDetails ? [] : shimDialogs(response?.result?.value, policy),
-        };
-      } catch {
+      // Sent even when the install's answer was lost (it may have run): a finish without the key
+      // is harmless. Never on the action's signal, and never on a short abort either: the paired
+      // transport ends the whole connection on an abort, so a page busy past the cleanup bound
+      // only loses this action's records (the late answer is dropped; the shim also expires).
+      const finish = evaluate(
+        { expression: dialogShimFinish(key), returnByValue: true, silent: true },
+        new AbortController().signal,
+      ).then(
+        (raw) => {
+          const response = raw as
+            | { result?: { value?: unknown }; exceptionDetails?: unknown }
+            | undefined;
+          return response?.exceptionDetails ? [] : shimDialogs(response?.result?.value, policy);
+        },
         // A navigation destroyed the document, and the shim with it.
-        return { dialogs: [] };
+        (): BrowserHandledDialog[] => [],
+      );
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const late = new Promise<BrowserHandledDialog[]>((resolve) => {
+        timer = setTimeout(() => resolve([]), DIALOG_SHIM_CLEANUP_TIMEOUT_MS);
+      });
+      try {
+        return { dialogs: await Promise.race([finish, late]) };
+      } finally {
+        clearTimeout(timer);
       }
     },
   };

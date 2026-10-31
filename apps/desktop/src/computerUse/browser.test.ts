@@ -1015,12 +1015,13 @@ describe("dialogs", () => {
       return base(tab, method, params, signal);
     });
     await expect(run({ action: "click", ref: "e1" })).resolves.toBeDefined();
-    // Nothing went in, so nothing is finished.
+    // The install may have run although its answer was lost: the finish is sent anyway (harmless
+    // without the key), so the page always gets its own functions back.
     expect(
       send.mock.calls.filter(([, , params]) =>
         String(params.expression).includes("delete window["),
       ),
-    ).toEqual([]);
+    ).toHaveLength(1);
   });
 
   it("has no dialog action", async () => {
