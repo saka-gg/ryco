@@ -61,7 +61,9 @@ import {
 import { makeNodeE2eeSessionDirectory } from "./NodeE2eeSessionDirectory.ts";
 import { relayChannelAuthority } from "./relayChannelAuthority.ts";
 import {
+  channelDeviceLinks,
   linkedAccessCloseReaction,
+  linkedAccessOpenNarrowing,
   startLinkedAccessCheck,
   linkedAccessDevices,
   type LinkedAccessCheck,
@@ -450,15 +452,17 @@ const makeHubConnectorService = (dependencies: HubConnectorLiveDependencies) =>
     // within those seconds: the second sweep would end a link it rightly got after the first.
     const revokeLinkedSessions = (
       selector: LinkedSessionSelector,
-      options: { readonly resweep: boolean } = { resweep: false },
+      options: { readonly resweep: boolean; readonly codes?: LinkedCodeSelector } = {
+        resweep: false,
+      },
     ) => {
       if (Option.isNone(authSessions)) return Promise.resolve();
       const revocation = linkedAccessRevocation({
         revokeCodes:
           linkedCodes === undefined
             ? Effect.void
-            : linkedCodes.revoke(linkedCodeSelector(selector)),
-        revokeSessions: authSessions.value.revokeLinked(selector),
+            : Effect.asVoid(linkedCodes.revoke(options.codes ?? linkedCodeSelector(selector))),
+        revokeSessions: Effect.asVoid(authSessions.value.revokeLinked(selector)),
       });
       const done = runPromise(revocation.now);
       if (options.resweep) void done.then(() => runPromise(revocation.resweep));
@@ -480,21 +484,21 @@ const makeHubConnectorService = (dependencies: HubConnectorLiveDependencies) =>
     ) => {
       const device = authority.trustSource === "none" ? null : authority;
       const reaction = linkedAccessCloseReaction(reason, device);
-      // The channel's own device, under the channel's own account when it names one.
       const revoked =
         reaction.revokeDevice && device !== null
-          ? revokeLinkedSessions({
-              clientFingerprint: base64UrlEncode(device.clientIdentityFingerprint),
-              trustSource: device.trustSource,
-              ...(device.trustSource === "account-enrolled"
-                ? {
-                    enrollmentId: device.enrollmentId,
-                    ...(device.accountId === undefined ? {} : { accountId: device.accountId }),
-                  }
-                : {}),
-            })
+          ? revokeLinkedSessions(channelDeviceLinks(device))
           : Promise.resolve();
       if (reaction.check) void revoked.then(() => linkedAccessCheck?.request("channel-closed"));
+    };
+    // A device's relay channel opened at a lower role than some of its links carry; see
+    // `linkedAccessOpenNarrowing`. Its unredeemed codes above that role go too, and only those:
+    // the code it may ask for on this very channel carries the lower role.
+    const onDeviceChannelOpened = (authority: RelayChannelAuthority) => {
+      if (authority.trustSource === "none") return;
+      const narrowing = linkedAccessOpenNarrowing(authority);
+      // The device links again only at its new role, below the ones swept.
+      if (narrowing !== null)
+        void revokeLinkedSessions(narrowing, { resweep: true, codes: narrowing });
     };
     // Push alert registrations: offered to every relay channel's RPCs, read by the publisher.
     const pushRegistry = yield* makeNodePushRegistry({
@@ -712,6 +716,7 @@ const makeHubConnectorService = (dependencies: HubConnectorLiveDependencies) =>
           rateLimiter: handshakeRateLimiter,
           registerSession: (session) => {
             channelAuthority = relayChannelAuthority(effectiveRole, session);
+            onDeviceChannelOpened(channelAuthority);
             const release = sessionDirectory.register({
               ...session,
               terminate: () => {
