@@ -12,20 +12,17 @@ import {
 const PROJECT_ID = "0f8a2c9e-1234-4abc-9def-0123456789ab";
 const PROJECT_ROOT = "/workspace/apps/mobile";
 
-// A self-signed public certificate made for this test (its private key was discarded).
-const CERTIFICATE = [
-  "-----BEGIN CERTIFICATE-----",
-  "MIIBbjCCARSgAwIBAgIUX5DziUgh5yi6H+S1DkwLc539f3kwCgYIKoZIzj0EAwIw",
-  "HDEaMBgGA1UEAwwRcnljby10ZXN0LXVwZGF0ZXMwIBcNMjYxMDMxMDMzMzU4WhgP",
-  "MjEyNjEwMDcwMzMzNThaMBwxGjAYBgNVBAMMEXJ5Y28tdGVzdC11cGRhdGVzMFkw",
-  "EwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEiwRXouCZWAQWK39V0FxqS9XlmyvU4Mz0",
-  "2b3LJT3GcDHtwxdrXo5P3tI5uYrVSdxoReAgrxBh1CVUpN8xPhf5naMyMDAwHQYD",
-  "VR0OBBYEFAH1dWjYNep+bOHQXP+8RV0LV1tWMA8GA1UdEwEB/wQFMAMBAf8wCgYI",
-  "KoZIzj0EAwIDSAAwRQIhAJZXyKYw/YVrN+oR/d3sfrKNbj8EghxpFIEV+xR160c1",
-  "AiA/AZS6DM5sAvVVs/t/dqqOnrCd7boBKJUiQR2O6cmCuA==",
-  "-----END CERTIFICATE-----",
-  "",
-].join("\n");
+// Self-signed public certificates made for these tests (their private keys were discarded):
+// one as `npx expo-updates codesigning:generate` makes it (RSA, code signing), one without
+// the code-signing usage expo-updates requires.
+const CERTIFICATE = NodeFS.readFileSync(
+  NodePath.join(import.meta.dirname, "fixtures", "update-signing-certificate.pem"),
+  "utf8",
+);
+const CERTIFICATE_WITHOUT_CODE_SIGNING = NodeFS.readFileSync(
+  NodePath.join(import.meta.dirname, "fixtures", "update-certificate-without-code-signing.pem"),
+  "utf8",
+);
 
 function readFrom(files: Record<string, string>) {
   return (path: string) => {
@@ -120,11 +117,28 @@ describe("over-the-air updates", () => {
       });
     expect(resolveWith(undefined)).toThrow(/names no readable file/u);
     expect(resolveWith("not a pem")).toThrow(/must be a PEM certificate/u);
-    expect(resolveWith(CERTIFICATE.replace("MIIBbjCC", "MIIBbjXX"))).toThrow(
+    expect(resolveWith(CERTIFICATE.replace("MIIDHzCC", "MIIDHzXX"))).toThrow(
       /must be a PEM certificate/u,
     );
     const privateKeyHeader = ["-----BEGIN", "PRIVATE", "KEY-----"].join(" ");
     expect(resolveWith(`${privateKeyHeader}\nAAAA\n`)).toThrow(/never the private key/u);
+  });
+
+  it("refuse a certificate the app would reject on the device", () => {
+    const certificatePath = "/secrets/update.pem";
+    const resolveWith = (pem: string, now?: Date) => () =>
+      resolveMobileUpdates({
+        projectId: PROJECT_ID,
+        certificatePath,
+        runtimePolicy: "fingerprint",
+        projectRoot: PROJECT_ROOT,
+        readFile: readFrom({ [certificatePath]: pem }),
+        ...(now === undefined ? {} : { now }),
+      });
+    expect(resolveWith(CERTIFICATE_WITHOUT_CODE_SIGNING)).toThrow(/must allow code signing/u);
+    expect(resolveWith(CERTIFICATE, new Date("2020-01-01T00:00:00Z"))).toThrow(/is not valid now/u);
+    expect(resolveWith(CERTIFICATE, new Date("2200-01-01T00:00:00Z"))).toThrow(/is not valid now/u);
+    expect(resolveWith(CERTIFICATE)).not.toThrow();
   });
 
   it("refuse signing without the fingerprint runtime version", () => {
@@ -149,17 +163,18 @@ describe("over-the-air updates", () => {
     // Native checks are NEVER, so nothing fetches an update unless app code asks for one.
     // A check, fetch or reload belongs to one owner that refuses while `extra.updates.signed`
     // is false; until it exists, no app source may call them.
-    const SOURCE_ROOTS = ["src", "index.ts"].map((entry) =>
+    const SOURCE_ROOTS = ["src", "modules", "index.ts"].map((entry) =>
       NodePath.join(import.meta.dirname, "..", entry),
     );
     const offenders: string[] = [];
     const visit = (path: string) => {
       const stat = NodeFS.statSync(path);
       if (stat.isDirectory()) {
+        if (NodePath.basename(path) === "node_modules") return;
         for (const entry of NodeFS.readdirSync(path)) visit(NodePath.join(path, entry));
         return;
       }
-      if (!/\.(?:ts|tsx)$/u.test(path)) return;
+      if (!/\.(?:[cm]?[jt]s|[jt]sx)$/u.test(path)) return;
       const text = NodeFS.readFileSync(path, "utf8");
       if (
         /\b(?:checkForUpdateAsync|fetchUpdateAsync|reloadAsync|checkAutomatically)\b/u.test(text)

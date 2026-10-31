@@ -91,11 +91,18 @@ app only ever fetches one it can verify.
   certificate (PEM `BEGIN CERTIFICATE`). On EAS it is a secret file variable;
   locally it is a file outside the repo. The build then verifies every update
   against it (`keyid` `main`, `rsa-v1_5-sha256`), needs the fingerprint
-  `runtimeVersion`, and records `extra.updates.signed: true`. The private key never
-  enters the repo, CI or EAS: publish with
-  `eas update --channel <channel> --private-key-path <key>` from `apps/mobile`, and
-  sign `eas update:roll-back-to-embedded` the same way. Make the pair once with
-  `npx expo-updates codesigning:generate`.
+  `runtimeVersion`, and records `extra.updates.signed: true`. The certificate must be
+  what expo-updates accepts on the device (RSA, code-signing usage, valid now), or the
+  build fails. Make the pair once with `npx expo-updates codesigning:generate`.
+- **Publishing:** the private key never enters the repo, CI or EAS. Publish from
+  `apps/mobile` with `RYCO_EAS_UPDATE_CERTIFICATE` set to the same certificate (without
+  it, `eas update` ignores the key and publishes unsigned, which signed builds refuse):
+  `eas update --channel <channel> --private-key-path <key>`, and sign
+  `eas update:roll-back-to-embedded` the same way. The fingerprint hashes the
+  certificate's contents rather than its path (`fingerprint.config.js`), so the build
+  server's secret file and the local copy give the same runtime version.
+- Signed builds do not check for updates on their own yet: the app-owned check that
+  applies them (and flushes queued messages first) is a follow-up.
 
 Each `eas.json` build profile names its channel (`development`, `preview`,
 `production`), and the fingerprint `runtimeVersion` keeps an update from reaching a

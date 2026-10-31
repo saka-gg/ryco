@@ -67,6 +67,9 @@ export const MOBILE_UPDATE_CODE_SIGNING_METADATA = {
   alg: "rsa-v1_5-sha256",
 } as const;
 
+/** The extended key usage expo-updates requires of a code-signing certificate. */
+const CODE_SIGNING_EXTENDED_KEY_USAGE = "1.3.6.1.5.5.7.3.3";
+
 export type MobileUpdates =
   | {
       readonly updates: {
@@ -113,6 +116,7 @@ export function resolveMobileUpdates(input: {
   /** apps/mobile: expo-updates resolves `codeSigningCertificate` relative to it. */
   readonly projectRoot?: string;
   readonly readFile?: (path: string) => string;
+  readonly now?: Date;
 }): MobileUpdates {
   const id = input.projectId?.trim();
   if (!id) return { updates: { enabled: false }, projectId: null, signed: false };
@@ -148,12 +152,32 @@ export function resolveMobileUpdates(input: {
       "RYCO_EAS_UPDATE_CERTIFICATE must be the public certificate, never the private key.",
     );
   }
+  let certificate: NodeCrypto.X509Certificate;
   try {
     if (!/-----BEGIN CERTIFICATE-----/u.test(pem)) throw new Error("not a certificate");
-    new NodeCrypto.X509Certificate(pem);
+    certificate = new NodeCrypto.X509Certificate(pem);
   } catch {
     throw new Error(
       `RYCO_EAS_UPDATE_CERTIFICATE must be a PEM certificate (BEGIN CERTIFICATE): ${absolutePath}`,
+    );
+  }
+  // What expo-updates checks before it trusts the certificate on the device: a binary built
+  // with anything else would reject every update. Make the pair with
+  // `npx expo-updates codesigning:generate`.
+  if (certificate.publicKey.asymmetricKeyType !== "rsa") {
+    throw new Error(
+      "RYCO_EAS_UPDATE_CERTIFICATE must hold an RSA key: expo-updates verifies rsa-v1_5-sha256.",
+    );
+  }
+  if (!(certificate.keyUsage ?? []).includes(CODE_SIGNING_EXTENDED_KEY_USAGE)) {
+    throw new Error(
+      "RYCO_EAS_UPDATE_CERTIFICATE must allow code signing (extended key usage 1.3.6.1.5.5.7.3.3).",
+    );
+  }
+  const now = (input.now ?? new Date()).getTime();
+  if (now < Date.parse(certificate.validFrom) || now > Date.parse(certificate.validTo)) {
+    throw new Error(
+      `RYCO_EAS_UPDATE_CERTIFICATE is not valid now (${certificate.validFrom} to ${certificate.validTo}).`,
     );
   }
   return {
