@@ -225,7 +225,7 @@ function ChoiceLabel({ choice }: { readonly choice: SettingsNodeChoice }) {
 /**
  * Switches the device whose settings the page shows, from the one list in
  * {@link useSettingsNodeMenu}. More than six devices get a search field
- * (`SettingsNodeCombobox`).
+ * (`SettingsNodeCombobox`) once it has loaded; until then, the plain menu.
  */
 export function SettingsNodeMenu(props: {
   readonly model: SettingsNodeMenuModel;
@@ -236,7 +236,10 @@ export function SettingsNodeMenu(props: {
 }) {
   const { model } = props;
   const searchable = model.choices.length > SEARCHABLE_CHOICES_ABOVE;
-  const searchReady = useLazyComponentReady(SettingsNodeCombobox, searchable);
+  // A failed load keeps the plain menu: Settings must never lose its way to switch device.
+  const searchReady = useLazyComponentReady(SettingsNodeCombobox, searchable, {
+    onLoadError: () => {},
+  });
   const trigger = <MenuTrigger render={props.trigger} />;
   const opener = props.tooltip ? (
     <Tooltip>
@@ -247,9 +250,8 @@ export function SettingsNodeMenu(props: {
     trigger
   );
 
-  if (searchable) {
-    // The button shows at once; it opens the list once that has loaded.
-    if (!searchReady) return props.trigger;
+  // The plain menu works until the search field has loaded, and stays if it never does.
+  if (searchable && searchReady) {
     return (
       <SettingsNodeCombobox
         model={model}
