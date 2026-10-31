@@ -20,6 +20,7 @@ export * from "./delegatedTaskStatus.ts";
 export * from "./threadBranchAdoption.ts";
 export * from "./interruptibleTurns.ts";
 export * from "./threadAttention.ts";
+export * from "./agentActivitySummary.ts";
 export * from "./threadFailure.ts";
 
 export * from "./sidebarUndo.ts";
