@@ -48,8 +48,10 @@ import {
   generateCustomThemeId,
   getActiveThemePair,
   getAllThemes,
+  themeEditSlot,
+  themePickSlot,
+  type ThemePickSlot,
   isBuiltInThemeId,
-  setActiveThemeId,
   updateCustomTheme,
 } from "../../themes/registry";
 import { copyThemeToClipboard, downloadTheme, importThemeFromFile } from "../../themes/transport";
@@ -112,6 +114,9 @@ export function AppearanceSettingsPanel({
     setActiveTheme,
     darkThemeId,
     setDarkTheme,
+    shownThemeId,
+    pickTheme,
+    setThemeInSlot,
   } = useTheme();
   const darkPaletteId = darkThemeId ?? activeThemeId;
   const [editingId, setEditingId] = useState<string | null>(null);
@@ -177,35 +182,43 @@ export function AppearanceSettingsPanel({
     setAppearancePreferencesState(getAppearancePreferences());
   }, []);
 
+  // The pick the theme being edited stands in: its copy and its live preview replace that pick
+  // only, so editing dark mode's palette never replaces light mode's.
+  const [editSlot, setEditSlot] = useState<ThemePickSlot>("both");
+  const beginEditing = useCallback(
+    (theme: ThemeDefinition, slot: ThemePickSlot) => {
+      setThemeInSlot(slot, theme.id);
+      setEditSlot(slot);
+      setEditingId(theme.id);
+      setDraft(theme);
+    },
+    [setThemeInSlot],
+  );
+
   const startEditing = useCallback(
     (target: ThemeDefinition) => {
+      const slot = themeEditSlot(target.id, { resolvedTheme, activeThemeId, darkThemeId });
       if (isBuiltInThemeId(target.id)) {
         const copy = duplicateTheme(target);
         addCustomTheme(copy);
-        setActiveThemeId(copy.id);
-        setActiveTheme(copy.id);
-        setEditingId(copy.id);
-        setDraft(copy);
+        beginEditing(copy, slot);
         refresh();
         return;
       }
-      setActiveTheme(target.id);
-      setEditingId(target.id);
-      setDraft(target);
+      beginEditing(target, slot);
     },
-    [refresh, setActiveTheme],
+    [beginEditing, refresh, resolvedTheme, activeThemeId, darkThemeId],
   );
 
   const handleDuplicate = useCallback(
     (target: ThemeDefinition) => {
       const copy = duplicateTheme(target);
       addCustomTheme(copy);
-      setActiveTheme(copy.id);
-      setEditingId(copy.id);
-      setDraft(copy);
+      // A copy of a pick takes that pick's place; a copy of another theme, the mode on screen's.
+      beginEditing(copy, themeEditSlot(target.id, { resolvedTheme, activeThemeId, darkThemeId }));
       refresh();
     },
-    [refresh, setActiveTheme],
+    [beginEditing, refresh, resolvedTheme, activeThemeId, darkThemeId],
   );
 
   const handleAddNew = useCallback(() => {
@@ -215,17 +228,15 @@ export function AppearanceSettingsPanel({
       builtIn: false,
     };
     addCustomTheme(fresh);
-    setActiveTheme(fresh.id);
-    setEditingId(fresh.id);
-    setDraft(fresh);
+    beginEditing(fresh, themePickSlot({ resolvedTheme, activeThemeId, darkThemeId }));
     refresh();
-  }, [refresh, setActiveTheme]);
+  }, [beginEditing, refresh, resolvedTheme, activeThemeId, darkThemeId]);
 
   const handleSave = useCallback(() => {
     if (!editing) return;
     updateCustomTheme(editing.source.id, editing.draft);
     if (editing.source.id !== editing.draft.id) {
-      setActiveTheme(editing.draft.id);
+      setThemeInSlot(editSlot, editing.draft.id);
     } else {
       const pair = getActiveThemePair();
       applyThemeToDocument(pair.light, pair.dark);
@@ -233,7 +244,7 @@ export function AppearanceSettingsPanel({
     setEditingId(null);
     setDraft(null);
     refresh();
-  }, [editing, refresh, setActiveTheme]);
+  }, [editSlot, editing, refresh, setThemeInSlot]);
 
   const handleCancel = useCallback(() => {
     if (editing) {
@@ -296,7 +307,7 @@ export function AppearanceSettingsPanel({
       if (!file) return;
       try {
         const result = await importThemeFromFile(file, { collision: "rename", activate: true });
-        setActiveTheme(result.theme.id);
+        pickTheme(result.theme.id);
         refresh();
         toastManager.add({
           type: "success",
@@ -314,7 +325,7 @@ export function AppearanceSettingsPanel({
         });
       }
     },
-    [refresh, setActiveTheme],
+    [pickTheme, refresh],
   );
 
   return (
@@ -396,7 +407,8 @@ export function AppearanceSettingsPanel({
       >
         <div role="radiogroup" aria-label="Theme palette" className="grid gap-3 sm:grid-cols-2">
           {themes.map((entry) => {
-            const isActive = entry.id === activeThemeId;
+            // The grid picks for the mode on screen, so a choice always shows.
+            const isActive = entry.id === shownThemeId;
             const isEditing = editingId === entry.id;
             return (
               <Fragment key={entry.id}>
@@ -404,7 +416,7 @@ export function AppearanceSettingsPanel({
                   role="radio"
                   aria-checked={isActive}
                   tabIndex={isActive ? 0 : -1}
-                  onClick={() => setActiveTheme(entry.id)}
+                  onClick={() => pickTheme(entry.id)}
                   onKeyDown={(event) => {
                     const direction =
                       event.key === "ArrowRight" || event.key === "ArrowDown"
@@ -416,7 +428,7 @@ export function AppearanceSettingsPanel({
                       event.preventDefault();
                       const index = themes.findIndex((theme) => theme.id === entry.id);
                       const next = (index + direction + themes.length) % themes.length;
-                      setActiveTheme(themes[next]!.id);
+                      pickTheme(themes[next]!.id);
                       const radios =
                         event.currentTarget.parentElement?.querySelectorAll<HTMLElement>(
                           '[role="radio"]',
@@ -425,7 +437,7 @@ export function AppearanceSettingsPanel({
                     }
                     if (event.key === " " || event.key === "Enter") {
                       event.preventDefault();
-                      setActiveTheme(entry.id);
+                      pickTheme(entry.id);
                     }
                   }}
                   className={cn(
@@ -518,6 +530,7 @@ export function AppearanceSettingsPanel({
                       onSave={handleSave}
                       onCancel={handleCancel}
                       resolvedVariant={resolvedTheme}
+                      slot={editSlot}
                     />
                   </SettingsCard>
                 ) : null}
@@ -525,34 +538,37 @@ export function AppearanceSettingsPanel({
             );
           })}
         </div>
-        <SettingsRow
-          title="Dark mode palette"
-          description="Use another theme's dark colors in dark mode, or the palette above for both."
-          control={
-            <Select
-              value={darkThemeId ?? SAME_AS_LIGHT}
-              onValueChange={(value) =>
-                setDarkTheme(value === SAME_AS_LIGHT || value === null ? null : value)
-              }
-            >
-              <SelectTrigger className="w-full sm:w-48" aria-label="Dark mode palette">
-                <SelectValue>
-                  {darkThemeId === null ? "Same as light" : findTheme(darkThemeId).name}
-                </SelectValue>
-              </SelectTrigger>
-              <SelectPopup align="end" alignItemWithTrigger={false}>
-                <SelectItem hideIndicator value={SAME_AS_LIGHT}>
-                  Same as light
-                </SelectItem>
-                {themes.map((entry) => (
-                  <SelectItem hideIndicator key={entry.id} value={entry.id}>
-                    {entry.name}
+        {/* The frozen phone tier keeps one palette (AGENTS.md: the web phone tier is not extended). */}
+        {!isPhoneTier && (
+          <SettingsRow
+            title="Dark mode palette"
+            description="Use another theme's dark colors in dark mode, or the palette above for both."
+            control={
+              <Select
+                value={darkThemeId ?? SAME_AS_LIGHT}
+                onValueChange={(value) =>
+                  setDarkTheme(value === SAME_AS_LIGHT || value === null ? null : value)
+                }
+              >
+                <SelectTrigger className="w-full sm:w-48" aria-label="Dark mode palette">
+                  <SelectValue>
+                    {darkThemeId === null ? "Same as light" : findTheme(darkThemeId).name}
+                  </SelectValue>
+                </SelectTrigger>
+                <SelectPopup align="end" alignItemWithTrigger={false}>
+                  <SelectItem hideIndicator value={SAME_AS_LIGHT}>
+                    Same as light
                   </SelectItem>
-                ))}
-              </SelectPopup>
-            </Select>
-          }
-        />
+                  {themes.map((entry) => (
+                    <SelectItem hideIndicator key={entry.id} value={entry.id}>
+                      {entry.name}
+                    </SelectItem>
+                  ))}
+                </SelectPopup>
+              </Select>
+            }
+          />
+        )}
       </SettingsSection>
 
       {!isHub && <DiffAppearanceSettings />}

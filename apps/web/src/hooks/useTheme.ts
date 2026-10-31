@@ -11,6 +11,9 @@ import {
   getActiveThemePair,
   setActiveDarkThemeId,
   setActiveThemeId,
+  shownThemeId,
+  themePickSlot,
+  type ThemePickSlot,
   subscribeThemeRegistry,
   themeDocumentNeedsUpdate,
 } from "../themes/registry";
@@ -345,6 +348,15 @@ function setDarkTheme(id: string | null) {
   invalidateAndEmit();
 }
 
+/** Puts `id` into a pick; a dark pick equal to the active theme is no pick of its own. */
+function setThemeInSlot(slot: ThemePickSlot, id: string) {
+  if (slot !== "dark") {
+    setActiveTheme(id);
+    return;
+  }
+  setDarkTheme(id === getActiveThemeId() ? null : id);
+}
+
 export function useTheme() {
   const snapshot = useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
   const theme = snapshot.theme;
@@ -354,6 +366,7 @@ export function useTheme() {
   const resolvedTheme: "light" | "dark" =
     theme === "system" ? (snapshot.systemDark ? "dark" : "light") : theme;
 
+  const pickState = { resolvedTheme, activeThemeId, darkThemeId };
   return {
     theme,
     setTheme,
@@ -362,6 +375,11 @@ export function useTheme() {
     setActiveTheme,
     darkThemeId,
     setDarkTheme,
+    /** The theme a theme list marks current: the one the mode on screen shows. */
+    shownThemeId: shownThemeId(pickState),
+    /** A theme list's choice: it sets the pick for the mode on screen (`themePickSlot`). */
+    pickTheme: (id: string) => setThemeInSlot(themePickSlot(pickState), id),
+    setThemeInSlot,
   } as const;
 }
 

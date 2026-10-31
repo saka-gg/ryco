@@ -29,6 +29,10 @@ import {
   resolveTokens,
   setActiveDarkThemeId,
   setActiveThemeId,
+  shownThemeId,
+  themeEditSlot,
+  themePairWith,
+  themePickSlot,
   themeTokensToStyle,
   tokensToCss,
   updateCustomTheme,
@@ -731,5 +735,39 @@ describe("a separate dark mode palette", () => {
     deleteCustomTheme(custom.id);
     expect(getActiveDarkThemeId()).toBeNull();
     expect(localStorage.getItem(ACTIVE_DARK_THEME_STORAGE_KEY)).toBeNull();
+  });
+});
+
+describe("which pick a theme choice sets", () => {
+  beforeEach(installLocalStorage);
+  const light = { resolvedTheme: "light" as const, activeThemeId: "nord", darkThemeId: "dracula" };
+  const dark = { ...light, resolvedTheme: "dark" as const };
+
+  it("sets the pick of the mode on screen, or both without a dark pick", () => {
+    expect(themePickSlot({ ...dark, darkThemeId: null })).toBe("both");
+    expect(themePickSlot(dark)).toBe("dark");
+    expect(themePickSlot(light)).toBe("light");
+    expect(shownThemeId(dark)).toBe("dracula");
+    expect(shownThemeId(light)).toBe("nord");
+    expect(shownThemeId({ ...dark, darkThemeId: null })).toBe("nord");
+  });
+
+  it("edits a theme in the pick it stands in", () => {
+    expect(themeEditSlot("dracula", light)).toBe("dark");
+    expect(themeEditSlot("nord", dark)).toBe("light");
+    expect(themeEditSlot("other", dark)).toBe("dark");
+    expect(themeEditSlot("other", light)).toBe("light");
+    expect(themeEditSlot("dracula", { ...dark, darkThemeId: null })).toBe("both");
+  });
+
+  it("previews a draft in its own pick only", () => {
+    localStorage.setItem(ACTIVE_THEME_STORAGE_KEY, "nord");
+    localStorage.setItem(ACTIVE_DARK_THEME_STORAGE_KEY, "dracula");
+    const draft: ThemeDefinition = { id: "draft", name: "Draft", builtIn: false };
+    expect(themePairWith(draft, "dark")).toEqual({ light: findTheme("nord"), dark: draft });
+    expect(themePairWith(draft, "light")).toEqual({ light: draft, dark: findTheme("dracula") });
+    expect(themePairWith(draft, "both")).toEqual({ light: draft, dark: draft });
+    localStorage.removeItem(ACTIVE_DARK_THEME_STORAGE_KEY);
+    localStorage.removeItem(ACTIVE_THEME_STORAGE_KEY);
   });
 });

@@ -302,6 +302,57 @@ export function setActiveDarkThemeId(id: string | null): void {
   notifyThemeRegistryChange();
 }
 
+/** The picks a theme choice reads: the active theme and dark mode's own one, in the mode on screen. */
+export interface ThemePickState {
+  readonly resolvedTheme: "light" | "dark";
+  readonly activeThemeId: string;
+  readonly darkThemeId: string | null;
+}
+
+/** Which pick a theme stands in: light mode's, dark mode's, or both when dark mode has none of its own. */
+export type ThemePickSlot = "light" | "dark" | "both";
+
+/**
+ * The pick a choice in a theme list sets: the one for the mode on screen, so a choice always
+ * shows. Without a dark pick of its own, the active theme covers both modes.
+ */
+export function themePickSlot(state: ThemePickState): ThemePickSlot {
+  if (state.darkThemeId === null) return "both";
+  return state.resolvedTheme === "dark" ? "dark" : "light";
+}
+
+/** The theme a list marks current: the one the mode on screen shows. */
+export function shownThemeId(state: ThemePickState): string {
+  return themePickSlot(state) === "dark" && state.darkThemeId !== null
+    ? state.darkThemeId
+    : state.activeThemeId;
+}
+
+/**
+ * The pick a theme being edited stands in, so its copy and its preview replace that pick only:
+ * the dark pick when it is that, the active theme when it is that, else the mode on screen's.
+ */
+export function themeEditSlot(themeId: string, state: ThemePickState): ThemePickSlot {
+  if (state.darkThemeId === null) return "both";
+  if (themeId === state.darkThemeId && themeId !== state.activeThemeId) return "dark";
+  if (themeId === state.activeThemeId) return "light";
+  return themePickSlot(state);
+}
+
+/**
+ * The document's two palettes while `draft` stands in `slot`: the other mode keeps its pick.
+ */
+export function themePairWith(
+  draft: ThemeDefinition,
+  slot: ThemePickSlot,
+): { readonly light: ThemeDefinition; readonly dark: ThemeDefinition } {
+  const pair = getActiveThemePair();
+  return {
+    light: slot === "dark" ? pair.light : draft,
+    dark: slot === "light" ? pair.dark : draft,
+  };
+}
+
 /** The themes the document shows: light mode's palette and dark mode's. */
 export function getActiveThemePair(): {
   readonly light: ThemeDefinition;

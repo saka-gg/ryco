@@ -156,6 +156,39 @@ describe("AppearanceSettingsPanel", () => {
     });
   });
 
+  it("in dark mode with a dark pick, picks and copies dark mode's palette, never light mode's", async () => {
+    localStorage.setItem("ryco:theme", "dark");
+    localStorage.setItem(ACTIVE_THEME_STORAGE_KEY, "nord");
+    localStorage.setItem("ryco:active-theme-dark", "dracula");
+    mounted = await render(<AppearanceSettingsPanel />);
+
+    // The grid marks what dark mode shows.
+    await expect
+      .element(page.getByRole("radio", { name: /Dracula/ }))
+      .toHaveAttribute("aria-checked", "true");
+    await page.getByRole("radio", { name: /One Dark Pro/ }).click();
+    expect(localStorage.getItem("ryco:active-theme-dark")).toBe("one-dark-pro");
+    expect(localStorage.getItem(ACTIVE_THEME_STORAGE_KEY)).toBe("nord");
+    await vi.waitFor(() => {
+      expect(document.getElementById(THEME_STYLE_ELEMENT_ID)?.textContent).toContain("#282c34");
+    });
+
+    // A copy of the dark pick takes its place; light mode keeps Nord.
+    await page.getByRole("button", { name: "Theme actions for One Dark Pro", exact: true }).click();
+    await page.getByRole("menuitem", { name: "Duplicate", exact: true }).click();
+    await expect
+      .element(page.getByRole("radio", { name: /One Dark Pro \(Copy\)/ }))
+      .toBeInTheDocument();
+    expect(localStorage.getItem("ryco:active-theme-dark")).toMatch(/^custom-/u);
+    expect(localStorage.getItem(ACTIVE_THEME_STORAGE_KEY)).toBe("nord");
+
+    // Picking light mode's own theme leaves dark mode no pick of its own.
+    await page.getByRole("button", { name: "Cancel" }).click();
+    await page.getByRole("radio", { name: /^Nord/ }).click();
+    expect(localStorage.getItem("ryco:active-theme-dark")).toBeNull();
+    expect(localStorage.getItem(ACTIVE_THEME_STORAGE_KEY)).toBe("nord");
+  });
+
   it("adds, duplicates, and deletes custom themes", async () => {
     mounted = await render(<AppearanceSettingsPanel />);
 
