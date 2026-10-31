@@ -1,6 +1,12 @@
 import { describe, expect, it, vi } from "vitest";
 import { renderToStaticMarkup } from "react-dom/server";
-import type { EnvironmentId, ServerProvider } from "@ryco/contracts";
+import type {
+  CliProxyAccount,
+  CliProxyHubSnapshot,
+  EnvironmentId,
+  ProviderInstanceId,
+  ServerProvider,
+} from "@ryco/contracts";
 
 vi.mock("./CodexResetCredits", () => ({
   CodexResetCredits: ({
@@ -44,8 +50,49 @@ function node(
   label: string,
   providers: readonly ServerProvider[],
   connected = true,
+  hubs: readonly CliProxyHubSnapshot[] = [],
 ): ProviderLimitsNode {
-  return { environmentId: label as EnvironmentId, label, connected, providers };
+  return { environmentId: label as EnvironmentId, label, connected, providers, hubs };
+}
+
+function hubAccount(
+  authIndex: string,
+  usedPercent: number,
+  overrides: Partial<CliProxyAccount> = {},
+) {
+  return {
+    authIndex,
+    provider: "claude",
+    name: `${authIndex}.json`,
+    status: "active",
+    disabled: false,
+    unavailable: false,
+    cooldowns: [],
+    requests: { success: 0, failed: 0, recent: [] },
+    quota: {
+      status: "ok",
+      checkedAt: new Date(now).toISOString(),
+      planType: "max",
+      windows: [{ id: "five-hour", usedPercent, windowDurationMins: 300 }],
+    },
+    ...overrides,
+  } satisfies CliProxyAccount;
+}
+
+function hub(
+  accounts: readonly CliProxyAccount[],
+  routedInstanceIds: readonly string[] = [],
+): CliProxyHubSnapshot {
+  return {
+    hubId: "home" as CliProxyHubSnapshot["hubId"],
+    label: "Home hub",
+    url: "https://hub.example.test",
+    checkedAt: new Date(now).toISOString(),
+    status: "ok",
+    accounts,
+    apiKeys: [],
+    routedInstanceIds: routedInstanceIds as ProviderInstanceId[],
+  };
 }
 
 function render(
@@ -192,6 +239,55 @@ describe("native provider limits", () => {
       `Usage from ${new Date(observedAt).toLocaleString()}; the provider is limiting usage reads.`,
     );
     expect(html).not.toContain("Checked ");
+  });
+
+  it("shows every account a hub pools and their pooled windows, never an email", () => {
+    const html = render([
+      node("M5", [], true, [
+        hub([
+          hubAccount("a", 40, { email: "alice@example.com" }),
+          hubAccount("b", 60, { label: "Team seat" }),
+        ]),
+      ]),
+    ]);
+    expect(html).toContain("Claude");
+    expect(html).toContain("5h · avg of 2 accounts: 50% left");
+    expect(html).toContain("Account 1");
+    expect(html).toContain("Team seat");
+    expect(html).toContain("Max · via Home hub");
+    expect(html).toContain("5h: 60% left");
+    expect(html).toContain("5h: 40% left");
+    expect(html).not.toContain("alice@example.com");
+    expect(html).not.toContain("No enabled providers");
+  });
+
+  it("names an instance a hub serves instead of showing its own limits", () => {
+    const claude = {
+      ...provider,
+      instanceId: "claude",
+      driver: "claudeAgent",
+      displayName: "Claude",
+    };
+    const html = render([
+      node("M5", [claude as ServerProvider], true, [hub([hubAccount("a", 10)], ["claude"])]),
+    ]);
+    expect(html).toContain(
+      "Claude is routed through Home hub, so it uses the hub&#x27;s accounts and its own limits are not shown.",
+    );
+    // Its own 40% used window is not shown; the hub account's 10% is.
+    expect(html).not.toContain("60% left");
+    expect(html).toContain("5h: 90% left");
+  });
+
+  it("says why a device's hubs are missing", () => {
+    const html = render([
+      {
+        ...node("M5", [provider]),
+        hubsMessage: "Update Ryco on this node to read CLIProxyAPI hubs.",
+      },
+    ]);
+    expect(html).toContain("Update Ryco on this node to read CLIProxyAPI hubs.");
+    expect(html).toContain("60% left");
   });
 
   it("says when no provider is enabled", () => {

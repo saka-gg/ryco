@@ -5,18 +5,23 @@ import {
   SupersedingLoads,
   USAGE_UPDATE_MESSAGE,
   usageSummaryCache,
+  type CliProxyHubRead,
   type UsageEnvironmentResult,
   type StatRange,
 } from "@ryco/client-runtime/usage";
 import { readRpcClient } from "../../../connection/environmentApi";
+import { mobileCliProxyHubReads } from "../../../state/cliProxyHubReads";
 import type { InboxEnvironment } from "../../inbox/inboxModel";
+import type { StatisticsTab } from "./statisticsRoute";
 
-export type StatisticsTab = "usage" | "activity" | "limits";
+export type { StatisticsTab } from "./statisticsRoute";
 export interface NodeStatistics {
   readonly environment: InboxEnvironment;
   readonly activity?: StatisticsSnapshot;
   readonly usage?: UsageEnvironmentResult;
   readonly providers?: readonly ServerProvider[];
+  /** The node's CLIProxyAPI hubs, read with its providers for the Limits tab. */
+  readonly hubs?: CliProxyHubRead;
   readonly error?: string;
 }
 
@@ -49,8 +54,13 @@ export async function loadNodeStatistics(
     if (!api) throw new Error("This device is reconnecting. Try again when it is connected.");
     if (tab === "activity") return { environment, activity: await api.server.getStatistics() };
     if (tab === "limits") {
-      const refreshed = await api.server.refreshProviders();
-      return { environment, providers: refreshed.providers };
+      // A hub read never rejects: a failed one is reported beside the providers it came with.
+      // An explicit refresh asks the node to bypass its hub caches too.
+      const [refreshed, hubs] = await Promise.all([
+        api.server.refreshProviders(),
+        mobileCliProxyHubReads.read(environment.environmentId, { refresh: options.fresh }),
+      ]);
+      return { environment, providers: refreshed.providers, hubs };
     }
     // The shared cache classifies the answer, joins an identical request already
     // in flight, and keeps the last usable summary for the next visit.

@@ -5,25 +5,23 @@ import { AppState, View } from "react-native";
 import {
   availablePercent,
   describeRateLimitPace,
-  groupSubscriptionLimits,
-  listDirectProviderAccounts,
   nextLimitResetAtMs,
   rateLimitPace,
   rateLimitsObservedAt,
   staleRateLimitsReason,
   type DirectAccountLocation,
+  type PooledLimitWindow,
 } from "@ryco/client-runtime/usage";
 import { AppText as Text } from "../../../components/AppText";
 import { ProviderIcon } from "../../../components/ProviderIcon";
 import { Note, Panel, Row } from "./StatisticsParts";
+import {
+  deriveProviderLimitsView,
+  type HubAccountRow,
+  type ProviderLimitsNode,
+} from "./providerLimitsModel";
 
-/** One device's providers, as the Limits tab read them. */
-export interface ProviderLimitsNode {
-  readonly environmentId: EnvironmentId;
-  readonly label: string;
-  readonly connected: boolean;
-  readonly providers: readonly ServerProvider[];
-}
+export type { ProviderLimitsNode } from "./providerLimitsModel";
 
 function LimitWindow({
   label,
@@ -65,6 +63,57 @@ function LimitWindow({
         <Note>Resets {reset.toLocaleString()}</Note>
       ) : null}
     </View>
+  );
+}
+
+/** A window several hub accounts share: their mean use, and the soonest reset among them. */
+function PooledWindow({
+  window,
+  besideDirect,
+}: {
+  window: PooledLimitWindow;
+  /** Direct accounts share the group; the pool averages hub accounts only, so it says so. */
+  besideDirect: boolean;
+}) {
+  const reset = window.nextResetsAt ? new Date(window.nextResetsAt * 1000) : null;
+  return (
+    <View className="gap-1">
+      <Row
+        label={`${window.label} · avg of ${window.accountCount} ${besideDirect ? "hub accounts" : "accounts"}`}
+        value={`${Math.round(100 - window.usedPercent)}% left`}
+      />
+      {reset && Number.isFinite(reset.getTime()) ? (
+        <Note>Next reset {reset.toLocaleString()}</Note>
+      ) : null}
+    </View>
+  );
+}
+
+/** One account a CLIProxyAPI hub pools: its name (never an email), plan and hub, then its limits. */
+function HubAccountPanel({ row, now }: { row: HubAccountRow; now: number }) {
+  return (
+    <Panel title={row.name}>
+      <View className="flex-row items-center gap-3">
+        <ProviderIcon provider={row.driver} size={22} />
+        <View className="flex-1">
+          <Text className="text-sm text-foreground-secondary">{row.detail}</Text>
+          <Note>{`Checked ${new Date(row.checkedAt).toLocaleString()}`}</Note>
+        </View>
+      </View>
+      {row.windows.map(({ id, label, window }) => (
+        <LimitWindow
+          key={id}
+          label={label}
+          window={window}
+          checkedAt={row.checkedAt}
+          available={row.available}
+          now={now}
+        />
+      ))}
+      {row.notes.map((note) => (
+        <Note key={note}>{note}</Note>
+      ))}
+    </Panel>
   );
 }
 
@@ -117,8 +166,8 @@ function LimitsPanel({
 }
 
 /**
- * Native provider limits across devices, through the same shared selector as the web Limits
- * page: each account once, grouped by provider. Mobile reads no hubs, so nothing is routed.
+ * Provider limits across devices, through the same shared selectors as the web Limits page: each
+ * direct account once and every account a CLIProxyAPI hub pools, grouped by provider.
  */
 export function ProviderLimits({
   nodes,
@@ -129,44 +178,15 @@ export function ProviderLimits({
   canRedeem: (environmentId: EnvironmentId) => boolean;
   onRefresh?: () => void;
 }) {
-  const view = useMemo(() => {
-    const { accounts, withoutLimits } = listDirectProviderAccounts(
-      nodes.map((node) => ({ ...node, hubs: [] })),
-    );
-    // A Codex instance keeps its banked resets, and any pending reset attempt, without windows.
-    const resettable = withoutLimits.filter((instance) => instance.driver === "codex");
-    return {
-      groups: groupSubscriptionLimits({
-        hubs: [],
-        direct: accounts,
-        routed: [],
-        withoutLimits: resettable,
-      }),
-      windows: accounts.flatMap((account) => account.windows),
-      // Every other instance without limits is named on one line.
-      limitless: [
-        ...new Set(
-          withoutLimits
-            .filter((instance) => instance.driver !== "codex")
-            .map((instance) =>
-              nodes.length > 1
-                ? `${instance.displayName} on ${instance.environmentLabel}`
-                : instance.displayName,
-            ),
-        ),
-      ],
-      empty: accounts.length === 0 && withoutLimits.length === 0,
-      environmentIds: new Map<string, EnvironmentId>(
-        nodes.map((node) => [node.environmentId, node.environmentId]),
-      ),
-    };
-  }, [nodes]);
   const [now, setNow] = useState(Date.now);
+  // Read the clock again as soon as a snapshot changes, so a live push never looks future-dated
+  // to pace and a hub's cooldown is judged against the time it answered.
   useEffect(() => {
-    if (view.windows.length === 0) return;
+    if (nodes.length === 0) return;
     const timer = setTimeout(() => setNow(Date.now()), 0);
     return () => clearTimeout(timer);
-  }, [view]);
+  }, [nodes]);
+  const view = useMemo(() => deriveProviderLimitsView(nodes, now), [nodes, now]);
   // One wakeup at the next reset, plus foreground recovery. No provider polling.
   useEffect(() => {
     const update = () => setNow(Date.now());
@@ -213,15 +233,32 @@ export function ProviderLimits({
   return (
     <View className="gap-4">
       <Note>
-        Account limits reported by each provider. These allowances may be shared with other apps and
-        devices.
+        Account limits reported by each provider and CLIProxyAPI hub. These allowances may be shared
+        with other apps and devices.
       </Note>
+      {view.notices.map((notice) => (
+        <Panel key={notice.key} title={notice.title}>
+          <Note>{notice.message}</Note>
+        </Panel>
+      ))}
       {view.empty ? (
         <Note>No enabled providers on {nodes.length === 1 ? "this device" : "these devices"}.</Note>
       ) : null}
       {view.groups.map((group) => (
         <View key={group.provider} className="gap-3">
           <Text className="text-lg font-ryco-bold text-foreground">{group.label}</Text>
+          {group.pooled.length > 0 ? (
+            <Panel title="Pooled">
+              {group.pooled.map((window) => (
+                <PooledWindow
+                  key={window.id}
+                  window={window}
+                  besideDirect={group.directAccounts.length > 0}
+                />
+              ))}
+              <Note>Plans of different sizes count equally in the average.</Note>
+            </Panel>
+          ) : null}
           {group.directAccounts.map((account) => (
             <LimitsPanel
               key={account.key}
@@ -242,7 +279,13 @@ export function ProviderLimits({
                   now={now}
                 />
               ))}
+              {view.alsoInHubs.has(account.key) ? (
+                <Note>{view.alsoInHubs.get(account.key)}</Note>
+              ) : null}
             </LimitsPanel>
+          ))}
+          {group.hubAccounts.map((row) => (
+            <HubAccountPanel key={row.key} row={row} now={now} />
           ))}
           {group.withoutLimits.map((instance) => (
             <LimitsPanel
@@ -257,7 +300,13 @@ export function ProviderLimits({
               <Note>{instance.reason ?? "This provider has not reported usage limits."}</Note>
             </LimitsPanel>
           ))}
+          {group.routed.map((note) => (
+            <Note key={note}>{note}</Note>
+          ))}
         </View>
+      ))}
+      {view.routed.map((note) => (
+        <Note key={note}>{note}</Note>
       ))}
       {view.limitless.length > 0 ? (
         <Note>{`No limits reported: ${view.limitless.join(", ")}`}</Note>

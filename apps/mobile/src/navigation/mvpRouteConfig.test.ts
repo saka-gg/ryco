@@ -2,15 +2,45 @@
 // this test runs under Node, so it pulls the types in for itself.
 /// <reference types="node" />
 import { readFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { join } from "node:path";
 import { describe, expect, it } from "vite-plus/test";
 
+import {
+  statisticsLinkPath,
+  statisticsTabParam,
+} from "../features/settings/statistics/statisticsRoute";
 import {
   MVP_ROOT_ROUTES,
   MVP_SETTINGS_SHEET_ROUTES,
   WORKSPACE_OVERLAY_ROUTE_NAMES,
   type MvpRootRouteName,
 } from "./mvpRouteConfig";
+
+interface ParsedRoute {
+  readonly name: string;
+  readonly params?: Record<string, unknown>;
+  readonly state?: { readonly routes: readonly ParsedRoute[] };
+}
+
+/** React Navigation's own link parser, as the app's linking config runs it. */
+function parseLink(path: string): ParsedRoute | undefined {
+  const mobileRequire = createRequire(new URL("../../package.json", import.meta.url));
+  const nativeRequire = createRequire(mobileRequire.resolve("@react-navigation/native"));
+  const { getStateFromPath } = nativeRequire("@react-navigation/core") as {
+    getStateFromPath(
+      path: string,
+      config: unknown,
+    ): { readonly routes: readonly ParsedRoute[] } | undefined;
+  };
+  const screens = Object.fromEntries(
+    Object.entries(MVP_SETTINGS_SHEET_ROUTES).map(([name, route]) => [name, route.linking]),
+  );
+  const state = getStateFromPath(path, {
+    screens: { SettingsSheet: { path: MVP_ROOT_ROUTES.SettingsSheet.linking, screens } },
+  });
+  return state?.routes[0]?.state?.routes[0];
+}
 
 describe("MVP route config", () => {
   it("registers exactly the MVP root route set plus the NotFound catch-all", () => {
@@ -217,6 +247,17 @@ describe("MVP route config", () => {
       expect(MVP_SETTINGS_SHEET_ROUTES[name].ios.presentation).toBe("card");
       expect(MVP_SETTINGS_SHEET_ROUTES[name].android.presentation).toBe("card");
     }
+  });
+
+  it("opens Statistics on the tab a link names, such as a Limits widget's tap", () => {
+    expect(statisticsLinkPath("limits")).toBe("settings/statistics?tab=limits");
+    const route = parseLink(statisticsLinkPath("limits"));
+    expect(route).toMatchObject({ name: "SettingsStatistics", params: { tab: "limits" } });
+    expect(statisticsTabParam(route?.params?.tab as string | undefined)).toBe("limits");
+    expect(statisticsTabParam(["activity", "usage"])).toBe("activity");
+    // An unknown or missing tab leaves the screen on its default.
+    expect(statisticsTabParam("billing")).toBeNull();
+    expect(statisticsTabParam(undefined)).toBeNull();
   });
 
   it("gives every nested settings route both platform decisions", () => {

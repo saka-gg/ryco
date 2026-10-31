@@ -1,3 +1,4 @@
+import type { StaticScreenProps } from "@react-navigation/native";
 import { MotionReveal } from "../../components/MotionReveal";
 import { useMemo, useState } from "react";
 import { ActivityIndicator, Pressable, RefreshControl, ScrollView, View } from "react-native";
@@ -16,12 +17,29 @@ import {
 } from "./statistics/StatisticsParts";
 import { UsageStatistics } from "./statistics/UsageStatistics";
 import { ActivityStatistics } from "./statistics/ActivityStatistics";
-import { ProviderLimits, type ProviderLimitsNode } from "./statistics/ProviderLimits";
+import { ProviderLimits } from "./statistics/ProviderLimits";
+import { providerLimitsNodes } from "./statistics/providerLimitsModel";
+import { statisticsTabParam } from "./statistics/statisticsRoute";
 
-export function SettingsStatisticsRouteScreen() {
+type SettingsStatisticsRouteScreenProps = StaticScreenProps<
+  | {
+      /** The tab to open, as a link names it (`settings/statistics?tab=limits`). */
+      readonly tab?: string | string[];
+    }
+  | undefined
+>;
+
+export function SettingsStatisticsRouteScreen(props: SettingsStatisticsRouteScreenProps) {
   const colors = useStatisticsPalette();
   const environments = useHomeEnvironments();
-  const [tab, setTab] = useState<StatisticsTab>("usage");
+  const linkedTab = statisticsTabParam(props.route.params?.tab);
+  const [tab, setTab] = useState<StatisticsTab>(linkedTab ?? "usage");
+  // A link that names a tab opens it, also while Statistics is already open.
+  const [followedTab, setFollowedTab] = useState(linkedTab);
+  if (linkedTab !== followedTab) {
+    setFollowedTab(linkedTab);
+    if (linkedTab !== null) setTab(linkedTab);
+  }
   const [range, setRange] = useState<StatRange>("30d");
   const [device, setDevice] = useState("all");
   const selected =
@@ -38,24 +56,7 @@ export function SettingsStatisticsRouteScreen() {
   const scoped = tab === "activity" ? (activityDevice ? [activityDevice] : []) : selected;
   const data = useStatisticsData(scoped, tab, range);
   // Memoized: this screen is not React-compiled, and the limits selector keys on it.
-  const limitNodes = useMemo(
-    () =>
-      data.nodes.flatMap((node): ProviderLimitsNode[] =>
-        node.providers
-          ? [
-              {
-                environmentId: node.environment.environmentId,
-                label: node.environment.label,
-                connected:
-                  node.environment.connectionState === "connected" ||
-                  node.environment.connectionState === "read-only",
-                providers: node.providers,
-              },
-            ]
-          : [],
-      ),
-    [data.nodes],
-  );
+  const limitNodes = useMemo(() => providerLimitsNodes(data.nodes), [data.nodes]);
   // Reset credits are spent only through a connected, mutation-ready owner session.
   const canRedeem = (environmentId: EnvironmentId) =>
     environments.some(

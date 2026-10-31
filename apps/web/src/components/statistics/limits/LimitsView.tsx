@@ -2,6 +2,7 @@ import {
   cliProxyAccountHealth,
   cliProxyHubIdentity,
   cliProxyProviderLabel,
+  cliProxyQuotaNote,
   cliProxyRecentRequestTotal,
   cliProxyWindowLabel,
   directAccountHealth,
@@ -645,20 +646,6 @@ function HubHealthBadge({
   }
 }
 
-function quotaNote(entry: CliProxyHubAccountEntry): string | null {
-  const { quota } = entry.account;
-  switch (quota.status) {
-    case "ok":
-      return quota.windows.length === 0 ? "No usage windows reported." : null;
-    case "unsupported":
-      return `${cliProxyProviderLabel(entry.account.provider)} has no quota API Ryco reads; request counts only.`;
-    case "skipped":
-      return "Disabled on the hub, so its quota is not read.";
-    case "failed":
-      return quota.message ?? "The quota could not be read.";
-  }
-}
-
 function HubAccountCard({
   entry,
   now,
@@ -671,7 +658,7 @@ function HubAccountCard({
   const { account } = entry;
   const health = cliProxyAccountHealth(account, now);
   const plan = formatCliProxyPlan(account.quota.planType);
-  const note = quotaNote(entry);
+  const note = cliProxyQuotaNote(account);
   const recent = cliProxyRecentRequestTotal(account.requests);
   const credits = account.quota.credits;
   return (
