@@ -4,7 +4,11 @@ import {
 } from "@ryco/shared/retiredFeatures";
 import { canSnoozeThread } from "@ryco/shared/threadSnooze";
 import { isChatProject, projectKindOf } from "@ryco/shared/projectKind";
-import { forkContextHandoffPending } from "@ryco/shared/threadFork";
+import {
+  CARRIED_FORK_SOURCE_ID_SUFFIX,
+  forkContextHandoffPending,
+  isCarriedForkSourceThreadId,
+} from "@ryco/shared/threadFork";
 import { applicableUsageLimit } from "@ryco/shared/usageLimit";
 import type {
   AgentTokenMode,
@@ -196,6 +200,13 @@ const decideThreadCreated = Effect.fn("decideThreadCreated")(function* ({
     command,
     threadId: fields.threadId,
   });
+  // Reserved for carried forks' placeholder sources, which must never name a thread here.
+  if (isCarriedForkSourceThreadId(fields.threadId)) {
+    return yield* new OrchestrationCommandInvariantError({
+      commandType: command.type,
+      detail: `Thread ids ending in '${CARRIED_FORK_SOURCE_ID_SUFFIX}' are reserved for forks carried from another machine.`,
+    });
+  }
   const tokenMode = normalizeTokenMode(fields.tokenMode);
   const event: PlannedOrchestrationEvent = {
     ...withEventBase({

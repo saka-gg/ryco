@@ -280,12 +280,19 @@ The other node:
 Where the fork works on the other node:
 
 - **A project with Git:** a new worktree of that node's own copy of the project, on a new
-  `<worktree branch prefix>/fork-<8 characters>` branch that starts at the original's branch as it is
-  on `origin`. The original's checkout must track a branch on `origin` with nothing left to push; the
-  other node fetches that branch from its own `origin` with its own credentials, then creates the
-  worktree where its own settings put worktrees. A branch it cannot fetch is refused before anything
-  is recorded.
+  `<worktree branch prefix>/fork-<8 characters>` branch that starts at the commit the original's
+  checkout is at. The original's checkout must track the branch of the same name on `origin` with
+  nothing left to push. The request names that commit. The other node fetches the branch from its own
+  `origin` with its own credentials (always a new fetch, even right after another one), and starts
+  the worktree from that commit only when its own `origin/<branch>` is that commit or a later one.
+  So a newer push does not change what the fork starts from, and a node whose `origin` is another
+  repository, or a branch rewritten since, is refused. The fetch happens before the fork takes one
+  of the node's fork slots, so a slow remote holds up no other fork. Refusals leave nothing recorded.
 - **A chat without a project:** a new chat with an empty folder.
+
+The fork's divider and lineage name the original by a placeholder id that ends in `:origin`. That
+ending is reserved: a node refuses to create any thread whose id ends in it, so the placeholder can
+never point to a thread of the other node.
 
 Retries work as for every fork: the request carries a fork key, the node records the fork with the
 carried conversation before it answers, a retry with the same key and conversation returns the same

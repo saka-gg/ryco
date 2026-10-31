@@ -53,6 +53,24 @@ export function inheritedItemId(input: {
   return `${inheritedItemIdPrefix(input.forkThreadId)}${originalItemId(input.sourceThreadId, input.sourceItemId)}`;
 }
 
+/**
+ * The end of a carried fork's placeholder source id (`<fork thread id>:origin`): a fork carried
+ * from another node names its source by a placeholder, because the source lives on that node.
+ * The namespace is reserved: no thread of a node may take an id in it (the decider refuses), so a
+ * carried fork's lineage and provenance can never resolve to a thread of this node.
+ */
+export const CARRIED_FORK_SOURCE_ID_SUFFIX = ":origin";
+
+/** A carried fork's placeholder source id. */
+export function carriedForkSourceThreadId(forkThreadId: ThreadId | string): string {
+  return `${forkThreadId}${CARRIED_FORK_SOURCE_ID_SUFFIX}`;
+}
+
+/** Whether `threadId` is in the namespace reserved for carried forks' placeholder sources. */
+export function isCarriedForkSourceThreadId(threadId: ThreadId | string): boolean {
+  return threadId.endsWith(CARRIED_FORK_SOURCE_ID_SUFFIX);
+}
+
 /** Whether `itemId` is history `threadId` inherited when it was forked. */
 export function isInheritedItemId(threadId: ThreadId | string, itemId: string): boolean {
   return itemId.startsWith(inheritedItemIdPrefix(threadId));

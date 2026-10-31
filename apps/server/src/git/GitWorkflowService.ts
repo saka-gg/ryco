@@ -121,6 +121,7 @@ export interface GitWorkflowServiceShape {
     input: VcsCreateWorktreeInput & GitWorktreeCreationContext,
   ) => Effect.Effect<VcsCreateWorktreeResult, GitCommandError>;
   readonly prefetchWorktreeBase: GitVcsDriverShape["prefetchWorktreeBase"];
+  readonly isAncestorCommit: GitVcsDriverShape["isAncestorCommit"];
   readonly removeWorktree: GitVcsDriverShape["removeWorktree"];
   readonly listWorktreePaths: (cwd: string) => Effect.Effect<readonly string[], GitCommandError>;
   readonly listLocalBranchNames: (cwd: string) => Effect.Effect<readonly string[], GitCommandError>;
@@ -457,6 +458,10 @@ export const make = Effect.fn("makeGitWorkflowService")(function* () {
     prefetchWorktreeBase: (input) =>
       ensureGitCommand("GitWorkflowService.prefetchWorktreeBase", input.cwd).pipe(
         Effect.andThen(git.prefetchWorktreeBase(input)),
+      ),
+    isAncestorCommit: (input) =>
+      ensureGitCommand("GitWorkflowService.isAncestorCommit", input.cwd).pipe(
+        Effect.andThen(git.isAncestorCommit(input)),
       ),
     removeWorktree: (input) =>
       ensureGitCommand("GitWorkflowService.removeWorktree", input.cwd).pipe(

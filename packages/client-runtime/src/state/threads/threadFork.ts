@@ -56,7 +56,7 @@ const THREAD_FORK_ERROR_COPY = {
     "This conversation is too long to continue on another machine. Fork from an earlier reply.",
   "history-invalid": "The other machine couldn't read this conversation.",
   "base-ref-unavailable":
-    "The other machine couldn't fetch this branch. Push it and check that machine can reach the remote.",
+    "The other machine couldn't fetch this branch, or its copy doesn't have the commit you're on. Push it, and check both machines use the same origin.",
 } as const satisfies Record<ThreadForkErrorReason, string>;
 
 /**

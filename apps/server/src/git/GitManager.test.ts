@@ -1630,6 +1630,34 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
     }),
   );
 
+  it.effect("names the upstream and the commit its counts were read at", () =>
+    Effect.gen(function* () {
+      const { repoDir } = yield* makeRemoteAheadFixture;
+      const head = (yield* runGit(repoDir, ["rev-parse", "HEAD"])).stdout.trim();
+      const { manager } = yield* makeManager();
+
+      const remote = yield* manager.remoteStatus({ cwd: repoDir }, { fetch: true });
+      expect(remote).toMatchObject({
+        hasUpstream: true,
+        upstreamRef: "origin/feature/tracked",
+        headCommit: head,
+        aheadCount: 0,
+        behindCount: 1,
+      });
+      expect(yield* manager.status({ cwd: repoDir })).toMatchObject({
+        upstreamRef: "origin/feature/tracked",
+        headCommit: head,
+      });
+
+      yield* runGit(repoDir, ["checkout", "-b", "feature/unpublished"]);
+      yield* manager.invalidateStatus(repoDir);
+      expect(yield* manager.remoteStatus({ cwd: repoDir })).toMatchObject({
+        hasUpstream: false,
+        upstreamRef: null,
+      });
+    }),
+  );
+
   it.effect("reuses local status details when the status fetch fails", () =>
     Effect.gen(function* () {
       const { repoDir } = yield* makeRemoteAheadFixture;

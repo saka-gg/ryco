@@ -1144,6 +1144,9 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* (
 
     return {
       hasUpstream: details.hasUpstream,
+      upstreamRef: details.upstreamRef,
+      // Read with the counts, so with nothing ahead it is a commit of the upstream.
+      ...(details.headCommit ? { headCommit: details.headCommit } : {}),
       aheadCount: details.aheadCount,
       behindCount: details.behindCount,
       aheadOfDefaultCount: details.aheadOfDefaultCount,

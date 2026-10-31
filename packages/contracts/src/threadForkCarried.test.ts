@@ -2,8 +2,13 @@ import * as Schema from "effect/Schema";
 import * as Struct from "effect/Struct";
 import { describe, expect, it } from "vite-plus/test";
 
+import { VcsStatusRemoteResult } from "./git.ts";
 import { ThreadForkCarriedRequest, ThreadForkedActivityPayload } from "./threadFork.ts";
-import { CARRIED_THREAD_HISTORY_MAX_BYTES, ThreadForkCarriedInput } from "./threadForkCarried.ts";
+import {
+  CARRIED_THREAD_HISTORY_MAX_BYTES,
+  ThreadForkCarriedDestination,
+  ThreadForkCarriedInput,
+} from "./threadForkCarried.ts";
 import { RELAY_MAX_RPC_MESSAGE_BYTES } from "./relayConstants.ts";
 
 const carriedPayload = {
@@ -63,5 +68,27 @@ describe("carried fork contracts", () => {
         history: {},
       }),
     ).toThrow();
+  });
+
+  it("pins a new worktree to a full commit id", () => {
+    const decode = Schema.decodeUnknownExit(ThreadForkCarriedDestination);
+    const destination = (commit: unknown) => ({
+      kind: "new-worktree",
+      start: { kind: "base-ref", baseRef: "origin/feature", commit },
+    });
+    expect(decode(destination("a".repeat(40)))._tag).toBe("Success");
+    expect(decode(destination("b".repeat(64)))._tag).toBe("Success");
+    for (const commit of [undefined, "abc1234", "A".repeat(40), `${"a".repeat(39)}g`, "HEAD"]) {
+      expect(decode(destination(commit))._tag).toBe("Failure");
+    }
+  });
+
+  it("decodes a remote status without the upstream name or commit an older node leaves out", () => {
+    const decode = Schema.decodeUnknownSync(VcsStatusRemoteResult);
+    const older = { hasUpstream: true, aheadCount: 0, behindCount: 0, pr: null };
+    expect(decode(older)).toEqual(older);
+    const newer = { ...older, upstreamRef: "origin/feature", headCommit: "c".repeat(40) };
+    expect(decode(newer)).toEqual(newer);
+    expect(decode({ ...older, upstreamRef: null })).toMatchObject({ upstreamRef: null });
   });
 });

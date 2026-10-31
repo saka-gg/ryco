@@ -175,18 +175,18 @@ export interface ThreadForkNativeOperations {
     readonly plan: ClaudeNativeCandidate["plan"];
     readonly config: ProviderInstanceConfig;
     readonly laterTurnIds: ReadonlyArray<TurnId>;
-  }) => Effect.Effect<ClaudeCutoffPin>;
+  }) => Effect.Effect<ClaudeCutoffPin, ThreadForkRunError>;
   /** At most once per fork key. Never repeated when its outcome is uncertain. */
   readonly fork: (
     request: ThreadForkNativeForkRequest,
-  ) => Effect.Effect<NativeForkOutcome, NativeForkUncertain>;
+  ) => Effect.Effect<NativeForkOutcome, NativeForkUncertain | ThreadForkRunError>;
   /** Deletes a copy this fork created and recorded (never one it merely may have created). */
   readonly removeCopy: (input: {
     readonly plan: NativeProviderPlan;
     readonly config: ProviderInstanceConfig | undefined;
     readonly nativeThreadId: string;
     readonly copy: ThreadForkOwnedNativeCopy;
-  }) => Effect.Effect<void, NativeForkCleanupError>;
+  }) => Effect.Effect<void, NativeForkCleanupError | ThreadForkRunError>;
 }
 
 /** Named points of a run; a test hook failing or dying there simulates a crash. */
@@ -275,12 +275,6 @@ export type ThreadForkRunError = ForkRunError;
 
 const isForkRunError = (value: unknown): value is ForkRunError => value instanceof ForkRunError;
 
-/**
- * The provider-native fork code (Codex app-server copies, Claude transcript copies) loads with
- * the first native fork, pin or cleanup; a node that never forks natively never loads it.
- */
-const loadNativeFork = Effect.promise(() => import("../nativeFork.ts"));
-
 const isNativeForkUncertain = (value: unknown): value is NativeForkUncertain =>
   typeof value === "object" &&
   value !== null &&
@@ -288,6 +282,36 @@ const isNativeForkUncertain = (value: unknown): value is NativeForkUncertain =>
 
 const forkError = (reason: ThreadForkErrorReason, message: string, retryable = false) =>
   new ForkRunError({ reason, message, retryable });
+
+/**
+ * Loads a lazily loaded chunk of the fork code. A chunk that fails to load (a file replaced by an
+ * update, a disk error) fails the attempt as retryable instead of crashing it.
+ */
+const loadForkChunk = <A>(load: () => Promise<A>): Effect.Effect<A, ForkRunError> =>
+  Effect.tryPromise({ try: load, catch: (cause) => String(cause) }).pipe(
+    Effect.catch((cause) =>
+      Effect.logWarning("thread fork code could not be loaded", { cause }).pipe(
+        Effect.andThen(
+          Effect.fail(
+            forkError(
+              "preparation-failed",
+              "This machine could not load the code for forks right now. Try again in a moment.",
+              true,
+            ),
+          ),
+        ),
+      ),
+    ),
+  );
+
+/**
+ * The provider-native fork code (Codex app-server copies, Claude transcript copies) loads with
+ * the first native fork, pin or cleanup; a node that never forks natively never loads it.
+ */
+const loadNativeFork = loadForkChunk(() => import("../nativeFork.ts"));
+
+/** A fork carried from another node: its checks, acceptance and publication. */
+const loadCarriedFork = loadForkChunk(() => import("../carriedFork.ts"));
 
 const failureOf = (error: ForkRunError): ThreadForkFailure => ({
   reason: error.reason,
@@ -1692,7 +1716,9 @@ export const makeThreadFork = (options: ThreadForkTestOptions = {}) =>
         });
         yield* runPoint("provider-forking", claimed);
         /** Records what the native call returned. */
-        const record = (outcome: Exit.Exit<NativeForkOutcome, NativeForkUncertain>) =>
+        const record = (
+          outcome: Exit.Exit<NativeForkOutcome, NativeForkUncertain | ForkRunError>,
+        ) =>
           Effect.gen(function* () {
             if (Exit.isFailure(outcome)) {
               if (Cause.hasInterruptsOnly(outcome.cause)) {
@@ -2111,8 +2137,13 @@ export const makeThreadFork = (options: ThreadForkTestOptions = {}) =>
         return yield* error;
       });
 
-    /** Records a new key's row (`accept`, or a carried fork's acceptance) under its digest. */
-    type Acceptance = (digest: string) => ReturnType<typeof accept>;
+    /**
+     * Records a new key's row (`accept`, or a carried fork's acceptance) under its digest, in two
+     * steps: the outer effect runs before the attempt takes a fork permit (a carried fork fetches
+     * its branch there, so a slow remote holds up no other fork), and the effect it returns runs
+     * under the permit and records the row.
+     */
+    type Acceptance = (digest: string) => Effect.Effect<ReturnType<typeof accept>, ForkRunError>;
 
     /**
      * One attempt for a key: accept it when new, otherwise answer, retry or resume its row.
@@ -2150,12 +2181,17 @@ export const makeThreadFork = (options: ThreadForkTestOptions = {}) =>
         if (existing?.phase === "failed" && !(retry && acceptance !== null)) {
           return yield* errorOf(existing.error ?? failureOf(interruptedRunError()));
         }
+        // A new key's slow preparation waits for no permit.
+        const accepting =
+          existing === undefined && acceptance !== null && digest !== null
+            ? yield* acceptance(digest)
+            : null;
         return yield* permits.withPermits(1)(
           Effect.gen(function* () {
             let row = existing;
             if (row === undefined) {
-              if (acceptance === null || digest === null) return yield* interruptedRunError();
-              row = yield* acceptance(digest);
+              if (accepting === null) return yield* interruptedRunError();
+              row = yield* accepting;
               yield* runPoint("accepted", row);
             } else if (row.phase === "failed") {
               // Fenced on the failure as read: an expiry that settled it meanwhile wins.
@@ -2288,7 +2324,11 @@ export const makeThreadFork = (options: ThreadForkTestOptions = {}) =>
       );
 
     const fork: ThreadForkShape["fork"] = (input) =>
-      join(input.forkKey, (digest) => accept(input, digest), threadForkRequestDigest(input));
+      join(
+        input.forkKey,
+        (digest) => Effect.succeed(accept(input, digest)),
+        threadForkRequestDigest(input),
+      );
 
     const attemptState: ThreadForkShape["attemptState"] = (forkKey) =>
       flights.has(forkKey) ? Effect.succeed("running") : recordedAttempt(forkKey);
@@ -2300,7 +2340,11 @@ export const makeThreadFork = (options: ThreadForkTestOptions = {}) =>
      */
     const forkCarried: ThreadForkShape["forkCarried"] = (input) =>
       Effect.flatMap(
-        Effect.promise(() => import("../carriedFork.ts")),
+        loadCarriedFork.pipe(
+          Effect.catch((error) =>
+            reportError(input.forkKey, error).pipe(Effect.flatMap(Effect.fail)),
+          ),
+        ),
         (carried) =>
           carried.forkCarried(input, {
             join,

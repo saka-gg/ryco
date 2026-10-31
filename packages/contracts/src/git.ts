@@ -14,6 +14,12 @@ import { WorktreeSubmodules } from "./settings.ts";
 const TrimmedNonEmptyStringSchema = TrimmedNonEmptyString;
 const GIT_LIST_BRANCHES_MAX_LIMIT = 200;
 
+/** A full Git commit id: 40 hex characters (SHA-1) or 64 (SHA-256), lowercase. */
+export const GitCommitOid = Schema.String.check(
+  Schema.isPattern(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/),
+);
+export type GitCommitOid = typeof GitCommitOid.Type;
+
 // Domain Types
 
 export const GitStackedAction = Schema.Literals([
@@ -331,6 +337,16 @@ const VcsStatusLocalShape = {
 
 const VcsStatusRemoteShape = {
   hasUpstream: Schema.Boolean,
+  /**
+   * The branch's upstream as Git names it (`origin/main`), null without one. Optional: older
+   * nodes do not send it, and a client that needs it treats it as unknown.
+   */
+  upstreamRef: Schema.optional(Schema.NullOr(TrimmedNonEmptyStringSchema)),
+  /**
+   * The commit HEAD was at when `aheadCount` and `behindCount` were counted (so with no commit
+   * ahead it is on the upstream). Absent on an unborn branch and from older nodes.
+   */
+  headCommit: Schema.optional(GitCommitOid),
   aheadCount: NonNegativeInt,
   behindCount: NonNegativeInt,
   aheadOfDefaultCount: Schema.optional(NonNegativeInt),
@@ -648,7 +664,7 @@ export type GitReadComparisonResult = typeof GitReadComparisonResult.Type;
 /** One immutable committed-file line. No symbolic refs or working-tree fallback. */
 export const GitReadLineBlameInput = Schema.Struct({
   cwd: TrimmedNonEmptyStringSchema,
-  oid: Schema.String.check(Schema.isPattern(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/)),
+  oid: GitCommitOid,
   filePath: Schema.String.check(
     Schema.isMinLength(1),
     Schema.isMaxLength(4096),

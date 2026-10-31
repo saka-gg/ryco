@@ -318,6 +318,8 @@ export function mergeGitStatusParts(
 function toRemoteStatusPart(status: VcsStatusResult): VcsStatusRemoteResult {
   return {
     hasUpstream: status.hasUpstream,
+    ...(status.upstreamRef === undefined ? {} : { upstreamRef: status.upstreamRef }),
+    ...(status.headCommit === undefined ? {} : { headCommit: status.headCommit }),
     aheadCount: status.aheadCount,
     behindCount: status.behindCount,
     ...(status.aheadOfDefaultCount === undefined

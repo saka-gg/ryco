@@ -7,6 +7,7 @@ import {
   TrimmedNonEmptyString,
   TurnId,
 } from "./baseSchemas.ts";
+import { GitCommitOid } from "./git.ts";
 import { AgentTokenMode, ProviderInteractionMode } from "./orchestration.ts";
 import { ProviderDriverKind } from "./providerInstance.ts";
 import { RuntimeMode } from "./runtimeMode.ts";
@@ -110,13 +111,19 @@ export type CarriedThreadHistory = typeof CarriedThreadHistory.Type;
  * Where a fork carried from another node works:
  * - `new-worktree`: a new worktree of the target's own project, from the source's published
  *   branch (`baseRef` is `origin/<branch>`), which the target fetches with its own remote and
- *   credentials.
+ *   credentials. `commit` is the commit the source checkout is at (with nothing left to push it
+ *   is on that branch): the target starts the worktree from exactly that commit, and refuses
+ *   unless its own fresh `origin/<branch>` is that commit or descends from it.
  * - `new-chat`: a new chat with an empty folder, for a chat without a project.
  */
 export const ThreadForkCarriedDestination = Schema.Union([
   Schema.Struct({
     kind: Schema.Literal("new-worktree"),
-    start: Schema.Struct({ kind: Schema.Literal("base-ref"), baseRef: ThreadForkBaseRef }),
+    start: Schema.Struct({
+      kind: Schema.Literal("base-ref"),
+      baseRef: ThreadForkBaseRef,
+      commit: GitCommitOid,
+    }),
   }),
   Schema.Struct({ kind: Schema.Literal("new-chat") }),
 ]);

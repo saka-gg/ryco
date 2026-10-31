@@ -173,7 +173,8 @@ export const ThreadForkErrorReason = Schema.Literals([
   "history-invalid",
   /**
    * `threads.forkCarried` only: this node could not fetch the branch from its own remote (it is
-   * not pushed, or this node cannot reach the remote).
+   * not pushed, or this node cannot reach the remote), or the branch it fetched does not hold the
+   * commit the source checkout is at (another repository, or a rewritten branch).
    */
   "base-ref-unavailable",
 ]);

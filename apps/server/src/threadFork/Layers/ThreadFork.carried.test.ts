@@ -22,6 +22,8 @@ import {
 } from "@ryco/contracts";
 import { readThreadForkedActivity } from "@ryco/shared/threadFork";
 import { Effect } from "effect";
+
+import { GitWorkflowService } from "../../git/GitWorkflowService.ts";
 import { afterEach, describe, expect, it } from "vite-plus/test";
 
 import { buildContextHandoffDocument } from "../../orchestration/contextHandoff/ContextHandoffBuilder.ts";
@@ -118,12 +120,31 @@ const history: CarriedThreadHistory = {
   interactionMode: "default",
 };
 
-const carried = (forkKey: string, baseRef = "origin/feature"): ThreadForkCarriedRequest => ({
+const carried = (
+  forkKey: string,
+  commit: string,
+  baseRef = "origin/feature",
+): ThreadForkCarriedRequest => ({
   forkKey,
   projectId,
-  destination: { kind: "new-worktree", start: { kind: "base-ref", baseRef } },
+  destination: { kind: "new-worktree", start: { kind: "base-ref", baseRef, commit } },
   history,
 });
+
+const carriedChat = (forkKey: string): ThreadForkCarriedRequest => ({
+  forkKey,
+  projectId: null,
+  destination: { kind: "new-chat" },
+  history,
+});
+
+/** Machine A adds a commit to `feature` and pushes it; returns the new commit. */
+async function pushAnotherCommit(a: string, text: string) {
+  await writeFile(path.join(a, "app.txt"), `${text}\n`);
+  git(a, "commit", "-am", text);
+  git(a, "push", "origin", "feature");
+  return git(a, "rev-parse", "HEAD");
+}
 
 const forkWorktrees = (repo: string) =>
   git(repo, "worktree", "list", "--porcelain")
@@ -139,7 +160,7 @@ describe("ThreadFork carried from another machine", () => {
     const aBefore = git(a, "for-each-ref", "--format=%(refname) %(objectname)");
 
     const forkKey = "carried-worktree-key-0001";
-    const result = await h.run(h.forks.forkCarried(carried(forkKey)));
+    const result = await h.run(h.forks.forkCarried(carried(forkKey, featureCommit)));
     const forkThreadId = threadForkIdentity(forkKey).forkThreadId;
     expect(result).toMatchObject({
       threadId: forkThreadId,
@@ -211,24 +232,114 @@ describe("ThreadFork carried from another machine", () => {
   });
 
   it("refuses a branch this node cannot fetch, before recording anything", async () => {
-    const { root, b } = await machines();
+    const { root, b, featureCommit } = await machines();
     const h = await harness(root);
     await seedProject(h, { projectId, workspaceRoot: b });
     const missing = await h.run(
-      Effect.flip(h.forks.forkCarried(carried("carried-missing-0001", "origin/not-pushed"))),
+      Effect.flip(
+        h.forks.forkCarried(carried("carried-missing-0001", featureCommit, "origin/not-pushed")),
+      ),
     );
     expect(missing).toBeInstanceOf(ThreadForkError);
     expect(missing).toMatchObject({ reason: "base-ref-unavailable", attempt: "none" });
     const elsewhere = await h.run(
-      Effect.flip(h.forks.forkCarried(carried("carried-upstream-0001", "upstream/feature"))),
+      Effect.flip(
+        h.forks.forkCarried(carried("carried-upstream-0001", featureCommit, "upstream/feature")),
+      ),
     );
     expect(elsewhere).toMatchObject({ reason: "base-ref-invalid", attempt: "none" });
     expect(await h.ledgerRows()).toEqual([]);
     expect(forkWorktrees(b)).toEqual([]);
   });
 
+  it("starts from the carried commit, not a newer tip of origin", async () => {
+    const { root, a, b, featureCommit } = await machines();
+    const newer = await pushAnotherCommit(a, "work pushed after the conversation");
+    const h = await harness(root);
+    await seedProject(h, { projectId, workspaceRoot: b });
+    const result = await h.run(h.forks.forkCarried(carried("carried-pinned-0001", featureCommit)));
+    if (result.checkout.kind !== "new-worktree") throw new Error("expected a new worktree");
+    expect(git(b, "rev-parse", "refs/remotes/origin/feature")).toBe(newer);
+    expect(git(result.checkout.worktreePath, "rev-parse", "HEAD")).toBe(featureCommit);
+    expect(result.checkout.baseRef).toBe("origin/feature");
+  });
+
+  it("refuses unless this node's origin holds the carried commit", async () => {
+    const { root, a, b } = await machines();
+    const h = await harness(root);
+    await seedProject(h, { projectId, workspaceRoot: b });
+    // A commit only machine A has (never pushed), as when B's origin is another repository.
+    await writeFile(path.join(a, "app.txt"), "not pushed\n");
+    git(a, "commit", "-am", "not pushed");
+    const unpushed = git(a, "rev-parse", "HEAD");
+    const unknown = await h.run(
+      Effect.flip(h.forks.forkCarried(carried("carried-unknown-0001", unpushed))),
+    );
+    expect(unknown).toMatchObject({
+      reason: "base-ref-unavailable",
+      retryable: true,
+      attempt: "none",
+    });
+    expect(unknown.message).toContain(`does not contain ${unpushed.slice(0, 12)}`);
+    // A commit B knows, but not on origin/feature (the branch was rewritten, or another branch).
+    git(a, "checkout", "-b", "side", "main");
+    await writeFile(path.join(a, "side.txt"), "side\n");
+    git(a, "add", ".");
+    git(a, "commit", "-m", "side");
+    git(a, "push", "origin", "side");
+    const side = git(a, "rev-parse", "HEAD");
+    git(b, "fetch", "origin", "side");
+    const elsewhere = await h.run(
+      Effect.flip(h.forks.forkCarried(carried("carried-elsewhere-0001", side))),
+    );
+    expect(elsewhere).toMatchObject({ reason: "base-ref-unavailable", attempt: "none" });
+    expect(await h.ledgerRows()).toEqual([]);
+    expect(forkWorktrees(b)).toEqual([]);
+  });
+
+  it("fetches the branch again even right after another fetch of it", async () => {
+    const { root, a, b } = await machines();
+    const h = await harness(root);
+    await seedProject(h, { projectId, workspaceRoot: b });
+    // The composer prefetched origin/feature a moment ago; then A pushed again.
+    await h.run(
+      Effect.flatMap(Effect.service(GitWorkflowService), (gitWorkflow) =>
+        gitWorkflow.prefetchWorktreeBase({ cwd: b, refName: "origin/feature" }),
+      ),
+    );
+    const pushed = await pushAnotherCommit(a, "pushed right before the fork");
+    const result = await h.run(h.forks.forkCarried(carried("carried-fresh-0001", pushed)));
+    if (result.checkout.kind !== "new-worktree") throw new Error("expected a new worktree");
+    expect(git(result.checkout.worktreePath, "rev-parse", "HEAD")).toBe(pushed);
+  });
+
+  it("fetches before it takes a fork permit, so a slow remote holds up no other fork", async () => {
+    const { root, b, featureCommit } = await machines();
+    let fetchStarted!: () => void;
+    const fetching = new Promise<void>((resolve) => (fetchStarted = resolve));
+    let releaseFetch!: () => void;
+    const released = new Promise<void>((resolve) => (releaseFetch = resolve));
+    const h = await harness(root, {
+      chatsRoot: path.join(root, "chats"),
+      service: { maxConcurrentForks: 1 },
+      prefetchWorktreeBase: (real) => (input) =>
+        Effect.promise(async () => {
+          fetchStarted();
+          await released;
+        }).pipe(Effect.andThen(real(input))),
+    });
+    await seedProject(h, { projectId, workspaceRoot: b });
+    const slow = h.run(h.forks.forkCarried(carried("carried-slow-remote-0001", featureCommit)));
+    await fetching;
+    // The only permit is free while the slow fork waits for its remote.
+    const chat = await h.run(h.forks.forkCarried(carriedChat("carried-while-fetching-0001")));
+    expect(chat).toMatchObject({ replayed: false, checkout: { kind: "new-chat" } });
+    releaseFetch();
+    expect(await slow).toMatchObject({ replayed: false, checkout: { kind: "new-worktree" } });
+  });
+
   it("finishes once after a restart that stopped it past checkout-ready", async () => {
-    const { root, b } = await machines();
+    const { root, b, featureCommit } = await machines();
     const databasePath = path.join(root, "state.sqlite");
     const forkKey = "carried-restart-key-0001";
     const forkThreadId = threadForkIdentity(forkKey).forkThreadId;
@@ -240,7 +351,9 @@ describe("ThreadFork carried from another machine", () => {
       },
     });
     await seedProject(first, { projectId, workspaceRoot: b });
-    const stopped = await first.run(Effect.flip(first.forks.forkCarried(carried(forkKey))));
+    const stopped = await first.run(
+      Effect.flip(first.forks.forkCarried(carried(forkKey, featureCommit))),
+    );
     expect(stopped).toMatchObject({ retryable: true, attempt: "running" });
     expect(await first.ledgerRows()).toEqual([{ forkKey, phase: "provider-ready" }]);
     expect(forkWorktrees(b)).toHaveLength(1);
@@ -253,7 +366,7 @@ describe("ThreadFork carried from another machine", () => {
     expect((await second.threadIds()).filter((id) => id === forkThreadId)).toHaveLength(1);
     expect(forkWorktrees(b)).toHaveLength(1);
     expect((await second.detail(forkThreadId))?.messages).toHaveLength(history.messages.length);
-    const replay = await second.run(second.forks.forkCarried(carried(forkKey)));
+    const replay = await second.run(second.forks.forkCarried(carried(forkKey, featureCommit)));
     expect(replay).toMatchObject({ threadId: forkThreadId, replayed: true });
   });
 

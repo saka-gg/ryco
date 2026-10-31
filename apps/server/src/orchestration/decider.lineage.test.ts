@@ -322,3 +322,22 @@ describe("decider thread.delegated.create delegation limits", () => {
     }),
   );
 });
+
+describe("decider carried fork placeholder namespace", () => {
+  it.effect("refuses a new thread whose id a carried fork's placeholder source could name", () =>
+    Effect.gen(function* () {
+      const readModel = yield* seed;
+      for (const command of [
+        threadCreate("fork-0123456789abcdef:origin"),
+        delegatedCreate("fork-0123456789abcdef:origin", "parent"),
+      ]) {
+        const error = yield* Effect.flip(decide(readModel, command));
+        assert.instanceOf(error, OrchestrationCommandInvariantError);
+        assert.strictEqual(error.commandType, command.type);
+        assert.include(error.detail, "reserved for forks carried from another machine");
+      }
+      // Only the suffix is reserved.
+      createdPayload(yield* decide(readModel, threadCreate("origin:of-something")));
+    }),
+  );
+});

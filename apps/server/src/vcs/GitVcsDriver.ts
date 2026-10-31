@@ -185,6 +185,8 @@ export interface GitStatusDetails {
   hasOriginRemote: boolean;
   isDefaultBranch: boolean;
   branch: string | null;
+  /** The commit HEAD is at (`# branch.oid`); absent on an unborn branch. */
+  headCommit?: string;
   upstreamRef: string | null;
   hasWorkingTreeChanges: boolean;
   workingTree: VcsStatusResult["workingTree"];
@@ -396,12 +398,24 @@ export interface GitVcsDriverShape {
   ) => Effect.Effect<VcsCreateWorktreeResult, GitCommandError>;
   /**
    * Fetches a worktree base from origin ahead of `createWorktree`, which reuses
-   * the fetch while it runs and for a short while after it finished.
+   * the fetch while it runs and for a short while after it finished. `fresh`
+   * never stands on an earlier fetch: it waits for one that is running, then
+   * fetches again.
    */
   readonly prefetchWorktreeBase: (input: {
     readonly cwd: string;
     readonly refName: string;
+    readonly fresh?: boolean;
   }) => Effect.Effect<void, GitCommandError>;
+  /**
+   * Whether `ancestor` is `descendant` or one of its ancestors
+   * (`git merge-base --is-ancestor`); null when Git knows either of them not.
+   */
+  readonly isAncestorCommit: (input: {
+    readonly cwd: string;
+    readonly ancestor: string;
+    readonly descendant: string;
+  }) => Effect.Effect<boolean | null, GitCommandError>;
   readonly fetchPullRequestBranch: (
     input: GitFetchPullRequestBranchInput,
   ) => Effect.Effect<void, GitCommandError>;
