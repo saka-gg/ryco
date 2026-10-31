@@ -114,6 +114,8 @@ describe("inbox row menu", () => {
       { id: "settle", title: "Settle task", attributes: { disabled: false } },
       { id: "hour", title: "In 1 hour", attributes: { disabled: true } },
       { id: "snooze-custom", title: "Custom…", attributes: { disabled: true } },
+      // Copying the ID reads nothing from the node, so it is never disabled.
+      { id: "copy-id", title: "Copy task ID", attributes: { disabled: false } },
     ]);
     expect(
       buildInboxRowMenuActions(
@@ -127,6 +129,7 @@ describe("inbox row menu", () => {
     ).toEqual([
       { id: "unsettle", title: "Move to Active", attributes: { disabled: false } },
       { id: "unsnooze", title: "Unsnooze", attributes: { disabled: false } },
+      { id: "copy-id", title: "Copy task ID", attributes: { disabled: false } },
     ]);
   });
 });

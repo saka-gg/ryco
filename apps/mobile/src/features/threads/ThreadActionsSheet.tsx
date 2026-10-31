@@ -7,6 +7,7 @@ import { Modal, Pressable, ScrollView, Switch, TextInput, View } from "react-nat
 import { AppText as Text } from "../../components/AppText";
 import { ErrorBanner } from "../../components/ErrorBanner";
 import { SymbolView, type AppSymbolName } from "../../components/AppSymbol";
+import { copyTextWithHaptic } from "../../lib/copyTextWithHaptic";
 import { useThemeColor } from "../../lib/useThemeColor";
 import type { ThreadHeaderModel } from "./threadHeaderModel";
 import {
@@ -274,6 +275,35 @@ export function ThreadActionsSheet(props: {
               label={`Open pull request #${props.model.pullRequestNumber}`}
               detail="Read its conversation, checks and files."
               onPress={props.onOpenPullRequest}
+            />
+          ) : null}
+          <ActionRow
+            icon="doc.on.doc"
+            label={
+              props.model.copyReference.kind === "pull-request"
+                ? "Copy link to pull request"
+                : "Copy task ID"
+            }
+            detail={
+              props.model.copyReference.kind === "pull-request"
+                ? "The pull request this task works on."
+                : "Find this task again, or hand it to an agent."
+            }
+            onPress={() =>
+              copyTextWithHaptic(props.model.copyReference.value, {
+                target:
+                  props.model.copyReference.kind === "pull-request"
+                    ? "pull request link"
+                    : "task ID",
+              })
+            }
+          />
+          {props.model.copyReference.kind === "pull-request" ? (
+            <ActionRow
+              icon="doc.on.doc"
+              label="Copy task ID"
+              detail="Find this task again, or hand it to an agent."
+              onPress={() => copyTextWithHaptic(props.model.taskId, { target: "task ID" })}
             />
           ) : null}
           {props.model.reviewVisible ? (

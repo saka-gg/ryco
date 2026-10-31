@@ -9,12 +9,14 @@ import { resolveThreadWorkspaceRoot } from "@ryco/client-runtime/state/files";
 import {
   findPullRequestWatch,
   pullRequestWatchView,
+  resolveThreadReferenceCopyTarget,
   type Project,
   type PullRequestWatchTarget,
   type PullRequestWatchTone,
   type SidebarWorktreeSummary,
   type Thread,
   type ThreadInboxMutationBlocker,
+  type ThreadReferenceCopyTarget,
 } from "@ryco/client-runtime/state/threads";
 import type { ThreadPullRequestWatchShell } from "@ryco/contracts";
 import { isChatProject } from "@ryco/shared/projectKind";
@@ -119,6 +121,13 @@ export interface ThreadHeaderModel {
    * latest context usage says the node can (for Claude, that its CLI lists `/compact`).
    */
   readonly compactAction: ThreadCompactActionModel | null;
+  /**
+   * What "Copy" puts on the clipboard: the pull request link when one is known, else the
+   * task's ID (the shared rule web's Copy Thread ID uses, `resolveThreadReferenceCopyTarget`).
+   */
+  readonly copyReference: ThreadReferenceCopyTarget;
+  /** The task's own ID, also offered beside a pull request link. */
+  readonly taskId: string;
 }
 
 function compactAction(
@@ -253,8 +262,11 @@ function basename(path: string): string {
 }
 
 export function buildThreadHeaderModel(input: {
+  /** The pull request link `resolveThreadWorkspacePullRequestLink` picks, when known. */
+  readonly pullRequestUrl?: string | null | undefined;
   readonly thread: Pick<
     Thread,
+    | "id"
     | "title"
     | "archivedAt"
     | "latestTurn"
@@ -388,6 +400,11 @@ export function buildThreadHeaderModel(input: {
     reviewVisible: input.thread.turnDiffSummaries.some((summary) => summary.files.length > 0),
     filesVisible: workspaceRoot !== null,
     terminalVisible: workspaceRoot !== null && input.thread.archivedAt === null,
+    copyReference: resolveThreadReferenceCopyTarget({
+      threadId: input.thread.id,
+      pullRequestUrl: input.pullRequestUrl,
+    }),
+    taskId: input.thread.id,
     moreActions,
     changeRequest: buildChangeRequestBadge(input.worktree),
     pullRequestNumber: input.worktree?.prNumber ?? null,

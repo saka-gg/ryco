@@ -17,6 +17,7 @@ function thread(
   overrides: Partial<
     Pick<
       Thread,
+      | "id"
       | "title"
       | "archivedAt"
       | "latestTurn"
@@ -31,6 +32,7 @@ function thread(
   > = {},
 ) {
   return {
+    id: "thread-1" as Thread["id"],
     title: "Fix mobile navigation",
     archivedAt: null,
     latestTurn: null,
@@ -42,6 +44,7 @@ function thread(
     ...overrides,
   } as Pick<
     Thread,
+    | "id"
     | "title"
     | "archivedAt"
     | "latestTurn"
@@ -733,5 +736,32 @@ describe("thread header terminal action", () => {
     expect(build(null, "/repo").terminalVisible).toBe(true);
     expect(build("2026-10-28T00:00:00.000Z", "/repo").terminalVisible).toBe(false);
     expect(build(null, null).terminalVisible).toBe(false);
+  });
+});
+
+describe("copying a task's reference", () => {
+  const base = {
+    project: { name: "Ryco" } as Project,
+    worktree: null,
+    nodeLabel: "Mac Studio",
+    hasPendingApproval: false,
+    hasPendingUserInput: false,
+  };
+
+  it("copies the pull request link when one is known, else the task's ID", () => {
+    expect(buildThreadHeaderModel({ ...base, thread: thread() })).toMatchObject({
+      copyReference: { kind: "thread", value: "thread-1" },
+      taskId: "thread-1",
+    });
+    expect(
+      buildThreadHeaderModel({
+        ...base,
+        thread: thread(),
+        pullRequestUrl: "https://github.com/saka-gg/ryco/pull/42",
+      }),
+    ).toMatchObject({
+      copyReference: { kind: "pull-request", value: "https://github.com/saka-gg/ryco/pull/42" },
+      taskId: "thread-1",
+    });
   });
 });

@@ -23,8 +23,10 @@ import {
 } from "./inboxListModel";
 import { InboxThreadRow as ThreadRow } from "./InboxThreadRow";
 import { requestCustomSnooze } from "./customSnoozeModel";
+import { copyTextWithHaptic } from "../../lib/copyTextWithHaptic";
 import {
   buildInboxRowMenuActions,
+  COPY_TASK_ID_ACTION_ID,
   CUSTOM_SNOOZE_ACTION_ID,
   resolveSnoozeMenuPresets,
   snoozeMenuPresetsFromKey,
@@ -64,6 +66,10 @@ const EMPTY_COPY: Readonly<
 };
 
 function dispatchRowMenuAction(row: InboxThreadRow, event: string): void {
+  if (event === COPY_TASK_ID_ACTION_ID) {
+    copyTextWithHaptic(row.threadId, { target: "task ID" });
+    return;
+  }
   if (event === "settle" || event === "unsettle") {
     if (!row.mutationEnabled || !row.canSettle) return;
     void (async () => {
