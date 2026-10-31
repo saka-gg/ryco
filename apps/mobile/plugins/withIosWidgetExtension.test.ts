@@ -36,6 +36,8 @@ const notificationService = require("./withIosNotificationServiceExtension.cjs")
   ) => XcodeProject;
 };
 
+const MOBILE_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
+const WIDGETS_MODULE = join(MOBILE_ROOT, "modules", "ryco-widgets");
 const BUNDLE_ID = "dev.ryco.app.dev";
 const APP_GROUP = "group.dev.ryco.app.dev";
 const CONFIG = {
@@ -123,13 +125,13 @@ describe("the extension's Info.plist", () => {
       expect(readFileSync(join(extension, "RycoWidgets.entitlements"), "utf8")).toContain(
         APP_GROUP,
       );
-      for (const file of [
-        "RycoWidgetsBundle.swift",
-        "WidgetTimelineStore.swift",
-        "WidgetGroupStore.swift",
-      ]) {
-        expect(readFileSync(join(extension, file), "utf8").length, file).toBeGreaterThan(0);
-      }
+      // Every extension source, and the store it shares with the app's module.
+      const sources = readdirSync(join(WIDGETS_MODULE, "extension"))
+        .filter((file) => file.endsWith(".swift"))
+        .concat("WidgetGroupStore.swift");
+      expect(readdirSync(extension).toSorted()).toEqual(
+        [...sources, "Info.plist", "RycoWidgets.entitlements"].toSorted(),
+      );
     });
   });
 });
@@ -156,7 +158,7 @@ describe("EAS Build", () => {
 
 /** The Swift module names of the app's own pods: each podspec under `modules`. */
 function localPodModuleNames(): string[] {
-  const modules = join(dirname(fileURLToPath(import.meta.url)), "..", "modules");
+  const modules = join(MOBILE_ROOT, "modules");
   const podspecs = (directory: string): string[] =>
     readdirSync(directory, { withFileTypes: true }).flatMap((entry) =>
       entry.isDirectory() && entry.name !== "node_modules"
@@ -209,6 +211,8 @@ describe("the extension target", () => {
       const sources = phases.find((phase) => phase.comment === "Sources")!;
       expect(phaseFiles(project, sources.value, "PBXSourcesBuildPhase").toSorted()).toEqual([
         "RycoWidgetsBundle.swift in Sources",
+        "SubscriptionUsageContent.swift in Sources",
+        "SubscriptionUsageWidget.swift in Sources",
         "WidgetGroupStore.swift in Sources",
         "WidgetTimelineStore.swift in Sources",
       ]);

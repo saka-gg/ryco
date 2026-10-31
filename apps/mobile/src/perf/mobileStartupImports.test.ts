@@ -339,6 +339,29 @@ describe("mobile launch graph boundaries", () => {
     ).toEqual([]);
   });
 
+  it("loads the widgets runtime only once the app is idle", () => {
+    const reachable = [...staticGraph(LAUNCH_ENTRY).keys()].map(display);
+    expect(reachable).toContain("apps/mobile/src/widgets/WidgetsBridge.tsx");
+    // The walker follows the bridge's own imports, so an empty result is not a blind spot.
+    expect(reachable).toContain("apps/mobile/src/navigation/idlePrewarm.ts");
+    expect(chainsTo(LAUNCH_ENTRY, [/^apps\/mobile\/src\/widgets\/(?!WidgetsBridge)/u])).toEqual([]);
+    expect(
+      chainsTo("src/widgets/mobileWidgetsRuntime.tsx", [
+        /^apps\/mobile\/src\/widgets\/widgetsRuntime\.ts$/u,
+      ]),
+    ).not.toEqual([]);
+    // The sign-in screen empties the widgets with a module that loads none of their models.
+    expect([...staticGraph("src/widgets/clearWidgets.ts").keys()].map(display)).toContain(
+      "apps/mobile/src/widgets/rycoWidgetsNative.ts",
+    );
+    expect(
+      chainsTo("src/widgets/clearWidgets.ts", [
+        /^apps\/mobile\/src\/widgets\/(?:subscriptionUsageSnapshot|widgetsRuntime|mobileWidgetsRuntime)\.tsx?$/u,
+        /^packages\/client-runtime\/src\/usage\//u,
+      ]),
+    ).toEqual([]);
+  });
+
   it("checks the push key at every launch without loading push alerts", () => {
     // ThreadAlertsBridge imports the install check lazily, on every launch; the
     // check itself must stay a keychain call and a storage read.

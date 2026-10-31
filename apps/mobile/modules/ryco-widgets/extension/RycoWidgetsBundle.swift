@@ -7,5 +7,6 @@ import WidgetKit
 @main
 struct RycoWidgetsBundle: WidgetBundle {
   var body: some Widget {
+    SubscriptionUsageWidget()
   }
 }

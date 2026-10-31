@@ -8,6 +8,11 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vite-plus/test";
 
+import {
+  buildSubscriptionUsageSnapshot,
+  buildSubscriptionUsageTimeline,
+  TAP_TO_REFRESH,
+} from "../../../src/widgets/subscriptionUsageSnapshot";
 import { encodeWidgetTimeline } from "../../../src/widgets/widgetTimeline";
 
 /**
@@ -25,7 +30,85 @@ const EXTENSION_SOURCES = [
     .map((file) => join(MODULE_DIR, "extension", file)),
   ...SHARED_SOURCES,
 ];
-const READER_SOURCES = [join(MODULE_DIR, "extension/WidgetTimelineStore.swift"), ...SHARED_SOURCES];
+/** The extension's Foundation-only sources: what reads and selects, not what renders. */
+const READER_SOURCES = [
+  join(MODULE_DIR, "extension/WidgetTimelineStore.swift"),
+  join(MODULE_DIR, "extension/SubscriptionUsageContent.swift"),
+  ...SHARED_SOURCES,
+];
+
+const NOW = 1_700_000_000_000;
+
+/** Two Claude accounts on a hub (one email-named) and a direct Codex account. */
+function usageTimeline(): string {
+  const window = (id: string, usedPercent: number, minutes: number, scope?: string) => ({
+    id,
+    usedPercent,
+    windowDurationMins: minutes,
+    resetsAt: NOW / 1000 + 3600,
+    ...(scope ? { scope } : {}),
+  });
+  const hubAccount = (authIndex: string, name: string, windows: unknown[]) => ({
+    authIndex,
+    provider: "claude",
+    name,
+    status: "active",
+    disabled: false,
+    unavailable: false,
+    cooldowns: [],
+    requests: { success: 0, failed: 0, recent: [] },
+    quota: { status: "ok", planType: "max", checkedAt: new Date(NOW).toISOString(), windows },
+  });
+  const snapshot = buildSubscriptionUsageSnapshot(
+    [
+      {
+        environmentId: "env",
+        label: "Mac",
+        connected: true,
+        providers: [
+          {
+            instanceId: "codex",
+            driver: "codex",
+            displayName: "Codex",
+            enabled: true,
+            status: "ready",
+            auth: { status: "authenticated" },
+            checkedAt: new Date(NOW).toISOString(),
+            rateLimits: {
+              planType: "plus",
+              observedAt: new Date(NOW).toISOString(),
+              windows: [window("five-hour", 30, 300), window("weekly", 10, 10_080)],
+            },
+          },
+        ],
+        hubs: [
+          {
+            hubId: "home",
+            label: "Home",
+            url: "https://hub.example.test",
+            checkedAt: new Date(NOW).toISOString(),
+            status: "ok",
+            apiKeys: [],
+            routedInstanceIds: [],
+            accounts: [
+              hubAccount("a", "alpha.json", [
+                window("five-hour", 20, 300),
+                window("weekly", 50, 10_080),
+                window("weekly-opus", 70, 10_080, "Opus"),
+              ]),
+              hubAccount("b", ["claude-bob", "example.com.json"].join("@"), [
+                window("five-hour", 60, 300),
+                window("weekly", 30, 10_080),
+              ]),
+            ],
+          },
+        ],
+      },
+    ] as never,
+    "ryco-dev://settings/statistics?tab=limits",
+  );
+  return encodeWidgetTimeline(buildSubscriptionUsageTimeline(snapshot, NOW));
+}
 
 const swiftcAvailable =
   process.platform === "darwin" &&
@@ -75,11 +158,13 @@ describe.skipIf(!swiftcAvailable)("the widget extension's Swift", () => {
           { at: 1_700_000_000_000, content: { label: "now" } },
         ]),
       );
+      const usage = join(directory, "usage.json");
+      writeFileSync(usage, usageTimeline());
       const output = JSON.parse(
-        execFileSync(binary, [join(directory, "group"), timeline], { encoding: "utf8" }),
+        execFileSync(binary, [join(directory, "group"), timeline, usage], { encoding: "utf8" }),
       ) as Record<string, unknown>;
 
-      expect(output).toEqual({
+      expect(output).toMatchObject({
         beforeWrite: [],
         written: [
           { at: 1_700_000_000_000, seconds: 1_700_000_000, label: "now" },
@@ -91,6 +176,63 @@ describe.skipIf(!swiftcAvailable)("the widget extension's Swift", () => {
         notJson: [],
         afterRemove: [],
       });
+      // Now, then the soonest reset (in an hour) is past the fifteen minutes: one deadline, on
+      // the whole minute before them.
+      expect(output.usageEntries).toEqual([
+        { at: NOW, fresh: [true, true] },
+        { at: Math.floor((NOW + 15 * 60_000) / 60_000) * 60_000, fresh: [false, false] },
+      ]);
+      // Claude pools 5h and Weekly over both accounts; only one reports Weekly · Opus, the
+      // tightest weekly window, so the two-row sizes show it beside the session.
+      const claudeDetail = "2 accounts · pooled";
+      expect(output.usageColumns).toEqual({
+        medium: [
+          { name: "Claude", detail: claudeDetail, rows: ["5h", "Weekly · Opus"], more: 1 },
+          { name: "Codex", detail: "Plus", rows: ["5h", "Weekly"], more: 0 },
+        ],
+        large: [
+          {
+            name: "Claude",
+            detail: claudeDetail,
+            rows: ["5h", "Weekly · Opus", "Weekly"],
+            more: 0,
+          },
+          { name: "Codex", detail: "Plus", rows: ["5h", "Weekly"], more: 0 },
+        ],
+        small: [
+          { name: "Claude", detail: claudeDetail, rows: ["5h", "Weekly · Opus"], more: 1 },
+          { name: "Codex", detail: "Plus", rows: ["5h", "Weekly"], more: 0 },
+        ],
+        lockScreen: [
+          { name: "Claude", detail: claudeDetail, rows: ["Weekly · Opus"], more: 2 },
+          { name: "Codex", detail: "Plus", rows: ["5h"], more: 1 },
+        ],
+        weeklyOnly: [
+          { name: "Claude", detail: claudeDetail, rows: ["Weekly · Opus", "Weekly"], more: 0 },
+          { name: "Codex", detail: "Plus", rows: ["Weekly"], more: 0 },
+        ],
+        // In the Limits tab's order; the email-named account is "Account 2", never its file name.
+        eachAccount: [
+          {
+            name: "Claude",
+            detail: "2 accounts",
+            rows: [
+              "Account 2 · 5h",
+              "alpha.json · Weekly · Opus",
+              "Account 2 · Weekly",
+              "alpha.json · 5h",
+            ],
+            more: 0,
+          },
+          { name: "Codex", detail: "Plus", rows: ["5h", "Weekly"], more: 0 },
+        ],
+      });
+      expect(output.usageAfterExpiry).toEqual([
+        { detail: TAP_TO_REFRESH, rows: 0, more: 0 },
+        { detail: TAP_TO_REFRESH, rows: 0, more: 0 },
+      ]);
+      // The footer and the Lock Screen say what the app's expired detail says.
+      expect(output.tapToRefresh).toBe(TAP_TO_REFRESH);
     });
   }, 180_000);
 });

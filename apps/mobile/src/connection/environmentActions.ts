@@ -4,6 +4,7 @@ import {
   type SavedEnvironmentRecord,
 } from "@ryco/client-runtime/connection";
 import { switchSavedEnvironment } from "@ryco/client-runtime/connection/savedEnvironmentSwitch";
+import { forgetEnvironmentServerConfig } from "@ryco/client-runtime/rpc";
 
 import { useStore } from "../state/threadsRuntime";
 import { clearProjectFilesStateForEnvironment } from "../rpc/projectFilesAtoms";
@@ -144,7 +145,8 @@ export function createEnvironmentActions(deps: EnvironmentActionsDeps) {
 
   /**
    * Ends what the app holds of a node while it is in use: its connection (or
-   * the attempt making one), thread subscriptions, live state and threads.
+   * the attempt making one), thread subscriptions, live state, threads and
+   * config (so its providers and hubs leave the Limits tab and the widgets).
    * The record, credential, trust and stored snapshot are the caller's.
    */
   async function teardownSavedEnvironmentSession(environmentId: EnvironmentId): Promise<void> {
@@ -152,6 +154,7 @@ export function createEnvironmentActions(deps: EnvironmentActionsDeps) {
     await registry.driver.supervisor.remove(environmentId).catch(() => false);
     registry.driver.supervisor.disposeThreadDetailSubscriptionsForEnvironment(environmentId);
     registry.catalog.runtimeStore.getState().clear(environmentId);
+    forgetEnvironmentServerConfig(environmentId);
     useStore.getState().removeEnvironmentState(environmentId);
   }
 

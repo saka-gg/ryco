@@ -1,7 +1,7 @@
-// The harness `widgetExtension.test.ts` compiles with `WidgetGroupStore.swift`
-// and `WidgetTimelineStore.swift` for the Mac. It reads a timeline the app's
-// TypeScript encoded the way the widget extension does, and prints what it
-// found as JSON for the test to check.
+// The harness `widgetExtension.test.ts` compiles with `WidgetGroupStore.swift`,
+// `WidgetTimelineStore.swift` and `SubscriptionUsageContent.swift` for the Mac.
+// It reads timelines the app's TypeScript encoded the way the widget extension
+// does, and prints what it found as JSON for the test to check.
 import Foundation
 
 struct Label: Decodable {
@@ -44,6 +44,44 @@ output["notJson"] = labels("not-json")
 try store.remove(kind: "test-kind")
 try store.remove(kind: "test-kind")
 output["afterRemove"] = labels("test-kind")
+
+// The subscription usage timeline, and what its first entry shows per setting.
+try store.write(
+  kind: SubscriptionUsageContent.kind, data: try Data(contentsOf: URL(fileURLWithPath: arguments[3])))
+let usage = WidgetTimelineStore.entries(
+  kind: SubscriptionUsageContent.kind, as: SubscriptionUsageContent.self, store: store)
+output["usageEntries"] = usage.map { entry in
+  ["at": entry.at, "fresh": entry.content.providers.map { $0.fresh }] as [String: Any]
+}
+let settings: [(String, UsagePeriodChoice, UsageAccountsChoice, Int, Bool, Bool)] = [
+  ("medium", .both, .pooled, 2, false, false),
+  ("large", .both, .pooled, 4, false, false),
+  ("small", .both, .pooled, 2, true, false),
+  ("lockScreen", .both, .pooled, 2, true, true),
+  ("weeklyOnly", .weekly, .pooled, 4, false, false),
+  ("eachAccount", .both, .each, 4, false, false),
+]
+var columns: [String: Any] = [:]
+for (name, period, accounts, limit, compact, single) in settings {
+  columns[name] = usage.first?.content.providers.map { provider -> [String: Any] in
+    let column = provider.column(
+      period: period, accounts: accounts, limit: limit, compact: compact, single: single)
+    return [
+      "name": column.name, "detail": column.detail, "rows": column.rows.map { $0.title },
+      "more": column.more,
+    ]
+  }
+}
+output["usageColumns"] = columns
+output["usageAfterExpiry"] = usage.last.map { entry in
+  entry.content.providers.map { provider -> [String: Any] in
+    let column = provider.column(
+      period: .both, accounts: .pooled, limit: 4, compact: false, single: false)
+    return ["detail": column.detail, "rows": column.rows.count, "more": column.more]
+  }
+}
+
+output["tapToRefresh"] = SubscriptionUsageContent.tapToRefresh
 
 let json = try JSONSerialization.data(withJSONObject: output, options: [.sortedKeys])
 print(String(decoding: json, as: UTF8.self))

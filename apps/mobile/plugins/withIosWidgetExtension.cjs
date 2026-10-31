@@ -33,6 +33,8 @@ const MODULE_DIR = path.join(__dirname, "..", "modules", "ryco-widgets");
 /** Sources compiled into the extension; `WidgetGroupStore.swift` is shared with the app's module. */
 const EXTENSION_SOURCES = [
   path.join(MODULE_DIR, "extension", "RycoWidgetsBundle.swift"),
+  path.join(MODULE_DIR, "extension", "SubscriptionUsageContent.swift"),
+  path.join(MODULE_DIR, "extension", "SubscriptionUsageWidget.swift"),
   path.join(MODULE_DIR, "extension", "WidgetTimelineStore.swift"),
   path.join(MODULE_DIR, "ios", "WidgetGroupStore.swift"),
 ];

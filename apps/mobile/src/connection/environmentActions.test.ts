@@ -4,6 +4,10 @@ import {
   readProjectIconSource,
   type SavedEnvironmentRecord,
 } from "@ryco/client-runtime/connection";
+import {
+  readEnvironmentServerConfig,
+  writeEnvironmentServerConfig,
+} from "@ryco/client-runtime/rpc";
 import { describe, expect, it, vi } from "vite-plus/test";
 
 vi.mock("react-native", () => ({
@@ -212,6 +216,7 @@ describe("environmentActions", () => {
       null,
     );
     expect(peekProjectIconSource(ENV, iconProject, null)).not.toBeUndefined();
+    writeEnvironmentServerConfig(ENV, { providers: [] } as never);
 
     await actions(reg).removeSavedEnvironment(ENV);
 
@@ -222,6 +227,8 @@ describe("environmentActions", () => {
     expect(reg.spies.forgetSessionHint).toHaveBeenCalledWith(ENV);
     expect(removeEnvironmentState).toHaveBeenCalledWith(ENV);
     expect(reg.spies.removeBearerToken).toHaveBeenCalledWith(ENV);
+    // Its providers and hubs leave the Limits tab and the widgets with its config.
+    expect(readEnvironmentServerConfig(ENV)).toBeNull();
     // The node's project artwork is memory-only and keyed by node: forgotten too.
     expect(peekProjectIconSource(ENV, iconProject, null)).toBeUndefined();
     // docs/relay-e2ee-protocol.md §13.1/§13.3: forgetting a node forgets its pin,
