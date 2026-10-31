@@ -75,6 +75,7 @@ export * from "./providerSignIn.ts";
 export * from "./cliProxy.ts";
 export * from "./sessionImport.ts";
 export * from "./threadFork.ts";
+export * from "./threadLocalServers.ts";
 export * from "./claudeCache.ts";
 
 export * from "./storage.ts";

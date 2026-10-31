@@ -61,6 +61,7 @@ import {
   type AgentControlNativeHttpInjection,
   redactAgentControlSecrets,
 } from "../../agentControl/ProviderInjection.ts";
+import { withThreadAttribution } from "../../localServers/threadAttributionEnv.ts";
 
 type CopilotReasoningEffort = "low" | "medium" | "high" | "xhigh";
 
@@ -204,7 +205,13 @@ export const makeStartSession =
       }
 
       const clientOptions: CopilotClientOptions = yield* Effect.promise(() =>
-        makeCopilotClientOptions(deps.copilotSettings, deps.environment, input.cwd),
+        // The CLI and every job it starts carry the thread's id, so the servers it leaves running
+        // stay listed under this thread (`localServers/threadAttributionEnv.ts`).
+        makeCopilotClientOptions(
+          deps.copilotSettings,
+          withThreadAttribution(deps.environment, input.threadId),
+          input.cwd,
+        ),
       ).pipe(
         Effect.flatMap((options) =>
           withCopilotAgentPriority(deps.options?.processPriority, options),

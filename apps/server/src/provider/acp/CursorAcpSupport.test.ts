@@ -179,4 +179,34 @@ describe("makeCursorAcpRuntime agent priority", () => {
   it("starts it unchanged without one (provider probes)", async () => {
     expect(await spawnedArgv()).toEqual([["/opt/cursor/agent", "acp"]]);
   });
+
+  it("marks a session's agent with its thread, and leaves probes unmarked", async () => {
+    const spawnedEnv = async (threadId?: string) => {
+      const envs: Array<NodeJS.ProcessEnv | undefined> = [];
+      const spawner = ChildProcessSpawner.make((command) => {
+        envs.push((command as ChildProcess.StandardCommand).options.env);
+        return Effect.fail(
+          PlatformError.systemError({
+            _tag: "PermissionDenied",
+            module: "ChildProcess",
+            method: "spawn",
+            description: "test spawner refuses",
+          }),
+        );
+      });
+      await Effect.runPromise(
+        makeCursorAcpRuntime({
+          cursorSettings: { apiEndpoint: "", binaryPath: "/opt/cursor/agent" },
+          childProcessSpawner: spawner,
+          cwd: "/tmp",
+          clientInfo: { name: "ryco-test", version: "0.0.0" },
+          environment: { PATH: "/usr/bin", RYCO_THREAD_ID: "outer-thread" },
+          ...(threadId ? { threadId } : {}),
+        }).pipe(Effect.scoped, Effect.flip),
+      );
+      return envs[0];
+    };
+    expect((await spawnedEnv("thread-cursor"))?.RYCO_THREAD_ID).toBe("thread-cursor");
+    expect((await spawnedEnv())?.RYCO_THREAD_ID).toBe("outer-thread");
+  });
 });

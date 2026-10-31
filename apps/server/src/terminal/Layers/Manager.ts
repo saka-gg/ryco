@@ -2178,7 +2178,13 @@ export const makeTerminalManagerWithOptions = Effect.fn("makeTerminalManagerWith
           Effect.andThen(
             Effect.gen(function* () {
               const shellCandidates = resolveShellCandidates(shellResolver, platform, baseEnv);
-              const terminalEnv = createTerminalSpawnEnv(baseEnv, session.runtimeEnv);
+              // The shell and every job it starts carry the thread's id, so the servers it starts
+              // stay listed under this thread (`localServers/threadAttributionEnv.ts`).
+              const terminalEnv = createTerminalSpawnEnv(
+                baseEnv,
+                session.runtimeEnv,
+                session.threadId,
+              );
               const spawnResult = yield* trySpawn(shellCandidates, terminalEnv, session);
               ptyProcess = spawnResult.process;
               startedShell = spawnResult.shellLabel;

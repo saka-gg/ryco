@@ -79,6 +79,8 @@ it.layer(NodeServices.layer)("ServerEnvironmentLive", (it) => {
       expect(second.capabilities.projectContentSearch).toBe(true);
       expect(second.capabilities.projectReadFileChunk).toBe(true);
       expect(second.capabilities.projectFileWatch).toBe(true);
+      expect(second.capabilities.threadLocalServers).toBe(process.platform !== "win32");
+      expect(second.capabilities.threadLocalServerStop).toBe(process.platform !== "win32");
       expect(second.capabilities.cliProxyHubs).toBe(true);
       expect(second.capabilities.cliProxyCloudflareAccess).toBe(true);
       expect(second.capabilities.stagedOnlyCommit).toBe(true);

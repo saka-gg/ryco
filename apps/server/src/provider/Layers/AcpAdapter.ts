@@ -457,6 +457,7 @@ export function makeAcpAdapter(options: AcpAdapterLiveOptions) {
 
           const acp = yield* options
             .makeRuntime({
+              threadId: input.threadId,
               ...(options?.environment ? { environment: options.environment } : {}),
               ...(options.processPriority ? { processPriority: options.processPriority } : {}),
               childProcessSpawner,

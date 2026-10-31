@@ -7830,6 +7830,12 @@ export default function ChatView(props: ChatViewProps) {
                 open={showCrownRail}
                 notesTarget={worktreeNotesTarget}
                 chatProject={chatProjectHeaderTarget}
+                // The crown's Servers open in the Browser panel on this desktop's own backend.
+                onOpenBrowserPanel={
+                  !isPhoneTier && activeThread.environmentId === localComputerEnvironmentId
+                    ? onOpenBrowserPanel
+                    : null
+                }
                 threadTitle={activeThread.title}
                 project={activeProject ?? null}
                 // A chat's face wears its "No project" glyph, also before its first send.

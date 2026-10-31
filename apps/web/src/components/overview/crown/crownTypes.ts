@@ -1,4 +1,4 @@
-import type { OrchestrationLatestTurnState } from "@ryco/contracts";
+import type { OrchestrationLatestTurnState, ThreadLocalServer } from "@ryco/contracts";
 import type { ReactNode } from "react";
 
 import type { GitActionNotice } from "../../../gitActionNotices";
@@ -20,6 +20,30 @@ export interface CrownChatBinding {
   readonly turnIntoProject: (origin: HTMLElement) => void;
   /** Starts loading the dialog ahead of a likely open. */
   readonly preload: () => void;
+}
+
+/**
+ * The servers the thread's agents and terminals started (`useCrownServersBinding`), from the
+ * node's `threads.subscribeLocalServers`. The rail shows Servers only while `servers` has some.
+ */
+export interface CrownServersBinding {
+  readonly servers: ReadonlyArray<ThreadLocalServer>;
+  /**
+   * Opens a server's page: in the desktop Browser panel when the thread runs on this desktop's
+   * own backend, otherwise in the system browser.
+   */
+  readonly open: (server: ThreadLocalServer) => void;
+  /** Where Open goes, for its label. */
+  readonly opensIn: "browser-panel" | "external";
+  /**
+   * The node's machine, when it is not this computer: `localhost` there is not `localhost` here,
+   * so a page opens only if its port is reachable or forwarded.
+   */
+  readonly remoteNodeLabel: string | null;
+  /** Stops a server's process group; null when the node or the user's role cannot. */
+  readonly stop: ((server: ThreadLocalServer) => void) | null;
+  /** Servers whose stop is in flight, by pid. */
+  readonly stopping: ReadonlySet<number>;
 }
 
 /** Where the Ship button is: waiting out its grace period, or running its steps. */
@@ -103,6 +127,8 @@ export interface CrownOverviewProps extends OverviewLayoutProps {
   readonly chat?: CrownChatBinding | undefined;
   /** The checkout's one-click Ship button; without it the rail's Ship icon opens the branch card. */
   readonly ship?: CrownShipBinding | undefined;
+  /** The thread's running servers; the Servers icon shows only while there are some. */
+  readonly servers?: CrownServersBinding | undefined;
   /** The thread's project; the face shows its logo (a folder without one). */
   readonly project?: CrownProject | null | undefined;
   /**
@@ -114,8 +140,8 @@ export interface CrownOverviewProps extends OverviewLayoutProps {
 
 /** Props of the shared section detail used by both the hover flyout and the card. */
 export interface CrownSectionDetailProps {
-  /** Notes and a chat's "Turn into project" render from their own bindings. */
-  readonly section: Exclude<CrownSection, "notes" | "project">;
+  /** Notes, servers and a chat's "Turn into project" render from their own bindings. */
+  readonly section: Exclude<CrownSection, "notes" | "project" | "servers">;
   /**
    * Flyouts are read-only previews with a heading row; the card titles the
    * section itself and hosts the interactive controls.

@@ -4481,6 +4481,41 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 
+  it.effect("routes websocket rpc threads.subscribeLocalServers and threads.stopLocalServer", () =>
+    Effect.gen(function* () {
+      // Windows refuses both (`threadLocalServers` is false there).
+      if (process.platform === "win32") return;
+      yield* buildAppUnderTest();
+
+      const wsUrl = yield* getWsServerUrl("/ws");
+      const threadId = ThreadId.make(`thread-route-servers-${process.pid}`);
+      const [lists, stopped] = yield* Effect.scoped(
+        withWsRpcClient(wsUrl, (client) =>
+          Effect.all([
+            client[WS_METHODS.threadsSubscribeLocalServers]({ threadId }).pipe(
+              Stream.take(1),
+              Stream.runCollect,
+            ),
+            client[WS_METHODS.threadsStopLocalServer]({
+              threadId,
+              pid: 2_147_483_000,
+              startTimeMs: 1,
+              port: 65_000,
+            }).pipe(Effect.flip),
+          ]),
+        ),
+      );
+
+      // Nothing on this machine carries the thread's marker.
+      assert.deepEqual(
+        Array.from(lists).map((list) => [list.threadId, list.servers]),
+        [[threadId, []]],
+      );
+      assertTrue(stopped._tag === "ThreadStopLocalServerError");
+      assert.equal(stopped.reason, "not-found");
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
   it.effect("routes websocket rpc shell.openInEditor", () =>
     Effect.gen(function* () {
       let openedInput: { cwd: string; editor: EditorId } | null = null;

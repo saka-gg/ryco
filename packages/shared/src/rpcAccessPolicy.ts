@@ -263,6 +263,12 @@ export const RPC_ACCESS_POLICY = {
   [WS_METHODS.threadsSetManualPosition]: "operator",
   // Creates a thread (and possibly a worktree) without starting a turn, like dispatchCommand.
   [WS_METHODS.threadsFork]: "operator",
+  // The servers a thread's agents and terminals started: ports, pids, process names and page
+  // titles, which an operator who can open the thread's terminal sees there anyway.
+  [WS_METHODS.threadsSubscribeLocalServers]: "operator",
+  // Stops only a server the node attributes to that thread again at stop time, never the node,
+  // an agent CLI or a terminal shell: no more than closing the thread's terminal does.
+  [WS_METHODS.threadsStopLocalServer]: "operator",
   // Starts the provider process a send by the same operator would start.
   [WS_METHODS.providerPrewarmSession]: "operator",
   // Starts the provider's CLI in the directory (project settings and hooks apply), as a send does.
@@ -551,6 +557,9 @@ export const RPC_DELIVERY_EFFECT_POLICY = {
   [WS_METHODS.threadsSetManualPosition]: "mutation",
   // Idempotent by forkKey: a dropped request is retried with the same key after acknowledgement.
   [WS_METHODS.threadsFork]: "mutation",
+  [WS_METHODS.threadsSubscribeLocalServers]: "read",
+  // Signals a process group: never replayed (a repeat finds the server gone).
+  [WS_METHODS.threadsStopLocalServer]: "mutation",
   // Idempotent per thread: a repeat finds the session it already started.
   [WS_METHODS.providerPrewarmSession]: "read",
   [WS_METHODS.providerReadProjectCommands]: "read",

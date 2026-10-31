@@ -1104,6 +1104,30 @@ describe("ClaudeAdapterLive", () => {
     );
   });
 
+  it.effect("marks the Claude Code process with its thread", () => {
+    const harness = makeHarness();
+    return Effect.gen(function* () {
+      const adapter = yield* ClaudeAdapter;
+      yield* adapter.startSession({
+        runtimeSessionId: RuntimeSessionId.make("test-claudeadapter-thread-marker"),
+        threadId: THREAD_ID,
+        provider: ProviderDriverKind.make("claudeAgent"),
+        modelSelection: createModelSelection(
+          ProviderInstanceId.make("claudeAgent"),
+          "claude-opus-4-6",
+        ),
+        runtimeMode: "full-access",
+      });
+
+      // Every job Claude Code starts inherits it, so the servers it leaves stay listed.
+      const createInput = harness.getLastCreateQueryInput();
+      assert.equal(createInput?.options.env?.RYCO_THREAD_ID, THREAD_ID);
+    }).pipe(
+      Effect.provideService(Random.Random, makeDeterministicRandomService()),
+      Effect.provide(harness.layer),
+    );
+  });
+
   it.effect("uses the Claude Opus 4.7 default xhigh effort", () => {
     const harness = makeHarness();
     return Effect.gen(function* () {

@@ -15,7 +15,13 @@ import {
   type CrownRailKey,
   type CrownSection,
 } from "./crownSections";
-import type { CrownChatBinding, CrownNotesBinding, CrownShipBinding } from "./crownTypes";
+import type {
+  CrownChatBinding,
+  CrownNotesBinding,
+  CrownServersBinding,
+  CrownShipBinding,
+} from "./crownTypes";
+import { CrownServersDetail } from "./details/ServersDetail";
 import { ShipDetail } from "./details/ShipDetail";
 
 type FlyoutSection = CrownSection;
@@ -33,12 +39,13 @@ const CLOSED_CONTENT_MS = 280;
 
 function flyoutSection(
   key: CrownRailKey | null,
-  bindings: { readonly notes: boolean; readonly chat: boolean },
+  bindings: { readonly notes: boolean; readonly chat: boolean; readonly servers: boolean },
 ): FlyoutSection | null {
   if (key === null) return null;
   const section = crownSectionForRailKey(key);
   if (section === "notes" && !bindings.notes) return null;
   if (section === "project" && !bindings.chat) return null;
+  if (section === "servers" && !bindings.servers) return null;
   return section;
 }
 
@@ -94,16 +101,19 @@ export function CrownFlyout(props: {
   readonly chat?: CrownChatBinding | undefined;
   /** The Ship button the branch section previews; without it the plain branch summary shows. */
   readonly ship?: CrownShipBinding | undefined;
+  readonly servers?: CrownServersBinding | undefined;
   readonly onPointerEnter: () => void;
   readonly onPointerLeave: () => void;
   /** Focus inside started or stopped holding the preview (the Notes composer, keyboard focus). */
   readonly onEditingChange?: (editing: boolean) => void;
 }) {
-  const { anchorEl, rootRef, railRef, reducedMotion, notes, chat, ship, onEditingChange } = props;
+  const { anchorEl, rootRef, railRef, reducedMotion, notes, chat, ship, servers, onEditingChange } =
+    props;
   const onPointerLeave = useEvent(props.onPointerLeave);
   const section = flyoutSection(props.openKey, {
     notes: notes !== undefined,
     chat: chat !== undefined,
+    servers: servers !== undefined,
   });
   const open = section !== null && anchorEl !== null;
   const flyRef = useRef<HTMLDivElement>(null);
@@ -314,6 +324,10 @@ export function CrownFlyout(props: {
           ) : entry.section === "project" ? (
             chat ? (
               <CrownChatDetail chat={chat} variant="flyout" />
+            ) : null
+          ) : entry.section === "servers" ? (
+            servers ? (
+              <CrownServersDetail servers={servers} variant="flyout" />
             ) : null
           ) : entry.section === "branch" && ship ? (
             <div

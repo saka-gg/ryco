@@ -46,6 +46,10 @@
       "types": "./src/rpc/projectFileWatch.ts",
       "import": "./src/rpc/projectFileWatch.ts"
     },
+    "./rpc/threadLocalServers": {
+      "types": "./src/rpc/threadLocalServers.ts",
+      "import": "./src/rpc/threadLocalServers.ts"
+    },
     "./connection": {
       "types": "./src/connection/index.ts",
       "import": "./src/connection/index.ts"

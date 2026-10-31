@@ -76,6 +76,8 @@ function isFocusDropped(): boolean {
  */
 export function CrownOverview(props: CrownOverviewProps & { readonly open?: boolean }) {
   const { open = true, isGitRepo, chat, ship } = props;
+  // The Servers section exists only while the thread has servers running.
+  const servers = props.servers && props.servers.servers.length > 0 ? props.servers : undefined;
   const notes = props.notes?.available ? props.notes : undefined;
   const reducedMotion = useReducedMotionEffective();
   const paneFocused = usePaneFocus();
@@ -88,6 +90,7 @@ export function CrownOverview(props: CrownOverviewProps & { readonly open?: bool
     isGitRepo,
     notesFilled: notes?.filled === true,
     ship,
+    serverCount: servers?.servers.length ?? 0,
   });
   const headline = resolveCrownHeadline(summary, props);
   const items = visibleCrownRailItems({
@@ -95,6 +98,7 @@ export function CrownOverview(props: CrownOverviewProps & { readonly open?: bool
     notesAvailable: notes !== undefined,
     chatAvailable: chat !== undefined,
     hasPlan: crownHasPlan(props),
+    hasServers: servers !== undefined,
   });
   /** The card only opens on sections the rail shows. */
   const isShown = (section: CrownSection) => items.some((item) => item.section === section);
@@ -393,6 +397,7 @@ export function CrownOverview(props: CrownOverviewProps & { readonly open?: bool
           branchName={refName}
           notes={notes}
           chat={chat}
+          servers={servers}
           onCollapse={() => collapse(true)}
           spine={
             <CrownRailNav
@@ -429,6 +434,7 @@ export function CrownOverview(props: CrownOverviewProps & { readonly open?: bool
         notes={notes}
         chat={chat}
         ship={ship}
+        servers={servers}
         onPointerEnter={onFlyoutPointerEnter}
         onPointerLeave={onFlyoutPointerLeave}
         onEditingChange={onFlyoutEditingChange}

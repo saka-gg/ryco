@@ -11,6 +11,7 @@ import type {
   OpinionatedPluginCheckInput,
   OpinionatedPluginInstallInput,
   ProjectFileChangeEvent,
+  ThreadLocalServerList,
   ProviderSignInWireEvent,
   ServerSettingsPatch,
 } from "@ryco/contracts";
@@ -419,6 +420,14 @@ export interface WsRpcClient {
     readonly searchMessages: RpcUnaryMethod<typeof WS_METHODS.searchThreadMessages>;
     /** Idempotent per `forkKey`; never retried here (see `runThreadFork`). */
     readonly fork: RpcUnaryMethod<typeof WS_METHODS.threadsFork>;
+    /** Only for nodes that advertise `threadLocalServers`; `watchThreadLocalServers` shares it. */
+    readonly subscribeLocalServers: (
+      input: RpcInput<typeof WS_METHODS.threadsSubscribeLocalServers>,
+      listener: (list: ThreadLocalServerList) => void,
+      options?: StreamSubscriptionOptions,
+    ) => () => void;
+    /** Only for nodes that advertise `threadLocalServerStop`; never retried (it signals). */
+    readonly stopLocalServer: RpcUnaryMethod<typeof WS_METHODS.threadsStopLocalServer>;
   };
   readonly server: {
     readonly getConfig: RpcUnaryNoArgMethod<typeof WS_METHODS.serverGetConfig>;
@@ -1045,6 +1054,14 @@ export function createWsRpcClient(
       searchMessages: (input) =>
         transport.request((client) => client[WS_METHODS.searchThreadMessages](input)),
       fork: (input) => transport.request((client) => client[WS_METHODS.threadsFork](input)),
+      subscribeLocalServers: (input, listener, options) =>
+        transport.subscribe(
+          (client) => client[WS_METHODS.threadsSubscribeLocalServers](input),
+          listener,
+          transportSubscribeOptions(options, WS_METHODS.threadsSubscribeLocalServers),
+        ),
+      stopLocalServer: (input) =>
+        transport.request((client) => client[WS_METHODS.threadsStopLocalServer](input)),
     },
     server: {
       getConfig: () => transport.request((client) => client[WS_METHODS.serverGetConfig]({})),

@@ -9,6 +9,7 @@ import { makeStorageHandlers } from "./storageRpc.ts";
 import { makeLifecycleHandlers } from "./lifecycleRpc.ts";
 import { makeSessionImportHandlers } from "./sessionImportRpc.ts";
 import { makeThreadForkHandlers } from "./threadForkRpc.ts";
+import { makeThreadLocalServerHandlers } from "./threadLocalServersRpc.ts";
 import { makeAutomationCentreHandlers } from "./automationCentreRpc.ts";
 import { makeSideQuestionHandlers } from "./sideQuestionRpc.ts";
 import { Effect, Layer, Option, type Scope, type Stream } from "effect";
@@ -55,6 +56,7 @@ type WsRpcHandlerMap = ReturnType<typeof makeAgentControlHandlers> &
   ReturnType<typeof makeChatProjectHandlers> &
   ReturnType<typeof makeSessionImportHandlers> &
   ReturnType<typeof makeThreadForkHandlers> &
+  ReturnType<typeof makeThreadLocalServerHandlers> &
   ReturnType<typeof makeStorageHandlers> &
   ReturnType<typeof makeLifecycleHandlers> &
   ReturnType<typeof makeDailyRecapHandlers> &
@@ -95,6 +97,7 @@ const makeWsRpcHandlers = (
       ...makeChatProjectHandlers(ctx),
       ...makeSessionImportHandlers(ctx),
       ...makeThreadForkHandlers(ctx),
+      ...makeThreadLocalServerHandlers(ctx),
       ...makeStorageHandlers(ctx),
       ...makeLifecycleHandlers(ctx),
       ...makeDailyRecapHandlers(ctx),

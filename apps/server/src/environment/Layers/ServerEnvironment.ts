@@ -75,6 +75,9 @@ export const makeServerEnvironment = Effect.fn("makeServerEnvironment")(function
     cwdBaseName,
   });
 
+  // A thread's servers are found by the marker in their launch environment, which only macOS
+  // (`ps -E`) and Linux (`/proc/<pid>/environ`) let the node read (docs/thread-servers.md).
+  const readsThreadServers = process.platform === "darwin" || process.platform === "linux";
   const descriptor: ExecutionEnvironmentDescriptor = {
     environmentId,
     label,
@@ -116,6 +119,8 @@ export const makeServerEnvironment = Effect.fn("makeServerEnvironment")(function
       projectContentSearch: true,
       projectReadFileChunk: true,
       projectFileWatch: true,
+      threadLocalServers: readsThreadServers,
+      threadLocalServerStop: readsThreadServers,
       cliProxyHubs: true,
       cliProxyCloudflareAccess: true,
       stagedOnlyCommit: true,

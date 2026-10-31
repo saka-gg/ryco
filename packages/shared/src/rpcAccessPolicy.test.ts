@@ -182,6 +182,7 @@ describe("shared RPC access policy", () => {
       WS_METHODS.projectsReadFile,
       WS_METHODS.projectsReadFileChunk,
       WS_METHODS.projectsSubscribeFileChanges,
+      WS_METHODS.threadsSubscribeLocalServers,
       WS_METHODS.vcsReadLocalChanges,
       // Attaching to a running Git action again observes it and never starts Git.
       WS_METHODS.gitResumeStackedAction,
@@ -199,6 +200,12 @@ describe("shared RPC access policy", () => {
     // A file's change notices reveal what its read would: operators, not viewers.
     expect(hostedRoleAllows("viewer", WS_METHODS.projectsSubscribeFileChanges)).toBe(false);
     expect(hostedRoleAllows("operator", WS_METHODS.projectsSubscribeFileChanges)).toBe(true);
+    // A thread's servers and their stop: the same tier as its terminal, never a viewer.
+    expect(hostedRoleAllows("viewer", WS_METHODS.threadsSubscribeLocalServers)).toBe(false);
+    expect(hostedRoleAllows("operator", WS_METHODS.threadsSubscribeLocalServers)).toBe(true);
+    expect(hostedRoleAllows("viewer", WS_METHODS.threadsStopLocalServer)).toBe(false);
+    expect(hostedRoleAllows("operator", WS_METHODS.threadsStopLocalServer)).toBe(true);
+    expect(rpcDeliveryEffectFor(WS_METHODS.threadsStopLocalServer)).toBe("mutation");
     // Long-lived read streams outside the session-sync set.
     expect(rpcDeliveryEffectFor(AGENT_CONTROL_WS_METHODS.subscribeProposals)).toBe("read");
     expect(rpcDeliveryEffectFor(DEVICE_WS_METHODS.subscribeEvents)).toBe("read");

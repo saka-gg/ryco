@@ -121,6 +121,13 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
    */
   projectFileWatch: Schema.optionalKey(Schema.Boolean),
   /**
+   * `threads.subscribeLocalServers` (the listening servers a thread's agents and terminals
+   * started); absent on older servers and false on Windows.
+   */
+  threadLocalServers: Schema.optionalKey(Schema.Boolean),
+  /** `threads.stopLocalServer` for those servers; absent on older servers and false on Windows. */
+  threadLocalServerStop: Schema.optionalKey(Schema.Boolean),
+  /**
    * CLIProxyAPI hub settings and reads (`server.readCliProxyHubs` / `server.testCliProxyHub`);
    * absent on older servers, which drop `cliProxyHubs` from settings patches.
    */

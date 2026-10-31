@@ -30,4 +30,21 @@ describe("createTerminalSpawnEnv", () => {
       ),
     ).toEqual({ PATH: "/usr/bin", TERM: "xterm-256color", RYCO_PROJECT_ROOT: "/repo" });
   });
+
+  it("marks a thread terminal with its thread, over an inherited or requested marker", () => {
+    expect(
+      createTerminalSpawnEnv(
+        // A Ryco started from another Ryco's thread inherits that thread's marker.
+        { PATH: "/usr/bin", RYCO_THREAD_ID: "outer-thread" },
+        { RYCO_THREAD_ID: "requested-thread" },
+        "thread-1",
+      ),
+    ).toEqual({ PATH: "/usr/bin", RYCO_THREAD_ID: "thread-1" });
+  });
+
+  it("leaves a terminal without a thread (a provider sign-in) unmarked", () => {
+    expect(
+      createTerminalSpawnEnv({ PATH: "/usr/bin", RYCO_THREAD_ID: "outer-thread" }, null),
+    ).toEqual({ PATH: "/usr/bin" });
+  });
 });
