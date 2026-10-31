@@ -299,6 +299,13 @@ export const SETTINGS_SEARCH_INDEX: ReadonlyArray<SettingsSearchEntry> = [
   },
   {
     section: "appearance",
+    title: "Contrast",
+    owner: "client",
+    description: "Make text and borders stronger, or softer, than the theme draws them.",
+    keywords: "accessibility readability legibility high contrast",
+  },
+  {
+    section: "appearance",
     title: "Corner radius",
     owner: "client",
     description: "Rounding for panels, buttons, inputs, and menus.",
