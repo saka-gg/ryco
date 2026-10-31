@@ -11,7 +11,8 @@
  * counts the target's starts in `bootAttempts` until the server marks it `readyAt`, and
  * after too many it reinstalls the previous release, restores the database snapshot and
  * records `rolledBack`, which the previous release then reports. Every field added for
- * that is optional, so markers from earlier releases (and desktop updates) still decode.
+ * that is optional, so markers from earlier releases (and desktop updates) still decode. An
+ * update the node ran on its own says so (`unattended`).
  *
  * @module nodeUpdate/marker
  */
@@ -64,6 +65,12 @@ export const NodeUpdateMarker = Schema.Struct({
   bootAttempts: Schema.optional(NonNegativeInt),
   readyAt: Schema.optional(IsoDateTime),
   rolledBack: Schema.optional(NodeUpdateRolledBack),
+  /**
+   * Nobody asked for this update: the node updated itself (`nodeAutoUpdater.ts`). The restarted
+   * release then exits when it is not ready in time, so the boot guard counts the start and rolls
+   * back (`awaitNodeReadyAfterUpdate`'s watchdog); an update someone runs is left to them.
+   */
+  unattended: Schema.optional(Schema.Literal(true)),
 });
 export type NodeUpdateMarker = typeof NodeUpdateMarker.Type;
 

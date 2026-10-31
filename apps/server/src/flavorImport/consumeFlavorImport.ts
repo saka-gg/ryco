@@ -67,7 +67,8 @@ export const FLAVOR_IMPORT_COPIED_FILES = ["settings.json", "keybindings.json"] 
  * Settings Nightly never takes from Ryco. Those that name Ryco's own folders keep Nightly's
  * defaults (folders in its own home): its idle chat-folder sweep and orphan cleanup act on these
  * folders, and must never reach Ryco's chats or worktrees. `automaticUpdates` lets a node replace
- * the machine's provider CLIs on its own; the owner turns it on for each node, never by a copy.
+ * the machine's provider CLIs, and a CLI service node its own Ryco release, on its own; the owner
+ * turns it on for each node, never by a copy.
  */
 export const FLAVOR_IMPORT_DROPPED_SETTINGS = [
   "chatsRoot",

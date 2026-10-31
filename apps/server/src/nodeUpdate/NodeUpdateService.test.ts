@@ -5,13 +5,29 @@ import type {
   DesktopAppUpdateRequestFrame,
   DesktopAppUpdateSnapshot,
 } from "@ryco/shared/desktopResourceTelemetry";
-import { Deferred, Duration, Effect, FileSystem, Option, Path, Stream } from "effect";
+import { Deferred, Duration, Effect, Fiber, FileSystem, Option, Path, Stream } from "effect";
 
 import type { DesktopAppUpdateBridge } from "../desktopAppUpdateBridge.ts";
+import { npmGlobalInstallLockKey } from "../provider/installLockKeys.ts";
+import type { ProviderInstallLockRuntime } from "../provider/providerInstallLock.ts";
+import { NODE_UPDATE_INSTALL_LOCK_HELD_MESSAGE } from "./cliUpdate.ts";
 import type { DetectedNodeInstallation } from "./installation.ts";
 import { type NodeUpdateMarker, readNodeUpdateMarker, writeNodeUpdateMarker } from "./marker.ts";
-import { makeNodeUpdateService, type NodeUpdateRuntime } from "./NodeUpdateService.ts";
 import {
+  confirmNodeUpdateAfterServe,
+  makeNodeUpdateService,
+  NodeUpdateService,
+  type NodeUpdateRuntime,
+  type NodeUpdateServiceShape,
+  type UnattendedNodeUpdate,
+} from "./NodeUpdateService.ts";
+import {
+  armNodeBootWatchdog,
+  disarmNodeBootWatchdog,
+  isNodeBootWatchdogArmed,
+  NODE_UPDATE_AUTO_SKIP_FILE_NAME,
+  NODE_UPDATE_MAX_BOOT_ATTEMPTS,
+  NODE_UPDATE_ROLLBACK_TRIES,
   NODE_UPDATE_PREFLIGHT_ARG,
   NODE_UPDATE_PREFLIGHT_PASSED,
   NODE_UPDATE_PREFLIGHT_STARTED,
@@ -70,6 +86,32 @@ const healthy =
       if (isPreflight(command)) return passedPreflight(installedVersion.value);
       return ok(`ryco v${installedVersion.value}`);
     });
+
+/** The pid every fake installer reports once it runs. */
+const INSTALLER_PID = 4242;
+
+/**
+ * The host-wide install lock as a person's update meets it: each key a run takes, the pids it
+ * records, and how many runs hold it now. With `heldUntil`, another Ryco holds it until then.
+ */
+const makeFakeInstallLock = (heldUntil?: Deferred.Deferred<void>) => {
+  const takes: Array<string> = [];
+  const pids: Array<number> = [];
+  let holding = 0;
+  const runWhenFree: ProviderInstallLockRuntime["runWhenFree"] = (lockKey, onHeld, run) =>
+    Effect.gen(function* () {
+      takes.push(lockKey);
+      if (heldUntil !== undefined) {
+        yield* onHeld;
+        yield* Deferred.await(heldUntil);
+      }
+      holding += 1;
+      return yield* run((pid) => Effect.sync(() => void pids.push(pid))).pipe(
+        Effect.ensuring(Effect.sync(() => void (holding -= 1))),
+      );
+    });
+  return { takes, pids, holding: () => holding, lock: Effect.succeed({ runWhenFree }) };
+};
 
 const makeFakeDesktop = () => {
   let current: DesktopAppUpdateSnapshot | null = null;
@@ -131,6 +173,7 @@ interface HarnessOptions {
   readonly dir?: string;
   /** Replaces the database copy; the default writes `copy of <database>`. */
   readonly copyDatabase?: NodeUpdateRuntime["copyDatabase"];
+  readonly installLock?: ReturnType<typeof makeFakeInstallLock>;
 }
 
 const makeHarness = (options: HarnessOptions = {}) =>
@@ -151,6 +194,9 @@ const makeHarness = (options: HarnessOptions = {}) =>
     const installedVersion = { value: options.packageVersion ?? "0.1.35" };
     const runCommand = options.runCommand ?? healthy(installedVersion);
     const desktop = makeFakeDesktop();
+    const installLock = options.installLock ?? makeFakeInstallLock();
+    // Per command: whether it ran as an installer (its pid recorded with the install lock).
+    const recordsPid: Array<boolean> = [];
     const runtime: NodeUpdateRuntime = {
       packageVersion: options.packageVersion ?? "0.1.35",
       platform: "darwin",
@@ -178,11 +224,16 @@ const makeHarness = (options: HarnessOptions = {}) =>
             : registry.value;
         }),
       automaticChecksEnabled: Effect.succeed(options.checksEnabled ?? true),
-      runCommand: (command) =>
+      runCommand: (command, onSpawned) =>
         Effect.suspend(() => {
           commands.push(command);
-          return runCommand(command);
+          recordsPid.push(onSpawned !== undefined);
+          return (onSpawned === undefined ? Effect.void : onSpawned(INSTALLER_PID)).pipe(
+            Effect.orDie,
+            Effect.andThen(runCommand(command)),
+          );
         }),
+      installLock: installLock.lock,
       restart: (target) =>
         Effect.sync(() => {
           restarts.push(target);
@@ -190,6 +241,7 @@ const makeHarness = (options: HarnessOptions = {}) =>
       desktop: desktop.bridge,
       restartDelay: 0,
       restartGrace: options.restartGrace ?? Duration.infinity,
+      restartRecheck: 0,
     };
     const service = yield* makeNodeUpdateService(runtime);
     const waitFor = (predicate: (state: NodeUpdateState) => boolean) =>
@@ -202,6 +254,8 @@ const makeHarness = (options: HarnessOptions = {}) =>
     return {
       service,
       commands,
+      recordsPid,
+      installLock,
       restarts,
       restarted,
       registry,
@@ -519,6 +573,371 @@ describe("node self-update (CLI service)", () => {
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 
+  const unattended = (
+    beforeRestart: Effect.Effect<boolean>,
+    extra: Partial<UnattendedNodeUpdate> = {},
+  ): { readonly unattended: UnattendedNodeUpdate } => ({
+    unattended: {
+      beforeRestart,
+      restartWindow: Effect.succeed(true),
+      recordInstallerPid: () => Effect.void,
+      minimumReleaseAge: Duration.hours(48),
+      ...extra,
+    },
+  });
+  /** Answers each call with the next of `values`, then with the last one. */
+  const answers = (...values: ReadonlyArray<boolean>) => {
+    let calls = 0;
+    return {
+      effect: Effect.sync(() => values[Math.min(calls++, values.length - 1)]!),
+      calls: () => calls,
+    };
+  };
+  const preflightCopyOf = (harness: { readonly updateDirectory: string }) =>
+    `${harness.updateDirectory}/preflight.sqlite`;
+  /** The installed spec, or the preflight's database copy, of each command. */
+  const commandTargets = (harness: { readonly commands: ReadonlyArray<NodeUpdateCommand> }) =>
+    harness.commands.map((command) => command.args.at(-1));
+
+  it.live("records an update the node runs on its own in the marker", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness();
+      const asked: Array<number> = [];
+      const accepted = yield* harness.service.update(
+        { ...update, requestId: "auto-1" },
+        unattended(Effect.sync(() => asked.push(harness.copies.length)).pipe(Effect.as(true))),
+      );
+      yield* Deferred.await(harness.restarted).pipe(Effect.timeout("5 seconds"));
+      // Asked after the preflight's copy, and again once the snapshot was taken.
+      expect(asked).toEqual([1, 2]);
+      const marker = Option.getOrThrow(yield* readNodeUpdateMarker(harness.markerPath));
+      expect(marker).toMatchObject({
+        requestId: "auto-1",
+        targetVersion: "0.1.36",
+        startedAt: accepted.run.startedAt,
+        unattended: true,
+      });
+      expect(marker.rollback).toBeDefined();
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.live("puts the previous release back when the node got busy before the restart", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness();
+      yield* harness.service.update(update, unattended(Effect.succeed(false)));
+      const state = yield* harness.waitFor((value) => value.run.status === "postponed");
+      expect(state.run.message).toBe(
+        "Someone started using this node before it could restart into 0.1.36. Reinstalled 0.1.35. It updates once the node is quiet again.",
+      );
+      // The previous release is checked like the target was.
+      expect(commandTargets(harness)).toEqual([
+        "ryco-cli@0.1.36",
+        preflightCopyOf(harness),
+        "ryco-cli@0.1.35",
+        preflightCopyOf(harness),
+      ]);
+      expect(harness.restarts).toEqual([]);
+      expect(Option.isNone(yield* readNodeUpdateMarker(harness.markerPath))).toBe(true);
+      // Postponed is settled: a person can update now.
+      expect(state.canUpdate).toBe(true);
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.live("keeps the releases unattended updates skip through the snapshot cleanup", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const dir = yield* fs.makeTempDirectoryScoped({ prefix: "node-update-" });
+      yield* fs.makeDirectory(`${dir}/node-update`, { recursive: true });
+      const skipFile = `${dir}/node-update/${NODE_UPDATE_AUTO_SKIP_FILE_NAME}`;
+      yield* fs.writeFileString(skipFile, '{"versions":["0.1.34"]}\n');
+      yield* fs.writeFileString(`${dir}/node-update/pre-0.1.34.sqlite`, "older snapshot");
+      const harness = yield* makeHarness({ dir });
+      yield* harness.service.update(update);
+      yield* Deferred.await(harness.restarted).pipe(Effect.timeout("5 seconds"));
+      expect((yield* fs.readDirectory(harness.updateDirectory)).toSorted()).toEqual([
+        NODE_UPDATE_AUTO_SKIP_FILE_NAME,
+        "pre-0.1.35.sqlite",
+      ]);
+      expect(yield* fs.readFileString(skipFile)).toBe('{"versions":["0.1.34"]}\n');
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.live("asks again once the restart is recorded, and takes the record back when busy", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness();
+      const fs = yield* FileSystem.FileSystem;
+      const window = answers(true, false);
+      let markerWhenAsked: boolean | null = null;
+      yield* harness.service.update(
+        update,
+        unattended(
+          Effect.gen(function* () {
+            if (window.calls() === 1) {
+              markerWhenAsked = Option.isSome(yield* readNodeUpdateMarker(harness.markerPath));
+            }
+            return yield* window.effect;
+          }).pipe(Effect.provideService(FileSystem.FileSystem, fs)),
+        ),
+      );
+      const state = yield* harness.waitFor((value) => value.run.status === "postponed");
+      expect(window.calls()).toBe(2);
+      // The second answer came once the snapshot and the marker were written.
+      expect(markerWhenAsked).toBe(true);
+      expect(Option.isNone(yield* readNodeUpdateMarker(harness.markerPath))).toBe(true);
+      expect(yield* fs.exists(`${harness.updateDirectory}/pre-0.1.35.sqlite`)).toBe(false);
+      expect(commandTargets(harness).slice(-2)).toEqual([
+        "ryco-cli@0.1.35",
+        preflightCopyOf(harness),
+      ]);
+      expect(state.run.message).toContain("Reinstalled 0.1.35.");
+      expect(harness.restarts).toEqual([]);
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.live(
+    "restarts into the release at the next quiet moment when the previous one cannot go back",
+    () =>
+      Effect.gen(function* () {
+        const installedVersion = { value: "0.1.35" };
+        const base = healthy(installedVersion);
+        const harness = yield* makeHarness({
+          runCommand: (command) =>
+            command.args.at(-1) === "ryco-cli@0.1.35"
+              ? Effect.succeed(exited(1, "ETARGET"))
+              : base(command),
+        });
+        const window = answers(false, false, true);
+        const accepted = yield* harness.service.update(
+          update,
+          unattended(Effect.succeed(false), { restartWindow: window.effect }),
+        );
+        yield* Deferred.await(harness.restarted).pipe(Effect.timeout("5 seconds"));
+        // It waited for the window, and did not end failed with a release on disk it never ran.
+        expect(window.calls()).toBe(3);
+        expect(harness.restarts).toEqual([{ manager: "launchd", label: "space.ryco.node" }]);
+        // The target was checked again before it became what runs next.
+        expect(commandTargets(harness)).toEqual([
+          "ryco-cli@0.1.36",
+          preflightCopyOf(harness),
+          "ryco-cli@0.1.35",
+          preflightCopyOf(harness),
+        ]);
+        const marker = Option.getOrThrow(yield* readNodeUpdateMarker(harness.markerPath));
+        expect(marker).toMatchObject({ requestId: "update-1", unattended: true });
+        expect(marker.rollback?.snapshotPath).toBe(`${harness.updateDirectory}/pre-0.1.35.sqlite`);
+        // A fresh snapshot right before the restart, and a marker as young as the restart.
+        expect(harness.copies.filter((copy) => copy.endsWith("pre-0.1.35.sqlite"))).toHaveLength(2);
+        expect(Date.parse(marker.startedAt)).toBeGreaterThanOrEqual(
+          Date.parse(accepted.run.startedAt!),
+        );
+      }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.live("guards the next start as soon as it knows the previous release cannot go back", () =>
+    Effect.gen(function* () {
+      const installedVersion = { value: "0.1.35" };
+      const base = healthy(installedVersion);
+      const harness = yield* makeHarness({
+        runCommand: (command) =>
+          command.args.at(-1) === "ryco-cli@0.1.35"
+            ? Effect.succeed(exited(1, "ETARGET"))
+            : base(command),
+      });
+      yield* harness.service.update(
+        update,
+        unattended(Effect.succeed(false), { restartWindow: Effect.succeed(false) }),
+      );
+      const waiting = yield* harness.waitFor((value) => value.run.status === "waiting");
+      expect(waiting.run.message).toBe(
+        "Someone started using this node before it could restart into 0.1.36. npm exited with code 1 while reinstalling 0.1.35. Ryco 0.1.36 is installed and checked, so the node restarts into it once nobody is using it.",
+      );
+      // A crash or reboot meanwhile starts the target under the boot guard and the watchdog.
+      const marker = Option.getOrThrow(yield* readNodeUpdateMarker(harness.markerPath));
+      expect(marker).toMatchObject({ unattended: true, targetVersion: "0.1.36" });
+      expect(marker.rollback).toBeDefined();
+      expect(harness.restarts).toEqual([]);
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.live(
+    "goes forward to the release when the previous one fails its check after the reinstall",
+    () =>
+      Effect.gen(function* () {
+        const installedVersion = { value: "0.1.35" };
+        const base = healthy(installedVersion);
+        const harness = yield* makeHarness({
+          runCommand: (command) =>
+            isPreflight(command) && installedVersion.value === "0.1.35"
+              ? Effect.succeed(exited(1, "native module missing", NODE_UPDATE_PREFLIGHT_STARTED))
+              : base(command),
+        });
+        yield* harness.service.update(update, unattended(Effect.succeed(false)));
+        yield* Deferred.await(harness.restarted).pipe(Effect.timeout("5 seconds"));
+        expect(commandTargets(harness)).toEqual([
+          "ryco-cli@0.1.36",
+          preflightCopyOf(harness),
+          "ryco-cli@0.1.35",
+          preflightCopyOf(harness),
+          "ryco-cli@0.1.36",
+          preflightCopyOf(harness),
+        ]);
+        expect(Option.getOrThrow(yield* readNodeUpdateMarker(harness.markerPath))).toMatchObject({
+          unattended: true,
+        });
+      }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.live("takes this installation's install lock, waiting while another Ryco holds it", () =>
+    Effect.gen(function* () {
+      const release = yield* Deferred.make<void>();
+      const installLock = makeFakeInstallLock(release);
+      const harness = yield* makeHarness({ installLock });
+      yield* harness.service.update(update);
+      const waiting = yield* harness.waitFor(
+        (value) => value.run.message === NODE_UPDATE_INSTALL_LOCK_HELD_MESSAGE,
+      );
+      expect(waiting.run.status).toBe("preparing");
+      expect(harness.commands).toEqual([]);
+      yield* Deferred.succeed(release, undefined);
+      yield* Deferred.await(harness.restarted).pipe(Effect.timeout("5 seconds"));
+      // The key a provider CLI update into the same npm prefix takes.
+      expect(installLock.takes).toEqual([npmGlobalInstallLockKey("/opt/homebrew")]);
+      // The installer's pid is recorded with the lock; the preflight is no installer.
+      expect(harness.recordsPid).toEqual([true, false]);
+      expect(installLock.pids).toEqual([INSTALLER_PID]);
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.live("holds the lock for the reinstall of a failed update too", () =>
+    Effect.gen(function* () {
+      const installLock = makeFakeInstallLock();
+      const held: Array<number> = [];
+      const harness = yield* makeHarness({
+        installLock,
+        runCommand: (command) =>
+          Effect.sync(() => {
+            held.push(installLock.holding());
+            return command.args.at(-1) === "ryco-cli@0.1.36" ? exited(1, "EACCES") : ok();
+          }),
+      });
+      yield* harness.service.update(update);
+      const failed = yield* harness.waitFor((value) => value.run.status === "failed");
+      expect(failed.run.message).toBe(
+        "npm exited with code 1 while installing 0.1.36. Reinstalled 0.1.35.",
+      );
+      expect(commandTargets(harness)).toEqual(["ryco-cli@0.1.36", "ryco-cli@0.1.35"]);
+      expect(held).toEqual([1, 1]);
+      expect(installLock.pids).toEqual([INSTALLER_PID, INSTALLER_PID]);
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.live("records the installer with the lock an unattended caller holds, without taking it", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness();
+      const recorded: Array<number> = [];
+      yield* harness.service.update(
+        update,
+        unattended(Effect.succeed(true), {
+          recordInstallerPid: (pid) => Effect.sync(() => void recorded.push(pid)),
+        }),
+      );
+      yield* Deferred.await(harness.restarted).pipe(Effect.timeout("5 seconds"));
+      expect(harness.installLock.takes).toEqual([]);
+      expect(recorded).toEqual([INSTALLER_PID]);
+      expect(yield* harness.service.installLockKey).toBe(npmGlobalInstallLockKey("/opt/homebrew"));
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.live("holds back brand-new dependency releases in an update nobody asked for", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness();
+      const before = Date.now();
+      yield* harness.service.update(update, unattended(Effect.succeed(true)));
+      yield* Deferred.await(harness.restarted).pipe(Effect.timeout("5 seconds"));
+      const args = harness.commands[0]!.args;
+      expect(args.slice(0, 4)).toEqual(["install", "-g", "--prefix", "/opt/homebrew"]);
+      expect(args.at(-1)).toBe("ryco-cli@0.1.36");
+      expect(args[4]).toMatch(/^--before=/u);
+      const age = before - Date.parse(args[4]!.replace(/^--before=/u, ""));
+      expect(age).toBeGreaterThanOrEqual(Duration.toMillis(Duration.hours(48)) - 60_000);
+      expect(age).toBeLessThanOrEqual(Duration.toMillis(Duration.hours(48)));
+      // The rollback the boot guard runs holds them back as well.
+      const marker = Option.getOrThrow(yield* readNodeUpdateMarker(harness.markerPath));
+      expect(marker.rollback?.install.args).toContain(args[4]);
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.live("updates a pnpm install unattended only with a pnpm that holds back new releases", () =>
+    Effect.gen(function* () {
+      const servicePnpm: DetectedNodeInstallation = {
+        ...serviceNpm,
+        kind: "pnpm-global",
+        npmPrefix: null,
+        entryScript: "/Users/me/Library/pnpm/global/5/node_modules/ryco-cli/dist/bin.mjs",
+      };
+      const withPnpm = (pnpmVersion: string) => {
+        const installedVersion = { value: "0.1.35" };
+        const base = healthy(installedVersion);
+        return makeHarness({
+          installation: servicePnpm,
+          runCommand: (command) =>
+            command.command === "pnpm" && command.args[0] === "--version"
+              ? Effect.succeed(ok(`${pnpmVersion}\n`))
+              : base(command),
+        });
+      };
+      const old = yield* withPnpm("10.15.1");
+      const refused = yield* Effect.flip(
+        old.service.update(update, unattended(Effect.succeed(true))),
+      );
+      expect(refused.reason).toBe(
+        "pnpm 10.15.1 cannot hold back brand-new dependency releases, so this node does not update itself. pnpm 10.16 or later can.",
+      );
+      expect(commandTargets(old)).toEqual(["--version"]);
+
+      const current = yield* withPnpm("10.16.0");
+      yield* current.service.update(update, unattended(Effect.succeed(true)));
+      yield* Deferred.await(current.restarted).pipe(Effect.timeout("5 seconds"));
+      expect(current.commands[1]).toMatchObject({
+        command: "pnpm",
+        args: ["add", "-g", "--config.minimumReleaseAge=2880", "ryco-cli@0.1.36"],
+      });
+      // A person's update keeps today's command.
+      const manual = yield* withPnpm("10.15.1");
+      yield* manual.service.update(update);
+      yield* Deferred.await(manual.restarted).pipe(Effect.timeout("5 seconds"));
+      expect(manual.commands[0]).toMatchObject({ args: ["add", "-g", "ryco-cli@0.1.36"] });
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.live("never updates a bun install unattended", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness({
+        installation: { ...serviceNpm, kind: "bun-global", npmPrefix: null },
+      });
+      const refused = yield* Effect.flip(
+        harness.service.update(update, unattended(Effect.succeed(true))),
+      );
+      expect(refused.reason).toBe(
+        "Only an npm or pnpm install can hold back brand-new dependency releases, so this node does not update itself.",
+      );
+      expect(harness.commands).toEqual([]);
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.live("shows its owner why automatic updates leave a release alone", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness();
+      expect((yield* harness.service.current).automaticUpdateNote).toBeUndefined();
+      yield* harness.service.setAutomaticUpdateNote("Automatic update: Ryco 0.1.36 is left alone.");
+      expect((yield* harness.service.current).automaticUpdateNote).toBe(
+        "Automatic update: Ryco 0.1.36 is left alone.",
+      );
+      yield* harness.service.setAutomaticUpdateNote(null);
+      expect("automaticUpdateNote" in (yield* harness.service.current)).toBe(false);
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
   it.live("reports a restart that never came", () =>
     Effect.gen(function* () {
       const harness = yield* makeHarness({ restartGrace: Duration.millis(20) });
@@ -635,6 +1054,101 @@ describe("node update after a restart", () => {
       });
       expect(Option.isNone(yield* readNodeUpdateMarker(harness.markerPath))).toBe(true);
     }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.live("exits a release that does not get ready only after an update nobody asked for", () =>
+    Effect.gen(function* () {
+      const restartedInto = (extra: Partial<NodeUpdateMarker>) =>
+        makeHarness({
+          packageVersion: "0.1.36",
+          marker: { ...marker, rollback, bootAttempts: 1, ...extra },
+        });
+      // Its startup failed: it will not get ready.
+      const readiness = {
+        commandReady: Effect.die(new Error("migration failed")),
+        hubConnector: null,
+      };
+      const confirm = (service: NodeUpdateServiceShape) =>
+        Effect.gen(function* () {
+          const exited = yield* Deferred.make<number>();
+          const fiber = yield* confirmNodeUpdateAfterServe(readiness, (code) =>
+            Deferred.succeed(exited, code),
+          ).pipe(Effect.provideService(NodeUpdateService, service), Effect.forkScoped);
+          return { exited, fiber };
+        });
+
+      const automatic = yield* restartedInto({ unattended: true });
+      expect(yield* automatic.service.awaitsUnattendedBootReady).toBe(true);
+      const watched = yield* confirm(automatic.service);
+      expect(yield* Deferred.await(watched.exited).pipe(Effect.timeout("5 seconds"))).toBe(1);
+      // Never confirmed: the boot guard keeps counting.
+      expect((yield* automatic.service.current).run.status).toBe("restarting");
+      expect(Option.isSome(yield* readNodeUpdateMarker(automatic.markerPath))).toBe(true);
+
+      const manual = yield* restartedInto({});
+      expect(yield* manual.service.awaitsBootReady).toBe(true);
+      expect(yield* manual.service.awaitsUnattendedBootReady).toBe(false);
+      const left = yield* confirm(manual.service);
+      yield* Fiber.join(left.fiber).pipe(Effect.timeout("5 seconds"));
+      expect(yield* Deferred.isDone(left.exited)).toBe(false);
+
+      // Once the boot guard gave up rolling back, an exit would only restart it again and again.
+      const gaveUp = yield* restartedInto({
+        unattended: true,
+        bootAttempts: NODE_UPDATE_MAX_BOOT_ATTEMPTS + NODE_UPDATE_ROLLBACK_TRIES + 1,
+      });
+      expect(yield* gaveUp.service.awaitsBootReady).toBe(true);
+      expect(yield* gaveUp.service.awaitsUnattendedBootReady).toBe(false);
+      const startedAnyway = yield* confirm(gaveUp.service);
+      yield* Fiber.join(startedAnyway.fiber).pipe(Effect.timeout("5 seconds"));
+      expect(yield* Deferred.isDone(startedAnyway.exited)).toBe(false);
+      // The last start the next one still rolls back after.
+      const lastChance = yield* restartedInto({
+        unattended: true,
+        bootAttempts: NODE_UPDATE_MAX_BOOT_ATTEMPTS,
+      });
+      expect(yield* lastChance.service.awaitsUnattendedBootReady).toBe(true);
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.live(
+    "disarms the boot guard's watchdog once ready, or at once for a start it need not watch",
+    () =>
+      Effect.gen(function* () {
+        yield* Effect.addFinalizer(() => Effect.sync(disarmNodeBootWatchdog));
+        const ready = { commandReady: Effect.void, hubConnector: null };
+        const confirmWith = (service: NodeUpdateServiceShape) =>
+          Effect.gen(function* () {
+            armNodeBootWatchdog(() => {});
+            expect(isNodeBootWatchdogArmed()).toBe(true);
+            yield* confirmNodeUpdateAfterServe(ready, () => Effect.void).pipe(
+              Effect.provideService(NodeUpdateService, service),
+            );
+            return isNodeBootWatchdogArmed();
+          });
+        const restartedInto = (extra: Partial<NodeUpdateMarker>) =>
+          makeHarness({
+            packageVersion: "0.1.36",
+            marker: { ...marker, rollback, bootAttempts: 1, ...extra },
+          });
+
+        const automatic = yield* restartedInto({ unattended: true });
+        expect(yield* confirmWith(automatic.service)).toBe(false);
+        expect(
+          (yield* automatic.waitFor((value) => value.run.status === "succeeded")).run.requestId,
+        ).toBe("update-1");
+        // A person's update, a start past the rollback tries, an ordinary start: nothing to end.
+        expect(yield* confirmWith((yield* restartedInto({})).service)).toBe(false);
+        expect(
+          yield* confirmWith(
+            (yield* restartedInto({
+              unattended: true,
+              bootAttempts: NODE_UPDATE_MAX_BOOT_ATTEMPTS + NODE_UPDATE_ROLLBACK_TRIES + 1,
+            })).service,
+          ),
+        ).toBe(false);
+        expect(yield* confirmWith((yield* makeHarness()).service)).toBe(false);
+      }).pipe(Effect.scoped, Effect.provide(NodeServices.layer)),
   );
 
   it.live("ignores and deletes a marker older than a day", () =>
@@ -787,6 +1301,26 @@ describe("node self-update (desktop app)", () => {
       );
       expect((yield* harness.service.current).run.status).toBe("failed");
       expect(Option.isNone(yield* readNodeUpdateMarker(harness.markerPath))).toBe(true);
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
+  it.live("refuses to update the desktop app unattended", () =>
+    Effect.gen(function* () {
+      const harness = yield* makeHarness({ installation: desktopApp });
+      harness.desktop.report(desktopSnapshot());
+      yield* harness.waitFor((state) => state.canUpdate);
+      const refused = yield* Effect.flip(
+        harness.service.update(update, {
+          unattended: {
+            beforeRestart: Effect.succeed(true),
+            restartWindow: Effect.succeed(true),
+            recordInstallerPid: () => Effect.void,
+            minimumReleaseAge: Duration.hours(48),
+          },
+        }),
+      );
+      expect(refused.reason).toBe("The desktop app does not update itself unattended.");
+      expect(harness.desktop.requests).toEqual([]);
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 

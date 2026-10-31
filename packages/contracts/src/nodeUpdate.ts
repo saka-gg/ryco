@@ -53,7 +53,8 @@ export type NodeUpdateAvailability = typeof NodeUpdateAvailability.Type;
  * - `preparing`: installing (CLI) or downloading (desktop) the target release.
  * - `verifying`: running the installed release once before the restart (CLI).
  * - `waiting`: a desktop app counts down to its relaunch (`restartAt`); someone at that
- *   machine can still postpone it.
+ *   machine can still postpone it. A CLI node whose unattended update could not put its
+ *   previous release back waits for a quiet moment to restart into the installed one.
  * - `postponed`: someone at that machine postponed the relaunch. The download stays.
  * - `restarting`: handed off; the node is going down and comes back on the target.
  * - `succeeded` / `failed`: terminal. A success is reported by the restarted process.
@@ -103,6 +104,12 @@ export const NodeUpdateState = Schema.Struct({
   manualCommand: Schema.NullOr(TrimmedNonEmptyString),
   checkedAt: Schema.NullOr(IsoDateTime),
   run: NodeUpdateRun,
+  /**
+   * Why the node's own unattended updates leave a release alone, for its owner ("Automatic
+   * update: …"): a release whose automatic update did not finish, or a skip list it cannot read.
+   * Absent when there is nothing to say, and on nodes from before it.
+   */
+  automaticUpdateNote: Schema.optional(TrimmedNonEmptyString),
 });
 export type NodeUpdateState = typeof NodeUpdateState.Type;
 

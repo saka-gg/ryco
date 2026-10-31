@@ -168,6 +168,10 @@ function fixture() {
     createWorktree: null as WorkspaceLifecycleDeps["git"]["createWorktree"] | null,
     /** The merge prover the service gets; null: none (only the project HEAD counts). */
     mergeProof: null as CheckoutMergeProverShape | null,
+    /** The restart-sensitive work counter the service gets; null: none. */
+    restartWork: null as WorkspaceLifecycleDeps["restartWork"] | null,
+    /** Runs with every git command the service runs itself. */
+    onGit: null as ((args: readonly string[]) => void) | null,
   };
 
   const updateWorktree = (id: WorktreeId, patch: Record<string, unknown>) => {
@@ -242,6 +246,7 @@ function fixture() {
 
   const runGit = (cwd: string, args: readonly string[]) => {
     state.gitCalls.push(`${cwd}\u0000${args.join(" ")}`);
+    state.onGit?.(args);
     return git(cwd, ...args);
   };
   const gitDriver = {
@@ -371,6 +376,7 @@ function fixture() {
     fence,
     now: () => NOW_MS,
     ...(state.mergeProof ? { mergeProof: state.mergeProof } : {}),
+    ...(state.restartWork ? { restartWork: state.restartWork } : {}),
   });
 
   const run = <A, E>(
@@ -803,6 +809,35 @@ describe("workspace lifecycle service", () => {
     expect(preview.summary).toContain("delete merged branch topic");
     expect(result.outcome).toBe("completed");
     expect(f.branchExists("topic")).toBe(false);
+  });
+
+  it("counts an applied action, branch deletion included, as work a restart waits for", async () => {
+    const f = fixture();
+    let running = 0;
+    f.state.restartWork = {
+      track: (effect) =>
+        Effect.acquireUseRelease(
+          Effect.sync(() => void (running += 1)),
+          () => effect,
+          () => Effect.sync(() => void (running -= 1)),
+        ),
+    };
+    const countedAt: Array<string> = [];
+    f.state.onGit = (args) => {
+      if (args[0] === "update-ref" || args[0] === "worktree")
+        countedAt.push(`${args[0]} ${running}`);
+    };
+    const { result } = await f.previewAndApply({
+      worktreeId: topicId,
+      action: "remove-checkout",
+      deleteBranch: true,
+    });
+    expect(result.outcome).toBe("completed");
+    expect(f.branchExists("topic")).toBe(false);
+    // The branch deletion runs git directly, past the counted git workflow.
+    expect(countedAt).toContain("update-ref 1");
+    expect(countedAt.every((entry) => entry.endsWith(" 1"))).toBe(true);
+    expect(running).toBe(0);
   });
 
   it("deletes a workspace with unsaved and unmerged work only when discarding", async () => {

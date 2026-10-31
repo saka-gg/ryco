@@ -81,6 +81,7 @@ describe("DesktopAgentWorkFramesLive", () => {
                 current: SubscriptionRef.get(ref),
                 changes: SubscriptionRef.changes(ref),
                 interruptible: Effect.succeed(false),
+                restartInterruptible: Effect.succeed(false),
               }),
             ),
           ),
@@ -228,6 +229,7 @@ describe("ProviderBusyMarkerLive", () => {
                 current: SubscriptionRef.get(ref),
                 changes: SubscriptionRef.changes(ref),
                 interruptible: Effect.succeed(false),
+                restartInterruptible: Effect.succeed(false),
               }),
               Layer.succeed(ProviderInstallLock, {
                 lock: Effect.succeed({ holdBusy } as unknown as ProviderInstallLockRuntime),

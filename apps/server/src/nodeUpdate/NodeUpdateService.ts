@@ -10,7 +10,8 @@
  *   snapshot reinstalls the previous release. The restarted process confirms the update
  *   once it is ready (cliUpdate.ts) and reports it from the marker; one that keeps
  *   failing to start is rolled back before it boots (bootGuard.ts), and the previous
- *   release reports that instead.
+ *   release reports that instead. The installs hold the host-wide install lock under the
+ *   installation's own key, the one a provider CLI update into the same install takes.
  * - Desktop backends ask their Electron app over the backend pipe and mirror its
  *   download, countdown and relaunch.
  * - Every other installation reports why it cannot, and what to run instead.
@@ -60,6 +61,8 @@ import { ServerConfig } from "../config.ts";
 import { type DesktopAppUpdateBridge, desktopAppUpdateBridge } from "../desktopAppUpdateBridge.ts";
 import { fetchNpmDistTagVersion } from "../npmRegistry.ts";
 import { makeRuntimeSqliteLayer } from "../persistence/Layers/Sqlite.ts";
+import type { ProviderInstallLockRuntime } from "../provider/providerInstallLock.ts";
+import { ProviderInstallLock } from "../provider/Services/ProviderInstallLock.ts";
 import { ServerSettingsService } from "../serverSettings.ts";
 import {
   applyDesktopRemoteInstall,
@@ -70,6 +73,7 @@ import {
 import {
   type DetectedNodeInstallation,
   isNewerNodeRelease,
+  nodeInstallLockKey,
   nodeReleaseChannel,
   nodeUpdateAvailability,
   nodeUpdateCapability,
@@ -86,7 +90,12 @@ import {
 } from "./marker.ts";
 import type { NodeBootReadiness } from "./cliUpdate.ts";
 import type { NodeServiceRestart, NodeUpdateCommandRunner } from "./processes.ts";
-import { NODE_UPDATE_DIRECTORY_NAME, NODE_UPDATE_MARKER_FILE_NAME } from "./updateProtocol.ts";
+import {
+  disarmNodeBootWatchdog,
+  NODE_UPDATE_DIRECTORY_NAME,
+  NODE_UPDATE_MARKER_FILE_NAME,
+  nodeUpdateNextStartRollsBack,
+} from "./updateProtocol.ts";
 
 export interface NodeUpdateServiceShape {
   /** The node's update state now. */
@@ -96,19 +105,60 @@ export interface NodeUpdateServiceShape {
   /** Looks for the newest release now: the npm registry, or the desktop app's feed. */
   readonly check: Effect.Effect<NodeUpdateState, NodeUpdateError>;
   /** Starts installing `targetVersion` and answers once it is under way. */
-  readonly update: (input: NodeUpdateInput) => Effect.Effect<NodeUpdateState, NodeUpdateError>;
+  readonly update: (
+    input: NodeUpdateInput,
+    options?: NodeUpdateOptions,
+  ) => Effect.Effect<NodeUpdateState, NodeUpdateError>;
   /**
    * Whether this process was restarted into an update it has yet to confirm. The server then
    * waits until it is ready (`confirmNodeUpdateAfterServe`) and calls {@link confirmBootReady}.
    */
   readonly awaitsBootReady: Effect.Effect<boolean>;
+  /** {@link awaitsBootReady}, for an update the node ran on its own (the marker's `unattended`). */
+  readonly awaitsUnattendedBootReady: Effect.Effect<boolean>;
   /** This process is ready: the update it was restarted into succeeded. */
   readonly confirmBootReady: Effect.Effect<void>;
+  /**
+   * The host-wide install lock key of this installation (`nodeInstallLockKey`), which its updates
+   * hold: an unattended caller takes it itself (`UnattendedNodeUpdate`). `null` when it has none.
+   */
+  readonly installLockKey: Effect.Effect<string | null>;
+  /** What the node's own unattended updates tell its owner (`automaticUpdateNote`); `null` clears. */
+  readonly setAutomaticUpdateNote: (note: string | null) => Effect.Effect<void>;
 }
 
 export class NodeUpdateService extends Context.Service<NodeUpdateService, NodeUpdateServiceShape>()(
   "ryco/nodeUpdate/NodeUpdateService",
 ) {}
+
+/**
+ * An update nobody asked for: the node updates itself (`nodeAutoUpdater.ts`). The marker records
+ * it. CLI nodes installed with npm, or pnpm 10.16 or later, only (`unattendedInstallRefusal`).
+ */
+export interface UnattendedNodeUpdate {
+  /**
+   * Asked once the release is installed and checked, and again once the restart is recorded:
+   * `false` puts the previous release back and the run ends `postponed`.
+   */
+  readonly beforeRestart: Effect.Effect<boolean>;
+  /**
+   * Whether a restart would cut nobody off now (the update window alone, whatever the setting),
+   * for a node that has to restart into the release because the previous one could not go back.
+   */
+  readonly restartWindow: Effect.Effect<boolean>;
+  /**
+   * The caller holds this installation's install lock (`installLockKey`) for the whole run;
+   * each installer records its pid with it.
+   */
+  readonly recordInstallerPid: (pid: number) => Effect.Effect<void, Error>;
+  /** Dependency releases younger than this stay out of the install (`NodeInstallHoldBack`). */
+  readonly minimumReleaseAge: Duration.Input;
+}
+
+/** Server-side only, never on the wire: what a client's update cannot ask for. */
+export interface NodeUpdateOptions {
+  readonly unattended?: UnattendedNodeUpdate;
+}
 
 /** What the service needs from the process and the machine; tests replace each part. */
 export interface NodeUpdateRuntime {
@@ -131,6 +181,11 @@ export interface NodeUpdateRuntime {
   /** Whether automatic (not explicit) checks may contact the registry. */
   readonly automaticChecksEnabled: Effect.Effect<boolean>;
   readonly runCommand: NodeUpdateCommandRunner;
+  /**
+   * The host-wide install lock (`ProviderInstallLock`), loaded on first use: a person's update
+   * holds its installation's key, waiting while another Ryco on this machine holds it.
+   */
+  readonly installLock: Effect.Effect<Pick<ProviderInstallLockRuntime, "runWhenFree">>;
   /** Ends this process through its service manager, which starts it again. */
   readonly restart: NodeServiceRestart;
   readonly desktop: DesktopAppUpdateBridge;
@@ -138,6 +193,8 @@ export interface NodeUpdateRuntime {
   readonly restartDelay?: Duration.Input;
   /** How long a restart may take before the run reports that it did not happen. */
   readonly restartGrace?: Duration.Input;
+  /** How often a node that has to restart into an installed release asks its window again. */
+  readonly restartRecheck?: Duration.Input;
 }
 
 export const NODE_LATEST_RELEASE_TTL = Duration.hours(1);
@@ -182,6 +239,7 @@ export function deriveNodeUpdateState(input: {
   readonly latest: NodeLatestRelease | null;
   readonly desktop: DesktopAppUpdateSnapshot | null;
   readonly run: NodeUpdateRun;
+  readonly automaticUpdateNote?: string | null;
 }): NodeUpdateState {
   const { installation } = input;
   const desktopApp = installation.kind === "desktop-app";
@@ -203,6 +261,7 @@ export function deriveNodeUpdateState(input: {
     ...nodeUpdateCapability({ installation, platform: input.platform, channel, desktop }),
     checkedAt: desktopApp ? presentIsoTime(desktop?.checkedAt) : (latest?.checkedAt ?? null),
     run: input.run,
+    ...(input.automaticUpdateNote ? { automaticUpdateNote: input.automaticUpdateNote } : {}),
   };
 }
 
@@ -227,6 +286,7 @@ interface NodeUpdateInternalState {
   readonly latest: KnownLatestRelease | null;
   readonly desktop: DesktopAppUpdateSnapshot | null;
   readonly run: NodeUpdateRun;
+  readonly automaticUpdateNote: string | null;
 }
 
 const DESKTOP_NOT_CONNECTED = "The desktop app is not connected to this node.";
@@ -250,6 +310,7 @@ export const makeNodeUpdateService = Effect.fn("makeNodeUpdateService")(function
     latest: null,
     desktop: null,
     run: IDLE_NODE_UPDATE_RUN,
+    automaticUpdateNote: null,
   });
   // Admits one update at a time: validation and the switch to `preparing` happen under it.
   const admission = yield* Semaphore.make(1);
@@ -260,6 +321,7 @@ export const makeNodeUpdateService = Effect.fn("makeNodeUpdateService")(function
   let automaticCheckRunning = false;
   const restartDelay = runtime.restartDelay ?? Duration.seconds(1);
   const restartGrace = runtime.restartGrace ?? Duration.minutes(2);
+  const restartRecheck = runtime.restartRecheck ?? Duration.minutes(1);
   const cliChannel = nodeReleaseChannel(runtime.packageVersion);
   const nowIso = Effect.map(Clock.currentTimeMillis, (ms) => new Date(ms).toISOString());
 
@@ -271,6 +333,7 @@ export const makeNodeUpdateService = Effect.fn("makeNodeUpdateService")(function
       latest: internal.latest,
       desktop: internal.desktop,
       run: internal.run,
+      automaticUpdateNote: internal.automaticUpdateNote,
     });
 
   const current = Effect.gen(function* () {
@@ -284,6 +347,10 @@ export const makeNodeUpdateService = Effect.fn("makeNodeUpdateService")(function
   const finishFailed = (run: NodeUpdateRun, message: string, output: string | null) =>
     Effect.flatMap(nowIso, (finishedAt) =>
       setRun({ ...run, status: "failed", finishedAt, message, output }),
+    );
+  const finishPostponed = (run: NodeUpdateRun, message: string) =>
+    Effect.flatMap(nowIso, (finishedAt) =>
+      setRun({ ...run, status: "postponed", finishedAt, message, output: null }),
     );
 
   // ── Newest release (CLI nodes) ────────────────────────────────────────────
@@ -424,6 +491,7 @@ export const makeNodeUpdateService = Effect.fn("makeNodeUpdateService")(function
 
   const bootReady = yield* Deferred.make<void>();
   let bootConfirmationPending = false;
+  let bootConfirmationUnattended = false;
 
   /**
    * Once the server is ready: records `readyAt`, so the boot guard stops counting starts even
@@ -469,6 +537,11 @@ export const makeNodeUpdateService = Effect.fn("makeNodeUpdateService")(function
       ) {
         // Still `restarting` until the node is ready, which also keeps another update out.
         bootConfirmationPending = true;
+        // Exiting helps only while the next start still rolls back: past that the boot guard
+        // lets the release start anyway, and an exit would only restart it again and again.
+        bootConfirmationUnattended =
+          marker.value.unattended === true &&
+          nodeUpdateNextStartRollsBack(marker.value.bootAttempts ?? 0);
         const pending: NodeUpdateRun = {
           ...IDLE_NODE_UPDATE_RUN,
           status: "restarting",
@@ -497,7 +570,13 @@ export const makeNodeUpdateService = Effect.fn("makeNodeUpdateService")(function
   );
 
   const awaitsBootReady = Effect.map(settleBootMarker, () => bootConfirmationPending);
-  const confirmBootReady = Deferred.succeed(bootReady, undefined).pipe(Effect.asVoid);
+  const awaitsUnattendedBootReady = Effect.map(
+    settleBootMarker,
+    () => bootConfirmationPending && bootConfirmationUnattended,
+  );
+  const confirmBootReady = Deferred.succeed(bootReady, undefined).pipe(
+    Effect.andThen(Effect.sync(disarmNodeBootWatchdog)),
+  );
 
   yield* Effect.gen(function* () {
     const detected = yield* installation;
@@ -516,6 +595,7 @@ export const makeNodeUpdateService = Effect.fn("makeNodeUpdateService")(function
     detected: DetectedNodeInstallation,
     run: NodeUpdateRun,
     marker: NodeUpdateMarker,
+    options: NodeUpdateOptions | undefined,
   ) =>
     Effect.tryPromise(() => import("./cliUpdate.ts")).pipe(
       Effect.flatMap(({ runCliNodeUpdate }) =>
@@ -527,8 +607,11 @@ export const makeNodeUpdateService = Effect.fn("makeNodeUpdateService")(function
             marker,
             setRun,
             finishFailed,
+            finishPostponed,
             restartDelay,
             restartGrace,
+            restartRecheck,
+            ...(options?.unattended ? { unattended: options.unattended } : {}),
           }),
         ),
       ),
@@ -558,11 +641,23 @@ export const makeNodeUpdateService = Effect.fn("makeNodeUpdateService")(function
       return yield* refuse(DESKTOP_NOT_CONNECTED);
     });
 
-  const update = (input: NodeUpdateInput) =>
+  const update = (input: NodeUpdateInput, options?: NodeUpdateOptions) =>
     Effect.gen(function* () {
       yield* settleBootMarker;
       const detected = yield* installation;
       const desktopApp = detected.kind === "desktop-app";
+      if (desktopApp && options?.unattended) {
+        return yield* refuse("The desktop app does not update itself unattended.");
+      }
+      if (options?.unattended) {
+        // Loaded only for an update nobody asked for; pnpm's version is asked each time.
+        const refusal = yield* Effect.promise(() => import("./cliUpdate.ts")).pipe(
+          Effect.flatMap(({ unattendedInstallRefusal }) =>
+            unattendedInstallRefusal(detected, runtime.runCommand),
+          ),
+        );
+        if (refusal !== null) return yield* refuse(refusal);
+      }
       return yield* admission.withPermit(
         Effect.gen(function* () {
           const before = yield* current;
@@ -611,6 +706,7 @@ export const makeNodeUpdateService = Effect.fn("makeNodeUpdateService")(function
             fromVersion: before.currentVersion,
             targetVersion: latest,
             startedAt,
+            ...(options?.unattended ? { unattended: true } : {}),
           };
           const run: NodeUpdateRun = {
             ...IDLE_NODE_UPDATE_RUN,
@@ -624,7 +720,7 @@ export const makeNodeUpdateService = Effect.fn("makeNodeUpdateService")(function
             yield* startDesktopUpdate(run, marker);
           } else {
             yield* setRun(run);
-            yield* Effect.forkIn(runCliUpdate(detected, run, marker), scope);
+            yield* Effect.forkIn(runCliUpdate(detected, run, marker, options), scope);
           }
           return yield* current;
         }),
@@ -663,21 +759,46 @@ export const makeNodeUpdateService = Effect.fn("makeNodeUpdateService")(function
     check,
     update,
     awaitsBootReady,
+    awaitsUnattendedBootReady,
     confirmBootReady,
+    installLockKey: Effect.map(installation, nodeInstallLockKey),
+    setAutomaticUpdateNote: (note) =>
+      SubscriptionRef.update(state, (internal) =>
+        internal.automaticUpdateNote === note
+          ? internal
+          : { ...internal, automaticUpdateNote: note },
+      ),
   } satisfies NodeUpdateServiceShape;
 });
+
+const exitThisProcess = (code: number) =>
+  Effect.sync(() => {
+    process.exit(code);
+  });
 
 /**
  * Run once request handlers are attached (server.ts), in the background: confirms the update
  * this process was restarted into, if any, once the node is ready (cliUpdate.ts, loaded only
- * then).
+ * then). After an update the node ran on its own, a release that is not ready in time exits
+ * (`awaitNodeReadyOrExit`), so its service manager starts it again and the boot guard counts it.
  */
-export const confirmNodeUpdateAfterServe = (readiness: NodeBootReadiness) =>
+export const confirmNodeUpdateAfterServe = (
+  readiness: NodeBootReadiness,
+  exitProcess: (code: number) => Effect.Effect<void> = exitThisProcess,
+) =>
   Effect.gen(function* () {
     const nodeUpdate = yield* NodeUpdateService;
+    const unattended = yield* nodeUpdate.awaitsUnattendedBootReady;
+    // The boot guard's watchdog (armed at process start) ends only a start this process still
+    // has to confirm after an unattended update; any other start keeps running.
+    if (!unattended) disarmNodeBootWatchdog();
     if (!(yield* nodeUpdate.awaitsBootReady)) return;
-    const { awaitNodeReadyAfterUpdate } = yield* Effect.promise(() => import("./cliUpdate.ts"));
-    yield* awaitNodeReadyAfterUpdate(readiness);
+    const { awaitNodeReadyAfterUpdate, awaitNodeReadyOrExit } = yield* Effect.promise(
+      () => import("./cliUpdate.ts"),
+    );
+    yield* unattended
+      ? awaitNodeReadyOrExit(readiness, exitProcess)
+      : awaitNodeReadyAfterUpdate(readiness);
     yield* nodeUpdate.confirmBootReady;
   }).pipe(Effect.ignoreCause({ log: true }));
 
@@ -688,6 +809,7 @@ export const NodeUpdateServiceLive = Layer.effect(
     const settings = yield* ServerSettingsService;
     const httpClient = yield* HttpClient.HttpClient;
     const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
+    const installLock = yield* ProviderInstallLock;
     const fileSystem = yield* FileSystem.FileSystem;
     const path = yield* Path.Path;
     return yield* makeNodeUpdateService({
@@ -737,10 +859,10 @@ export const NodeUpdateServiceLive = Layer.effect(
       ),
       // The update's child processes (processes.ts, through cliUpdate.ts) load with the first
       // update.
-      runCommand: (command) =>
+      runCommand: (command, onSpawned) =>
         Effect.promise(() => import("./cliUpdate.ts")).pipe(
           Effect.flatMap(({ makeNodeUpdateCommandRunner }) =>
-            makeNodeUpdateCommandRunner(spawner)(command),
+            makeNodeUpdateCommandRunner(spawner)(command, onSpawned),
           ),
         ),
       restart: (target) =>
@@ -749,6 +871,7 @@ export const NodeUpdateServiceLive = Layer.effect(
             restartThroughServiceManager(target),
           ),
         ),
+      installLock: installLock.lock,
       desktop: desktopAppUpdateBridge,
     });
   }),

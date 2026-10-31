@@ -81,6 +81,10 @@ import {
 } from "../sourceControl/checkoutMergeProof.ts";
 import { TerminalManager, type TerminalManagerShape } from "../terminal/Services/Manager.ts";
 import { isTerminalAlive, isTerminalWorking } from "../terminal/terminalActivity.ts";
+import {
+  RestartSensitiveWork,
+  type RestartSensitiveWorkShape,
+} from "../updates/restartSensitiveWork.ts";
 import { GitVcsDriver, type GitVcsDriverShape } from "../vcs/GitVcsDriver.ts";
 import { type CheckoutFence, makeSqlCheckoutFence } from "./checkoutFence.ts";
 import {
@@ -179,6 +183,11 @@ export interface WorkspaceLifecycleDeps {
    * project HEAD counts.
    */
   readonly mergeProof?: CheckoutMergeProverShape | undefined;
+  /**
+   * Counts an applied action while it runs (checkout removal, branch deletion, conversation
+   * changes), so an unattended restart waits for it. Absent: not counted.
+   */
+  readonly restartWork?: Pick<RestartSensitiveWorkShape, "track"> | undefined;
 }
 
 interface LoadedContext {
@@ -968,6 +977,9 @@ export function makeWorkspaceLifecycle(deps: WorkspaceLifecycleDeps): WorkspaceL
       terminals: deps.terminals,
     }).pipe(Effect.asVoid);
 
+  const restartSensitive = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+    deps.restartWork === undefined ? effect : deps.restartWork.track(effect);
+
   const execute = (
     rawRequest: WorkspaceLifecycleRequest,
     expectedFingerprint: string | null,
@@ -1401,7 +1413,7 @@ export function makeWorkspaceLifecycle(deps: WorkspaceLifecycleDeps): WorkspaceL
             return result("completed", preview.summary);
           }
         }
-      }),
+      }).pipe(restartSensitive),
     );
 
   const preview: WorkspaceLifecycleShape["preview"] = (request) =>
@@ -1608,6 +1620,8 @@ export const WorkspaceLifecycleLive = Layer.effect(
       fence: makeSqlCheckoutFence(yield* SqlClient.SqlClient),
       migration: { sql: yield* SqlClient.SqlClient, stateDir: (yield* ServerConfig).stateDir },
       mergeProof: yield* CheckoutMergeProver,
+      // Its branch deletion runs git directly, past the counted git workflow.
+      restartWork: yield* RestartSensitiveWork,
     });
   }),
 );
