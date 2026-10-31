@@ -11,6 +11,7 @@ const RESTORABLE_SETTINGS = {
   sendShortcut: "Send shortcut",
   claudeResumeReview: "Claude resume review",
   chatWidth: "Chat width",
+  openChatTabs: "Open chat tabs",
   gitStatusPollIntervalMs: "Remote Git status",
   sourceControlRefreshMode: "PR & workflow updates",
   responseStreamingMode: "Response streaming",

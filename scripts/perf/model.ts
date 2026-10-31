@@ -284,7 +284,7 @@ const CHAT_DEFERRED_SOURCES: readonly ForbiddenBundleSource[] = [
   },
   {
     pattern:
-      /^apps\/web\/src\/components\/(?:SideChatPanel|chat\/ContextHandoffInspectionPanel|chat\/ComputerBetaPreview|chat\/ExpandedImageDialog|PullRequestThreadDialog|agent-control\/AgentControlApprovals)\.tsx$/u,
+      /^apps\/web\/src\/components\/(?:SideChatPanel|chat\/ContextHandoffInspectionPanel|chat\/ComputerBetaPreview|chat\/ExpandedImageDialog|chat\/OpenChatTabStrip|chat\/ContentTabStrip|PullRequestThreadDialog|agent-control\/AgentControlApprovals)\.tsx$/u,
     reason: "on-demand chat surface",
   },
   {

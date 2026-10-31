@@ -332,6 +332,7 @@ import {
 } from "./chat/ThreadMessageSearch.logic";
 import type { ThreadMessageSearchOccurrence } from "./chat/ThreadMessageSearch.logic";
 import { ChatHeader } from "./chat/ChatHeader";
+import { ChatHeaderSessionTitle } from "./chat/ChatHeaderBreadcrumb";
 import type { ChatProjectTarget } from "./chat/ChatProjectActions";
 import type { PhoneThreadDockProps } from "./shell/phone/PhoneThreadDock";
 import {
@@ -385,6 +386,7 @@ import {
   LazyComputerBetaPreview,
   LazyContextHandoffInspectionPanel,
   LazyExpandedImageDialog,
+  LazyOpenChatTabStrip,
   LazyPullRequestThreadDialog,
   LazySideChatPanel,
 } from "./chat/chatViewLazySurfaces";
@@ -7073,6 +7075,28 @@ export default function ChatView(props: ChatViewProps) {
   // warmed in idle time wherever a side chat can be started.
   usePreloadWhenIdle(LazySideChatPanel, sideChatAvailable);
 
+  // Open chats as tabs in place of the title, in the header of the chat you
+  // type into: a lone chat, or the focused pane of a split. Never on the frozen
+  // phone tier. The strip loads after the header's first frame, which shows
+  // the title until then. Memoised for the header's `memo`.
+  const showOpenChatTabs =
+    settings.openChatTabs && !isPhoneTier && (paneThreadRef === null || paneFocused);
+  const openChatTabStripReady = useLazyComponentReady(LazyOpenChatTabStrip, showOpenChatTabs, {
+    onLoadError: (error, retry) => notifySurfaceLoadFailure("chat tabs", error, retry),
+  });
+  // An unsent draft has no tab: the strip shows the open chats without an active one.
+  const openChatTabRef = routeKind === "server" ? activeThreadRef : null;
+  const activeThreadTitle = activeThread?.title ?? "";
+  const headerSessionTabs = useMemo(
+    () =>
+      showOpenChatTabs && openChatTabStripReady ? (
+        <LazyOpenChatTabStrip
+          activeRef={openChatTabRef}
+          fallback={<ChatHeaderSessionTitle title={activeThreadTitle} />}
+        />
+      ) : null,
+    [activeThreadTitle, openChatTabRef, openChatTabStripReady, showOpenChatTabs],
+  );
   // Delegation and Agent Control dock on the composer; off the frozen phone
   // tier (apps/mobile owns the native surface). Memoised for the composer's `memo`.
   const delegationDock = useMemo(
@@ -7335,6 +7359,7 @@ export default function ChatView(props: ChatViewProps) {
             activeThreadEnvironmentId={activeThread.environmentId}
             activeThreadRef={activeThreadRef}
             activeThreadTitle={activeThread.title}
+            sessionTabs={headerSessionTabs}
             // An unsent chat draft has no project yet but is already a chat.
             activeProjectName={isChatContext ? CHAT_PROJECT_LABEL : activeProject?.name}
             activeProjectId={isChatContext ? null : (activeProject?.id ?? null)}

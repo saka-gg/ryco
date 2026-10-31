@@ -378,6 +378,13 @@ export const SETTINGS_SEARCH_INDEX: ReadonlyArray<SettingsSearchEntry> = [
   },
   {
     section: "appearance",
+    title: "Open chat tabs",
+    owner: "client",
+    description: "Keep the chats you open as tabs in the chat header, like a browser.",
+    keywords: "tabs tab strip header browser open chats threads",
+  },
+  {
+    section: "appearance",
     title: "Color mode",
     owner: "client",
     description: "Light, dark, or follow the system preference.",

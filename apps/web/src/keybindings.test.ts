@@ -1173,3 +1173,44 @@ describe("plus key parsing", () => {
     );
   });
 });
+
+describe("open chat tab shortcuts", () => {
+  const resolve = (
+    overrides: Partial<ShortcutEventLike>,
+    platform: string,
+    context: { terminalFocus?: boolean } = {},
+  ) =>
+    resolveShortcutCommand(event(overrides), APP_DEFAULT_RESOLVED_KEYBINDINGS, {
+      platform,
+      context,
+    });
+
+  it("steps tabs with Cmd+Ctrl+Left/Right on macOS, also from the terminal", () => {
+    const right = { key: "ArrowRight", metaKey: true, ctrlKey: true };
+    const left = { key: "ArrowLeft", metaKey: true, ctrlKey: true };
+    assert.strictEqual(resolve(right, "MacIntel"), "threadTab.next");
+    assert.strictEqual(resolve(left, "MacIntel"), "threadTab.previous");
+    assert.strictEqual(resolve(right, "MacIntel", { terminalFocus: true }), "threadTab.next");
+    // Ctrl+PageDown is a Windows and Linux chord.
+    assert.isNull(resolve({ key: "PageDown", ctrlKey: true }, "MacIntel"));
+  });
+
+  it("steps tabs with Ctrl+PageUp/PageDown elsewhere, leaving them to a focused terminal", () => {
+    assert.strictEqual(resolve({ key: "PageDown", ctrlKey: true }, "Linux"), "threadTab.next");
+    assert.strictEqual(resolve({ key: "PageUp", ctrlKey: true }, "Win32"), "threadTab.previous");
+    assert.isNull(resolve({ key: "PageDown", ctrlKey: true }, "Linux", { terminalFocus: true }));
+    // `mod+ctrl` is plain Ctrl there: word movement must stay with the text field.
+    assert.isNull(resolve({ key: "ArrowRight", ctrlKey: true }, "Linux"));
+  });
+
+  it("labels the shortcut of the platform", () => {
+    assert.strictEqual(
+      shortcutLabelForCommand(APP_DEFAULT_RESOLVED_KEYBINDINGS, "threadTab.next", "MacIntel"),
+      "⌃⌘Right",
+    );
+    assert.strictEqual(
+      shortcutLabelForCommand(APP_DEFAULT_RESOLVED_KEYBINDINGS, "threadTab.next", "Linux"),
+      "Ctrl+PageDown",
+    );
+  });
+});

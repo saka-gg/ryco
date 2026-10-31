@@ -62,6 +62,7 @@ const clientSettings: ClientSettings = {
   sendShortcut: "enter",
   claudeResumeReview: false,
   chatWidth: "comfortable",
+  openChatTabs: true,
   favorites: [],
   providerModelPreferences: {},
   sidebarProjectGroupingMode: "repository_path",

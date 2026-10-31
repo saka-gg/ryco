@@ -3,6 +3,7 @@ import { replaceAppKeybindings } from "../appKeybindingsEditing";
 import { serializeShortcut } from "../lib/shortcutCapture";
 import { serializeWhenAst } from "../lib/keybindingWhenPresets";
 import { useChatPanesStore } from "../chatPanesStore";
+import { useOpenChatTabsStore } from "../openChatTabsStore";
 
 import { resetPreviewFileSessionsForTests } from "./previewFileSessions";
 import { useInboxFilterStore } from "./inboxSidebar/inboxFilterStore";
@@ -2799,6 +2800,7 @@ export function setupChatViewBrowserSuite() {
     await setViewport(DEFAULT_VIEWPORT);
     localStorage.clear();
     useChatPanesStore.setState({ root: null, activeRef: null });
+    useOpenChatTabsStore.setState({ refs: [] });
     usePromptStashStore.setState({ entries: [] });
     document.body.innerHTML = "";
     wsRequests.length = 0;

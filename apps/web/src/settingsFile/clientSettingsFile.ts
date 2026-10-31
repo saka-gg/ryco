@@ -44,6 +44,7 @@ export const CLIENT_SETTINGS_FILE_SCOPE = {
   sendShortcut: true,
   claudeResumeReview: true,
   chatWidth: true,
+  openChatTabs: true,
   favorites: false,
   providerModelPreferences: false,
   sidebarProjectGroupingMode: true,

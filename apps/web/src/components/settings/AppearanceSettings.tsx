@@ -80,6 +80,7 @@ import {
   SettingsSection,
 } from "./settingsLayout";
 import { ChatWidthSetting } from "./ChatWidthSetting";
+import { OpenChatTabsSetting } from "./OpenChatTabsSetting";
 import { DiffAppearanceSettings } from "./DiffAppearanceSettings";
 import { WindowTranslucencySettings } from "./WindowTranslucencySettings";
 import { ThemePreview } from "./ThemePreview";
@@ -746,6 +747,7 @@ export function AppearanceSettingsPanel({
           </SettingsRow>
         )}
         {isHub || isPhoneTier ? null : <ChatWidthSetting />}
+        {isHub || isPhoneTier ? null : <OpenChatTabsSetting />}
         <SettingsRow
           title="Primary color"
           description="Theme palettes control buttons by default; enable a custom color to pin one app accent."

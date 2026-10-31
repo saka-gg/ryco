@@ -3877,3 +3877,90 @@ label:has(> select#reasoning-effort) select {
 :root[data-window-translucency="window"] .xterm .xterm-viewport {
   background-color: transparent;
 }
+
+/* Open chat tabs (components/chat/ContentTabStrip.tsx), after Synara's SurfaceTabStrip. The
+   scroller softly fades whichever edge still has tabs hidden behind it: scroll-driven, so a strip
+   whose tabs fit shows no fade at all, and browsers without scroll timelines show none. */
+@property --content-tab-fade-start {
+  syntax: "<length>";
+  inherits: false;
+  initial-value: 0px;
+}
+
+@property --content-tab-fade-end {
+  syntax: "<length>";
+  inherits: false;
+  initial-value: 0px;
+}
+
+@keyframes content-tab-fade-start {
+  from {
+    --content-tab-fade-start: 0px;
+  }
+  to {
+    --content-tab-fade-start: 1.5rem;
+  }
+}
+
+@keyframes content-tab-fade-end {
+  from {
+    --content-tab-fade-end: 1.5rem;
+  }
+  to {
+    --content-tab-fade-end: 0px;
+  }
+}
+
+.content-tab-scroller {
+  -webkit-mask-image: linear-gradient(
+    to right,
+    transparent 0,
+    #000 var(--content-tab-fade-start),
+    #000 calc(100% - var(--content-tab-fade-end)),
+    transparent 100%
+  );
+  mask-image: linear-gradient(
+    to right,
+    transparent 0,
+    #000 var(--content-tab-fade-start),
+    #000 calc(100% - var(--content-tab-fade-end)),
+    transparent 100%
+  );
+  animation:
+    content-tab-fade-start linear both,
+    content-tab-fade-end linear both;
+  animation-timeline: scroll(self x), scroll(self x);
+  animation-range:
+    0 1.5rem,
+    calc(100% - 1.5rem) 100%;
+}
+
+/* A hairline between adjacent tabs, centred in the 4px gutter. It steps aside next to the active
+   or hovered tab, whose own fill already sets it apart, like browser tab strips. */
+.content-tab-scroller > [data-content-tab] + [data-content-tab]::before {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: calc(-0.125rem - 0.5px);
+  width: 1px;
+  height: 1.25rem;
+  translate: 0 -50%;
+  pointer-events: none;
+  background: var(--border);
+  transition: opacity 150ms ease-out;
+}
+
+.content-tab-scroller > [data-content-tab]:is([data-content-tab-active], :hover)::before,
+.content-tab-scroller
+  > [data-content-tab]:is([data-content-tab-active], :hover)
+  + [data-content-tab]::before {
+  opacity: 0;
+}
+
+/* A tab title dissolves at its end instead of ending in an ellipsis. */
+.content-tab-label {
+  overflow: hidden;
+  white-space: nowrap;
+  -webkit-mask-image: linear-gradient(to right, #000 0, #000 calc(100% - 1rem), transparent 100%);
+  mask-image: linear-gradient(to right, #000 0, #000 calc(100% - 1rem), transparent 100%);
+}

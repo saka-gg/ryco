@@ -210,6 +210,10 @@
       "types": "./src/state/threads/interThreadMessage.ts",
       "import": "./src/state/threads/interThreadMessage.ts"
     },
+    "./state/threads/openChatTabs": {
+      "types": "./src/state/threads/openChatTabs.ts",
+      "import": "./src/state/threads/openChatTabs.ts"
+    },
     "./state/threads/runningThreads": {
       "types": "./src/state/threads/runningThreads.ts",
       "import": "./src/state/threads/runningThreads.ts"
