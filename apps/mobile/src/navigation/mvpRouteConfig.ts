@@ -193,6 +193,18 @@ export const MVP_ROOT_ROUTES = {
     ios: { presentation: "card" },
     android: { presentation: "card" },
   },
+  /**
+   * The simulator or emulator the thread's agent uses, full screen with no header: the device
+   * screen owns the viewport, and its own controls bar closes it.
+   */
+  ThreadDevice: {
+    linking: `${THREAD}/device`,
+    overlay: true,
+    headerPreset: "none",
+    headerAction: "none",
+    ios: { presentation: "fullScreenModal" },
+    android: { presentation: "fullScreenModal", headerShown: false },
+  },
   Connections: {
     linking: "connections",
     overlay: true,

@@ -199,6 +199,13 @@ export const ThreadTerminalRouteScreen = lazyScreen(
       require("../features/terminal/ThreadTerminalRouteScreen") as typeof import("../features/terminal/ThreadTerminalRouteScreen")
     ).ThreadTerminalRouteScreen,
 );
+export const ThreadDeviceRouteScreen = lazyScreen(
+  "ThreadDeviceRouteScreen",
+  () =>
+    (
+      require("../features/devices/ThreadDeviceRouteScreen") as typeof import("../features/devices/ThreadDeviceRouteScreen")
+    ).ThreadDeviceRouteScreen,
+);
 export const ThreadRouteScreen = lazyScreen(
   "ThreadRouteScreen",
   () =>

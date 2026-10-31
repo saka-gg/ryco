@@ -275,6 +275,7 @@ import { ThreadQueuedMessages } from "./ThreadQueuedMessages";
 import { clearCancelledServerQueueEdit } from "./serverQueueEdit";
 import type { ThreadComposerHandle } from "./ThreadComposer";
 import { ThreadContextBar } from "./ThreadContextBar";
+import { ThreadDevicePill } from "../devices/ThreadDevicePill";
 import {
   buildThreadHeaderModel,
   findThreadWorktree,
@@ -1594,6 +1595,10 @@ export function ThreadDetailScreen(props: {
       }),
     [environmentId, navigation, threadId],
   );
+  const openDevice = useCallback(
+    () => navigation.navigate("ThreadDevice", { environmentId, threadId }),
+    [environmentId, navigation, threadId],
+  );
 
   useLayoutEffect(() => {
     navigation.setOptions({
@@ -2789,6 +2794,8 @@ export function ThreadDetailScreen(props: {
           onClear={() => sideChatStore.getState().clear(sideChatKey)}
         />
       ) : null}
+
+      <ThreadDevicePill environmentId={environmentId} threadId={threadId} onOpen={openDevice} />
 
       <ThreadComposer
         ref={composerRef}
