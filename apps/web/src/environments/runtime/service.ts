@@ -1744,7 +1744,9 @@ function subscribeBrowserResumeReconnects(listener: (reason: string) => void): (
   const handlePageShow = (event: PageTransitionEvent) => {
     if (event.persisted || lastBrowserHiddenAt !== null) {
       lastBrowserHiddenAt = null;
-      listener("pageshow");
+      // A page restored from the back/forward cache reconnects at once; one only shown again
+      // waits for a heartbeat like a visibility change.
+      listener(event.persisted ? "pageshow-restored" : "pageshow");
     }
   };
 

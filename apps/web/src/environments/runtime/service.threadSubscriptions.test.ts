@@ -6,7 +6,10 @@ import {
   TurnId,
   type OrchestrationShellSnapshot,
 } from "@ryco/contracts";
-import { VIEW_RESUME_HEARTBEAT_GRACE_MS } from "@ryco/client-runtime/connection";
+import {
+  VIEW_RESUME_HEARTBEAT_GRACE_MS,
+  VIEW_RESUME_SILENT_MS,
+} from "@ryco/client-runtime/connection";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 const mockSubscribeThread = vi.fn();
@@ -752,6 +755,14 @@ describe("retainThreadDetailSubscription", () => {
 
     const stop = startEnvironmentConnectionService();
     expect(mockConnectionReconnects).toHaveLength(1);
+    // Hidden, the pinger still ran about once a minute: a pong within the last few minutes.
+    (
+      mockCreateWsRpcClient.mock.results.at(-1)?.value as {
+        isHeartbeatFresh: ReturnType<typeof vi.fn>;
+      }
+    ).isHeartbeatFresh.mockImplementation(
+      (maxAgeMs?: number) => maxAgeMs !== undefined && maxAgeMs >= VIEW_RESUME_SILENT_MS,
+    );
 
     visibilityState = "hidden";
     documentTarget.dispatchEvent(new Event("visibilitychange"));

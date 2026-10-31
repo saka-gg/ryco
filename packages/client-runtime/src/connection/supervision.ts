@@ -76,10 +76,15 @@ const BROWSER_RESUME_RECONNECT_COOLDOWN_MS = 2_000;
  * pong is old. While hidden, the RPC pinger ran about once a minute (Chrome's intensive timer
  * throttling), so the pong is always old there, yet the socket is alive: Effect 4.0.5 sends a
  * ping on a late tick before it can declare silence. The pinger's first visible tick (every 8 s)
- * pings, so a socket that answered nothing within this window after the page came back is
- * reconnected. Waking from sleep, coming online and network changes still reconnect at once.
+ * pings, so a socket that answered nothing within this window after the page came back, and did
+ * not reconnect by itself meanwhile, is reconnected. A connection with no answer for
+ * {@link VIEW_RESUME_SILENT_MS} is reconnected at once: hidden, it still pings about once a
+ * minute, so that long a silence means the machine slept or the page was frozen. Waking from
+ * sleep where it is signalled (desktop, phone), a page restored from the back/forward cache,
+ * coming online and network changes reconnect at once, as before.
  */
 export const VIEW_RESUME_HEARTBEAT_GRACE_MS = 12_000;
+export const VIEW_RESUME_SILENT_MS = 3 * 60_000;
 const VIEW_RESUME_REASONS: ReadonlySet<string> = new Set(["visibilitychange", "pageshow"]);
 const SAVED_ENVIRONMENT_STARTUP_DELAY_MS = 2500;
 const SAVED_ENVIRONMENT_CONNECT_CONCURRENCY = 2;
@@ -1524,20 +1529,32 @@ export function createEnvironmentConnectionSupervisor<
   };
   /**
    * After the page came back into view, reconnects the connections it already had that have not
-   * answered a heartbeat since (see {@link VIEW_RESUME_HEARTBEAT_GRACE_MS}). Connections made
-   * meanwhile are left alone: their pinger has not run yet.
+   * answered a heartbeat since and did not reconnect by themselves (see
+   * {@link VIEW_RESUME_HEARTBEAT_GRACE_MS}); one silent for {@link VIEW_RESUME_SILENT_MS} is
+   * reconnected at once. Connections made meanwhile are left alone: their pinger has not run yet.
    */
   const checkHeartbeatsAfterViewResume = (reason: string) => {
     cancelViewResumeCheck();
-    const resumed = [...connections.values()].filter(
+    const resumedAt = input.now();
+    const stale = [...connections.values()].filter(
       (connection) => !connection.client.isHeartbeatFresh(),
     );
+    const resumed: EnvironmentConnection[] = [];
+    for (const connection of stale) {
+      if (connection.client.isHeartbeatFresh(VIEW_RESUME_SILENT_MS)) {
+        resumed.push(connection);
+      } else {
+        lastBrowserResumeReconnectAt = resumedAt;
+        reconnectLogged(connection, reason);
+      }
+    }
     if (resumed.length === 0) return;
     viewResumeCheckTimeoutId = input.setTimeout(() => {
       viewResumeCheckTimeoutId = null;
       for (const connection of resumed) {
         if (connections.get(connection.environmentId) !== connection) continue;
         if (connection.client.isHeartbeatFresh(VIEW_RESUME_HEARTBEAT_GRACE_MS)) continue;
+        if (connection.client.hasReopenedSince?.(resumedAt) === true) continue;
         lastBrowserResumeReconnectAt = input.now();
         reconnectLogged(connection, reason);
       }

@@ -43,6 +43,7 @@ import {
   savedEnvironmentRetryDelayMs,
   type ShellAcceptance,
   VIEW_RESUME_HEARTBEAT_GRACE_MS,
+  VIEW_RESUME_SILENT_MS,
 } from "./supervision.ts";
 
 type Record = { readonly environmentId: EnvironmentId; readonly lastConnectedAt?: string };
@@ -288,13 +289,14 @@ describe("saved environment retry", () => {
   describe("coming back into view", () => {
     /** A connection whose server last answered a heartbeat at `pong.at` (0: never). */
     const heartbeatConnection = (environmentId: string, reconnected: string[]) => {
-      const pong = { at: Date.now() - 60_000 };
+      const pong = { at: Date.now() - 60_000, reopenedAt: 0 };
       const connection = {
         environmentId: environmentId as EnvironmentId,
         kind: "saved",
         knownEnvironment: { source: "manual" },
         client: {
           isHeartbeatFresh: (maxAgeMs = 15_000) => pong.at > 0 && Date.now() - pong.at <= maxAgeMs,
+          hasReopenedSince: (sinceMs: number) => pong.reopenedAt > 0 && pong.reopenedAt >= sinceMs,
         },
         reconnect: async () => void reconnected.push(environmentId),
         dispose: async () => undefined,
@@ -340,8 +342,42 @@ describe("saved environment retry", () => {
       stop();
     });
 
+    it("leaves a socket that reconnected by itself during the grace window", async () => {
+      const reconnected: string[] = [];
+      const { supervisor, resume } = makeSupervisor(async (record) => connectionFor(record), {
+        records: [],
+      });
+      const stop = supervisor.start();
+      const lan = heartbeatConnection("env-lan", reconnected);
+      supervisor.register(lan.connection);
+
+      resume("visibilitychange");
+      // Its own ping timed out and it opened a new socket, whose first ping is still to come.
+      await vi.advanceTimersByTimeAsync(8_000);
+      lan.pong.reopenedAt = Date.now();
+      await vi.advanceTimersByTimeAsync(VIEW_RESUME_HEARTBEAT_GRACE_MS);
+      expect(reconnected).toEqual([]);
+      stop();
+    });
+
+    it("reconnects at once a socket silent for minutes: the machine slept or the page froze", async () => {
+      const reconnected: string[] = [];
+      const { supervisor, resume } = makeSupervisor(async (record) => connectionFor(record), {
+        records: [],
+      });
+      const stop = supervisor.start();
+      const lan = heartbeatConnection("env-lan", reconnected);
+      lan.pong.at = Date.now() - VIEW_RESUME_SILENT_MS - 1;
+      supervisor.register(lan.connection);
+
+      resume("visibilitychange");
+      await vi.advanceTimersByTimeAsync(0);
+      expect(reconnected).toEqual(["env-lan"]);
+      stop();
+    });
+
     it("still reconnects a stale socket at once after a wake from sleep or coming online", async () => {
-      for (const reason of ["system-resume", "online", "appstate-active"]) {
+      for (const reason of ["system-resume", "online", "appstate-active", "pageshow-restored"]) {
         const reconnected: string[] = [];
         const { supervisor, resume } = makeSupervisor(async (record) => connectionFor(record), {
           records: [],

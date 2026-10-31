@@ -159,6 +159,8 @@ export interface WsRpcClient {
   readonly reconnect: () => Promise<void>;
   /** Whether the server answered a heartbeat within `maxAgeMs` (15 s by default). */
   readonly isHeartbeatFresh: (maxAgeMs?: number) => boolean;
+  /** Whether a socket opened at or after `sinceMs`: the connection has reconnected since. */
+  readonly hasReopenedSince?: (sinceMs: number) => boolean;
   readonly device?: DeviceRpcClient;
   readonly terminal: {
     readonly open: RpcUnaryMethod<typeof WS_METHODS.terminalOpen>;
@@ -651,6 +653,7 @@ export function createWsRpcClient(transport: WsTransport, device?: DeviceRpcClie
       await Promise.all([transport.reconnect(), device?.reconnect()]);
     },
     isHeartbeatFresh: (maxAgeMs) => transport.isHeartbeatFresh(maxAgeMs),
+    hasReopenedSince: (sinceMs) => transport.hasReopenedSince(sinceMs),
     ...(device ? { device } : {}),
     terminal: {
       open: (input) => transport.request((client) => client[WS_METHODS.terminalOpen](input)),

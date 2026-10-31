@@ -201,6 +201,7 @@ class RpcTransport<Client> {
   private activeSessionId = 0;
   private session: TransportSession<Client>;
   private lastHeartbeatPongAt = 0;
+  private lastSocketOpenedAt = 0;
   private readonly makeClient: () => Effect.Effect<Client, never, RpcClient.Protocol | Scope.Scope>;
   private readonly subscriptionRetryWakeups = new Set<() => void>();
   private readonly streamRequestStartListeners = new Set<(info: StreamRequestStartInfo) => void>();
@@ -474,6 +475,11 @@ class RpcTransport<Client> {
     return this.lastHeartbeatPongAt > 0 && Date.now() - this.lastHeartbeatPongAt <= maxAgeMs;
   }
 
+  /** Whether a socket of this transport opened at or after `sinceMs` (a reconnect since then). */
+  hasReopenedSince(sinceMs: number): boolean {
+    return this.lastSocketOpenedAt > 0 && this.lastSocketOpenedAt >= sinceMs;
+  }
+
   async dispose() {
     if (this.disposed) {
       return;
@@ -509,6 +515,10 @@ class RpcTransport<Client> {
           onHeartbeatPong: () => {
             this.lastHeartbeatPongAt = Date.now();
             this.lifecycleHandlers?.onHeartbeatPong?.();
+          },
+          onOpen: () => {
+            this.lastSocketOpenedAt = Date.now();
+            this.lifecycleHandlers?.onOpen?.();
           },
           onRequestStart: (info) => {
             this.lifecycleHandlers?.onRequestStart?.(info);
