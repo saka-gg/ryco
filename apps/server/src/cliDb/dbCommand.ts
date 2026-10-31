@@ -1,7 +1,9 @@
 /**
- * `ryco db`: back up the database, list its backups, and restore one into a new data directory.
+ * `ryco db`: back up the database, list its backups, and restore one into a new data directory
+ * or in place of the database in use.
  *
- * None of these migrate or write the database in use, so they are safe while Ryco runs. They
+ * None of these migrate the database in use, and only `restore --replace` changes it, as its
+ * owner while no server runs; the others are safe while Ryco runs. They
  * open their own SQLite connections instead of the persistence layer, which would migrate.
  * See docs/database-backups.md.
  *
@@ -111,6 +113,13 @@ export const makeDbCommand = <E, R>(deps: DbCommandDeps<E, R>) => {
       Flag.withDescription(
         "A new or empty directory to restore into, outside the data directory in use. It becomes a separate Ryco data directory (--base-dir).",
       ),
+      Flag.optional,
+    ),
+    replace: Flag.Boolean("replace").pipe(
+      Flag.withDescription(
+        "Make the backup the database in use instead (Ryco must not be running). The replaced database and the session signing key are kept in <state dir>/replaced-<time>/, and every device signs out.",
+      ),
+      Flag.withDefault(false),
     ),
     fullCheck: Flag.Boolean("full-check").pipe(
       Flag.withDescription(
@@ -121,7 +130,7 @@ export const makeDbCommand = <E, R>(deps: DbCommandDeps<E, R>) => {
     json: deps.jsonFlag,
   }).pipe(
     Command.withDescription(
-      "Restore a backup into a new data directory, after checking it. Never touches the database in use.",
+      "Restore a backup into a new data directory (--into), or make it the database in use (--replace), after checking it.",
     ),
     Command.withHandler((flags) =>
       runDb(flags, (config) =>
@@ -132,6 +141,7 @@ export const makeDbCommand = <E, R>(deps: DbCommandDeps<E, R>) => {
             emitJson: deps.emitJson,
             file: flags.file,
             into: flags.into,
+            replace: flags.replace,
             fullCheck: flags.fullCheck,
           }),
         ),
@@ -141,7 +151,7 @@ export const makeDbCommand = <E, R>(deps: DbCommandDeps<E, R>) => {
 
   return Command.make("db").pipe(
     Command.withDescription(
-      "Back up the database, list its backups, or restore one into a new data directory.",
+      "Back up the database, list its backups, or restore one (into a new data directory, or in place).",
     ),
     Command.withSubcommands([backupCommand, listCommand, restoreCommand]),
   );

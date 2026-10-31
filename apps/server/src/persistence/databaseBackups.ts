@@ -54,6 +54,7 @@ import type { SqlError } from "effect/sql/SqlError";
 
 import { syncDirectory, syncFile } from "../fsDurability.ts";
 import { databaseBackupsDirectory, type PremigrationBackupMode } from "./databaseBackupPolicy.ts";
+import { databaseRestoreJournalPath } from "./databaseRestoreJournal.ts";
 import {
   migrationEntries,
   repairedMigrationIds,
@@ -1599,6 +1600,12 @@ export const createManualBackup = Effect.fn("createManualBackup")(function* (inp
   const { dbPath, openSqlite } = input;
   const step = (name: ManualBackupStep) => input.onStep?.(name) ?? Effect.void;
 
+  if (yield* exists(databaseRestoreJournalPath(dbPath)).pipe(Effect.orElseSucceed(() => false))) {
+    return yield* commandError(
+      "live-database",
+      `A restore of ${dbPath} was interrupted. Start Ryco, or run \`ryco db restore <backup> --replace\` again, to finish it before backing up.`,
+    );
+  }
   const database = yield* io("stat", dbPath, () => stat(dbPath)).pipe(Effect.option);
   if (Option.isNone(database) || !database.value.isFile()) {
     return yield* commandError("no-database", `No Ryco database at ${dbPath}.`);
@@ -1984,6 +1991,8 @@ export interface RestoreResult {
   readonly schema: number;
   readonly supportedSchema: number;
   readonly opensWithThisBuild: boolean;
+  /** This build's own migrations it would skip there (another branch wrote it under these ids). */
+  readonly skippedMigrations: ReadonlyArray<number>;
   readonly check: "quick_check" | "integrity_check";
   readonly bytes: number;
   /** Not errors: what the person restoring should know (another branch, a newer schema, a failed flush). */
@@ -2006,6 +2015,11 @@ export const restoreDatabaseBackup = Effect.fn("restoreDatabaseBackup")(function
   readonly openSqlite: OpenSqlite;
   /** `integrity_check` instead of `quick_check` (much slower on large databases). */
   readonly fullCheck?: boolean | undefined;
+  /**
+   * The target is the staging directory of an in-place restore (databaseRestoreSwap.ts), which
+   * lives inside the data directory in use on purpose: the restored file is renamed into place.
+   */
+  readonly staging?: boolean | undefined;
 }) {
   const env = yield* BackupEnvironment;
   const startedAt = performance.now();
@@ -2063,14 +2077,18 @@ export const restoreDatabaseBackup = Effect.fn("restoreDatabaseBackup")(function
     );
   }
 
-  // 2. The target: outside the data directory in use, new or empty.
-  const unsafe = yield* io("resolve", targetDir, () =>
-    unsafeRestoreTarget(targetDir, [
-      input.live.baseDir,
-      input.live.stateDir,
-      dirname(input.live.dbPath),
-    ]),
-  ).pipe(ioError);
+  // 2. The target: outside the data directory in use (unless it stages an in-place restore),
+  // new or empty.
+  const unsafe =
+    input.staging === true
+      ? undefined
+      : yield* io("resolve", targetDir, () =>
+          unsafeRestoreTarget(targetDir, [
+            input.live.baseDir,
+            input.live.stateDir,
+            dirname(input.live.dbPath),
+          ]),
+        ).pipe(ioError);
   if (unsafe !== undefined) {
     return yield* commandError(
       "unsafe-target",
@@ -2286,6 +2304,7 @@ export const restoreDatabaseBackup = Effect.fn("restoreDatabaseBackup")(function
       schema,
       supportedSchema: SUPPORTED_MIGRATION_ID,
       opensWithThisBuild: schema <= SUPPORTED_MIGRATION_ID,
+      skippedMigrations: skipped,
       check: pragma,
       bytes,
       warnings,
