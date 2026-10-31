@@ -17,6 +17,7 @@ import * as Semaphore from "effect/Semaphore";
 import { ServerConfig } from "../../config.ts";
 import { LocalDiagnosticsMetrics } from "../../observability/Services/LocalDiagnosticsMetrics.ts";
 import { AuthSessionRepositoryLive } from "../../persistence/Layers/AuthSessions.ts";
+import type { AuthAccessLink } from "../../persistence/Services/AuthAccessLink.ts";
 import {
   type AuthSessionRecord,
   AuthSessionRepository,
@@ -68,6 +69,23 @@ const SUPERSEDED_SESSION_GRACE = Duration.minutes(1);
  * at this bound too.
  */
 export const LINKED_SESSION_MAX_AGE = Duration.days(4);
+/**
+ * The cap for a link of a locally verified device: a key the node's owner
+ * approved on the node, never enrolled through the Hub. The Hub cannot say
+ * whether such a device's member still reaches the node (its linked-access
+ * check answers `unknown`), so a member it removed keeps the link until it
+ * ends. Clients that find the link refused fall back to the relay and link
+ * again there, at the role the Hub grants then. Applied on every check, like
+ * the four days, so longer links issued before it end at this bound too.
+ */
+export const LOCALLY_VERIFIED_LINKED_SESSION_MAX_AGE = Duration.hours(24);
+
+/** How long a Hub-linked pairing may live, counted from when it was made. */
+export function linkedSessionMaxAge(link: Pick<AuthAccessLink, "trustSource">): Duration.Duration {
+  return link.trustSource === "locally-verified"
+    ? LOCALLY_VERIFIED_LINKED_SESSION_MAX_AGE
+    : LINKED_SESSION_MAX_AGE;
+}
 /** The least time between two rotations of one pairing. */
 const BEARER_ROTATION_MIN_INTERVAL = Duration.hours(1);
 const DEFAULT_WEBSOCKET_TOKEN_TTL = Duration.minutes(5);
@@ -132,7 +150,8 @@ type DisconnectOutcome = {
 
 /**
  * When a session stops authenticating: its own expiry, and for a Hub-linked one
- * never later than `LINKED_SESSION_MAX_AGE` after its pairing.
+ * never later than its trust source's cap (`linkedSessionMaxAge`) after its
+ * pairing.
  */
 export function sessionExpiresAtMs(
   record: Pick<AuthSessionRecord, "expiresAt" | "chainIssuedAt" | "link">,
@@ -141,7 +160,8 @@ export function sessionExpiresAtMs(
     ? record.expiresAt.epochMilliseconds
     : Math.min(
         record.expiresAt.epochMilliseconds,
-        record.chainIssuedAt.epochMilliseconds + Duration.toMillis(LINKED_SESSION_MAX_AGE),
+        record.chainIssuedAt.epochMilliseconds +
+          Duration.toMillis(linkedSessionMaxAge(record.link)),
       );
 }
 
@@ -412,7 +432,7 @@ export const makeSessionCredentialService = Effect.gen(function* () {
         milliseconds:
           input?.link === undefined
             ? Duration.toMillis(ttl)
-            : Math.min(Duration.toMillis(ttl), Duration.toMillis(LINKED_SESSION_MAX_AGE)),
+            : Math.min(Duration.toMillis(ttl), Duration.toMillis(linkedSessionMaxAge(input.link))),
       });
       const claims = sessionClaims({
         sessionId,
@@ -721,7 +741,7 @@ export const makeSessionCredentialService = Effect.gen(function* () {
           }
           // A linked chain never outlives its device's last relay renewal.
           const chainMaxAge =
-            current.link === null ? BEARER_PAIRING_MAX_AGE : LINKED_SESSION_MAX_AGE;
+            current.link === null ? BEARER_PAIRING_MAX_AGE : linkedSessionMaxAge(current.link);
           const expiresAtMs = Math.min(
             nowMs + Duration.toMillis(DEFAULT_SESSION_TTL),
             current.chainIssuedAt.epochMilliseconds + Duration.toMillis(chainMaxAge),

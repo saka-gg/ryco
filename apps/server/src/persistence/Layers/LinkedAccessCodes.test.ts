@@ -14,6 +14,40 @@ const layer = BootstrapCredentialServiceLive.pipe(
 );
 
 it.layer(NodeServices.layer)("LinkedAccessCodes", (it) => {
+  it.effect("revokes only a device's codes above a role when asked to narrow", () =>
+    Effect.gen(function* () {
+      const bootstrap = yield* BootstrapCredentialService;
+      const codes = yield* makeLinkedAccessCodes;
+      const issueLinked = (role: "viewer" | "operator" | "owner") =>
+        bootstrap.issueOneTimeToken({
+          ttl: Duration.minutes(2),
+          subject: "hub-linked",
+          link: {
+            trustSource: "locally-verified",
+            enrollmentId: null,
+            clientFingerprint: "fp-desk",
+            role,
+          },
+        });
+      const owner = yield* issueLinked("owner");
+      const operator = yield* issueLinked("operator");
+      const viewer = yield* issueLinked("viewer");
+
+      expect(
+        yield* codes.revoke({
+          clientFingerprint: "fp-desk",
+          trustSource: "locally-verified",
+          roles: ["operator", "owner"],
+        }),
+      ).toBe(2);
+      for (const code of [owner, operator]) {
+        const refused = yield* Effect.flip(bootstrap.consume(code.credential));
+        expect(refused.message).toContain("no longer available");
+      }
+      yield* bootstrap.consume(viewer.credential);
+    }).pipe(Effect.provide(layer)),
+  );
+
   it.effect(
     "lists and revokes a device's unredeemed linked codes, narrowed like its sessions",
     () =>

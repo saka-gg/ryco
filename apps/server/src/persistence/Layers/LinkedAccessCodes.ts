@@ -36,6 +36,8 @@ export type LinkedCodeSelector =
       readonly trustSource?: AuthAccessLink["trustSource"];
       readonly enrollmentId?: string | null;
       readonly accountId?: string | null;
+      /** Only codes linked at one of these roles; every role when absent. */
+      readonly roles?: ReadonlyArray<AuthAccessLink["role"]>;
     };
 
 export interface LinkedAccessCodes {
@@ -125,6 +127,7 @@ export const makeLinkedAccessCodes = Effect.gen(function* () {
                       ? sql`link_account_id IS NULL`
                       : sql`link_account_id = ${selector.accountId}`,
                   ]),
+              ...(selector.roles === undefined ? [] : [sql.in("link_role", selector.roles)]),
             ]
           : "allLinks" in selector
             ? [sql`link_trust_source IS NOT NULL`]

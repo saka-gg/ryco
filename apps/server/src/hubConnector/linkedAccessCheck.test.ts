@@ -3,7 +3,9 @@ import type { RelayEffectiveRole } from "@ryco/contracts/relay";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  channelDeviceLinks,
   linkedAccessCloseReaction,
+  linkedAccessOpenNarrowing,
   LINKED_ACCESS_CHECK_MIN_INTERVAL_MS,
   LINKED_ACCESS_CHECK_PERIOD_MS,
   LINKED_ACCESS_CHECK_UNSUPPORTED_RETRY_MS,
@@ -110,6 +112,47 @@ describe("linked access check", () => {
     expect(linkedAccessCloseReaction("grant_revoked", null)).toEqual({
       revokeDevice: false,
       check: false,
+    });
+  });
+
+  it("narrows a device's own links to the role its new relay channel opened at", () => {
+    const key = new Uint8Array(32).fill(7);
+    const encoded = Buffer.from(key).toString("base64url");
+    const enrolled = {
+      trustSource: "account-enrolled",
+      enrollmentId: "enr_studio",
+      accountId: "acct_a",
+      clientIdentityFingerprint: key,
+    } as const;
+    // Only the channel's own enrollment and account: another account on the same key keeps its own.
+    expect(linkedAccessOpenNarrowing({ ...enrolled, role: "viewer" })).toEqual({
+      clientFingerprint: encoded,
+      trustSource: "account-enrolled",
+      enrollmentId: "enr_studio",
+      accountId: "acct_a",
+      roles: ["operator", "owner"],
+    });
+    expect(linkedAccessOpenNarrowing({ ...enrolled, role: "operator" })?.roles).toEqual(["owner"]);
+    // Nothing is above owner, and nothing is ever raised.
+    expect(linkedAccessOpenNarrowing({ ...enrolled, role: "owner" })).toBeNull();
+    // A locally verified device: its key, under no enrollment.
+    expect(
+      linkedAccessOpenNarrowing({
+        trustSource: "locally-verified",
+        clientIdentityFingerprint: key,
+        role: "viewer",
+      }),
+    ).toEqual({
+      clientFingerprint: encoded,
+      trustSource: "locally-verified",
+      roles: ["operator", "owner"],
+    });
+    // A grant from before nodes kept the account names none.
+    const { accountId: _accountId, ...withoutAccount } = enrolled;
+    expect(channelDeviceLinks({ ...withoutAccount, role: "owner" })).toEqual({
+      clientFingerprint: encoded,
+      trustSource: "account-enrolled",
+      enrollmentId: "enr_studio",
     });
   });
 

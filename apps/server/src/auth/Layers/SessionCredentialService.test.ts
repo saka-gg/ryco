@@ -497,6 +497,86 @@ it.layer(NodeServices.layer)("SessionCredentialServiceLive", (it) => {
     }).pipe(Effect.provide(withStore())),
   );
 
+  it.effect("keeps a locally verified device's link within 24 hours, older links included", () =>
+    Effect.gen(function* () {
+      const sessions = yield* SessionCredentialService;
+      const sql = yield* SqlClient.SqlClient;
+      const secrets = yield* ServerSecretStore;
+      const localLink = {
+        trustSource: "locally-verified",
+        enrollmentId: null,
+        clientFingerprint: "fp-desk",
+        role: "operator",
+      } as const;
+      const issuedAtMs = yield* Clock.currentTimeMillis;
+      const dayMs = issuedAtMs + Duration.toMillis(Duration.hours(24));
+      const fourDaysMs = issuedAtMs + Duration.toMillis(Duration.days(4));
+      const local = yield* sessions.issue({
+        method: "bearer-session-token",
+        subject: "hub-linked",
+        link: localLink,
+      });
+      expect(local.expiresAt.epochMilliseconds).toBe(dayMs);
+      // An account-enrolled device keeps its four days.
+      const enrolled = yield* sessions.issue({
+        method: "bearer-session-token",
+        subject: "hub-linked",
+        link: studioLink,
+      });
+      expect(enrolled.expiresAt.epochMilliseconds).toBe(fourDaysMs);
+
+      // What a node before the 24-hour limit wrote: a four-day row and token.
+      const earlier = yield* sessions.issue({
+        method: "bearer-session-token",
+        subject: "hub-linked",
+        link: localLink,
+      });
+      yield* sql`
+        UPDATE auth_sessions
+        SET expires_at = ${new Date(fourDaysMs).toISOString()}
+        WHERE session_id = ${earlier.sessionId}
+      `;
+      const claims = JSON.parse(
+        Buffer.from(earlier.token.split(".")[0] ?? "", "base64url").toString("utf8"),
+      ) as Record<string, unknown>;
+      const payload = base64UrlEncode(JSON.stringify({ ...claims, exp: fourDaysMs }));
+      const signingKey = yield* secrets.getOrCreateRandom("server-signing-key", 32);
+      const fourDayToken = `${payload}.${signPayload(payload, signingKey)}`;
+      const verified = yield* sessions.verify(fourDayToken);
+      expect(verified.expiresAt?.epochMilliseconds).toBe(dayMs);
+      const socketToken = yield* sessions.issueWebSocketToken(earlier.sessionId, {
+        ttl: Duration.days(2),
+      });
+      expect(
+        (yield* sessions.verifyWebSocketToken(socketToken.token)).expiresAt?.epochMilliseconds,
+      ).toBe(dayMs);
+      const socket = yield* sessions
+        .awaitEnd({ sessionId: verified.sessionId, chainId: verified.chainId })
+        .pipe(Effect.forkChild({ startImmediately: true }));
+
+      // It renews only over the relay, never by rotation.
+      yield* TestClock.adjust(Duration.hours(2));
+      const refused = yield* Effect.flip(sessions.rotate(local.sessionId));
+      expect((refused as SessionRotationError).reason).toBe("renewal-limit");
+
+      yield* TestClock.adjust(Duration.hours(22));
+      // The live socket closes at the 24 hours.
+      yield* Fiber.join(socket);
+      for (const token of [local.token, fourDayToken]) {
+        expect((yield* Effect.flip(sessions.verify(token))).message).toBe("Session token expired.");
+      }
+      expect((yield* Effect.flip(sessions.verifyWebSocketToken(socketToken.token))).message).toBe(
+        "Websocket session expired.",
+      );
+      expect((yield* sessions.verify(enrolled.token)).expiresAt?.epochMilliseconds).toBe(
+        fourDaysMs,
+      );
+      expect((yield* sessions.listActive()).map((entry) => entry.sessionId)).toEqual([
+        enrolled.sessionId,
+      ]);
+    }).pipe(Effect.provide(withStore())),
+  );
+
   it.effect("ends a socket's wait when its pairing is revoked, or a link at its end", () =>
     Effect.gen(function* () {
       const sessions = yield* SessionCredentialService;

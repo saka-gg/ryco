@@ -11,7 +11,9 @@ import type { SavedEnvironmentRecord } from "./catalog.ts";
  * that same node and proves it holds the node identity key the relay channel
  * verified, and redeems the code there like a pasted pairing link. The node's
  * linked session lives four days; the client links again through the relay
- * well before then.
+ * well before then. A device the node's owner approved locally (never enrolled
+ * through the Hub) gets 24 hours: its address refuses the bearer after that,
+ * and the refusal links it again over the relay.
  */
 
 const DAY_MS = 24 * 60 * 60 * 1000;

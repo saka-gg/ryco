@@ -111,8 +111,9 @@ export interface SessionCredentialServiceShape {
     readonly role?: SessionRole;
     readonly client?: AuthClientMetadata;
     /**
-     * A Hub-linked session. It lives at most `LINKED_SESSION_MAX_AGE` from
-     * issue, and rotation never carries its chain past that.
+     * A Hub-linked session. It lives at most `linkedSessionMaxAge` from issue
+     * (four days, a locally verified device's 24 hours), and rotation never
+     * carries its chain past that.
      */
     readonly link?: AuthAccessLink;
   }) => Effect.Effect<IssuedSession, SessionCredentialError>;
