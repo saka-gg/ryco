@@ -55,9 +55,7 @@ import {
   STALL_NEVER_STARTED_MS,
   STALL_WAITING_ON_YOU_MS,
   buildDelegationReturnCommand,
-  buildStallNoticeCommand,
   compareCodeUnits,
-  renderStallNotice,
   delegationWakeIds,
   deliveryExpiresAtMs,
   isStoredAttachmentWake,
@@ -236,6 +234,10 @@ export const makeCompletionReturnDelivery = Effect.gen(function* () {
     ThreadId,
     { readonly sinceMs: number; readonly checkedMs: number }
   >();
+  /** Stall notices' texts and commands, loaded with the first notice this node sends. */
+  const stallMessages = yield* Effect.cached(
+    Effect.promise(() => import("../completionReturnStallMessages.ts")),
+  );
 
   const publish = (proposalIds: Iterable<AgentControlProposalId>) =>
     Effect.forEach(
@@ -960,6 +962,7 @@ export const makeCompletionReturnDelivery = Effect.gen(function* () {
       )
         return "dropped" as const;
       if (yield* parentReverting(record.parentThreadId, ctx)) return "held" as const;
+      const { buildStallNoticeCommand, renderStallNotice } = yield* stallMessages;
       const command = buildStallNoticeCommand({
         parent: parent.value,
         latestUserMessageId: yield* fence.latestUserMessageId(record.parentThreadId),
