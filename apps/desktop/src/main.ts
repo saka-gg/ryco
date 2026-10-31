@@ -78,6 +78,7 @@ import { isRemoteEditorLink } from "@ryco/shared/remoteEditorLink";
 import { AsyncRotatingFileSink, DESKTOP_BACKEND_LOG_FILE_NAME } from "@ryco/shared/logging";
 import { normalizeHubNodeName } from "@ryco/shared/nodeIdentity";
 import { rycoDesktopFlavorIdentity, updateFilesBelongToFlavor } from "@ryco/shared/desktopFlavor";
+import { flavorImportAllowedSourceHome } from "@ryco/shared/flavorImport";
 import { readEnv } from "@ryco/shared/runtimeEnv";
 import { parsePersistedServerObservabilitySettings } from "@ryco/shared/serverSettings";
 import {
@@ -364,6 +365,19 @@ const DESKTOP_PATHS = resolveDesktopPaths({
   flavor: DESKTOP_FLAVOR,
 });
 const BACKEND_BASE_DIR = DESKTOP_PATHS.backendBaseDir;
+/**
+ * Ryco Nightly only: the one Ryco data home its backend may copy from when Ryco asked for a copy
+ * (`@ryco/shared/flavorImport`): the home Ryco handed over when it opened Nightly, else `~/.ryco`.
+ * Never Nightly's own home. Ryco itself sends none, so its backend never takes a copy.
+ */
+const FLAVOR_IMPORT_SOURCE_HOME =
+  DESKTOP_FLAVOR === "nightly"
+    ? flavorImportAllowedSourceHome({
+        env: process.env,
+        homeDir: OS.homedir(),
+        nightlyHome: BACKEND_BASE_DIR,
+      })
+    : null;
 const STATE_DIR = DESKTOP_PATHS.stateDir;
 const DESKTOP_SETTINGS_PATH = DESKTOP_PATHS.desktopSettingsPath;
 const CLIENT_SETTINGS_PATH = Path.join(STATE_DIR, "client-settings.json");
@@ -3849,6 +3863,9 @@ function writeBackendBootstrapEnvelope(
       desktopControlToken: input.controlToken,
       ...(desktopShellEnvironment === null ? {} : { shellEnvironment: desktopShellEnvironment }),
       ...(computerUseRuntime ? { computerUseBridge: computerUseRuntime.backendBinding() } : {}),
+      ...(FLAVOR_IMPORT_SOURCE_HOME === null
+        ? {}
+        : { flavorImport: { allowedSourceHome: FLAVOR_IMPORT_SOURCE_HOME } }),
       tailscaleServeEnabled: tailscaleServe.enabled,
       tailscaleServePort: tailscaleServe.port,
       hubConnectorEnabled: hubLaunch.enabled,

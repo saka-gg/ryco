@@ -387,6 +387,19 @@ describe("server boot import boundaries", () => {
     expect(reachable).toContain("apps/server/src/provider/providerMaintenanceRunnerRuntime.ts");
   });
 
+  it("loads the copy of Ryco's data into Ryco Nightly only when one was asked for", () => {
+    // Boot checks for the request (flavorImportStartup.ts); the copy, its table policy and the
+    // backup code it uses load with import().
+    const graph = staticGraph("src/cliMain.ts");
+    expect(graph.files).toContain("apps/server/src/flavorImportStartup.ts");
+    expect(graph.files.filter((file) => file.startsWith("apps/server/src/flavorImport/"))).toEqual(
+      [],
+    );
+    expect(staticGraph("src/cliMain.ts", { dynamic: true }).files).toContain(
+      "apps/server/src/flavorImport/consumeFlavorImport.ts",
+    );
+  });
+
   it("loads the repository clone runner with the first clone", () => {
     const graph = staticGraph("src/cliMain.ts");
     expect(graph.files).toContain(
@@ -626,6 +639,10 @@ describe.skipIf(!hasCurrentBuild)("built server bundle", () => {
       // Loaded once an OpenCode server is detected as 2.x.
       expect(source).not.toMatch(/^\/\/#region .*@opencode\//mu);
       expect(source).not.toMatch(/^\/\/#region src\/provider\/openCodeV2\w*\.ts$/mu);
+      // Loaded only on the start of Ryco Nightly after Ryco asked it to copy its data. In case a
+      // module carries no region marker of its own: the copy's refusal text is unique.
+      expect(source).not.toMatch(/^\/\/#region src\/flavorImport\//mu);
+      expect(source).not.toContain("Ryco Nightly copies no links");
       // Loaded with the first provider sign-in call.
       expect(source).not.toMatch(
         /^\/\/#region src\/provider\/signIn\/(?:providerSignInRuntime|codexDeviceCodeSignIn|terminalSignIn|signInCommands|privateDirectory)\.ts$/mu,

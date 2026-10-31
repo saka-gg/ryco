@@ -924,6 +924,45 @@ it.layer(NodeServices.layer)("cli config resolution", (it) => {
     }),
   );
 
+  it.effect("takes the envelope's copy allowance for Ryco Nightly only in desktop mode", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const baseDir = yield* fs.makeTempDirectoryScoped({ prefix: "ryco-cli-config-flavor-" });
+      const stableHome = join(baseDir, "stable-home");
+      const resolveWith = (envelope: Record<string, unknown>) =>
+        Effect.gen(function* () {
+          const fd = yield* openBootstrapFd({ rycoHome: baseDir, noBrowser: true, ...envelope });
+          return yield* resolveServerConfig(
+            makeServerFlags(baseDir, { baseDir: Option.none(), bootstrapFd: Option.some(fd) }),
+            Option.none(),
+          ).pipe(
+            Effect.provide(
+              Layer.mergeAll(
+                ConfigProvider.layer(ConfigProvider.fromEnv({ env: {} })),
+                NetService.layer,
+              ),
+            ),
+          );
+        });
+
+      const desktop = yield* resolveWith({
+        mode: "desktop",
+        flavorImport: { allowedSourceHome: stableHome },
+      });
+      expect(desktop.flavorImport).toEqual({ allowedSourceHome: stableHome });
+
+      const web = yield* resolveWith({
+        mode: "web",
+        flavorImport: { allowedSourceHome: stableHome },
+      });
+      expect(web.mode).toBe("web");
+      expect(web.flavorImport).toBeUndefined();
+
+      const absent = yield* resolveWith({ mode: "desktop" });
+      expect(absent.flavorImport).toBeUndefined();
+    }),
+  );
+
   it.effect("creates derived runtime directories during config resolution", () =>
     Effect.gen(function* () {
       const fs = yield* FileSystem.FileSystem;
