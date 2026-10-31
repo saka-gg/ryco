@@ -129,7 +129,16 @@ const makeFixture = (): Fixture => {
       db.close();
     }
   }
-  write(join(stableState, "settings.json"), JSON.stringify({ theme: "stable" }));
+  // Ryco's own folders: Nightly must keep its own, so its folder sweeps never reach these.
+  write(
+    join(stableState, "settings.json"),
+    JSON.stringify({
+      theme: "stable",
+      chatsRoot: join(root, "stable-chats"),
+      worktreeRoot: join(root, "stable-worktrees"),
+      projectWorktreeRoots: { "project-1": join(root, "stable-project-worktrees") },
+    }),
+  );
   write(join(stableState, "attachments", "thread-1", "image.png"), "stable image");
   write(join(stableState, "task-files", "file-1"), "stable task file");
   for (const name of NEVER_COPIED) write(join(stableState, name), `stable ${name}`);

@@ -62,6 +62,32 @@ import { type FlavorImportScrubReport, scrubFlavorImportCopy } from "./flavorImp
 const SOURCE_STATE_DIRECTORY = "userdata";
 /** The files Nightly takes from Ryco's state folder besides the database. Nothing else is read. */
 export const FLAVOR_IMPORT_COPIED_FILES = ["settings.json", "keybindings.json"] as const;
+/**
+ * Settings that name Ryco's own folders. Nightly keeps its defaults for them (folders in its own
+ * home): its idle chat-folder sweep and orphan cleanup act on these folders, and must never reach
+ * Ryco's chats or worktrees.
+ */
+export const FLAVOR_IMPORT_DROPPED_SETTINGS = [
+  "chatsRoot",
+  "worktreeRoot",
+  "projectWorktreeRoots",
+] as const;
+
+/** `settings.json` without the settings that name Ryco's folders; other files unchanged. */
+function stagedFileContents(name: string, contents: Buffer): Buffer {
+  if (name !== "settings.json") return contents;
+  let settings: unknown;
+  try {
+    settings = JSON.parse(contents.toString("utf8"));
+  } catch {
+    // Nightly's settings loader treats an unreadable file as it treats its own.
+    return contents;
+  }
+  if (typeof settings !== "object" || settings === null || Array.isArray(settings)) return contents;
+  const kept = { ...(settings as Record<string, unknown>) };
+  for (const key of FLAVOR_IMPORT_DROPPED_SETTINGS) delete kept[key];
+  return Buffer.from(`${JSON.stringify(kept, null, 2)}\n`, "utf8");
+}
 export const FLAVOR_IMPORT_COPIED_FOLDERS = ["attachments", "task-files"] as const;
 const DATABASE_SIDECARS = ["-wal", "-shm", "-journal"] as const;
 /** In Nightly's home: copies being prepared, removed by the next copy if a crash left one. */
@@ -319,7 +345,10 @@ async function stageEntries(sourceStateDir: string, stagingDir: string): Promise
     if (info === null) continue;
     const contents = info.isFile() ? await readRegularFile(from, Number.MAX_SAFE_INTEGER) : null;
     if (contents === null) throw refusal(linkedEntry(from));
-    await writeFile(Path.join(stagingDir, name), contents, { flag: "wx", mode: 0o600 });
+    await writeFile(Path.join(stagingDir, name), stagedFileContents(name, contents), {
+      flag: "wx",
+      mode: 0o600,
+    });
     staged.push(name);
   }
   for (const name of FLAVOR_IMPORT_COPIED_FOLDERS) {
