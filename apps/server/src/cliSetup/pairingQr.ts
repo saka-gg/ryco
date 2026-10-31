@@ -72,6 +72,8 @@ export function formatPairingQrBlock(input: {
   readonly footer: ReadonlyArray<string>;
   readonly dim?: (text: string) => string;
   readonly indent?: string;
+  /** Print the primary link under the code (off when the caller printed it already). */
+  readonly showPairingUrl?: boolean;
 }): string {
   const dim = input.dim ?? ((text: string) => text);
   const indent = input.indent ?? "";
@@ -83,7 +85,7 @@ export function formatPairingQrBlock(input: {
       ? [`${indent}${LOOPBACK_ONLY_PAIRING_NOTE}`]
       : [input.renderQrCode(links.qrUrl)]),
     "",
-    `${indent}${links.pairingUrl}`,
+    ...(input.showPairingUrl === false ? [] : [`${indent}${links.pairingUrl}`]),
     ...links.alternativeLinks.map((link) => `${indent}${dim(`${link.label}:`)} ${link.url}`),
     "",
     ...input.footer.map((line) => `${indent}${dim(line)}`),

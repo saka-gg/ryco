@@ -58,11 +58,26 @@ export const isLoopbackHost = (host: string | undefined): boolean => {
 export const LOOPBACK_ONLY_PAIRING_NOTE =
   "Only this computer can reach this node. Turn on network access or Tailscale Serve to pair another device.";
 
+/**
+ * A host a phone scanning a QR code cannot reach this node at: loopback in any spelling the URL
+ * parser leaves (127/8, `::1`, IPv4-mapped `::ffff:7f..`, `localhost` and its subdomains, with or
+ * without a trailing dot) and the unspecified addresses.
+ */
+const isUnreachableFromAnotherDevice = (hostname: string): boolean => {
+  const host = hostname.toLowerCase().replace(/\.$/u, "");
+  return (
+    isLoopbackHost(host) ||
+    host.endsWith(".localhost") ||
+    isWildcardHost(host) ||
+    /^\[::ffff:7f[0-9a-f]{2}:[0-9a-f]{1,4}\]$/u.test(host) ||
+    /^\[::ffff:127\./u.test(host)
+  );
+};
+
 /** A pairing link worth drawing as a QR code: one another device can reach. */
 export const pairingQrUrl = (pairingUrl: string): string | null => {
   try {
-    const hostname = new URL(pairingUrl).hostname;
-    return isLoopbackHost(hostname) ? null : pairingUrl;
+    return isUnreachableFromAnotherDevice(new URL(pairingUrl).hostname) ? null : pairingUrl;
   } catch {
     return null;
   }

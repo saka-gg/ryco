@@ -189,7 +189,18 @@ it("never puts a loopback address in a QR code", () => {
   });
   expect(loopbackOnly.pairingUrl).toBe("http://127.0.0.1:3773/pair#token=PAIRCODE");
   expect(loopbackOnly.qrUrl).toBeNull();
-  for (const base of ["http://localhost:3773", "http://[::1]:3773", "http://127.0.0.2:3773"]) {
+  for (const base of [
+    "http://localhost:3773",
+    "http://LOCALHOST.:3773",
+    "http://node.localhost:3773",
+    "http://[::1]:3773",
+    "http://[0:0:0:0:0:0:0:1]:3773",
+    "http://[::ffff:127.0.0.1]:3773",
+    "http://127.0.0.2:3773",
+    "http://127.1:3773",
+    "http://0.0.0.0:3773",
+    "http://[::]:3773",
+  ]) {
     expect(
       resolveHeadlessServeLinks({ endpoints: [], credential: "X", fallbackConnectionString: base })
         .qrUrl,

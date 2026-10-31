@@ -159,6 +159,7 @@ import { RepositoryIdentityResolverLive } from "./project/Layers/RepositoryIdent
 import {
   clearPersistedServerRuntimeStateIfStale,
   isPersistedServerRunning,
+  type PersistedServerRuntimeState,
   readPersistedServerRuntimeState,
 } from "./serverRuntimeState.ts";
 import { WorkspacePaths } from "./workspace/Services/WorkspacePaths.ts";
@@ -1651,7 +1652,7 @@ const tokenOnlyFlag = Flag.Boolean("token-only").pipe(
 
 const qrFlag = Flag.Boolean("qr").pipe(
   Flag.withDescription(
-    "Print the pairing link as a QR code (default when the output is a terminal; `--no-qr` turns it off).",
+    "Print the pairing link as a QR code (default when the output is a terminal, never with --json; `--no-qr` turns it off).",
   ),
   Flag.optional,
 );
@@ -1678,40 +1679,49 @@ const pairingCreateCommand = Command.make("create", {
             ...(Option.isSome(flags.ttl) ? { ttl: flags.ttl.value } : {}),
             ...(Option.isSome(flags.label) ? { label: flags.label.value } : {}),
           });
-          // `--json` never draws a QR; it reports the link a QR would hold instead.
+          // `--json` never draws a QR and never looks for the node: with `--base-url` it reports
+          // the link a QR would hold, as before plus `qrUrl`.
           const wantsQr = !flags.json && Option.getOrElse(flags.qr, () => isInteractiveTerminal());
-          if (!wantsQr && !flags.json) {
+          if (!wantsQr) {
             yield* Console.log(
               formatIssuedPairingCredential(issued, {
-                ...(Option.isSome(flags.baseUrl) ? { baseUrl: flags.baseUrl.value } : {}),
+                json: flags.json,
+                ...(Option.isSome(flags.baseUrl)
+                  ? (() => {
+                      const links = pairingLinksForBaseUrl(issued.credential, flags.baseUrl.value);
+                      return { pairUrl: links.pairingUrl, qrUrl: links.qrUrl };
+                    })()
+                  : {}),
               }),
             );
             return;
           }
-          const origin = Option.isSome(flags.baseUrl)
+          const runtime = Option.isSome(flags.baseUrl)
             ? null
-            : yield* probeLocalServer(config.serverRuntimeStatePath);
+            : yield* probeLocalServerRuntime(config.serverRuntimeStatePath);
+          // The node's own bind host (its runtime file) and its saved Tailscale Serve settings:
+          // the QR must hold an address that node really listens on.
+          const savedNode =
+            runtime === null
+              ? null
+              : yield* Effect.promise(() => readNodeConfig(nodeConfigPath(config.stateDir)));
           const links = Option.isSome(flags.baseUrl)
             ? pairingLinksForBaseUrl(issued.credential, flags.baseUrl.value)
-            : origin === null
+            : runtime === null
               ? null
               : yield* Effect.promise(() =>
                   discoverPairingLinks({
                     credential: issued.credential,
-                    origin,
-                    host: config.host,
-                    tailscaleServeEnabled: config.tailscaleServeEnabled,
-                    tailscaleServePort: config.tailscaleServePort,
+                    origin: runtime.origin,
+                    host: runtime.host,
+                    tailscaleServeEnabled:
+                      config.tailscaleServeEnabled || savedNode?.tailscaleServe === true,
+                    tailscaleServePort: savedNode?.tailscaleServePort ?? config.tailscaleServePort,
                   }),
-                );
+                ).pipe(Effect.orElseSucceed(() => null));
           const summary = formatIssuedPairingCredential(issued, {
-            json: flags.json,
-            ...(links === null ? {} : { pairUrl: links.pairingUrl, qrUrl: links.qrUrl }),
+            ...(links === null ? {} : { pairUrl: links.pairingUrl }),
           });
-          if (flags.json) {
-            yield* Console.log(summary);
-            return;
-          }
           if (links === null) {
             yield* Console.log(`${summary}${PAIRING_QR_NO_NODE_NOTE}\n`);
             return;
@@ -1731,6 +1741,8 @@ const pairingCreateCommand = Command.make("create", {
               footer: [
                 `One-time client link, valid for ${minutes} minute${minutes === 1 ? "" : "s"}.`,
               ],
+              // The summary above already printed it as "Pair URL".
+              showPairingUrl: false,
               dim,
             })}`,
           );
@@ -4197,20 +4209,26 @@ const resolveSetupContext = (baseDir: Option.Option<string>) =>
   });
 
 /** The running node's origin, when a server recorded one and actually answers there. */
-const probeLocalServer = (serverRuntimeStatePath: string) =>
+/** The runtime file of this home's node, when that node answers. */
+const probeLocalServerRuntime = (serverRuntimeStatePath: string) =>
   readPersistedServerRuntimeState(serverRuntimeStatePath).pipe(
     Effect.flatMap((state) =>
       Option.isNone(state)
-        ? Effect.succeed<string | null>(null)
+        ? Effect.succeed<PersistedServerRuntimeState | null>(null)
         : Effect.tryPromise(async () => {
             const response = await fetch(
               new URL("/.well-known/ryco/environment", state.value.origin),
               { signal: AbortSignal.timeout(1_500) },
             );
-            return response.ok ? state.value.origin : null;
+            return response.ok ? state.value : null;
           }),
     ),
     Effect.orElseSucceed(() => null),
+  );
+
+const probeLocalServer = (serverRuntimeStatePath: string) =>
+  probeLocalServerRuntime(serverRuntimeStatePath).pipe(
+    Effect.map((state) => state?.origin ?? null),
   );
 
 const emptyServerFlags = (baseDir: Option.Option<string>): CliServerFlags => ({
