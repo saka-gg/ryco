@@ -247,6 +247,8 @@ import {
   resolveOptionalAnswerRoute,
   sendOptionalAnswerAsMessage,
 } from "@ryco/client-runtime/state/user-input";
+import { SecretRequestCard } from "./SecretRequestCard";
+import { mobileSecretRequestCards } from "./secretRequestCardModel";
 import { sendThreadTurn } from "./sendThreadTurn";
 import { runUndoFileChanges } from "./undoFileChanges";
 import {
@@ -1173,6 +1175,25 @@ export function ThreadDetailScreen(props: {
     ],
   );
   const threadActivities = thread?.activities;
+  const secretRequests = useMemo(
+    () =>
+      mobileSecretRequestCards({
+        activities: threadActivities,
+        nowMs: settlementNowMs,
+        nodeSupports: environmentServerConfig?.environment.capabilities.secretRequests === true,
+        role: environmentRow?.role,
+        mutationReady: environmentRow?.mutationReady ?? false,
+        promptsDisabled: cachedView.promptsDisabled,
+      }),
+    [
+      cachedView.promptsDisabled,
+      environmentRow?.mutationReady,
+      environmentRow?.role,
+      environmentServerConfig,
+      settlementNowMs,
+      threadActivities,
+    ],
+  );
   const pillFastEnabled = modelPicker?.pillFastEnabled === true;
   const fastModeNotice = useMemo(
     () =>
@@ -2545,6 +2566,7 @@ export function ThreadDetailScreen(props: {
     pendingApprovals.length > 0 ||
     pendingUserInputs.length > 0 ||
     optionalUserInputs.length > 0 ||
+    secretRequests.requests.length > 0 ||
     agentControlProposals.length > 0;
   // While approvals wait on a turn this message could steer, a send declines them and
   // redirects it: the same decision the send makes, from the composer's current selection.
@@ -2755,6 +2777,15 @@ export function ThreadDetailScreen(props: {
               route={resolveOptionalAnswerRoute({ userInput, session: thread?.session })}
               onSendAsMessage={sendOptionalAnswer}
               disabled={cachedView.promptsDisabled}
+            />
+          ))}
+          {secretRequests.requests.map((request) => (
+            <SecretRequestCard
+              key={request.requestId}
+              environmentId={environmentId}
+              threadId={threadId}
+              request={request}
+              disabledReason={secretRequests.access.reason}
             />
           ))}
           {agentControlProposals.map((proposal) => (

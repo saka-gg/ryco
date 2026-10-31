@@ -6,7 +6,7 @@ import { completionFixture } from "../../agentControl/completionReturnTestSuppor
 import {
   derivePendingThreadRequests,
   derivePendingThreadRequestState,
-} from "@ryco/shared/threadActivity";
+} from "@ryco/shared/pendingThreadRequests";
 import fs from "node:fs";
 import * as SqlClient from "effect/sql/SqlClient";
 import os from "node:os";

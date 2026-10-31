@@ -241,6 +241,16 @@
       "import": "./src/threadForkCarried.ts",
       "require": "./src/threadForkCarried.ts"
     },
+    "./secret-request": {
+      "types": "./src/secretRequest.ts",
+      "import": "./src/secretRequest.ts",
+      "require": "./src/secretRequest.ts"
+    },
+    "./secret-request-details": {
+      "types": "./src/secretRequestDetails.ts",
+      "import": "./src/secretRequestDetails.ts",
+      "require": "./src/secretRequestDetails.ts"
+    },
     "./usage": {
       "types": "./src/usage.ts",
       "import": "./src/usage.ts",

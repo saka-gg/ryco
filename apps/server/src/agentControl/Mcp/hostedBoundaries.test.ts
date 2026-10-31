@@ -74,6 +74,7 @@ describe("pre-auth server environment descriptor", () => {
       "repositoryIdentity",
       "requiredWorktreeBootstrap",
       "responseStreamingModes",
+      "secretRequests",
       "serverFollowUpQueue",
       "stagedOnlyCommit",
       "storageManagement",

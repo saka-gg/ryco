@@ -29,7 +29,7 @@ import type {
   ThreadId,
 } from "@ryco/contracts";
 import { deriveBackgroundWork } from "@ryco/shared/backgroundWork";
-import { derivePendingThreadRequestState } from "@ryco/shared/threadActivity";
+import { derivePendingThreadRequestState } from "@ryco/shared/pendingThreadRequests";
 import {
   Cause,
   Clock,

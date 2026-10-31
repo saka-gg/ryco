@@ -46,7 +46,9 @@ import {
   AGENT_CONTROL_MCP_WAIT_TIMEOUT_MS_MAX,
   AGENT_CONTROL_QUEUE_MCP_TOOLS,
   AGENT_CONTROL_WORKTREE_MCP_TOOLS,
+  AGENT_CONTROL_SECRET_REQUEST_MCP_TOOL,
 } from "@ryco/contracts";
+import { threadWakeSource, waitUntil } from "../eventDrivenWait.ts";
 import { Effect, Exit, Layer, Option, Scope, Stream } from "effect";
 import { ServerConfig } from "../../config.ts";
 import { CliProxyService } from "../../cliProxy/CliProxyService.ts";
@@ -351,7 +353,27 @@ const makeAgentControlMcpServer = Effect.gen(function* () {
         }),
       ),
   });
-  const tools = withCompleteAgentControlCatalog(handoffTools);
+  // `ryco_request_secret`: a private card for a secret the agent needs, written into a
+  // Git-ignored dotenv file of its own checkout. Its module (and the dotenv writer) loads the
+  // first time a session that may ask lists or calls tools, never at boot.
+  const secretTools = withLazyAgentControlTools(handoffTools, {
+    names: [AGENT_CONTROL_SECRET_REQUEST_MCP_TOOL],
+    writeNames: [AGENT_CONTROL_SECRET_REQUEST_MCP_TOOL],
+    mayUse: (session) =>
+      session.grantedCapabilities.includes(AGENT_CONTROL_CAPABILITIES.requestSecrets),
+    load: () =>
+      import("../Mcp/secretRequestTools.ts").then((module) =>
+        module.withSecretRequestTools(handoffTools, {
+          policy,
+          registry,
+          engine,
+          projections,
+          ...(Option.isSome(workspaceAccess) ? { workspaceAccess: workspaceAccess.value } : {}),
+          helpers: { findThreadInArray, waitUntil, threadWakeSource },
+        }),
+      ),
+  });
+  const tools = withCompleteAgentControlCatalog(secretTools);
 
   // Start/stop transitions are serialized so a rapid settings flip cannot
   // interleave a start with a teardown. `shuttingDown` latches inside the

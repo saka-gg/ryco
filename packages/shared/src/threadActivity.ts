@@ -5,8 +5,16 @@ import {
   type OrchestrationThreadActivity,
 } from "@ryco/contracts/orchestration";
 import { THREAD_FORKED_ACTIVITY_KIND } from "@ryco/contracts/thread-fork";
+import {
+  SECRET_REQUESTED_ACTIVITY_KIND,
+  SECRET_RESOLVED_ACTIVITY_KIND,
+} from "@ryco/contracts/secret-request";
 import * as Schema from "effect/Schema";
 import { backgroundWorkCheckpoint, BACKGROUND_WORK_CHECKPOINT } from "./backgroundWork.ts";
+import {
+  comparePendingRequestActivities,
+  type PendingThreadRequestActivity,
+} from "./pendingRequestOrder.ts";
 import { isForkBaseItemId } from "./threadFork.ts";
 
 export const CONTEXT_COMPACTION_ACTIVITY_KIND = "context-compaction";
@@ -77,7 +85,11 @@ export function isThreadActivityMilestone(
   return (
     isContextCompactionActivity(activity) ||
     isTerminalContextHandoffActivity(activity) ||
-    isThreadForkedActivity(activity)
+    isThreadForkedActivity(activity) ||
+    // Rare, small and long-lived (a request waits up to a day): the cap never drops a pending
+    // secret request's card or the answer that closed it.
+    activity.kind === SECRET_REQUESTED_ACTIVITY_KIND ||
+    activity.kind === SECRET_RESOLVED_ACTIVITY_KIND
   );
 }
 
@@ -133,8 +145,8 @@ function openOptionalQuestionActivityIds(
 }
 
 /**
- * The activity kinds `derivePendingThreadRequests` reads: they open, resolve or clear a pending
- * approval or user-input request.
+ * The activity kinds `derivePendingThreadRequests` (`@ryco/shared/pendingThreadRequests`) reads:
+ * they open, resolve or clear a pending approval, user-input or secret request.
  */
 export const PENDING_REQUEST_ACTIVITY_KINDS = [
   "approval.requested",
@@ -143,24 +155,9 @@ export const PENDING_REQUEST_ACTIVITY_KINDS = [
   "user-input.requested",
   "user-input.resolved",
   "provider.user-input.respond.failed",
+  SECRET_REQUESTED_ACTIVITY_KIND,
+  SECRET_RESOLVED_ACTIVITY_KIND,
 ] as const;
-
-interface PendingThreadRequestActivity {
-  readonly kind: string;
-  readonly payload: unknown;
-  readonly createdAt: string;
-  readonly id?: string | undefined;
-  readonly activityId?: string | undefined;
-  readonly sequence?: number | undefined;
-  readonly turnId?: string | null | undefined;
-}
-
-export interface PendingThreadRequestState {
-  readonly pendingApprovalCount: number;
-  readonly pendingUserInputCount: number;
-  readonly hasPendingApprovals: boolean;
-  readonly hasPendingUserInput: boolean;
-}
 
 function activityRequestId(payload: unknown): string | null {
   if (typeof payload !== "object" || payload === null || !("requestId" in payload)) {
@@ -193,26 +190,21 @@ function isStaleRequestFailure(detail: string | null, requestKind: "approval" | 
   );
 }
 
-function comparePendingRequestActivities(
-  left: PendingThreadRequestActivity,
-  right: PendingThreadRequestActivity,
-): number {
-  const bySequence =
-    (left.sequence ?? Number.MAX_SAFE_INTEGER) - (right.sequence ?? Number.MAX_SAFE_INTEGER);
-  if (bySequence !== 0) return bySequence;
-  const byCreatedAt = left.createdAt.localeCompare(right.createdAt);
-  if (byCreatedAt !== 0) return byCreatedAt;
-  return (left.id ?? left.activityId ?? "").localeCompare(right.id ?? right.activityId ?? "");
-}
-
-export function derivePendingThreadRequests(
-  activities: ReadonlyArray<PendingThreadRequestActivity>,
-): ReadonlyArray<{
+export interface PendingProviderCallbackRequest {
   readonly requestId: string;
   readonly kind: "approval" | "user-input";
   readonly nonBlocking?: boolean;
   readonly turnId: string | null;
-}> {
+}
+
+/**
+ * The pending requests a provider callback answers (approvals and questions). A turn's end, a
+ * superseding turn or a restart invalidates them; a secret request is the node's own and outlives
+ * all three, so it is left out here.
+ */
+export function derivePendingProviderCallbackRequests(
+  activities: ReadonlyArray<PendingThreadRequestActivity>,
+): ReadonlyArray<PendingProviderCallbackRequest> {
   const approvalIds = new Map<string, string | null>();
   const userInputIds = new Map<string, string | null>();
   const optionalIds = new Set<string>();
@@ -260,22 +252,6 @@ export function derivePendingThreadRequests(
   ];
 }
 
-export function derivePendingThreadRequestState(
-  activities: ReadonlyArray<PendingThreadRequestActivity>,
-): PendingThreadRequestState {
-  const requests = derivePendingThreadRequests(activities);
-  const pendingApprovalCount = requests.filter((request) => request.kind === "approval").length;
-  const pendingUserInputCount = requests.filter(
-    (request) => request.kind === "user-input" && !request.nonBlocking,
-  ).length;
-  return {
-    pendingApprovalCount,
-    pendingUserInputCount,
-    hasPendingApprovals: pendingApprovalCount > 0,
-    hasPendingUserInput: pendingUserInputCount > 0,
-  };
-}
-
 /** Response attempts and provider callbacks share the durable orchestration order.
  * Provider-local sequence numbers cannot be compared to local response attempts.
  */
@@ -286,7 +262,9 @@ export function pendingRequestActivityInOrchestrationOrder(
   return activity.kind.startsWith("approval.") ||
     activity.kind === "provider.approval.respond.failed" ||
     activity.kind.startsWith("user-input.") ||
-    activity.kind === "provider.user-input.respond.failed"
+    activity.kind === "provider.user-input.respond.failed" ||
+    activity.kind === SECRET_REQUESTED_ACTIVITY_KIND ||
+    activity.kind === SECRET_RESOLVED_ACTIVITY_KIND
     ? { ...activity, sequence }
     : activity;
 }

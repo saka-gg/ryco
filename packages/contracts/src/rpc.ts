@@ -58,6 +58,11 @@ import {
   ThreadSubscribeLocalServersInput,
 } from "./threadLocalServers.ts";
 import {
+  SecretRequestAnswerInput,
+  SecretRequestAnswerResult,
+  SecretRequestError,
+} from "./secretRequest.ts";
+import {
   ProviderSignInError,
   ProviderSignInInput,
   ProviderSignInRespondInput,
@@ -564,6 +569,7 @@ export const WS_METHODS = {
   threadsForkCarried: "threads.forkCarried",
   threadsSubscribeLocalServers: "threads.subscribeLocalServers",
   threadsStopLocalServer: "threads.stopLocalServer",
+  secretsAnswerRequest: "secrets.answerRequest",
   worktreesSetManualPosition: "worktrees.setManualPosition",
   projectsInitializeGit: "projects.initializeGit",
   projectsPromoteChatPreview: "projects.promoteChatPreview",
@@ -2183,6 +2189,16 @@ export const WsThreadsStopLocalServerRpc = Rpc.make(WS_METHODS.threadsStopLocalS
   error: Schema.Union([ThreadStopLocalServerError, AuthRpcError]),
 });
 
+/**
+ * The user's answer to an agent's `ryco_request_secret` (owner only, on nodes that advertise
+ * `secretRequests`). The value is written into the request's dotenv file and goes nowhere else.
+ */
+export const WsSecretsAnswerRequestRpc = Rpc.make(WS_METHODS.secretsAnswerRequest, {
+  payload: SecretRequestAnswerInput,
+  success: SecretRequestAnswerResult,
+  error: Schema.Union([SecretRequestError, AuthRpcError]),
+});
+
 export const WsSearchThreadMessagesRpc = Rpc.make(WS_METHODS.searchThreadMessages, {
   payload: SearchThreadMessagesInput,
   success: SearchThreadMessagesResult,
@@ -2890,6 +2906,7 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   | typeof WsThreadsForkCarriedRpc
   | typeof WsThreadsSubscribeLocalServersRpc
   | typeof WsThreadsStopLocalServerRpc
+  | typeof WsSecretsAnswerRequestRpc
   | typeof WsThreadsSetManualPositionRpc
   | typeof WsSearchThreadMessagesRpc
   | typeof WsWorktreesSetManualPositionRpc
@@ -3133,6 +3150,7 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   WsThreadsForkCarriedRpc,
   WsThreadsSubscribeLocalServersRpc,
   WsThreadsStopLocalServerRpc,
+  WsSecretsAnswerRequestRpc,
   WsThreadsSetManualPositionRpc,
   WsSearchThreadMessagesRpc,
   WsWorktreesSetManualPositionRpc,
