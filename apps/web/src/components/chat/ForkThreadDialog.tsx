@@ -16,7 +16,10 @@
 // Motion: the dialog grows out of the reply's fork button and folds back into it.
 
 import { scopeProjectRef, scopeThreadRef } from "@ryco/client-runtime/scoped";
-import { CARRIED_FORK_COPY } from "@ryco/client-runtime/state/threads/carriedFork";
+import {
+  CARRIED_FORK_COPY,
+  type CarriedForkTarget,
+} from "@ryco/client-runtime/state/threads/carriedFork";
 import { captureReviewedSendReadiness } from "@ryco/client-runtime/state/composer";
 import {
   alignThreadForkSelection,
@@ -157,20 +160,24 @@ export function ForkThreadDialog() {
  * "This machine" forks on the source's node (the shared attempt controller); "Another machine"
  * carries the conversation to a machine that has the same project (`CarriedForkBody`). The choice
  * shows only while another machine qualifies, and cannot change while a request is in flight.
+ * Nor can the machine list: one that drops off it meanwhile must not unmount the body that is
+ * sending to it, or change which machine it reports on.
  */
 function ForkThreadDialogBody(props: {
   readonly request: ForkThreadDialogRequest;
   readonly onBusyChange: (busy: boolean) => void;
 }) {
   const { request, onBusyChange } = props;
-  const machines = useCarriedForkTargets(request);
+  const liveTargets = useCarriedForkTargets(request);
+  const [frozenTargets, setFrozenTargets] = useState<ReadonlyArray<CarriedForkTarget> | null>(null);
   // A side chat's "Continue as thread" seeds the fork's composer on this machine; carrying it
   // elsewhere would drop that draft, so it stays here.
-  const targets = request.draftSeed ? [] : machines;
+  const targets = request.draftSeed ? [] : (frozenTargets ?? liveTargets);
   const [machine, setMachine] = useState<"this" | "other">("this");
   const [busy, setBusy] = useState(false);
   const handleBusyChange = useEvent((next: boolean) => {
     setBusy(next);
+    setFrozenTargets(next ? targets : null);
     onBusyChange(next);
   });
   const other = machine === "other" && targets.length > 0;

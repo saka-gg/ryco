@@ -1,8 +1,12 @@
 import {
+  type EnvironmentApi,
   type EnvironmentId,
+  EventId,
   MessageId,
+  type OrchestrationThreadActivity,
   ProjectId,
   type RepositoryIdentity,
+  THREAD_FORKED_ACTIVITY_KIND,
   ThreadForkError,
   type ThreadForkResult,
   ThreadId,
@@ -11,19 +15,24 @@ import {
 import {
   CARRIED_THREAD_HISTORY_MAX_MESSAGES,
   CARRIED_THREAD_TEXT_MAX_CHARS,
+  CarriedThreadSource,
   type CarriedThreadHistory,
 } from "@ryco/contracts/thread-fork-carried";
+import * as Schema from "effect/Schema";
 import { describe, expect, it, vi } from "vite-plus/test";
 
 import {
   buildCarriedForkInput,
   buildCarriedThreadHistory,
   carriedForkBranch,
+  carriedForkBranchPushable,
   carriedForkKey,
   carriedForkModel,
   carriedForkSignature,
+  carriedForkSource,
   type CarriedForkTargetCandidate,
   listCarriedForkTargets,
+  readCarriedForkSource,
   runCarriedFork,
   settleCarriedForkKey,
 } from "./carriedFork.ts";
@@ -154,8 +163,7 @@ function candidate(
   return {
     environmentId: environmentId as EnvironmentId,
     label: environmentId,
-    connected: true,
-    allowed: true,
+    access: { hosted: false, role: "owner", phase: "connected" },
     supported: true,
     chatsAvailable: true,
     providers: [
@@ -190,8 +198,13 @@ describe("listCarriedForkTargets", () => {
       candidates: [
         candidate("environment-a"),
         candidate("b-ready"),
-        candidate("c-offline", { connected: false }),
-        candidate("d-viewer", { allowed: false }),
+        candidate("c-offline", { access: { hosted: false, role: "owner", phase: "disconnected" } }),
+        candidate("c-connecting", {
+          access: { hosted: false, role: "operator", phase: "connecting" },
+        }),
+        candidate("d-viewer", { access: { hosted: false, role: "viewer", phase: "connected" } }),
+        candidate("d-no-role", { access: { hosted: false, role: null, phase: "connected" } }),
+        candidate("d-hosted-not-ready", { access: { hosted: true, allowed: false } }),
         candidate("e-old", { supported: false }),
         candidate("f-other-repo", {
           projects: [
@@ -223,6 +236,21 @@ describe("listCarriedForkTargets", () => {
     });
     expect(targets.map((target) => target.environmentId)).toEqual(["b-ready"]);
     expect(targets[0]).toMatchObject({ projectId: "project-b-ready", enabled: true });
+  });
+
+  it("offers an operator's machine, and a hosted one its session allows", () => {
+    const targets = listCarriedForkTargets({
+      sourceEnvironmentId: A,
+      source: sourceProject,
+      driver: "codex",
+      candidates: [
+        candidate("b-operator", {
+          access: { hosted: false, role: "operator", phase: "connected" },
+        }),
+        candidate("c-hosted", { access: { hosted: true, allowed: true } }),
+      ],
+    });
+    expect(targets.map((target) => target.environmentId)).toEqual(["b-operator", "c-hosted"]);
   });
 
   it("maps the source's codex instance to the target's codex instance by driver", () => {
@@ -263,13 +291,23 @@ describe("listCarriedForkTargets", () => {
   });
 });
 
+const HEAD = "a".repeat(40);
+
 describe("carriedForkBranch", () => {
   it("needs a branch on origin with nothing left to push", () => {
-    const status = { isRepo: true, refName: "feature/login", hasUpstream: true, aheadCount: 0 };
+    const status = {
+      isRepo: true,
+      refName: "feature/login",
+      hasUpstream: true,
+      upstreamRef: "origin/feature/login",
+      headCommit: HEAD,
+      aheadCount: 0,
+    };
     expect(carriedForkBranch(status)).toEqual({
       kind: "ready",
       branch: "feature/login",
       baseRef: "origin/feature/login",
+      commit: HEAD,
     });
     expect(carriedForkBranch({ ...status, aheadCount: 2 })).toEqual({
       kind: "unpushed",
@@ -300,9 +338,146 @@ describe("carriedForkBranch", () => {
       projectId: "project-b",
       destination: {
         kind: "new-worktree",
-        start: { kind: "base-ref", baseRef: "origin/feature/login" },
+        start: { kind: "base-ref", baseRef: "origin/feature/login", commit: HEAD },
       },
     });
+  });
+
+  it("needs the upstream to be the branch of the same name on origin", () => {
+    const status = {
+      isRepo: true,
+      refName: "main",
+      hasUpstream: true,
+      upstreamRef: "upstream/main",
+      headCommit: HEAD,
+      aheadCount: 0,
+    };
+    // A local main that tracks another remote is not on origin, whatever its counts say.
+    const other = carriedForkBranch(status);
+    expect(other).toEqual({ kind: "other-upstream", branch: "main", upstreamRef: "upstream/main" });
+    expect(carriedForkBranchPushable(other)).toBe(false);
+    expect(carriedForkBranch({ ...status, upstreamRef: "origin/release" }).kind).toBe(
+      "other-upstream",
+    );
+    // An older node names no upstream and no commit: the branch counts as not pushed.
+    const { upstreamRef: _upstreamRef, headCommit: _headCommit, ...older } = status;
+    const unnamed = carriedForkBranch(older);
+    expect(unnamed).toEqual({ kind: "no-upstream", branch: "main" });
+    expect(carriedForkBranchPushable(unnamed)).toBe(true);
+    expect(
+      carriedForkBranch({ ...status, upstreamRef: "origin/main", headCommit: undefined }),
+    ).toEqual({ kind: "no-upstream", branch: "main" });
+    expect(carriedForkBranch({ ...status, upstreamRef: "origin/main" }).kind).toBe("ready");
+  });
+});
+
+describe("carriedForkSource", () => {
+  it("bounds the machine name and title without leaving a space where they were cut", () => {
+    const sourceFields = {
+      threadId: ThreadId.make("thread-on-a"),
+      environmentId: A,
+    };
+    const built = carriedForkSource({
+      ...sourceFields,
+      machineLabel: `${"m".repeat(119)} and more`,
+      threadTitle: `  ${"t".repeat(199)} tail`,
+    });
+    expect(built.machineLabel).toBe("m".repeat(119));
+    expect(built.threadTitle).toBe("t".repeat(199));
+    expect(Schema.is(CarriedThreadSource)(built)).toBe(true);
+    expect(
+      carriedForkSource({ ...sourceFields, machineLabel: "   ", threadTitle: "  " }),
+    ).toMatchObject({ machineLabel: "Another machine", threadTitle: "Untitled" });
+  });
+});
+
+describe("readCarriedForkSource", () => {
+  const forkedActivity = (id: string, outcomeTurn: TurnId): OrchestrationThreadActivity =>
+    ({
+      id: EventId.make(id),
+      tone: "info",
+      kind: THREAD_FORKED_ACTIVITY_KIND,
+      summary: "Forked",
+      payload: {
+        schemaVersion: 1,
+        sourceThreadId: "thread-original",
+        sourceMessageId: "message-original",
+        sourceTurnId: "turn-original",
+        sourceTitle: "Original",
+        inheritedMessageCount: 2,
+        inheritedTurnOutcomes: [{ turnId: outcomeTurn, state: "interrupted" }],
+        providerContext: "handoff",
+        checkout: { kind: "current-checkout", worktreePath: null, branch: null },
+        notices: [],
+      },
+      turnId: null,
+      createdAt: at(1),
+    }) as unknown as OrchestrationThreadActivity;
+  const toolActivity = (id: string): OrchestrationThreadActivity =>
+    ({
+      id: EventId.make(id),
+      tone: "tool",
+      kind: "tool.completed",
+      summary: "Ran a tool",
+      payload: {},
+      turnId: turn(3),
+      createdAt: at(30),
+    }) as unknown as OrchestrationThreadActivity;
+
+  it("finds the fork's record of interrupted turns behind later activity", async () => {
+    const page = (hasMoreBefore: boolean) => ({
+      oldestCursor: hasMoreBefore ? "cursor-1" : null,
+      newestCursor: null,
+      hasMoreBefore,
+    });
+    const thread = {
+      id: ThreadId.make("thread-on-a"),
+      title: "Feature work",
+      modelSelection: { instanceId: "codex", model: "gpt-fixture" },
+      runtimeMode: "approval-required",
+      interactionMode: "default",
+      latestTurn: null,
+      messages: [],
+      proposedPlans: [],
+      checkpoints: [],
+    };
+    const getThreadWindow = vi.fn((input: { readonly limits: { readonly activities: number } }) =>
+      Promise.resolve({
+        snapshotSequence: 9,
+        // Only the newest activities fit the window; the fork's record is older.
+        thread: {
+          ...thread,
+          activities: [toolActivity("tool-1")].slice(0, input.limits.activities),
+        },
+        history: {
+          messages: page(false),
+          proposedPlans: page(false),
+          activities: page(true),
+          checkpoints: page(false),
+        },
+      }),
+    );
+    const getThreadHistoryPage = vi.fn((input: { readonly collection: string }) =>
+      Promise.resolve({
+        snapshotSequence: 9,
+        collection: input.collection,
+        items: [forkedActivity("forked-1", turn(1))],
+        page: page(false),
+      }),
+    );
+    const api = {
+      orchestration: { getThreadWindow, getThreadHistoryPage },
+    } as unknown as EnvironmentApi;
+    const read = await readCarriedForkSource({
+      api,
+      threadId: ThreadId.make("thread-on-a"),
+      signal: new AbortController().signal,
+      isCurrent: () => true,
+    });
+    expect(read.turnOutcomes).toEqual([{ turnId: turn(1), state: "interrupted" }]);
+    expect(getThreadHistoryPage).toHaveBeenCalledWith(
+      expect.objectContaining({ collection: "activities" }),
+    );
   });
 });
 
@@ -314,6 +489,7 @@ describe("carried fork keys and calls", () => {
     targetEnvironmentId: "b" as EnvironmentId,
     projectId: ProjectId.make("project-b"),
     baseRef: "origin/feature",
+    commit: HEAD,
   });
 
   it("keeps the key for a retry until a new attempt is safe", async () => {
@@ -354,6 +530,40 @@ describe("carried fork keys and calls", () => {
     expect(succeeded).toEqual({ status: "succeeded", result });
     settleCarriedForkKey(signature, succeeded);
     expect(carriedForkKey(signature, mint)).not.toBe(first);
+  });
+
+  it("mints a new key once the node refused the old one for another request", async () => {
+    let minted = 0;
+    const mint = () => `fork-conflict-${String(++minted).padStart(8, "0")}`;
+    const conflictSignature = `${signature}\u0000conflict`;
+    const first = carriedForkKey(conflictSignature, mint);
+    const built = build();
+    if (!built.ok) throw new Error("expected a history");
+    // The title changed before Retry: the node holds the key for the earlier request.
+    for (const attempt of ["none", "running"] as const) {
+      const conflict = await runCarriedFork({
+        api: {
+          forkCarried: () =>
+            Promise.reject(
+              new ThreadForkError({
+                reason: "idempotency-conflict",
+                message: "conflict",
+                retryable: false,
+                attempt,
+              }),
+            ),
+        },
+        input: buildCarriedForkInput({
+          forkKey: carriedForkKey(conflictSignature, mint),
+          target: { projectId: null },
+          branch: null,
+          history: built.history,
+        })!,
+      });
+      settleCarriedForkKey(conflictSignature, conflict);
+    }
+    expect(minted).toBe(2);
+    expect(carriedForkKey(conflictSignature, mint)).not.toBe(first);
   });
 
   it("sends nothing when the target's connection changed since the dialog showed it", async () => {

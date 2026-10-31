@@ -30,9 +30,11 @@ import {
   CARRIED_FORK_COPY,
   carriedForkBranch,
   carriedForkBranchLine,
+  carriedForkBranchPushable,
   carriedForkKey,
   carriedForkModel,
   carriedForkSignature,
+  carriedForkSource,
   type CarriedForkTarget,
   type CarriedForkTargetCandidate,
   listCarriedForkTargets,
@@ -43,6 +45,8 @@ import {
 } from "@ryco/client-runtime/state/threads/carriedFork";
 import {
   type EnvironmentId,
+  type GitRunStackedActionResult,
+  ORCHESTRATION_WS_METHODS,
   type ServerConfig,
   type ThreadForkKey,
   type ThreadForkResult,
@@ -52,7 +56,15 @@ import { isChatProject } from "@ryco/shared/projectKind";
 import { Radio as RadioPrimitive } from "@base-ui/react/radio";
 import { useNavigate } from "@tanstack/react-router";
 import { GitForkIcon } from "lucide-react";
-import { type ReactNode, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import {
+  type ReactNode,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+} from "react";
 import { useShallow } from "zustand/react/shallow";
 
 import { readEnvironmentApi } from "../../environmentApi";
@@ -63,10 +75,7 @@ import {
   subscribeEnvironmentConnections,
   useSavedEnvironmentRuntimeStore,
 } from "../../environments/runtime";
-import {
-  readHostedRpcCapability,
-  subscribeHostedRpcCapabilities,
-} from "../../hostedHub/capabilities";
+import { readHostedRpcCapability, useHostedRpcCapability } from "../../hostedHub/capabilities";
 import {
   readEnvironmentServerConfig,
   useEnvironmentServerConfig,
@@ -75,6 +84,13 @@ import { useEvent } from "../../hooks/useEvent";
 import { useThreadActions } from "../../hooks/useThreadActions";
 import { useGitStatus } from "../../lib/gitStatusState";
 import { cn, randomUUID } from "../../lib/utils";
+import {
+  GIT_USER_ACTION_KIND,
+  gitMutationTrackingKey,
+  gitScopeKey,
+  useGitActionActivity,
+  useGitMutation,
+} from "../../rpc/useGit";
 import { selectEnvironmentState, selectProjectByRef, type AppState, useStore } from "../../store";
 import { buildThreadRouteParams } from "../../threadRoutes";
 import { Button } from "../ui/button";
@@ -89,6 +105,10 @@ import {
 import { RadioGroup } from "../ui/radio-group";
 import { Spinner } from "../ui/spinner";
 import { stackedThreadToast, toastManager } from "../ui/toast";
+import {
+  readCarriedForkTargetsAccess,
+  subscribeCarriedForkTargetsAccess,
+} from "./carriedForkTargetAccess";
 import { closeForkThreadDialog, type ForkThreadDialogRequest } from "./forkThreadDialogStore";
 
 const CARRIED_FORM_ID = "carried-fork-form";
@@ -121,16 +141,16 @@ function providersOf(config: ServerConfig | null): CarriedForkTargetCandidate["p
 /** This client's view of the other machines, read from its own stores. */
 function useCarriedForkCandidates(): ReadonlyArray<CarriedForkTargetCandidate> {
   const connections = useSyncExternalStore(subscribeEnvironmentConnections, readConnections);
-  // Which connected machines the shared capability policy lets this session fork on, as one
-  // string so an unchanged answer keeps its identity.
-  const allowed = useSyncExternalStore(subscribeHostedRpcCapabilities, () =>
-    connections
-      .map((connection) =>
-        readHostedRpcCapability(WS_METHODS.threadsForkCarried, connection.environmentId).allowed
-          ? "1"
-          : "0",
-      )
-      .join(""),
+  const environmentIds = useMemo(
+    () => connections.map((connection) => connection.environmentId),
+    [connections],
+  );
+  const subscribeAccess = useCallback(
+    (listener: () => void) => subscribeCarriedForkTargetsAccess(environmentIds, listener),
+    [environmentIds],
+  );
+  const access = useSyncExternalStore(subscribeAccess, () =>
+    readCarriedForkTargetsAccess(environmentIds),
   );
   const saved = useSavedEnvironmentRuntimeStore((state) => state.byId);
   const primaryEnvironmentId = usePrimaryEnvironmentId();
@@ -153,8 +173,7 @@ function useCarriedForkCandidates(): ReadonlyArray<CarriedForkTargetCandidate> {
       return {
         environmentId,
         label: connection.knownEnvironment.label,
-        connected: true,
-        allowed: allowed[index] === "1",
+        access: access[index] ?? { hosted: true, allowed: false },
         supported: capabilities?.threadForkCarried === true,
         chatsAvailable: resolveChatsAvailability(config).available,
         providers: providersOf(config),
@@ -172,7 +191,7 @@ function useCarriedForkCandidates(): ReadonlyArray<CarriedForkTargetCandidate> {
         ),
       };
     });
-  }, [allowed, connections, primaryConfig, primaryEnvironmentId, projectRecords, saved]);
+  }, [access, connections, primaryConfig, primaryEnvironmentId, projectRecords, saved]);
 }
 
 /** The machines a source thread can continue on; empty hides "Another machine". */
@@ -274,8 +293,37 @@ export function CarriedForkBody(props: {
   const [phase, setPhase] = useState<Phase>("idle");
   const [notice, setNotice] = useState<ThreadForkAttemptNotice | null>(null);
   const [canRetry, setCanRetry] = useState(false);
-  const [pushing, setPushing] = useState(false);
   const busy = phase !== "idle";
+  // Push and the archive afterwards are mutations on the source machine: the shared capability
+  // policy gates them like every other mutation there.
+  const pushCapability = useHostedRpcCapability(
+    WS_METHODS.gitRunStackedAction,
+    sourceEnvironmentId,
+  );
+  const archiveCapability = useHostedRpcCapability(
+    ORCHESTRATION_WS_METHODS.dispatchCommand,
+    sourceEnvironmentId,
+  );
+  const pushCwd = project && !isChat ? (shell?.worktreePath ?? project.cwd) : null;
+  // The git controls' own push path: the same tracking key (they show it running) and the same
+  // recoverable request (a dropped connection does not fail it; the node keeps it running).
+  const pushMutation = useGitMutation<void, GitRunStackedActionResult>({
+    mutationFn: () => {
+      const api = readEnvironmentApi(sourceEnvironmentId);
+      if (!api || !pushCwd) return Promise.reject(new Error("Push is unavailable right now."));
+      return api.git.runStackedAction(
+        { action: "push", actionId: randomUUID(), cwd: pushCwd },
+        { recoverable: true },
+      );
+    },
+    invalidates: pushCwd ? [gitScopeKey(pushCwd)] : [],
+    trackingKey: gitMutationTrackingKey(
+      GIT_USER_ACTION_KIND.runStackedAction,
+      sourceEnvironmentId,
+      pushCwd,
+    ),
+  });
+  const pushing = useGitActionActivity(sourceEnvironmentId, pushCwd) || pushMutation.isPending;
   useEffect(() => {
     onBusyChange(busy);
   }, [busy, onBusyChange]);
@@ -310,49 +358,66 @@ export function CarriedForkBody(props: {
     setPhase("idle");
   };
 
-  const opened = useEvent(async (result: ThreadForkResult, signal: AbortSignal) => {
-    if (target === null) return;
-    const forkRef = scopeThreadRef(target.environmentId, result.threadId);
-    if (archiveAfter) {
-      // An ordinary archive on the source machine, by this user, after the target confirmed.
-      try {
-        await archiveThread(sourceThreadRef);
-      } catch {
-        toastManager.add(
-          stackedThreadToast({ type: "warning", title: CARRIED_FORK_COPY.archiveFailed }),
+  /** The machine the request went to, as it was picked: never the list's latest answer. */
+  const opened = useEvent(
+    async (result: ThreadForkResult, signal: AbortSignal, picked: CarriedForkTarget) => {
+      const forkRef = scopeThreadRef(picked.environmentId, result.threadId);
+      if (archiveAfter) {
+        // An ordinary archive on the source machine, by this user, after the target confirmed,
+        // only while the shared capability policy allows mutations there.
+        const capability = readHostedRpcCapability(
+          ORCHESTRATION_WS_METHODS.dispatchCommand,
+          sourceEnvironmentId,
         );
+        const archived = capability.allowed
+          ? await archiveThread(sourceThreadRef).then(
+              () => true,
+              () => false,
+            )
+          : false;
+        if (!archived) {
+          toastManager.add(
+            stackedThreadToast({
+              type: "warning",
+              title: CARRIED_FORK_COPY.archiveFailed,
+              ...(capability.reason ? { description: capability.reason } : {}),
+            }),
+          );
+        }
       }
-    }
-    setPhase("opening");
-    const arrived = await threadForkShellPorts(target.environmentId)
-      .waitForShell(result, signal)
-      .catch(() => false);
-    onBusyChange(false);
-    closeForkThreadDialog();
-    const open = () => {
-      void navigate({ to: "/$environmentId/$threadId", params: buildThreadRouteParams(forkRef) });
-    };
-    if (arrived) {
-      open();
-      return;
-    }
-    toastManager.add(
-      stackedThreadToast({
-        type: "success",
-        title: "Fork created",
-        description: `It will appear in the sidebar once ${target.label} syncs it.`,
-        actionProps: { children: "Open fork", onClick: open },
-      }),
-    );
-  });
+      setPhase("opening");
+      const arrived = await threadForkShellPorts(picked.environmentId)
+        .waitForShell(result, signal)
+        .catch(() => false);
+      onBusyChange(false);
+      closeForkThreadDialog();
+      const open = () => {
+        void navigate({ to: "/$environmentId/$threadId", params: buildThreadRouteParams(forkRef) });
+      };
+      if (arrived) {
+        open();
+        return;
+      }
+      toastManager.add(
+        stackedThreadToast({
+          type: "success",
+          title: "Fork created",
+          description: `It will appear in the sidebar once ${picked.label} syncs it.`,
+          actionProps: { children: "Open fork", onClick: open },
+        }),
+      );
+    },
+  );
 
   const submit = useEvent(async () => {
     if (busy || !sendable || target === null || shell === undefined) return;
+    // Every step below goes to this machine, even if the list changes while it runs.
+    const picked = target;
     setNotice(null);
     // The reviewed target connection: if it changes before the request leaves, nothing is sent.
     const assertMutationReady = captureReviewedSendReadiness(
-      target.environmentId,
-      () => readEnvironmentConnection(target.environmentId),
+      picked.environmentId,
+      () => readEnvironmentConnection(picked.environmentId),
       THREAD_FORK_COPY.connectionChanged,
     );
     const controller = new AbortController();
@@ -383,15 +448,12 @@ export function CarriedForkBody(props: {
       proposedPlans: read.proposedPlans,
       turnOutcomes: read.turnOutcomes,
       boundaryMessageId: request.sourceMessageId,
-      source: {
-        machineLabel: (
-          readEnvironmentConnection(sourceEnvironmentId)?.knownEnvironment.label ??
-          "Another machine"
-        ).slice(0, 120),
-        threadTitle: (read.thread.title.trim() || "Untitled").slice(0, 200),
+      source: carriedForkSource({
+        machineLabel: readEnvironmentConnection(sourceEnvironmentId)?.knownEnvironment.label,
+        threadTitle: read.thread.title,
         threadId: sourceThreadRef.threadId,
         environmentId: sourceEnvironmentId,
-      },
+      }),
       model,
       runtimeMode: read.thread.runtimeMode,
       interactionMode: read.thread.interactionMode,
@@ -402,38 +464,39 @@ export function CarriedForkBody(props: {
       sourceEnvironmentId,
       sourceThreadId: sourceThreadRef.threadId,
       sourceMessageId: request.sourceMessageId,
-      targetEnvironmentId: target.environmentId,
-      projectId: target.projectId,
+      targetEnvironmentId: picked.environmentId,
+      projectId: picked.projectId,
       baseRef: branch?.kind === "ready" ? branch.baseRef : null,
+      commit: branch?.kind === "ready" ? branch.commit : null,
     });
     const input = buildCarriedForkInput({
       forkKey: carriedForkKey(signature, mintForkKey),
-      target,
+      target: picked,
       branch,
       history: built.history,
     });
-    const api = readCarriedForkApi(readEnvironmentApi(target.environmentId));
+    const api = readCarriedForkApi(readEnvironmentApi(picked.environmentId));
     if (input === null || api === null)
       return fail({ message: THREAD_FORK_COPY.errors.unavailable });
     setPhase("sending");
     const outcome = await runCarriedFork({ api, input, assertMutationReady });
     settleCarriedForkKey(signature, outcome);
     if (outcome.status !== "succeeded") return fail(outcome);
-    await opened(outcome.result, controller.signal);
+    await opened(outcome.result, controller.signal, picked);
   });
 
   const push = useEvent(async () => {
-    const cwd = project && !isChat ? (shell?.worktreePath ?? project.cwd) : null;
-    const api = readEnvironmentApi(sourceEnvironmentId);
-    if (!cwd || !api || pushing) return;
-    setPushing(true);
-    const failure = await api.git
-      .runStackedAction({ action: "push", actionId: randomUUID(), cwd }, {})
-      .then(
-        () => null,
-        (error: unknown) => (error instanceof Error ? error.message : "Git reported an error."),
-      );
-    setPushing(false);
+    if (
+      !pushCwd ||
+      pushing ||
+      !readHostedRpcCapability(WS_METHODS.gitRunStackedAction, sourceEnvironmentId).allowed
+    ) {
+      return;
+    }
+    const failure = await pushMutation.mutateAsync().then(
+      () => null,
+      (error: unknown) => (error instanceof Error ? error.message : "Git reported an error."),
+    );
     if (failure !== null) {
       setNotice({ tone: "error", title: "Couldn't push", message: failure, detail: null });
     }
@@ -543,12 +606,13 @@ export function CarriedForkBody(props: {
               <p className="min-w-0 flex-1 text-xs text-muted-foreground">
                 {carriedForkBranchLine(branch)}
               </p>
-              {branch.kind === "unpushed" || branch.kind === "no-upstream" ? (
+              {carriedForkBranchPushable(branch) ? (
                 <Button
                   type="button"
                   size="sm"
                   variant="outline"
-                  disabled={busy || pushing}
+                  disabled={busy || pushing || !pushCapability.allowed}
+                  title={pushCapability.reason ?? undefined}
                   data-testid="carried-fork-push"
                   onClick={() => void push()}
                 >
@@ -560,8 +624,8 @@ export function CarriedForkBody(props: {
           ) : null}
           <label className="flex items-start gap-2.5 text-sm" data-testid="carried-fork-archive">
             <Checkbox
-              checked={archiveAfter}
-              disabled={busy}
+              checked={archiveAfter && archiveCapability.allowed}
+              disabled={busy || !archiveCapability.allowed}
               onCheckedChange={(checked) => setArchiveAfter(checked === true)}
             />
             <span className="flex flex-col gap-0.5">

@@ -17,12 +17,15 @@ import type {
   OrchestrationMessage,
   OrchestrationProposedPlan,
   OrchestrationThread,
+  OrchestrationThreadActivity,
   ProjectId,
   RepositoryIdentity,
   ThreadForkKey,
   ThreadForkResult,
   ThreadId,
 } from "@ryco/contracts";
+import type { RelayEffectiveRole } from "@ryco/contracts/relay";
+import { WS_METHODS } from "@ryco/contracts/rpc";
 import { THREAD_FORKED_ACTIVITY_KIND } from "@ryco/contracts/thread-fork";
 import {
   CARRIED_THREAD_HISTORY_MAX_BYTES,
@@ -41,6 +44,7 @@ import {
   isValidCarriedBranchName,
   pickCarriedForkInstance,
 } from "@ryco/shared/carriedFork";
+import { hostedRoleAllows } from "@ryco/shared/rpcAccessPolicy";
 import { readThreadForkedActivity } from "@ryco/shared/threadFork";
 import * as Schema from "effect/Schema";
 
@@ -63,11 +67,14 @@ export const CARRIED_FORK_COPY = {
   targetChat: "A new chat with an empty folder.",
   branch: {
     loading: "Checking this branch…",
-    ready: (baseRef: string) => `Starts a new worktree there from ${baseRef}.`,
+    ready: (baseRef: string, commit: string) =>
+      `Starts a new worktree there from ${baseRef} at ${commit.slice(0, 7)}.`,
     unpushed: (branch: string, count: number) =>
       `${branch} has ${count} ${count === 1 ? "commit" : "commits"} that aren't pushed. Push first: the other machine starts from origin.`,
     noUpstream: (branch: string) =>
       `${branch} isn't pushed to origin yet. Push it first: the other machine starts from origin.`,
+    otherUpstream: (branch: string, upstreamRef: string) =>
+      `${branch} tracks ${upstreamRef}, not origin/${branch}. The other machine starts from origin: push the branch there first.`,
     noBranch: "The other machine needs a branch pushed to origin. Check out a branch and push it.",
   },
   stays:
@@ -88,17 +95,33 @@ export const CARRIED_FORK_COPY = {
 
 // ── Targets ────────────────────────────────────────────────────────────
 
+/**
+ * What lets this session run `threads.forkCarried` on a machine, as the platform reads it:
+ * - hosted: the shared hosted capability policy's answer for that machine (its own relay session
+ *   is ready for mutations and its role there allows the method);
+ * - direct: this session's role there (a direct session that is not the owner's counts as a
+ *   viewer, `relayRoleOf`) and its connection's phase.
+ */
+export type CarriedForkTargetAccess =
+  | { readonly hosted: true; readonly allowed: boolean }
+  | {
+      readonly hosted: false;
+      readonly role: RelayEffectiveRole | null;
+      readonly phase: "idle" | "connecting" | "connected" | "disconnected";
+    };
+
+/** Whether a machine may take a carried fork now: the shared role policy and a live connection. */
+export function carriedForkTargetAllowed(access: CarriedForkTargetAccess): boolean {
+  return access.hosted
+    ? access.allowed
+    : access.phase === "connected" && hostedRoleAllows(access.role, WS_METHODS.threadsForkCarried);
+}
+
 /** What a client knows about one other machine, assembled by the platform. */
 export interface CarriedForkTargetCandidate {
   readonly environmentId: EnvironmentId;
   readonly label: string;
-  /** A live connection whose shell snapshot is current. */
-  readonly connected: boolean;
-  /**
-   * The shared capability policy lets this session run `threads.forkCarried` there now: its role
-   * is operator or owner and, when hosted, its own relay session is ready for mutations.
-   */
-  readonly allowed: boolean;
+  readonly access: CarriedForkTargetAccess;
   /** The node advertises `threadForkCarried`. */
   readonly supported: boolean;
   readonly chatsAvailable: boolean;
@@ -123,9 +146,9 @@ export interface CarriedForkTarget {
 }
 
 /**
- * The machines a fork can continue on. A machine is left out when it is the source, offline, not
- * allowed (viewer, or a hosted session not ready), older than carried forks, or has no copy of
- * the project: exactly one project of the same repository and folder (two make it ambiguous), or
+ * The machines a fork can continue on. A machine is left out when it is the source, offline or not
+ * allowed (`carriedForkTargetAllowed`: a viewer, a direct session that is not the owner's, a
+ * hosted session not ready), older than carried forks, or has no copy of the project: exactly one project of the same repository and folder (two make it ambiguous), or
  * chats for a chat. One without an enabled instance of the source's driver is listed, disabled.
  */
 export function listCarriedForkTargets(input: {
@@ -172,8 +195,7 @@ export function listCarriedForkTargets(input: {
   for (const candidate of input.candidates) {
     if (
       candidate.environmentId === input.sourceEnvironmentId ||
-      !candidate.connected ||
-      !candidate.allowed ||
+      !carriedForkTargetAllowed(candidate.access) ||
       !candidate.supported
     ) {
       continue;
@@ -229,14 +251,25 @@ export function carriedForkModel(
 
 export type CarriedForkBranch =
   | { readonly kind: "loading" }
-  | { readonly kind: "ready"; readonly branch: string; readonly baseRef: string }
+  | {
+      readonly kind: "ready";
+      readonly branch: string;
+      readonly baseRef: string;
+      /** The commit the checkout is at; the target starts from exactly this commit. */
+      readonly commit: string;
+    }
   | { readonly kind: "unpushed"; readonly branch: string; readonly aheadCount: number }
   | { readonly kind: "no-upstream"; readonly branch: string }
+  /** The branch tracks another remote or another name, which Push does not change. */
+  | { readonly kind: "other-upstream"; readonly branch: string; readonly upstreamRef: string }
   | { readonly kind: "no-branch" };
 
 /**
- * Where the target's worktree starts: the source checkout's branch as it is on origin, which
- * needs the branch pushed with nothing left to push. Uncommitted changes never travel.
+ * Where the target's worktree starts: the commit the source checkout is at, which needs the
+ * branch to track the branch of the same name on origin with nothing left to push (then the
+ * commit is on origin, and the target checks its own origin holds it). Without the upstream's
+ * name or the commit (a node older than carried forks) the branch counts as not pushed.
+ * Uncommitted changes never travel.
  */
 export function carriedForkBranch(
   status:
@@ -244,6 +277,8 @@ export function carriedForkBranch(
         readonly isRepo: boolean;
         readonly refName: string | null;
         readonly hasUpstream: boolean;
+        readonly upstreamRef?: string | null | undefined;
+        readonly headCommit?: string | undefined;
         readonly aheadCount: number;
       }
     | null
@@ -254,9 +289,19 @@ export function carriedForkBranch(
   if (!status.isRepo || branch.length === 0 || !isValidCarriedBranchName(branch)) {
     return { kind: "no-branch" };
   }
-  if (!status.hasUpstream) return { kind: "no-upstream", branch };
+  const upstreamRef = status.upstreamRef?.trim() ?? "";
+  const baseRef = `${CARRIED_FORK_REMOTE}/${branch}`;
+  if (!status.hasUpstream || upstreamRef.length === 0 || status.headCommit === undefined) {
+    return { kind: "no-upstream", branch };
+  }
+  if (upstreamRef !== baseRef) return { kind: "other-upstream", branch, upstreamRef };
   if (status.aheadCount > 0) return { kind: "unpushed", branch, aheadCount: status.aheadCount };
-  return { kind: "ready", branch, baseRef: `${CARRIED_FORK_REMOTE}/${branch}` };
+  return { kind: "ready", branch, baseRef, commit: status.headCommit };
+}
+
+/** Whether Push (to the branch's own upstream, or publishing it) can make the branch ready. */
+export function carriedForkBranchPushable(branch: CarriedForkBranch | null): boolean {
+  return branch?.kind === "unpushed" || branch?.kind === "no-upstream";
 }
 
 export function carriedForkBranchLine(branch: CarriedForkBranch): string {
@@ -265,11 +310,13 @@ export function carriedForkBranchLine(branch: CarriedForkBranch): string {
     case "loading":
       return copy.loading;
     case "ready":
-      return copy.ready(branch.baseRef);
+      return copy.ready(branch.baseRef, branch.commit);
     case "unpushed":
       return copy.unpushed(branch.branch, branch.aheadCount);
     case "no-upstream":
       return copy.noUpstream(branch.branch);
+    case "other-upstream":
+      return copy.otherUpstream(branch.branch, branch.upstreamRef);
     case "no-branch":
       return copy.noBranch;
   }
@@ -312,6 +359,29 @@ const byHistoryOrder = <T extends { readonly createdAt: string; readonly id: str
           : 0;
 
 const utf8 = new TextEncoder();
+
+/** `text` trimmed and cut to `max` characters, trimmed again (a cut can end in a space). */
+function boundedLabel(text: string, max: number, fallback: string): string {
+  return text.trim().slice(0, max).trim() || fallback;
+}
+
+/**
+ * Where a carried conversation comes from (display-only on the target), bounded so the target's
+ * schema accepts it: the machine's name (120 characters) and the thread's title (200).
+ */
+export function carriedForkSource(input: {
+  readonly machineLabel: string | null | undefined;
+  readonly threadTitle: string;
+  readonly threadId: ThreadId;
+  readonly environmentId: EnvironmentId;
+}): CarriedThreadSource {
+  return {
+    machineLabel: boundedLabel(input.machineLabel ?? "", 120, "Another machine"),
+    threadTitle: boundedLabel(input.threadTitle, 200, "Untitled"),
+    threadId: input.threadId,
+    environmentId: input.environmentId,
+  };
+}
 
 export type BuildCarriedThreadHistoryResult =
   | { readonly ok: true; readonly history: CarriedThreadHistory }
@@ -421,7 +491,7 @@ export function buildCarriedThreadHistory(input: {
  * an older interrupted turn it alone knows is carried as completed.
  */
 export function carriedForkKnownTurnOutcomes(input: {
-  readonly activities: OrchestrationThread["activities"];
+  readonly activities: ReadonlyArray<OrchestrationThreadActivity>;
   readonly latestTurn: Pick<OrchestrationLatestTurn, "turnId" | "state"> | null | undefined;
 }): ReadonlyArray<CarriedThreadTurnOutcome> {
   const outcomes: CarriedThreadTurnOutcome[] = [];
@@ -468,7 +538,10 @@ export interface CarriedForkSourceRead {
 
 /**
  * Reads the source thread's messages and proposed plans from its own node, at one projection
- * sequence (`collectThreadHistory`). Reads only; nothing is written there.
+ * sequence (`collectThreadHistory`), and pages its activities too: the fork provenance that says
+ * which inherited turns did not complete can sit behind any number of later activities. Only
+ * that provenance is kept of the activities; every activity counts toward the read's bounds.
+ * Reads only; nothing is written there.
  */
 export async function readCarriedForkSource(input: {
   readonly api: EnvironmentApi;
@@ -478,6 +551,7 @@ export async function readCarriedForkSource(input: {
 }): Promise<CarriedForkSourceRead> {
   const messages: SourceMessage[] = [];
   const proposedPlans: SourcePlan[] = [];
+  const provenance: OrchestrationThreadActivity[] = [];
   let bytes = 0;
   let records = 0;
   const retain = (text: string) => {
@@ -487,13 +561,11 @@ export async function readCarriedForkSource(input: {
       throw new Error(CARRIED_FORK_COPY.tooLong);
     }
   };
-  let turnOutcomes: ReadonlyArray<CarriedThreadTurnOutcome> = [];
   const thread = await collectThreadHistory({
     ...input,
-    collections: ["messages", "proposedPlans"],
+    collections: ["messages", "proposedPlans", "activities"],
     copy: CARRIED_HISTORY_COPY,
     project: (raw) => {
-      turnOutcomes = carriedForkKnownTurnOutcomes(raw);
       return {
         id: raw.id,
         title: raw.title,
@@ -513,8 +585,15 @@ export async function readCarriedForkSource(input: {
         const { id, turnId, planMarkdown, createdAt, implementedAt } = entry.item;
         retain(planMarkdown);
         proposedPlans.push({ id, turnId, planMarkdown, createdAt, implementedAt });
+      } else {
+        retain("");
+        if (entry.item.kind === THREAD_FORKED_ACTIVITY_KIND) provenance.push(entry.item);
       }
     },
+  });
+  const turnOutcomes = carriedForkKnownTurnOutcomes({
+    activities: provenance,
+    latestTurn: thread.latestTurn,
   });
   return { thread, messages, proposedPlans, turnOutcomes };
 }
@@ -537,7 +616,7 @@ export function buildCarriedForkInput(input: {
     if (input.branch?.kind !== "ready") return null;
     destination = {
       kind: "new-worktree",
-      start: { kind: "base-ref", baseRef: input.branch.baseRef },
+      start: { kind: "base-ref", baseRef: input.branch.baseRef, commit: input.branch.commit },
     };
   }
   const request: ThreadForkCarriedInput = {
@@ -550,9 +629,10 @@ export function buildCarriedForkInput(input: {
 }
 
 /**
- * The fork key of one carried attempt: the same source reply, target, destination and
- * conversation keep it, so Retry never creates a second fork; any change mints a new one. Kept
- * while the app runs, like the local fork's attempt.
+ * The fork key of one carried attempt: the same source reply, target and destination keep it, so
+ * Retry never creates a second fork; another one mints a new key. Kept while the app runs, like
+ * the local fork's attempt. The node also compares the whole request (the conversation, title,
+ * model and modes): one that changed meanwhile is refused as a conflict, which drops the key.
  */
 const carriedForkKeys = new Map<string, ThreadForkKey>();
 
@@ -563,6 +643,7 @@ export function carriedForkSignature(input: {
   readonly targetEnvironmentId: EnvironmentId;
   readonly projectId: ProjectId | null;
   readonly baseRef: string | null;
+  readonly commit: string | null;
 }): string {
   return [
     input.sourceEnvironmentId,
@@ -571,6 +652,7 @@ export function carriedForkSignature(input: {
     input.targetEnvironmentId,
     input.projectId ?? "",
     input.baseRef ?? "",
+    input.commit ?? "",
   ].join("\u0000");
 }
 
@@ -584,15 +666,16 @@ export function carriedForkKey(signature: string, mint: () => ThreadForkKey): Th
 
 /**
  * Drops the remembered key once a new attempt is safe: the fork exists (a retry would only
- * replay it), or the node holds nothing that a new key could duplicate.
+ * replay it), the node holds nothing that a new key could duplicate, or the node holds the key
+ * for another request (a conflict: the title, model or modes changed before Retry), which the
+ * same key can never get past.
  */
 export function settleCarriedForkKey(signature: string, outcome: ThreadForkOutcome): void {
   if (
     outcome.status === "succeeded" ||
     (outcome.status === "failed" &&
-      !outcome.retryable &&
-      outcome.attempt !== "running" &&
-      outcome.reason !== "idempotency-conflict")
+      (outcome.reason === "idempotency-conflict" ||
+        (!outcome.retryable && outcome.attempt !== "running")))
   ) {
     carriedForkKeys.delete(signature);
   }
