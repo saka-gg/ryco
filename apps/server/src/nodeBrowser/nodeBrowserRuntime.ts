@@ -505,7 +505,9 @@ export const makeNodeBrowserRuntime = Effect.fn("NodeBrowser.makeRuntime")(funct
     if (!options.baseCapability.available) return options.baseCapability;
     if (pausedUntil !== null && now() < pausedUntil) return { available: false, reason: "crashed" };
     if (sandboxBlocked) return { available: false, reason: "sandbox-blocked" };
-    return { available: true };
+    return options.baseCapability.sandbox === false
+      ? { available: true, sandbox: false }
+      : { available: true };
   });
 
   const snapshot = (tab: Tab): NodeBrowserTab => ({

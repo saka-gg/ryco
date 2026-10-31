@@ -23,7 +23,9 @@ const unavailableMessage = (capability: NodeBrowserCapability) =>
       ? "The node's browser stopped several times in a row. Ryco tries again in a few minutes."
       : capability.reason === "sandbox-blocked"
         ? "This node gives Chrome no usable sandbox, so it cannot run browser tabs."
-        : "Browser tabs are not available on this node.";
+        : capability.reason === "root-without-sandbox"
+          ? "Ryco runs as root on this node, where Chrome has no sandbox. Run Ryco as a regular user, or set RYCO_NODE_BROWSER_NO_SANDBOX=1 on the node to allow tabs without it."
+          : "Browser tabs are not available on this node.";
 
 const errorText = (error: unknown) =>
   typeof error === "object" &&
@@ -237,6 +239,12 @@ export function NodeBrowserPanel({
           Go
         </Button>
       </form>
+      {capability?.sandbox === false ? (
+        <p role="status" className="border-b p-2 text-xs text-warning-foreground">
+          Chrome&apos;s sandbox is off on this node (RYCO_NODE_BROWSER_NO_SANDBOX). Open only sites
+          you trust here.
+        </p>
+      ) : null}
       {error || selected?.error ? (
         <p role="alert" className="border-b p-2 text-xs text-destructive">
           {error ?? selected?.error?.text}

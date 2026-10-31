@@ -92,6 +92,11 @@ export const NodeBrowserCapability = Schema.Struct({
    * does not know still means unavailable.
    */
   reason: Schema.optionalKey(text(64)),
+  /**
+   * False while the node runs its tabs without Chrome's sandbox
+   * (`RYCO_NODE_BROWSER_NO_SANDBOX`), so clients can warn. Absent means sandboxed.
+   */
+  sandbox: Schema.optionalKey(Schema.Boolean),
 });
 export type NodeBrowserCapability = typeof NodeBrowserCapability.Type;
 

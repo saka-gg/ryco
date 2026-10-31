@@ -454,6 +454,19 @@ describe("node browser runtime", () => {
     }).pipe(Effect.scoped, Effect.provide(TestLayer)),
   );
 
+  it.effect("keeps reporting tabs without the sandbox once the browser runs", () =>
+    Effect.gen(function* () {
+      const chrome = makeFakeChrome();
+      const runtime = yield* makeNodeBrowserRuntime({
+        baseCapability: { available: true, sandbox: false },
+        noSandbox: true,
+        launch: chrome.launch,
+      });
+      yield* openTab(runtime);
+      expect(yield* runtime.capability).toEqual({ available: true, sandbox: false });
+    }).pipe(Effect.scoped, Effect.provide(TestLayer)),
+  );
+
   it.effect("pauses the browser after three exits within a minute", () =>
     Effect.gen(function* () {
       const { chrome, runtime } = yield* makeRuntime;
