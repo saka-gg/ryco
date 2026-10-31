@@ -24,6 +24,9 @@ import {
 import type { ServerSettings } from "@ryco/contracts/settings";
 import {
   PROJECT_PREFERENCE_FIELDS,
+  PROJECT_PREFERENCE_PROJECT_GONE,
+  projectPreferenceSourceLabel,
+  projectPreferenceValueLabel,
   readProjectPreferenceText,
 } from "@ryco/shared/projectPreferences";
 import { createModelSelection } from "@ryco/shared/model";
@@ -51,13 +54,6 @@ import { SettingsSelect } from "./SettingsSelect";
 const SELECT_NODE_PREFERENCE = Object.fromEntries(
   PROJECT_PREFERENCE_VALUE_KEYS.map((key) => [key, (settings: ServerSettings) => settings[key]]),
 ) as Readonly<Record<ProjectPreferenceValueKey, (settings: ServerSettings) => unknown>>;
-
-/** How a node default reads in the "Mixed" list: its option's label, or the text itself. */
-function formatNodePreference(key: ProjectPreferenceValueKey, value: unknown): string {
-  const field = PROJECT_PREFERENCE_FIELDS[key];
-  if (field.kind === "text") return typeof value === "string" && value ? value : field.placeholder;
-  return field.options.find((option) => option.value === value)?.label ?? String(value);
-}
 
 export function ProjectPreferenceSettings({
   projectId,
@@ -111,7 +107,7 @@ function ProjectPreferenceEditor(props: {
     setEffective(null);
     setError(null);
     if (projectMissing) {
-      setError("Project no longer exists.");
+      setError(PROJECT_PREFERENCE_PROJECT_GONE);
       return;
     }
     if (!config || props.disabled) return;
@@ -154,15 +150,10 @@ function ProjectPreferenceEditor(props: {
     }
   }
   function source(field: ProjectPreferenceKey) {
-    const result = effective?.[field];
-    if (!result) return "Loading…";
-    return result.source === "project" || result.source === "legacy-project"
-      ? "Overridden for this project"
-      : projectId
-        ? `Inherited from ${result.source === "builtin" ? "Ryco defaults" : "device defaults"}`
-        : result.source === "builtin"
-          ? "Ryco default"
-          : "Device default";
+    return projectPreferenceSourceLabel(effective?.[field]?.source, {
+      projectId,
+      nodeNoun: "device",
+    });
   }
   function reset(field: ProjectPreferenceKey, label: string) {
     if (!projectPreferenceCanReset({ effective, projectId, field })) return null;
@@ -236,7 +227,7 @@ function ProjectPreferenceEditor(props: {
               <ApplyToAllNodes
                 label={field.resetLabel}
                 select={SELECT_NODE_PREFERENCE[key]}
-                format={(node) => formatNodePreference(key, node)}
+                format={(node) => projectPreferenceValueLabel(key, node)}
                 patch={nodePreferencesPatchFor({ [key]: value })}
                 supported={nodeKeepsProjectPreferences}
                 disabled={blocked || value === undefined}

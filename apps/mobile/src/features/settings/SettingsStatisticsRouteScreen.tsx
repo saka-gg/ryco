@@ -20,6 +20,7 @@ import { ActivityStatistics } from "./statistics/ActivityStatistics";
 import { ProviderLimits } from "./statistics/ProviderLimits";
 import { providerLimitsNodes } from "./statistics/providerLimitsModel";
 import { statisticsTabParam } from "./statistics/statisticsRoute";
+import { canChangeNodeSettings } from "./nodeSettingsTargets";
 
 type SettingsStatisticsRouteScreenProps = StaticScreenProps<
   | {
@@ -61,10 +62,7 @@ export function SettingsStatisticsRouteScreen(props: SettingsStatisticsRouteScre
   const canRedeem = (environmentId: EnvironmentId) =>
     environments.some(
       (environment) =>
-        environment.environmentId === environmentId &&
-        environment.mutationReady === true &&
-        environment.role === "owner" &&
-        environment.connectionState === "connected",
+        environment.environmentId === environmentId && canChangeNodeSettings(environment),
     );
   return (
     <ScrollView
