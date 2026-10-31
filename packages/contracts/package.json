@@ -146,6 +146,11 @@
       "import": "./src/device.ts",
       "require": "./src/device.ts"
     },
+    "./node-browser": {
+      "types": "./src/nodeBrowser.ts",
+      "import": "./src/nodeBrowser.ts",
+      "require": "./src/nodeBrowser.ts"
+    },
     "./editor": {
       "types": "./src/editor.ts",
       "import": "./src/editor.ts",

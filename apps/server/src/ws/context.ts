@@ -6,6 +6,7 @@ import { PullRequestWatchService } from "../sourceControl/PullRequestWatchServic
 import { WorktreeNotesService } from "../notes/WorktreeNotesService.ts";
 import { NodeUpdateService } from "../nodeUpdate/NodeUpdateService.ts";
 import { ProviderSignIn } from "../provider/signIn/ProviderSignIn.ts";
+import { NodeBrowser } from "../nodeBrowser/NodeBrowser.ts";
 import { NodePushRegistry } from "../push/NodePushRegistry.ts";
 import { DailyRecapQuery } from "../statistics/DailyRecapQuery.ts";
 import { ProviderSessionPrewarm } from "../orchestration/Services/ProviderSessionPrewarm.ts";
@@ -284,6 +285,7 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
     // Optional for the route-test reason above; production provides it with the runtime.
     const nodeUpdate = yield* Effect.serviceOption(NodeUpdateService);
     const providerSignIn = yield* Effect.serviceOption(ProviderSignIn);
+    const nodeBrowser = yield* Effect.serviceOption(NodeBrowser);
     const nodePushRegistry = yield* Effect.serviceOption(NodePushRegistry);
     const dailyRecapQuery = yield* Effect.serviceOption(DailyRecapQuery);
     // Optional: route tests without the orchestration runtime answer "skipped".
@@ -1249,6 +1251,7 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
           : {}),
         ...(chats !== undefined ? { chats } : {}),
         ...(Option.isSome(pullRequestWatch) ? { pullRequestWatch: { available: true } } : {}),
+        ...(Option.isSome(nodeBrowser) ? { nodeBrowser: yield* nodeBrowser.value.capability } : {}),
         usageContractVersion: USAGE_CONTRACT_VERSION,
         keybindingsConfigPath: config.keybindingsConfigPath,
         keybindings: keybindingsConfig.keybindings,
@@ -1448,6 +1451,7 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
       worktreeNotesService,
       nodeUpdate,
       providerSignIn,
+      nodeBrowser,
       nodePushRegistry,
       /** Who this relay channel's handshake authenticated; `none` off the relay. */
       relayAuthority: (): RelayChannelAuthority =>

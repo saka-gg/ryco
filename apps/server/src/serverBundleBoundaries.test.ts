@@ -287,6 +287,22 @@ describe("server boot import boundaries", () => {
     expect(reached(/^apps\/server\/src\/provider\/signIn\//u)).toEqual([
       "apps/server/src/provider/signIn/ProviderSignIn.ts",
     ]);
+    // The preview browser's launcher loads with the first HTML preview or measurement (and with
+    // node browser tabs); boot carries the render service and the pinned browser's install.
+    expect(
+      reached(
+        /^apps\/server\/src\/htmlRender\/(?:headlessChrome|cdpPipeBrowser|cdpFrameReader|publicProxy)\.ts$/u,
+      ),
+    ).toEqual([]);
+    // Node browser tabs load with the first node browser call or frame socket; boot carries only
+    // the facade and the frame route.
+    expect(reached(/^apps\/server\/src\/nodeBrowser\//u).toSorted()).toEqual([
+      "apps/server/src/nodeBrowser/NodeBrowser.ts",
+      "apps/server/src/nodeBrowser/nodeBrowserRoute.ts",
+    ]);
+    expect(staticGraph("src/bin.ts", { dynamic: true }).files).toContain(
+      "apps/server/src/nodeBrowser/nodeBrowserRuntime.ts",
+    );
     // Agent-advertised slash commands are normalized in the driver chunks that receive them.
     expect(
       reached(/^apps\/server\/src\/provider\/(?:providerSlashCommands|openCodeCommands)\.ts$/u),
@@ -508,6 +524,7 @@ describe.skipIf(!hasCurrentBuild)("built server bundle", () => {
       const source = readFileSync(chunk, "utf8");
       // Region markers rolldown leaves in the output name the modules each chunk holds.
       expect(source).not.toMatch(/^\/\/#region src\/computer\/CuaComputerBackend\.ts$/mu);
+      expect(source).not.toMatch(/^\/\/#region src\/nodeBrowser\/nodeBrowserRuntime\.ts$/mu);
       // The terminal QR encoder loads when a command prints a pairing code.
       expect(source).not.toMatch(/^\/\/#region \.\.\/\.\.\/packages\/shared\/src\/qrCode\.ts$/mu);
       expect(source).not.toMatch(/^\/\/#region src\/hubConnector\/HubIdentityRuntime\.ts$/mu);

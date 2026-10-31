@@ -4,6 +4,10 @@ import {
 } from "./workspace/WorkspaceLifecycle.ts";
 import * as NodeHttpServer from "@effect/platform-node/NodeHttpServer";
 import * as NodeSocket from "@effect/platform-node/NodeSocket";
+import {
+  NODE_BROWSER_FRAME_CLOSE,
+  NODE_BROWSER_FRAME_WS_PATH,
+} from "@ryco/shared/nodeBrowserFrame";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import * as NodeHttp from "node:http";
 import { brotliCompressSync, gzipSync } from "node:zlib";
@@ -2319,6 +2323,43 @@ it.layer(NodeServices.layer)("server router seam", (it) => {
       assert.equal(clientsAfter[0]?.current, true);
       assert.equal(pairedClientPairingResponse.status, 401);
       assert.equal(pairedClientPairingBody.error, "Unauthorized request.");
+    }).pipe(Effect.provide(NodeHttpServer.layerTest)),
+  );
+
+  it.effect("lets only operator sessions watch node browser tabs", () =>
+    Effect.gen(function* () {
+      yield* buildAppUnderTest({ config: { host: "0.0.0.0" } });
+      const ownerCookie = yield* getAuthenticatedSessionCookieHeader();
+      const pairingResponse = yield* HttpClient.post("/api/auth/pairing-token", {
+        headers: { cookie: ownerCookie },
+      });
+      const pairingBody = (yield* pairingResponse.json) as { readonly credential: string };
+      const pairedCookie = yield* getAuthenticatedSessionCookieHeader(pairingBody.credential);
+      const frameUrl = (socketUrl: string) => {
+        const url = new URL(socketUrl);
+        url.pathname = NODE_BROWSER_FRAME_WS_PATH;
+        url.searchParams.set("tab", "no-such-tab");
+        return url.toString();
+      };
+      const closeCode = (url: string) =>
+        Effect.promise(
+          () =>
+            new Promise<number>((resolve) => {
+              const socket = new NodeSocket.NodeWS.WebSocket(url);
+              socket.once("close", (code) => resolve(code));
+              socket.once("error", () => undefined);
+            }),
+        );
+      // A paired client is a viewer: the socket opens, then closes with the role refusal.
+      assert.equal(
+        yield* closeCode(frameUrl(yield* getWsServerUrlForCookie(pairedCookie))),
+        NODE_BROWSER_FRAME_CLOSE.forbidden,
+      );
+      // The owner passes the role check; this app runs no node browser.
+      assert.equal(
+        yield* closeCode(frameUrl(yield* getWsServerUrlForCookie(ownerCookie))),
+        NODE_BROWSER_FRAME_CLOSE.unavailable,
+      );
     }).pipe(Effect.provide(NodeHttpServer.layerTest)),
   );
 

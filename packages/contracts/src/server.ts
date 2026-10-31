@@ -16,6 +16,7 @@ import {
 import { KeybindingRule, KeybindingsConfig, ResolvedKeybindingsConfig } from "./keybindings.ts";
 import { EditorId } from "./editor.ts";
 import { ModelCapabilities } from "./model.ts";
+import { NodeBrowserCapability } from "./nodeBrowser.ts";
 import { ProviderDriverKind, ProviderInstanceId } from "./providerInstance.ts";
 import { ServerSettings } from "./settings.ts";
 
@@ -424,6 +425,8 @@ export const ServerConfig = Schema.Struct({
   workspaceAccessRoot: Schema.optional(TrimmedNonEmptyString),
   chats: Schema.optionalKey(ServerChatsCapability),
   pullRequestWatch: Schema.optionalKey(ServerPullRequestWatchCapability),
+  /** Node browser tabs (`@ryco/contracts/node-browser`); absent on older nodes. */
+  nodeBrowser: Schema.optionalKey(NodeBrowserCapability),
   keybindingsConfigPath: TrimmedNonEmptyString,
   keybindings: ResolvedKeybindingsConfig,
   issues: ServerConfigIssues,

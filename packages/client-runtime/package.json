@@ -54,6 +54,10 @@
       "types": "./src/connection/directRouteIdentity.ts",
       "import": "./src/connection/directRouteIdentity.ts"
     },
+    "./connection/nodeBrowserFrameSource": {
+      "types": "./src/connection/nodeBrowserFrameSource.ts",
+      "import": "./src/connection/nodeBrowserFrameSource.ts"
+    },
     "./connection/hubLinkedRoutes": {
       "types": "./src/connection/hubLinkedRoutes.ts",
       "import": "./src/connection/hubLinkedRoutes.ts"

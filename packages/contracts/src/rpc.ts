@@ -166,6 +166,16 @@ import {
 } from "./atlassian.ts";
 import { ProjectId, ThreadId, TrimmedNonEmptyString } from "./baseSchemas.ts";
 import {
+  NODE_BROWSER_WS_METHODS,
+  NodeBrowserCommand,
+  NodeBrowserCommandResult,
+  NodeBrowserInputRequest,
+  NodeBrowserReadRequest,
+  NodeBrowserReadResponse,
+  NodeBrowserRpcError,
+  NodeBrowserWireEvent,
+} from "./nodeBrowser.ts";
+import {
   DEVICE_WS_METHODS,
   DeviceAppRequest,
   DeviceAppResponse,
@@ -1934,6 +1944,27 @@ export const WsSubscribeDeviceEventsRpc = Rpc.make(DEVICE_WS_METHODS.subscribeEv
   stream: true,
 });
 
+export const WsNodeBrowserReadRpc = Rpc.make(NODE_BROWSER_WS_METHODS.read, {
+  payload: NodeBrowserReadRequest,
+  success: NodeBrowserReadResponse,
+  error: Schema.Union([NodeBrowserRpcError, AuthRpcError]),
+});
+export const WsNodeBrowserCommandRpc = Rpc.make(NODE_BROWSER_WS_METHODS.command, {
+  payload: NodeBrowserCommand,
+  success: NodeBrowserCommandResult,
+  error: Schema.Union([NodeBrowserRpcError, AuthRpcError]),
+});
+export const WsNodeBrowserInputRpc = Rpc.make(NODE_BROWSER_WS_METHODS.input, {
+  payload: NodeBrowserInputRequest,
+  error: Schema.Union([NodeBrowserRpcError, AuthRpcError]),
+});
+export const WsNodeBrowserSubscribeRpc = Rpc.make(NODE_BROWSER_WS_METHODS.subscribe, {
+  payload: Schema.Struct({}),
+  success: NodeBrowserWireEvent,
+  error: Schema.Union([NodeBrowserRpcError, AuthRpcError]),
+  stream: true,
+});
+
 export const WsSubscribeVcsStatusRpc = Rpc.make(WS_METHODS.subscribeVcsStatus, {
   payload: VcsStatusInput,
   success: VcsStatusStreamEvent,
@@ -2822,6 +2853,10 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   | typeof WsSubscribeServerConfigRpc
   | typeof WsSubscribeServerLifecycleRpc
   | typeof WsSubscribeAuthAccessRpc
+  | typeof WsNodeBrowserReadRpc
+  | typeof WsNodeBrowserCommandRpc
+  | typeof WsNodeBrowserInputRpc
+  | typeof WsNodeBrowserSubscribeRpc
   | typeof WsAutomationCentreRpc
   | typeof WsAutomationCommandRpc
   | typeof WsAgentControlListProposalsRpc
@@ -3056,6 +3091,10 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   WsSubscribeServerConfigRpc,
   WsSubscribeServerLifecycleRpc,
   WsSubscribeAuthAccessRpc,
+  WsNodeBrowserReadRpc,
+  WsNodeBrowserCommandRpc,
+  WsNodeBrowserInputRpc,
+  WsNodeBrowserSubscribeRpc,
   WsAutomationCentreRpc,
   WsAutomationCommandRpc,
   WsAgentControlListProposalsRpc,

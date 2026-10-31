@@ -1,6 +1,7 @@
 import type { RelayEffectiveRole } from "@ryco/contracts";
 import { AGENT_CONTROL_WS_METHODS } from "@ryco/contracts/agent-control";
 import { DEVICE_WS_METHODS } from "@ryco/contracts/device";
+import { NODE_BROWSER_WS_METHODS } from "@ryco/contracts/node-browser";
 import {
   CONTEXT_HANDOFF_WS_METHODS,
   ORCHESTRATION_WS_METHODS,
@@ -12,6 +13,7 @@ export type RpcMethod =
   | (typeof ORCHESTRATION_WS_METHODS)[keyof typeof ORCHESTRATION_WS_METHODS]
   | (typeof CONTEXT_HANDOFF_WS_METHODS)[keyof typeof CONTEXT_HANDOFF_WS_METHODS]
   | (typeof DEVICE_WS_METHODS)[keyof typeof DEVICE_WS_METHODS]
+  | (typeof NODE_BROWSER_WS_METHODS)[keyof typeof NODE_BROWSER_WS_METHODS]
   | (typeof AGENT_CONTROL_WS_METHODS)[keyof typeof AGENT_CONTROL_WS_METHODS];
 
 /**
@@ -39,6 +41,12 @@ export const RPC_ACCESS_POLICY = {
   [DEVICE_WS_METHODS.input]: "owner",
   [DEVICE_WS_METHODS.app]: "owner",
   [DEVICE_WS_METHODS.recording]: "owner",
+  // A node browser page is as private as terminal output (its sessions, its logins), and
+  // driving it reaches what the node reaches: the terminal tier, reads included.
+  [NODE_BROWSER_WS_METHODS.read]: "operator",
+  [NODE_BROWSER_WS_METHODS.subscribe]: "operator",
+  [NODE_BROWSER_WS_METHODS.command]: "operator",
+  [NODE_BROWSER_WS_METHODS.input]: "operator",
   // Agent Control approval decisions authorize agent-requested mutations
   // and the queue exposes prompt summaries and target metadata, so the
   // whole surface is owner-only — including reads and the push stream.
@@ -328,6 +336,10 @@ export const RPC_DELIVERY_EFFECT_POLICY = {
   [DEVICE_WS_METHODS.input]: "mutation",
   [DEVICE_WS_METHODS.app]: "mutation",
   [DEVICE_WS_METHODS.recording]: "mutation",
+  [NODE_BROWSER_WS_METHODS.read]: "read",
+  [NODE_BROWSER_WS_METHODS.subscribe]: "read",
+  [NODE_BROWSER_WS_METHODS.command]: "mutation",
+  [NODE_BROWSER_WS_METHODS.input]: "mutation",
   [AGENT_CONTROL_WS_METHODS.acceptProposal]: "mutation",
   [AGENT_CONTROL_WS_METHODS.getProposal]: "read",
   [AGENT_CONTROL_WS_METHODS.listProposals]: "read",

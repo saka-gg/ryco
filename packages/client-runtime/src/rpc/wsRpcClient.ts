@@ -24,6 +24,7 @@ import {
   type OrchestrationThreadStreamItem,
   type OrchestrationThreadWindowStreamItem,
 } from "@ryco/contracts/orchestration";
+import { NODE_BROWSER_WS_METHODS } from "@ryco/contracts/node-browser";
 import { WS_METHODS } from "@ryco/contracts/rpc";
 import {
   assertUsageContractVersion,
@@ -38,6 +39,11 @@ import { type WsRpcProtocolClient } from "./protocol.ts";
 import { resetWsReconnectBackoff } from "./wsConnectionState.ts";
 import { type SubscriptionFailureKind, WsTransport } from "./wsTransport.ts";
 import type { DeviceRpcClient } from "./deviceRpcClient.ts";
+import type {
+  NodeBrowserFrameRequest,
+  NodeBrowserFrameSource,
+  NodeBrowserFrameSourceHandlers,
+} from "../connection/nodeBrowserFrameSource.ts";
 import { createShellSnapshotAssembler } from "./shellSnapshotAssembly.ts";
 import {
   providerCatalogCache,
@@ -516,6 +522,20 @@ export interface WsRpcClient {
     readonly subscribeLifecycle: RpcStreamMethod<typeof WS_METHODS.subscribeServerLifecycle>;
     readonly subscribeAuthAccess: RpcStreamMethod<typeof WS_METHODS.subscribeAuthAccess>;
   };
+  /**
+   * Browser tabs that run on the node (`ServerConfig.nodeBrowser`); operator sessions only.
+   * `openFrameSource` exists on direct connections, whose clients can open the frame socket.
+   */
+  readonly nodeBrowser: {
+    readonly read: RpcUnaryMethod<typeof NODE_BROWSER_WS_METHODS.read>;
+    readonly command: RpcUnaryMethod<typeof NODE_BROWSER_WS_METHODS.command>;
+    readonly input: RpcUnaryMethod<typeof NODE_BROWSER_WS_METHODS.input>;
+    readonly subscribe: RpcStreamMethod<typeof NODE_BROWSER_WS_METHODS.subscribe>;
+    readonly openFrameSource?: (
+      request: NodeBrowserFrameRequest,
+      handlers: NodeBrowserFrameSourceHandlers,
+    ) => NodeBrowserFrameSource;
+  };
   /** Owner-only; a node without it answers "Unknown request tag" (`isUnsupportedRpcError`). */
   readonly providerSignIn: {
     readonly subscribe: (
@@ -650,7 +670,13 @@ export interface WsRpcClient {
   };
 }
 
-export function createWsRpcClient(transport: WsTransport, device?: DeviceRpcClient): WsRpcClient {
+export function createWsRpcClient(
+  transport: WsTransport,
+  device?: DeviceRpcClient,
+  options?: {
+    readonly openNodeBrowserFrameSource?: WsRpcClient["nodeBrowser"]["openFrameSource"];
+  },
+): WsRpcClient {
   return {
     dispose: async () => {
       await Promise.all([transport.dispose(), device?.dispose()]);
@@ -1191,6 +1217,21 @@ export function createWsRpcClient(transport: WsTransport, device?: DeviceRpcClie
           ...options,
           tag: WS_METHODS.subscribeAuthAccess,
         }),
+    },
+    nodeBrowser: {
+      read: (input) => transport.request((client) => client[NODE_BROWSER_WS_METHODS.read](input)),
+      command: (input) =>
+        transport.request((client) => client[NODE_BROWSER_WS_METHODS.command](input)),
+      // Input is never retried: a click or a key cannot be taken back.
+      input: (input) => transport.request((client) => client[NODE_BROWSER_WS_METHODS.input](input)),
+      subscribe: (listener, subscribeOptions) =>
+        transport.subscribe((client) => client[NODE_BROWSER_WS_METHODS.subscribe]({}), listener, {
+          ...subscribeOptions,
+          tag: NODE_BROWSER_WS_METHODS.subscribe,
+        }),
+      ...(options?.openNodeBrowserFrameSource
+        ? { openFrameSource: options.openNodeBrowserFrameSource }
+        : {}),
     },
     providerSignIn: {
       subscribe: (input, listener, options) =>
