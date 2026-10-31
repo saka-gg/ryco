@@ -1,4 +1,4 @@
-import { Cause, Context, Effect, Exit, FileSystem, Option, Path, Schema } from "effect";
+import { Cause, Context, Effect, Exit, FileSystem, Option, Path, Schema, Semaphore } from "effect";
 import {
   type ClientOrchestrationCommand,
   DEFAULT_PROJECT_METADATA_DIR,
@@ -46,6 +46,9 @@ function isKnownUploadAttachment(
  * a node without it refuses the photo with a message the composer shows. The converter loads only
  * when such a photo arrives.
  */
+/** At most two `sips` run at once, node-wide: a large photo's decode takes hundreds of megabytes. */
+const heicConversions = Semaphore.makeUnsafe(2);
+
 const convertHeicUpload = (name: string, bytes: Uint8Array) =>
   Effect.tryPromise({
     try: (signal) =>
@@ -68,6 +71,7 @@ const convertHeicUpload = (name: string, bytes: Uint8Array) =>
         ? Effect.succeed(converted)
         : Effect.fail(new OrchestrationDispatchCommandError({ message: converted.message })),
     ),
+    heicConversions.withPermits(1),
   );
 
 /** The id a command gives a new message: a turn start's, a steer's or a queued follow-up's. */

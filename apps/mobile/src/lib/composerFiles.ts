@@ -157,6 +157,10 @@ export async function pickComposerAttachments(input: {
     selectionLimit: remainingSlots,
     base64: true,
     quality: 1,
+    // iOS hands over a JPEG for a HEIC photo: no provider reads HEIC, and only a Mac node could
+    // convert it.
+    preferredAssetRepresentationMode:
+      imagePicker.UIImagePickerPreferredAssetRepresentationMode.Compatible,
   });
 
   if (result.canceled) {

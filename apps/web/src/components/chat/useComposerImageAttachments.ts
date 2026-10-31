@@ -215,8 +215,7 @@ export function planDirectComposerAttachments(input: {
       isImage &&
       (heic ||
         imageAttachmentSizeAction(file.size, PROVIDER_SEND_TURN_MAX_IMAGE_BYTES) === "compress");
-    // A shrinking image counts at the image limit, the most it can weigh once it arrives.
-    const countedBytes = shrinks ? PROVIDER_SEND_TURN_MAX_IMAGE_BYTES : file.size;
+    const countedBytes = shrinks ? shrinkingImageCountedBytes(file.size) : file.size;
     if (nextAttachmentCount >= PROVIDER_SEND_TURN_MAX_ATTACHMENTS) {
       error = `You can attach up to ${PROVIDER_SEND_TURN_MAX_ATTACHMENTS} files per message.`;
       break;
@@ -230,6 +229,15 @@ export function planDirectComposerAttachments(input: {
     nextTotalBytes += countedBytes;
   }
   return { accepted, error };
+}
+
+/**
+ * What a shrinking image counts against the message total until it arrives: the image limit for
+ * one over it (the most it can weigh once shrunk), its own size for a HEIC photo within the limit
+ * that is only converted (the node checks the total again after converting).
+ */
+function shrinkingImageCountedBytes(size: number): number {
+  return Math.min(size, PROVIDER_SEND_TURN_MAX_IMAGE_BYTES);
 }
 
 /**
@@ -248,7 +256,7 @@ async function shrinkPlannedComposerImages(input: {
     composerImagePreparations.begin({
       targetKey: input.targetKey,
       name: entry.name,
-      reservedBytes: PROVIDER_SEND_TURN_MAX_IMAGE_BYTES,
+      reservedBytes: shrinkingImageCountedBytes(entry.file.size),
     }),
   );
   const attached: string[] = [];

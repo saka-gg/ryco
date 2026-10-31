@@ -44,7 +44,7 @@ function fakeSips(input: {
       return (
         input.probe ?? {
           ok: true,
-          stdout: `${args.at(-1)}\n  pixelWidth: ${width}\n  pixelHeight: ${height}\n`,
+          stdout: `${args.at(-1)}\n  format: heic\n  pixelWidth: ${width}\n  pixelHeight: ${height}\n`,
         }
       );
     }
@@ -55,7 +55,12 @@ function fakeSips(input: {
   return { run, calls, directories };
 }
 
-const heicBytes = Buffer.from("not decoded by the fake");
+/** An ISO base-media header with the `heic` brand: what the brand check lets through. */
+const heicBytes = Buffer.concat([
+  Buffer.from([0x00, 0x00, 0x00, 0x18]),
+  Buffer.from("ftypheic", "latin1"),
+  Buffer.from("not decoded by the fake"),
+]);
 
 describe("convertHeicToJpeg with a stand-in sips", () => {
   it("refuses on a node without sips, naming the Mac and the way out", async () => {
@@ -81,6 +86,29 @@ describe("convertHeicToJpeg with a stand-in sips", () => {
     );
   });
 
+  it("never hands sips bytes that are not a HEIC/HEIF still, whatever their declared type", async () => {
+    // ImageIO decodes by content: a PNG, TIFF or PSD labelled image/heic must not reach it.
+    const png = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0]);
+    const mp4 = Buffer.concat([
+      Buffer.from([0x00, 0x00, 0x00, 0x18]),
+      Buffer.from("ftypisom", "latin1"),
+    ]);
+    for (const bytes of [png, mp4]) {
+      const runner = fakeSips({});
+      expect(await convertHeicToJpeg({ bytes, maxOutputBytes: MB, sips: runner.run })).toEqual({
+        ok: false,
+        reason: "failed",
+      });
+      expect(runner.calls).toEqual([]);
+    }
+    // A HEIC brand whose content ImageIO reads as something else stops before the conversion.
+    const other = fakeSips({ probe: { ok: true, stdout: "x\n  format: png\n" } });
+    expect(
+      await convertHeicToJpeg({ bytes: heicBytes, maxOutputBytes: MB, sips: other.run }),
+    ).toEqual({ ok: false, reason: "failed" });
+    expect(other.calls).toHaveLength(1);
+  });
+
   it("converts at the composer's quality, shrinking only a photo over 2048 px", async () => {
     const large = fakeSips({ size: { width: 4032, height: 3024 } });
     const result = await convertHeicToJpeg({
@@ -90,7 +118,7 @@ describe("convertHeicToJpeg with a stand-in sips", () => {
     });
     expect(result).toEqual({ ok: true, bytes: TINY_JPEG });
     const [probe, convert] = large.calls;
-    expect(probe?.slice(0, 4)).toEqual(["-g", "pixelWidth", "-g", "pixelHeight"]);
+    expect(probe?.slice(0, 6)).toEqual(["-g", "format", "-g", "pixelWidth", "-g", "pixelHeight"]);
     expect(convert?.slice(0, 8)).toEqual([
       "-s",
       "format",

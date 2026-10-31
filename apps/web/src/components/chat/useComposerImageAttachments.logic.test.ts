@@ -210,6 +210,15 @@ describe("HEIC photos in the composer", () => {
     ]);
   });
 
+  it("counts a photo within the image limit at its own size, so a message holds eight", () => {
+    const photos = Array.from({ length: 8 }, (_, index) =>
+      photo(`IMG_000${index}.HEIC`, "image/heic", 3 * MB),
+    );
+    const result = plan(photos);
+    expect(result.error).toBeNull();
+    expect(result.accepted).toHaveLength(8);
+  });
+
   it("takes a photo dropped without a type as an image, never a file reference", () => {
     const dropped = photo("IMG_0002.heic", "");
     expect(plan([dropped]).accepted[0]).toMatchObject({ isImage: true, shrinks: true });

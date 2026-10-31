@@ -21,6 +21,7 @@ import {
   compressedImageFileName,
 } from "@ryco/client-runtime/state/composer/imageCompression";
 
+import { detectRasterImageMimeType } from "./imageMime.ts";
 import { jpegDimensions } from "./jpegHeader.ts";
 
 /** Only the system's own binary, never one found on `PATH`. */
@@ -110,6 +111,10 @@ export async function convertHeicToJpeg(input: {
 }): Promise<HeicConversionResult> {
   const sips = input.sips === undefined ? await systemSips() : input.sips;
   if (!sips) return { ok: false, reason: "unavailable" };
+  // ImageIO picks its decoder from the content, not the declared type: only bytes that really are
+  // a HEIC/HEIF still image (its ISO base-media brand) ever reach it.
+  if (detectRasterImageMimeType(input.bytes) !== "image/heic")
+    return { ok: false, reason: "failed" };
   const options = {
     timeoutMs: input.timeoutMs ?? HEIC_CONVERSION_TIMEOUT_MS,
     signal: input.signal,
@@ -123,8 +128,13 @@ export async function convertHeicToJpeg(input: {
     await writeFile(source, input.bytes, { mode: 0o600 });
 
     // Reads the header only. `-Z` also enlarges, so it is passed only for a larger photo.
-    const probe = await sips(["-g", "pixelWidth", "-g", "pixelHeight", source], options);
+    const probe = await sips(
+      ["-g", "format", "-g", "pixelWidth", "-g", "pixelHeight", source],
+      options,
+    );
     if (!probe.ok) return sipsFailure(probe);
+    // And ImageIO must read it as HEIC/HEIF too, not as another format the brand check let by.
+    if (!/format:\s*hei[cf]\b/i.test(probe.stdout)) return { ok: false, reason: "failed" };
     const width = Number(/pixelWidth:\s*(\d+)/.exec(probe.stdout)?.[1] ?? 0);
     const height = Number(/pixelHeight:\s*(\d+)/.exec(probe.stdout)?.[1] ?? 0);
     if (width <= 0 || height <= 0) return { ok: false, reason: "failed" };
