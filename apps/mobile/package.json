@@ -35,7 +35,7 @@
     "@expo-google-fonts/dm-sans": "^0.4.2",
     "@expo/metro-runtime": "~57.0.15",
     "@legendapp/list": "3.3.10",
-    "@pierre/diffs": "1.4.1",
+    "@pierre/diffs": "1.6.2",
     "@react-native-menu/menu": "^2.0.0",
     "@react-navigation/elements": "2.9.40",
     "@react-navigation/native": "7.3.18",

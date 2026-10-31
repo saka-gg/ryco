@@ -7,10 +7,10 @@ import { acquireDiffWorkerPool } from "../lib/diffWorkerPool";
 import { DiffWorkerPoolProvider } from "./DiffWorkerPoolProvider";
 
 describe("diff worker pool", () => {
-  it("highlights in its workers with the WASM engine", async () => {
+  it("highlights in its workers with Highlights' WASM lexers", async () => {
     const lease = acquireDiffWorkerPool(resolveDiffThemeName("dark"));
     try {
-      expect(lease.pool.getPreferredHighlighter()).toBe("shiki-wasm");
+      expect(lease.pool.getPreferredHighlighter()).toBe("highlights");
       const file = {
         name: "example.ts",
         contents: "const answer: number = 42;\n",
@@ -18,7 +18,11 @@ describe("diff worker pool", () => {
       };
       await lease.pool.primeFileHighlightCache(file);
       expect(lease.pool.getStats().workersFailed).toBe(false);
-      expect(lease.pool.getFileResultCache(file)).toBeDefined();
+      const highlighted = lease.pool.getFileResultCache(file)?.result.code;
+      expect(highlighted).toBeDefined();
+      // Tokens of several colors, not a plain-text rendering.
+      const colors = new Set(JSON.stringify(highlighted).match(/color:#[0-9a-f]{6}/giu));
+      expect(colors.size).toBeGreaterThan(2);
     } finally {
       lease.release();
     }

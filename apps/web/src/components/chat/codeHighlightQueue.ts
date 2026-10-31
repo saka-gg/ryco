@@ -1,4 +1,11 @@
-import type { DiffsHighlighter, ShikiTransformer, SupportedLanguages } from "@pierre/diffs";
+import type {
+  DiffsHighlighter,
+  DiffsStreamTokenizer,
+  SupportedLanguages,
+  ThemedToken,
+  tokensToHtml,
+  TokensResult,
+} from "@pierre/diffs";
 
 import {
   fnv1a32,
@@ -12,15 +19,16 @@ import { LRUCache } from "../../lib/lruCache";
 /**
  * Off-render syntax highlighting for settled chat code blocks.
  *
- * Shiki's first tokenization of a grammar compiles its regexes (50-80 ms per
- * language, and again whenever new rules are hit), and warm highlighting still
- * costs ~10 ms per 200 lines. Doing that inside render put long tasks into the
- * thread-open commit and into every Suspense retry. Blocks now render as plain
- * text, queue a job here, and swap in the highlighted HTML once an idle slot
- * has produced it; blocks on screen go first. The Shiki stack itself is loaded
- * on the first job, not with the chat route. A large block is highlighted a
- * slice of lines per step, carrying the grammar state across slices, so one
- * block is never one long task.
+ * Loading a highlighter costs a long task (compiling the Highlights WASM
+ * module, or Shiki's regexes for each grammar on its first tokenization, 50-80
+ * ms per language with the JS engine), and a large block still costs one to
+ * highlight. Doing that inside render put long tasks into the thread-open
+ * commit and into every Suspense retry. Blocks now render as plain text, queue
+ * a job here, and swap in the highlighted HTML once an idle slot has produced
+ * it; blocks on screen go first. The highlighter itself is loaded on the first
+ * job, not with the chat route. A large block is highlighted a slice of lines
+ * per step through a stream tokenizer, which carries the lexer state across
+ * slices, so one block is never one long task.
  */
 
 const MAX_HIGHLIGHT_CACHE_ENTRIES = 500;
@@ -30,8 +38,9 @@ const HIGHLIGHT_SLOT_BUDGET_MS = 8;
 /** Upper bound for how long a queued job waits for an idle slot. */
 const HIGHLIGHT_IDLE_TIMEOUT_MS = 500;
 /**
- * Most lines and characters one highlight step tokenizes. Warm tokenization
- * costs about 10 ms per 100 TSX lines, so a step stays near the slot budget.
+ * Most lines and characters one highlight step tokenizes. Shiki's JS engine,
+ * the fallback where WebAssembly cannot compile, costs about 10 ms per 100
+ * warm TSX lines, so a step stays near the slot budget with either highlighter.
  */
 const HIGHLIGHT_SLICE_MAX_LINES = 100;
 const HIGHLIGHT_SLICE_MAX_CHARS = 16_000;
@@ -47,19 +56,26 @@ export interface CodeHighlightJob {
 }
 
 type HighlightListener = (html: string) => void;
-type HighlightRoot = Parameters<NonNullable<ShikiTransformer["root"]>>[0];
-type GrammarState = ReturnType<DiffsHighlighter["getLastGrammarState"]>;
+
+/** The shared main-thread highlighter and the renderer for tokens it produced. */
+interface LoadedHighlighter {
+  readonly highlighter: DiffsHighlighter;
+  readonly tokensToHtml: typeof tokensToHtml;
+}
 
 /** A block highlighted in slices: what the slices produced so far. */
 interface SlicedHighlight {
   readonly lines: ReadonlyArray<string>;
   /** Index of the first line the next slice highlights. */
   nextLine: number;
-  grammarState: GrammarState | undefined;
+  /** Carries the lexer state from one slice into the next. */
+  readonly tokenizer: DiffsStreamTokenizer;
+  /** The block's colors, from tokenizing no code. */
+  readonly shell: TokensResult;
   /** The `<pre ...><code>` of the first slice; every slice has the same one. */
   opening: string | null;
   closing: string | null;
-  /** Each slice's lines, as Shiki renders them inside `<code>`. */
+  /** Each slice's lines, as `codeToHtml` renders them inside `<code>`. */
   readonly parts: string[];
 }
 
@@ -77,8 +93,8 @@ const highlightedCodeCache = new LRUCache<string>(
   MAX_HIGHLIGHT_CACHE_ENTRIES,
   MAX_HIGHLIGHT_CACHE_MEMORY_BYTES,
 );
-const highlighterPromiseCache = new Map<string, Promise<DiffsHighlighter>>();
-const readyHighlighters = new Map<string, DiffsHighlighter>();
+const highlighterPromiseCache = new Map<string, Promise<LoadedHighlighter>>();
+const readyHighlighters = new Map<string, LoadedHighlighter>();
 const pendingJobs = new Map<string, PendingHighlightJob>();
 const jobKeyByElement = new Map<Element, string>();
 let visibilityObserver: IntersectionObserver | null | undefined;
@@ -102,25 +118,28 @@ function estimateHighlightedSize(html: string, code: string): number {
   return Math.max(html.length * 2, code.length * 3);
 }
 
-function getHighlighterPromise(language: string): Promise<DiffsHighlighter> {
+function getHighlighterPromise(language: string): Promise<LoadedHighlighter> {
   const cached = highlighterPromiseCache.get(language);
   if (cached) return cached;
 
-  const promise = import("@pierre/diffs")
-    .then(({ getSharedHighlighter }) =>
-      getSharedHighlighter({
+  // The engine choice loads with the highlighter, off the chat route's graph.
+  const promise = Promise.all([import("@pierre/diffs"), import("../../lib/syntaxHighlighterType")])
+    .then(async ([{ getSharedHighlighter, tokensToHtml }, { getMainThreadSyntaxHighlighter }]) => ({
+      highlighter: await getSharedHighlighter({
         themes: [resolveDiffThemeName("dark"), resolveDiffThemeName("light")],
         langs: [language as SupportedLanguages],
-        preferredHighlighter: "shiki-js",
+        preferredHighlighter: getMainThreadSyntaxHighlighter(),
       }),
-    )
+      tokensToHtml,
+    }))
     .catch((error: unknown) => {
       highlighterPromiseCache.delete(language);
       if (language === "text") {
-        // "text" itself failed: Shiki cannot initialize at all.
+        // "text" itself failed: the highlighter cannot initialize at all.
         throw error;
       }
-      // Language not supported by Shiki: fall back to "text".
+      // A language Shiki has no grammar for (Highlights renders those as
+      // text itself): fall back to "text".
       return getHighlighterPromise("text");
     });
   highlighterPromiseCache.set(language, promise);
@@ -138,7 +157,7 @@ function ensureHighlighter(language: string): void {
     },
     () => {
       if (generation !== queueGeneration) return;
-      // Shiki is unavailable: these blocks stay plain text.
+      // No highlighter: these blocks stay plain text.
       for (const job of pendingJobs.values()) {
         if (job.language === language) dropJob(job);
       }
@@ -154,9 +173,22 @@ function highlightOptions(job: CodeHighlightJob, language: string) {
   };
 }
 
+/** ANSI escape sequences: CSI (colors, cursor), OSC (titles, links) and two-character escapes. */
+const ANSI_ESCAPE = /\u001b(?:\[[0-?]*[ -/]*[@-~]|\][^\u0007\u001b]*(?:\u0007|\u001b\\)|[@-_])/gu;
+
+/** `code` without its ANSI escape sequences. */
+export function stripAnsiEscapes(code: string): string {
+  return code.replace(ANSI_ESCAPE, "");
+}
+
 function highlight(highlighter: DiffsHighlighter, job: CodeHighlightJob): string | null {
   try {
-    return highlighter.codeToHtml(job.code, highlightOptions(job, job.language));
+    const html = highlighter.codeToHtml(job.code, highlightOptions(job, job.language));
+    // Shiki colors ANSI; Highlights has no ANSI language and would show the raw escapes, so the
+    // output keeps the text without them.
+    return job.language === "ansi" && html.includes("\u001b")
+      ? highlighter.codeToHtml(stripAnsiEscapes(job.code), highlightOptions(job, "text"))
+      : html;
   } catch (error) {
     console.warn(
       `Code highlighting failed for language "${job.language}", falling back to plain text.`,
@@ -182,7 +214,7 @@ function sliceEnd(lines: ReadonlyArray<string>, start: number): number {
   return end;
 }
 
-/** Splits Shiki's `<pre ...><code>LINES</code></pre>` around its lines. */
+/** Splits `<pre ...><code>LINES</code></pre>` around its lines. */
 function splitCodeElement(
   html: string,
 ): { readonly opening: string; readonly inner: string; readonly closing: string } | null {
@@ -197,57 +229,105 @@ function splitCodeElement(
   };
 }
 
+/** The first `count` lines of a stream tokenizer's tokens, split at its `\n` tokens. */
+function tokenLines(tokens: ReadonlyArray<ThemedToken>, count: number): ThemedToken[][] {
+  const lines: ThemedToken[][] = [[]];
+  for (const token of tokens) {
+    if (token.content === "\n") lines.push([]);
+    else lines.at(-1)!.push(token);
+  }
+  return lines.slice(0, count);
+}
+
+/**
+ * Starts highlighting `job` in slices, or returns null when it must take one
+ * step: it fits in one, a lone CR (which the tokenizer would take for a line
+ * break) is left after splitting, or ANSI (whose escapes carry state from line
+ * to line) needs the whole source.
+ */
+function startSlicedHighlight(
+  highlighter: DiffsHighlighter,
+  job: PendingHighlightJob,
+): SlicedHighlight | null {
+  // Split on the same breaks the highlighters do: a "\r" left at a slice end
+  // would render as an extra line, and their output joins lines with "\n".
+  const lines = job.code.split(/\r?\n/);
+  if (sliceEnd(lines, 0) >= lines.length || job.language === "ansi") return null;
+  if (lines.some((line) => line.includes("\r"))) return null;
+  const options = highlightOptions(job, job.language);
+  try {
+    // Before the tokenizer, so a language the highlighter lacks throws into
+    // the single-step path with nothing to dispose.
+    const shell = highlighter.codeToTokens("", options);
+    return {
+      lines,
+      nextLine: 0,
+      tokenizer: highlighter.createStreamTokenizer(options),
+      shell,
+      opening: null,
+      closing: null,
+      parts: [],
+    };
+  } catch {
+    return null;
+  }
+}
+
+/** Tokenizes the next slice of `sliced` and renders it inside `<code>`. */
+function highlightSlice(
+  { highlighter, tokensToHtml }: LoadedHighlighter,
+  job: PendingHighlightJob,
+  sliced: SlicedHighlight,
+  end: number,
+): ReturnType<typeof splitCodeElement> {
+  const last = end >= sliced.lines.length;
+  const source = sliced.lines.slice(sliced.nextLine, end).join("\n");
+  // Every slice but the last ends with its line break, so all its lines are
+  // final and the tokenizer resumes from an empty line.
+  const update = sliced.tokenizer.enqueue(last ? source : `${source}\n`);
+  if (update instanceof Promise) {
+    void update.catch(() => undefined);
+    return null;
+  }
+  const tokens = last ? [...update.stable, ...sliced.tokenizer.close().stable] : update.stable;
+  const html = tokensToHtml(
+    source,
+    { ...sliced.shell, tokens: tokenLines(tokens, end - sliced.nextLine) },
+    highlightOptions(job, job.language),
+    // What `codeToHtml` passes, so slices render exactly like one call.
+    highlighter.name === "highlights",
+  );
+  return splitCodeElement(html);
+}
+
 /**
  * Highlights the job's next slice. Returns the block's HTML once its last
  * slice is done, `undefined` while slices remain, and `null` on failure.
  */
 function highlightStep(
-  highlighter: DiffsHighlighter,
+  loaded: LoadedHighlighter,
   job: PendingHighlightJob,
 ): string | null | undefined {
   if (job.sliced === null) {
-    // Split on the same breaks Shiki does: a "\r" left at a slice end would
-    // render as an extra line, and Shiki joins its output lines with "\n".
-    const lines = job.code.split(/\r?\n/);
-    if (sliceEnd(lines, 0) >= lines.length) return highlight(highlighter, job);
-    job.sliced = {
-      lines,
-      nextLine: 0,
-      grammarState: undefined,
-      opening: null,
-      closing: null,
-      parts: [],
-    };
+    job.sliced = startSlicedHighlight(loaded.highlighter, job);
+    if (job.sliced === null) return highlight(loaded.highlighter, job);
   }
   const sliced = job.sliced;
   const end = sliceEnd(sliced.lines, sliced.nextLine);
-  let root: HighlightRoot | undefined;
   let split: ReturnType<typeof splitCodeElement> = null;
   try {
-    const html = highlighter.codeToHtml(sliced.lines.slice(sliced.nextLine, end).join("\n"), {
-      ...highlightOptions(job, job.language),
-      ...(sliced.grammarState !== undefined ? { grammarState: sliced.grammarState } : {}),
-      transformers: [
-        {
-          root(node) {
-            root = node;
-          },
-        },
-      ],
-    });
-    split = splitCodeElement(html);
+    split = highlightSlice(loaded, job, sliced, end);
   } catch {
     // Fall through: the whole block takes the single-step path and its fallback.
   }
   if (split === null) {
+    sliced.tokenizer.dispose();
     job.sliced = null;
-    return highlight(highlighter, job);
+    return highlight(loaded.highlighter, job);
   }
   sliced.opening ??= split.opening;
   sliced.closing = split.closing;
   sliced.parts.push(split.inner);
-  // Shiki records the grammar state at the end of the slice on its root.
-  sliced.grammarState = root === undefined ? undefined : highlighter.getLastGrammarState(root);
   sliced.nextLine = end;
   if (end < sliced.lines.length) return undefined;
   return `${sliced.opening}${sliced.parts.join("\n")}${sliced.closing}`;
@@ -283,6 +363,8 @@ function unobserveElement(element: Element): void {
 
 function dropJob(job: PendingHighlightJob): void {
   pendingJobs.delete(job.key);
+  job.sliced?.tokenizer.dispose();
+  job.sliced = null;
   for (const element of job.elements) unobserveElement(element);
   job.elements.clear();
   job.visibleElements.clear();

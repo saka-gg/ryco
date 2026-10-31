@@ -267,6 +267,7 @@ const MARKDOWN_SOURCES: readonly ForbiddenBundleSource[] = [
 const DIFF_RENDERER_SOURCES: readonly ForbiddenBundleSource[] = [
   { pattern: /^node_modules\/@pierre\/diffs\//u, reason: "diff renderer" },
   { pattern: /^node_modules\/(?:shiki|@shikijs\/)/u, reason: "syntax highlighter" },
+  { pattern: /^node_modules\/@pierre\/highlights\//u, reason: "syntax highlighter" },
 ];
 
 /**
@@ -517,8 +518,9 @@ export const DEFAULT_BUNDLE_BUDGET_POLICY: BundleBudgetPolicy = {
   ],
   chunks: [
     {
-      // The `@pierre/diffs` highlight worker (213 KiB on 2026-10-15). Built as
-      // an ES module it imports Shiki's Oniguruma engine (`wasm-*.js`, 608 KiB)
+      // The `@pierre/diffs` highlight worker (213 KiB on 2026-10-15, 45 KiB
+      // with Highlights on 2026-10-30). Built as an ES module it imports its
+      // WASM highlighter (`highlights-*.js`, 400 KiB with the module inlined)
       // only where WebAssembly may compile; an IIFE worker inlined it into
       // every worker start, hosted and JS-engine users included.
       name: "diff highlight worker",

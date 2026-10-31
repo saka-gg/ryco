@@ -33,7 +33,7 @@
     "@formkit/auto-animate": "^0.10.0",
     "@legendapp/list": "3.3.10",
     "@lexical/react": "^0.50.0",
-    "@pierre/diffs": "1.4.1",
+    "@pierre/diffs": "1.6.2",
     "@ryco/client-runtime": "workspace:*",
     "@ryco/contracts": "workspace:*",
     "@ryco/shared": "workspace:*",

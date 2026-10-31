@@ -331,6 +331,7 @@ describe("bundle budgets", () => {
         "apps/web/src/components/chat/MessageActionsSheet.tsx",
         "node_modules/@pierre/diffs/dist/index.js",
         "node_modules/shiki/dist/index.mjs",
+        "node_modules/@pierre/highlights/dist/default.js",
         "node_modules/parse5/dist/index.js",
         "packages/contracts/src/agentControlMcp.ts",
       ]) {

@@ -224,6 +224,13 @@ export function createWebViteConfig(
     // worker no longer embeds Shiki's unused 608 KiB Oniguruma WASM.
     worker: {
       format: "es",
+      rolldownOptions: {
+        // `@pierre/diffs` resolves grammars and themes on the main thread and
+        // throws when a worker tries; the flag lets the bundler drop those
+        // loaders, which otherwise copy every Shiki grammar and theme chunk
+        // into the worker's graph.
+        transform: { define: { __DIFFS_WORKER__: "true" } },
+      },
     },
     test: {
       ...ciTestReporting(),
