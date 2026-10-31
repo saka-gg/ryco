@@ -8,6 +8,11 @@ export const isRoutineAgentControlAction = (
   if (principal.kind !== "provider-session") return false;
   switch (plan.kind) {
     case "changeSettings":
+      // Turning provider update checks on while the owner's automatic updates are on would let
+      // Ryco install provider CLIs on its own: that waits for the owner.
+      return (
+        plan.change.kind !== "providerUpdateChecks" || plan.change.startsAutomaticUpdates !== true
+      );
     case "createThreads":
     case "sendMessage":
     case "interruptThread":

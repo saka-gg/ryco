@@ -82,6 +82,11 @@ export interface ProviderMaintenanceCommandAction {
    * install through the same variables the provider runs with (e.g. `CODEX_HOME`).
    */
   readonly env?: NodeJS.ProcessEnv;
+  /**
+   * A provider's own updater found at a path only its installer writes, not assumed for want of
+   * a better answer. Unattended updates run such an updater only then.
+   */
+  readonly installProven?: true;
 }
 
 /** Where a configured binary was found, as the resolver sees it. */
@@ -240,6 +245,22 @@ export function makeManualOnlyProviderMaintenanceCapabilities(input: {
   };
 }
 
+/** A release a pinned install names exactly; prereleases and tags are never pinned. */
+export const PINNABLE_VERSION = /^\d+\.\d+\.\d+$/;
+
+/** `update` installing `<package>@<version>` in place of `<package>@latest`; null without one. */
+export function pinLatestPackageSpec(
+  update: ProviderMaintenanceCommandAction,
+  packageName: string,
+  version: string,
+): ProviderMaintenanceCommandAction | null {
+  const latestSpec = `${packageName}@latest`;
+  if (!update.args.includes(latestSpec)) return null;
+  const pinnedSpec = `${packageName}@${version}`;
+  const args = update.args.map((arg) => (arg === latestSpec ? pinnedSpec : arg));
+  return { ...update, args, command: update.command.replace(latestSpec, pinnedSpec) };
+}
+
 /**
  * The command an update installs `latestVersion` with. pnpm 11 resolves `@latest` to the newest
  * release older than `minimumReleaseAge` and exits 0, so a release the advisory advertised would
@@ -255,15 +276,11 @@ export function resolveLatestProviderUpdateAction(
     update?.lockKey !== "pnpm-global" ||
     !packageName ||
     latestVersion === null ||
-    !/^\d+\.\d+\.\d+$/.test(latestVersion)
+    !PINNABLE_VERSION.test(latestVersion)
   ) {
     return update;
   }
-  const latestSpec = `${packageName}@latest`;
-  if (!update.args.includes(latestSpec)) return update;
-  const pinnedSpec = `${packageName}@${latestVersion}`;
-  const args = update.args.map((arg) => (arg === latestSpec ? pinnedSpec : arg));
-  return { ...update, args, command: update.command.replace(latestSpec, pinnedSpec) };
+  return pinLatestPackageSpec(update, packageName, latestVersion) ?? update;
 }
 
 export function hasPathSeparator(value: string): boolean {
@@ -845,8 +862,13 @@ export const resolvePackageManagedProviderMaintenance = Effect.fn(
     : manual;
   // A native-looking launcher can still delegate to a mise-owned install.
   const miseOwned = commandPaths.some(isMiseCommandPath) || (yield* isMiseWrapperScript(context));
-  if (nativeUpdate?.isCommandPath && commandPaths.some(nativeUpdate.isCommandPath) && !miseOwned) {
-    return native;
+  if (
+    native.update &&
+    nativeUpdate?.isCommandPath &&
+    commandPaths.some(nativeUpdate.isCommandPath) &&
+    !miseOwned
+  ) {
+    return { ...native, update: { ...native.update, installProven: true } };
   }
   // A `node_modules` path not proven below belongs to another package or a project, so the
   // provider's own updater could act on the wrong install.

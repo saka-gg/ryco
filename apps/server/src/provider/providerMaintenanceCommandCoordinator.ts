@@ -1,4 +1,4 @@
-import { Effect, Ref } from "effect";
+import { Effect, Option, Ref } from "effect";
 import * as Semaphore from "effect/Semaphore";
 
 export interface ProviderMaintenanceCommandCoordinatorShape<E> {
@@ -8,6 +8,15 @@ export interface ProviderMaintenanceCommandCoordinatorShape<E> {
     readonly onQueued?: Effect.Effect<void, E, R>;
     readonly run: Effect.Effect<A, E, R>;
   }) => Effect.Effect<A, E, R>;
+  /**
+   * `withCommandLock` that never waits: `None` without running when the target is already
+   * updating or another command holds the lock key.
+   */
+  readonly tryWithCommandLock: <A, E, R>(input: {
+    readonly targetKey: string;
+    readonly lockKey: string;
+    readonly run: Effect.Effect<A, E, R>;
+  }) => Effect.Effect<Option.Option<A>, E, R>;
 }
 
 export const makeProviderMaintenanceCommandCoordinator = Effect.fn(
@@ -73,7 +82,20 @@ export const makeProviderMaintenanceCommandCoordinator = Effect.fn(
       }).pipe(Effect.ensuring(releaseTarget(targetKey)));
     });
 
+  const tryWithCommandLock: ProviderMaintenanceCommandCoordinatorShape<E>["tryWithCommandLock"] = ({
+    targetKey,
+    lockKey,
+    run,
+  }) =>
+    Effect.gen(function* () {
+      if (!(yield* acquireTarget(targetKey))) return Option.none();
+      return yield* Effect.flatMap(getLock(lockKey), (lock) =>
+        lock.withPermitsIfAvailable(1)(run),
+      ).pipe(Effect.ensuring(releaseTarget(targetKey)));
+    });
+
   return {
     withCommandLock,
+    tryWithCommandLock,
   } satisfies ProviderMaintenanceCommandCoordinatorShape<E>;
 });

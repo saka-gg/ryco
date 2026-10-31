@@ -372,14 +372,22 @@ function EnvironmentConnectionManagerBootstrap() {
     // off the shell's critical path, like the update pill that shows it.
     let disposed = false;
     let stopNodeUpdates: (() => void) | null = null;
+    let stopInteractionReports: (() => void) | null = null;
     void import("../updates/nodeUpdateStore")
       .then(({ startNodeUpdateWiring }) => {
         if (!disposed) stopNodeUpdates = startNodeUpdateWiring();
       })
       .catch((error: unknown) => console.warn("Node update following failed to load.", error));
+    // Nodes that update themselves unattended wait while someone uses this app.
+    void import("../updates/clientInteractionReporting")
+      .then(({ startClientInteractionReporting }) => {
+        if (!disposed) stopInteractionReports = startClientInteractionReporting();
+      })
+      .catch((error: unknown) => console.warn("Interaction reports failed to load.", error));
     return () => {
       disposed = true;
       stopNodeUpdates?.();
+      stopInteractionReports?.();
       stopDesktopWorkspace();
       stopEnvironmentConnections();
     };

@@ -64,17 +64,19 @@ const SOURCE_STATE_DIRECTORY = "userdata";
 /** The files Nightly takes from Ryco's state folder besides the database. Nothing else is read. */
 export const FLAVOR_IMPORT_COPIED_FILES = ["settings.json", "keybindings.json"] as const;
 /**
- * Settings that name Ryco's own folders. Nightly keeps its defaults for them (folders in its own
- * home): its idle chat-folder sweep and orphan cleanup act on these folders, and must never reach
- * Ryco's chats or worktrees.
+ * Settings Nightly never takes from Ryco. Those that name Ryco's own folders keep Nightly's
+ * defaults (folders in its own home): its idle chat-folder sweep and orphan cleanup act on these
+ * folders, and must never reach Ryco's chats or worktrees. `automaticUpdates` lets a node replace
+ * the machine's provider CLIs on its own; the owner turns it on for each node, never by a copy.
  */
 export const FLAVOR_IMPORT_DROPPED_SETTINGS = [
   "chatsRoot",
   "worktreeRoot",
   "projectWorktreeRoots",
+  "automaticUpdates",
 ] as const;
 
-/** `settings.json` without the settings that name Ryco's folders; other files unchanged. */
+/** `settings.json` without {@link FLAVOR_IMPORT_DROPPED_SETTINGS}; other files unchanged. */
 function stagedFileContents(name: string, contents: Buffer): Buffer {
   if (name !== "settings.json") return contents;
   let settings: unknown;

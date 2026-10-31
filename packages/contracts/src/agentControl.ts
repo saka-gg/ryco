@@ -617,6 +617,11 @@ export const AgentControlProviderUpdateChecksChange = Schema.Struct({
   kind: Schema.Literal("providerUpdateChecks"),
   before: Schema.Boolean,
   after: Schema.Boolean,
+  /**
+   * Turning checks on also starts the node's automatic provider updates (its owner turned
+   * `automaticUpdates` on): Ryco would install provider CLIs on its own, so the owner approves.
+   */
+  startsAutomaticUpdates: Schema.optionalKey(Schema.Literal(true)),
 }).pipe(rejectExcessProperties);
 export type AgentControlProviderUpdateChecksChange =
   typeof AgentControlProviderUpdateChecksChange.Type;

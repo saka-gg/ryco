@@ -14,6 +14,7 @@ import {
   makeProviderMaintenanceCapabilities,
 } from "./providerMaintenance.ts";
 import {
+  BUSY_MARKER_REFRESH_INTERVAL,
   EXPIRED_TAKEOVER_GRACE,
   LAUNCH_WAIT,
   makeProviderInstallLock,
@@ -455,6 +456,112 @@ describe("providerInstallLock", () => {
       const recordMode = (yield* fs(() => NodeFs.stat(record(1)))).mode & 0o777;
       assert.strictEqual(folderMode, 0o700);
       assert.strictEqual(recordMode, 0o600);
+    }),
+  );
+
+  it.effect("sets aside only the lock its caller holds", () =>
+    Effect.gen(function* () {
+      const { first, second } = yield* withFolder;
+      const seen = yield* first.tryRun("npm-global", () =>
+        Effect.gen(function* () {
+          const alone = yield* second.anyHeldExcept("npm-global");
+          const other = yield* second.tryRun("homebrew", () => second.anyHeldExcept("npm-global"));
+          return { alone, other: Option.getOrThrow(other) };
+        }),
+      );
+      assert.deepStrictEqual(Option.getOrThrow(seen), { alone: false, other: true });
+    }),
+  );
+
+  /** A lock over the folder that reports each busy marker it writes or removes. */
+  const watchedBusyLock = (
+    lockWith: (
+      files: Partial<ProviderInstallLockFiles>,
+    ) => ReturnType<typeof makeProviderInstallLock>,
+  ) => {
+    const events: Array<string> = [];
+    let notify: () => void = () => undefined;
+    const next = () => new Promise<void>((resolve) => (notify = resolve));
+    const lock = lockWith({
+      rename: async (from, to) => {
+        await nodeProviderInstallLockFiles.rename(from, to);
+        if (!to.endsWith(".busy")) return;
+        events.push(`wrote ${path.basename(to)}`);
+        notify();
+      },
+      unlink: async (file) => {
+        await nodeProviderInstallLockFiles.unlink(file);
+        if (!file.endsWith(".busy")) return;
+        events.push(`removed ${path.basename(file)}`);
+        notify();
+      },
+    });
+    return { lock, events, next };
+  };
+
+  it.effect("publishes a busy marker other processes read, until its work ends", () =>
+    Effect.gen(function* () {
+      const { second, lockWith, directory } = yield* withFolder;
+      const busy = `${directory}-busy`;
+      const { lock: first, next } = watchedBusyLock(lockWith);
+      assert.isFalse(yield* second.othersBusy);
+
+      const written = next();
+      const holding = yield* Effect.forkChild(first.holdBusy);
+      yield* Effect.promise(() => written);
+      const [marker] = yield* names(busy);
+      assert.match(marker!, new RegExp(`^${process.pid}\\.[0-9a-f-]+\\.busy$`, "u"));
+      assert.strictEqual(
+        yield* read(path.join(busy, marker!)),
+        `${process.pid}\n${marker!.split(".")[1]}`,
+      );
+      assert.isTrue(yield* second.othersBusy);
+      // Its own marker never counts for itself.
+      assert.isFalse(yield* first.othersBusy);
+      if (POSIX) {
+        assert.strictEqual((yield* fs(() => NodeFs.stat(busy))).mode & 0o777, 0o700);
+        assert.strictEqual(
+          (yield* fs(() => NodeFs.stat(path.join(busy, marker!)))).mode & 0o777,
+          0o600,
+        );
+      }
+
+      // Kept fresh while the work lasts.
+      const refreshed = next();
+      const inode = (yield* fs(() => NodeFs.stat(path.join(busy, marker!)))).ino;
+      yield* TestClock.adjust(BUSY_MARKER_REFRESH_INTERVAL);
+      yield* Effect.promise(() => refreshed);
+      assert.notStrictEqual((yield* fs(() => NodeFs.stat(path.join(busy, marker!)))).ino, inode);
+
+      yield* Fiber.interrupt(holding);
+      assert.deepStrictEqual(yield* names(busy), []);
+      assert.isFalse(yield* second.othersBusy);
+    }),
+  );
+
+  it.effect("ignores the marker of a process that exited, and the next writer removes it", () =>
+    Effect.gen(function* () {
+      const { second, lockWith, directory } = yield* withFolder;
+      const busy = `${directory}-busy`;
+      const pid = exitedPid();
+      const stale = `${pid}.gone.busy`;
+      yield* fs(async () => {
+        await NodeFs.mkdir(busy, { recursive: true, mode: 0o700 });
+        await NodeFs.writeFile(path.join(busy, stale), `${pid}\ngone`);
+      });
+      assert.isFalse(yield* second.othersBusy);
+
+      const { lock: first, events, next } = watchedBusyLock(lockWith);
+      let pruned = next();
+      const holding = yield* Effect.forkChild(first.holdBusy);
+      // Written first, then the dead marker goes.
+      while (!events.some((event) => event.startsWith("removed"))) {
+        yield* Effect.promise(() => pruned);
+        pruned = next();
+      }
+      assert.deepStrictEqual(events.at(-1), `removed ${stale}`);
+      assert.notInclude(yield* names(busy), stale);
+      yield* Fiber.interrupt(holding);
     }),
   );
 

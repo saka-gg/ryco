@@ -20,6 +20,7 @@ import { ConnectionRegistryProvider } from "./providers/ConnectionRegistryProvid
 import { AppProviders } from "./providers/AppProviders";
 import { FatalRenderErrorBoundary } from "./diagnostics/FatalRenderErrorBoundary";
 import { useHostedAppLifecycle } from "./hostedHub/useHostedAppLifecycle";
+import { noteMobileClientInteraction } from "./runtime/clientInteraction";
 import { AppAccessGate } from "./features/access/AppAccessGate";
 import {
   isAppAccessDecided,
@@ -125,7 +126,13 @@ function AppRoot() {
           {/* The navigation theme drives the NATIVE header appearance (dark ->
               overrideUserInterfaceStyle). Blur target hosts Android dropdown
               backdrops (see appBlurTarget.ts). */}
-          <BlurTargetView ref={appBlurTargetRef} style={{ flex: 1 }}>
+          {/* Touches bubble here from every screen (observed, never handled): machines that
+              update themselves unattended wait while someone uses the app. */}
+          <BlurTargetView
+            ref={appBlurTargetRef}
+            style={{ flex: 1 }}
+            onTouchStart={noteMobileClientInteraction}
+          >
             <AppAccessGate
               linking={appLinking}
               theme={colorScheme === "dark" ? DarkTheme : DefaultTheme}

@@ -15,7 +15,10 @@
  * Nothing is reported before the startup command gate opens: startup reconciliation settles
  * turns a previous process left "running", and those must not read as work. A server whose
  * startup failed reports nothing at all, and a failing recompute reports idle. Sleep is allowed
- * whenever this module cannot tell.
+ * whenever this module cannot tell; an update or restart (`interruptible`) is not.
+ *
+ * One tracker serves the whole process: sleep holds (`agentWorkHold.ts`), the machine-wide busy
+ * marker other Ryco processes read, and unattended updates.
  *
  * @module AgentWorkActivity
  */
@@ -24,6 +27,7 @@ import type {
   OrchestrationReadModel,
   OrchestrationSession,
 } from "@ryco/contracts";
+import { derivePendingThreadRequestState } from "@ryco/shared/threadActivity";
 import {
   Cause,
   Clock,
@@ -97,6 +101,27 @@ export function hasLiveBackgroundWork(
   });
 }
 
+const isRequestActivity = (activity: { readonly kind: string }) =>
+  activity.kind === "approval.requested" || activity.kind === "user-input.requested";
+
+/**
+ * Work an update or restart would interrupt beyond running turns: a thread whose provider session
+ * is starting, or that waits on an approval or a (blocking) question. The server mirror of the
+ * client's `INTERRUPTIBLE` rule (`@ryco/client-runtime` `interruptibleTurns.ts`: working,
+ * approval, input, connecting); running turns and background work are `keepAwake`'s. Archived,
+ * deleted and trashed threads never count, as on the client.
+ */
+export function hasInterruptibleWork(readModel: Pick<OrchestrationReadModel, "threads">): boolean {
+  return readModel.threads.some((thread) => {
+    if (thread.deletedAt !== null || thread.archivedAt !== null) return false;
+    if (thread.session?.status === "starting") return true;
+    // Most threads never asked anything: a scan, before sorting a log that has requests.
+    if (!thread.activities.some(isRequestActivity)) return false;
+    const pending = derivePendingThreadRequestState(thread.activities);
+    return pending.hasPendingApprovals || pending.hasPendingUserInput;
+  });
+}
+
 /**
  * The domain events that can change what the two predicates above answer: `thread.session-set`
  * is the only writer of a thread's session, and deletion, trash and restore change `deletedAt`.
@@ -154,6 +179,16 @@ export interface AgentWorkActivityShape {
    * emitted before the first report, so a consumer never acts on a placeholder.
    */
   readonly changes: Stream.Stream<AgentWorkState>;
+  /**
+   * Whether an update or restart would interrupt something now, read from the model at the call
+   * (a turn that started a moment ago counts before any report says so): a running turn,
+   * background work, {@link hasInterruptibleWork}, or work that stopped (or a recompute that
+   * failed) less than {@link AGENT_WORK_RELEASE_DEBOUNCE_MS} ago on the monotonic clock, so a
+   * wall clock that moved never shortens or stretches it. True before the first report, when
+   * the engine keeps no in-memory model, and when the read fails: whoever cannot tell must not
+   * interrupt.
+   */
+  readonly interruptible: Effect.Effect<boolean>;
 }
 
 export class AgentWorkActivity extends Context.Service<AgentWorkActivity, AgentWorkActivityShape>()(
@@ -210,6 +245,11 @@ export const makeAgentWorkActivity = Effect.gen(function* () {
     working: false,
     releaseAtMs: null,
   };
+  // When a recompute last saw work, saw it stop, or failed: `interruptible`'s tail, monotonic.
+  let workSeenAtNanos: bigint | null = null;
+  const noteWorkSeen = Effect.map(Clock.monotonicTimeNanos, (now) => {
+    workSeenAtNanos = now;
+  });
 
   const publish = (state: AgentWorkState) =>
     SubscriptionRef.get(published).pipe(
@@ -225,6 +265,7 @@ export const makeAgentWorkActivity = Effect.gen(function* () {
     const model = engine.getReadModel === undefined ? null : yield* engine.getReadModel();
     const working =
       model !== null && (hasRunningTurn(model) || hasLiveBackgroundWork(model, liveness));
+    if (working || previous.working) yield* noteWorkSeen;
     const nowMs = yield* Clock.currentTimeMillis;
     const step = stepAgentWork({ working, nowMs, previous });
     previous = { working, releaseAtMs: step.releaseAtMs };
@@ -250,6 +291,7 @@ export const makeAgentWorkActivity = Effect.gen(function* () {
               });
             }
             previous = { working: false, releaseAtMs: null };
+            yield* noteWorkSeen;
             yield* publish(IDLE_AGENT_WORK);
             // Retry soon, or at the next change; triggers are state changes, never progress.
             return AGENT_WORK_FAILURE_BACKOFF_MS;
@@ -287,8 +329,26 @@ export const makeAgentWorkActivity = Effect.gen(function* () {
     ),
   );
 
+  const readModel = engine.getReadModel;
+  const tailNanos = BigInt(AGENT_WORK_RELEASE_DEBOUNCE_MS) * 1_000_000n;
+  const interruptible = Effect.gen(function* () {
+    if (readModel === undefined || (yield* SubscriptionRef.get(published)) === null) return true;
+    const model = yield* readModel();
+    // `previous.working`: work stopped since the last recompute, which has yet to start the tail.
+    if (previous.working || hasRunningTurn(model) || hasLiveBackgroundWork(model, liveness)) {
+      return true;
+    }
+    const now = yield* Clock.monotonicTimeNanos;
+    if (workSeenAtNanos !== null && now - workSeenAtNanos < tailNanos) return true;
+    return hasInterruptibleWork(model);
+  }).pipe(
+    Effect.catchCause((cause) =>
+      Cause.hasInterruptsOnly(cause) ? Effect.failCause(cause) : Effect.succeed(true),
+    ),
+  );
   return {
     current: SubscriptionRef.get(published).pipe(Effect.map((state) => state ?? IDLE_AGENT_WORK)),
+    interruptible,
     changes: SubscriptionRef.changes(published).pipe(
       Stream.filter((state): state is AgentWorkState => state !== null),
     ),

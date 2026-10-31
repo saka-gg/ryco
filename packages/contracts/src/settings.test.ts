@@ -328,6 +328,18 @@ describe("ServerSettings.continueThreadsAfterRestart", () => {
   });
 });
 
+describe("ServerSettings.automaticUpdates", () => {
+  it("defaults off, so no node updates its provider CLIs unattended unless its owner opts in", () => {
+    expect(DEFAULT_SERVER_SETTINGS.automaticUpdates).toBe(false);
+    expect(decodeServerSettings({}).automaticUpdates).toBe(false);
+  });
+
+  it("can be enabled and round-trips through the settings patch", () => {
+    expect(decodeServerSettings({ automaticUpdates: true }).automaticUpdates).toBe(true);
+    expect(decodeServerSettingsPatch({ automaticUpdates: true }).automaticUpdates).toBe(true);
+  });
+});
+
 describe("ServerSettings.providerInstances (slice-2 invariant)", () => {
   it("defaults to an empty record so legacy configs without the key still decode", () => {
     expect(DEFAULT_SERVER_SETTINGS.providerInstances).toEqual({});

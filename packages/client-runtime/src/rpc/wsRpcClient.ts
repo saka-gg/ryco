@@ -490,6 +490,13 @@ export interface WsRpcClient {
       typeof WS_METHODS.serverAuthenticateAcpRegistry
     >;
     readonly updateProvider: RpcUnaryMethod<typeof WS_METHODS.serverUpdateProvider>;
+    /**
+     * Tells the node a person is using this client, so its unattended updates wait. Only for
+     * nodes with `automaticUpdates` on; `createClientInteractionReporter` throttles it.
+     */
+    readonly noteClientInteraction: RpcUnaryNoArgMethod<
+      typeof WS_METHODS.serverNoteClientInteraction
+    >;
     readonly subscribeNodeUpdate: RpcStreamMethod<typeof WS_METHODS.serverSubscribeNodeUpdate>;
     readonly checkNodeUpdate: RpcUnaryNoArgMethod<typeof WS_METHODS.serverCheckNodeUpdate>;
     readonly updateNode: RpcUnaryMethod<typeof WS_METHODS.serverUpdateNode>;
@@ -1139,6 +1146,8 @@ export function createWsRpcClient(
         transport.request((client) => client[WS_METHODS.serverAuthenticateAcpRegistry](input)),
       updateProvider: (input) =>
         transport.request((client) => client[WS_METHODS.serverUpdateProvider](input)),
+      noteClientInteraction: () =>
+        transport.request((client) => client[WS_METHODS.serverNoteClientInteraction]({})),
       subscribeNodeUpdate: (listener, options) =>
         transport.subscribe(
           (client) => client[WS_METHODS.serverSubscribeNodeUpdate]({}),

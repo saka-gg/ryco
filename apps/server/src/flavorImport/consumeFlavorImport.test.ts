@@ -130,6 +130,7 @@ const makeFixture = (): Fixture => {
     }
   }
   // Ryco's own folders: Nightly must keep its own, so its folder sweeps never reach these.
+  // Automatic updates: Nightly's owner turns them on for Nightly, never a copy of Ryco's.
   write(
     join(stableState, "settings.json"),
     JSON.stringify({
@@ -137,6 +138,7 @@ const makeFixture = (): Fixture => {
       chatsRoot: join(root, "stable-chats"),
       worktreeRoot: join(root, "stable-worktrees"),
       projectWorktreeRoots: { "project-1": join(root, "stable-project-worktrees") },
+      automaticUpdates: true,
     }),
   );
   write(join(stableState, "attachments", "thread-1", "image.png"), "stable image");
