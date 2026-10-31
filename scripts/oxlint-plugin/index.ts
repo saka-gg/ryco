@@ -8,6 +8,8 @@
  */
 import { definePlugin } from "vite-plus/lint/plugins";
 
+import noPartialRuntimeMockInBrowserTests from "./rules/no-partial-runtime-mock-in-browser-tests.ts";
+import noRawMcpDispatch from "./rules/no-raw-mcp-dispatch.ts";
 import requireSuppressionReason from "./rules/require-suppression-reason.ts";
 
 export default definePlugin({
@@ -15,6 +17,8 @@ export default definePlugin({
     name: "ryco",
   },
   rules: {
+    "no-partial-runtime-mock-in-browser-tests": noPartialRuntimeMockInBrowserTests,
+    "no-raw-mcp-dispatch": noRawMcpDispatch,
     "require-suppression-reason": requireSuppressionReason,
   },
 });
