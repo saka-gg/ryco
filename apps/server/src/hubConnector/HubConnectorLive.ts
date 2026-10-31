@@ -464,6 +464,7 @@ const makeHubConnectorService = (dependencies: HubConnectorLiveDependencies) =>
           );
     // A device's pending codes go with its sessions, narrowed the same way (all roles).
     const linkedCodeSelector = (selector: LinkedSessionSelector): LinkedCodeSelector => {
+      if ("allLinks" in selector) return selector;
       if (!("clientFingerprint" in selector)) return { enrollmentId: selector.enrollmentId };
       const { roles: _roles, ...narrowed } = selector;
       return narrowed;
@@ -836,6 +837,10 @@ const makeHubConnectorService = (dependencies: HubConnectorLiveDependencies) =>
       features: [NODE_LINKED_ACCESS_CHECK_FEATURE],
       onOnline: () => linkedAccessCheck?.request("online"),
       onLinkedAccessChanged: () => linkedAccessCheck?.request("nudge"),
+      // A TLS-authenticated Hub said this node is revoked: every link it issued on the Hub's
+      // word ends now, and the devices link again once the node is enrolled again. Pairings the
+      // owner made by hand and the owner's own sessions carry no link and stay.
+      onRevoked: () => void revokeLinkedSessions({ allLinks: true }),
       processLock,
       // Only a lock actually held: past an unusable one the connector asks
       // again each time it needs the identity.

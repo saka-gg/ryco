@@ -231,6 +231,7 @@ export class HubConnector {
   readonly #features: ReadonlyArray<string>;
   readonly #onOnline: () => void;
   readonly #onLinkedAccessChanged: () => void;
+  readonly #onRevoked: () => void;
   readonly #networkFingerprint: () => string;
   readonly #livenessWatchEnabled: boolean;
   readonly #processLock: HubIdentityProcessLock | undefined;
@@ -337,6 +338,12 @@ export class HubConnector {
      * Must not block: it runs in the connection's frame order.
      */
     readonly onLinkedAccessChanged?: () => void;
+    /**
+     * The Hub refused this node's connection as revoked (`revoked`, `node_revoked`): each time
+     * the connector enters its terminal `revoked` state, never on a failure it retries. Must not
+     * block.
+     */
+    readonly onRevoked?: () => void;
     /** Injectable for tests; see `defaultNetworkFingerprint`. */
     readonly networkFingerprint?: () => string;
     /** Watch for wake and network changes; see `nudge`. On unless a test opts out. */
@@ -376,6 +383,7 @@ export class HubConnector {
     this.#features = options.features ?? [];
     this.#onOnline = options.onOnline ?? (() => undefined);
     this.#onLinkedAccessChanged = options.onLinkedAccessChanged ?? (() => undefined);
+    this.#onRevoked = options.onRevoked ?? (() => undefined);
     this.#networkFingerprint = options.networkFingerprint ?? defaultNetworkFingerprint;
     this.#livenessWatchEnabled = options.livenessWatch ?? true;
     this.#processLock = options.processLock;
@@ -1432,6 +1440,7 @@ export class HubConnector {
     if (disposition.action === "operator") {
       if (disposition.terminalState !== undefined) {
         this.#state.transition(disposition.terminalState, { failure: disposition.failure });
+        if (disposition.terminalState === "revoked") this.#onRevoked();
       } else {
         this.#state.transition("degraded", {
           degradedMode: "operator_action_required",
