@@ -204,6 +204,8 @@ it("brackets mutating actions with beginAgentMutation and leaves reads alone", a
         log.push("end");
       };
     }),
+    // The Ryco browser; this test's tab has no live page automation.
+    automation: vi.fn(() => undefined),
   };
   const context: ComputerOperationContext = {
     request: {
@@ -374,6 +376,8 @@ it("reports a revived Ryco tab and requires a fresh observation", async () => {
       reload = null;
       return revival;
     }),
+    // The Ryco browser; this test's tab has no live page automation.
+    automation: vi.fn(() => undefined),
   };
   const context: ComputerOperationContext = {
     request: { sessionId: "s", threadId: "t", turnId: "u", tool: "browser", args: {} },
@@ -933,6 +937,91 @@ describe("dialogs", () => {
     const observed = await run({ action: "observe" });
     expect(texts(observed)).toEqual([{ title: "Test", elements: [] }, { dialogs: [dialog] }]);
     expect(texts(await run({ action: "observe" }))).toHaveLength(1);
+  });
+
+  it("answers a paired browser's dialogs inside the page during actions that can run page code", async () => {
+    // The page's records claim an answer; the driver recomputes it from the action's policy.
+    let drained: unknown = [
+      { kind: "confirm", message: "sure?", action: "dismissed", openedAt: "2026-10-31T10:00:00Z" },
+    ];
+    const finishes = (expression: string) => expression.includes("delete window[");
+    const { run, sent, methods } = rycoFixture(
+      (expression) => (finishes(expression) ? drained : page(expression)),
+      { automation: false },
+    );
+    await run({ action: "observe" });
+    sent.length = 0;
+    const clicked = await run({ action: "click", ref: "e1", dialog: "accept" });
+    // A main-world shim (no isolated world) goes in before the input and is finished after it.
+    const shim = sent.filter(
+      ({ method, params }) => method === "Runtime.evaluate" && params.contextId === undefined,
+    );
+    expect(shim).toHaveLength(2);
+    const install = String(shim[0]!.params.expression);
+    const key = /__rycoDialogs[0-9a-f]{32}/u.exec(install)?.[0];
+    expect(key).toBeDefined();
+    expect(install).toContain('"accept":true');
+    expect(String(shim[1]!.params.expression)).toContain(JSON.stringify(key));
+    expect(methods().indexOf("Input.dispatchMouseEvent")).toBeGreaterThan(sent.indexOf(shim[0]!));
+    expect(methods().lastIndexOf("Input.dispatchMouseEvent")).toBeLessThan(sent.indexOf(shim[1]!));
+    expect(texts(clicked).at(-1)).toEqual({
+      dialogs: [
+        {
+          kind: "confirm",
+          message: "sure?",
+          openedAt: "2026-10-31T10:00:00.000Z",
+          action: "accepted",
+          during: "command",
+        },
+      ],
+    });
+    // Each action gets its own key; reads open no scope.
+    sent.length = 0;
+    await run({ action: "click", ref: "e1" });
+    expect(String(sent[0]!.params.expression)).not.toContain(key!);
+    sent.length = 0;
+    await run({ action: "observe" });
+    await run({ action: "screenshot" });
+    expect(sent.some(({ params }) => String(params.expression).includes("__rycoDialogs"))).toBe(
+      false,
+    );
+  });
+
+  it("reports a paired browser's dialogs from a failed action with the tab's next result", async () => {
+    const drained = [{ kind: "alert", message: "before failing" }];
+    const { run } = rycoFixture(
+      (expression) => (expression.includes("delete window[") ? drained : page(expression)),
+      { automation: false },
+    );
+    // Not observed yet: the click fails after its shim went in.
+    await expect(run({ action: "click", ref: "e1" })).rejects.toThrow("Observe this document");
+    drained.length = 0;
+    const observed = await run({ action: "observe" });
+    expect(texts(observed).at(-1)).toEqual({
+      dialogs: [
+        expect.objectContaining({ kind: "alert", message: "before failing", action: "accepted" }),
+      ],
+    });
+    expect(texts(await run({ action: "observe" }))).toHaveLength(1);
+  });
+
+  it("still runs a paired browser's action when its shim cannot go in", async () => {
+    const { run, transport } = rycoFixture(page, { automation: false });
+    await run({ action: "observe" });
+    const send = vi.mocked(transport.send);
+    const base = send.getMockImplementation()!;
+    send.mockImplementation(async (tab, method, params, signal) => {
+      if (String(params.expression).includes("__rycoDialogs")) throw new Error("Action failed");
+      return base(tab, method, params, signal);
+    });
+    await expect(run({ action: "click", ref: "e1" })).resolves.toBeDefined();
+    // The install may have run although its answer was lost: the finish is sent anyway (harmless
+    // without the key), so the page always gets its own functions back.
+    expect(
+      send.mock.calls.filter(([, , params]) =>
+        String(params.expression).includes("delete window["),
+      ),
+    ).toHaveLength(1);
   });
 
   it("has no dialog action", async () => {
