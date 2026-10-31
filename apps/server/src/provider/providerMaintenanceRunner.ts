@@ -12,6 +12,7 @@ import { Cause, Context, DateTime, Duration, Effect, Layer, Option, Ref, Schema 
 import { HttpClient } from "effect/http";
 import { ChildProcessSpawner } from "effect/process";
 
+import { ProviderInstallLock } from "./Services/ProviderInstallLock.ts";
 import { ProviderRegistry } from "./Services/ProviderRegistry.ts";
 import { makeProviderMaintenanceCommandCoordinator } from "./providerMaintenanceCommandCoordinator.ts";
 import {
@@ -70,6 +71,8 @@ const runProviderMaintenanceCommandWithSpawner = Effect.fn("ProviderMaintenanceR
     readonly command: string;
     readonly args: ReadonlyArray<string>;
     readonly env: NodeJS.ProcessEnv | undefined;
+    /** Runs once the installer has spawned; a failure stops it before it gets far. */
+    readonly onSpawned: (pid: number) => Effect.Effect<void, Error>;
   }) {
     const collectCommandResult = Effect.fn("ProviderMaintenanceRunner.collectCommandResult")(
       function* () {
@@ -89,6 +92,7 @@ const runProviderMaintenanceCommandWithSpawner = Effect.fn("ProviderMaintenanceR
             ),
           );
         yield* Effect.addFinalizer(() => child.kill().pipe(Effect.ignore));
+        yield* input.onSpawned(child.pid);
 
         const [stdout, stderr, exitCode] = yield* Effect.all(
           [
@@ -191,6 +195,7 @@ function makeUpdateState(input: {
 
 export const make = Effect.fn("ProviderMaintenanceRunner.make")(function* () {
   const providerRegistry = yield* ProviderRegistry;
+  const installLock = yield* ProviderInstallLock;
   const spawner = yield* ChildProcessSpawner.ChildProcessSpawner;
   const httpClient = yield* HttpClient.HttpClient;
   const serverSettings = yield* ServerSettingsService;
@@ -199,12 +204,16 @@ export const make = Effect.fn("ProviderMaintenanceRunner.make")(function* () {
     onNone: () => Effect.succeed(BUNDLED_MODEL_MANIFEST),
     onSome: (service) => service.current,
   });
-  const runMaintenanceCommand = (action: ProviderMaintenanceCommandAction) =>
+  const runMaintenanceCommand = (
+    action: ProviderMaintenanceCommandAction,
+    onSpawned: (pid: number) => Effect.Effect<void, Error>,
+  ) =>
     runProviderMaintenanceCommandWithSpawner({
       spawner,
       command: action.executable,
       args: action.args,
       env: action.env,
+      onSpawned,
     });
   const commandCoordinator = yield* makeProviderMaintenanceCommandCoordinator({
     makeAlreadyRunningError: () =>
@@ -325,7 +334,7 @@ export const make = Effect.fn("ProviderMaintenanceRunner.make")(function* () {
         const startedAtRef = yield* Ref.make<string | null>(null);
 
         const runCommandAndVerify = Effect.fn("ProviderMaintenanceRunner.runCommandAndVerify")(
-          function* () {
+          function* (recordChildPid: (pid: number) => Effect.Effect<void, Error>) {
             // Compatibility gate, inside the command lock so a queued update re-checks after
             // its wait. It rates the version the installer would install right now (a fresh
             // lookup through the installer's own channel, e.g. `brew info` or `pnpm outdated`,
@@ -368,7 +377,7 @@ export const make = Effect.fn("ProviderMaintenanceRunner.make")(function* () {
 
             // pnpm installs the exact version that was rated, not whatever `@latest` resolves to.
             const action = resolveLatestProviderUpdateAction(capabilities, latestVersion) ?? update;
-            const result = yield* runMaintenanceCommand(action);
+            const result = yield* runMaintenanceCommand(action, recordChildPid);
             const finishedAt = yield* nowIso;
             if (result.timedOut || result.exitCode !== 0) {
               return yield* finish(
@@ -423,7 +432,27 @@ export const make = Effect.fn("ProviderMaintenanceRunner.make")(function* () {
           },
         );
 
-        return yield* runCommandAndVerify().pipe(Effect.catchCause(recordFailedUpdate));
+        // Host-wide, inside this process's lock: another Ryco on this machine (Desktop, a CLI
+        // service, Nightly, a dev server) may run an installer on the same target. Held through
+        // verification. When it is held, wait for it, then start over from the compatibility
+        // gate, which re-checks what would be installed now.
+        return yield* installLock.lock.pipe(
+          Effect.flatMap((lock) =>
+            lock.runWhenFree(
+              update.lockKey,
+              setUpdateState(
+                makeUpdateState({
+                  status: "queued",
+                  startedAt: null,
+                  finishedAt: null,
+                  message: "Another Ryco on this machine is updating this CLI.",
+                }),
+              ),
+              runCommandAndVerify,
+            ),
+          ),
+          Effect.catchCause(recordFailedUpdate),
+        );
       },
     );
 

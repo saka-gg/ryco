@@ -119,6 +119,7 @@ import { ThreadGitMetadataReactorLive } from "./orchestration/Layers/ThreadGitMe
 import { ThreadDeletionReactorLive } from "./orchestration/Layers/ThreadDeletionReactor.ts";
 import { ThreadPurgeReactorLive } from "./orchestration/Layers/ThreadPurgeReactor.ts";
 import { ProviderRegistryLive } from "./provider/Layers/ProviderRegistry.ts";
+import { ProviderInstallLockLive } from "./provider/Layers/ProviderInstallLock.ts";
 import { ServerSettingsLive } from "./serverSettings.ts";
 import { ProjectFaviconResolverLive } from "./project/Layers/ProjectFaviconResolver.ts";
 import { RepositoryIdentityResolverLive } from "./project/Layers/RepositoryIdentityResolver.ts";
@@ -384,6 +385,9 @@ const ProviderSessionDirectoryLayerLive = ProviderSessionDirectoryLive.pipe(
 const ProviderLayerLive = ProviderServiceLive.pipe(
   Layer.provide(ProviderAdapterRegistryLive),
   Layer.provideMerge(ProviderSessionDirectoryLayerLive),
+  // The host-wide provider install lock: ProviderService waits for it before it launches a
+  // provider process, and the maintenance runner takes it around an install.
+  Layer.provideMerge(ProviderInstallLockLive),
 );
 
 const PersistenceLayerLive = Layer.empty.pipe(Layer.provideMerge(SqlitePersistenceLayerLive));
