@@ -29,11 +29,17 @@ import {
   type ReactNode,
 } from "react";
 import { useRouter } from "@tanstack/react-router";
-import type { Components } from "react-markdown";
-import ReactMarkdown from "react-markdown";
+import type { Components, UrlTransform } from "react-markdown";
 import { defaultUrlTransform } from "react-markdown";
 import remarkGfm from "remark-gfm";
+import type { PluggableList } from "unified";
 import { createIncrementalMarkdownPlugin } from "../markdown-incremental";
+import {
+  buildStreamingMarkdownChildren,
+  renderMarkdownBlock,
+  type MarkdownBlock,
+  type StreamingMarkdownChildren,
+} from "../markdown-blocks";
 import { VscodeEntryIcon } from "./chat/VscodeEntryIcon";
 import { QuoteCitationChip } from "./chat/QuoteCitationChip";
 import { QuoteCitationContext } from "./chat/quoteCitationContext";
@@ -75,6 +81,7 @@ import {
   resolveMarkdownFileLinkMeta,
   resolveMarkdownThreadHref,
   rewriteMarkdownFileUriHref,
+  type MarkdownFileLinkMeta,
 } from "../markdown-links";
 import { readLocalApi } from "../localApi";
 import { useWorkspaceFileOpener } from "../workspaceFileNavigation";
@@ -113,6 +120,28 @@ interface ChatMarkdownProps {
 }
 
 const EMPTY_MARKDOWN_SKILLS: ReadonlyArray<Pick<ServerProviderSkill, "name" | "displayName">> = [];
+
+const MARKDOWN_REMARK_PLUGINS: PluggableList = [remarkGfm];
+
+interface MarkdownParseOptions {
+  readonly remarkPlugins: PluggableList;
+  /** The plugins of a stream's tail block: the streaming renderer's prefix cache too. */
+  readonly tailRemarkPlugins: PluggableList;
+  readonly components: Components;
+  readonly urlTransform: UrlTransform;
+}
+
+function parseMarkdownBlock(
+  block: MarkdownBlock,
+  options: MarkdownParseOptions,
+  tail: boolean,
+): readonly ReactNode[] {
+  return renderMarkdownBlock(block, {
+    remarkPlugins: tail ? options.tailRemarkPlugins : options.remarkPlugins,
+    components: options.components,
+    urlTransform: options.urlTransform,
+  });
+}
 
 const WorkspaceMarkdownImage = memo(function WorkspaceMarkdownImage(props: {
   environmentId: EnvironmentId;
@@ -766,12 +795,14 @@ const RenderedChatMarkdown = memo(function RenderedChatMarkdown({
   const completedText = isStreaming ? "" : text;
   const { resolvedTheme } = useTheme();
   const diffThemeName = resolveDiffThemeName(resolvedTheme);
-  const incrementalParsing = isStreaming && /(?:^|\n) {0,3}(?:`{3}|~{3})/.test(text);
-  // Own the cache for this streaming renderer only; completion returns to the
-  // full parser so final replacements and highlighting always take effect.
-  const remarkPlugins = useMemo(
-    () => [remarkGfm, ...(incrementalParsing ? [createIncrementalMarkdownPlugin()] : [])],
-    [incrementalParsing],
+  // Own the prefix cache for this streaming renderer only; completion returns
+  // to the full parser so final replacements and highlighting always take effect.
+  const tailRemarkPlugins = useMemo<PluggableList>(
+    () =>
+      isStreaming
+        ? [...MARKDOWN_REMARK_PLUGINS, createIncrementalMarkdownPlugin()]
+        : MARKDOWN_REMARK_PLUGINS,
+    [isStreaming],
   );
   const searchHighlightCursorRef = useRef({ occurrenceIndex: 0 });
   searchHighlightCursorRef.current.occurrenceIndex = 0;
@@ -784,23 +815,26 @@ const RenderedChatMarkdown = memo(function RenderedChatMarkdown({
       }
     : undefined;
   // Growing prose/code must not recreate every custom Markdown component (and
-  // remount completed images/code blocks) when the link destinations are unchanged.
+  // remount completed images/code blocks, or re-parse a stream's settled
+  // blocks) when the file link destinations are unchanged. Only file links
+  // reach the renderers, so a new web link keeps them too.
   const markdownLinkHrefsKey = JSON.stringify(extractMarkdownLinkHrefs(text));
-  const markdownFileLinkMetaByHref = useMemo(() => {
-    const metaByHref = new Map<
-      string,
-      NonNullable<ReturnType<typeof resolveMarkdownFileLinkMeta>>
-    >();
+  const markdownFileLinksKey = useMemo(() => {
+    const entries: Array<[string, MarkdownFileLinkMeta]> = [];
+    const seenHrefs = new Set<string>();
     for (const href of JSON.parse(markdownLinkHrefsKey) as string[]) {
       const normalizedHref = normalizeMarkdownLinkHrefKey(href);
-      if (metaByHref.has(normalizedHref)) continue;
+      if (seenHrefs.has(normalizedHref)) continue;
+      seenHrefs.add(normalizedHref);
       const meta = resolveMarkdownFileLinkMeta(normalizedHref, cwd, documentFolder);
-      if (meta) {
-        metaByHref.set(normalizedHref, meta);
-      }
+      if (meta) entries.push([normalizedHref, meta]);
     }
-    return metaByHref;
+    return JSON.stringify(entries);
   }, [cwd, documentFolder, markdownLinkHrefsKey]);
+  const markdownFileLinkMetaByHref = useMemo(
+    () => new Map(JSON.parse(markdownFileLinksKey) as Array<[string, MarkdownFileLinkMeta]>),
+    [markdownFileLinksKey],
+  );
   const fileLinkParentSuffixByPath = useMemo(() => {
     const filePaths = [...markdownFileLinkMetaByHref.values()].map((meta) => meta.filePath);
     return buildFileLinkParentSuffixByPath(filePaths);
@@ -1133,18 +1167,33 @@ const RenderedChatMarkdown = memo(function RenderedChatMarkdown({
     ],
   );
 
+  // A streaming message parses and renders its settled top-level blocks once:
+  // they keep their element objects, so React skips them and only the tail
+  // re-renders. A search highlight numbers its hits in render order across the
+  // whole message, so a message with hits renders as one parse instead.
+  // Everything else the renderers read is in `markdownComponents`: a changed
+  // file link set (basename disambiguation) re-parses every block.
+  const markdownChildrenRef = useRef<StreamingMarkdownChildren<MarkdownParseOptions> | null>(null);
+  const markdownChildren = buildStreamingMarkdownChildren(
+    markdownChildrenRef.current,
+    text,
+    isStreaming && searchHighlight === undefined,
+    {
+      remarkPlugins: MARKDOWN_REMARK_PLUGINS,
+      tailRemarkPlugins,
+      components: markdownComponents,
+      urlTransform: markdownUrlTransform,
+    },
+    parseMarkdownBlock,
+  );
+  markdownChildrenRef.current = markdownChildren;
+
   return (
     <div
       ref={rootRef}
       className="chat-markdown w-full min-w-0 text-sm leading-relaxed text-foreground/80"
     >
-      <ReactMarkdown
-        remarkPlugins={remarkPlugins}
-        components={markdownComponents}
-        urlTransform={markdownUrlTransform}
-      >
-        {text}
-      </ReactMarkdown>
+      {markdownChildren.children}
     </div>
   );
 });

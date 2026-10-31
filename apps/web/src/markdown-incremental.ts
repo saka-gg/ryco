@@ -20,15 +20,31 @@ function hasDefinitions(node: Root | RootContent): boolean {
   );
 }
 
-function shiftPositions(node: Root | RootContent, offset: number, lines: number): void {
+type Point = NonNullable<Root["position"]>["start"];
+
+/** Moves the source positions of `node` and its descendants by `offset`
+ * characters and `lines` lines. Points are replaced, never mutated: plugins
+ * may share point objects between nodes.
+ */
+export function shiftMarkdownPositions(
+  node: Root | RootContent,
+  offset: number,
+  lines: number,
+): void {
   if (node.position) {
-    for (const point of [node.position.start, node.position.end]) {
-      if (point.offset !== undefined) point.offset += offset;
-      point.line += lines;
-    }
+    const shift = (point: Point): Point => ({
+      ...point,
+      line: point.line + lines,
+      ...(point.offset === undefined ? {} : { offset: point.offset + offset }),
+    });
+    node.position = {
+      ...node.position,
+      start: shift(node.position.start),
+      end: shift(node.position.end),
+    };
   }
   if ("children" in node) {
-    for (const child of node.children) shiftPositions(child, offset, lines);
+    for (const child of node.children) shiftMarkdownPositions(child, offset, lines);
   }
 }
 
@@ -49,7 +65,7 @@ function createIncrementalMarkdownParser(parse: Parser): Parser {
     if (prefix) {
       root = parse(source.slice(prefix.offset), file);
       if (hasDefinitions(root)) return parse(source, file);
-      shiftPositions(root, prefix.offset, prefix.line - 1);
+      shiftMarkdownPositions(root, prefix.offset, prefix.line - 1);
       if (root.position) root.position.start = { line: 1, column: 1, offset: 0 };
       // Remark transforms mutate their input. The cache owns pristine nodes and
       // each render receives its own copy, including source positions.
