@@ -179,6 +179,27 @@ chat with one automatic message, a normal queued turn that starts or resumes its
   and 50 MiB in all; the message says how many stayed in their tasks. A returned artifact that is
   gone (its task was reverted) is left out.
 
+### Delegation limits
+
+Delegated tasks get the same Agent Control tools as the chat that started them, so a task can
+delegate in turn. Settings → Integrations → **Delegation limits** can stop that from running away.
+Both limits are off until the person sets them; agents cannot change them.
+
+- A delegation tree starts at a chat that was not delegated itself (a chat the person started, a
+  fork, an automation run). Its tasks sit one level down, their tasks two levels down.
+- **How deep tasks can go** (1 to 10 levels). A task at the last level gets no delegation tools
+  at all: `ryco_create_threads` and `ryco_start_local_task_chat` are not offered to it. A request
+  from deeper down is refused with a message that names the limit.
+- **Tasks per chat** (1 to 1,000). How many tasks one tree may create in all, finished, stopped
+  and archived ones included. A task the person deletes no longer counts. A request whose batch
+  does not fit is refused as a whole before it is approved or run.
+- The limits are checked when a request is made, again before it runs, and once more for each
+  task as it is created, so requests running at the same time cannot overshoot a budget.
+- Limits apply to new requests. Tasks that already exist keep running, and a session that started
+  before a lower depth limit keeps its tools until it restarts (its requests are still refused).
+- Automation runs and chats a person starts are never children, so the limits do not cover them;
+  automations have their own limit of 25 active per project.
+
 ## Pull request watches
 
 An agent that waits on a pull request's checks or reviews calls `ryco_watch_pull_request` and ends

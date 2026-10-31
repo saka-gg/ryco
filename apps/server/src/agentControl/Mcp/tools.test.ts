@@ -1,4 +1,5 @@
 import { workspacePlan } from "../workspaceLifecycle.testSupport.ts";
+import { NO_DELEGATION_LIMITS } from "../../orchestration/delegationLimits.ts";
 import { computeAgentControlPlanDigest } from "../planDigest.ts";
 import {
   AGENT_CONTROL_CAPABILITIES,
@@ -290,6 +291,7 @@ const activeAuthority = {
 
 const allowPolicy: AgentControlPolicyShape = {
   isEnabled: Effect.succeed(true),
+  delegationLimits: Effect.succeed(NO_DELEGATION_LIMITS),
   requireEnabled: () => Effect.void,
   requiredCapabilityForAction: (kind) => AGENT_CONTROL_ACTION_CAPABILITIES[kind],
   authorize: (input) =>

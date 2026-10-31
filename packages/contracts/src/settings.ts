@@ -600,8 +600,40 @@ export type ObservabilitySettings = typeof ObservabilitySettings.Type;
  * closed. The struct exists (rather than a bare boolean) so later slices can
  * add non-secret operational limits without a settings migration.
  */
+/** The deepest a delegation limit can allow: a chat, its tasks, and nine more levels below. */
+export const AGENT_CONTROL_DELEGATION_MAX_DEPTH_LIMIT = 10;
+/** The largest per-tree task budget a person can set. */
+export const AGENT_CONTROL_DELEGATION_MAX_TASKS_LIMIT = 1_000;
+
+const DelegationMaxDepth = Schema.Int.check(
+  Schema.isBetween({ minimum: 1, maximum: AGENT_CONTROL_DELEGATION_MAX_DEPTH_LIMIT }),
+);
+const DelegationMaxTasks = Schema.Int.check(
+  Schema.isBetween({ minimum: 1, maximum: AGENT_CONTROL_DELEGATION_MAX_TASKS_LIMIT }),
+);
+
+/**
+ * Opt-in limits on agents delegating to agents (`ryco_create_threads` and
+ * `ryco_start_local_task_chat`). A delegation tree starts at a chat that was not delegated
+ * itself; its tasks are depth 1, their tasks depth 2, and so on. `null` is no limit.
+ *
+ * - `maxDepth`: the deepest a task may sit. A chat at that depth gets no delegation tools.
+ * - `maxTasksPerTree`: how many tasks one tree may create in all, counting finished and archived
+ *   ones; a task the person deletes no longer counts.
+ */
+export const AgentControlDelegationLimits = Schema.Struct({
+  maxDepth: Schema.NullOr(DelegationMaxDepth).pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
+  maxTasksPerTree: Schema.NullOr(DelegationMaxTasks).pipe(
+    Schema.withDecodingDefault(Effect.succeed(null)),
+  ),
+});
+export type AgentControlDelegationLimits = typeof AgentControlDelegationLimits.Type;
+
 export const AgentControlSettings = Schema.Struct({
   enabled: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
+  delegation: AgentControlDelegationLimits.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
 });
 export type AgentControlSettings = typeof AgentControlSettings.Type;
 
@@ -1062,6 +1094,12 @@ export const ServerSettingsPatch = Schema.Struct({
   agentControl: Schema.optionalKey(
     Schema.Struct({
       enabled: Schema.optionalKey(Schema.Boolean),
+      delegation: Schema.optionalKey(
+        Schema.Struct({
+          maxDepth: Schema.optionalKey(Schema.NullOr(DelegationMaxDepth)),
+          maxTasksPerTree: Schema.optionalKey(Schema.NullOr(DelegationMaxTasks)),
+        }),
+      ),
     }),
   ),
   providers: Schema.optionalKey(

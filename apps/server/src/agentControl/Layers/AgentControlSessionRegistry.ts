@@ -17,6 +17,8 @@ import {
   type AgentControlTurnAuthority,
 } from "../Services/AgentControlSessionRegistry.ts";
 import { AgentControlPolicy } from "../Services/AgentControlPolicy.ts";
+import { AGENT_CONTROL_CAPABILITIES } from "@ryco/contracts";
+import * as SqlClient from "effect/sql/SqlClient";
 
 /**
  * Internal provider-session bearer format: a recognizable prefix plus 32
@@ -67,6 +69,7 @@ const abortRequests = (
 
 const makeAgentControlSessionRegistry = Effect.gen(function* () {
   const policy = yield* AgentControlPolicy;
+  const sql = yield* Effect.serviceOption(SqlClient.SqlClient);
 
   // All state is per-process memory. A server restart therefore revokes
   // every previously issued credential wholesale, and a stale provider
@@ -103,9 +106,34 @@ const makeAgentControlSessionRegistry = Effect.gen(function* () {
     }
   };
 
+  /**
+   * A thread at the person's delegation depth limit gets no delegation tools at all, so it is
+   * never offered one it cannot use. Fails closed: an unreadable lineage withholds them too.
+   */
+  const leaseCapabilities = (
+    input: Parameters<AgentControlSessionRegistryShape["issueLease"]>[0],
+  ) =>
+    Effect.gen(function* () {
+      if (!input.capabilities.includes(AGENT_CONTROL_CAPABILITIES.createThreads))
+        return input.capabilities;
+      const limits = yield* policy.delegationLimits;
+      if (limits.maxDepth === null) return input.capabilities;
+      const mayDelegate = Option.isNone(sql)
+        ? false
+        : yield* Effect.promise(() => import("../delegationLimitCheck.ts")).pipe(
+            Effect.flatMap((check) => check.readMayDelegate(sql.value, limits, input.threadId)),
+            Effect.catch(() => Effect.succeed(false)),
+          );
+      return mayDelegate
+        ? input.capabilities
+        : input.capabilities.filter(
+            (capability) => capability !== AGENT_CONTROL_CAPABILITIES.createThreads,
+          );
+    });
+
   const issueLease: AgentControlSessionRegistryShape["issueLease"] = (input) =>
-    policy.isEnabled.pipe(
-      Effect.map((enabled) => {
+    Effect.all([policy.isEnabled, leaseCapabilities(input)]).pipe(
+      Effect.map(([enabled, capabilities]) => {
         if (!enabled || endpoint === null) return Option.none();
 
         // One runtime per thread: a new lease supersedes any prior epoch.
@@ -125,7 +153,7 @@ const makeAgentControlSessionRegistry = Effect.gen(function* () {
             threadId: input.threadId,
             providerInstanceId: input.providerInstanceId,
             runtimeSessionId: input.runtimeSessionId,
-            grantedCapabilities: [...input.capabilities],
+            grantedCapabilities: [...capabilities],
             issuedAt: new Date().toISOString(),
             injectionMode: input.injectionMode,
           },

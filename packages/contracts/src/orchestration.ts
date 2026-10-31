@@ -1966,6 +1966,16 @@ const ThreadDelegatedCreateCommand = Schema.Struct({
   ...ThreadCreateCommand.fields,
   type: Schema.Literal("thread.delegated.create"),
   parentThreadId: ThreadId,
+  /**
+   * The person's delegation limits when the command was made (`AgentControlDelegationLimits`).
+   * The decider refuses a child past them, so concurrent requests cannot overshoot a budget.
+   */
+  delegationLimits: Schema.optional(
+    Schema.Struct({
+      maxDepth: Schema.NullOr(PositiveInt),
+      maxTasksPerTree: Schema.NullOr(PositiveInt),
+    }),
+  ),
 });
 export type ThreadDelegatedCreateCommand = typeof ThreadDelegatedCreateCommand.Type;
 
