@@ -805,6 +805,22 @@ export type DesktopHubOriginValidation =
 
 export type DesktopQuitShortcutMode = "press-twice" | "hold" | "immediately";
 
+/** Where the desktop app's `ryco` terminal command stands (`desktopCliCommand.ts`). */
+export interface DesktopCliCommandState {
+  /** macOS and Linux, installed app only. */
+  readonly supported: boolean;
+  /** `ryco`, or `ryco-nightly` for Ryco Nightly. */
+  readonly commandName: string;
+  /** The link on a PATH folder this app made, if any. */
+  readonly installedPath: string | null;
+  /** A new terminal runs this app's launcher for `commandName`. */
+  readonly onPath: boolean;
+  /** Another command of that name a new terminal runs first. */
+  readonly shadowedBy?: string;
+  /** The launcher itself, which runs without a PATH entry. */
+  readonly launcherPath: string | null;
+}
+
 /**
  * What a chat that quitting would stop is doing. Only `working` chats can be continued after a
  * restart: chats waiting for a person are never continued.
@@ -861,6 +877,12 @@ export const DESKTOP_NAVIGATE_FORWARD_MENU_ACTION = "navigate-forward";
 
 export interface DesktopBridge {
   saveThreadExport?: (input: DesktopThreadExportInput) => Promise<DesktopThreadExportResult>;
+  /** Install the `ryco` command for terminals. Absent in desktop builds that predate it. */
+  cliCommand?: {
+    getState(): Promise<DesktopCliCommandState>;
+    install(): Promise<DesktopCliCommandState>;
+    uninstall(): Promise<DesktopCliCommandState>;
+  };
   quitShortcut?: {
     getMode(): Promise<DesktopQuitShortcutMode>;
     setMode(mode: DesktopQuitShortcutMode): Promise<void>;

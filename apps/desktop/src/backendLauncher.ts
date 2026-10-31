@@ -112,6 +112,8 @@ export function createDesktopBackendChildEnv(
   deleteEnv(env, "RYCO_DESKTOP_HTTPS_ENDPOINTS");
   deleteEnv(env, "RYCO_TAILSCALE_SERVE");
   deleteEnv(env, "RYCO_TAILSCALE_SERVE_PORT");
+  // Set by the `ryco` command launcher for the CLI it runs; the backend is never that CLI.
+  deleteEnv(env, "RYCO_DESKTOP_CLI");
   // The desktop is the single owner of these values: it persists them and passes
   // them on the bootstrap channel. Leaving the environment able to override
   // would give the settings panel a toggle that silently does nothing, guarded

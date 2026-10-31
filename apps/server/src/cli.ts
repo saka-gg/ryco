@@ -1,4 +1,5 @@
 import { spawn as spawnChild } from "node:child_process";
+import { realpathSync } from "node:fs";
 import NodePath from "node:path";
 
 import { DEFAULT_HOSTED_APP_ORIGIN } from "@ryco/shared/hostedApp";
@@ -922,6 +923,45 @@ class NodeConfigLoadError extends Data.TaggedError("NodeConfigLoadError")<{
   readonly message: string;
   readonly cause?: unknown;
 }> {}
+
+/**
+ * Set by Ryco Desktop's `ryco` command launcher to the home of the app's own
+ * node (apps/desktop/src/desktopCliCommand.ts).
+ */
+const DESKTOP_CLI_HOME_ENV = "RYCO_DESKTOP_CLI";
+
+class DesktopOwnedNodeError extends Data.TaggedError("DesktopOwnedNodeError")<{
+  readonly message: string;
+}> {}
+
+/**
+ * The desktop's command runs admin commands against the app's node; starting a
+ * second node, or a service, for that home would fight the app over its data.
+ * Returns the refusal, or `null` when `baseDir` is not the desktop app's home.
+ */
+/** The folder's real path, so another spelling of it (a link, letter case on APFS) is the same. */
+const canonicalPath = (path: string) => {
+  const resolved = NodePath.resolve(path);
+  try {
+    return realpathSync.native(resolved);
+  } catch {
+    return resolved;
+  }
+};
+
+export const desktopOwnedNodeRefusal = (
+  env: Readonly<Record<string, string | undefined>>,
+  baseDir: string,
+): string | null => {
+  const desktopHome = env[DESKTOP_CLI_HOME_ENV]?.trim();
+  if (!desktopHome || canonicalPath(desktopHome) !== canonicalPath(baseDir)) return null;
+  return `Ryco Desktop runs the node for ${baseDir}. Open Ryco to start it; \`ryco --help\` lists the commands that work with it.`;
+};
+
+const refuseDesktopOwnedNode = (baseDir: string) => {
+  const message = desktopOwnedNodeRefusal(process.env, baseDir);
+  return message === null ? Effect.void : Effect.fail(new DesktopOwnedNodeError({ message }));
+};
 
 const resolveCliAuthConfig = (
   flags: CliAuthLocationFlags,
@@ -3490,6 +3530,7 @@ const runServerCommand = (
   Effect.gen(function* () {
     const logLevel = yield* GlobalFlag.LogLevel;
     const config = yield* resolveServerConfig(flags, logLevel, { ...options, useNodeConfig: true });
+    yield* refuseDesktopOwnedNode(config.baseDir);
     // resolveServerConfig has started the desktop pipe watch this race reads
     // (initializeDesktopResourceTelemetry), so it must stay ahead of it.
     return yield* runServer.pipe(
@@ -3566,6 +3607,7 @@ const serviceInstallCommand = Command.make("install", {
   Command.withHandler((flags) =>
     Effect.gen(function* () {
       const { platform, config, label, logPath } = yield* resolveServiceContext(flags.baseDir);
+      yield* refuseDesktopOwnedNode(config.baseDir);
       const configPath = nodeConfigPath(config.stateDir);
       const saved = yield* serviceProcess(() => readNodeConfig(configPath));
       const settings = applyNodeSettings(saved ?? EMPTY_NODE_CONFIG, {
@@ -4436,6 +4478,7 @@ const setupCommand = Command.make("setup", { baseDir: baseDirFlag }).pipe(
         });
       }
       const { config, context } = yield* resolveSetupContext(flags.baseDir);
+      yield* refuseDesktopOwnedNode(config.baseDir);
       const operations = yield* makeSetupOperations(flags, config.serverRuntimeStatePath);
       yield* setupClosed(runSetup(context, operations));
     }),
@@ -4623,6 +4666,7 @@ const runBareCommand = (flags: CliServerFlags) =>
     if (!offerSetup) return yield* runServerCommand(flags);
 
     const { config, context } = yield* resolveSetupContext(Option.none());
+    yield* refuseDesktopOwnedNode(config.baseDir);
     const operations = yield* makeSetupOperations(
       { baseDir: Option.none() },
       config.serverRuntimeStatePath,

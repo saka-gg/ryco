@@ -1,5 +1,6 @@
 import { saveThreadExport } from "./threadExportSave.ts";
 import { createQuitShortcutGuard } from "./quitShortcut.ts";
+import type { DesktopCliCommandEnvironment } from "./desktopCliCommand.ts";
 import { buildEditMenu, PASTE_AS_TEXT_CHANNEL, resolvePasteAsTextTarget } from "./editMenu.ts";
 import { navigateWindow, swipeNavigation } from "./desktopNavigationCommands.ts";
 import { createQuitCleanupHandler } from "./quitCleanup.ts";
@@ -4173,6 +4174,23 @@ function registerIpcHandlers(): void {
     if (event.senderFrame !== event.sender.mainFrame) return;
     quitGuardRequester.receive(event.sender, raw);
   });
+  for (const [channel, action] of [
+    ["desktop:cli-command-state", "state"],
+    ["desktop:cli-command-install", "install"],
+    ["desktop:cli-command-uninstall", "uninstall"],
+  ] as const) {
+    ipcMain.removeHandler(channel);
+    ipcMain.handle(channel, async (event) => {
+      const owner = BrowserWindow.fromWebContents(event.sender);
+      if (!owner || event.senderFrame !== event.sender.mainFrame)
+        throw new Error("Invalid command line sender.");
+      const cli = await import("./desktopCliCommand.ts");
+      const environment = desktopCliCommandEnvironment();
+      if (action === "install") return cli.installDesktopCliCommand(environment);
+      if (action === "uninstall") return cli.uninstallDesktopCliCommand(environment);
+      return cli.readDesktopCliCommandState(environment);
+    });
+  }
   ipcMain.removeHandler("desktop:quit-shortcut-get");
   ipcMain.handle("desktop:quit-shortcut-get", () => desktopSettings.quitShortcutMode);
   ipcMain.removeHandler("desktop:quit-shortcut-set");
@@ -5704,6 +5722,33 @@ function boundedRendererCacheMaintenance(work: Promise<void>, timeoutMs = 1_500)
 }
 
 /** Integration that no part of startup waits for. */
+/** What the `ryco` command launcher embeds (`desktopCliCommand.ts`). */
+function desktopCliCommandEnvironment(): DesktopCliCommandEnvironment {
+  return {
+    platform: process.platform,
+    isPackaged: app.isPackaged && !isDevelopment,
+    flavor: DESKTOP_FLAVOR,
+    homeDirectory: OS.homedir(),
+    rycoHome: BACKEND_BASE_DIR,
+    executable: process.execPath,
+    backendEntry: resolveBackendEntry(),
+    appImage: process.env.APPIMAGE?.trim() || undefined,
+    // The login shell's PATH, applied at launch: what a new terminal runs.
+    path: process.env.PATH,
+  };
+}
+
+/** An installed `ryco` command follows the app when it moves or updates. */
+function refreshDesktopCliLauncher(): void {
+  void import("./desktopCliCommand.ts")
+    .then((cli) => cli.refreshDesktopCliLauncher(desktopCliCommandEnvironment()))
+    .catch((error: unknown) => {
+      writeDesktopLogHeader(
+        `ryco command launcher refresh failed message=${sanitizeLogValue(formatErrorMessage(error))}`,
+      );
+    });
+}
+
 function configureDeferredDesktopIntegration(): void {
   configureApplicationMenu();
   try {
@@ -5721,6 +5766,7 @@ function configureDeferredDesktopIntegration(): void {
       );
     });
   }, AUTO_UPDATE_CONFIGURE_DELAY_MS).unref();
+  setTimeout(refreshDesktopCliLauncher, AUTO_UPDATE_CONFIGURE_DELAY_MS).unref();
 }
 
 async function bootstrap(): Promise<void> {

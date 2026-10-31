@@ -19,6 +19,15 @@ npm install -g ryco-cli
 ryco
 ```
 
+### From Ryco Desktop
+
+Ryco Desktop on macOS and Linux installs the same CLI from **Settings → General → Command line**: it
+links `ryco` (`ryco-nightly` for Ryco Nightly) into a folder on your `PATH`, running the app's
+bundled CLI against the app's own node. Admin commands (`auth`, `hub`, `e2ee`, `thread`, `remote`,
+`doctor`, …) work as usual. Commands that would start a second node for the app's home (`ryco`,
+`start`, `serve`, `setup`, `service install`) refuse, because the app already runs it. Install never
+replaces a file it did not write and refuses when another `ryco` runs first in a new terminal.
+
 On Linux, installing compiles the terminal backend (`node-pty` ships no Linux prebuild), so the
 machine needs a C/C++ toolchain and Python first (Debian/Ubuntu: `sudo apt install build-essential
 python3`). A node whose `node-pty` could not be built still starts; it logs why and its terminals
