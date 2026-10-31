@@ -12,8 +12,22 @@ import {
 } from "../appChrome";
 import { useAppSidebarCollapsed } from "../hooks/useAppSidebarCollapsed";
 import { cn } from "~/lib/utils";
-import { DesktopAccountConnect } from "./DesktopAccountConnect";
+import { preloadableLazy, useLazyComponentReady } from "../lib/preloadableLazy";
 import { NoActiveThreadHostedStatus } from "./NoActiveThreadHostedStatus";
+
+// Only the desktop app shows the account prompt, and only after its bridge
+// confirms native sign-in is supported, so the prompt (with its relaunch
+// confirmation dialog) loads on demand instead of with the first paint.
+const LazyDesktopAccountConnect = preloadableLazy(() =>
+  import("./DesktopAccountConnect").then((module) => module.DesktopAccountConnect),
+);
+
+function DeferredDesktopAccountConnect() {
+  const ready = useLazyComponentReady(LazyDesktopAccountConnect, true, {
+    onLoadError: (error) => console.warn("Desktop account prompt failed to load.", error),
+  });
+  return ready ? <LazyDesktopAccountConnect /> : null;
+}
 
 export function NoActiveThreadState(
   props: {
@@ -78,7 +92,7 @@ export function NoActiveThreadState(
                   ? "Its conversation is on its way from the node."
                   : "Select an existing thread or create a new one to get started."}
               </EmptyDescription>
-              {isElectron ? <DesktopAccountConnect /> : null}
+              {isElectron ? <DeferredDesktopAccountConnect /> : null}
               {isHostedHubMode() ? <NoActiveThreadHostedStatus /> : null}
             </EmptyHeader>
           </div>

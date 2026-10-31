@@ -376,6 +376,24 @@ const QUOTE_CITATION_SOURCES: readonly ForbiddenBundleSource[] = [
   },
 ];
 
+/**
+ * The desktop's account prompt on the empty thread view, with the relaunch confirmation it
+ * may open. Only the desktop app shows it, after its bridge confirms native sign-in, so
+ * `NoActiveThreadState` loads it on demand; boot then carries no alert dialog at all.
+ */
+const DESKTOP_ACCOUNT_PROMPT_SOURCES: readonly ForbiddenBundleSource[] = [
+  {
+    pattern:
+      /^apps\/web\/src\/components\/(?:DesktopAccountConnect|settings\/useDesktopRelaunchGuard)\.tsx$/u,
+    reason: "desktop account prompt (the empty thread view loads it on demand)",
+  },
+  {
+    pattern:
+      /^(?:apps\/web\/src\/components\/ui\/alert-dialog\.tsx|node_modules\/@base-ui\/react\/alert-dialog\/)/u,
+    reason: "alert dialog (opens on a click; boot shows none)",
+  },
+];
+
 /** The thread routes (server thread and draft) share their chat graph. */
 const CHAT_ROUTE_FORBIDDEN_SOURCES: readonly ForbiddenBundleSource[] = [
   ...HOSTED_RUNTIME_SOURCES,
@@ -402,7 +420,7 @@ const CHAT_ROUTE_FORBIDDEN_SOURCES: readonly ForbiddenBundleSource[] = [
  * 2026-10-30 later: 749 KiB and 150 files once the pull requests popover mounted
  * on its first open; 753 KiB and 151 files once the quote citation parser
  * left boot (the route shares it with the shell, so a thread open loads it as
- * before).
+ * before). 752 KiB on 2026-10-31 once the alert dialog left boot (likewise).
  */
 const CHAT_ROUTE_GZIP_BUDGET = 765 * KIB;
 /**
@@ -440,6 +458,11 @@ const TRACING_EXPORTER_SOURCES: readonly ForbiddenBundleSource[] = [
  * thread) shrank by about 3 KiB; the cap stays so the rest is room for the
  * contract fields boot decodes. 526 KiB from 2026-10-30 (530 before): boot
  * measured 522.4 KiB, so the cap leaves about 3.6 KiB of room instead of 7.6.
+ * 520.1 KiB on 2026-10-31 (525.3 before): the desktop's account prompt, with
+ * its relaunch confirmation and Base UI's alert dialog, loads on demand from
+ * the empty thread view. The shell and the thread routes load the alert dialog
+ * as before; their first loads shrank by 0.3 to 2.3 KiB. The cap stays, so the
+ * room goes to the contract fields boot decodes.
  */
 export const DEFAULT_BUNDLE_BUDGET_POLICY: BundleBudgetPolicy = {
   bootChunk: "main",
@@ -458,6 +481,7 @@ export const DEFAULT_BUNDLE_BUDGET_POLICY: BundleBudgetPolicy = {
         ...RELAY_WIRE_SCHEMA_SOURCES,
         ...PAIRING_SOURCES,
         ...QUOTE_CITATION_SOURCES,
+        ...DESKTOP_ACCOUNT_PROMPT_SOURCES,
       ],
     },
     {
@@ -469,7 +493,8 @@ export const DEFAULT_BUNDLE_BUDGET_POLICY: BundleBudgetPolicy = {
       // 103 files on 2026-10-15. 419 KiB on 2026-10-29; 400 KiB and 106 files
       // on 2026-10-30 once the pull requests popover mounted on its first open,
       // 403 KiB and 107 with the queued message summary's quote citation
-      // parser, which boot no longer carries.
+      // parser, which boot no longer carries. 403 KiB and 83 files on
+      // 2026-10-31 with the alert dialog, which boot no longer carries.
       maxGzipBytes: 420 * KIB,
       maxFiles: 115,
       forbiddenSources: [
