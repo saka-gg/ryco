@@ -165,8 +165,11 @@ describe("server boot import boundaries", () => {
     const graph = staticGraph("src/cliMain.ts");
     // Image processing loads on first use (`loadSharp`).
     expect(graph.externals).not.toContain("sharp");
-    // Only the patch parser; the package root pulls in shiki and its grammars.
-    expect(graph.externals).not.toContain("@pierre/diffs");
+    // The patch parser loads with the first turn diff summary; the package root pulls in shiki
+    // and its grammars.
+    expect(graph.externals.filter((specifier) => specifier.startsWith("@pierre/diffs"))).toEqual(
+      [],
+    );
     // Provider SDKs load with their driver's adapter (chat forks read resume cursors from the
     // SDK-free cursor modules).
     expect(graph.externals.filter((specifier) => PROVIDER_SDKS.test(specifier))).toEqual([]);
@@ -392,6 +395,27 @@ describe("server boot import boundaries", () => {
     const reachable = staticGraph("src/cliMain.ts", { dynamic: true }).files;
     expect(reachable).toContain("apps/server/src/provider/providerInstallLock.ts");
     expect(reachable).toContain("apps/server/src/provider/providerMaintenanceRunnerRuntime.ts");
+    // Forgejo's review, merge readiness and diff line code loads with its pull request page API,
+    // the first time a Forgejo pull request is listed, opened or changed. The eager client keeps
+    // only the draft title rule (forgejoPullRequests.ts).
+    expect(
+      reached(
+        /^apps\/server\/src\/sourceControl\/forgejo(?:PullRequestActivity|PullRequestMutations|PullRequestReadiness|DiffLines)\.ts$/u,
+      ),
+    ).toEqual([]);
+    // The setup guide and node manager load when `ryco setup`, `ryco config edit` or a bare
+    // `ryco` in a terminal opens them; the turn diff parser with the first turn diff summary.
+    expect(
+      reached(/^apps\/server\/src\/(?:cliSetup\/(?:setupFlow|machine)|checkpointing\/Diffs)\.ts$/u),
+    ).toEqual([]);
+    const loadable = staticGraph("src/bin.ts", { dynamic: true }).files;
+    for (const file of [
+      "apps/server/src/sourceControl/forgejoPullRequestMutations.ts",
+      "apps/server/src/cliSetup/setupFlow.ts",
+      "apps/server/src/checkpointing/Diffs.ts",
+    ]) {
+      expect(loadable).toContain(file);
+    }
   });
 
   it("loads the copy of Ryco's data into Ryco Nightly only when one was asked for", () => {
@@ -588,7 +612,8 @@ describe.skipIf(!hasCurrentBuild)("built server bundle", () => {
     // code loads through import()). 7.101 MB at the end of October 2026: the in-place
     // restore's startup check (1.3 KB) and the sidebar rows' fingerprint revalidation
     // (1.7 KB: the repository list cache's change record, the row read path and the
-    // status poll's rule) passed 7.1 MB.
+    // status poll's rule) passed 7.1 MB. 7.00 MB once Forgejo's review code, the setup guide
+    // and the turn diff parser loaded through import() (-98 KB).
     expect(bytes).toBeLessThan(7_105_000);
     for (const chunk of serve.chunks) {
       const source = readFileSync(chunk, "utf8");
@@ -658,6 +683,14 @@ describe.skipIf(!hasCurrentBuild)("built server bundle", () => {
       expect(source).not.toMatch(
         /^\/\/#region src\/provider\/provider(?:InstallLock|MaintenanceRunnerRuntime)\.ts$/mu,
       );
+      // Loaded with Forgejo's pull request page API.
+      expect(source).not.toMatch(
+        /^\/\/#region src\/sourceControl\/forgejo(?:DiffLines|PullRequestReadiness|PullRequestMutations)\.ts$/mu,
+      );
+      // Loaded when a command opens the setup guide.
+      expect(source).not.toMatch(/^\/\/#region src\/cliSetup\/setupFlow\.ts$/mu);
+      // Loaded with the first turn diff summary.
+      expect(source).not.toMatch(/^\/\/#region .*\/@pierre\/diffs\//mu);
     }
   });
 });

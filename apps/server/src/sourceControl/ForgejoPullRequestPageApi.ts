@@ -24,7 +24,7 @@ import {
   hasCommentMutationMarker,
 } from "./gitHubCommentMutationMarker.ts";
 import { ForgejoApiError, forgejoStaleHeadError } from "./forgejoApiError.ts";
-import { forgejoPullRequestIndex } from "./forgejoPullRequests.ts";
+import { forgejoPullRequestIndex, forgejoWorkInProgressTitle } from "./forgejoPullRequests.ts";
 import type { SourceControlProviderContext } from "./SourceControlProvider.ts";
 import { indexForgejoDiffLines, type ForgejoDiffLineIndex } from "./forgejoDiffLines.ts";
 import { ForgejoCommentSchema, ForgejoLabelSchema, ForgejoUserSchema } from "./forgejoIssues.ts";
@@ -63,7 +63,6 @@ import {
   buildForgejoReviewSubmissionBody,
   encodeForgejoPathSegments,
   forgejoSubmitReviewResult,
-  forgejoWorkInProgressTitle,
   isForgejoRepositoryFilePath,
   nextForgejoAssignees,
   resolveForgejoLabelIds,
