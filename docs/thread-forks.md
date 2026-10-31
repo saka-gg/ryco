@@ -48,7 +48,8 @@ Also copied:
 
 Not copied: approvals and questions, checkpoints, setup-script output, model-switch dividers, and
 other state that belongs to the original's sessions. The fork has no turn of its own yet: nothing
-is sent to the agent until you send a message, and the composer starts empty.
+is sent to the agent until you send a message, and the composer starts empty, except after
+[Continue as thread](side-chat.md#continue-as-thread), which puts the side chat there as a draft.
 
 The fork is titled `<original title> (fork)` and uses the original's model, access mode,
 interaction mode and token mode. Its timeline starts with the inherited conversation, followed by

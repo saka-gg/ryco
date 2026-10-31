@@ -15,6 +15,7 @@ export const KEYBINDING_CATEGORIES = {
   sidebar: { id: "sidebar", label: "Sidebar", sortWeight: 50 },
   navigation: { id: "navigation", label: "Navigation", sortWeight: 55 },
   chat: { id: "chat", label: "Chat", sortWeight: 60 },
+  sideChat: { id: "sideChat", label: "Side chat", sortWeight: 65 },
   composer: { id: "composer", label: "Composer", sortWeight: 70 },
   editor: { id: "editor", label: "Editor", sortWeight: 80 },
   modelPicker: { id: "modelPicker", label: "Model picker", sortWeight: 90 },
@@ -122,6 +123,11 @@ const VIEW_COMMAND_META = {
   "view.reopenClosed": { title: "Reopen closed tab or pane", sortWeight: 2 },
 } satisfies StaticCommandMetaGroup;
 
+// Open or minimize the current thread's side chat.
+const SIDE_CHAT_COMMAND_META = {
+  "sideChat.toggle": { title: "Open or minimize side chat", sortWeight: 1 },
+} satisfies StaticCommandMetaGroup;
+
 // Typed over every static command, so a command without a title fails typecheck.
 const STATIC_COMMAND_META: Readonly<Record<StaticKeybindingCommand, StaticCommandMeta>> = {
   ...CORE_COMMAND_META,
@@ -130,6 +136,7 @@ const STATIC_COMMAND_META: Readonly<Record<StaticKeybindingCommand, StaticComman
   ...THREAD_ATTENTION_COMMAND_META,
   ...NAVIGATION_COMMAND_META,
   ...VIEW_COMMAND_META,
+  ...SIDE_CHAT_COMMAND_META,
 };
 
 function isStaticCommand(command: KeybindingCommand): command is StaticKeybindingCommand {

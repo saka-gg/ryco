@@ -978,6 +978,29 @@ describe("resolveShortcutCommand", () => {
     );
   });
 
+  it("opens or minimizes the side chat on ⌘⌥S (Ctrl+Alt+S elsewhere), apart from snooze", () => {
+    const resolve = (overrides: Partial<ShortcutEventLike>, platform = "MacIntel", context = {}) =>
+      resolveShortcutCommand(event(overrides), APP_DEFAULT_RESOLVED_KEYBINDINGS, {
+        platform,
+        context,
+      });
+    // Option+S types "ß" on macOS; the physical key names the binding.
+    const optionS = { key: "ß", code: "KeyS", metaKey: true, altKey: true };
+    assert.strictEqual(resolve(optionS), "sideChat.toggle");
+    assert.strictEqual(
+      resolve({ key: "s", code: "KeyS", ctrlKey: true, altKey: true }, "Linux"),
+      "sideChat.toggle",
+    );
+    assert.isNull(resolve(optionS, "MacIntel", { terminalFocus: true }));
+    // Shift makes it snooze, and ⌘S alone stays the composer stash.
+    assert.strictEqual(resolve({ ...optionS, key: "S", shiftKey: true }), "thread.snooze");
+    assert.strictEqual(resolve({ key: "s", code: "KeyS", metaKey: true }), "composer.stash");
+    const label = (platform: string) =>
+      shortcutLabelForCommand(APP_DEFAULT_RESOLVED_KEYBINDINGS, "sideChat.toggle", platform);
+    assert.strictEqual(label("MacIntel"), "⌥⌘S");
+    assert.strictEqual(label("Linux"), "Ctrl+Alt+S");
+  });
+
   it("resolves the next thread that needs you outside the terminal", () => {
     // The default is client-only: a node sends every default to clients that may predate the command.
     assert.isFalse(

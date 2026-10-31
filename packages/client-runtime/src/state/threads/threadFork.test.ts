@@ -29,6 +29,7 @@ import {
   resolveThreadForkApi,
   resolveThreadForkSourceGit,
   runThreadFork,
+  selectLatestForkableReply,
   THREAD_FORK_COPY,
   THREAD_FORK_EXCERPT_MAX_CHARS,
   threadForkBoundaryQuote,
@@ -36,6 +37,7 @@ import {
   threadForkFailureMessage,
   threadForkReplyExcerpt,
   threadForkRequestSignature,
+  threadForkSeededPrompt,
   type ThreadForkApi,
   type ThreadForkReplyContext,
 } from "./threadFork.ts";
@@ -189,6 +191,61 @@ describe("deriveForkableReplyMessageIds", () => {
         ]),
       ).toEqual(["reply-1", "reply-2"]);
     });
+  });
+});
+
+describe("selectLatestForkableReply", () => {
+  const latest = (
+    messages: ReadonlyArray<ChatMessage>,
+    context: Partial<ThreadForkReplyContext> = {},
+  ) => selectLatestForkableReply({ ...settled, ...context, messages })?.id ?? null;
+
+  it("picks the newest reply Fork from here is offered on, with its turn", () => {
+    expect(selectLatestForkableReply({ ...settled, messages: conversation })).toMatchObject({
+      id: "reply-2",
+      turnId: "turn-2",
+    });
+  });
+
+  it("falls back to an older turn while the newest one runs, failed or was steered", () => {
+    expect(latest(conversation, { latestTurn: { turnId: turn("turn-2"), state: "running" } })).toBe(
+      "reply-1",
+    );
+    expect(latest(conversation, { session: { activeTurnId: turn("turn-2") } })).toBe("reply-1");
+    expect(latest([...conversation, message("steer", "user", "turn-2")])).toBe("reply-1");
+    expect(
+      latest([...conversation, message("user-3", "user", "turn-3")], {
+        latestTurn: { turnId: turn("turn-3"), state: "running" },
+      }),
+    ).toBe("reply-2");
+  });
+
+  it("is null when no reply can be forked yet", () => {
+    expect(latest([])).toBeNull();
+    expect(
+      latest(conversation.slice(0, 3), {
+        latestTurn: { turnId: turn("turn-1"), state: "interrupted" },
+      }),
+    ).toBeNull();
+  });
+});
+
+describe("threadForkSeededPrompt", () => {
+  const seed = "From a side chat about this thread:\n\nQ: Why?\nA: Because.\n\n";
+
+  it("fills an empty draft with the seed as it is", () => {
+    expect(threadForkSeededPrompt("", seed)).toBe(seed);
+    expect(threadForkSeededPrompt("  \n", seed)).toBe(seed);
+  });
+
+  it("adds the seed after text already there, one blank line apart", () => {
+    expect(threadForkSeededPrompt("Keep this\n", seed)).toBe(`Keep this\n\n${seed}`);
+  });
+
+  it("adds a seed only once, and never an empty one", () => {
+    expect(threadForkSeededPrompt(`Draft\n\n${seed}`, seed)).toBeNull();
+    expect(threadForkSeededPrompt(`${seed.trim()} and more`, seed)).toBeNull();
+    expect(threadForkSeededPrompt("Draft", " \n")).toBeNull();
   });
 });
 

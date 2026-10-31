@@ -66,6 +66,11 @@ const VIEW_DEFAULT_KEYBINDINGS: readonly KeybindingRule[] = [
   { key: "mod+alt+shift+t", command: "view.reopenClosed", when: "!terminalFocus" },
 ];
 
+// Open or minimize the current thread's side chat: ⌘⌥S on macOS, Ctrl+Alt+S elsewhere.
+const SIDE_CHAT_DEFAULT_KEYBINDINGS: readonly KeybindingRule[] = [
+  { key: "mod+alt+s", command: "sideChat.toggle", when: "!terminalFocus" },
+];
+
 export const CLIENT_ONLY_DEFAULT_KEYBINDINGS: readonly KeybindingRule[] = [
   ...CORE_CLIENT_DEFAULT_KEYBINDINGS,
   ...FILE_SEARCH_DEFAULT_KEYBINDINGS,
@@ -73,6 +78,7 @@ export const CLIENT_ONLY_DEFAULT_KEYBINDINGS: readonly KeybindingRule[] = [
   ...THREAD_ATTENTION_DEFAULT_KEYBINDINGS,
   ...NAVIGATION_DEFAULT_KEYBINDINGS,
   ...VIEW_DEFAULT_KEYBINDINGS,
+  ...SIDE_CHAT_DEFAULT_KEYBINDINGS,
 ];
 
 /** The node's rules minus the superseded ones, in node order, then the client-only rules. */
