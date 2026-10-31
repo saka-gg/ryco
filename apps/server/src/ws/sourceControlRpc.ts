@@ -28,6 +28,7 @@ import {
   type OptionalChangeRequestOperation,
   type SourceControlProviderShape,
 } from "../sourceControl/SourceControlProvider.ts";
+import type { ChangeRequestRowRevalidation } from "../sourceControl/changeRequestRowRevalidation.ts";
 import { withSourceControlBodyFile } from "../sourceControl/sourceControlBodyFile.ts";
 import { PULL_REQUEST_INDEX_LIMIT } from "../sourceControl/pullRequestIndex.ts";
 import { markServedWhilePaused, pausedUntilOf } from "../sourceControl/lastGoodWhilePaused.ts";
@@ -85,6 +86,12 @@ export function selectCreatedChangeRequest(
   );
 }
 
+/**
+ * Each server's row revalidation, keyed by its git workflow service (built once per server), so
+ * connections share it and a second server in the same process (tests) gets its own.
+ */
+const rowRevalidationByServer = new WeakMap<object, Promise<ChangeRequestRowRevalidation>>();
+
 export const makeSourceControlHandlers = (ctx: WsRpcContext) => {
   const {
     ownerEffect,
@@ -105,6 +112,21 @@ export const makeSourceControlHandlers = (ctx: WsRpcContext) => {
   } = ctx;
 
   const linkFailure = pullRequestLinkFailure;
+
+  /**
+   * Row reads on host fingerprints, loaded with the first row read (off the boot path). One per
+   * server, not per connection: every window, phone and reconnect shares what the rows learned.
+   */
+  const loadRowRevalidation = Effect.promise(() => {
+    let rowRevalidation = rowRevalidationByServer.get(gitWorkflow);
+    if (rowRevalidation === undefined) {
+      rowRevalidation = import("../sourceControl/changeRequestRowRevalidation.ts").then((module) =>
+        module.makeChangeRequestRowRevalidation(),
+      );
+      rowRevalidationByServer.set(gitWorkflow, rowRevalidation);
+    }
+    return rowRevalidation;
+  });
 
   /** A live workspace and the checkout its source-control calls run in. */
   const requireLinkableWorktree = (worktreeId: WorktreeId, operation: string) =>
@@ -616,17 +638,31 @@ export const makeSourceControlHandlers = (ctx: WsRpcContext) => {
             // Passive row glyphs: every visible row polls its change request,
             // which is several forge children each. They queue in the
             // background lane behind the focused surfaces, and rows of the
-            // same repository share one read for a few seconds. While the
-            // forge is rate limiting, a row keeps its last good detail.
-            return gitWorkflow
-              .cachedRepositoryList({
-                cwd,
-                key: JSON.stringify(["changeRequestDetail", reference, fullContent ?? false]),
-                load: read,
-                ttlMs: CHANGE_REQUEST_ROW_DETAIL_CACHE_TTL_MS,
-                lastGood: fullContent !== true,
-              })
-              .pipe(inBackgroundProcessLane);
+            // same repository share one read for a few seconds. Past that, a
+            // row is read again only when the host's fingerprint moved (see
+            // `changeRequestRowRevalidation`). While the forge is rate
+            // limiting, a row keeps its last good detail.
+            const key = JSON.stringify(["changeRequestDetail", reference, fullContent ?? false]);
+            return loadRowRevalidation.pipe(
+              Effect.flatMap((rows) =>
+                gitWorkflow.cachedRepositoryList({
+                  cwd,
+                  key,
+                  load: read,
+                  ttlMs: CHANGE_REQUEST_ROW_DETAIL_CACHE_TTL_MS,
+                  lastGood: fullContent !== true,
+                  revalidate: (changes) =>
+                    rows.read({
+                      cwd,
+                      key,
+                      changes,
+                      load: read,
+                      provider: sourceControlRegistry.resolve({ cwd }),
+                    }),
+                }),
+              ),
+              inBackgroundProcessLane,
+            );
           }),
         ),
         {

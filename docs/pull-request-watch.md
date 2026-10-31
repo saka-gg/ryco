@@ -83,8 +83,10 @@ removing the checkout end its watches in the same command.
 Every 2 minutes (the first pass 30 seconds after the server admits commands) the server reads each
 watched pull request once, however many threads watch it, grouped per project:
 
-1. **GitHub fingerprint first**: one GraphQL request (1 point) that moves when the state, the
-   mergeability, the head, the check outcomes or the conversation move.
+1. **GitHub fingerprint first**: one GraphQL request (1 point for up to 25 pull requests) that moves
+   when the state, the mergeability, the head, the check outcomes or the conversation move. Watched
+   pull requests of a host share one request per pass, together with the sidebar rows' pull
+   requests (see [Source control providers](source-control-providers.md#how-ryco-talks-to-github)).
 2. The **detail** (checks with required flags, head, mergeability) only when the fingerprint's status
    moved, something was in flight (checks running, mergeability unknown), or a decision asks for a
    current read (the Auto-fix CI push grace ended).
@@ -182,3 +184,7 @@ virtual clock for 60 minutes and prints forge calls per hour by kind for five sc
 naive baseline that reads the detail and the activity every 60 seconds. These are provider calls in a
 simulation, not GitHub points; the `gh` estimate counts 1 process per fingerprint, 4 per detail, at
 least 2 per activity read and 2 per review-thread tail.
+
+`node apps/server/scripts/measure-github-quota.ts` counts GitHub points instead, for a whole busy
+node (sidebar rows and a watch sharing fingerprint requests; see
+[Source control providers](source-control-providers.md#how-ryco-spends-githubs-rate-limit)).

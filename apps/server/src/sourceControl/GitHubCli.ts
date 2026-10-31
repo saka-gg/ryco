@@ -75,6 +75,10 @@ import * as GitHubPullRequestMutations from "./gitHubPullRequestMutations.ts";
 import * as GitHubPullRequests from "./gitHubPullRequests.ts";
 import * as GitHubPullRequestStacks from "./gitHubPullRequestStacks.ts";
 import * as GitHubRequiredChecks from "./gitHubRequiredChecks.ts";
+import {
+  GITHUB_FINGERPRINT_QUIET_AFTER_MS,
+  makeGitHubPullRequestFingerprintBoard,
+} from "./gitHubPullRequestFingerprintBoard.ts";
 import * as GitHubPullRequestWatchFingerprint from "./gitHubPullRequestWatchFingerprint.ts";
 import * as GitHubRepositoryLists from "./gitHubRepositoryLists.ts";
 import type { ChangeRequestWatchFingerprint } from "./SourceControlProvider.ts";
@@ -389,15 +393,18 @@ export interface GitHubCliShape {
   >;
 
   /**
-   * What a pull request watch compares between passes, in one GraphQL point.
-   * Null when GitHub resolves no such repository or pull request, so the
-   * watch reads it in full instead.
+   * What a pull request watch (and a pull request row) compares between passes,
+   * batched per host: one GraphQL point for up to 25 pull requests (see
+   * `gitHubPullRequestFingerprintBoard`). Null when GitHub resolves no such
+   * repository or pull request, so the watch reads it in full instead.
    */
   readonly getPullRequestWatchFingerprint: (input: {
     readonly cwd: string;
     readonly repository: string;
     readonly host: string;
     readonly number: number;
+    /** An answer GitHub gave at or after this time may stand in, within the board's window. */
+    readonly reuseSinceMs?: number | undefined;
   }) => Effect.Effect<ChangeRequestWatchFingerprint | null, GitHubCliError>;
 
   readonly mergePullRequestAsync: (input: {
@@ -1405,6 +1412,51 @@ export const make = Effect.fn("makeGitHubCli")(function* () {
       );
 
   /**
+   * A REST GET over HTTPS when a credential for the host resolves, else its
+   * exact `gh api` call; the answer as gh would have printed it, as for
+   * {@link graphqlRead}. With `revalidate`, the direct path sends the last
+   * answer's ETag, and a 304 (which GitHub does not count against the REST
+   * rate limit) answers from it.
+   */
+  const restRead = (input: {
+    readonly cwd: string;
+    readonly host: string;
+    readonly operation: string;
+    readonly path: string;
+    readonly revalidate?: boolean;
+  }) => {
+    const args = ["api", "--hostname", input.host, ...githubApiVersionArgs(), input.path];
+    return directApi
+      .rest({
+        host: input.host,
+        operation: input.operation,
+        path: input.path,
+        apiVersion: GITHUB_API_VERSION,
+        ...(input.revalidate ? { revalidate: true } : {}),
+      })
+      .pipe(
+        Effect.catchTag("GitHubApiTimeoutError", (cause) =>
+          Effect.fail(
+            new GitHubCliError({
+              operation: input.operation,
+              detail: `GitHub did not answer within ${GitHubApi.GITHUB_API_TIMEOUT_MS / 1000} seconds.`,
+              cause,
+            }),
+          ),
+        ),
+        Effect.flatMap((outcome) => {
+          if (outcome._tag === "Unavailable") {
+            return execute({ cwd: input.cwd, args }).pipe(Effect.map((result) => result.stdout));
+          }
+          const output = GitHubApi.ghEquivalentOutput(outcome.answer, "rest");
+          return output.exitCode === 0
+            ? Effect.succeed(output.stdout)
+            : Effect.fail(gitHubApiFailure(input.operation, args, output));
+        }),
+      );
+  };
+
+  /**
    * The repository `gh pr list` and `gh issue list` read in `cwd` (gh's own
    * remote resolution, including `gh repo set-default`), so the GraphQL lists
    * address exactly that repository.
@@ -2156,22 +2208,22 @@ export const make = Effect.fn("makeGitHubCli")(function* () {
       return summaries;
     });
 
+  // Read with every pull request detail (the focused pull request every 30 s, rows when they
+  // move, watches), and repository settings rarely change: revalidated with its ETag, so an
+  // unchanged answer is a 304 GitHub does not count (T3 Code 0ea5e5a53e, #22078).
   const getRepositoryMergeCapabilities: GitHubCliShape["getRepositoryMergeCapabilities"] = (
     input,
   ) =>
-    execute({
+    restRead({
       cwd: input.cwd,
-      args: [
-        "api",
-        "--hostname",
-        input.host,
-        ...githubApiVersionArgs(),
-        `repos/${input.repository}`,
-      ],
+      host: input.host,
+      operation: "getRepositoryMergeCapabilities",
+      path: `repos/${input.repository}`,
+      revalidate: true,
     }).pipe(
-      Effect.flatMap((result) =>
+      Effect.flatMap((raw) =>
         githubResultOrError(
-          GitHubPullRequestStacks.decodeGitHubRepositoryMergeCapabilitiesJson(result.stdout.trim()),
+          GitHubPullRequestStacks.decodeGitHubRepositoryMergeCapabilitiesJson(raw.trim()),
           "getRepositoryMergeCapabilities",
         ),
       ),
@@ -2228,6 +2280,34 @@ export const make = Effect.fn("makeGitHubCli")(function* () {
       return checks;
     });
 
+  const fingerprintBoard = makeGitHubPullRequestFingerprintBoard<GitHubCliError>({
+    read: ({ cwd, host, targets }) =>
+      Effect.gen(function* () {
+        const operation = "getPullRequestWatchFingerprint";
+        const document =
+          GitHubPullRequestWatchFingerprint.buildGitHubPullRequestWatchFingerprintsQuery(targets);
+        const raw = yield* graphqlRead({
+          cwd,
+          host,
+          operation,
+          query: document.query,
+          variables: document.variables,
+          // A pull request or repository GitHub cannot resolve answers null; the decoder decides.
+          acceptPartialData: true,
+        });
+        const decoded =
+          GitHubPullRequestWatchFingerprint.decodeGitHubPullRequestWatchFingerprintsJson(
+            raw,
+            targets.length,
+            { quietAfterMs: GITHUB_FINGERPRINT_QUIET_AFTER_MS },
+          );
+        return Result.isSuccess(decoded)
+          ? decoded.success
+          : yield* normalizeGitHubCliError(operation, { detail: decoded.failure });
+      }),
+    failed: (detail) => normalizeGitHubCliError("getPullRequestWatchFingerprint", { detail }),
+  });
+
   const getPullRequestWatchFingerprint: GitHubCliShape["getPullRequestWatchFingerprint"] = (
     input,
   ) =>
@@ -2247,20 +2327,16 @@ export const make = Effect.fn("makeGitHubCli")(function* () {
           detail: `GitHub pull request number is out of range: ${input.number}`,
         });
       }
-      const raw = yield* graphqlDocument({
-        cwd: input.cwd,
-        host: input.host,
-        operation,
-        query: GitHubPullRequestWatchFingerprint.GITHUB_PULL_REQUEST_WATCH_FINGERPRINT_QUERY,
-        variables: { owner: parts.owner, name: parts.name, number: input.number },
-        // A pull request or repository GitHub cannot resolve answers null; the decoder decides.
-        acceptPartialData: true,
-      });
-      const decoded =
-        GitHubPullRequestWatchFingerprint.decodeGitHubPullRequestWatchFingerprintJson(raw);
-      return Result.isSuccess(decoded)
-        ? decoded.success
-        : yield* normalizeGitHubCliError(operation, { detail: decoded.failure });
+      return yield* fingerprintBoard.get(
+        {
+          cwd: input.cwd,
+          host: input.host,
+          owner: parts.owner,
+          name: parts.name,
+          number: input.number,
+        },
+        { nowMs: yield* Clock.currentTimeMillis, reuseSinceMs: input.reuseSinceMs },
+      );
     });
 
   const mergePullRequestAsync: GitHubCliShape["mergePullRequestAsync"] = (input) =>

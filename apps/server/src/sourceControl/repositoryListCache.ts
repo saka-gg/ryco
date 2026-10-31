@@ -9,7 +9,8 @@
  * (after git actions, agent turns and the periodic poll) and change request mutations.
  * Failures are not cached, except a forge's rate-limited answer, which is held until its
  * pause ends (see `lastGoodWhilePaused`). Reads that opt in keep their last good value for
- * background readers while the forge is rate limiting.
+ * background readers while the forge is rate limiting, and reads that opt in to `revalidate`
+ * learn what their repository went through, so a host fingerprint can stand in for a full read.
  */
 import { Cause, Deferred, Effect, Exit, Option } from "effect";
 
@@ -49,18 +50,38 @@ interface GetInput<A, E, R> {
    * rate limit. For reads background readers make, and not for large values.
    */
   readonly lastGood?: boolean;
+  /**
+   * Read through this instead of `load` (`changeRequestRowRevalidation`), told what the
+   * repository went through, so a cheap host fingerprint can stand in for a full read.
+   */
+  readonly revalidate?: (changes: RepositoryChanges) => Effect.Effect<A, E, R>;
 }
+
+/** What a revalidating read learns of its repository. */
+export interface RepositoryChanges {
+  /** The last `invalidate` that may have changed something: all but `revalidate: "reuse"`. */
+  readonly changedAtMs: number;
+  /** The `invalidate`s without `revalidate` (mutations through Ryco) so far. */
+  readonly mutations: number;
+}
+
+const NO_CHANGES: RepositoryChanges = { changedAtMs: 0, mutations: 0 };
 
 export interface RepositoryListCache {
   /** `load` once per (repository, key) per TTL; concurrent callers share it. */
   readonly get: <A, E, R>(input: GetInput<A, E, R>) => Effect.Effect<A, E, R>;
   /**
    * Drops the repository's entries. Held ones stay when `keepHeldWhile` (asked only when one
-   * is held) says the forge's pause still runs.
+   * is held) says the forge's pause still runs. `revalidate` says what may have changed, for
+   * reads that revalidate: `"fresh"` (a git action or an agent turn) something on the host,
+   * `"reuse"` (a periodic poll) nothing known; without it (a mutation through Ryco) anything.
    */
   readonly invalidate: (
     repository: string,
-    options?: { readonly keepHeldWhile?: Effect.Effect<boolean> },
+    options?: {
+      readonly keepHeldWhile?: Effect.Effect<boolean>;
+      readonly revalidate?: "fresh" | "reuse";
+    },
   ) => Effect.Effect<void>;
 }
 
@@ -74,6 +95,7 @@ export function makeRepositoryListCache(options?: {
   const lastGood = makeLastGood<object>(REPOSITORY_LIST_CACHE_CAPACITY);
   /** When `invalidate` last dropped each repository (for `settleTtlMs`). */
   const droppedAtMs = new Map<string, number>();
+  const changes = new Map<string, RepositoryChanges>();
 
   /** When a finished read is held until: its pause's end, or null to cache it as usual. */
   const holdUntil = (exit: Exit.Exit<unknown, unknown>, now: number) => {
@@ -142,7 +164,10 @@ export function makeRepositoryListCache(options?: {
             Deferred.succeed(entry.result, exit as unknown as Exit.Exit<unknown, never>),
           ),
         );
-      return input.load.pipe(Effect.onExit(settle));
+      const load = input.revalidate
+        ? input.revalidate(changes.get(input.repository) ?? NO_CHANGES)
+        : input.load;
+      return load.pipe(Effect.onExit(settle));
     });
 
   const get = <A, E, R>(input: GetInput<A, E, R>): Effect.Effect<A, E, R> =>
@@ -177,6 +202,18 @@ export function makeRepositoryListCache(options?: {
         for (const oldest of droppedAtMs.keys()) {
           if (droppedAtMs.size <= REPOSITORY_LIST_CACHE_CAPACITY) break;
           droppedAtMs.delete(oldest);
+        }
+        if (invalidateOptions?.revalidate !== "reuse") {
+          const mutations = changes.get(repository)?.mutations ?? 0;
+          changes.delete(repository);
+          changes.set(repository, {
+            changedAtMs: nowMs(),
+            mutations: mutations + (invalidateOptions?.revalidate === undefined ? 1 : 0),
+          });
+          for (const oldest of changes.keys()) {
+            if (changes.size <= REPOSITORY_LIST_CACHE_CAPACITY) break;
+            changes.delete(oldest);
+          }
         }
       });
     });

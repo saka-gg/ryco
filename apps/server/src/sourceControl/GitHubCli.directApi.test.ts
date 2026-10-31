@@ -397,6 +397,80 @@ const variablesOf = (request: FakeGitHubRequest | string) =>
     }
   ).variables;
 
+describe("GitHubCli REST reads over the direct API", () => {
+  const settings = {
+    allow_merge_commit: true,
+    allow_squash_merge: false,
+    allow_rebase_merge: true,
+    delete_branch_on_merge: true,
+  };
+
+  it.effect("revalidates the merge settings with their ETag, so an unchanged read is a 304", () =>
+    withDirectApi(
+      (request) =>
+        request.headers["if-none-match"] === '"settings-1"'
+          ? { status: 304, headers: { etag: '"settings-1"' } }
+          : { headers: { etag: '"settings-1"' }, body: settings },
+      { GH_TOKEN: SENTINEL },
+      (gh, server) =>
+        Effect.gen(function* () {
+          scriptGh();
+          const read = gh.getRepositoryMergeCapabilities({
+            cwd: "/repo",
+            host: "github.com",
+            repository: "acme/web",
+          });
+          const expected = { merge: true, squash: false, rebase: true, deleteBranchOnMerge: true };
+          assert.deepStrictEqual(yield* read, expected);
+          assert.deepStrictEqual(yield* read, expected);
+          assert.lengthOf(server.requests, 2);
+          assert.strictEqual(server.requests[0]!.url, "/api/v3/repos/acme/web");
+          assert.isUndefined(server.requests[0]!.headers["if-none-match"]);
+          assert.strictEqual(server.requests[1]!.headers["if-none-match"], '"settings-1"');
+          // The API version gh would have sent.
+          assert.strictEqual(server.requests[1]!.headers["x-github-api-version"], "2026-03-10");
+          assert.deepStrictEqual(ghCalls(), []);
+        }),
+    ),
+  );
+
+  it.effect("reads the merge settings through gh api without a credential", () =>
+    Effect.gen(function* () {
+      mockRun.mockImplementation((input) =>
+        input.args[0] === "auth"
+          ? Effect.succeed(output("", { exitCode: 1, stderr: "no oauth token found" }))
+          : Effect.succeed(output(JSON.stringify(settings))),
+      );
+      const capabilities = yield* withDirectApi(
+        () => ({ status: 500 }),
+        {},
+        (gh, server) =>
+          gh
+            .getRepositoryMergeCapabilities({
+              cwd: "/repo",
+              host: "github.com",
+              repository: "acme/web",
+            })
+            .pipe(Effect.tap(() => Effect.sync(() => assert.lengthOf(server.requests, 0)))),
+      );
+      assert.deepStrictEqual(capabilities, {
+        merge: true,
+        squash: false,
+        rebase: true,
+        deleteBranchOnMerge: true,
+      });
+      assert.deepStrictEqual(ghCalls().at(-1), [
+        "api",
+        "--hostname",
+        "github.com",
+        "-H",
+        "X-GitHub-Api-Version: 2026-03-10",
+        "repos/acme/web",
+      ]);
+    }),
+  );
+});
+
 describe("GitHubCli lists over the direct API", () => {
   it.effect("pages pull request lists over HTTPS without starting gh for the pages", () =>
     withDirectApi(

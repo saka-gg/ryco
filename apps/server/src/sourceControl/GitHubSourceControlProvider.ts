@@ -1053,6 +1053,7 @@ export const make = Effect.fn("makeGitHubSourceControlProvider")(function* () {
           host: identity.host,
           repository: identity.nameWithOwner,
           number: input.number,
+          ...(input.reuseSinceMs !== undefined ? { reuseSinceMs: input.reuseSinceMs } : {}),
         })
         .pipe(Effect.mapError((cause) => providerError("getChangeRequestWatchFingerprint", cause)));
     },

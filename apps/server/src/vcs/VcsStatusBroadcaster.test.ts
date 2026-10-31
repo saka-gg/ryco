@@ -210,6 +210,103 @@ describe("VcsStatusBroadcaster", () => {
     }).pipe(Effect.provide(testLayer));
   });
 
+  it.effect("tells the workflow when a poll's fetch moved the remote refs", () => {
+    let moved = false;
+    const invalidations: Array<boolean | undefined> = [];
+    const testLayer = VcsStatusBroadcaster.layer.pipe(
+      Layer.provide(
+        Layer.mock(GitWorkflowService.GitWorkflowService)({
+          localStatus: () => Effect.succeed(baseLocalStatus),
+          remoteStatus: () => Effect.succeed(baseRemoteStatus),
+          refreshRemoteTrackingRefs: () => Effect.sync(() => moved),
+          invalidateLocalStatus: () => Effect.void,
+          invalidateRemoteStatus: (_cwd, options) =>
+            Effect.sync(() => invalidations.push(options?.periodic)),
+        }),
+      ),
+    );
+    const settle = Effect.forEach(Array.from({ length: 20 }), () => Effect.yieldNow, {
+      discard: true,
+    });
+    return Effect.gen(function* () {
+      const broadcaster = yield* VcsStatusBroadcaster.VcsStatusBroadcaster;
+      yield* broadcaster
+        .streamStatus(
+          { cwd: "/repo" },
+          { automaticRemoteRefreshInterval: Effect.succeed(Duration.seconds(30)) },
+        )
+        .pipe(Stream.runDrain, Effect.forkScoped);
+      yield* settle;
+      // A poll whose fetch found nothing new says so: cached row details may stand.
+      assert.deepStrictEqual(invalidations, [true]);
+
+      // A push from elsewhere: the next poll's fetch moves the refs, so rows must see newer
+      // details.
+      moved = true;
+      yield* TestClock.adjust(Duration.seconds(30));
+      yield* settle;
+      assert.deepStrictEqual(invalidations, [true, false]);
+
+      // An explicit refresh always asks for newer details.
+      moved = false;
+      yield* broadcaster.refreshStatus("/repo");
+      assert.deepStrictEqual(invalidations, [true, false, false]);
+    }).pipe(Effect.provide(testLayer));
+  });
+
+  it.effect("keeps an explicit refresh's rule when it shares a poll's refresh", () => {
+    const invalidations: Array<boolean | undefined> = [];
+    let blocked: Deferred.Deferred<void> | null = null;
+    const testLayer = VcsStatusBroadcaster.layer.pipe(
+      Layer.provide(
+        Layer.mock(GitWorkflowService.GitWorkflowService)({
+          localStatus: () => Effect.succeed(baseLocalStatus),
+          remoteStatus: () =>
+            Effect.suspend(() => {
+              const gate = blocked;
+              blocked = null;
+              return gate === null ? Effect.void : Deferred.await(gate);
+            }).pipe(Effect.as(baseRemoteStatus)),
+          refreshRemoteTrackingRefs: () => Effect.succeed(false),
+          invalidateLocalStatus: () => Effect.void,
+          invalidateRemoteStatus: (_cwd, options) =>
+            Effect.sync(() => invalidations.push(options?.periodic)),
+        }),
+      ),
+    );
+    const settle = Effect.forEach(Array.from({ length: 20 }), () => Effect.yieldNow, {
+      discard: true,
+    });
+    return Effect.gen(function* () {
+      const broadcaster = yield* VcsStatusBroadcaster.VcsStatusBroadcaster;
+      yield* broadcaster
+        .streamStatus(
+          { cwd: "/repo" },
+          { automaticRemoteRefreshInterval: Effect.succeed(Duration.seconds(30)) },
+        )
+        .pipe(Stream.runDrain, Effect.forkScoped);
+      yield* settle;
+      assert.deepStrictEqual(invalidations, [true]);
+
+      // A refresh is reading the forge when a poll and then an explicit refresh come in: both
+      // wait for it, and the poll's trailing refresh, first in line, serves both.
+      const gate = yield* Deferred.make<void>();
+      blocked = gate;
+      const first = yield* broadcaster.refreshStatus("/repo").pipe(Effect.forkScoped);
+      yield* settle;
+      yield* TestClock.adjust(Duration.seconds(30));
+      yield* settle;
+      const second = yield* broadcaster.refreshStatus("/repo").pipe(Effect.forkScoped);
+      yield* settle;
+      yield* Deferred.succeed(gate, undefined);
+      yield* Fiber.join(first);
+      yield* Fiber.join(second);
+
+      // The shared refresh still asks for newer details, as the explicit one did.
+      assert.deepStrictEqual(invalidations, [true, false, false]);
+    }).pipe(Effect.provide(testLayer));
+  });
+
   it.effect("reuses the cached VCS status across repeated reads", () => {
     const state = {
       currentLocalStatus: baseLocalStatus,

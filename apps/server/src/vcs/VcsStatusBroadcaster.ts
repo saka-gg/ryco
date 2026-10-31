@@ -348,6 +348,8 @@ export const layer = Layer.effect(
 
     const coalesceLocalStatus = yield* makeStatusSingleFlight<VcsStatusLocalResult>();
     const coalesceRemoteStatus = yield* makeStatusSingleFlight<VcsStatusRemoteResult | null>();
+    /** Folders whose next remote refresh must not let rows reuse an older fingerprint. */
+    const freshRemoteWanted = new Set<string>();
 
     const getCachedStatus = Effect.fn("VcsStatusBroadcaster.getCachedStatus")(function* (
       cwd: string,
@@ -519,6 +521,7 @@ export const layer = Layer.effect(
 
     const refreshRemoteStatus = Effect.fn("VcsStatusBroadcaster.refreshRemoteStatus")(function* (
       rawCwd: string,
+      options?: { readonly periodic?: boolean },
     ) {
       const cwd = normalizeCwd(rawCwd);
       // An explicit refresh or poll brings the remote-tracking refs up to date
@@ -532,12 +535,18 @@ export const layer = Layer.effect(
         Effect.catchCause(() => Effect.succeed(false)),
         Effect.forkIn(broadcasterScope, { startImmediately: true }),
       );
-      yield* Fiber.join(fetch);
+      const moved = yield* Fiber.join(fetch);
+      // Only a poll whose fetch found nothing new lets rows reuse an older fingerprint. Any
+      // other refresh (explicit, or a poll that saw a push from elsewhere) may end up sharing a
+      // poll's refresh that starts after it, so it hands its rule to the next one that runs.
+      const changed = options?.periodic !== true || moved;
+      if (changed) freshRemoteWanted.add(cwd);
       return yield* coalesceRemoteStatus(
         cwd,
         "refresh",
         Effect.gen(function* () {
-          yield* workflow.invalidateRemoteStatus(cwd);
+          const handedOver = freshRemoteWanted.delete(cwd);
+          yield* workflow.invalidateRemoteStatus(cwd, { periodic: !changed && !handedOver });
           const remote = yield* workflow.remoteStatus({ cwd });
           return yield* updateCachedRemoteStatus(cwd, remote, { publish: true });
         }),
@@ -589,7 +598,7 @@ export const layer = Layer.effect(
             return DEFAULT_VCS_STATUS_REFRESH_INTERVAL;
           }
 
-          const exit = yield* refreshRemoteStatus(cwd).pipe(Effect.exit);
+          const exit = yield* refreshRemoteStatus(cwd, { periodic: true }).pipe(Effect.exit);
           if (Exit.isSuccess(exit)) {
             yield* Ref.set(consecutiveFailuresRef, 0);
             return configuredInterval;
