@@ -62,7 +62,14 @@ export type ImportResult = {
 };
 
 export function importTheme(raw: string, collision: ImportCollision = "rename"): ImportResult {
-  const parsed = parseTheme(raw);
+  return importThemeDefinition(parseTheme(raw), collision);
+}
+
+/** Adds `parsed` as a custom theme, renaming or replacing on an id that already exists. */
+export function importThemeDefinition(
+  parsed: ThemeDefinition,
+  collision: ImportCollision = "rename",
+): ImportResult {
   const all = getAllThemes();
   const existing = all.find((theme) => theme.id === parsed.id);
 
@@ -151,12 +158,100 @@ export async function importThemeFromFile(
   file: File,
   options: ImportFromFileOptions = {},
 ): Promise<ImportResult> {
-  const text = await file.text();
-  const result = importTheme(text, options.collision ?? "rename");
-  if (options.activate) {
-    setActiveThemeId(result.theme.id);
+  const { imported } = await importThemesFromFiles([file], options);
+  return imported[0]!;
+}
+
+/** Theme files are read whole; a larger file is refused before it is read (T3's cap). */
+export const MAX_THEME_FILE_BYTES = 256 * 1024;
+/** At most this many files in one import. */
+export const MAX_THEME_FILES = 16;
+
+export interface ThemeFilesImport {
+  readonly imported: ReadonlyArray<ImportResult>;
+  /** What could not be honoured, for the toast (a VS Code base theme that was not picked). */
+  readonly notices: ReadonlyArray<string>;
+}
+
+const themeIdFromName = (name: string) =>
+  name
+    .toLowerCase()
+    .replaceAll(/[^a-z0-9]+/gu, "-")
+    .replaceAll(/^-+|-+$/gu, "") || "theme";
+
+/**
+ * Imports Ryco theme files and VS Code color themes (JSONC, `*-color-theme.json`) picked
+ * together. VS Code files load their converter on demand; a light and a dark file of one
+ * family become one theme. With `activate`, the last import becomes the active theme.
+ */
+export async function importThemesFromFiles(
+  files: ReadonlyArray<File>,
+  options: ImportFromFileOptions = {},
+): Promise<ThemeFilesImport> {
+  if (files.length === 0) return { imported: [], notices: [] };
+  if (files.length > MAX_THEME_FILES) {
+    throw new Error(`Pick at most ${MAX_THEME_FILES} theme files at once.`);
+  }
+  for (const file of files) {
+    if (file.size > MAX_THEME_FILE_BYTES) {
+      throw new Error(`${file.name} is larger than 256 KiB, which no theme file needs.`);
+    }
+  }
+  const texts = await Promise.all(files.map((file) => file.text()));
+  const collision = options.collision ?? "rename";
+  const rycoThemes: ThemeDefinition[] = [];
+  const others: Array<{ readonly name: string; readonly text: string }> = [];
+  texts.forEach((text, index) => {
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(text);
+    } catch {
+      parsed = undefined;
+    }
+    if (isValidTheme(parsed)) rycoThemes.push(parseTheme(text));
+    else others.push({ name: files[index]!.name, text });
+  });
+
+  const notices: string[] = [];
+  const converted: ThemeDefinition[] = [];
+  if (others.length > 0) {
+    const vscode = await import("./vscodeThemeImport");
+    const values = others.map((file) => {
+      try {
+        return { name: file.name, value: vscode.parseJsonc(file.text) };
+      } catch {
+        throw new Error(`${file.name} is not valid JSON or JSONC.`);
+      }
+    });
+    const siblings = new Map(values.map((file) => [file.name, file.value]));
+    // A file another picked file builds on only supplies colors: it is not a theme of its own,
+    // needs no editor background, and never becomes the active theme. When every file is someone's
+    // base (two that include each other), each is imported.
+    const bases = vscode.vsCodeBaseThemeNames(siblings);
+    const themeFiles = values.some((file) => !bases.has(file.name))
+      ? values.filter((file) => !bases.has(file.name))
+      : values;
+    const themes = themeFiles.map((file) => {
+      if (!vscode.isVsCodeThemeFile(file.value)) {
+        throw new Error(`${file.name} is neither a Ryco theme nor a VS Code color theme.`);
+      }
+      const theme = vscode.convertVsCodeTheme(file.value, { sourceName: file.name, siblings });
+      notices.push(...theme.notices.map((notice) => `${theme.name}: ${notice}`));
+      return theme;
+    });
+    for (const theme of vscode.pairVsCodeThemes(vscode.relabelVsCodeThemeCollisions(themes))) {
+      converted.push({ ...theme, id: generateCustomThemeId(themeIdFromName(theme.name)) });
+    }
+  }
+
+  const imported = [...rycoThemes, ...converted].map((theme) =>
+    importThemeDefinition(theme, collision),
+  );
+  const last = imported.at(-1);
+  if (options.activate && last) {
+    setActiveThemeId(last.theme.id);
     const pair = getActiveThemePair();
     applyThemeToDocument(pair.light, pair.dark);
   }
-  return result;
+  return { imported, notices };
 }

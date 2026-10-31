@@ -1,8 +1,14 @@
 import { afterEach, beforeEach, describe, expect, it } from "vite-plus/test";
 
 import { DEFAULT_THEME, DEFAULT_THEME_ID } from "./builtin";
-import { addCustomTheme, getCustomThemes, setCustomThemes } from "./registry";
 import {
+  ACTIVE_THEME_STORAGE_KEY,
+  addCustomTheme,
+  getCustomThemes,
+  setCustomThemes,
+} from "./registry";
+import {
+  importThemesFromFiles,
   THEME_FILE_EXTENSION,
   decodeThemeFromBase64,
   encodeThemeToBase64,
@@ -269,5 +275,69 @@ describe("importThemeFromFile", () => {
 
     await importThemeFromFile(file);
     expect(accessed).toEqual([]);
+  });
+});
+
+describe("importThemesFromFiles", () => {
+  beforeEach(installLocalStorage);
+  afterEach(uninstallLocalStorage);
+
+  const fileOf = (name: string, text: string) =>
+    new File([text], name, { type: "application/json" });
+
+  it("adds a VS Code color theme as a custom theme", async () => {
+    const { imported } = await importThemesFromFiles([
+      fileOf(
+        "harbor-night-color-theme.json",
+        `{ "name": "Harbor Night", "type": "dark", // JSONC
+           "colors": { "editor.background": "#101820", "editor.foreground": "#d8e0e8", }, }`,
+      ),
+    ]);
+    expect(imported).toHaveLength(1);
+    expect(imported[0]?.theme).toMatchObject({
+      name: "Harbor Night",
+      dark: { background: "#101820" },
+    });
+    expect(imported[0]?.theme.light).toBeUndefined();
+    expect(getCustomThemes().map((theme) => theme.name)).toEqual(["Harbor Night"]);
+  });
+
+  it("uses a picked base theme for its colors only: never as a theme, even when it comes last", async () => {
+    const { imported } = await importThemesFromFiles(
+      [
+        fileOf(
+          "harbor-dimmed.json",
+          `{ "name": "Harbor Dimmed", "type": "dark", "include": "./harbor-base.json",
+             "colors": { "editor.background": "#101820" } }`,
+        ),
+        // A base without an editor background of its own.
+        fileOf("harbor-base.json", `{ "colors": { "editor.foreground": "#c0d0e0" } }`),
+      ],
+      { activate: true },
+    );
+    expect(imported.map((entry) => entry.theme.name)).toEqual(["Harbor Dimmed"]);
+    expect(imported[0]?.theme.dark).toMatchObject({ foreground: "#c0d0e0" });
+    expect(getCustomThemes().map((theme) => theme.name)).toEqual(["Harbor Dimmed"]);
+    expect(localStorage.getItem(ACTIVE_THEME_STORAGE_KEY)).toBe(imported[0]?.theme.id);
+  });
+
+  it("refuses a file larger than 256 KiB without reading it", async () => {
+    let read = false;
+    const big = {
+      name: "huge.json",
+      size: 300 * 1024,
+      text: async () => {
+        read = true;
+        return "{}";
+      },
+    } as unknown as File;
+    await expect(importThemesFromFiles([big])).rejects.toThrow(/larger than 256 KiB/u);
+    expect(read).toBe(false);
+  });
+
+  it("refuses a file that is neither kind of theme", async () => {
+    await expect(importThemesFromFiles([fileOf("notes.json", `{ "hello": 1 }`)])).rejects.toThrow(
+      /neither a Ryco theme nor a VS Code color theme/u,
+    );
   });
 });
