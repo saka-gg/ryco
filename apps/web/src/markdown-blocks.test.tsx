@@ -1,7 +1,7 @@
 import type { Root } from "mdast";
-import { isValidElement, type ReactNode } from "react";
+import { createElement, isValidElement, type ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
-import ReactMarkdown from "react-markdown";
+import ReactMarkdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 import type { PluggableList } from "unified";
 import { describe, expect, it } from "vite-plus/test";
@@ -58,6 +58,21 @@ const CORPUS: Readonly<Record<string, string>> = {
 
 const BASE_PLUGINS: PluggableList = [remarkGfm];
 
+// Function components receive the hast `node`, so the source positions shifted
+// into each block are compared too (plain tags never get it).
+const POSITION_COMPONENTS: Components = Object.fromEntries(
+  [
+    ...["p", "h1", "h2", "h3", "h4", "h5", "h6", "pre", "code", "blockquote", "hr", "br"],
+    ...["ul", "ol", "li", "input", "a", "img", "em", "strong", "del", "sup", "section"],
+    ...["table", "thead", "tbody", "tr", "th", "td", "div", "span", "details", "summary"],
+  ].map((tag) => {
+    const Rendered = ({ node: _node, ...props }: Record<string, unknown>) =>
+      createElement(tag, props);
+    Rendered.displayName = tag;
+    return [tag, Rendered];
+  }),
+);
+
 // ChatMarkdown's configuration: the tail also goes through the streaming
 // renderer's prefix cache.
 function chatMarkdownParser() {
@@ -65,13 +80,19 @@ function chatMarkdownParser() {
   const parsed: string[] = [];
   const parseBlock = (block: MarkdownBlock, _options: object, tail: boolean) => {
     parsed.push(block.text);
-    return renderMarkdownBlock(block, { remarkPlugins: tail ? tailPlugins : BASE_PLUGINS });
+    return renderMarkdownBlock(block, {
+      remarkPlugins: tail ? tailPlugins : BASE_PLUGINS,
+      components: POSITION_COMPONENTS,
+    });
   };
   return { parsed, parseBlock };
 }
 
 function wholeParse(text: string): readonly ReactNode[] {
-  return renderMarkdownBlock({ text, offset: 0, line: 1 }, { remarkPlugins: BASE_PLUGINS });
+  return renderMarkdownBlock(
+    { text, offset: 0, line: 1 },
+    { remarkPlugins: BASE_PLUGINS, components: POSITION_COMPONENTS },
+  );
 }
 
 // Element types, keys, props and the source positions of the `node` prop:
@@ -81,7 +102,10 @@ function elementShape(node: ReactNode): unknown {
   if (!isValidElement<Record<string, unknown>>(node)) return node;
   const { children, node: hast, ...props } = node.props;
   return {
-    type: typeof node.type === "string" ? node.type : String(node.type),
+    type:
+      typeof node.type === "string"
+        ? node.type
+        : ((node.type as { displayName?: string }).displayName ?? String(node.type)),
     key: node.key,
     props,
     position: (hast as { position?: unknown } | undefined)?.position,
@@ -240,6 +264,8 @@ const FUZZ_LINES = [
   ["[f](./src/a.ts)", "[r]", "[r]: /target", "note[^1]", "[^1]: n", "*", "10. ten"],
   ["- [ ] task", "- [x] done", "www.example.com", "~~gone~~", "\uFEFFbom", "  code", "  ```"],
   ["   ~~~", "```` x", "#", "####### seven", " # h", "--- x"],
+  // Text to CommonMark, though `trim()` would call them blank.
+  ["\u00a0", "\u3000", "\u2003", "\f", "\v"],
 ].flat();
 // Without definitions, byte order marks, tabs, HTML and empty list items.
 const SPLITTABLE_FUZZ_LINES = FUZZ_LINES.filter(
@@ -319,6 +345,40 @@ describe("buildStreamingMarkdownChildren", () => {
     },
     15_000,
   );
+
+  it("treats only spaces and tabs as a blank line", () => {
+    // A line of NBSP or U+3000 is paragraph text: `---` under it underlines a
+    // setext heading, and it does not end an HTML block.
+    for (const text of ["foo\n\u00a0\n---\nbar", "foo\n\u3000\n## h\n", "<div>\n\u2003\n## h\n"]) {
+      expect(splitMarkdownBlocks(text).blocks, JSON.stringify(text)).toHaveLength(1);
+      expectStreamingParity(text);
+    }
+  });
+
+  it("renders text that changed other than by an append like a single parse", () => {
+    for (const steps of [
+      // The blank line that made `# h` a boundary now continues the item.
+      ["- a\n\n# h\nx", "- a\n\n  b"],
+      // Shrunk: the break became a second list item.
+      ["- a\n\n---\n", "- a\n\n-"],
+      // The same block at the same offset, one line further down.
+      ["## a\n\nxy z\n\n## b\n", "## a\n\nxy\nz\n\n## b\n"],
+    ]) {
+      const { parseBlock } = chatMarkdownParser();
+      let previous: StreamingMarkdownChildren<object> | null = null;
+      let previousSplit = splitMarkdownBlocks("");
+      for (const text of steps) {
+        previousSplit = splitMarkdownBlocks(text, previousSplit);
+        expect(previousSplit.blocks, JSON.stringify(text)).toEqual(
+          splitMarkdownBlocks(text).blocks,
+        );
+        previous = buildStreamingMarkdownChildren(previous, text, true, {}, parseBlock);
+        expect(elementShape(previous.children), JSON.stringify(text)).toEqual(
+          elementShape(wholeParse(text)),
+        );
+      }
+    }
+  });
 
   it("matches a single parse when splitting starts or stops mid-stream", () => {
     const { parseBlock } = chatMarkdownParser();

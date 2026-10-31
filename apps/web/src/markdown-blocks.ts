@@ -62,6 +62,9 @@ const TILDE_FENCE_OPENER_PATTERN = /^(~{3,})/;
 const FENCE_CLOSER_PATTERN = /^ {0,3}(`{3,}|~{3,})[ \t]*$/;
 const BULLET_LIST_MARKER_PATTERN = /^([-*+])(?:( +)(.*))?$/;
 const ORDERED_LIST_MARKER_PATTERN = /^(\d{1,9})([.)])(?:( +)(.*))?$/;
+/** CommonMark's blank: spaces and tabs only (`trim()` also strips NBSP, U+3000 and more). */
+const BLANK_PATTERN = /^[ \t\n]*$/;
+const isBlank = (text: string): boolean => BLANK_PATTERN.test(text);
 // HTML block start conditions 1-5 continue past blank lines.
 const MULTILINE_HTML_BLOCK_START_PATTERN =
   /^<(?:(?:script|pre|style|textarea)(?:[\s>]|$)|!--|\?|![A-Za-z]|!\[CDATA\[)/i;
@@ -107,7 +110,7 @@ function classifyContent(content: string, relativeIndent: number): LineClass {
     return {
       type: "list",
       kind: bullet[1]!,
-      canInterruptParagraph: itemContent.trim().length > 0,
+      canInterruptParagraph: !isBlank(itemContent),
       markerWidth: 1,
       spacesAfterMarker: bullet[2]?.length ?? 0,
       content: itemContent,
@@ -119,7 +122,7 @@ function classifyContent(content: string, relativeIndent: number): LineClass {
     return {
       type: "list",
       kind: ordered[2]!,
-      canInterruptParagraph: ordered[1] === "1" && itemContent.trim().length > 0,
+      canInterruptParagraph: ordered[1] === "1" && !isBlank(itemContent),
       markerWidth: ordered[1]!.length + 1,
       spacesAfterMarker: ordered[3]?.length ?? 0,
       content: itemContent,
@@ -187,7 +190,7 @@ class BlockScanner {
   }
 
   isBoundary(line: string): boolean {
-    if (this.poisoned || this.topFence || line.trim().length === 0) return false;
+    if (this.poisoned || this.topFence || isBlank(line)) return false;
     if (this.boundaryAfterFence) return true;
     // A list item's open fence keeps its trailing blank lines when the text
     // ends there, and drops them when a later line closes the item.
@@ -207,7 +210,7 @@ class BlockScanner {
       this.previousBlank = false;
       return;
     }
-    if (line.trim().length === 0) {
+    if (isBlank(line)) {
       this.previousBlank = true;
       this.previousHtmlStart = false;
       return;
@@ -301,7 +304,7 @@ class BlockScanner {
       case "list": {
         const continuesList = lastClosedItem?.kind === lineClass.kind;
         if (
-          lineClass.content.trim().length === 0 ||
+          isBlank(lineClass.content) ||
           lineClass.spacesAfterMarker > 4 ||
           (!this.previousBlank && !continuesList && !lineClass.canInterruptParagraph)
         ) {
@@ -350,10 +353,12 @@ export function splitMarkdownBlocks(
     previousTail &&
     previousTail.offset > 0 &&
     text.length >= previousTail.offset &&
-    text.startsWith(previous.text.slice(0, previousTail.offset))
+    text.startsWith(previous.text)
   ) {
     // Settled blocks end before the tail and never change once text is only
     // appended; the scanner state at a block start is always the initial one.
+    // Any other change (a reveal that steps back, an older snapshot) may change
+    // the line that made the tail's start a boundary, so it splits afresh.
     blocks.push(...previous.blocks.slice(0, -1));
     blockStart = previousTail.offset;
     blockLine = previousTail.line;
@@ -370,7 +375,7 @@ export function splitMarkdownBlocks(
     const line = text.slice(lineStart, lineEnd);
     if (lineStart > blockStart && scanner.isBoundary(line)) {
       const blockText = text.slice(blockStart, lineStart);
-      if (blockText.trim().length > 0) {
+      if (!isBlank(blockText)) {
         blocks.push({ text: blockText, offset: blockStart, line: blockLine });
         blockStart = lineStart;
         blockLine = lineNumber;
@@ -554,6 +559,7 @@ export function buildStreamingMarkdownChildren<Options extends object>(
     const blockChildren =
       cached !== undefined &&
       cached.block.offset === block.offset &&
+      cached.block.line === block.line &&
       cached.block.text === block.text
         ? cached.children
         : parseBlock(block, options, index === blocks.length - 1);
