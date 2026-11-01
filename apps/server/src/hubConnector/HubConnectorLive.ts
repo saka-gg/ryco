@@ -59,7 +59,7 @@ import {
   nodeE2eeChannelPlaintextCeiling,
 } from "./NodeE2eeRelayChannel.ts";
 import { makeNodeE2eeSessionDirectory } from "./NodeE2eeSessionDirectory.ts";
-import { relayChannelAuthority } from "./relayChannelAuthority.ts";
+import { relayChannelAuthority, relayChannelPrincipal } from "./relayChannelAuthority.ts";
 import {
   channelDeviceLinks,
   linkedAccessCloseReaction,
@@ -749,9 +749,7 @@ const makeHubConnectorService = (dependencies: HubConnectorLiveDependencies) =>
               WsHostedRpcGroup,
               Layer.merge(
                 makeServerWsRpcLayer(
-                  relayRpcPrincipal(effectiveRole, channelId, () =>
-                    e2ee.mode() === "e2ee" ? channelAuthority : { trustSource: "none" },
-                  ),
+                  relayChannelPrincipal(effectiveRole, channelId, e2ee, () => channelAuthority),
                 ).pipe(Layer.provide(pushRegistryLayer)),
                 makeDeviceWsRpcLayer(relayRpcPrincipal(effectiveRole, channelId)),
               ),

@@ -19,6 +19,7 @@ import {
   parseTailscaleMagicDnsName,
   probeTailscaleHttpsEndpoint,
   readTailscaleStatus,
+  type TailscaleStatus,
 } from "./tailscale.ts";
 
 /**
@@ -30,7 +31,7 @@ import {
 // The probe is one plain GET, so the runtime's fetch is enough and no HTTP
 // client implementation has to stay loaded for it.
 const TailscaleEndpointLayer = Layer.mergeAll(NodeServices.layer, FetchHttpClient.layer);
-const TAILSCALE_MAGIC_DNS_CACHE_TTL_MS = 60_000;
+const TAILSCALE_STATUS_CACHE_TTL_MS = 60_000;
 
 export const TAILSCALE_ENDPOINT_PROVIDER: AdvertisedEndpointProvider = {
   id: "tailscale",
@@ -50,34 +51,38 @@ function createTailscaleEndpoint(
   });
 }
 
-let cachedTailscaleMagicDnsName: {
+let cachedTailscaleStatus: {
   readonly expiresAtMs: number;
-  readonly promise: Promise<string | null>;
+  readonly promise: Promise<TailscaleStatus | null>;
 } | null = null;
 
-async function readDefaultTailscaleMagicDnsName(): Promise<string | null> {
+async function readDefaultTailscaleStatus(): Promise<TailscaleStatus | null> {
   return Effect.runPromise(
     readTailscaleStatus.pipe(
-      Effect.map((status) => status.magicDnsName),
       Effect.catch(() => Effect.succeed(null)),
       Effect.provide(TailscaleEndpointLayer),
     ),
   );
 }
 
-/** The local MagicDNS name, or `null` without Tailscale. Cached for a minute. */
-export function readCachedTailscaleMagicDnsName(): Promise<string | null> {
+/** This machine's Tailscale status, or `null` without Tailscale (or its CLI). Cached for a minute. */
+export function readCachedTailscaleStatus(): Promise<TailscaleStatus | null> {
   const now = Date.now();
-  if (cachedTailscaleMagicDnsName && cachedTailscaleMagicDnsName.expiresAtMs > now) {
-    return cachedTailscaleMagicDnsName.promise;
+  if (cachedTailscaleStatus && cachedTailscaleStatus.expiresAtMs > now) {
+    return cachedTailscaleStatus.promise;
   }
 
-  const promise = readDefaultTailscaleMagicDnsName();
-  cachedTailscaleMagicDnsName = {
-    expiresAtMs: now + TAILSCALE_MAGIC_DNS_CACHE_TTL_MS,
+  const promise = readDefaultTailscaleStatus();
+  cachedTailscaleStatus = {
+    expiresAtMs: now + TAILSCALE_STATUS_CACHE_TTL_MS,
     promise,
   };
   return promise;
+}
+
+/** The local MagicDNS name, or `null` without Tailscale. Cached for a minute. */
+export function readCachedTailscaleMagicDnsName(): Promise<string | null> {
+  return readCachedTailscaleStatus().then((status) => status?.magicDnsName ?? null);
 }
 
 export function resolveTailscaleIpAdvertisedEndpoints(input: {

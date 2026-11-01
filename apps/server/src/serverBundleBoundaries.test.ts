@@ -526,11 +526,14 @@ describe("server boot import boundaries", () => {
   it("loads secret requests (tool, answer, dotenv writer) on first use, never at boot", () => {
     // `ryco_request_secret` loads through `withLazyAgentControlTools`, the owner's answer and the
     // restart's expiry timers through import(); the boot path keeps the activity kinds and the
-    // request derivation the pending-input count reads (`@ryco/shared/secretRequestState`).
+    // request derivation the pending-input count reads (`@ryco/shared/secretRequestState`). The
+    // answer's connection check loads with it: boot only records the connection's facts on the
+    // principal.
     const secretRequests = [
       "apps/server/src/agentControl/Mcp/secretRequestTools.ts",
       "apps/server/src/secretRequests/secretRequests.ts",
       "apps/server/src/secretRequests/dotenvSink.ts",
+      "apps/server/src/ws/rpcConnectionPath.ts",
       "packages/shared/src/secretRequests.ts",
     ];
     const boot = staticGraph("src/cliMain.ts").files;

@@ -12,7 +12,8 @@ const loadSecretRequests = Effect.promise(() => import("../secretRequests/secret
 /**
  * `secrets.answerRequest`: the owner's answer to an agent's `ryco_request_secret`, checked
  * against the owner tier before the module loads. The input's value goes only into the
- * request's dotenv file: no trace attribute, log line or response names it.
+ * request's dotenv file: no trace attribute, log line or response names it. A value is taken
+ * only over a connection the node saw as encrypted (`ctx.connection`, from the principal).
  */
 export const makeSecretRequestHandlers = (ctx: WsRpcContext) =>
   defineWsHandlers({
@@ -29,8 +30,10 @@ export const makeSecretRequestHandlers = (ctx: WsRpcContext) =>
                   projections: ctx.projectionSnapshotQuery,
                   workspaceAccess: ctx.workspaceAccessPolicy,
                   findThreadInArray,
+                  readNodeTailscaleAddresses: ctx.readNodeTailscaleAddresses,
                 },
                 input,
+                ctx.connection,
               ),
             ),
           ),

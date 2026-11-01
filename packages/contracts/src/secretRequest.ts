@@ -108,6 +108,7 @@ export const SecretRequestFailureReason = Schema.Literals([
   "file-too-large",
   "write-failed",
   "record-failed",
+  "unencrypted-connection",
 ]);
 export type SecretRequestFailureReason = typeof SecretRequestFailureReason.Type;
 

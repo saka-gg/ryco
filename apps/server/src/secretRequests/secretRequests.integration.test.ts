@@ -46,6 +46,7 @@ import { OrchestrationEventStoreLive } from "../persistence/Layers/Orchestration
 import { SqlitePersistenceMemory } from "../persistence/Layers/Sqlite.ts";
 import { RepositoryIdentityResolverLive } from "../project/Layers/RepositoryIdentityResolver.ts";
 import { ProjectAvatarStore } from "../project/Services/ProjectAvatarStore.ts";
+import type { RpcConnectionFacts } from "../ws/RpcPrincipal.ts";
 import { LEFTOVER_TEMPORARY_MIN_AGE_MS } from "./dotenvSink.ts";
 import {
   answerSecretRequest,
@@ -55,6 +56,22 @@ import {
 
 // Built from parts, so no fixture looks like a real credential.
 const SECRET = ["ryco", "integration", "secret", "c0ffee"].join("-");
+
+const NO_FORWARDING = {
+  forwardedFor: undefined,
+  forwarded: undefined,
+  forwardedProto: undefined,
+  realIp: undefined,
+};
+/** The card on this machine, straight to the node's loopback listener. */
+const LOOPBACK: RpcConnectionFacts = {
+  kind: "direct",
+  remote: "loopback",
+  remoteAddress: "127.0.0.1",
+  localAddress: "127.0.0.1",
+  tls: false,
+  forwarding: NO_FORWARDING,
+};
 
 const layer = it.layer(
   OrchestrationEngineLive.pipe(
@@ -223,11 +240,15 @@ layer("secret requests", (it) => {
         // An agent waiting on the card wakes when the owner saves it.
         const waiting = yield* Effect.forkChild(ask(20_000));
         const requestId = secretRequestIdFor(threadId, "stripe");
-        const answered = yield* answerSecretRequest(deps, {
-          threadId,
-          requestId,
-          answer: { type: "provide", value: `  ${SECRET}\n` },
-        });
+        const answered = yield* answerSecretRequest(
+          deps,
+          {
+            threadId,
+            requestId,
+            answer: { type: "provide", value: `  ${SECRET}\n` },
+          },
+          LOOPBACK,
+        );
         assert.deepEqual(answered, { status: "provided", file: ".env", key: "STRIPE_KEY" });
         const woken = yield* Fiber.join(waiting);
         assert.strictEqual((woken.structuredContent as { status: string }).status, "provided");
@@ -238,7 +259,7 @@ layer("secret requests", (it) => {
         assert.isFalse(yield* hasPendingUserInput(threadId));
         // Answered once.
         const again = yield* Effect.flip(
-          answerSecretRequest(deps, { threadId, requestId, answer: { type: "decline" } }),
+          answerSecretRequest(deps, { threadId, requestId, answer: { type: "decline" } }, LOOPBACK),
         );
         assert.strictEqual(again.reason, "already-answered");
 
@@ -265,6 +286,89 @@ layer("secret requests", (it) => {
           SECRET,
         );
       }).pipe(Effect.withTracer(tracer), Effect.provide(logger));
+    },
+  );
+
+  it.effect(
+    "takes a value only over an encrypted connection, and a decline over any connection",
+    () => {
+      const logged: string[] = [];
+      const logger = Logger.layer([
+        Logger.make((options) => {
+          logged.push(JSON.stringify([options.message, String(options.cause)]));
+        }),
+      ]);
+      return Effect.gen(function* () {
+        const { engine, root, threadId, tools, deps } = yield* setup("channel");
+        const ask = (requestId: string) =>
+          tools.callTool(session(threadId), AGENT_CONTROL_SECRET_REQUEST_MCP_TOOL, {
+            requestId,
+            key: "DEPLOY_TOKEN",
+            purpose: "Deploy previews",
+            waitMs: 0,
+          });
+        yield* ask("deploy");
+        const requestId = secretRequestIdFor(threadId, "deploy");
+        const provide = (connection: RpcConnectionFacts | undefined) =>
+          answerSecretRequest(
+            deps,
+            { threadId, requestId, answer: { type: "provide", value: SECRET } },
+            connection,
+          );
+        const relay = (encrypted: boolean): RpcConnectionFacts => ({
+          kind: "relay",
+          endToEndEncrypted: () => encrypted,
+        });
+        const lan: RpcConnectionFacts = {
+          ...LOOPBACK,
+          remote: "other",
+          remoteAddress: "192.168.1.20",
+          localAddress: "192.168.1.10",
+        };
+        // Refused on a relay channel without E2EE, on plain ws:// from another machine, with
+        // forged forwarding headers from that machine, on a pod network numbered in Tailscale's
+        // range when the node cannot name its own Tailscale addresses, and without any facts.
+        for (const connection of [
+          relay(false),
+          lan,
+          { ...lan, forwarding: { ...NO_FORWARDING, forwardedProto: "https" } },
+          { ...lan, remote: "tailscale", remoteAddress: "100.96.1.2", localAddress: "100.96.1.3" },
+          undefined,
+        ] satisfies ReadonlyArray<RpcConnectionFacts | undefined>) {
+          const refused = yield* Effect.flip(provide(connection));
+          assert.strictEqual(refused.reason, "unencrypted-connection");
+        }
+        assert.isFalse(existsSync(path.join(root, ".env")));
+        assert.isTrue(yield* hasPendingUserInput(threadId));
+
+        // An encrypted relay channel saves it.
+        assert.deepEqual(yield* provide(relay(true)), {
+          status: "provided",
+          file: ".env",
+          key: "DEPLOY_TOKEN",
+        });
+        assert.deepEqual(parseEnv(readFileSync(path.join(root, ".env"), "utf8")), {
+          DEPLOY_TOKEN: SECRET,
+        });
+
+        // A decline carries no value: taken over plain ws:// too.
+        yield* ask("other");
+        const declined = yield* answerSecretRequest(
+          deps,
+          {
+            threadId,
+            requestId: secretRequestIdFor(threadId, "other"),
+            answer: { type: "decline" },
+          },
+          lan,
+        );
+        assert.strictEqual(declined.status, "declined");
+
+        // The refused value went nowhere: no event, no log line.
+        const events = yield* Stream.runCollect(engine.readEvents(0));
+        assert.notInclude(JSON.stringify(events), SECRET);
+        assert.notInclude(logged.join("\n"), SECRET);
+      }).pipe(Effect.provide(logger));
     },
   );
 
@@ -295,11 +399,15 @@ layer("secret requests", (it) => {
       const reused = yield* call({ requestId: "hook", key: "OTHER_KEY" });
       assert.isTrue(reused.isError);
 
-      const declined = yield* answerSecretRequest(deps, {
-        threadId,
-        requestId: secretRequestIdFor(threadId, "hook"),
-        answer: { type: "decline" },
-      });
+      const declined = yield* answerSecretRequest(
+        deps,
+        {
+          threadId,
+          requestId: secretRequestIdFor(threadId, "hook"),
+          answer: { type: "decline" },
+        },
+        LOOPBACK,
+      );
       assert.strictEqual(declined.status, "declined");
       const after = yield* call({ requestId: "hook", key: "HOOK_SECRET" });
       assert.strictEqual((after.structuredContent as { status: string }).status, "declined");
@@ -335,11 +443,15 @@ layer("secret requests", (it) => {
         worktreePath: null,
       });
       const refused = yield* Effect.flip(
-        answerSecretRequest(deps, {
-          threadId,
-          requestId: secretRequestIdFor(threadId, "moved"),
-          answer: { type: "provide", value: SECRET },
-        }),
+        answerSecretRequest(
+          deps,
+          {
+            threadId,
+            requestId: secretRequestIdFor(threadId, "moved"),
+            answer: { type: "provide", value: SECRET },
+          },
+          LOOPBACK,
+        ),
       );
       assert.strictEqual(refused.reason, "checkout-changed");
       assert.isFalse(existsSync(path.join(root, ".env")));
@@ -412,19 +524,27 @@ layer("secret requests", (it) => {
         waitMs: 0,
       });
       const unknown = yield* Effect.flip(
-        answerSecretRequest(deps, {
-          threadId,
-          requestId: secretRequestIdFor(threadId, "never-asked"),
-          answer: { type: "decline" },
-        }),
+        answerSecretRequest(
+          deps,
+          {
+            threadId,
+            requestId: secretRequestIdFor(threadId, "never-asked"),
+            answer: { type: "decline" },
+          },
+          LOOPBACK,
+        ),
       );
       assert.strictEqual(unknown.reason, "not-found");
       const blank = yield* Effect.flip(
-        answerSecretRequest(deps, {
-          threadId,
-          requestId: secretRequestIdFor(threadId, "blank"),
-          answer: { type: "provide", value: "  \n " },
-        }),
+        answerSecretRequest(
+          deps,
+          {
+            threadId,
+            requestId: secretRequestIdFor(threadId, "blank"),
+            answer: { type: "provide", value: "  \n " },
+          },
+          LOOPBACK,
+        ),
       );
       assert.strictEqual(blank.reason, "empty-value");
       assert.isTrue(yield* hasPendingUserInput(threadId));

@@ -152,6 +152,27 @@ describe("the card's send", () => {
       error: "Git does not ignore that file, so Ryco will not write a secret there.",
     });
 
+    // A value sent over an unencrypted connection: the node's words, shown on the card as is
+    // (the card keeps the typed value; it clears it only once the node took it).
+    const unencrypted = await sendSecretRequestAnswer({
+      api: () =>
+        ({
+          threads: {
+            answerSecretRequest: async () => {
+              throw new SecretRequestError({ reason: "unencrypted-connection" });
+            },
+          },
+        }) as unknown as Pick<EnvironmentApi, "threads">,
+      threadId,
+      requestId,
+      answer: { type: "provide", value: VALUE },
+    });
+    expect(unencrypted).toEqual({
+      kind: "failed",
+      error:
+        "Secrets need an end-to-end encrypted connection: update the app, open Ryco on the computer it runs on, or connect to that computer over HTTPS or Tailscale.",
+    });
+
     // No connection: finding the API throws, and the transport's text is never shown.
     const offline = await sendSecretRequestAnswer({
       api: () => {
