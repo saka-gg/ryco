@@ -6,7 +6,7 @@ import {
 import type { ScopedThreadRef } from "@ryco/contracts";
 import { useSyncExternalStore } from "react";
 
-import type { CompressImageFileResult } from "./lib/imageCompression";
+import type { PreparedComposerImage } from "./lib/imageCompression";
 
 /**
  * Images over the provider's image limit that are being shrunk before they join a composer's
@@ -27,11 +27,15 @@ export function useComposerImagePreparationSendBlock(
   return imagePreparationSendBlock(pending, composerTargetKey(target));
 }
 
-/** Shrinks an oversized image; the canvas code loads only now, never with the app. */
+/**
+ * Shrinks an oversized image or converts a HEIC photo, or says why it cannot join the draft. The
+ * canvas code and the messages load only now, never with the app.
+ */
 export async function shrinkComposerImage(
   file: File,
+  name: string,
   maxBytes: number,
-): Promise<CompressImageFileResult> {
-  const { compressImageFileToByteLimit } = await import("./lib/imageCompression");
-  return compressImageFileToByteLimit(file, maxBytes);
+): Promise<PreparedComposerImage> {
+  const { prepareComposerImage } = await import("./lib/imageCompression");
+  return prepareComposerImage(file, name, maxBytes);
 }

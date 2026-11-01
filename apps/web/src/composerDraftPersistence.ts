@@ -363,8 +363,12 @@ export async function restoreComposerDraftAttachments(
         image: {
           ...image,
           file,
+          // A HEIC photo waiting for the node's conversion has no preview Chromium can draw (its
+          // type was set to image/heic or image/heif when it was added).
           previewUrl:
-            image.type === "image" ? createObjectUrl(file) || image.previewUrl : image.previewUrl,
+            image.type === "image" && !/^image\/hei[cf]$/i.test(file.type)
+              ? createObjectUrl(file) || image.previewUrl
+              : image.previewUrl,
           bytesPending: undefined,
         },
         ...(replacement ? { persisted: replacement } : {}),

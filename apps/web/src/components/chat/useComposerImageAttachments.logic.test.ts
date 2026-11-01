@@ -9,6 +9,7 @@ import { describe, expect, it, vi } from "vite-plus/test";
 // Imported statically (vi.mock is hoisted above it) so the module graph loads
 // while the file is collected, not inside the first test's timeout.
 import {
+  composerAttachmentFromFile,
   planDirectComposerAttachments,
   resolveComposerAttachmentRouting,
 } from "./useComposerImageAttachments";
@@ -180,5 +181,62 @@ describe("planDirectComposerAttachments with oversized images", () => {
     );
     expect(overflows.accepted).toEqual([]);
     expect(overflows.error).toContain("Attachments can total at most");
+  });
+});
+
+describe("HEIC photos in the composer", () => {
+  const MB = 1024 * 1024;
+  const photo = (name: string, type: string, sizeBytes = 2 * MB) => {
+    const file = new File(["x"], name, { type });
+    Object.defineProperty(file, "size", { value: sizeBytes });
+    return file;
+  };
+  const plan = (files: File[]) =>
+    planDirectComposerAttachments({
+      files,
+      existing: [],
+      fileUploadMaxBytes: null,
+      streamFiles: true,
+    });
+
+  it("converts a photo within the image limit before it joins the draft", () => {
+    const result = plan([photo("IMG_0001.HEIC", "image/heic"), photo("shot.png", "image/png")]);
+    expect(result.error).toBeNull();
+    expect(
+      result.accepted.map(({ name, isImage, shrinks }) => ({ name, isImage, shrinks })),
+    ).toEqual([
+      { name: "IMG_0001.HEIC", isImage: true, shrinks: true },
+      { name: "shot.png", isImage: true, shrinks: false },
+    ]);
+  });
+
+  it("counts a photo within the image limit at its own size, so a message holds eight", () => {
+    const photos = Array.from({ length: 8 }, (_, index) =>
+      photo(`IMG_000${index}.HEIC`, "image/heic", 3 * MB),
+    );
+    const result = plan(photos);
+    expect(result.error).toBeNull();
+    expect(result.accepted).toHaveLength(8);
+  });
+
+  it("takes a photo dropped without a type as an image, never a file reference", () => {
+    const dropped = photo("IMG_0002.heic", "");
+    expect(plan([dropped]).accepted[0]).toMatchObject({ isImage: true, shrinks: true });
+    expect(
+      resolveComposerAttachmentRouting({
+        fileUploadMaxBytes: null,
+        selectedProvider: CODEX,
+        files: [dropped, photo("notes.txt", "text/plain")],
+      }),
+    ).toEqual({ direct: [dropped], references: [expect.objectContaining({ name: "notes.txt" })] });
+  });
+
+  it("shows the name of a photo this browser cannot draw instead of a broken preview", () => {
+    expect(
+      composerAttachmentFromFile(photo("IMG_0001.HEIC", "image/heic"), "IMG_0001.HEIC"),
+    ).toMatchObject({ type: "image", mimeType: "image/heic", previewUrl: "" });
+    expect(
+      composerAttachmentFromFile(photo("shot.png", "image/png"), "shot.png").previewUrl,
+    ).toMatch(/^blob:/);
   });
 });

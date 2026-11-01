@@ -72,6 +72,18 @@ saved, such as `[Attached image "screenshot.png" is saved at: …]`. The agent s
 itself, and with the path it can open or copy the file too, for example to add a pasted
 screenshot to a pull request.
 
+## HEIC and HEIF photos
+
+No agent reads HEIC or HEIF, the format iPhones save photos in, so a photo in that format is
+converted to JPEG before it is sent, its long edge at most 2048 pixels. Safari converts it in the
+browser while you add it. Chrome, Edge, Firefox and the desktop app cannot read HEIC: there the
+photo goes to the node as it is, and the composer shows its name instead of a preview. A Mac node
+converts it with macOS's built-in `sips` when you send the message; the agent and the chat then get
+the JPEG. A Linux or Windows node cannot convert it and refuses the message with a note saying so;
+remove the photo and attach a JPEG instead (on an iPhone, **Settings > Camera > Formats > Most
+Compatible** saves new photos as JPEG). A photo the browser cannot convert has to be within the
+10 MB image limit.
+
 ## Recall a sent prompt
 
 Press `ArrowUp` in an empty composer to bring back the last prompt you sent in this thread. Press

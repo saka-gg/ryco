@@ -23,6 +23,7 @@ import {
 import {
   IMAGE_COMPRESSION_MAX_SOURCE_BYTES,
   imageAttachmentSizeAction,
+  isHeicImageFile,
 } from "@ryco/client-runtime/state/composer/imageCompression";
 import { providerSupportsGeneralFileAttachments } from "@ryco/shared/providerCapabilities";
 import { quoteCitationsToPlainText } from "@ryco/shared/quoteCitations";
@@ -94,6 +95,8 @@ async function readFileAsBase64(file: File): Promise<string> {
  * A composer entry for a file the user attached: a fresh id unless the caller
  * brings one, and a blob preview for images. Non-image files stream through
  * the upload queue (`enqueueComposerFileUpload`) where the machine supports it.
+ * A HEIC photo still HEIC here is one this browser cannot draw: its chip shows
+ * its name instead of a broken preview.
  */
 export function composerAttachmentFromFile(
   file: File,
@@ -107,7 +110,7 @@ export function composerAttachmentFromFile(
     name,
     mimeType: file.type || "application/octet-stream",
     sizeBytes: file.size,
-    previewUrl: isImage ? URL.createObjectURL(file) : "",
+    previewUrl: isImage && !isHeicImageFile(file) ? URL.createObjectURL(file) : "",
     file,
   };
 }
@@ -140,7 +143,7 @@ export function resolveComposerAttachmentRouting(input: {
   const direct: File[] = [];
   const references: File[] = [];
   for (const file of input.files) {
-    if (file.type.startsWith("image/")) {
+    if (file.type.startsWith("image/") || isHeicImageFile(file)) {
       direct.push(file);
     } else {
       references.push(file);
@@ -155,7 +158,7 @@ export interface PlannedComposerAttachment {
   readonly isImage: boolean;
   /** Non-image bytes stream to the environment under an upload token. */
   readonly streamsUpload: boolean;
-  /** An image over the image limit, shrunk before it joins the draft. */
+  /** An image over the image limit or a HEIC photo, shrunk or converted before it joins the draft. */
   readonly shrinks: boolean;
 }
 
@@ -183,7 +186,8 @@ export function planDirectComposerAttachments(input: {
   );
   let error: string | null = null;
   for (const file of input.files) {
-    const isImage = file.type.startsWith("image/");
+    const heic = isHeicImageFile(file);
+    const isImage = heic || file.type.startsWith("image/");
     const attachmentName = file.name || (isImage ? "image" : "file");
     if (!/^[^/\\\p{Cc}]+$/u.test(attachmentName)) {
       error = `'${attachmentName}' has an unsafe filename. Rename it without path separators or control characters.`;
@@ -206,11 +210,12 @@ export function planDirectComposerAttachments(input: {
       error = `'${attachmentName}' must be non-empty and no larger than the ${limitLabel} attachment limit.`;
       continue;
     }
+    // No provider reads HEIC, so a HEIC photo is converted even within the image limit.
     const shrinks =
       isImage &&
-      imageAttachmentSizeAction(file.size, PROVIDER_SEND_TURN_MAX_IMAGE_BYTES) === "compress";
-    // A shrinking image counts at the image limit, the most it can weigh once it arrives.
-    const countedBytes = shrinks ? PROVIDER_SEND_TURN_MAX_IMAGE_BYTES : file.size;
+      (heic ||
+        imageAttachmentSizeAction(file.size, PROVIDER_SEND_TURN_MAX_IMAGE_BYTES) === "compress");
+    const countedBytes = shrinks ? shrinkingImageCountedBytes(file.size) : file.size;
     if (nextAttachmentCount >= PROVIDER_SEND_TURN_MAX_ATTACHMENTS) {
       error = `You can attach up to ${PROVIDER_SEND_TURN_MAX_ATTACHMENTS} files per message.`;
       break;
@@ -224,6 +229,15 @@ export function planDirectComposerAttachments(input: {
     nextTotalBytes += countedBytes;
   }
   return { accepted, error };
+}
+
+/**
+ * What a shrinking image counts against the message total until it arrives: the image limit for
+ * one over it (the most it can weigh once shrunk), its own size for a HEIC photo within the limit
+ * that is only converted (the node checks the total again after converting).
+ */
+function shrinkingImageCountedBytes(size: number): number {
+  return Math.min(size, PROVIDER_SEND_TURN_MAX_IMAGE_BYTES);
 }
 
 /**
@@ -242,7 +256,7 @@ async function shrinkPlannedComposerImages(input: {
     composerImagePreparations.begin({
       targetKey: input.targetKey,
       name: entry.name,
-      reservedBytes: PROVIDER_SEND_TURN_MAX_IMAGE_BYTES,
+      reservedBytes: shrinkingImageCountedBytes(entry.file.size),
     }),
   );
   const attached: string[] = [];
@@ -251,6 +265,7 @@ async function shrinkPlannedComposerImages(input: {
     for (const [index, entry] of input.planned.entries()) {
       const result = await shrinkComposerImage(
         entry.file,
+        entry.name,
         PROVIDER_SEND_TURN_MAX_IMAGE_BYTES,
       ).catch(() => null);
       if (result?.ok) {
@@ -260,9 +275,8 @@ async function shrinkPlannedComposerImages(input: {
         );
       } else {
         error =
-          result?.reason === "unreadable"
-            ? `'${entry.name}' could not be read as an image.`
-            : `'${entry.name}' could not be shrunk to the ${IMAGE_SIZE_LIMIT_LABEL} image limit.`;
+          result?.message ??
+          `'${entry.name}' could not be shrunk to the ${IMAGE_SIZE_LIMIT_LABEL} image limit.`;
       }
       finishes[index]?.();
     }

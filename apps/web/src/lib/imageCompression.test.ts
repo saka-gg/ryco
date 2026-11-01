@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 
-import { compressImageFileToByteLimit } from "./imageCompression";
+import { compressImageFileToByteLimit, prepareComposerImage } from "./imageCompression";
 
 /**
  * The unit runner has no canvas or codecs, so the browser half runs against a stubbed
@@ -122,6 +122,66 @@ describe("compressImageFileToByteLimit", () => {
     expect(await compressImageFileToByteLimit(makeImage(2_000_000), 1_000_000)).toEqual({
       ok: false,
       reason: "unreadable",
+    });
+  });
+});
+
+describe("compressImageFileToByteLimit with HEIC photos", () => {
+  const photo = (sizeBytes: number, name = "IMG_0001.HEIC", type = "image/heic") =>
+    new File([new Uint8Array(sizeBytes)], name, { type, lastModified: 123 });
+  /** Chromium's answer to a HEIC photo. */
+  const undecodable = () => {
+    const decode = vi.fn(async () => {
+      throw new DOMException("The source image could not be decoded.", "InvalidStateError");
+    });
+    vi.stubGlobal("createImageBitmap", decode);
+    return decode;
+  };
+
+  it("converts a photo within the limit where the browser decodes HEIC (Safari)", async () => {
+    stubCanvas(() => 200_000, { supportsWebp: false });
+
+    const result = await compressImageFileToByteLimit(photo(1_000_000), 10_000_000);
+
+    expect(result.ok && result.recompressed).toBe(true);
+    expect(result.ok && result.file.type).toBe("image/jpeg");
+    expect(result.ok && result.file.name).toBe("IMG_0001.jpg");
+  });
+
+  it("hands a photo this browser cannot decode to the node as HEIC, typed even when the drop was not", async () => {
+    stubCanvas(() => 1);
+    const decode = undecodable();
+    const typed = photo(1_000_000);
+    expect(await compressImageFileToByteLimit(typed, 10_000_000)).toEqual({
+      ok: true,
+      file: typed,
+      recompressed: false,
+    });
+    expect(decode).toHaveBeenCalledWith(typed);
+
+    const dropped = await compressImageFileToByteLimit(
+      photo(1_000_000, "scan.heif", ""),
+      10_000_000,
+    );
+    expect(dropped.ok && dropped.file.type).toBe("image/heif");
+    expect(dropped.ok && dropped.file.name).toBe("scan.heif");
+    expect(dropped.ok && dropped.file.size).toBe(1_000_000);
+  });
+
+  it("refuses a photo it cannot decode that is over what the node takes", async () => {
+    stubCanvas(() => 1);
+    undecodable();
+
+    expect(await compressImageFileToByteLimit(photo(12_000_000), 10_000_000)).toEqual({
+      ok: false,
+      reason: "heic-too-large",
+    });
+    expect(
+      await prepareComposerImage(photo(12 * 1024 * 1024), "IMG_0001.HEIC", 10 * 1024 * 1024),
+    ).toEqual({
+      ok: false,
+      message:
+        "'IMG_0001.HEIC' is a HEIC photo over the 10MB image limit, which this browser cannot shrink. Convert it to JPEG first.",
     });
   });
 });
