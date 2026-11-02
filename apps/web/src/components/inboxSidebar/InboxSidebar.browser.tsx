@@ -24,6 +24,7 @@ import {
   __setEnvironmentApiOverrideForTests,
 } from "../../environmentApi";
 import { PANE_DRAG_TYPE } from "../../chatPanes.logic";
+import { DraftId } from "../../composerDraftStore";
 import { readPaneDragSource } from "../../chatPanesStore";
 import {
   noteSourceControlReadOutcome,
@@ -387,6 +388,60 @@ describe("Inbox sidebar rendering and settlement", () => {
       expect(readPaneDragSource()).toEqual({ environmentId: ENVIRONMENT_ID, threadId: THREAD_ID });
       row.dispatchEvent(new DragEvent("dragend", { bubbles: true }));
       expect(readPaneDragSource()).toBeNull();
+    } finally {
+      await mounted.unmount();
+    }
+  });
+
+  it("lists a draft with content as a Draft row that opens its draft and is not dragged", async () => {
+    const onOpenThread = vi.fn();
+    const onOpenDraft = vi.fn();
+    const draftThreadId = ThreadId.make("thread-draft");
+    const props: InboxSidebarProps = {
+      projects: [],
+      worktrees: [],
+      environments: [],
+      threads: [],
+      drafts: [
+        {
+          draftId: DraftId.make("draft-1"),
+          environmentId: ENVIRONMENT_ID,
+          threadId: draftThreadId,
+          projectId: PROJECT_ID,
+          title: "Fix the login flow",
+          createdAt: "2026-09-01T00:00:00.000Z",
+          branch: null,
+          worktreePath: null,
+          isChat: false,
+        },
+      ],
+      deliveryUnknownThreadKeys: new Set(),
+      localQueuedThreadKeys: new Set(),
+      activeThreadKey: null,
+      autoSettleAfterDays: null,
+      pinnedThreadKeys: new Set(),
+      onOpenThread,
+      onOpenDraft,
+    };
+    await page.viewport(1280, 800);
+    const mounted = await render(<InboxSidebar {...props} />);
+    try {
+      const row = document.querySelector<HTMLElement>('[data-testid="inbox-thread-row"]')!;
+      expect(row.textContent).toContain("Fix the login flow");
+      expect(row.textContent).toContain("Draft");
+      expect(row.querySelector('[data-inbox-glyph="draft"]')).not.toBeNull();
+      // Only the actions menu: a draft has nothing to settle.
+      expect(document.querySelector(".inbox-settle-action")).toBeNull();
+      await expect.poll(() => row.draggable).toBe(false);
+      row.click();
+      expect(onOpenDraft).toHaveBeenCalledWith(
+        "draft-1",
+        scopeThreadRef(ENVIRONMENT_ID, draftThreadId),
+      );
+      expect(onOpenThread).not.toHaveBeenCalled();
+      // Without a way to open drafts, none is listed.
+      await mounted.rerender(<InboxSidebar {...props} onOpenDraft={undefined} />);
+      expect(document.querySelectorAll('[data-testid="inbox-thread-row"]')).toHaveLength(0);
     } finally {
       await mounted.unmount();
     }

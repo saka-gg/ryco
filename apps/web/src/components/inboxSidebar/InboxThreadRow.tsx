@@ -44,6 +44,7 @@ import {
   noteThreadHoverEnd,
   noteThreadHoverIntent,
   noteThreadPressIntent,
+  preloadDraftRoute,
 } from "../sidebar/threadNavigationIntent";
 import {
   ContextMenu,
@@ -155,6 +156,8 @@ export const InboxThreadRow = memo(function InboxThreadRow(props: {
   readonly selection?: InboxRowSelection | undefined;
 }) {
   const { row } = props;
+  // A new thread not sent yet: it opens its draft and is never settled, snoozed or dragged.
+  const isDraft = row.draftId !== undefined;
   const isPhone = usePresentationTier() === "phone";
   const navigate = useNavigate();
   const rowProject = row.project;
@@ -410,7 +413,7 @@ export const InboxThreadRow = memo(function InboxThreadRow(props: {
       )}
       data-selected={selected ? "" : undefined}
       data-testid="inbox-thread-row"
-      draggable={!isPhone}
+      draggable={!isPhone && !isDraft}
       onClick={(event) => {
         if (!props.selection?.click(row, event)) props.onOpenRow(row);
       }}
@@ -418,14 +421,17 @@ export const InboxThreadRow = memo(function InboxThreadRow(props: {
         workingTreeWanted.start();
         // The row navigates imperatively: warm the route and the thread's
         // detail on intent so the history request overlaps the navigation.
-        if (!props.active) noteThreadHoverIntent(threadRef);
+        // A draft has no history: only its route is warmed.
+        if (props.active) return;
+        if (isDraft) preloadDraftRoute();
+        else noteThreadHoverIntent(threadRef);
       }}
       onPointerLeave={() => {
         workingTreeWanted.end();
-        noteThreadHoverEnd(threadRef);
+        if (!isDraft) noteThreadHoverEnd(threadRef);
       }}
       onPointerDown={(event) => {
-        if (isNavigationPress(event) && !props.active) noteThreadPressIntent(threadRef);
+        if (isNavigationPress(event) && !props.active && !isDraft) noteThreadPressIntent(threadRef);
       }}
       onFocus={workingTreeWanted.start}
       onBlur={workingTreeWanted.end}
@@ -452,7 +458,10 @@ export const InboxThreadRow = memo(function InboxThreadRow(props: {
           // Size before leading: tailwind-merge drops a leading that precedes a size.
           resting
             ? "text-xs leading-[18px] text-muted-foreground group-hover/inbox-row:pr-3 group-focus-within/inbox-row:pr-3"
-            : "text-[13px] leading-[18px] group-hover/inbox-row:pr-11 group-focus-within/inbox-row:pr-11",
+            : isDraft
+              ? // Only the actions menu shows on a draft.
+                "text-[13px] leading-[18px] group-hover/inbox-row:pr-6 group-focus-within/inbox-row:pr-6"
+              : "text-[13px] leading-[18px] group-hover/inbox-row:pr-11 group-focus-within/inbox-row:pr-11",
           !resting &&
             (unseen || woke
               ? "font-semibold text-sidebar-foreground"
@@ -577,31 +586,33 @@ export const InboxThreadRow = memo(function InboxThreadRow(props: {
           render={navigationButton}
         />
         <div className="absolute right-1.5 top-1 z-10 flex items-center">
-          <Tooltip>
-            <TooltipTrigger
-              render={
-                <button
-                  aria-disabled={!actionEnabled}
-                  aria-label={`${actionLabel} ${row.title}`}
-                  className={cn(
-                    "inbox-settle-action flex size-6 items-center justify-center rounded-md text-muted-foreground hover:bg-sidebar-accent hover:text-sidebar-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring aria-disabled:cursor-not-allowed aria-disabled:text-muted-foreground/40 aria-disabled:hover:bg-transparent",
-                    revealAction,
-                  )}
-                  onClick={() => void handleSettlement()}
-                  type="button"
-                />
-              }
-            >
-              {pending ? (
-                <LoaderCircleIcon aria-hidden className="size-3.5 animate-spin" />
-              ) : row.settled ? (
-                <Undo2Icon aria-hidden className="size-3.5" />
-              ) : (
-                <CheckIcon aria-hidden className="size-3.5" />
-              )}
-            </TooltipTrigger>
-            <TooltipPopup side="top">{actionTitle}</TooltipPopup>
-          </Tooltip>
+          {isDraft ? null : (
+            <Tooltip>
+              <TooltipTrigger
+                render={
+                  <button
+                    aria-disabled={!actionEnabled}
+                    aria-label={`${actionLabel} ${row.title}`}
+                    className={cn(
+                      "inbox-settle-action flex size-6 items-center justify-center rounded-md text-muted-foreground hover:bg-sidebar-accent hover:text-sidebar-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring aria-disabled:cursor-not-allowed aria-disabled:text-muted-foreground/40 aria-disabled:hover:bg-transparent",
+                      revealAction,
+                    )}
+                    onClick={() => void handleSettlement()}
+                    type="button"
+                  />
+                }
+              >
+                {pending ? (
+                  <LoaderCircleIcon aria-hidden className="size-3.5 animate-spin" />
+                ) : row.settled ? (
+                  <Undo2Icon aria-hidden className="size-3.5" />
+                ) : (
+                  <CheckIcon aria-hidden className="size-3.5" />
+                )}
+              </TooltipTrigger>
+              <TooltipPopup side="top">{actionTitle}</TooltipPopup>
+            </Tooltip>
+          )}
           <Menu onOpenChange={handleMenuOpenChange}>
             <MenuTrigger
               aria-label={`Thread actions for ${row.title}`}

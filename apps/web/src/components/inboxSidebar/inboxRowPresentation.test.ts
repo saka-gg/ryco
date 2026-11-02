@@ -11,6 +11,7 @@ import {
   resolveInboxStateLine,
 } from "./inboxRowPresentation";
 import type { InboxSidebarRow } from "./inboxSidebarModel";
+import { DraftId } from "../../composerDraftStore";
 
 type Row = Pick<InboxSidebarRow, "state" | "attention" | "errorDetail" | "statusLabel">;
 const row = (overrides: Partial<Row>): Row => ({
@@ -32,6 +33,25 @@ describe("resolveInboxGlyph", () => {
     expect(resolveInboxGlyph(row({ state: "offline" }), true)).toBe("offline");
     expect(resolveInboxGlyph(row({ state: "idle" }), false)).toBe("idle");
     expect(resolveInboxGlyph(row({ state: "idle" }), true)).toBe("completed");
+  });
+});
+
+describe("draft rows", () => {
+  const draftRow = {
+    ...row({ statusLabel: "Draft" }),
+    draftId: DraftId.make("draft-1"),
+    runningSince: null,
+    latestTurnCompletedAt: null,
+    settled: false,
+    snoozedUntil: null,
+  };
+
+  it("mark a draft as a draft whatever else the row says", () => {
+    expect(resolveInboxGlyph(draftRow, true, true)).toBe("draft");
+    expect(inboxGlyphLabel(draftRow, true)).toBe("Draft");
+    expect(inboxGlyphHint(draftRow, false)).toBe("Draft · not sent yet");
+    expect(resolveInboxStateLine(draftRow)).toEqual({ kind: "status", text: "Draft" });
+    expect(inboxTimeHint(draftRow, "2026-08-23T10:00:00.000Z")).toMatch(/^Started /);
   });
 });
 

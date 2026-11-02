@@ -1,7 +1,9 @@
-import { useCallback, useLayoutEffect, useMemo, useRef } from "react";
+import { useCallback, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useRouter } from "@tanstack/react-router";
 import { scopedProjectKey, scopedThreadKey, scopeThreadRef } from "@ryco/client-runtime/scoped";
 import { WS_METHODS, type ScopedProjectRef } from "@ryco/contracts";
+import { inboxDraftThreadSummary } from "@ryco/client-runtime/state/threads";
+import { useComposerDraftStore } from "../../composerDraftStore";
 import { buildProjectsPageLocation } from "../../projectsRoute";
 import { useCommandPaletteStore } from "../../commandPaletteStore";
 import { useHostedRpcCapability } from "../../hostedHub/capabilities";
@@ -15,6 +17,7 @@ import { useThreadClipboardActions } from "../sidebar/hooks/useThreadClipboardAc
 import { Dialog, DialogPopup, DialogTitle } from "../ui/dialog";
 import { Button } from "../ui/button";
 import { Input } from "../ui/input";
+import { createInboxDraftsSelector } from "./inboxDrafts";
 import { InboxSidebar, type InboxSidebarProps } from "./InboxSidebar";
 
 export function ConnectedInboxSidebar(
@@ -47,18 +50,31 @@ export function ConnectedInboxSidebar(
   const appSettingsConfirmThreadArchive = useSettings((s) => s.confirmThreadArchive);
   const appSettingsConfirmThreadUnpin = useSettings((s) => s.confirmThreadUnpin);
   const markThreadUnread = useUiStateStore((s) => s.markThreadUnread);
-  // Menus act on inbox rows, which are all unarchived (never stubs).
+  // Drafts the composer holds content for; the selector keeps its result while
+  // typing only changes a prompt past its title.
+  const [selectDrafts] = useState(createInboxDraftsSelector);
+  const drafts = useComposerDraftStore(selectDrafts);
+  // Menus act on inbox rows, which are all unarchived (never stubs). A draft row
+  // carries its draft id, so its menu offers only discarding it.
   const threadByKey = useMemo(
     () =>
-      new Map(
-        props.threads
+      // Server threads come last: one the draft already became wins over it.
+      new Map([
+        ...drafts.map(
+          (draft) =>
+            [
+              scopedThreadKey(scopeThreadRef(draft.environmentId, draft.threadId)),
+              { ...inboxDraftThreadSummary(draft), draftId: draft.draftId },
+            ] as const,
+        ),
+        ...props.threads
           .filter(isUnarchivedThreadEntry)
-          .map((thread) => [
-            scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)),
-            thread,
-          ]),
-      ),
-    [props.threads],
+          .map(
+            (thread) =>
+              [scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)), thread] as const,
+          ),
+      ]),
+    [drafts, props.threads],
   );
   // Read by menu callbacks; synced after render so the React Compiler can
   // optimize this component (render-time ref writes make it bail out).
@@ -102,6 +118,7 @@ export function ConnectedInboxSidebar(
     <>
       <InboxSidebar
         {...props}
+        drafts={drafts}
         threadActions={actions}
         onAddProject={addProjectCapability.allowed ? openAddProject : undefined}
       />

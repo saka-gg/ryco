@@ -55,6 +55,8 @@ const TALLY_ORDER: Record<InboxGlyphKind, number> = {
   woke: 5,
   offline: 6,
   idle: 7,
+  // The map lists server threads only; ranked with an idle one if a draft came in.
+  draft: 7,
 };
 
 /** Where a disk figure stands: still being measured, or no device can measure it. */

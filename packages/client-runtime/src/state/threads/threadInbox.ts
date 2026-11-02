@@ -582,7 +582,11 @@ function filterEntry(entry: ThreadInboxEntry, filters: ThreadInboxFilters | unde
   ].some((value) => value?.toLocaleLowerCase().includes(text) === true);
 }
 
-function createDraftThreadSummary(draft: ThreadInboxDraftSummary): SidebarThreadSummary {
+/**
+ * A local draft as a thread summary with nothing sent: what an inbox row shows
+ * for a draft entry, whose `thread` stays null.
+ */
+export function inboxDraftThreadSummary(draft: ThreadInboxDraftSummary): SidebarThreadSummary {
   return {
     id: draft.threadId,
     environmentId: draft.environmentId,
@@ -747,7 +751,7 @@ export function buildThreadInbox(input: BuildThreadInboxInput): ThreadInboxModel
     }
     const environment =
       environmentById.get(draft.environmentId) ?? fallbackEnvironment(draft.environmentId);
-    const thread = createDraftThreadSummary(draft);
+    const thread = inboxDraftThreadSummary(draft);
     const project =
       projectByKey.get(
         scopedProjectKey({

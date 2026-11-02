@@ -17,16 +17,21 @@ export type InboxGlyphKind =
   | "limited"
   | "error"
   | "offline"
-  | "idle";
+  | "idle"
+  | "draft";
 
-type GlyphRow = Pick<InboxSidebarRow, "state" | "attention" | "statusLabel">;
+/** Whether the row is a new thread not sent yet; optional for partial rows. */
+type DraftRow = { readonly draftId?: InboxSidebarRow["draftId"] };
+
+type GlyphRow = Pick<InboxSidebarRow, "state" | "attention" | "statusLabel"> & DraftRow;
 
 /** `woke`: an idle row that woke from its snooze and was not opened since; it wins over unseen. */
 export function resolveInboxGlyph(
-  row: Pick<InboxSidebarRow, "state">,
+  row: Pick<InboxSidebarRow, "state"> & DraftRow,
   unseen: boolean,
   woke = false,
 ): InboxGlyphKind {
+  if (row.draftId) return "draft";
   switch (row.state) {
     case "needs-input":
       return "needs-input";
@@ -55,6 +60,7 @@ const ATTENTION_LABEL = {
 } as const;
 
 export function inboxGlyphLabel(row: GlyphRow, unseen: boolean, woke = false): string {
+  if (row.draftId) return row.statusLabel;
   if (row.state === "needs-input") return ATTENTION_LABEL[row.attention ?? "input"];
   if (row.state === "idle") return woke ? "Woke" : unseen ? "Completed" : "Idle";
   return row.statusLabel;
@@ -113,9 +119,10 @@ export function inboxUsageLimitDetail(row: UsageLimitRow): string {
 export function resolveInboxStateLine(
   row: Pick<InboxSidebarRow, "state" | "attention" | "errorDetail" | "statusLabel"> & {
     readonly usageLimit?: InboxSidebarRow["usageLimit"];
-  },
+  } & DraftRow,
   woke = false,
 ): InboxStateLine {
+  if (row.draftId) return { kind: "status", text: row.statusLabel };
   switch (row.state) {
     case "needs-input":
       return { kind: "attention", text: ATTENTION_LABEL[row.attention ?? "input"] };
@@ -191,11 +198,13 @@ export function inboxGlyphHint(
   > & {
     readonly usageLimit?: InboxSidebarRow["usageLimit"];
     readonly wokeAt?: InboxSidebarRow["wokeAt"];
-  } & DelegatedStateRow,
+  } & DelegatedStateRow &
+    DraftRow,
   unseen: boolean,
   woke = false,
 ): string {
   const label = inboxGlyphLabel(row, unseen, woke);
+  if (row.draftId) return `${label} · not sent yet`;
   const where = row.delegatedState ? " in a delegated thread" : "";
   switch (row.state) {
     case "limited":
@@ -221,9 +230,10 @@ export function inboxGlyphHint(
 
 /** What hovering the time says: the exact moment behind the compact age. */
 export function inboxTimeHint(
-  row: Pick<InboxSidebarRow, "runningSince" | "settled" | "snoozedUntil">,
+  row: Pick<InboxSidebarRow, "runningSince" | "settled" | "snoozedUntil"> & DraftRow,
   timestamp: string,
 ): string {
+  if (row.draftId) return `Started ${formatInboxDayTime(timestamp)}`;
   if (row.runningSince) return `Running since ${formatInboxDayTime(row.runningSince)}`;
   if (row.snoozedUntil) return `Snoozed until ${formatInboxDayTime(row.snoozedUntil)}`;
   if (row.settled) return `Settled ${formatInboxDayTime(timestamp)}`;
