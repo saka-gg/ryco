@@ -1,5 +1,7 @@
 import { isLocalHubAlias } from "../../deviceName.logic";
 import { inboxModelName } from "./inboxContextHandoff";
+import type { InboxSidebarDraft } from "./inboxDrafts";
+import type { DraftId } from "../../composerDraftStore";
 import { getModelDisplayName } from "@ryco/shared/model";
 import {
   deriveThreadActivityStatus,
@@ -14,7 +16,11 @@ import {
   followUpQueueBadgeOf,
   type FollowUpQueueBadge,
 } from "@ryco/client-runtime/state/message-queue/queueBadge";
-import { CHAT_WORKSPACE_LABEL, projectDisplayLabel } from "@ryco/client-runtime/state/composer";
+import {
+  CHAT_PROJECT_LABEL,
+  CHAT_WORKSPACE_LABEL,
+  projectDisplayLabel,
+} from "@ryco/client-runtime/state/composer";
 import { isChatProject } from "@ryco/shared/projectKind";
 import { threadSnoozeWokeAt } from "@ryco/shared/threadSnooze";
 import type { SavedEnvironmentRuntimeState } from "@ryco/client-runtime/connection";
@@ -35,6 +41,7 @@ import type {
 } from "@ryco/client-runtime/state/threads";
 import {
   buildThreadInbox,
+  inboxDraftThreadSummary,
   planDelegatedNesting,
   resolveThreadHideAvailability,
   resolveThreadLifecycleAvailability,
@@ -185,6 +192,11 @@ export interface InboxSidebarRow {
   readonly key: string;
   readonly environmentId: EnvironmentId;
   readonly threadId: ThreadId;
+  /**
+   * Set on a new thread not sent yet (its composer holds content): the row opens
+   * the draft and offers only discarding it. Absent on server threads.
+   */
+  readonly draftId?: DraftId | undefined;
   readonly title: string;
   readonly pinned: boolean;
   readonly gitCwd: string | null;
@@ -322,6 +334,8 @@ export interface BuildInboxSidebarInput {
   readonly primaryEnvironmentId?: EnvironmentId | null;
   /** Fold delegated children under their host (default true; off on the phone tier). */
   readonly nestDelegated?: boolean;
+  /** New threads not sent yet whose composer holds content. */
+  readonly drafts?: ReadonlyArray<InboxSidebarDraft>;
   readonly nowMs?: number;
 }
 
@@ -791,6 +805,9 @@ function sectionKey(
 }
 
 const NO_DELEGATED_CHILDREN: ReadonlyArray<InboxSidebarRow> = [];
+const NO_DRAFTS: ReadonlyArray<InboxSidebarDraft> = [];
+/** What a draft row's state reads: it waits for the person to send it. */
+const INBOX_DRAFT_STATUS_LABEL = "Draft";
 const UNKNOWN_PROJECT_LABEL = "Unknown project";
 const UNTITLED_THREAD_TITLE = "Untitled task";
 
@@ -1075,6 +1092,7 @@ export function buildInboxSidebarModel(input: BuildInboxSidebarInput): InboxSide
     localQueuedThreadKeys: input.localQueuedThreadKeys,
     deliveryUnknownThreadKeys,
     pinnedThreadKeys: input.pinnedThreadKeys,
+    drafts: input.drafts,
     filters: {
       ...(input.filters.environmentId ? { environmentIds: [input.filters.environmentId] } : {}),
       ...(input.filters.projectKeys ? { projectKeys: input.filters.projectKeys } : {}),
@@ -1085,7 +1103,16 @@ export function buildInboxSidebarModel(input: BuildInboxSidebarInput): InboxSide
     nowMs,
   });
 
-  const threadEnvironmentIds = new Set(input.threads.map((thread) => thread.environmentId));
+  const drafts = input.drafts ?? NO_DRAFTS;
+  const draftByKey = new Map(
+    drafts.map((draft) => [
+      scopedThreadKey(scopeThreadRef(draft.environmentId, draft.threadId)),
+      draft,
+    ]),
+  );
+  const threadEnvironmentIds = new Set(
+    [...input.threads, ...drafts].map((thread) => thread.environmentId),
+  );
   const singleEnvironment = threadEnvironmentIds.size <= 1;
   const projectNameByKey = new Map(
     input.projects.map((project) => [
@@ -1094,30 +1121,42 @@ export function buildInboxSidebarModel(input: BuildInboxSidebarInput): InboxSide
     ]),
   );
   const threadProjectNames = new Set(
-    input.threads.map(
-      (thread) => projectNameByKey.get(`${thread.environmentId}:${thread.projectId}`) ?? null,
+    [...input.threads, ...drafts].map((thread) =>
+      "isChat" in thread && thread.isChat
+        ? CHAT_PROJECT_LABEL
+        : (projectNameByKey.get(`${thread.environmentId}:${thread.projectId}`) ?? null),
     ),
   );
   const singleProject = threadProjectNames.size <= 1;
   const rows: InboxSidebarRow[] = [];
   for (const entry of [...inbox.active, ...inbox.settled, ...inbox.snoozed, ...inbox.hidden]) {
-    const thread = entry.thread;
+    // A draft has sent nothing: its row reads a summary of the draft, with no session.
+    const draft = entry.draft ? (draftByKey.get(entry.key) ?? null) : null;
+    const thread = entry.thread ?? (draft ? inboxDraftThreadSummary(draft) : null);
     if (!thread) continue;
     const environment = environmentById.get(thread.environmentId);
     const project = entry.project;
     const worktree = entry.worktree;
     const machineLabel = environment?.label ?? "Unknown machine";
-    const isChat = isChatProject(project);
+    // A chat draft's project does not exist until its first send.
+    const isChat = isChatProject(project) || draft?.isChat === true;
     // A chat's project is its folder, not something to name: chats read "No project".
-    const projectLabel = projectDisplayLabel(project, UNKNOWN_PROJECT_LABEL);
+    const projectLabel =
+      draft?.isChat === true
+        ? CHAT_PROJECT_LABEL
+        : projectDisplayLabel(project, UNKNOWN_PROJECT_LABEL);
     const workspaceLabel = isChat
       ? CHAT_WORKSPACE_LABEL
       : (worktree?.title ?? worktree?.branch ?? thread.branch ?? "Local workspace");
     const contextLabel = `${machineLabel} · ${projectLabel} · ${workspaceLabel}`;
-    const state = resolveThreadState(thread, environment, deliveryUnknownThreadKeys, nowMs);
-    const placementState = isMachineConnecting(environment)
-      ? resolvePlacementState(thread, environment, deliveryUnknownThreadKeys, nowMs)
-      : state;
+    // A draft lives in this client: its machine's connection says nothing about it.
+    const state = draft
+      ? "idle"
+      : resolveThreadState(thread, environment, deliveryUnknownThreadKeys, nowMs);
+    const placementState =
+      !draft && isMachineConnecting(environment)
+        ? resolvePlacementState(thread, environment, deliveryUnknownThreadKeys, nowMs)
+        : state;
     const usageLimit = state === "limited" ? deriveUsageLimitStatus(thread, nowMs) : null;
     const settled = entry.lifecycle.classification === "settled";
     const snoozed = entry.lifecycle.classification === "snoozed";
@@ -1130,15 +1169,22 @@ export function buildInboxSidebarModel(input: BuildInboxSidebarInput): InboxSide
       key: scopedThreadKey(scopeThreadRef(thread.environmentId, thread.id)),
       environmentId: thread.environmentId,
       threadId: thread.id,
+      ...(draft ? { draftId: draft.draftId } : {}),
       title: thread.title || UNTITLED_THREAD_TITLE,
       pinned: entry.pinned,
-      gitCwd: thread.worktreePath ?? worktree?.worktreePath ?? project?.cwd ?? null,
+      // A draft has no pull request or change counts of its own to read yet.
+      gitCwd: draft
+        ? null
+        : (thread.worktreePath ?? worktree?.worktreePath ?? project?.cwd ?? null),
       sourceControlEnabled: Boolean(
+        !draft &&
         environment?.connectionState === "connected" &&
         environment.shellCurrent &&
         !environment.stale,
       ),
+      // Discarding a draft is local; nothing on its machine can change it yet.
       mutationEnabled: Boolean(
+        !draft &&
         environment?.mutationReady &&
         environment.shellCurrent &&
         environment.connectionState === "connected",
@@ -1152,7 +1198,7 @@ export function buildInboxSidebarModel(input: BuildInboxSidebarInput): InboxSide
       workspaceLabel,
       contextLabel,
       state,
-      statusLabel: statusLabel(state, environment, usageLimit),
+      statusLabel: draft ? INBOX_DRAFT_STATUS_LABEL : statusLabel(state, environment, usageLimit),
       placementState,
       attention: state === "needs-input" ? resolveAttention(thread) : null,
       errorDetail: state === "error" ? sessionFailureDetail(thread.session)?.trim() || null : null,

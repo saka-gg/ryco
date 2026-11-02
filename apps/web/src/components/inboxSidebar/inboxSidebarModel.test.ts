@@ -45,6 +45,8 @@ import {
   type InboxSidebarEnvironment,
   type InboxSidebarFilters,
 } from "./inboxSidebarModel";
+import type { InboxSidebarDraft } from "./inboxDrafts";
+import { DraftId } from "../../composerDraftStore";
 
 const ENV_A = EnvironmentId.make("machine-a");
 const ENV_B = EnvironmentId.make("machine-b");
@@ -2251,5 +2253,84 @@ describe("Hidden shelf and settling a working thread", () => {
     const sections = build({ threads: [filed], environments: [triage] });
     expect(sections.map((section) => section.key)).toEqual(["settled"]);
     expect(sections[0]?.rows[0]).toMatchObject({ filed: true, settled: true, state: "working" });
+  });
+});
+
+describe("draft rows", () => {
+  const draft = (overrides: Partial<InboxSidebarDraft> = {}): InboxSidebarDraft => ({
+    draftId: DraftId.make("draft-1"),
+    environmentId: ENV_A,
+    threadId: ThreadId.make("thread-draft"),
+    projectId: PROJECT_A,
+    title: "Fix the login flow",
+    createdAt: "2026-08-23T11:00:00.000Z",
+    branch: "main",
+    worktreePath: null,
+    isChat: false,
+    ...overrides,
+  });
+  const build = (input: { drafts: InboxSidebarDraft[]; threads?: SidebarThreadSummary[] }) =>
+    buildInboxSidebarSections({
+      projects: [project()],
+      worktrees: [],
+      threads: input.threads ?? [],
+      drafts: input.drafts,
+      environments: [environment(ENV_A)],
+      filters: ALL_FILTERS,
+      nowMs: Date.parse("2026-08-23T12:00:00.000Z"),
+    });
+
+  it("lists a draft under Recent, opening its draft and allowing no lifecycle action", () => {
+    const sections = build({ drafts: [draft()] });
+    expect(sections.map((section) => section.key)).toEqual(["recent"]);
+    expect(sections[0]?.rows[0]).toMatchObject({
+      key: "machine-a:thread-draft",
+      draftId: "draft-1",
+      title: "Fix the login flow",
+      state: "idle",
+      statusLabel: "Draft",
+      projectLabel: "Ryco",
+      gitCwd: null,
+      sourceControlEnabled: false,
+      mutationEnabled: false,
+      settlementActionEnabled: false,
+      settlementDisabledReason: "Drafts cannot be settled yet.",
+      canSnooze: false,
+      hideActionEnabled: false,
+      updatedAt: "2026-08-23T11:00:00.000Z",
+    });
+  });
+
+  it("reads a chat draft as No project, before its chat project exists", () => {
+    const row = build({
+      drafts: [draft({ projectId: ProjectId.make("chat-pending"), isChat: true })],
+    })[0]?.rows[0];
+    expect(row).toMatchObject({
+      isChat: true,
+      projectLabel: "No project",
+      workspaceLabel: "Chat folder",
+    });
+  });
+
+  it("lists the server thread once a draft's thread exists", () => {
+    const rows = build({ drafts: [draft()], threads: [thread("thread-draft")] }).flatMap(
+      (section) => section.rows,
+    );
+    expect(rows).toHaveLength(1);
+    expect(rows[0]?.draftId).toBeUndefined();
+  });
+
+  it("matches a draft by its title in text search", () => {
+    const sections = buildInboxSidebarSections({
+      projects: [project()],
+      worktrees: [],
+      threads: [thread("other")],
+      drafts: [draft()],
+      environments: [environment(ENV_A)],
+      filters: { ...ALL_FILTERS, query: "login" },
+    });
+    expect(sections.flatMap((section) => section.rows.map((row) => row.key))).toEqual([
+      "machine-a:thread-draft",
+    ]);
   });
 });

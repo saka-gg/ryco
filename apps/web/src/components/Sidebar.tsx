@@ -880,6 +880,20 @@ export default function Sidebar() {
     },
     [clearSelection, isMobile, navigate, setOpenMobile, setSelectionAnchor],
   );
+  // Inbox draft rows: a new thread not sent yet opens its draft, as in the project tree.
+  const navigateToDraft = useCallback(
+    (draftId: DraftId, threadRef: ScopedThreadRef) => {
+      if (hasSelectedThreads()) {
+        clearSelection();
+      }
+      setSelectionAnchor(scopedThreadKey(threadRef));
+      if (isMobile) {
+        setOpenMobile(false);
+      }
+      void navigate({ to: "/draft/$draftId", params: { draftId } });
+    },
+    [clearSelection, isMobile, navigate, setOpenMobile, setSelectionAnchor],
+  );
 
   const projectDnDSensors = useSensors(
     useSensor(PointerSensor, {
@@ -1540,6 +1554,7 @@ export default function Sidebar() {
                   pinnedThreadKeys={pinnedThreadKeys}
                   primaryEnvironmentId={primaryEnvironmentId}
                   onOpenThread={navigateToThread}
+                  onOpenDraft={navigateToDraft}
                   onDeleteThreads={confirmAndDeleteThreads}
                   projects={projects}
                   threads={sidebarThreads}

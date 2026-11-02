@@ -332,53 +332,56 @@ export function InboxThreadMenuItems(props: {
     ],
     [
       "lifecycle",
-      [
-        row.snoozedUntil ? (
-          <MenuItem
-            key="unsnooze"
-            disabled={!row.canUnsnooze || props.pending}
-            onClick={() => props.onSnooze(null)}
-          >
-            <AlarmClockOffIcon aria-hidden />
-            Unsnooze
-          </MenuItem>
-        ) : (
-          <MenuSub key="snooze">
-            <MenuSubTrigger
-              className="[&>svg:first-child]:-mx-0.5 [&>svg]:opacity-80"
-              disabled={!row.canSnooze || props.pending}
-            >
-              <ClockIcon aria-hidden />
-              Snooze
-            </MenuSubTrigger>
-            <MenuSubPopup className="min-w-52">
-              {snoozePresetItems(props.snoozePresets, props.onSnooze)}
-            </MenuSubPopup>
-          </MenuSub>
-        ),
-        <MenuItem key="settle" disabled={!props.settleEnabled} onClick={props.onSettle}>
-          {row.settled ? <Undo2Icon aria-hidden /> : <CheckIcon aria-hidden />}
-          {props.settleLabel}
-        </MenuItem>,
-        // The Hidden shelf: out of the Inbox until the thread needs the person.
-        ...(props.offerHide
-          ? [
+      // A draft has nothing on its machine to settle, snooze or hide yet.
+      row.draftId !== undefined
+        ? []
+        : [
+            row.snoozedUntil ? (
               <MenuItem
-                key="hide"
-                disabled={!row.hideActionEnabled || props.pending}
-                onClick={() =>
-                  void dispatchThreadHidden(
-                    scopeThreadRef(row.environmentId, row.threadId),
-                    !row.hiddenByUser,
-                  )
-                }
+                key="unsnooze"
+                disabled={!row.canUnsnooze || props.pending}
+                onClick={() => props.onSnooze(null)}
               >
-                {row.hiddenByUser ? <EyeIcon aria-hidden /> : <EyeOffIcon aria-hidden />}
-                {row.hiddenByUser ? "Show in Inbox" : "Hide until needed"}
-              </MenuItem>,
-            ]
-          : []),
-      ],
+                <AlarmClockOffIcon aria-hidden />
+                Unsnooze
+              </MenuItem>
+            ) : (
+              <MenuSub key="snooze">
+                <MenuSubTrigger
+                  className="[&>svg:first-child]:-mx-0.5 [&>svg]:opacity-80"
+                  disabled={!row.canSnooze || props.pending}
+                >
+                  <ClockIcon aria-hidden />
+                  Snooze
+                </MenuSubTrigger>
+                <MenuSubPopup className="min-w-52">
+                  {snoozePresetItems(props.snoozePresets, props.onSnooze)}
+                </MenuSubPopup>
+              </MenuSub>
+            ),
+            <MenuItem key="settle" disabled={!props.settleEnabled} onClick={props.onSettle}>
+              {row.settled ? <Undo2Icon aria-hidden /> : <CheckIcon aria-hidden />}
+              {props.settleLabel}
+            </MenuItem>,
+            // The Hidden shelf: out of the Inbox until the thread needs the person.
+            ...(props.offerHide
+              ? [
+                  <MenuItem
+                    key="hide"
+                    disabled={!row.hideActionEnabled || props.pending}
+                    onClick={() =>
+                      void dispatchThreadHidden(
+                        scopeThreadRef(row.environmentId, row.threadId),
+                        !row.hiddenByUser,
+                      )
+                    }
+                  >
+                    {row.hiddenByUser ? <EyeIcon aria-hidden /> : <EyeOffIcon aria-hidden />}
+                    {row.hiddenByUser ? "Show in Inbox" : "Hide until needed"}
+                  </MenuItem>,
+                ]
+              : []),
+          ],
     ],
     ["session", inGroup("session")],
     ["copy", inGroup("copy")],

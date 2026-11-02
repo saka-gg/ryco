@@ -1,4 +1,4 @@
-import { AlarmClockIcon } from "lucide-react";
+import { AlarmClockIcon, PencilLineIcon } from "lucide-react";
 
 import { cn } from "../../lib/utils";
 
@@ -119,5 +119,8 @@ function GlyphMark({ kind }: { readonly kind: InboxGlyphKind }) {
       return <span className="size-[9px] rounded-full border-[1.5px] border-muted-foreground/45" />;
     case "idle":
       return <span className="size-[5px] rounded-full bg-muted-foreground/35" />;
+    case "draft":
+      // Nothing runs and nothing waits on the person's answer: it waits to be sent.
+      return <PencilLineIcon aria-hidden className="size-3 text-muted-foreground/80" />;
   }
 }

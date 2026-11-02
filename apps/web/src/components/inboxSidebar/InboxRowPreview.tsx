@@ -49,6 +49,7 @@ const STATUS_TONE = {
   connecting: "text-muted-foreground",
   offline: "text-muted-foreground",
   idle: "text-muted-foreground",
+  draft: "text-muted-foreground",
 } as const;
 
 export function InboxProjectIcon(props: {
@@ -140,6 +141,11 @@ export function InboxRowPreview({ payload }: { readonly payload: InboxRowPreview
       ) : line.kind === "woke" && row.wokeAt ? (
         <p className="text-[11.5px] leading-4 text-warning-foreground">
           {`Woke from snooze ${formatInboxDayTime(row.wokeAt)}.`}
+        </p>
+      ) : row.draftId !== undefined ? (
+        // The header already says "Draft".
+        <p className="text-[11.5px] leading-4 text-muted-foreground">
+          Not sent yet. Open it to keep writing.
         </p>
       ) : line.kind === "status" ? (
         <p className="text-[11.5px] leading-4 text-muted-foreground">{line.text}</p>

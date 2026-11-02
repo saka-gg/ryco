@@ -6,6 +6,7 @@ import type {
   SidebarWorktreeSummary,
 } from "@ryco/client-runtime/state/threads";
 import type { EnvironmentId, ScopedThreadRef } from "@ryco/contracts";
+import type { DraftId } from "../../composerDraftStore";
 import type { SidebarAutoSettleAfterDays } from "@ryco/contracts/settings";
 import { ChevronDownIcon, ChevronRightIcon } from "lucide-react";
 import { Fragment, type ReactNode, useCallback, useEffect, useMemo, useState } from "react";
@@ -26,6 +27,7 @@ import { ProjectImportBanner } from "../projectImport/ProjectImportBanner";
 import { SidebarContent } from "../ui/sidebar";
 import { TooltipCreateHandle } from "../ui/tooltip";
 import { InboxDelegatedGroup } from "./InboxDelegatedGroup";
+import type { InboxSidebarDraft } from "./inboxDrafts";
 import { useInboxFilterStore } from "./inboxFilterStore";
 import { InboxHoverLayer } from "./InboxHoverLayer";
 import type { InboxOrderSnapshot } from "./inboxOrderHold";
@@ -75,6 +77,10 @@ export interface InboxSidebarProps {
   /** Rows on other machines are labelled; this one is implicit. */
   readonly primaryEnvironmentId?: EnvironmentId | null | undefined;
   readonly onOpenThread: (threadRef: ScopedThreadRef) => void;
+  /** New threads not sent yet whose composer holds content; listed as drafts. */
+  readonly drafts?: ReadonlyArray<InboxSidebarDraft> | undefined;
+  /** Opens a draft row; without it, draft rows are not listed. */
+  readonly onOpenDraft?: ((draftId: DraftId, threadRef: ScopedThreadRef) => void) | undefined;
   /** Deletes a selection of rows after one confirmation; omit to offer no bulk Delete. */
   readonly onDeleteThreads?:
     | ((targets: readonly ScopedThreadRef[]) => Promise<boolean>)
@@ -135,6 +141,7 @@ export function InboxSidebar(props: InboxSidebarProps) {
   const [modelSharing] = useState(() => createInboxSidebarModelSharing());
   // Every section: the status filter applies after the order hold, so a row
   // that leaves the filtered section keeps its place too.
+  const drafts = props.onOpenDraft ? props.drafts : undefined;
   const liveModel = useMemo(
     () =>
       modelSharing.share(
@@ -151,10 +158,12 @@ export function InboxSidebar(props: InboxSidebarProps) {
           pinnedThreadKeys: props.pinnedThreadKeys,
           primaryEnvironmentId: props.primaryEnvironmentId ?? null,
           nestDelegated,
+          ...(drafts ? { drafts } : {}),
           nowMs: Math.max(settlementNowMs, Date.now()),
         }),
       ),
     [
+      drafts,
       environmentId,
       modelSharing,
       nestDelegated,
@@ -286,11 +295,15 @@ export function InboxSidebar(props: InboxSidebarProps) {
     enabled: motionEnabled,
     orderSignature,
   });
-  const { onOpenThread } = props;
+  const { onOpenThread, onOpenDraft } = props;
   // One callback for every row: a per-row closure would defeat the row's memo.
   const openRow = useCallback(
-    (row: InboxSidebarRow) => onOpenThread(scopeThreadRef(row.environmentId, row.threadId)),
-    [onOpenThread],
+    (row: InboxSidebarRow) => {
+      const threadRef = scopeThreadRef(row.environmentId, row.threadId);
+      if (row.draftId !== undefined) onOpenDraft?.(row.draftId, threadRef);
+      else onOpenThread(threadRef);
+    },
+    [onOpenDraft, onOpenThread],
   );
   const renderRow = (row: InboxSidebarRow) => (
     <InboxThreadRow
