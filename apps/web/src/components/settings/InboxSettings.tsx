@@ -82,7 +82,7 @@ export function AutoSettleSettingsSection(props: {
                 }
               }}
             >
-              <SelectTrigger className="w-48" aria-label="Auto-settle inactive tasks">
+              <SelectTrigger size="sm" className="w-48" aria-label="Auto-settle inactive tasks">
                 <SelectValue>
                   {value === null ? "Off" : `After ${value} ${value === 1 ? "day" : "days"}`}
                 </SelectValue>

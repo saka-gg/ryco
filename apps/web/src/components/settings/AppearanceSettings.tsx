@@ -29,7 +29,6 @@ import {
   FONT_FAMILY_SANS_OPTIONS,
   FONT_SIZE_OPTIONS,
   PRIMARY_COLOR_OPTIONS,
-  RADIUS_OPTIONS,
   applyAppearancePreferencesToDocument,
   getAppearancePreferences,
   hasAppearancePreferenceOverride,
@@ -599,45 +598,6 @@ export function AppearanceSettingsPanel({
         </SettingsRow>
       </SettingsSection>
       <SettingsSection title="Interface">
-        {isHub ? null : (
-          <SettingsRow
-            title="Corner radius"
-            description="Adjust rounding for panels, buttons, inputs, and menus globally."
-            resetAction={
-              hasAppearancePreferenceOverride("radius") ? (
-                <SettingResetButton
-                  label="corner radius"
-                  onClick={() => handleAppearancePreferenceReset("radius")}
-                />
-              ) : null
-            }
-            control={
-              <SliderPreferenceValue
-                options={RADIUS_OPTIONS}
-                value={appearancePreferences.radius}
-                preview={
-                  <span className="grid h-8 min-w-12 grid-cols-2 gap-1 rounded-md border border-border/70 bg-background p-1.5 shadow-xs/5">
-                    <span
-                      className="border border-primary/55 bg-primary/15"
-                      style={{ borderRadius: appearancePreferences.radius }}
-                    />
-                    <span
-                      className="border border-muted-foreground/30 bg-muted"
-                      style={{ borderRadius: appearancePreferences.radius }}
-                    />
-                  </span>
-                }
-              />
-            }
-          >
-            <AppearancePreferenceSlider
-              ariaLabel="Corner radius"
-              options={RADIUS_OPTIONS}
-              value={appearancePreferences.radius}
-              onChange={(value) => handleAppearancePreferenceChange("radius", value)}
-            />
-          </SettingsRow>
-        )}
         {isHub || isPhoneTier ? null : <ChatWidthSetting />}
         <SettingsRow
           title="Primary color"

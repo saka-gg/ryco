@@ -231,7 +231,7 @@ export function NotificationsTestSection() {
                 if (typeof value === "string") setPresetValue(value);
               }}
             >
-              <SelectTrigger className="w-full sm:w-56" aria-label="Notification sample">
+              <SelectTrigger size="sm" className="w-full sm:w-56" aria-label="Notification sample">
                 <SelectValue>{preset?.label}</SelectValue>
               </SelectTrigger>
               <SelectPopup align="end" alignItemWithTrigger={false}>

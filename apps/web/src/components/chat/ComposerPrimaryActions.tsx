@@ -3,6 +3,7 @@ import { ChevronDownIcon, ChevronLeftIcon, CornerDownLeftIcon } from "lucide-rea
 import { cn } from "~/lib/utils";
 import { Button } from "../ui/button";
 import { Menu, MenuItem, MenuPopup, MenuTrigger } from "../ui/menu";
+import { SendGlyph } from "./SendGlyph";
 
 interface PendingActionState {
   questionIndex: number;
@@ -277,15 +278,7 @@ export const ComposerPrimaryActions = memo(function ComposerPrimaryActions({
           />
         </svg>
       ) : (
-        <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
-          <path
-            d="M7 11.5V2.5M7 2.5L3 6.5M7 2.5L11 6.5"
-            stroke="currentColor"
-            strokeWidth="1.8"
-            strokeLinecap="round"
-            strokeLinejoin="round"
-          />
-        </svg>
+        <SendGlyph />
       )}
     </button>
   );

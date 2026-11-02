@@ -15,11 +15,11 @@ import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
  * Every settings panel composes these instead of drawing its own chrome, so a
  * page reads as one system: a quiet heading, one solid card per group, rows
  * divided by hairlines, and nothing nested more than that. Containers cap the
- * user's corner radius — a pill-shaped input is a preference, but a pill-shaped
- * card clips its own content.
+ * round corner ramp — a pill-shaped input reads as a control, but a
+ * pill-shaped card clips its own content.
  */
 
-/** Card corner radius, capped so a large global radius never clips content. */
+/** Card corner radius, capped so the round global radius never clips content. */
 export const SETTINGS_CARD_RADIUS_CLASS = "rounded-[min(var(--radius-xl),0.875rem)]";
 
 /** Inline padding every row and block inside a card shares. */

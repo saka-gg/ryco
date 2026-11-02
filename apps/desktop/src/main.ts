@@ -5152,6 +5152,13 @@ function createWindow(): BrowserWindow {
     show: false,
     autoHideMenuBar: true,
     backgroundColor: getInitialWindowBackgroundColor(),
+    // Created transparent wherever the window can turn translucent. A window
+    // made clear only later (setBackgroundColor) keeps Chromium treating the
+    // page as opaque, and the regions it redraws while busy lose their alpha:
+    // opaque blocks of the glass coat on every quick thread switch.
+    // Transparency cannot be switched on after creation; an opaque window
+    // stays opaque through its background color and the page's own fill.
+    transparent: windowTranslucency.supported,
     ...getIconOption(),
     title: APP_DISPLAY_NAME,
     ...getWindowTitleBarOptions(),

@@ -3,6 +3,7 @@
 import { AlertDialog as AlertDialogPrimitive } from "@base-ui/react/alert-dialog";
 
 import { cn } from "~/lib/utils";
+import { SolidButtons } from "~/components/ui/button";
 import {
   DIALOG_MORPH_POPUP_CLASS_NAME,
   DIALOG_MORPH_PROFILE,
@@ -52,6 +53,7 @@ function AlertDialogViewport({ className, ...props }: AlertDialogPrimitive.Viewp
 
 function AlertDialogPopup({
   className,
+  children,
   onKeyDown,
   bottomStickOnMobile = true,
   morph = "auto",
@@ -91,7 +93,9 @@ function AlertDialogPopup({
             event.stopPropagation();
           }}
           {...props}
-        />
+        >
+          <SolidButtons>{children}</SolidButtons>
+        </AlertDialogPrimitive.Popup>
       </AlertDialogViewport>
     </AlertDialogPortal>
   );

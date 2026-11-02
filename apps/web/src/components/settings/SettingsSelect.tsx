@@ -26,7 +26,7 @@ export function SettingsSelect<T extends string>({
   placeholder = "Choose…",
   disabled,
   width = "md",
-  size,
+  size = "sm",
   className,
 }: {
   value: T | "" | null | undefined;

@@ -33,10 +33,7 @@ export const HUB_SURFACE_VALUE = "hub";
  *
  * Scoping note: `:root[data-surface="hub"]` has specificity (0,2,0), so it wins
  * against the runtime-injected `<style id="ryco-active-theme">` — which writes
- * plain `:root{}` / `:root.dark{}` rules — regardless of source order. It does
- * NOT win against `themes/appearancePreferences.ts`, which emits the
- * `--radius-*` ramp with `!important`; Hub radii must go through that emitter
- * or use literal lengths.
+ * plain `:root{}` / `:root.dark{}` rules — regardless of source order.
  */
 export function syncDocumentHubSurface(): void {
   if (typeof document === "undefined") return;

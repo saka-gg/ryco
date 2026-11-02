@@ -314,6 +314,7 @@ function AboutVersionSection({ scopeLabel }: { readonly scopeLabel: string }) {
             }}
           >
             <SelectTrigger
+              size="sm"
               className="w-full sm:w-40"
               aria-label="Update track"
               disabled={!hasDesktopBridge || isChangingUpdateChannel}
@@ -485,7 +486,7 @@ export function GeneralSettingsPanel() {
                 }
               }}
             >
-              <SelectTrigger className="w-full sm:w-40" aria-label="Timestamp format">
+              <SelectTrigger size="sm" className="w-full sm:w-40" aria-label="Timestamp format">
                 <SelectValue>{TIMESTAMP_FORMAT_LABELS[settings.timestampFormat]}</SelectValue>
               </SelectTrigger>
               <SelectPopup align="end" alignItemWithTrigger={false}>
@@ -536,7 +537,7 @@ export function GeneralSettingsPanel() {
                 if (match) updateSettings({ preferredEditor: match.id as EditorId });
               }}
             >
-              <SelectTrigger className="w-full sm:w-56" aria-label="Default editor">
+              <SelectTrigger size="sm" className="w-full sm:w-56" aria-label="Default editor">
                 {settings.preferredEditor ? (
                   <EditorOptionIcon editor={settings.preferredEditor} />
                 ) : null}
@@ -675,7 +676,11 @@ export function GeneralSettingsPanel() {
                     }
                   }}
                 >
-                  <SelectTrigger className="w-full sm:w-44" aria-label="Default thread mode">
+                  <SelectTrigger
+                    size="sm"
+                    className="w-full sm:w-44"
+                    aria-label="Default thread mode"
+                  >
                     <SelectValue>
                       {settings.defaultThreadEnvMode === "worktree" ? "New worktree" : "Local"}
                     </SelectValue>

@@ -178,7 +178,6 @@ describe("AppearanceSettingsPanel", () => {
     await page.getByRole("radio", { name: `Use ${interfaceFontLabel} for interface font` }).click();
     await page.getByRole("radio", { name: `Use ${codeFontLabel} for code font` }).click();
     await page.getByRole("button", { name: "Set text size to Large" }).click();
-    await page.getByRole("button", { name: "Set corner radius to Square" }).click();
     expect(
       JSON.parse(localStorage.getItem(APPEARANCE_PREFERENCES_STORAGE_KEY) ?? "{}").primaryColorMode,
     ).toBeUndefined();
@@ -194,7 +193,6 @@ describe("AppearanceSettingsPanel", () => {
           fontFamilySans: interfaceFontValue,
           fontFamilyMono: codeFontValue,
           fontSizeBase: "18px",
-          radius: "0rem",
           primaryColorMode: "custom",
           primaryColor: primaryColorValue,
         }),
@@ -205,7 +203,6 @@ describe("AppearanceSettingsPanel", () => {
     expect(style?.textContent).toContain('--font-family-sans: "Geist"');
     expect(style?.textContent).toContain('--font-family-mono: "Geist Mono"');
     expect(style?.textContent).toContain("--font-size-base: 18px");
-    expect(style?.textContent).toContain("--radius: 0rem");
     expect(style?.textContent).toContain(`--primary: ${primaryColorValue}`);
     // The desktop has no transparency step; its surfaces stay Solid.
     expect(style?.textContent).toContain("--app-surface-opacity: 100%");
@@ -221,9 +218,6 @@ describe("AppearanceSettingsPanel", () => {
       .toBeInTheDocument();
     await expect
       .element(page.getByRole("button", { name: "Reset text size to default" }))
-      .toBeInTheDocument();
-    await expect
-      .element(page.getByRole("button", { name: "Reset corner radius to default" }))
       .toBeInTheDocument();
     await expect
       .element(page.getByRole("button", { name: "Reset primary color to default" }))
@@ -259,7 +253,7 @@ describe("AppearanceSettingsPanel", () => {
       await expect
         .element(page.getByRole("combobox", { name: "Chat width" }))
         .not.toBeInTheDocument();
-      await expect.element(page.getByText("Corner radius", { exact: true })).toBeVisible();
+      await expect.element(page.getByText("Primary color", { exact: true })).toBeVisible();
     } finally {
       useTierOverrideStore.setState({ override: null });
     }

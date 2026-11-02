@@ -3,7 +3,7 @@
 import { Dialog as DialogPrimitive } from "@base-ui/react/dialog";
 import { XIcon } from "lucide-react";
 import { cn } from "~/lib/utils";
-import { Button } from "~/components/ui/button";
+import { Button, SolidButtons } from "~/components/ui/button";
 import { ScrollArea } from "~/components/ui/scroll-area";
 import {
   DIALOG_MORPH_POPUP_CLASS_NAME,
@@ -111,7 +111,7 @@ function DialogPopup({
           }}
           {...props}
         >
-          {children}
+          <SolidButtons>{children}</SolidButtons>
           {showCloseButton && (
             <DialogPrimitive.Close
               aria-label="Close"

@@ -1732,7 +1732,7 @@ describe("ChatView Workspace (full app)", () => {
     }
   });
 
-  it("hides the Crown rail on an empty thread and restores it on request", async () => {
+  it("opens the Crown rail on an empty thread, and its toggle closes and reopens it", async () => {
     const draftId = DraftId.make("draft-empty-thread-overview");
     useComposerDraftStore.setState({
       draftThreadsByThreadKey: {
@@ -1755,7 +1755,7 @@ describe("ChatView Workspace (full app)", () => {
     });
 
     const mounted = await mountChatView({
-      viewport: DEFAULT_VIEWPORT,
+      viewport: WIDE_FOOTER_VIEWPORT,
       snapshot: createDraftOnlySnapshot(),
       initialPath: `/draft/${draftId}`,
     });
@@ -1766,8 +1766,7 @@ describe("ChatView Workspace (full app)", () => {
         "Unable to find the new-thread hero.",
       );
 
-      // The overview describes a thread's history, so it stays out of the way
-      // until there is one — or until the user explicitly asks for it.
+      // The new-thread page opens with the overview docked, like any thread.
       // Open state plus visibility, not DOM presence: the rail stays mounted
       // through its exit transition.
       const overviewShowing = () => {
@@ -1777,7 +1776,7 @@ describe("ChatView Workspace (full app)", () => {
       };
       await vi.waitFor(
         () => {
-          expect(overviewShowing()).toBe(false);
+          expect(overviewShowing()).toBe(true);
         },
         { timeout: 8_000, interval: 16 },
       );
@@ -1788,7 +1787,14 @@ describe("ChatView Workspace (full app)", () => {
         "Unable to find the overview toggle.",
       );
       overviewToggle.click();
+      await vi.waitFor(
+        () => {
+          expect(overviewShowing()).toBe(false);
+        },
+        { timeout: 8_000, interval: 16 },
+      );
 
+      overviewToggle.click();
       await vi.waitFor(
         () => {
           expect(overviewShowing()).toBe(true);

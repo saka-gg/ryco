@@ -36,7 +36,7 @@ export const ProjectListRow = memo(function ProjectListRow(props: {
         onClick={() => props.onSelect(row)}
         onKeyDown={(event) => props.onKeyDown(event, row)}
         className={cn(
-          "grid w-full grid-cols-[1.25rem_minmax(0,1fr)_auto] items-center gap-x-2.5 gap-y-0.5 rounded-[min(var(--radius-lg),0.625rem)] px-2.5 py-2 text-left outline-hidden",
+          "grid w-full grid-cols-[1.25rem_minmax(0,1fr)_auto] items-center gap-x-2.5 gap-y-0.5 rounded-lg px-2.5 py-2 text-left outline-hidden",
           "focus-visible:ring-2 focus-visible:ring-ring focus-visible:ring-inset",
         )}
       >

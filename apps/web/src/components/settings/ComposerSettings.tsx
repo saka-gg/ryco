@@ -94,7 +94,11 @@ export function ComposerSettings() {
               if (behavior !== null) updateSettings({ followUpBehavior: behavior });
             }}
           >
-            <SelectTrigger className="w-full sm:w-40" aria-label="Messages sent while a turn runs">
+            <SelectTrigger
+              size="sm"
+              className="w-full sm:w-40"
+              aria-label="Messages sent while a turn runs"
+            >
               <SelectValue>{FOLLOW_UP_BEHAVIOR_LABELS[followUpBehavior]}</SelectValue>
             </SelectTrigger>
             <SelectPopup align="end" alignItemWithTrigger={false}>
