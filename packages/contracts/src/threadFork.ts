@@ -1,6 +1,7 @@
 import * as Schema from "effect/Schema";
 
 import {
+  EnvironmentId,
   MessageId,
   NonNegativeInt,
   ProjectId,
@@ -60,6 +61,21 @@ export const ThreadForkInput = Schema.Struct({
   destination: ThreadForkDestination,
 });
 export type ThreadForkInput = typeof ThreadForkInput.Type;
+
+/**
+ * The `threads.forkCarried` payload as it travels: only the key and the target project are read
+ * before the node has checked the caller's access and the payload's size. It then decodes
+ * `destination` and `history` as `ThreadForkCarriedInput` (threadForkCarried.ts), refusing
+ * unknown keys.
+ */
+export const ThreadForkCarriedRequest = Schema.Struct({
+  forkKey: ThreadForkKey,
+  /** This node's own project (`new-worktree`); null for `new-chat`. */
+  projectId: Schema.NullOr(ProjectId),
+  destination: Schema.Unknown,
+  history: Schema.Unknown,
+});
+export type ThreadForkCarriedRequest = typeof ThreadForkCarriedRequest.Type;
 
 /**
  * How the fork's provider continues:
@@ -148,6 +164,19 @@ export const ThreadForkErrorReason = Schema.Literals([
   "preparation-failed",
   /** The fork completed earlier but its thread was deleted since. */
   "deleted",
+  /**
+   * `threads.forkCarried` only: the carried conversation is over the size or count limits. Fork
+   * from an earlier reply.
+   */
+  "history-too-large",
+  /** `threads.forkCarried` only: the carried conversation is malformed (nothing was written). */
+  "history-invalid",
+  /**
+   * `threads.forkCarried` only: this node could not fetch the branch from its own remote (it is
+   * not pushed, or this node cannot reach the remote), or the branch it fetched does not hold the
+   * commit the source checkout is at (another repository, or a rewritten branch).
+   */
+  "base-ref-unavailable",
 ]);
 export type ThreadForkErrorReason = typeof ThreadForkErrorReason.Type;
 
@@ -174,6 +203,23 @@ export class ThreadForkError extends Schema.TaggedError<ThreadForkError>()("Thre
   attempt: ThreadForkAttemptState,
 }) {}
 
+/**
+ * Where a fork carried from another node came from (`threads.forkCarried`). Display-only
+ * provenance the client sent: the node never looks anything up, authorizes or connects with it.
+ * Absent on a fork made on its source's own node.
+ */
+export const ThreadForkOrigin = Schema.Struct({
+  kind: Schema.Literal("other-machine"),
+  /** The source machine's name as the client showed it (bounded when it was carried). */
+  machineLabel: TrimmedNonEmptyString,
+  /** The source node's environment id, so a client connected to it can link back. */
+  sourceEnvironmentId: EnvironmentId,
+  /** The source thread's id on its own node. Never an id of this node. */
+  sourceThreadId: ThreadId,
+  sourceThreadTitle: TrimmedNonEmptyString,
+});
+export type ThreadForkOrigin = typeof ThreadForkOrigin.Type;
+
 /** Provenance activity appended once to a fork, after its inherited history. */
 export const THREAD_FORKED_ACTIVITY_KIND = "thread.forked";
 
@@ -198,5 +244,11 @@ export const ThreadForkedActivityPayload = Schema.Struct({
   handoffReason: Schema.optional(ThreadForkHandoffReason),
   checkout: ThreadForkCheckout,
   notices: ThreadForkNotices,
+  /**
+   * Set when the conversation was carried from another node. An optional key, so older clients
+   * decode the payload and show a plain divider whose link finds no thread here. A carried fork
+   * always continues by `handoff` and has no `handoffReason`.
+   */
+  origin: Schema.optional(ThreadForkOrigin),
 });
 export type ThreadForkedActivityPayload = typeof ThreadForkedActivityPayload.Type;

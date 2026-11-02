@@ -8,6 +8,22 @@ through its own updater, and is not covered here.
 An update installs the exact release, checks that it starts on this node, and only then restarts
 into it. A release that still fails to start is rolled back, with the database it migrated.
 
+## From a terminal
+
+`ryco update` starts the same update as the button, on this machine's node or, with
+`--remote <name>`, on a paired one. It reads the node's state, shows the versions and asks before
+the restart (`--yes` skips the question and is needed when the output is not a terminal), then
+follows the run until the node reports how it ended after its restart. The node checks everything
+itself, exactly as for the button: the newest release again, one update at a time, and the
+installation and service it can restart. `ryco update --check` only shows where the node stands.
+
+`--channel nightly` (or `latest`) moves a CLI node to another npm dist-tag. The node checks that
+channel's newest release and refuses one that is not newer than what it runs: a channel switch
+never downgrades. A node keeps following the channel of the release it runs, so a node on a
+nightly moves back to stable with `--channel latest` once a stable release newer than its nightly
+is out. The
+desktop app follows its own channel instead (Ryco and Ryco Nightly are separate apps).
+
 ## What an update does
 
 1. **Install.** The running node installs exactly the new release into the installation it runs

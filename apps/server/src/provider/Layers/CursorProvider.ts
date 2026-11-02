@@ -49,6 +49,7 @@ const CURSOR_PRESENTATION = {
   badgeLabel: "Early Access",
   showInteractionModeToggle: true,
   supportsAskMode: true,
+  turnSteeringMode: "interrupt-restart",
 } as const;
 const EMPTY_CAPABILITIES: ModelCapabilities = createModelCapabilities({
   optionDescriptors: [],
@@ -563,7 +564,7 @@ const ABOUT_TIMEOUT_MS = 8_000;
 
 /** Strip ANSI escape sequences so we can parse plain key-value lines. */
 function stripAnsi(text: string): string {
-  // eslint-disable-next-line no-control-regex
+  // eslint-disable-next-line no-control-regex -- ANSI escapes start with ESC, and OSC ends with BEL
   return text.replace(/\x1b\[[0-9;]*[A-Za-z]|\x1b\].*?\x07/g, "");
 }
 

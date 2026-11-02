@@ -15,10 +15,11 @@ import {
   type ServerProvider,
 } from "@ryco/contracts";
 import { scopedThreadKey } from "@ryco/client-runtime/scoped";
-import type { SideChat } from "@ryco/client-runtime/state/side-chat";
+import { SIDE_CHAT_CONTINUE_COPY, type SideChat } from "@ryco/client-runtime/state/side-chat";
 import {
   BrainIcon,
   ChevronDownIcon,
+  GitForkIcon,
   MessageSquarePlusIcon,
   MinusIcon,
   SquareIcon,
@@ -55,10 +56,16 @@ export function SideChatPanel({
   threadRef,
   providers,
   connected,
+  onContinueAsThread,
 }: {
   threadRef: ScopedThreadRef;
   providers: readonly ServerProvider[];
   connected: boolean;
+  /**
+   * Forks the thread with this side chat as the fork's draft. Present only where the thread can
+   * be forked; offered once the side chat has an answer.
+   */
+  onContinueAsThread?: ((trigger: HTMLElement) => void) | undefined;
 }) {
   const key = scopedThreadKey(threadRef);
   const chat = useSideChatStore((state) => state.chatsByThreadKey[key]);
@@ -124,6 +131,7 @@ export function SideChatPanel({
           providers={providers}
           ready={ready}
           open={open}
+          onContinueAsThread={onContinueAsThread}
         />
       ) : null}
     </>
@@ -138,6 +146,7 @@ function SideChatSurface({
   providers,
   ready,
   open,
+  onContinueAsThread,
 }: {
   ref: Ref<HTMLElement>;
   chat: SideChat;
@@ -146,6 +155,7 @@ function SideChatSurface({
   providers: readonly ServerProvider[];
   ready: boolean;
   open: boolean;
+  onContinueAsThread: ((trigger: HTMLElement) => void) | undefined;
 }) {
   const actions = sideChatStore.getState();
   const sendShortcut = useSendShortcut();
@@ -202,6 +212,16 @@ function SideChatSurface({
         <h2 className="text-sm font-medium">Side chat</h2>
         <span className="text-xs text-muted-foreground">Temporary</span>
         <span className="flex-1" />
+        {onContinueAsThread && chat.exchanges.length > 0 ? (
+          <HeaderAction
+            label={SIDE_CHAT_CONTINUE_COPY.action}
+            // The fork takes the answered exchanges; one still on its way would be left out.
+            disabled={!!chat.pending}
+            onClick={onContinueAsThread}
+          >
+            <GitForkIcon aria-hidden className="size-3.5" />
+          </HeaderAction>
+        ) : null}
         <HeaderAction label="New chat" disabled={!!chat.pending} onClick={() => actions.clear(key)}>
           <SquarePenIcon aria-hidden className="size-3.5" />
         </HeaderAction>
@@ -343,7 +363,7 @@ function HeaderAction(props: {
   label: string;
   hint?: string;
   disabled?: boolean;
-  onClick: () => void;
+  onClick: (trigger: HTMLElement) => void;
   children: ReactNode;
 }) {
   return (
@@ -356,7 +376,7 @@ function HeaderAction(props: {
             size="icon-xs"
             aria-label={props.label}
             disabled={props.disabled}
-            onClick={props.onClick}
+            onClick={(event) => props.onClick(event.currentTarget)}
           />
         }
       >

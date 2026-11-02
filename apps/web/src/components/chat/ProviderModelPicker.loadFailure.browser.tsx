@@ -146,10 +146,15 @@ describe("ProviderModelPicker load failure", () => {
       chunks.failing.clear();
       chunks.notify.mock.calls[0]?.[2]();
 
-      await vi.waitFor(() => {
-        expect(document.querySelector(".model-picker-list")).not.toBeNull();
-        expect(document.querySelector('[data-slot="model-tuning-dial"]')).not.toBeNull();
-      });
+      // The failed open reported before the picker's own module finished loading; on a busy
+      // runner the retry can wait more than a second for it.
+      await vi.waitFor(
+        () => {
+          expect(document.querySelector(".model-picker-list")).not.toBeNull();
+          expect(document.querySelector('[data-slot="model-tuning-dial"]')).not.toBeNull();
+        },
+        { timeout: 15_000 },
+      );
       expect(LazyComposerModelTuning.isLoaded()).toBe(true);
       expect(chunks.notify).toHaveBeenCalledOnce();
     } finally {

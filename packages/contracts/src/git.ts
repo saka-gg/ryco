@@ -14,6 +14,12 @@ import { WorktreeSubmodules } from "./settings.ts";
 const TrimmedNonEmptyStringSchema = TrimmedNonEmptyString;
 const GIT_LIST_BRANCHES_MAX_LIMIT = 200;
 
+/** A full Git commit id: 40 hex characters (SHA-1) or 64 (SHA-256), lowercase. */
+export const GitCommitOid = Schema.String.check(
+  Schema.isPattern(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/),
+);
+export type GitCommitOid = typeof GitCommitOid.Type;
+
 // Domain Types
 
 export const GitStackedAction = Schema.Literals([
@@ -159,6 +165,19 @@ export const GitRunStackedActionInput = Schema.Struct({
     Schema.Array(TrimmedNonEmptyStringSchema).check(Schema.isMinLength(1)),
   ),
   stagedOnly: Schema.optional(GitStagedOnlyCommit),
+  /**
+   * Pull request text for `create_pr` / `commit_push_pr`; a missing one is generated. Servers
+   * without `capabilities.pullRequestOptions` drop these keys and generate both.
+   */
+  prTitle: Schema.optional(TrimmedNonEmptyStringSchema.check(Schema.isMaxLength(300))),
+  prBody: Schema.optional(TrimmedNonEmptyStringSchema.check(Schema.isMaxLength(60_000))),
+  /** Open the pull request as a draft; a host that has no drafts fails instead. */
+  prDraft: Schema.optional(Schema.Boolean),
+  /**
+   * `create_pr` with uncommitted changes the user chose to leave out: the pull request takes
+   * the committed work only, instead of failing "Commit local changes before creating a PR."
+   */
+  allowDirtyWorkingTree: Schema.optional(Schema.Boolean),
 }).check(
   Schema.makeFilter((input) =>
     input.stagedOnly === undefined || input.filePaths === undefined
@@ -318,6 +337,16 @@ const VcsStatusLocalShape = {
 
 const VcsStatusRemoteShape = {
   hasUpstream: Schema.Boolean,
+  /**
+   * The branch's upstream as Git names it (`origin/main`), null without one. Optional: older
+   * nodes do not send it, and a client that needs it treats it as unknown.
+   */
+  upstreamRef: Schema.optional(Schema.NullOr(TrimmedNonEmptyStringSchema)),
+  /**
+   * The commit HEAD was at when `aheadCount` and `behindCount` were counted (so with no commit
+   * ahead it is on the upstream). Absent on an unborn branch and from older nodes.
+   */
+  headCommit: Schema.optional(GitCommitOid),
   aheadCount: NonNegativeInt,
   behindCount: NonNegativeInt,
   aheadOfDefaultCount: Schema.optional(NonNegativeInt),
@@ -594,9 +623,16 @@ export const GitComparisonRef = TrimmedNonEmptyStringSchema.check(
   Schema.isPattern(/^[A-Za-z0-9][A-Za-z0-9._/-]*$/),
   Schema.isPattern(/^(?!.*\.\.).*$/),
 );
+/**
+ * `mode` picks the left endpoint (the merge-base of `ref` and HEAD, or `ref` itself). The right
+ * endpoint is HEAD, or with `target: "workingTree"` the working files, including staged, unstaged
+ * and untracked changes. Only nodes that advertise `capabilities.workingTreeComparison` honour
+ * `target`; older ones drop the key and echo the selection without it.
+ */
 export const GitComparisonSelection = Schema.Struct({
   ref: GitComparisonRef,
   mode: Schema.Literals(["mergeBase", "direct"]),
+  target: Schema.optionalKey(Schema.Literal("workingTree")),
 });
 export type GitComparisonSelection = typeof GitComparisonSelection.Type;
 export const GitReadComparisonInput = Schema.Struct({
@@ -610,8 +646,11 @@ export const GitComparisonSource = Schema.Struct({
   repositoryPath: TrimmedNonEmptyStringSchema,
   worktreePath: TrimmedNonEmptyStringSchema,
   refOid: TrimmedNonEmptyStringSchema,
+  /** HEAD when the comparison was read; with a working-tree target not the patch's right side. */
   headOid: TrimmedNonEmptyStringSchema,
   baseOid: TrimmedNonEmptyStringSchema,
+  /** Present when the right side is the working files rather than `headOid`. */
+  target: Schema.optionalKey(Schema.Literal("workingTree")),
   revision: TrimmedNonEmptyStringSchema,
 });
 export type GitComparisonSource = typeof GitComparisonSource.Type;
@@ -625,7 +664,7 @@ export type GitReadComparisonResult = typeof GitReadComparisonResult.Type;
 /** One immutable committed-file line. No symbolic refs or working-tree fallback. */
 export const GitReadLineBlameInput = Schema.Struct({
   cwd: TrimmedNonEmptyStringSchema,
-  oid: Schema.String.check(Schema.isPattern(/^(?:[0-9a-f]{40}|[0-9a-f]{64})$/)),
+  oid: GitCommitOid,
   filePath: Schema.String.check(
     Schema.isMinLength(1),
     Schema.isMaxLength(4096),

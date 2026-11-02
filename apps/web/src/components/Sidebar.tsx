@@ -1,4 +1,5 @@
 import { useAppKeybindings } from "../appKeybindings";
+import { isSavedEnvironmentSwitchedOff } from "@ryco/client-runtime/connection";
 import { useDeviceName } from "../deviceName";
 import { useServerConfigSelector } from "~/rpc/serverState";
 import { autoAnimate, type AnimationController } from "@formkit/auto-animate";
@@ -590,8 +591,9 @@ export default function Sidebar() {
     const knownEnvironmentIds = new Set<EnvironmentId>();
     for (const project of projects) knownEnvironmentIds.add(project.environmentId);
     for (const thread of sidebarThreads) knownEnvironmentIds.add(thread.environmentId);
-    for (const environmentId of Object.keys(savedEnvironmentRegistry) as EnvironmentId[]) {
-      knownEnvironmentIds.add(environmentId);
+    for (const record of Object.values(savedEnvironmentRegistry)) {
+      // A machine switched off is left out until it is on again.
+      if (!isSavedEnvironmentSwitchedOff(record)) knownEnvironmentIds.add(record.environmentId);
     }
     return buildInboxSidebarEnvironments({
       knownEnvironmentIds,

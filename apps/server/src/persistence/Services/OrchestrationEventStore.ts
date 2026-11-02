@@ -112,6 +112,12 @@ export interface OrchestrationEventStoreShape {
    * same state; sequences are AUTOINCREMENT and never reused, so without holes
    * this is the same answer as "the event at `sequence` exists". A cursor below
    * the first or above the last held sequence (a reset or foreign log) is not.
+   *
+   * Retention (`EventLogRetention`) removes events a replay would need and
+   * raises floors (`orchestration_stream_floors`): a cursor below the floor of
+   * what the replay reads (the stream's own floor when `stream` is given, the
+   * whole log's otherwise) is not anchored either, so the client takes a
+   * snapshot instead of a replay with a gap.
    */
   readonly probeResume?: (input: {
     readonly sequence: number;
@@ -129,6 +135,17 @@ export interface OrchestrationEventStoreShape {
     },
     OrchestrationEventStoreError
   >;
+
+  /**
+   * The replay floor of one stream, or of the whole log (`{ aggregateKind: "log", streamId: "" }`):
+   * events at or below it may have been removed by retention (`EventLogRetention`); 0 when none
+   * were. A resumed replay checks it after each page, so retention that ran after the resume
+   * probe ends the subscription (the client then takes a snapshot) instead of leaving a gap.
+   */
+  readonly readReplayFloor?: (input: {
+    readonly aggregateKind: OrchestrationEvent["aggregateKind"] | "log";
+    readonly streamId: string;
+  }) => Effect.Effect<number, OrchestrationEventStoreError>;
 
   /** Newest-first bounded operational read. Callers must authorization-filter aggregates. */
   readonly readRecent?: (input: {

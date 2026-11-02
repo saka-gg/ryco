@@ -31,6 +31,17 @@ function normalizeAbsolutePath(value: string): string | null {
 }
 
 /**
+ * A key under which two spellings of one absolute path are equal: `/`
+ * separators, no empty, `.` or `..` segments, and lower case on a Windows
+ * drive. Null for relative, UNC or root-escaping paths.
+ */
+export function absolutePathKey(value: string): string | null {
+  const normalized = normalizeAbsolutePath(value);
+  if (!normalized) return null;
+  return WINDOWS_DRIVE_ROOT_PATTERN.test(normalized) ? normalized.toLowerCase() : normalized;
+}
+
+/**
  * A path (an agent's file link, a markdown image) as a path inside
  * `workspaceRoot`, or null when it addresses anything outside it. Absolute
  * paths must sit under the root (case-insensitively on a Windows drive);

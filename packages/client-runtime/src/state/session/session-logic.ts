@@ -192,6 +192,10 @@ export interface PendingApproval {
 
 export interface PendingUserInput {
   nonBlocking?: boolean;
+  /** The turn that asked. */
+  turnId?: TurnId;
+  /** An optional question's provider item, which its answer names. */
+  itemId?: string;
   requestId: ApprovalRequestId;
   userInputIdentity?: ApprovalResponseIdentity;
   responseState?: ApprovalResponseState;
@@ -571,7 +575,11 @@ function updatePendingUserInputState(
         ? { userInputIdentity: payload.userInputIdentity }
         : {}),
       createdAt: activity.createdAt,
+      ...(activity.turnId ? { turnId: activity.turnId } : {}),
       ...(payload?.nonBlocking === true ? { nonBlocking: true } : {}),
+      ...(payload?.nonBlocking === true && typeof payload.itemId === "string"
+        ? { itemId: payload.itemId }
+        : {}),
       questions,
     });
     return;

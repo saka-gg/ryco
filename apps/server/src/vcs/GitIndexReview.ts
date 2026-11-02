@@ -59,6 +59,18 @@ const makeReader = Effect.fn("makeIndexReviewReader")(function* (
   cwd: string,
 ) {
   const root = yield* authorizeGitReadWorkspace(execute, cwd, "indexReview");
+  return yield* makeAuthorizedIndexReader(execute, root);
+});
+
+/**
+ * The index reader of a worktree root that `authorizeGitReadWorkspace` already
+ * returned; never pass it a client-supplied path. `operation` labels its Git commands.
+ */
+export const makeAuthorizedIndexReader = Effect.fn("makeAuthorizedIndexReader")(function* (
+  execute: GitVcsDriverShape["execute"],
+  root: string,
+  operation = "indexReview",
+) {
   const run = (
     args: readonly string[],
     options: {
@@ -68,7 +80,7 @@ const makeReader = Effect.fn("makeIndexReviewReader")(function* (
     } = {},
   ) =>
     execute({
-      operation: "indexReview",
+      operation,
       cwd: root,
       args,
       timeoutMs: 15_000,
@@ -363,7 +375,18 @@ const makeReader = Effect.fn("makeIndexReviewReader")(function* (
         };
       }),
     );
-  return { root, run, gitPath, indexPath, headPath, readIndex, identity, read, readStaged };
+  return {
+    root,
+    run,
+    gitPath,
+    indexPath,
+    headPath,
+    readIndex,
+    identity,
+    copyIndex,
+    read,
+    readStaged,
+  };
 });
 
 export const readGitLocalChanges = Effect.fn("readGitLocalChanges")(function* (

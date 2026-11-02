@@ -2094,3 +2094,120 @@ it.effect("refuses tasks past the person's delegation limits, with the batch's s
     assert.strictEqual(stale.reason, "delegation-limit");
   }),
 );
+
+describe("worktree handoffs", () => {
+  const handoff = (threadId: ThreadId) => ({
+    kind: "worktreeHandoff" as const,
+    threadId,
+    branch: "feature/handoff",
+    startFromOrigin: false,
+    runSetupScript: true,
+  });
+  const handoffValidator = (awaited: ReadonlySet<ThreadId> = new Set()) =>
+    Effect.gen(function* () {
+      const snapshot = yield* Ref.make(
+        makeSnapshot(
+          thread({
+            id: callerThreadId,
+            runtimeMode: "approval-required",
+            envMode: "local",
+            running: true,
+          }),
+        ),
+      );
+      const providers = yield* Ref.make<ReadonlyArray<typeof provider>>([provider]);
+      return makeAgentControlActionValidatorFromDeps({
+        projections: {
+          getShellSnapshot: () => Ref.get(snapshot),
+        } as unknown as ProjectionSnapshotQueryShape,
+        getProviders: Ref.get(providers),
+        listRefs: () => Effect.die("unused"),
+        delegatedReturnPending: (threadId) => Effect.succeed(awaited.has(threadId)),
+      });
+    });
+
+  it.effect("moves only the calling chat, at submission and again before execution", () =>
+    Effect.gen(function* () {
+      const validator = yield* handoffValidator();
+      const principal = yield* validator.validateSubmission({
+        session,
+        authority,
+        plan: handoff(callerThreadId),
+      });
+      assert.strictEqual(principal.kind, "provider-session");
+      yield* validator.revalidateExecution(approvedProposal(principal, handoff(callerThreadId)));
+      const other = yield* Effect.flip(
+        validator.validateSubmission({ session, authority, plan: handoff(targetThreadId) }),
+      );
+      assert.strictEqual(other.reason, "project-scope");
+      const forged = yield* Effect.flip(
+        validator.revalidateExecution(approvedProposal(principal, handoff(targetThreadId))),
+      );
+      assert.strictEqual(forged.reason, "project-scope");
+      const badBase = yield* Effect.flip(
+        validator.validateSubmission({
+          session,
+          authority,
+          plan: { ...handoff(callerThreadId), baseRef: "--upload-pack=x" },
+        }),
+      );
+      assert.strictEqual(badBase.reason, "invalid-plan");
+    }),
+  );
+
+  it.effect("needs the exact active turn", () =>
+    Effect.gen(function* () {
+      const validator = yield* handoffValidator();
+      const stale = yield* Effect.flip(
+        validator.validateSubmission({
+          session,
+          authority: { ...authority, turnId: TurnId.make("turn-ended") },
+          plan: handoff(callerThreadId),
+        }),
+      );
+      assert.strictEqual(stale.reason, "caller-stale");
+    }),
+  );
+
+  it.effect("refuses a delegated chat whose result is awaited", () =>
+    Effect.gen(function* () {
+      const refused = yield* Effect.flip(
+        (yield* handoffValidator(new Set([callerThreadId]))).validateSubmission({
+          session,
+          authority,
+          plan: handoff(callerThreadId),
+        }),
+      );
+      assert.strictEqual(refused.reason, "delegated-return-pending");
+      assert.include(refused.detail, "cannot move into a worktree");
+    }),
+  );
+
+  it.effect("never lets a standalone integration move a chat", () =>
+    Effect.gen(function* () {
+      const validator = yield* handoffValidator();
+      const refused = yield* Effect.flip(
+        validator.validateExternalSubmission({
+          integration: externalIntegration([AGENT_CONTROL_CAPABILITIES.externalManageWorkspaces]),
+          plan: handoff(callerThreadId),
+        }),
+      );
+      assert.strictEqual(refused.reason, "privilege-escalation");
+      const executed = yield* Effect.flip(
+        validator.revalidateExecution(
+          approvedProposal(
+            {
+              kind: "external-integration",
+              integrationId: AgentControlIntegrationId.make("integration-control"),
+              projectId,
+              runtimeMode: "approval-required",
+              envMode: "worktree",
+            },
+            handoff(callerThreadId),
+          ),
+        ),
+      );
+      assert.strictEqual(executed.reason, "privilege-escalation");
+    }),
+  );
+});

@@ -1,7 +1,7 @@
 /**
  * Server wakes: queued turn starts the server sends on its own, with no person at the keyboard
- * (delegated results, pull request watch updates, goal continuations, the thread's own queued
- * follow-ups). Pure rules and wording shared by every wake source, the decider and the provider
+ * (delegated results, pull request and command watch updates, goal continuations, the thread's
+ * own queued follow-ups). Pure rules and wording shared by every wake source, the decider and the provider
  * reactor. The stateful part (pending-start sightings, the cold-start budget) is
  * `ServerWakeFence`.
  *
@@ -154,6 +154,28 @@ export interface ServerWakeCopy {
   readonly uncertain: ServerWakeNotice;
 }
 
+/** The wording for a watch's wake (a pull request or a command watch); `update` is lowercase. */
+function watchWakeCopy(input: { readonly update: string; readonly again: string }): ServerWakeCopy {
+  const Update = `${input.update[0]!.toUpperCase()}${input.update.slice(1)}`;
+  const notSent = { summary: `${Update} was not sent` };
+  return {
+    originChanged: `The chat changed while this ${input.update} was prepared.`,
+    usageLimited: `The chat hit its usage limit. The ${input.update} waits until it is resumed.`,
+    handoffRefused: {
+      ...notSent,
+      detail: `A ${input.update} cannot start a model handoff. Nothing was sent to the agent.`,
+    },
+    notSent: {
+      ...notSent,
+      detail: `Ryco restarted before this ${input.update} reached the agent. Nothing was sent. Ryco ${input.again} and reports what is still new.`,
+    },
+    uncertain: {
+      summary: `${Update} delivery unconfirmed`,
+      detail: `Ryco restarted while sending this ${input.update}. It may have reached the agent. Check the chat before acting on it again.`,
+    },
+  };
+}
+
 export const SERVER_WAKE_COPY: Record<ServerWakeSource, ServerWakeCopy> = {
   "delegation-return": {
     originChanged:
@@ -195,25 +217,15 @@ export const SERVER_WAKE_COPY: Record<ServerWakeSource, ServerWakeCopy> = {
         "Ryco restarted while sending this queued message. It may have been received. Check the chat before sending it again.",
     },
   },
-  "pull-request-watch": {
-    originChanged: "The chat changed while this pull request update was prepared.",
-    usageLimited:
-      "The chat hit its usage limit. The pull request update waits until it is resumed.",
-    handoffRefused: {
-      summary: "Pull request update was not sent",
-      detail: "A pull request update cannot start a model handoff. Nothing was sent to the agent.",
-    },
-    notSent: {
-      summary: "Pull request update was not sent",
-      detail:
-        "Ryco restarted before this pull request update reached the agent. Nothing was sent. Ryco checks the pull request again and reports what is still new.",
-    },
-    uncertain: {
-      summary: "Pull request update delivery unconfirmed",
-      detail:
-        "Ryco restarted while sending this pull request update. It may have reached the agent. Check the chat before acting on it again.",
-    },
-  },
+  // A watch's update: the same wording for each kind of watch.
+  "pull-request-watch": watchWakeCopy({
+    update: "pull request update",
+    again: "checks the pull request again",
+  }),
+  "command-watch": watchWakeCopy({
+    update: "command watch update",
+    again: "runs the command again",
+  }),
   "goal-continuation": {
     originChanged: "The chat changed before the goal's next turn started.",
     usageLimited: "The chat hit its usage limit. The goal continues after it is resumed.",

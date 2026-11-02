@@ -25,6 +25,10 @@ import { databaseBackupsDirectory } from "../persistence/databaseBackupPolicy.ts
 import { EventLogCompaction } from "../persistence/Services/EventLogCompaction.ts";
 import { ServerSettingsService, type ServerSettingsShape } from "../serverSettings.ts";
 import {
+  RestartSensitiveWork,
+  type RestartSensitiveWorkShape,
+} from "../updates/restartSensitiveWork.ts";
+import {
   ProjectionSnapshotQuery,
   type ProjectionSnapshotQueryShape,
   readProjectShells,
@@ -166,8 +170,12 @@ export function makeStorageService(deps: {
    * the remote default branch). Absent: only the project HEAD counts.
    */
   mergeProof?: CheckoutMergeProverShape;
+  /** Counts removals and purges, so an unattended restart waits for them. Absent: not counted. */
+  restartWork?: Pick<RestartSensitiveWorkShape, "track">;
 }) {
   const { sql, config, settings, snapshots, providers, terminals, policy, git } = deps;
+  const restartSensitive = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+    deps.restartWork === undefined ? effect : deps.restartWork.track(effect);
   const resolveProtectedSources = (
     current: Parameters<ProviderProtectedPathsShape["resolve"]>[0],
   ) =>
@@ -195,7 +203,7 @@ export function makeStorageService(deps: {
         }>`SELECT id FROM storage_owned_entries WHERE state = 'removing' AND json_extract(identity_json, '$.purge') = 'caches-only' LIMIT 1`;
         if (pending.length === 0) return;
         const { purgePendingCacheFolders } = yield* attempt(() => import("./cacheFolders.ts"));
-        yield* purgePendingCacheFolders(sql);
+        yield* restartSensitive(purgePendingCacheFolders(sql));
       }),
     )
     .pipe(Effect.mapError(failure));
@@ -1478,7 +1486,7 @@ export function makeStorageService(deps: {
       }
       active.users++;
       const current = active;
-      return current.lock.withPermit(executeBatch(principalKey, token)).pipe(
+      return current.lock.withPermit(restartSensitive(executeBatch(principalKey, token))).pipe(
         Effect.ensuring(
           Effect.sync(() => {
             if (--current.users === 0) executions.delete(token);
@@ -1542,7 +1550,7 @@ export function makeStorageService(deps: {
           Effect.option,
         );
         if (Option.isSome(verdict) && verdict.value.eligible) {
-          const status = yield* remove(verdict.value.entry, retention, true).pipe(
+          const status = yield* restartSensitive(remove(verdict.value.entry, retention, true)).pipe(
             Effect.map((result) => result.status),
             Effect.tapError((cause) =>
               Effect.logWarning("storage retention could not remove an entry", cause),
@@ -1680,6 +1688,7 @@ export const StorageServiceLive = Layer.effect(
       policy: yield* WorkspaceAccessPolicy,
       git: yield* GitWorkflowService,
       mergeProof: yield* CheckoutMergeProver,
+      restartWork: yield* RestartSensitiveWork,
     });
     // An approved removal whose cache folders were still being deleted when the node stopped
     // finishes 5 minutes after start, without waiting for the first retention pass.

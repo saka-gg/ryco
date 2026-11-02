@@ -12,6 +12,7 @@ import {
 import { useAppKeybindings } from "~/appKeybindings";
 import {
   hasOpenDialogShortcutTarget,
+  isEditableShortcutTarget,
   resolveShortcutCommand,
   type ShortcutMatchContext,
 } from "~/keybindings";
@@ -94,13 +95,18 @@ function readThreadFindShortcutContext(
  */
 export function useDiffFindSurface(input: {
   readonly onFind: () => void;
+  /**
+   * `diff.hunk.next` / `diff.hunk.previous` (Alt+Down / Alt+Up by default), taken here too
+   * while focus is inside the diff, but never from a text field, where they move the caret.
+   */
+  readonly onHunk?: ((direction: 1 | -1) => void) | undefined;
   /** Off on the frozen phone tier and while there is no diff to search. */
   readonly enabled: boolean;
   readonly scope: ScriptShortcutScope | null;
   /** The thread beside the diff, whose terminal state the `when` context reads. */
   readonly threadRef: ScopedThreadRef | null;
 }): DiffFindSurface {
-  const { enabled, onFind, scope, threadRef } = input;
+  const { enabled, onFind, onHunk, scope, threadRef } = input;
   const keybindings = useAppKeybindings(scope);
   const rootRef = useRef<HTMLDivElement | null>(null);
 
@@ -121,13 +127,16 @@ export function useDiffFindSurface(input: {
       const command = resolveShortcutCommand(nativeEvent, keybindings, {
         context: readThreadFindShortcutContext(threadRef),
       });
-      if (command !== "thread.find") return;
+      const hunk = command === "diff.hunk.next" ? 1 : command === "diff.hunk.previous" ? -1 : null;
+      if (command !== "thread.find" && (hunk === null || !onHunk)) return;
       if (shouldIgnoreDiffFindShortcut(nativeEvent, event.currentTarget)) return;
+      if (hunk !== null && isEditableShortcutTarget(nativeEvent.target)) return;
       event.preventDefault();
       event.stopPropagation();
-      onFind();
+      if (hunk === null) onFind();
+      else onHunk?.(hunk);
     },
-    [keybindings, onFind, threadRef],
+    [keybindings, onFind, onHunk, threadRef],
   );
 
   const focus = useCallback(() => {

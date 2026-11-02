@@ -1,13 +1,19 @@
 import { useSyncExternalStore } from "react";
 
 import {
+  ACTIVE_DARK_THEME_STORAGE_KEY,
   ACTIVE_THEME_STORAGE_KEY,
   CUSTOM_THEMES_STORAGE_KEY,
   DEFAULT_THEME_ID,
   applyThemeToDocument,
-  findTheme,
+  getActiveDarkThemeId,
   getActiveThemeId,
+  getActiveThemePair,
+  setActiveDarkThemeId,
   setActiveThemeId,
+  shownThemeId,
+  themePickSlot,
+  type ThemePickSlot,
   subscribeThemeRegistry,
   themeDocumentNeedsUpdate,
 } from "../themes/registry";
@@ -31,6 +37,8 @@ type ThemeSnapshot = {
   theme: Theme;
   systemDark: boolean;
   activeThemeId: string;
+  /** Dark mode's own palette; null when the active theme covers both modes. */
+  darkThemeId: string | null;
 };
 
 const STORAGE_KEY = "ryco:theme";
@@ -39,6 +47,7 @@ const DEFAULT_THEME_SNAPSHOT: ThemeSnapshot = {
   theme: "system",
   systemDark: false,
   activeThemeId: DEFAULT_THEME_ID,
+  darkThemeId: null,
 };
 const THEME_COLOR_META_NAME = "theme-color";
 const DYNAMIC_THEME_COLOR_SELECTOR = `meta[name="${THEME_COLOR_META_NAME}"][data-dynamic-theme-color="true"]`;
@@ -150,9 +159,10 @@ function resolveIsDark(theme: Theme): boolean {
  * and storage, never computed style.
  */
 function themeApplyChangesDocument(theme: Theme): boolean {
+  const pair = getActiveThemePair();
   return (
     document.documentElement.classList.contains("dark") !== resolveIsDark(theme) ||
-    themeDocumentNeedsUpdate(findTheme(getActiveThemeId())) ||
+    themeDocumentNeedsUpdate(pair.light, pair.dark) ||
     appearancePreferencesDocumentNeedsUpdate()
   );
 }
@@ -167,7 +177,8 @@ function applyTheme(theme: Theme, suppressTransitions = false) {
   const changesDocument = themeApplyChangesDocument(theme);
   if (suppressTransitions && changesDocument) startThemeTransitionGuard(root);
   root.classList.toggle("dark", resolveIsDark(theme));
-  applyThemeToDocument(findTheme(getActiveThemeId()));
+  const pair = getActiveThemePair();
+  applyThemeToDocument(pair.light, pair.dark);
   applyAppearancePreferencesToDocument();
   if (!suppressTransitions) syncBrowserChromeTheme();
   syncDesktopTheme(theme);
@@ -215,17 +226,19 @@ function readSnapshot(): ThemeSnapshot {
   const theme = getStored();
   const systemDark = theme === "system" ? getSystemDark() : false;
   const activeThemeId = getActiveThemeId();
+  const darkThemeId = getActiveDarkThemeId();
 
   if (
     lastSnapshot &&
     lastSnapshot.theme === theme &&
     lastSnapshot.systemDark === systemDark &&
-    lastSnapshot.activeThemeId === activeThemeId
+    lastSnapshot.activeThemeId === activeThemeId &&
+    lastSnapshot.darkThemeId === darkThemeId
   ) {
     return lastSnapshot;
   }
 
-  return { theme, systemDark, activeThemeId };
+  return { theme, systemDark, activeThemeId, darkThemeId };
 }
 
 /**
@@ -256,6 +269,7 @@ function handleThemeStorage(event: StorageEvent) {
   if (
     event.key === STORAGE_KEY ||
     event.key === ACTIVE_THEME_STORAGE_KEY ||
+    event.key === ACTIVE_DARK_THEME_STORAGE_KEY ||
     event.key === CUSTOM_THEMES_STORAGE_KEY ||
     event.key === APPEARANCE_PREFERENCES_STORAGE_KEY
   ) {
@@ -326,15 +340,47 @@ function setActiveTheme(id: string) {
   invalidateAndEmit();
 }
 
+/** Dark mode's own palette, or null for the active theme's dark palette. */
+function setDarkTheme(id: string | null) {
+  if (!hasThemeStorage()) return;
+  setActiveDarkThemeId(id);
+  applyThemeChange(getStored(), true);
+  invalidateAndEmit();
+}
+
+/** Puts `id` into a pick; a dark pick equal to the active theme is no pick of its own. */
+function setThemeInSlot(slot: ThemePickSlot, id: string) {
+  if (slot !== "dark") {
+    setActiveTheme(id);
+    return;
+  }
+  setDarkTheme(id === getActiveThemeId() ? null : id);
+}
+
 export function useTheme() {
   const snapshot = useSyncExternalStore(subscribe, getSnapshot, getServerSnapshot);
   const theme = snapshot.theme;
   const activeThemeId = snapshot.activeThemeId;
+  const darkThemeId = snapshot.darkThemeId;
 
   const resolvedTheme: "light" | "dark" =
     theme === "system" ? (snapshot.systemDark ? "dark" : "light") : theme;
 
-  return { theme, setTheme, resolvedTheme, activeThemeId, setActiveTheme } as const;
+  const pickState = { resolvedTheme, activeThemeId, darkThemeId };
+  return {
+    theme,
+    setTheme,
+    resolvedTheme,
+    activeThemeId,
+    setActiveTheme,
+    darkThemeId,
+    setDarkTheme,
+    /** The theme a theme list marks current: the one the mode on screen shows. */
+    shownThemeId: shownThemeId(pickState),
+    /** A theme list's choice: it sets the pick for the mode on screen (`themePickSlot`). */
+    pickTheme: (id: string) => setThemeInSlot(themePickSlot(pickState), id),
+    setThemeInSlot,
+  } as const;
 }
 
 export function __resetThemeControllerForTests(): void {

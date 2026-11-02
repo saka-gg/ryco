@@ -86,6 +86,38 @@ export async function dispatchThreadSnooze(
 }
 
 /**
+ * Puts a thread on the Hidden shelf until it needs the person, or shows it in the Inbox again.
+ * Hiding offers Undo, like Settle and Snooze.
+ */
+export async function dispatchThreadHidden(
+  target: ScopedThreadRef,
+  hidden: boolean,
+): Promise<void> {
+  const title = hidden ? "Could not hide thread" : "Could not show thread";
+  if (!readEnvironmentApi(target.environmentId)) {
+    toastManager.add({
+      type: "error",
+      title,
+      description: "The owning machine is not connected.",
+    });
+    return;
+  }
+  try {
+    await sidebarUndo.dispatch(target, {
+      type: hidden ? "thread.hide" : "thread.unhide",
+      commandId: newCommandId(),
+      threadId: target.threadId,
+    });
+  } catch (error) {
+    toastManager.add({
+      type: "error",
+      title,
+      description: errorDescription(error, "The request failed."),
+    });
+  }
+}
+
+/**
  * Asks for a custom snooze time ("Custom…" in a snooze menu): a local date and
  * time, or a duration. Resolves the wake instant, or null when dismissed. The
  * dialog loads on first use, so the menus offering it add nothing to boot.

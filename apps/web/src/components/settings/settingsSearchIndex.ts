@@ -7,6 +7,7 @@ import { settingsSectionInDestination, settingsSectionReachable } from "./settin
 export type SettingsDestination = "client" | "node";
 
 export type SettingsDesktopCapability =
+  | "cliCommand"
   | "computerUse"
   | "quitShortcut"
   | "setKeepAwakeMode"
@@ -73,6 +74,14 @@ export const SETTINGS_SEARCH_INDEX: ReadonlyArray<SettingsSearchEntry> = [
     description: "Prevent accidental quits: press twice, hold, or quit immediately.",
     keywords: "ctrl cmd q exit desktop",
     desktopCapability: "quitShortcut",
+  },
+  {
+    section: "general",
+    title: "Terminal command",
+    owner: "client",
+    description: "Install the ryco command to use this app's node from any terminal.",
+    keywords: "cli command line shell path install ryco nightly",
+    desktopCapability: "cliCommand",
   },
   {
     section: "general",
@@ -290,6 +299,13 @@ export const SETTINGS_SEARCH_INDEX: ReadonlyArray<SettingsSearchEntry> = [
   },
   {
     section: "appearance",
+    title: "Contrast",
+    owner: "client",
+    description: "Make text and borders stronger, or softer, than the theme draws them.",
+    keywords: "accessibility readability legibility high contrast",
+  },
+  {
+    section: "appearance",
     title: "Primary color",
     owner: "client",
     description: "Accent color for links, focus rings, and actions.",
@@ -352,6 +368,13 @@ export const SETTINGS_SEARCH_INDEX: ReadonlyArray<SettingsSearchEntry> = [
     owner: "client",
     description: "How wide messages and the composer grow on large screens.",
     keywords: "comfortable wide full width column layout timeline monitor",
+  },
+  {
+    section: "appearance",
+    title: "Open chat tabs",
+    owner: "client",
+    description: "Keep the chats you open as tabs in the chat header, like a browser.",
+    keywords: "tabs tab strip header browser open chats threads",
   },
   {
     section: "appearance",

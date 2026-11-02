@@ -420,6 +420,8 @@ export interface WsRpcClient {
     readonly searchMessages: RpcUnaryMethod<typeof WS_METHODS.searchThreadMessages>;
     /** Idempotent per `forkKey`; never retried here (see `runThreadFork`). */
     readonly fork: RpcUnaryMethod<typeof WS_METHODS.threadsFork>;
+    /** Idempotent per `forkKey`; never retried here (see `runCarriedFork`). */
+    readonly forkCarried: RpcUnaryMethod<typeof WS_METHODS.threadsForkCarried>;
     /** Only for nodes that advertise `threadLocalServers`; `watchThreadLocalServers` shares it. */
     readonly subscribeLocalServers: (
       input: RpcInput<typeof WS_METHODS.threadsSubscribeLocalServers>,
@@ -428,6 +430,8 @@ export interface WsRpcClient {
     ) => () => void;
     /** Only for nodes that advertise `threadLocalServerStop`; never retried (it signals). */
     readonly stopLocalServer: RpcUnaryMethod<typeof WS_METHODS.threadsStopLocalServer>;
+    /** Only for nodes that advertise `secretRequests`; never retried (a repeat finds it answered). */
+    readonly answerSecretRequest: RpcUnaryMethod<typeof WS_METHODS.secretsAnswerRequest>;
   };
   readonly server: {
     readonly getConfig: RpcUnaryNoArgMethod<typeof WS_METHODS.serverGetConfig>;
@@ -490,6 +494,13 @@ export interface WsRpcClient {
       typeof WS_METHODS.serverAuthenticateAcpRegistry
     >;
     readonly updateProvider: RpcUnaryMethod<typeof WS_METHODS.serverUpdateProvider>;
+    /**
+     * Tells the node a person is using this client, so its unattended updates wait. Only for
+     * nodes with `automaticUpdates` on; `createClientInteractionReporter` throttles it.
+     */
+    readonly noteClientInteraction: RpcUnaryNoArgMethod<
+      typeof WS_METHODS.serverNoteClientInteraction
+    >;
     readonly subscribeNodeUpdate: RpcStreamMethod<typeof WS_METHODS.serverSubscribeNodeUpdate>;
     readonly checkNodeUpdate: RpcUnaryNoArgMethod<typeof WS_METHODS.serverCheckNodeUpdate>;
     readonly updateNode: RpcUnaryMethod<typeof WS_METHODS.serverUpdateNode>;
@@ -1054,6 +1065,8 @@ export function createWsRpcClient(
       searchMessages: (input) =>
         transport.request((client) => client[WS_METHODS.searchThreadMessages](input)),
       fork: (input) => transport.request((client) => client[WS_METHODS.threadsFork](input)),
+      forkCarried: (input) =>
+        transport.request((client) => client[WS_METHODS.threadsForkCarried](input)),
       subscribeLocalServers: (input, listener, options) =>
         transport.subscribe(
           (client) => client[WS_METHODS.threadsSubscribeLocalServers](input),
@@ -1062,6 +1075,8 @@ export function createWsRpcClient(
         ),
       stopLocalServer: (input) =>
         transport.request((client) => client[WS_METHODS.threadsStopLocalServer](input)),
+      answerSecretRequest: (input) =>
+        transport.request((client) => client[WS_METHODS.secretsAnswerRequest](input)),
     },
     server: {
       getConfig: () => transport.request((client) => client[WS_METHODS.serverGetConfig]({})),
@@ -1139,6 +1154,8 @@ export function createWsRpcClient(
         transport.request((client) => client[WS_METHODS.serverAuthenticateAcpRegistry](input)),
       updateProvider: (input) =>
         transport.request((client) => client[WS_METHODS.serverUpdateProvider](input)),
+      noteClientInteraction: () =>
+        transport.request((client) => client[WS_METHODS.serverNoteClientInteraction]({})),
       subscribeNodeUpdate: (listener, options) =>
         transport.subscribe(
           (client) => client[WS_METHODS.serverSubscribeNodeUpdate]({}),

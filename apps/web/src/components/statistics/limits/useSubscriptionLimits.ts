@@ -1,7 +1,14 @@
 import { useAtomValue } from "@effect/atom-react";
 import { serverConfigAtom } from "@ryco/client-runtime/rpc";
-import { UsageRequestGeneration } from "@ryco/client-runtime/usage";
-import type { CliProxyHubSnapshot, EnvironmentId, ServerProvider } from "@ryco/contracts";
+import {
+  CLI_PROXY_HUB_POLL_INTERVAL_MS,
+  CLI_PROXY_HUBS_UNSUPPORTED_MESSAGE,
+  cliProxyHubsSupported,
+  readCliProxyHubsOutcome,
+  UsageRequestGeneration,
+  type CliProxyHubRead,
+} from "@ryco/client-runtime/usage";
+import type { EnvironmentId, ServerProvider } from "@ryco/contracts";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { usePrimaryEnvironmentId } from "~/environments/primary";
@@ -13,24 +20,15 @@ import { useQueryClient } from "~/rpc/queryClient";
 import { cliProxyHubsQueryKey } from "../../usage/cliProxyHubsQuery";
 import { selectConnections, useConnectedEnvironments } from "../useConnectedEnvironments";
 
-// The node caches hub reads and floors upstream quota calls; this only bounds how stale an
-// open Limits page gets. Foregrounding the app refreshes immediately.
-const POLL_INTERVAL_MS = 5 * 60_000;
-
-const UNSUPPORTED_MESSAGE = "Update Ryco on this node to read CLIProxyAPI hubs.";
-
 const NO_PROVIDERS: readonly ServerProvider[] = [];
 
-interface HubReadResult {
+/** One environment's hub read, by the shared hub-read policy (`usage/cliProxyHubReads`). */
+interface HubReadResult extends CliProxyHubRead {
   readonly environmentId: EnvironmentId;
-  /** `unsupported`: the node predates hubs, so it is not asked. */
-  readonly status: "ok" | "failed" | "unsupported";
-  readonly hubs: readonly CliProxyHubSnapshot[];
-  readonly message?: string;
 }
 
 /** One selected environment's last hub read, with its provider snapshots as they are now. */
-export interface LimitsEnvironmentResult extends Omit<HubReadResult, "status"> {
+export interface LimitsEnvironmentResult extends Omit<HubReadResult, "status" | "receivedAtMs"> {
   readonly label: string;
   /** `loading`: no hub read has answered for it yet, so it lists no hubs. */
   readonly status: HubReadResult["status"] | "loading";
@@ -91,7 +89,7 @@ export function useSubscriptionLimits(input: {
         connection.environmentId === primaryEnvironmentId
           ? primaryConfig
           : (savedRuntimeById[connection.environmentId]?.serverConfig ?? null);
-      return config !== null && config.environment.capabilities.cliProxyHubs !== true;
+      return !cliProxyHubsSupported(config);
     })
     .map((connection) => connection.environmentId)
     .toSorted()
@@ -117,21 +115,18 @@ export function useSubscriptionLimits(input: {
       selected.map(async (connection): Promise<HubReadResult> => {
         const base = { environmentId: connection.environmentId };
         if (unsupported.has(connection.environmentId)) {
-          return { ...base, status: "unsupported", hubs: [], message: UNSUPPORTED_MESSAGE };
-        }
-        try {
-          const result = await connection.client.server.readCliProxyHubs(
-            refresh ? { refresh: true } : {},
-          );
-          return { ...base, status: "ok", hubs: result.hubs };
-        } catch (cause) {
           return {
             ...base,
-            status: "failed",
+            status: "unsupported",
             hubs: [],
-            message: cause instanceof Error ? cause.message : String(cause),
+            message: CLI_PROXY_HUBS_UNSUPPORTED_MESSAGE,
+            receivedAtMs: Date.now(),
           };
         }
+        const read = await readCliProxyHubsOutcome(() =>
+          connection.client.server.readCliProxyHubs(refresh ? { refresh: true } : {}),
+        );
+        return { ...base, ...read };
       }),
     );
     if (!generations.current.isCurrent(generation)) return;
@@ -150,7 +145,9 @@ export function useSubscriptionLimits(input: {
     const poller = createVisibilityAwarePoller({
       lifecycle: webAppLifecycle,
       run: load,
-      resolveDelayMs: () => POLL_INTERVAL_MS,
+      // The node caches hub reads and floors upstream quota calls; this only bounds how stale
+      // an open Limits page gets. Foregrounding the app refreshes immediately.
+      resolveDelayMs: () => CLI_PROXY_HUB_POLL_INTERVAL_MS,
       jitterRatio: 0.1,
     });
     pollerRef.current = poller;

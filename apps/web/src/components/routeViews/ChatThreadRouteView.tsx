@@ -4,6 +4,7 @@ import { paneContains } from "../../chatPanes.logic";
 import type { ClosedViewOwner } from "../../closedViews";
 import { ChatPanes, PaneThreadAvailability } from "../chat/ChatPanes";
 import type { ScopedThreadRef } from "@ryco/contracts";
+import { isSavedEnvironmentSwitchedOff } from "@ryco/client-runtime/connection";
 import { useDeviceStateStore } from "@ryco/client-runtime/state/device";
 import { useDeviceRuntime } from "../device/useDeviceRuntime";
 import { getRouteApi, useNavigate } from "@tanstack/react-router";
@@ -25,6 +26,7 @@ import { useSettings } from "../../hooks/useSettings";
 import { releaseThreadDetailPrewarm } from "../../lib/threadDetailPrewarm";
 import { markStartupPhaseAfterPaint } from "../../perf/startupInstrumentation";
 import { usePerfMark } from "../../perf/tabSwitchInstrumentation";
+import { useSavedEnvironmentRegistryStore } from "../../environments/runtime";
 import { retainDesktopWorkspaceThreadScope } from "../../platform/desktopWorkspace";
 import { RIGHT_PANEL_INLINE_LAYOUT_MEDIA_QUERY } from "../../rightPanelLayout";
 import {
@@ -265,6 +267,17 @@ export function ChatThreadRouteView({
     routeInPanes,
     threadRef,
   ]);
+
+  // A machine switched off keeps no threads here, so its thread's page would
+  // stay blank waiting for a sync that never comes. A draft on it stays: its
+  // banner offers Switch on.
+  const routeEnvironmentSwitchedOff = useSavedEnvironmentRegistryStore((state) =>
+    routeEnvironmentId ? isSavedEnvironmentSwitchedOff(state.byId[routeEnvironmentId]) : false,
+  );
+  useEffect(() => {
+    if (!routeEnvironmentSwitchedOff || routeInPanes || draftThreadExists) return;
+    void navigate({ to: "/", replace: true });
+  }, [draftThreadExists, navigate, routeEnvironmentSwitchedOff, routeInPanes]);
 
   useEffect(() => {
     if (!threadRef || !serverThreadStarted || !draftThread?.promotedTo) {

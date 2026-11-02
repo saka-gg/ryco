@@ -1,5 +1,7 @@
 import { saveThreadExport } from "./threadExportSave.ts";
 import { createQuitShortcutGuard } from "./quitShortcut.ts";
+import type { DesktopCliCommandEnvironment } from "./desktopCliCommand.ts";
+import type { ExpectedTeamId, NightlyHandoffEnvironment } from "./nightlyHandoff.ts";
 import { buildEditMenu, PASTE_AS_TEXT_CHANNEL, resolvePasteAsTextTarget } from "./editMenu.ts";
 import { navigateWindow, swipeNavigation } from "./desktopNavigationCommands.ts";
 import { createQuitCleanupHandler } from "./quitCleanup.ts";
@@ -69,13 +71,19 @@ import {
 import type { AppUpdater, UpdateDownloadedEvent } from "electron-updater";
 
 import type { ContextMenuItem } from "@ryco/contracts";
-import type {
-  DesktopAppUpdateRequestFrame,
-  DesktopBackendLifecycleFrame,
+import {
+  desktopAppAutomaticUpdateMode,
+  type DesktopAppUpdateRequestFrame,
+  type DesktopBackendLifecycleFrame,
 } from "@ryco/shared/desktopResourceTelemetry";
 import { isRemoteEditorLink } from "@ryco/shared/remoteEditorLink";
 import { AsyncRotatingFileSink, DESKTOP_BACKEND_LOG_FILE_NAME } from "@ryco/shared/logging";
 import { normalizeHubNodeName } from "@ryco/shared/nodeIdentity";
+import { rycoDesktopFlavorIdentity, updateFilesBelongToFlavor } from "@ryco/shared/desktopFlavor";
+import {
+  flavorImportAllowedSourceHome,
+  takeFlavorImportLaunchToken,
+} from "@ryco/shared/flavorImport";
 import { readEnv } from "@ryco/shared/runtimeEnv";
 import { parsePersistedServerObservabilitySettings } from "@ryco/shared/serverSettings";
 import {
@@ -138,7 +146,12 @@ import {
 } from "./backendStartup.ts";
 import { pruneStaleDesktopCompileCaches } from "./compileCacheDirectory.ts";
 import { createDesktopWorkspaceActivity } from "./desktopBackgroundSignal.ts";
-import { resolveDesktopPaths, resolveDesktopUserDataPath } from "./desktopPaths.ts";
+import { readDesktopFlavor } from "./desktopFlavor.ts";
+import {
+  configuredDesktopBaseDir,
+  resolveDesktopPaths,
+  resolveDesktopUserDataPath,
+} from "./desktopPaths.ts";
 import { registerDeferredIpcHandlers } from "./deferredIpc.ts";
 import {
   DESKTOP_STARTUP_MARKS_CHANNEL,
@@ -162,7 +175,6 @@ import {
   resolveDesktopHubConnectorLaunch,
   resolveDesktopTailscaleServeLaunch,
   setDesktopServerExposurePreference,
-  setDesktopUpdateChannelPreference,
   resolveDefaultDesktopSettings,
   setDesktopHubPreference,
   isDesktopKeepAwakeMode,
@@ -224,6 +236,13 @@ import { createStartupTiming, formatStartupTimingEntry } from "./startupTiming.t
 import { waitForBackendStartupReady } from "./backendStartupReadiness.ts";
 import { getAutoUpdateDisabledReason, shouldBroadcastDownloadProgress } from "./updateState.ts";
 import { doesVersionMatchDesktopUpdateChannel } from "./updateChannels.ts";
+import { AutomaticAppUpdates } from "./automaticAppUpdates.ts";
+import {
+  DESKTOP_UPDATE_INSTALL_RECORD_FILE,
+  removeDesktopUpdateInstallRecord,
+  settleDesktopUpdateInstallRecord,
+  writeDesktopUpdateInstallRecord,
+} from "./updateInstallRecord.ts";
 import {
   createRemoteAppInstaller,
   parseRemoteInstallResponse,
@@ -315,7 +334,6 @@ const MENU_ACTION_CHANNEL = "desktop:menu-action";
 const SYSTEM_RESUMED_CHANNEL = "desktop:system-resumed";
 const UPDATE_STATE_CHANNEL = "desktop:update-state";
 const UPDATE_GET_STATE_CHANNEL = "desktop:update-get-state";
-const UPDATE_SET_CHANNEL_CHANNEL = "desktop:update-set-channel";
 const UPDATE_DOWNLOAD_CHANNEL = "desktop:update-download";
 const UPDATE_INSTALL_CHANNEL = "desktop:update-install";
 const UPDATE_CHECK_CHANNEL = "desktop:update-check";
@@ -348,11 +366,36 @@ const CANCEL_HOSTED_GITHUB_CONNECTION_CHANNEL = "desktop:cancel-hosted-github-co
 const isDevelopment = Boolean(process.env.VITE_DEV_SERVER_URL);
 const isDesktopAuthorizationCallbackRelay =
   isDevelopment && process.env.RYCO_DESKTOP_CALLBACK_RELAY === "1";
+/** Ryco or Ryco Nightly (`@ryco/shared/desktopFlavor`): the data home, profile and update channel follow it. */
+const DESKTOP_FLAVOR = readDesktopFlavor({ appPath: app.getAppPath(), isPackaged: app.isPackaged });
+const DESKTOP_FLAVOR_IDENTITY = rycoDesktopFlavorIdentity(DESKTOP_FLAVOR);
+/** The one channel this app updates from; it never takes a version outside it, nor a downgrade. */
+const DESKTOP_UPDATE_CHANNEL: DesktopUpdateChannel = DESKTOP_FLAVOR_IDENTITY.updateChannel;
 const DESKTOP_PATHS = resolveDesktopPaths({
-  configuredBaseDir: readEnv("RYCO_HOME"),
+  configuredBaseDir: configuredDesktopBaseDir(DESKTOP_FLAVOR),
   isDevelopment,
+  flavor: DESKTOP_FLAVOR,
 });
 const BACKEND_BASE_DIR = DESKTOP_PATHS.backendBaseDir;
+/**
+ * Ryco Nightly only: the one Ryco data home its backend may copy from when Ryco asked for a copy
+ * (`@ryco/shared/flavorImport`): the home Ryco handed over when it opened Nightly, else `~/.ryco`.
+ * Never Nightly's own home. Ryco itself sends none, so its backend never takes a copy.
+ */
+const FLAVOR_IMPORT_SOURCE_HOME =
+  DESKTOP_FLAVOR === "nightly"
+    ? flavorImportAllowedSourceHome({
+        env: process.env,
+        homeDir: OS.homedir(),
+        nightlyHome: BACKEND_BASE_DIR,
+      })
+    : null;
+/**
+ * Ryco Nightly only: the token of the launch Ryco opened it with to take a copy. Taken out of this
+ * process's environment so nothing it starts inherits it; the backend takes only that request.
+ */
+const FLAVOR_IMPORT_TOKEN =
+  DESKTOP_FLAVOR === "nightly" ? takeFlavorImportLaunchToken(process.env) : null;
 const STATE_DIR = DESKTOP_PATHS.stateDir;
 const DESKTOP_SETTINGS_PATH = DESKTOP_PATHS.desktopSettingsPath;
 const CLIENT_SETTINGS_PATH = Path.join(STATE_DIR, "client-settings.json");
@@ -372,11 +415,16 @@ const DEV_REMOTE_SERVER_ENTRY_PATH = readEnv("RYCO_DEV_REMOTE_SERVER_ENTRY_PATH"
 const desktopAppBranding: DesktopAppBranding = resolveDesktopAppBranding({
   isDevelopment,
   appVersion: app.getVersion(),
+  flavor: DESKTOP_FLAVOR,
 });
 const APP_DISPLAY_NAME = desktopAppBranding.displayName;
-const APP_USER_MODEL_ID = isDevelopment ? "com.sak0a.ryco.dev" : "com.sak0a.ryco";
-const LINUX_DESKTOP_ENTRY_NAME = isDevelopment ? "ryco-dev.desktop" : "ryco.desktop";
-const LINUX_WM_CLASS = isDevelopment ? "ryco-dev" : "ryco";
+const APP_USER_MODEL_ID = isDevelopment
+  ? "com.sak0a.ryco.dev"
+  : DESKTOP_FLAVOR_IDENTITY.appUserModelId;
+const LINUX_DESKTOP_ENTRY_NAME = isDevelopment
+  ? "ryco-dev.desktop"
+  : `${DESKTOP_FLAVOR_IDENTITY.linuxName}.desktop`;
+const LINUX_WM_CLASS = isDevelopment ? "ryco-dev" : DESKTOP_FLAVOR_IDENTITY.linuxName;
 const COMMIT_HASH_PATTERN = /^[0-9a-f]{7,40}$/i;
 const COMMIT_HASH_DISPLAY_LENGTH = 12;
 const LOG_DIR = DESKTOP_PATHS.logDir;
@@ -402,6 +450,7 @@ const COMPILE_CACHE_HOOK_PATH = Path.join(__dirname, "compileCache.cjs");
 const RENDERER_CACHE_VERSION_FILE = "renderer-cache-version";
 const AUTO_UPDATE_POLL_INTERVAL_MS = 4 * 60 * 60 * 1000;
 const UNSIGNED_MAC_UPDATE_INSTALLER_DIR = Path.join(STATE_DIR, "update-installers");
+const UPDATE_INSTALL_RECORD_PATH = Path.join(STATE_DIR, DESKTOP_UPDATE_INSTALL_RECORD_FILE);
 const UNSIGNED_MAC_UPDATE_INSTALLER_LOG_PATH = Path.join(LOG_DIR, "unsigned-mac-update.log");
 const NATIVE_SECURITY_DIR = Path.join(STATE_DIR, "native-security");
 
@@ -642,22 +691,27 @@ let backendObservabilitySettings = readPersistedBackendObservabilitySettings();
 let desktopSettingsUnreadable = false;
 let desktopSettings = ((): DesktopSettings => {
   try {
-    return readDesktopSettings(DESKTOP_SETTINGS_PATH, app.getVersion(), {
-      hasRetainedHubSession: () => {
-        try {
-          return desktopProtectedRecordExists({
-            directory: NATIVE_SECURITY_DIR,
-            name: "hub-session-token",
-          });
-        } catch {
-          // Unreadable: assume a session, which only keeps the connector off.
-          return true;
-        }
+    return readDesktopSettings(
+      DESKTOP_SETTINGS_PATH,
+      app.getVersion(),
+      {
+        hasRetainedHubSession: () => {
+          try {
+            return desktopProtectedRecordExists({
+              directory: NATIVE_SECURITY_DIR,
+              name: "hub-session-token",
+            });
+          } catch {
+            // Unreadable: assume a session, which only keeps the connector off.
+            return true;
+          }
+        },
       },
-    });
+      DESKTOP_FLAVOR,
+    );
   } catch {
     desktopSettingsUnreadable = true;
-    return resolveDefaultDesktopSettings(app.getVersion());
+    return resolveDefaultDesktopSettings(app.getVersion(), DESKTOP_FLAVOR);
   }
 })();
 let desktopServerExposureMode: DesktopServerExposureMode = desktopSettings.serverExposureMode;
@@ -665,7 +719,7 @@ let desktopServerExposureMode: DesktopServerExposureMode = desktopSettings.serve
 let destructiveMenuIconCache: Electron.NativeImage | null | undefined;
 const expectedBackendExitChildren = new WeakSet<ChildProcess.ChildProcess>();
 const initialUpdateState = (): DesktopUpdateState =>
-  createInitialDesktopUpdateState(app.getVersion(), desktopSettings.updateChannel);
+  createInitialDesktopUpdateState(app.getVersion(), DESKTOP_UPDATE_CHANNEL);
 
 function logTimestamp(): string {
   return new Date().toISOString();
@@ -767,6 +821,7 @@ function backendChildEnv(): NodeJS.ProcessEnv {
     isPackaged: app.isPackaged,
     platform: process.platform,
     resourcesPath: process.resourcesPath,
+    ...(DESKTOP_FLAVOR === "nightly" ? { nightlyHome: BACKEND_BASE_DIR } : {}),
   });
 }
 
@@ -931,7 +986,23 @@ function getDesktopSecretStorage() {
 
 function desktopAuthorizationVariant(): DesktopAuthorizationVariant {
   if (isDevelopment) return "development";
-  return desktopAppBranding.stageLabel === "Nightly" ? "preview" : "production";
+  // Ryco Nightly, and the in-place nightly it replaces, never claim the stable `ryco://` scheme.
+  return DESKTOP_FLAVOR === "nightly" || desktopAppBranding.stageLabel === "Nightly"
+    ? "preview"
+    : "production";
+}
+
+/**
+ * Ryco Nightly is a node of its own in the same account: name it apart from Ryco's node on
+ * this computer unless the user chose a name.
+ */
+function desktopDefaultHubNodeName(): string | null {
+  if (DESKTOP_FLAVOR !== "nightly") return null;
+  try {
+    return normalizeHubNodeName(`${desktopHostedDeviceLabel()} Nightly`);
+  } catch {
+    return null;
+  }
 }
 
 function desktopHostedDeviceLabel(): string {
@@ -1514,7 +1585,7 @@ function desktopHubRestartRequired(settings: DesktopSettings = desktopSettings):
   return (
     backendHubLaunch !== null &&
     desktopHubLaunchNeedsRestart(
-      resolveDesktopHubConnectorLaunch(settings),
+      resolveDesktopHubConnectorLaunch(settings, desktopDefaultHubNodeName()),
       backendHubLaunch,
       backendHubConnectorEnabled,
     )
@@ -1607,6 +1678,8 @@ function relaunchDesktopApp(reason: string): void {
     desktopWindowState.flushAll();
     isQuitting = true;
     clearUpdatePollTimer();
+    // app.exit() still emits "quit", where an armed update would install under the new app.
+    automaticAppUpdates.relaunching();
     cancelBackendReadinessWait();
     void stopBackendAndWaitForExit()
       .catch((error) => {
@@ -2238,7 +2311,23 @@ function loadElectronUpdater(): typeof import("electron-updater") {
   return require("electron-updater") as typeof import("electron-updater");
 }
 let updateState: DesktopUpdateState = initialUpdateState();
+// The version the last run installed an update from, once this run settled its install record.
+let updatedFromVersion: string | null = null;
 let downloadedUpdateFilePath: string | null = null;
+// Unattended updates, while the node's owner has them on (the backend's `app-update-policy`).
+const automaticAppUpdates = new AutomaticAppUpdates({
+  mode: desktopAppAutomaticUpdateMode({
+    platform: process.platform,
+    appImage: process.env.APPIMAGE,
+  }),
+  state: () => updateState,
+  check: (reason) => checkForUpdatesOrJoin(reason),
+  download: () => downloadAvailableUpdateOrJoin(),
+  setInstallOnQuit: (armed) => {
+    if (loadedAutoUpdater !== null) loadedAutoUpdater.autoInstallOnAppQuit = armed;
+  },
+  log: (line) => console.info(`[desktop-updater] ${line}`),
+});
 let macCodeSignatureKindCache: MacCodeSignatureKind | null = null;
 // The running check and download, so a remote install can wait for their outcome.
 let updateCheckTask: Promise<boolean> | null = null;
@@ -2305,7 +2394,7 @@ async function loadDesktopSshEnvironmentBridge(): Promise<DesktopSshEnvironmentB
       return {
         packageSpec: ssh.resolveRemoteRycoCliPackageSpec({
           appVersion: app.getVersion(),
-          updateChannel: desktopSettings.updateChannel,
+          updateChannel: DESKTOP_UPDATE_CHANNEL,
           isDevelopment,
         }),
       };
@@ -2950,6 +3039,7 @@ function createBaseUpdateState(
     ...createInitialDesktopUpdateState(app.getVersion(), channel),
     enabled,
     status: enabled ? "idle" : "disabled",
+    updatedFromVersion,
   };
 }
 
@@ -2957,9 +3047,11 @@ function applyAutoUpdaterChannel(channel: DesktopUpdateChannel): void {
   const autoUpdater = requireAutoUpdater();
   autoUpdater.channel = channel;
   autoUpdater.allowPrerelease = channel === "nightly";
-  autoUpdater.allowDowngrade = channel === "nightly";
+  // Ryco and Ryco Nightly are separate apps: moving between them means opening the other
+  // app, never installing an older build over a database a newer one already migrated.
+  autoUpdater.allowDowngrade = false;
   console.info(
-    `[desktop-updater] Using update channel '${channel}' (allowPrerelease=${channel === "nightly"}, allowDowngrade=${channel === "nightly"}).`,
+    `[desktop-updater] Using update channel '${channel}' (allowPrerelease=${channel === "nightly"}, allowDowngrade=false).`,
   );
 }
 
@@ -3038,13 +3130,21 @@ async function downloadAvailableUpdate(): Promise<{
   accepted: boolean;
   completed: boolean;
 }> {
-  if (!updaterConfigured || updateDownloadInFlight || updateState.status !== "available") {
+  if (
+    isQuitting ||
+    !updaterConfigured ||
+    updateDownloadInFlight ||
+    updateState.status !== "available"
+  ) {
     return { accepted: false, completed: false };
   }
   downloadedUpdateFilePath = null;
   updateDownloadInFlight = true;
+  const version = updateState.availableVersion;
+  // Before the download: electron-updater adds its quit installer when it completes, if armed.
+  automaticAppUpdates.downloadStarting(version);
   setUpdateState(reduceDesktopUpdateStateOnDownloadStart(updateState));
-  const task = runUpdateDownload();
+  const task = runUpdateDownload(version);
   updateDownloadTask = task;
   return task;
 }
@@ -3058,7 +3158,9 @@ async function downloadAvailableUpdateOrJoin(): Promise<void> {
   await downloadAvailableUpdate();
 }
 
-async function runUpdateDownload(): Promise<{ accepted: boolean; completed: boolean }> {
+async function runUpdateDownload(
+  version: string | null,
+): Promise<{ accepted: boolean; completed: boolean }> {
   const autoUpdater = requireAutoUpdater();
   console.info("[desktop-updater] Downloading update...");
   const cancellation = new (loadElectronUpdater().CancellationToken)();
@@ -3081,6 +3183,7 @@ async function runUpdateDownload(): Promise<{ accepted: boolean; completed: bool
   } catch (error: unknown) {
     const message = error instanceof Error ? error.message : String(error);
     downloadedUpdateFilePath = null;
+    automaticAppUpdates.downloadFailed(version);
     setUpdateState(reduceDesktopUpdateStateOnDownloadFailure(updateState, message));
     console.error(`[desktop-updater] Failed to download update: ${message}`);
     return { accepted: true, completed: false };
@@ -3171,6 +3274,7 @@ function prepareUnsignedMacUpdateInstaller(): {
     scriptPath,
     createUnsignedMacUpdateInstallScript({
       appLabel: APP_DISPLAY_NAME,
+      expectedBundleId: DESKTOP_FLAVOR_IDENTITY.appId,
       updateZipPath: downloadedUpdateFilePath,
       targetAppPath,
       waitPid: process.pid,
@@ -3197,6 +3301,24 @@ function launchUnsignedMacUpdateInstaller(input: {
   );
 }
 
+/** Records the install about to run, so the next launch can tell whether it took effect. */
+function recordUpdateInstall(targetVersion: string | null): void {
+  if (targetVersion === null) return;
+  const fromVersion = app.getVersion();
+  if (targetVersion === fromVersion) return;
+  if (
+    !writeDesktopUpdateInstallRecord(UPDATE_INSTALL_RECORD_PATH, { fromVersion, targetVersion })
+  ) {
+    console.warn(`[desktop-updater] Could not record the install of ${targetVersion}.`);
+  }
+}
+
+/** An install did not start: no install at quit, and never in the background again. */
+function noteUpdateInstallFailed(): void {
+  removeDesktopUpdateInstallRecord(UPDATE_INSTALL_RECORD_PATH);
+  automaticAppUpdates.installFailed(updateState.downloadedVersion);
+}
+
 async function installDownloadedUpdate(): Promise<{
   accepted: boolean;
   completed: boolean;
@@ -3216,6 +3338,7 @@ async function installDownloadedUpdate(): Promise<{
       : null;
 
     await stopBackendAndWaitForExit();
+    recordUpdateInstall(updateState.downloadedVersion);
     if (unsignedMacInstallPlan) {
       launchUnsignedMacUpdateInstaller(unsignedMacInstallPlan);
       for (const win of BrowserWindow.getAllWindows()) {
@@ -3241,6 +3364,7 @@ async function installDownloadedUpdate(): Promise<{
     const message = formatErrorMessage(error);
     updateInstallInFlight = false;
     isQuitting = false;
+    noteUpdateInstallFailed();
     setUpdateState(reduceDesktopUpdateStateOnInstallFailure(updateState, message));
     remoteAppInstaller.installFailed(message);
     console.error(`[desktop-updater] Failed to install update: ${message}`);
@@ -3248,11 +3372,17 @@ async function installDownloadedUpdate(): Promise<{
   }
 }
 
-/** A client's update request, relayed by a backend over its pipe. */
+/** A client's update request or the automatic update policy, from a backend over its pipe. */
 function handleAppUpdateRequest(
   frame: DesktopAppUpdateRequestFrame,
   pipe: DesktopBackendPipe,
+  child: object,
 ): void {
+  if (frame.type === "app-update-policy") {
+    // A hint from the backend this app launched; a replaced generation's report is dropped.
+    automaticAppUpdates.report(child, frame.automatic);
+    return;
+  }
   if (frame.type === "app-update-install") {
     console.info(
       `[desktop-updater] Install of ${frame.targetVersion} requested from another device (request ${frame.requestId}).`,
@@ -3301,13 +3431,31 @@ function closeRemoteInstallNotification(): void {
 }
 
 /**
+ * Settles the install record the last run left: "Updated to X" when its update took effect; when
+ * it did not, that version is never installed again in the background.
+ */
+function settleLastUpdateInstall(): void {
+  const outcome = settleDesktopUpdateInstallRecord(UPDATE_INSTALL_RECORD_PATH, app.getVersion());
+  if (outcome.kind === "updated") {
+    updatedFromVersion = outcome.fromVersion;
+    console.info(`[desktop-updater] Updated from ${outcome.fromVersion} to ${outcome.version}.`);
+  } else if (outcome.kind === "not-applied") {
+    automaticAppUpdates.installFailed(outcome.version);
+    console.warn(
+      `[desktop-updater] The install of ${outcome.version} did not apply; it waits for Restart.`,
+    );
+  }
+}
+
+/**
  * Load and configure electron-updater. Deferred until after startup (the first
  * check runs 15 s later anyway); anything that needs it earlier awaits
  * {@link ensureAutoUpdaterConfigured}.
  */
 async function configureAutoUpdater(): Promise<void> {
   const enabled = shouldEnableAutoUpdates();
-  setUpdateState(createBaseUpdateState(desktopSettings.updateChannel, enabled));
+  if (enabled) settleLastUpdateInstall();
+  setUpdateState(createBaseUpdateState(DESKTOP_UPDATE_CHANNEL, enabled));
   if (!enabled || isQuitting) {
     return;
   }
@@ -3341,8 +3489,21 @@ async function configureAutoUpdater(): Promise<void> {
   updaterConfigured = true;
 
   autoUpdater.autoDownload = false;
+  // Armed only while the node's owner has automatic updates on (automaticAppUpdates).
   autoUpdater.autoInstallOnAppQuit = false;
-  applyAutoUpdaterChannel(desktopSettings.updateChannel);
+  // Added before any download, so it runs before the quit installer electron-updater adds once
+  // a download completes armed. A relaunch or a failed exit installs nothing, and neither does a
+  // quit during a system shutdown or logout (it disarms here): the update waits for a later quit.
+  app.once("quit", (_event, exitCode) => {
+    if (updateInstallInFlight) return;
+    recordUpdateInstall(
+      automaticAppUpdates.quitting({
+        exitCode,
+        sessionEnding: terminatedBySignal || systemShutdownNotice.active(),
+      }),
+    );
+  });
+  applyAutoUpdaterChannel(DESKTOP_UPDATE_CHANNEL);
   let lastLoggedDownloadMilestone = -1;
 
   autoUpdater.on("checking-for-update", () => {
@@ -3350,6 +3511,14 @@ async function configureAutoUpdater(): Promise<void> {
   });
   autoUpdater.on("update-available", (info) => {
     downloadedUpdateFilePath = null;
+    if (!updateFilesBelongToFlavor(info.files, DESKTOP_FLAVOR)) {
+      console.info(
+        `[desktop-updater] Ignoring ${info.version}: its files belong to the other app (${info.files.map((file) => file.url).join(", ")}).`,
+      );
+      setUpdateState(reduceDesktopUpdateStateOnNoUpdate(updateState, new Date().toISOString()));
+      lastLoggedDownloadMilestone = -1;
+      return;
+    }
     if (!doesVersionMatchDesktopUpdateChannel(info.version, updateState.channel)) {
       console.info(
         `[desktop-updater] Ignoring ${info.version} because it does not match the selected '${updateState.channel}' channel.`,
@@ -3380,6 +3549,7 @@ async function configureAutoUpdater(): Promise<void> {
     if (updateInstallInFlight) {
       updateInstallInFlight = false;
       isQuitting = false;
+      noteUpdateInstallFailed();
       setUpdateState(reduceDesktopUpdateStateOnInstallFailure(updateState, message));
       remoteAppInstaller.installFailed(message);
       console.error(`[desktop-updater] Updater error: ${message}`);
@@ -3414,6 +3584,8 @@ async function configureAutoUpdater(): Promise<void> {
   });
   autoUpdater.on("update-downloaded", (info: UpdateDownloadedEvent) => {
     downloadedUpdateFilePath = info.downloadedFile;
+    // Read before electron-updater adds its quit installer, which it does only if armed now.
+    automaticAppUpdates.downloaded(info.version, autoUpdater.autoInstallOnAppQuit);
     setUpdateState(reduceDesktopUpdateStateOnDownloadComplete(updateState, info.version));
     console.info(
       `[desktop-updater] Update downloaded: ${info.version} file=${info.downloadedFile}`,
@@ -3422,14 +3594,15 @@ async function configureAutoUpdater(): Promise<void> {
 
   clearUpdatePollTimer();
 
+  // With automatic updates on, these checks also download what they find.
   updateStartupTimer = setTimeout(() => {
     updateStartupTimer = null;
-    void checkForUpdates("startup");
+    void automaticAppUpdates.runScheduledCheck("startup");
   }, AUTO_UPDATE_STARTUP_DELAY_MS);
   updateStartupTimer.unref();
 
   updatePollTimer = setInterval(() => {
-    void checkForUpdates("poll");
+    void automaticAppUpdates.runScheduledCheck("poll");
   }, AUTO_UPDATE_POLL_INTERVAL_MS);
   updatePollTimer.unref();
 }
@@ -3800,6 +3973,14 @@ function writeBackendBootstrapEnvelope(
       desktopControlToken: input.controlToken,
       ...(desktopShellEnvironment === null ? {} : { shellEnvironment: desktopShellEnvironment }),
       ...(computerUseRuntime ? { computerUseBridge: computerUseRuntime.backendBinding() } : {}),
+      ...(FLAVOR_IMPORT_SOURCE_HOME === null || FLAVOR_IMPORT_TOKEN === null
+        ? {}
+        : {
+            flavorImport: {
+              allowedSourceHome: FLAVOR_IMPORT_SOURCE_HOME,
+              requestToken: FLAVOR_IMPORT_TOKEN,
+            },
+          }),
       tailscaleServeEnabled: tailscaleServe.enabled,
       tailscaleServePort: tailscaleServe.port,
       hubConnectorEnabled: hubLaunch.enabled,
@@ -3876,7 +4057,7 @@ function startBackend(): void {
   const child = launched.child;
   const childControlToken = Crypto.randomBytes(32).toString("base64url");
   backendControlToken = childControlToken;
-  const hubLaunch = resolveDesktopHubConnectorLaunch(desktopSettings);
+  const hubLaunch = resolveDesktopHubConnectorLaunch(desktopSettings, desktopDefaultHubNodeName());
   backendHubLaunch = hubLaunch;
   backendHubConnectorEnabled = null;
   const tailscaleServe = resolveDesktopTailscaleServeLaunch(desktopSettings);
@@ -3888,7 +4069,7 @@ function startBackend(): void {
   if (telemetryPipe instanceof Duplex) {
     const backendPipe = attachDesktopResourceTelemetry(telemetryPipe, {
       onLifecycleFrame: (frame) => handleBackendFrame(readiness, frame),
-      onAppUpdateRequest: (frame) => handleAppUpdateRequest(frame, backendPipe),
+      onAppUpdateRequest: (frame) => handleAppUpdateRequest(frame, backendPipe, child),
       appUpdateState: () => updateState,
       onAgentWork: (frame) => backendAgentWork.report(child, frame.keepAwake),
     });
@@ -3919,6 +4100,7 @@ function startBackend(): void {
   backendReadiness = readiness;
   backendProcess = child;
   backendAgentWork.begin(child);
+  automaticAppUpdates.begin(child);
   let backendSessionClosed = false;
   const closeBackendSession = (details: string) => {
     if (backendSessionClosed) return;
@@ -3951,6 +4133,8 @@ function startBackend(): void {
     }
     // Work it reported keeps the machine awake while its successor starts, unless Ryco quits.
     backendAgentWork.end(child, { holdIfWorking: !isQuitting });
+    // Its policy ends with it (until the next backend reports), unless the quit stopped it.
+    automaticAppUpdates.end(child, { quitting: isQuitting });
     if (backendControlToken === childControlToken) backendControlToken = "";
     if (!isQuitting && !wasExpected) outputCapture.recordUnexpectedExit(details);
     closeBackendSession(`pid=${child.pid ?? "unknown"} ${details}`);
@@ -4124,6 +4308,55 @@ function registerIpcHandlers(): void {
     // Only the window that was asked, from its own document, can answer.
     if (event.senderFrame !== event.sender.mainFrame) return;
     quitGuardRequester.receive(event.sender, raw);
+  });
+  for (const [channel, action] of [
+    ["desktop:cli-command-state", "state"],
+    ["desktop:cli-command-install", "install"],
+    ["desktop:cli-command-uninstall", "uninstall"],
+  ] as const) {
+    ipcMain.removeHandler(channel);
+    ipcMain.handle(channel, async (event) => {
+      const owner = BrowserWindow.fromWebContents(event.sender);
+      if (!owner || event.senderFrame !== event.sender.mainFrame)
+        throw new Error("Invalid command line sender.");
+      const cli = await import("./desktopCliCommand.ts");
+      const environment = desktopCliCommandEnvironment();
+      if (action === "install") return cli.installDesktopCliCommand(environment);
+      if (action === "uninstall") return cli.uninstallDesktopCliCommand(environment);
+      return cli.readDesktopCliCommandState(environment);
+    });
+  }
+  const nightlyHandoffSender = (event: Electron.IpcMainInvokeEvent) => {
+    const owner = BrowserWindow.fromWebContents(event.sender);
+    if (!owner || event.senderFrame !== event.sender.mainFrame)
+      throw new Error("Invalid Ryco Nightly sender.");
+  };
+  ipcMain.removeHandler("desktop:nightly-state");
+  ipcMain.handle("desktop:nightly-state", async (event) => {
+    nightlyHandoffSender(event);
+    const handoff = await import("./nightlyHandoff.ts");
+    return handoff.readNightlyState(await nightlyHandoffEnvironment());
+  });
+  ipcMain.removeHandler("desktop:nightly-open");
+  ipcMain.handle("desktop:nightly-open", async (event, input: unknown) => {
+    nightlyHandoffSender(event);
+    const copyData =
+      typeof input === "object" && input !== null && (input as { copyData?: unknown }).copyData;
+    if (typeof copyData !== "boolean") throw new Error("Invalid Ryco Nightly request.");
+    if (nightlyOpenInFlight) throw new Error("Ryco Nightly is already opening.");
+    nightlyOpenInFlight = true;
+    try {
+      const handoff = await import("./nightlyHandoff.ts");
+      await handoff.openNightly(await nightlyHandoffEnvironment(), { copyData });
+    } finally {
+      nightlyOpenInFlight = false;
+    }
+  });
+  ipcMain.removeHandler("desktop:nightly-switch-back");
+  ipcMain.handle("desktop:nightly-switch-back", async (event) => {
+    nightlyHandoffSender(event);
+    const handoff = await import("./nightlyHandoff.ts");
+    await handoff.switchBackToRyco(await nightlyHandoffEnvironment());
   });
   ipcMain.removeHandler("desktop:quit-shortcut-get");
   ipcMain.handle("desktop:quit-shortcut-get", () => desktopSettings.quitShortcutMode);
@@ -4935,50 +5168,6 @@ function registerIpcHandlers(): void {
   ipcMain.removeHandler(UPDATE_GET_STATE_CHANNEL);
   ipcMain.handle(UPDATE_GET_STATE_CHANNEL, async () => updateState);
 
-  ipcMain.removeHandler(UPDATE_SET_CHANNEL_CHANNEL);
-  ipcMain.handle(UPDATE_SET_CHANNEL_CHANNEL, async (_event, rawChannel: unknown) => {
-    if (rawChannel !== "latest" && rawChannel !== "nightly") {
-      throw new Error("Invalid desktop update channel input.");
-    }
-    if (
-      updateCheckInFlight ||
-      updateDownloadInFlight ||
-      updateInstallInFlight ||
-      remoteAppInstaller.isActive()
-    ) {
-      throw new Error("Cannot change update tracks while an update action is in progress.");
-    }
-
-    const nextChannel = rawChannel as DesktopUpdateChannel;
-
-    desktopSettings = setDesktopUpdateChannelPreference(desktopSettings, nextChannel);
-    writeDesktopSettings(DESKTOP_SETTINGS_PATH, desktopSettings);
-
-    if (nextChannel === updateState.channel) {
-      return updateState;
-    }
-
-    const enabled = shouldEnableAutoUpdates();
-    downloadedUpdateFilePath = null;
-    setUpdateState(createBaseUpdateState(nextChannel, enabled));
-
-    if (!enabled || !updaterConfigured) {
-      return updateState;
-    }
-
-    applyAutoUpdaterChannel(nextChannel);
-    const autoUpdater = requireAutoUpdater();
-    const allowDowngrade = autoUpdater.allowDowngrade;
-    // An explicit channel switch should allow the immediate nightly->stable rollback path.
-    autoUpdater.allowDowngrade = true;
-    try {
-      await checkForUpdates("channel-change");
-    } finally {
-      autoUpdater.allowDowngrade = allowDowngrade;
-    }
-    return updateState;
-  });
-
   ipcMain.removeHandler(UPDATE_DOWNLOAD_CHANNEL);
   ipcMain.handle(UPDATE_DOWNLOAD_CHANNEL, async () => {
     const result = await downloadAvailableUpdate();
@@ -5444,7 +5633,7 @@ function createWindow(): BrowserWindow {
 // Override Electron's userData path before the `ready` event so that
 // Chromium session data uses a filesystem-friendly directory name.
 // Must be called synchronously at the top level — before `app.whenReady()`.
-app.setPath("userData", resolveDesktopUserDataPath({ isDevelopment }));
+app.setPath("userData", resolveDesktopUserDataPath({ isDevelopment, flavor: DESKTOP_FLAVOR }));
 
 configureAppIdentity();
 
@@ -5520,7 +5709,11 @@ async function selectDesktopBackendPort(
     settingsPort: desktopSettings.backendPort,
   });
   const hasPriorRendererState = hasPriorDesktopRendererState(userDataPath);
-  const startPort = resolveDesktopBackendStartPort({ persistedPort, hasPriorRendererState });
+  const startPort = resolveDesktopBackendStartPort({
+    persistedPort,
+    hasPriorRendererState,
+    defaultPort: DESKTOP_FLAVOR_IDENTITY.defaultBackendPort,
+  });
   const port = await resolveDesktopBackendPort({
     host: DESKTOP_LOOPBACK_HOST,
     startPort,
@@ -5703,6 +5896,64 @@ function boundedRendererCacheMaintenance(work: Promise<void>, timeoutMs = 1_500)
 }
 
 /** Integration that no part of startup waits for. */
+/** What the `ryco` command launcher embeds (`desktopCliCommand.ts`). */
+function desktopCliCommandEnvironment(): DesktopCliCommandEnvironment {
+  return {
+    platform: process.platform,
+    isPackaged: app.isPackaged && !isDevelopment,
+    flavor: DESKTOP_FLAVOR,
+    homeDirectory: OS.homedir(),
+    rycoHome: BACKEND_BASE_DIR,
+    executable: process.execPath,
+    backendEntry: resolveBackendEntry(),
+    appImage: process.env.APPIMAGE?.trim() || undefined,
+    // The login shell's PATH, applied at launch: what a new terminal runs.
+    path: process.env.PATH,
+  };
+}
+
+/** An installed `ryco` command follows the app when it moves or updates. */
+function refreshDesktopCliLauncher(): void {
+  void import("./desktopCliCommand.ts")
+    .then((cli) => cli.refreshDesktopCliLauncher(desktopCliCommandEnvironment()))
+    .catch((error: unknown) => {
+      writeDesktopLogHeader(
+        `ryco command launcher refresh failed message=${sanitizeLogValue(formatErrorMessage(error))}`,
+      );
+    });
+}
+
+/** What Ryco and Ryco Nightly read to find and open each other (`nightlyHandoff.ts`). */
+/** One "Open Ryco Nightly" at a time: a second would write a request no launch carries. */
+let nightlyOpenInFlight = false;
+let ownTeamIdLookup: Promise<ExpectedTeamId> | null = null;
+
+async function nightlyHandoffEnvironment(): Promise<NightlyHandoffEnvironment> {
+  const handoff = await import("./nightlyHandoff.ts");
+  ownTeamIdLookup ??= handoff.ownAppTeamId({
+    platform: process.platform,
+    isPackaged: app.isPackaged,
+    executable: process.execPath,
+  });
+  return {
+    platform: process.platform,
+    flavor: DESKTOP_FLAVOR,
+    homeDirectory: OS.homedir(),
+    rycoHome: BACKEND_BASE_DIR,
+    nightlyHome:
+      DESKTOP_FLAVOR === "nightly"
+        ? BACKEND_BASE_DIR
+        : resolveDesktopPaths({
+            configuredBaseDir: configuredDesktopBaseDir("nightly"),
+            isDevelopment: false,
+            flavor: "nightly",
+          }).backendBaseDir,
+    executable: process.execPath,
+    env: process.env,
+    expectedTeamId: await ownTeamIdLookup,
+  };
+}
+
 function configureDeferredDesktopIntegration(): void {
   configureApplicationMenu();
   try {
@@ -5712,7 +5963,7 @@ function configureDeferredDesktopIntegration(): void {
       `authorization protocol registration failed message=${sanitizeLogValue(formatErrorMessage(error))}`,
     );
   }
-  setUpdateState(createBaseUpdateState(desktopSettings.updateChannel, shouldEnableAutoUpdates()));
+  setUpdateState(createBaseUpdateState(DESKTOP_UPDATE_CHANNEL, shouldEnableAutoUpdates()));
   setTimeout(() => {
     void ensureAutoUpdaterConfigured().catch((error: unknown) => {
       writeDesktopLogHeader(
@@ -5720,6 +5971,7 @@ function configureDeferredDesktopIntegration(): void {
       );
     });
   }, AUTO_UPDATE_CONFIGURE_DELAY_MS).unref();
+  setTimeout(refreshDesktopCliLauncher, AUTO_UPDATE_CONFIGURE_DELAY_MS).unref();
 }
 
 async function bootstrap(): Promise<void> {
@@ -5971,6 +6223,8 @@ app.on("child-process-gone", (_event, details) => {
  * its parent out); no confirmation can open then, as no backend child or usable window exists.
  */
 let terminationSignalsHandled = false;
+// SIGTERM arrived (a Linux shutdown, or a `kill`): an update armed for quit waits for a later quit.
+let terminatedBySignal = false;
 function handleTerminationSignals(): void {
   if (terminationSignalsHandled || process.platform === "win32") return;
   terminationSignalsHandled = true;
@@ -5986,6 +6240,8 @@ function handleTerminationSignals(): void {
   });
 
   process.on("SIGTERM", () => {
+    // A Linux shutdown ends apps with SIGTERM: nothing installs at this quit.
+    terminatedBySignal = true;
     if (isQuitting) return;
     isQuitting = true;
     writeDesktopLogHeader("SIGTERM received");

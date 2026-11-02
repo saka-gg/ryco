@@ -114,6 +114,8 @@ describe("isThreadWaitWakeActivity", () => {
       "user-input.requested",
       "user-input.resolved",
       "provider.user-input.respond.failed",
+      "secret.requested",
+      "secret.resolved",
     ]) {
       expect(isThreadWaitWakeActivity(threadId, activity(kind)), kind).toBe(true);
       expect(isThreadWaitWakeEvent(appended(activity(kind))), kind).toBe(true);

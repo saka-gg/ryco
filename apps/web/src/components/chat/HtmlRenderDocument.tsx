@@ -1,3 +1,4 @@
+import { createHtmlRenderMessageGate } from "@ryco/client-runtime/state/session";
 import {
   htmlRenderResult,
   htmlRenderThemeMessage,
@@ -5,13 +6,15 @@ import {
   isHtmlRenderEscape,
   readHtmlRenderContentHeight,
   readHtmlRenderLinkRequest,
+  readHtmlRenderMessageRequest,
   readHtmlRenderPointerInside,
   type HtmlRenderTheme,
 } from "@ryco/shared/htmlRender";
-import { memo, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { memo, useEffect, useEffectEvent, useLayoutEffect, useRef, useState } from "react";
 
 import { cn } from "~/lib/utils";
 import { useHtmlRenderTheme } from "~/themes/htmlRenderTheme";
+import { createHtmlRenderFrameFocus, type HtmlRenderPageMessageSender } from "./htmlRenderMessages";
 
 /** Posts a theme to the frame's running page. */
 function postTheme(frame: HTMLIFrameElement, theme: HtmlRenderTheme) {
@@ -39,6 +42,14 @@ export const HtmlRenderDocument = memo(function HtmlRenderDocument(props: {
   readonly onPointerInside?: (inside: boolean) => void;
   /** The reader pressed Escape inside the page; its keys never reach the app. */
   readonly onEscape?: () => void;
+  /**
+   * Where the page's `ryco.send` goes once its request passed this frame's
+   * checks: the confirmation, then the thread's queue. Absent where the page
+   * may not send (a page handed over from another thread, the phone tier);
+   * whether it is present must not change while the frame lives, since the
+   * frame name tells the page.
+   */
+  readonly onSendMessage?: HtmlRenderPageMessageSender | undefined;
 }) {
   const theme = useHtmlRenderTheme();
   const frameRef = useRef<HTMLIFrameElement>(null);
@@ -46,7 +57,7 @@ export const HtmlRenderDocument = memo(function HtmlRenderDocument(props: {
   // for the frame's lifetime; later themes arrive as messages.
   const [initial] = useState(() => ({
     html: props.html,
-    name: htmlRenderThemeWindowName(theme),
+    name: htmlRenderThemeWindowName(theme, { sendMessages: props.onSendMessage !== undefined }),
   }));
   const [loaded, setLoaded] = useState(false);
 
@@ -77,6 +88,61 @@ export const HtmlRenderDocument = memo(function HtmlRenderDocument(props: {
     };
     window.addEventListener("message", openLink);
     return () => window.removeEventListener("message", openLink);
+  }, []);
+
+  // A page's `ryco.send`. Only this frame's own window is heard, and only
+  // while the reader is using it: the frame has focus in a focused, visible
+  // app, it took that focus after the latest confirmation closed (the reader
+  // clicked or tabbed into it; a confirmation hands focus back to the frame's
+  // container, never the frame), and the app holds the user activation their
+  // click or key press gave it, so a page cannot send on load, on a timer,
+  // while the reader is elsewhere, or right after they answered a
+  // confirmation. The gate allows one request at a time, one a second, and
+  // none for a while after a cancel; the reader still confirms each one. The
+  // listener outlives prop changes, so a re-render cannot reset the limits.
+  const readSendMessage = useEffectEvent(() => props.onSendMessage);
+  useEffect(() => {
+    const focus = createHtmlRenderFrameFocus();
+    const frameTookFocus = () => {
+      if (frameRef.current !== null && document.activeElement === frameRef.current) {
+        focus.focused();
+      }
+    };
+    // The nearest focusable container of the frame: where its confirmation returns focus.
+    const returnFocus = () =>
+      frameRef.current?.parentElement?.closest<HTMLElement>("[tabindex]") ?? null;
+    const gate = createHtmlRenderMessageGate({
+      available: () => readSendMessage() !== undefined,
+      takeGesture: () => {
+        const frame = frameRef.current;
+        return (
+          frame !== null &&
+          document.activeElement === frame &&
+          focus.regained() &&
+          document.hasFocus() &&
+          document.visibilityState === "visible" &&
+          navigator.userActivation?.isActive === true
+        );
+      },
+      deliver: (text) => {
+        const send = readSendMessage();
+        return send === undefined ? Promise.reject(new Error()) : send(text, { returnFocus });
+      },
+      reply: (message) => frameRef.current?.contentWindow?.postMessage(message, "*"),
+    });
+    const sendMessage = (event: MessageEvent) => {
+      const frame = frameRef.current;
+      if (frame === null || event.source === null || event.source !== frame.contentWindow) return;
+      const request = readHtmlRenderMessageRequest(event.data);
+      if (request !== undefined) gate(request);
+    };
+    // Focus moving into the frame blurs this window with the frame active.
+    window.addEventListener("blur", frameTookFocus);
+    window.addEventListener("message", sendMessage);
+    return () => {
+      window.removeEventListener("blur", frameTookFocus);
+      window.removeEventListener("message", sendMessage);
+    };
   }, []);
 
   const { onContentHeight } = props;

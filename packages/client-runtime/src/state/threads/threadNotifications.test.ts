@@ -252,3 +252,41 @@ describe("thread notification projection", () => {
     expect(test.observe(completed({ interactionMode: "plan" }), 4)).toBeNull();
   });
 });
+
+describe("quiet completion of hidden and filed threads", () => {
+  it.each([
+    ["hidden", { hiddenAt: "2026-10-02T09:00:00.000Z" }],
+    ["settled while working", { settleWhenIdleAt: "2026-10-02T10:30:00.000Z" }],
+    [
+      "settled when its turn ended",
+      { settledOverride: "settled", settledAt: "2026-10-02T10:30:00.000Z" },
+    ],
+  ] as const)("does not announce the completion of a thread %s", (_label, patch) => {
+    const test = fixture(thread(patch));
+    expect(test.observe(completed(patch), 2)).toBeNull();
+  });
+
+  it.each([
+    ["shown in the Inbox again", { hiddenAt: "2026-10-02T09:00:00.000Z" }],
+    ["moved back to Active", { settleWhenIdleAt: "2026-10-02T10:30:00.000Z" }],
+  ] as const)(
+    "never announces a quiet completion later, once the thread is %s",
+    (_label, patch) => {
+      const test = fixture(thread(patch));
+      expect(test.observe(completed(patch), 2)).toBeNull();
+      expect(test.observe(completed(), 3)).toBeNull();
+    },
+  );
+
+  it("still announces its requests and failures", () => {
+    const patch = { hiddenAt: "2026-10-02T09:00:00.000Z" };
+    expect(
+      fixture(thread(patch)).observe(thread({ ...patch, hasPendingApprovals: true }), 2)?.kind,
+    ).toBe("approval");
+    const failed = completed({
+      ...patch,
+      latestTurn: { ...completed().latestTurn!, state: "error" },
+    });
+    expect(fixture(thread(patch)).observe(failed, 2)?.kind).toBe("failed");
+  });
+});

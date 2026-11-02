@@ -62,6 +62,7 @@ const clientSettings: ClientSettings = {
   sendShortcut: "enter",
   claudeResumeReview: false,
   chatWidth: "comfortable",
+  openChatTabs: true,
   favorites: [],
   providerModelPreferences: {},
   sidebarProjectGroupingMode: "repository_path",
@@ -141,6 +142,37 @@ describe("clientPersistence", () => {
     writeSavedEnvironmentRegistry(registryPath, [linked]);
 
     expect(readSavedEnvironmentRegistry(registryPath)).toEqual([linked]);
+  });
+
+  it("keeps a switched-off machine off and its credential stored through rewrites", () => {
+    const registryPath = makeTempPath("saved-environments.json");
+    const secretStorage = makeSecretStorage(true);
+    const switchedOff: PersistedSavedEnvironmentRecord = {
+      ...savedRegistryRecord,
+      disabledAt: "2026-10-31T09:00:00.000Z",
+    };
+
+    writeSavedEnvironmentRegistry(registryPath, [savedRegistryRecord]);
+    writeSavedEnvironmentSecret({
+      registryPath,
+      environmentId: savedRegistryRecord.environmentId,
+      secret: "bearer-token",
+      secretStorage,
+    });
+    writeSavedEnvironmentRegistry(registryPath, [switchedOff]);
+
+    expect(readSavedEnvironmentRegistry(registryPath)).toEqual([switchedOff]);
+    expect(
+      readSavedEnvironmentSecret({
+        registryPath,
+        environmentId: savedRegistryRecord.environmentId,
+        secretStorage,
+      }),
+    ).toBe("bearer-token");
+
+    // Switched on again: the record is written without the field.
+    writeSavedEnvironmentRegistry(registryPath, [savedRegistryRecord]);
+    expect(readSavedEnvironmentRegistry(registryPath)).toEqual([savedRegistryRecord]);
   });
 
   it("persists encrypted saved environment secrets when encryption is available", () => {

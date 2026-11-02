@@ -10,15 +10,20 @@ import {
 
 // Ryco public mobile scaffold (B1). The upstream hosted-auth vendor plane and
 // managed-cloud plane, its EAS project/owner, upstream bundle IDs/schemes, brand
-// assets, the default telemetry endpoint, widgets, share extension, quick
-// actions, and the camera-showcase rig are all stripped per the design spec's
-// strip list. Direct-node bearer pairing is one auth plane; the hosted plane
+// assets, the default telemetry endpoint, share extension, quick actions, and
+// the camera-showcase rig are all stripped per the design spec's strip list.
+// Widgets came back as Ryco's own Swift extension (plugins/withIosWidgetExtension.cjs). Direct-node bearer pairing is one auth plane; the hosted plane
 // uses a system-browser public-client handoff and defaults to Ryco Cloud.
 const repoEnv = loadMobileEnv();
 Object.assign(process.env, repoEnv);
 
 const APP_VARIANT = resolveAppVariant(repoEnv.APP_VARIANT);
-const mobileUpdates = resolveMobileUpdates(repoEnv.RYCO_EAS_PROJECT_ID);
+const mobileRuntimeVersionPolicy = process.env.MOBILE_VERSION_POLICY ?? "fingerprint";
+const mobileUpdates = resolveMobileUpdates({
+  projectId: repoEnv.RYCO_EAS_PROJECT_ID,
+  certificatePath: repoEnv.RYCO_EAS_UPDATE_CERTIFICATE,
+  runtimePolicy: mobileRuntimeVersionPolicy,
+});
 
 // Local, capability-reduced device builds (free Apple Personal Team) can only
 // sign their own bundle id; expose an override so `expo run:ios` on a device
@@ -159,7 +164,7 @@ const config: ExpoConfig = {
     // project — native deps, config plugins, AND patches/ — matches the update.
     // Patches count only through fingerprint.config.js: under Bun's store the
     // fingerprint does not hash native package sources.
-    policy: process.env.MOBILE_VERSION_POLICY ?? "fingerprint",
+    policy: mobileRuntimeVersionPolicy,
   },
   orientation: "portrait",
   icon: "./assets/icon.png",
@@ -167,7 +172,8 @@ const config: ExpoConfig = {
   // a future appearance preference plugs into; this forces the native shell dark so
   // first paint (splash + system chrome) is dark before JS resolves.
   userInterfaceStyle: "dark",
-  // Off unless RYCO_EAS_PROJECT_ID names the Ryco EAS project (config/env.ts).
+  // Off unless RYCO_EAS_PROJECT_ID names the Ryco EAS project, and never checks
+  // unless RYCO_EAS_UPDATE_CERTIFICATE makes every update verifiable (config/env.ts).
   updates: mobileUpdates.updates,
   // Turns on babel-preset-expo's React Compiler pass. Which sources it compiles
   // is scoped in babel.config.js (all of apps/mobile/src);
@@ -308,11 +314,15 @@ const config: ExpoConfig = {
     ],
     "./plugins/withIosCocoaPodsUuidCache.cjs",
     "./plugins/withIosSceneLifecycle.cjs",
-    // Personal Team builds strip APNs and cannot sign the extension or its
-    // keychain group, so background push alerts are off there.
+    // Personal Team builds strip APNs and cannot sign an extension, its
+    // keychain group or an App Group, so background push alerts and widgets
+    // are off there.
     ...(isIosPersonalTeamBuild
       ? ["./plugins/withIosPersonalTeamCapabilities.cjs"]
-      : ["./plugins/withIosNotificationServiceExtension.cjs"]),
+      : [
+          "./plugins/withIosNotificationServiceExtension.cjs",
+          "./plugins/withIosWidgetExtension.cjs",
+        ]),
     "./plugins/withAndroidCleartextTraffic.cjs",
     "./plugins/withAndroidSecureStoreBackupExclusion.cjs",
     "./plugins/withAndroidGradleHeap.cjs",
@@ -322,6 +332,8 @@ const config: ExpoConfig = {
   ],
   extra: {
     ...(mobileUpdates.projectId ? { eas: { projectId: mobileUpdates.projectId } } : {}),
+    // Whether this binary verifies updates; app code must never check for one otherwise.
+    updates: { signed: mobileUpdates.signed },
     appVariant: APP_VARIANT,
     iosPersonalTeamBuild: isIosPersonalTeamBuild,
     // Background push alerts (docs/push-alerts.md): the APNs topic is the

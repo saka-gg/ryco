@@ -26,6 +26,7 @@ import {
 } from "../ui/combobox";
 import {
   branchSlotPreposition,
+  pullRequestWorktreeSource,
   resolveWorkLocation,
   showsBranchSlot,
   workLocationDraftPatch,
@@ -330,11 +331,7 @@ function toDraftWorktreeSource(
   source: Exclude<NewThreadSource, { kind: "branch" }>,
 ): DraftWorktreeSource {
   if (source.kind === "pr") {
-    return {
-      kind: "pr",
-      number: source.changeRequest.number,
-      label: `#${source.changeRequest.number} ${source.changeRequest.title}`,
-    };
+    return pullRequestWorktreeSource(source.changeRequest.number, source.changeRequest.title);
   }
   if (source.kind === "issue") {
     return {

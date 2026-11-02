@@ -45,7 +45,6 @@ const MENU_ACTION_CHANNEL = "desktop:menu-action";
 const SYSTEM_RESUMED_CHANNEL = "desktop:system-resumed";
 const UPDATE_STATE_CHANNEL = "desktop:update-state";
 const UPDATE_GET_STATE_CHANNEL = "desktop:update-get-state";
-const UPDATE_SET_CHANNEL_CHANNEL = "desktop:update-set-channel";
 const UPDATE_CHECK_CHANNEL = "desktop:update-check";
 const UPDATE_DOWNLOAD_CHANNEL = "desktop:update-download";
 const UPDATE_INSTALL_CHANNEL = "desktop:update-install";
@@ -238,6 +237,16 @@ contextBridge.exposeInMainWorld("desktopBridge", {
     if (bootstrap?.httpBaseUrl) cachedLocalEnvironmentBootstrap = bootstrap;
     return bootstrap;
   },
+  cliCommand: {
+    getState: () => ipcRenderer.invoke("desktop:cli-command-state"),
+    install: () => ipcRenderer.invoke("desktop:cli-command-install"),
+    uninstall: () => ipcRenderer.invoke("desktop:cli-command-uninstall"),
+  },
+  nightly: {
+    getState: () => ipcRenderer.invoke("desktop:nightly-state"),
+    open: (input) => ipcRenderer.invoke("desktop:nightly-open", input),
+    switchBack: () => ipcRenderer.invoke("desktop:nightly-switch-back"),
+  },
   quitShortcut: {
     getMode: () => ipcRenderer.invoke("desktop:quit-shortcut-get"),
     setMode: (mode) => ipcRenderer.invoke("desktop:quit-shortcut-set", mode),
@@ -417,7 +426,6 @@ contextBridge.exposeInMainWorld("desktopBridge", {
     };
   },
   getUpdateState: () => ipcRenderer.invoke(UPDATE_GET_STATE_CHANNEL),
-  setUpdateChannel: (channel) => ipcRenderer.invoke(UPDATE_SET_CHANNEL_CHANNEL, channel),
   checkForUpdate: () => ipcRenderer.invoke(UPDATE_CHECK_CHANNEL),
   downloadUpdate: () => ipcRenderer.invoke(UPDATE_DOWNLOAD_CHANNEL),
   installUpdate: () => ipcRenderer.invoke(UPDATE_INSTALL_CHANNEL),

@@ -1,6 +1,7 @@
 import {
   AGENT_CONTROL_MESSAGE_ID_PREFIX,
   AGENT_SENT_MESSAGE_ID_SUFFIX,
+  COMMAND_WATCH_WAKE_MESSAGE_PREFIX,
   DELEGATION_RESULT_MESSAGE_ID_PREFIX,
   GOAL_CONTINUATION_MESSAGE_ID_PREFIX,
   PULL_REQUEST_WATCH_WAKE_MESSAGE_PREFIX,
@@ -320,7 +321,12 @@ export function deriveDisplayedUserMessageContext(prompt: string): DisplayedUser
 
 /** A user-role message no person typed, shown folded to one line until it is opened. */
 export interface AgentMessageFold {
-  readonly kind: "delegation-result" | "agent-message" | "goal-continuation" | "pull-request";
+  readonly kind:
+    | "delegation-result"
+    | "agent-message"
+    | "goal-continuation"
+    | "pull-request"
+    | "command-watch";
   /**
    * "Results from 2 delegated tasks" · "Message from another agent" · "Goal continuation" ·
    * "Pull request update" or "Auto-fix CI".
@@ -332,12 +338,31 @@ export interface AgentMessageFold {
 
 const FOLD_SUMMARY_MAX_CHARS = 120;
 const DELEGATION_TASK_COUNT = /^(\d+) task\(s\) you delegated/m;
+/** Section states of a stall notice (`CompletionReturnStallKind`). */
+const DELEGATION_STALL_STATES: ReadonlySet<string> = new Set([
+  "never-started",
+  "waiting-on-you",
+  "silent",
+]);
 const DELEGATION_SECTION_STATE =
   /^Delegated (?:initial-run result|result|task notice) \(([a-z-]+)[,)]/gm;
 /** `renderPullRequestAutoFixPrompt`'s first line (`@ryco/shared/pullRequestWatch`). */
 const AUTO_FIX_ATTEMPT = /^Auto-fix CI\b.*? PR #(\d+) at \S+, (attempt \d+ of \d+)/;
 /** The pull request an update or notice names first (`pull request #12`, `PR #12`). */
 const PULL_REQUEST_NUMBER = /\b(?:pull request|PR) #(\d+)/i;
+/** The watch's label, JSON-quoted after "the command" in every command watch message. */
+const COMMAND_WATCH_LABEL = /\bthe command (?:Ryco is watching for you, )?("(?:[^"\\]|\\.)*")/u;
+
+function commandWatchLabelOf(text: string): string {
+  const quoted = COMMAND_WATCH_LABEL.exec(text)?.[1];
+  if (quoted === undefined) return "";
+  try {
+    const label: unknown = JSON.parse(quoted);
+    return typeof label === "string" ? label : "";
+  } catch {
+    return "";
+  }
+}
 
 function firstLine(text: string): string {
   const line =
@@ -370,9 +395,16 @@ export function agentMessageFoldOf(message: {
       const state = match[1]!;
       states.set(state, (states.get(state) ?? 0) + 1);
     }
+    // A stall notice (`renderStallWake`): the task still runs, so it is no result.
+    const stalled = [...states.keys()].every((state) => DELEGATION_STALL_STATES.has(state));
     return {
       kind: "delegation-result",
-      label: count === 1 ? "Result from a delegated task" : `Results from ${count} delegated tasks`,
+      label:
+        states.size > 0 && stalled
+          ? "A delegated task needs attention"
+          : count === 1
+            ? "Result from a delegated task"
+            : `Results from ${count} delegated tasks`,
       summary: [...states].map(([state, n]) => `${n} ${state}`).join(", "),
     };
   }
@@ -388,6 +420,20 @@ export function agentMessageFoldOf(message: {
       kind: "goal-continuation",
       label: "Goal continuation",
       summary: "Ryco started the next turn toward the goal",
+    };
+  }
+  if (id.startsWith(COMMAND_WATCH_WAKE_MESSAGE_PREFIX)) {
+    const label = commandWatchLabelOf(message.text);
+    // Only Ryco's own lines say whether the watch stopped: the body's first line (a closing
+    // message) or the line after the fence (the last wake). Output sits inside the fence.
+    const lines = message.text.split("\n");
+    const stopped = [lines[1], lines.at(-1)].some((line) =>
+      line?.startsWith("Ryco stopped watching"),
+    );
+    return {
+      kind: "command-watch",
+      label: "Command watch",
+      summary: stopped && label ? `${label}: stopped` : label,
     };
   }
   if (id.startsWith(PULL_REQUEST_WATCH_WAKE_MESSAGE_PREFIX)) {

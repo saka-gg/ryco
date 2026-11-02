@@ -317,6 +317,10 @@ describe("ryco_html_render", () => {
     expect(property(render, "height")).toContain(
       "Without a contentHeight from a preview at the default width, pass 2000: an unmeasured frame shrinks to the page but never grows past height.",
     );
+    // How a page sends the reader's answer, and that the reader confirms it.
+    expect(render!.description).toContain("call ryco.send(text) from a click or key handler");
+    expect(render!.description).toContain("only once they confirm");
+    expect(preview!.description).not.toContain("ryco.send");
   });
 
   it("reads images from /tmp only where it is the system's own temp directory", () => {

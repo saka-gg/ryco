@@ -13,6 +13,7 @@ import {
   buildReviewFileTree,
   filterFilePaths,
   flattenReviewFileTree,
+  type PullRequestFileStatus,
   type ReviewFileTreeNode,
 } from "@ryco/client-runtime/state/pull-request-review";
 
@@ -21,21 +22,31 @@ import { KeyHint } from "../primitives";
 import { FileStatusLetter, FileThreadCount, StaleViewedDot, ViewedCheckbox } from "./FileMarks";
 import { viewedProgress } from "./pullRequestFiles.logic";
 import type { FilesViewedModel } from "./useFilesViewed";
-import type { PullRequestDiffFiles } from "./usePullRequestDiffFiles";
 
 export interface FileThreadCounts {
   readonly total: number;
   readonly unresolved: number;
 }
 
+/** The files a tree lists: paths in reading order, their tree, and each file's status. */
+export interface FileTreeFiles {
+  readonly paths: ReadonlyArray<string>;
+  readonly tree: ReadonlyArray<ReviewFileTreeNode>;
+  readonly byPath: ReadonlyMap<string, { readonly status: PullRequestFileStatus }>;
+}
+
+const NO_THREAD_COUNTS: ReadonlyMap<string, FileThreadCounts> = new Map();
+
 const ROW_INDENT_PX = 12;
 const ROW_BASE_PADDING_PX = 8;
 
 /**
- * The Files tab's tree: a filter (T), viewed progress with a 1px line, then
- * compacted directories and files in reading order. One plate glides to the
- * file being read in the diff (scroll-spy); clicking a file scrolls the diff
- * there. Viewed checkboxes sit at the row's end, where the eye finishes.
+ * The Files tab's tree, and the diff panel's: a filter (T on the Files tab),
+ * viewed progress with a 1px line (or the file count where files have no viewed
+ * state), then compacted directories and files in reading order. One plate
+ * glides to the file being read in the diff (scroll-spy); clicking a file
+ * scrolls the diff there. Viewed checkboxes sit at the row's end, where the eye
+ * finishes.
  */
 export const FileTreePane = memo(function FileTreePane({
   files,
@@ -43,15 +54,18 @@ export const FileTreePane = memo(function FileTreePane({
   filterRef,
   ...props
 }: {
-  readonly files: PullRequestDiffFiles;
+  readonly files: FileTreeFiles;
   readonly currentPath: string | null;
-  readonly viewed: FilesViewedModel;
-  readonly threadCounts: ReadonlyMap<string, FileThreadCounts>;
+  /** Viewed state and its checkboxes; without it the tree shows the file count. */
+  readonly viewed?: FilesViewedModel | undefined;
+  readonly threadCounts?: ReadonlyMap<string, FileThreadCounts> | undefined;
   readonly onSelectFile: (path: string) => void;
-  readonly onToggleViewed: (path: string, viewed: boolean) => void;
+  readonly onToggleViewed?: ((path: string, viewed: boolean) => void) | undefined;
   /** Esc in an empty filter closes the tree (overlay); without it the filter just blurs. */
   readonly onDismiss?: (() => void) | undefined;
   readonly filterRef: RefObject<HTMLInputElement | null>;
+  /** The key that focuses the filter, shown in an empty field; null where there is none. */
+  readonly filterKeyHint?: string | null | undefined;
   readonly className?: string | undefined;
 }) {
   const [query, setQuery] = useState("");
@@ -63,7 +77,7 @@ export const FileTreePane = memo(function FileTreePane({
       ),
     [files.tree, query, visiblePaths],
   );
-  const progress = viewedProgress(files.paths, viewed.states);
+  const filterKeyHint = props.filterKeyHint === undefined ? "T" : props.filterKeyHint;
 
   const onFilterKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {
     if (event.key === "Escape") {
@@ -112,12 +126,12 @@ export const FileTreePane = memo(function FileTreePane({
             >
               <XIcon className="size-3" />
             </button>
-          ) : (
-            <KeyHint>T</KeyHint>
-          )}
+          ) : filterKeyHint !== null ? (
+            <KeyHint>{filterKeyHint}</KeyHint>
+          ) : null}
         </label>
-        {viewed.supported ? (
-          <ViewedProgress viewed={progress.viewed} total={progress.total} />
+        {viewed?.supported ? (
+          <ViewedProgress {...viewedProgress(files.paths, viewed.states)} />
         ) : (
           <p className="text-[11px] text-muted-foreground tabular-nums">
             {files.paths.length} {files.paths.length === 1 ? "file" : "files"}
@@ -128,7 +142,7 @@ export const FileTreePane = memo(function FileTreePane({
         rows={rows}
         currentPath={props.currentPath}
         viewed={viewed}
-        threadCounts={props.threadCounts}
+        threadCounts={props.threadCounts ?? NO_THREAD_COUNTS}
         files={files}
         onSelectFile={props.onSelectFile}
         onToggleViewed={props.onToggleViewed}
@@ -165,11 +179,11 @@ function ViewedProgress(props: { readonly viewed: number; readonly total: number
 function TreeRows(props: {
   readonly rows: ReadonlyArray<ReviewFileTreeNode>;
   readonly currentPath: string | null;
-  readonly viewed: FilesViewedModel;
+  readonly viewed: FilesViewedModel | undefined;
   readonly threadCounts: ReadonlyMap<string, FileThreadCounts>;
-  readonly files: PullRequestDiffFiles;
+  readonly files: FileTreeFiles;
   readonly onSelectFile: (path: string) => void;
-  readonly onToggleViewed: (path: string, viewed: boolean) => void;
+  readonly onToggleViewed: ((path: string, viewed: boolean) => void) | undefined;
   readonly emptyLabel: string | null;
 }) {
   const scrollerRef = useRef<HTMLDivElement>(null);
@@ -271,13 +285,14 @@ const TreeFileRow = memo(function TreeFileRow(props: {
   readonly name: string;
   readonly depth: number;
   readonly current: boolean;
-  readonly file: PullRequestDiffFiles["files"][number] | undefined;
-  readonly viewed: FilesViewedModel;
+  readonly file: { readonly status: PullRequestFileStatus } | undefined;
+  readonly viewed: FilesViewedModel | undefined;
   readonly threads: FileThreadCounts | undefined;
   readonly onSelect: (path: string) => void;
-  readonly onToggleViewed: (path: string, viewed: boolean) => void;
+  readonly onToggleViewed: ((path: string, viewed: boolean) => void) | undefined;
 }) {
-  const state = props.viewed.states.get(props.path);
+  const { viewed, onToggleViewed } = props;
+  const state = viewed?.states.get(props.path);
   return (
     <li
       data-tree-path={props.path}
@@ -312,12 +327,12 @@ const TreeFileRow = memo(function TreeFileRow(props: {
         ) : null}
         {state === "stale" ? <StaleViewedDot /> : null}
       </button>
-      {props.viewed.supported ? (
+      {viewed?.supported && onToggleViewed ? (
         <ViewedCheckbox
           path={props.path}
           state={state}
-          disabled={!props.viewed.writable || props.viewed.pendingPaths.has(props.path)}
-          onToggle={(next) => props.onToggleViewed(props.path, next)}
+          disabled={!viewed.writable || viewed.pendingPaths.has(props.path)}
+          onToggle={(next) => onToggleViewed(props.path, next)}
         />
       ) : null}
     </li>

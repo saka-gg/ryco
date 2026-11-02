@@ -39,10 +39,11 @@ const SECTION_RANK: Readonly<Record<InboxSidebarSectionKey, number>> = {
   recent: 3,
   snoozed: 4,
   settled: 5,
+  hidden: 6,
 };
 
 function lifecycleSignature(row: InboxSidebarRow): string {
-  return `${row.pinned}|${row.settled}|${row.snoozedUntil ?? ""}`;
+  return `${row.pinned}|${row.settled}|${row.snoozedUntil ?? ""}|${row.hidden}`;
 }
 
 function sameItems(left: ReadonlyArray<object>, right: ReadonlyArray<object>): boolean {

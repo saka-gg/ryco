@@ -67,9 +67,12 @@ import {
   type EventLogCompactionMode,
   type EventLogCompactionPassOptions,
   type EventLogCompactionShape,
+  type RetentionPassResult,
+  type ThreadUsageReader,
 } from "../Services/EventLogCompaction.ts";
 import { SqliteReadClient } from "../SqliteReadClient.ts";
-import { compactionStateKey, readCompactionState } from "./EventLogCompactionDeferred.ts";
+import { compactionStateKey, readCompactionState } from "./EventLogCompactionState.ts";
+import { runRetentionPass } from "./EventLogRetention.ts";
 
 /**
  * The largest selection window when selection runs on the main connection (no read worker):
@@ -158,404 +161,441 @@ const adaptBatchSize = (
   return size;
 };
 
-export const makeEventLogCompaction = Effect.gen(function* () {
-  const sql = yield* SqlClient.SqlClient;
-  const reader = Option.getOrElse(yield* Effect.serviceOption(SqliteReadClient), () => sql);
-  const selectionOnMain = reader === sql;
-  const passLock = yield* Semaphore.make(1);
+export interface EventLogCompactionDeps {
+  /** Statistics' per-thread reader; retention keeps deleted threads' events without it. */
+  readonly readThreadUsage?: ThreadUsageReader;
+}
 
-  const readState = (mode: EventLogCompactionMode) =>
-    readCompactionState(mode).pipe(Effect.provideService(SqlClient.SqlClient, sql));
+export const makeEventLogCompactionWith = (deps: EventLogCompactionDeps) =>
+  Effect.gen(function* () {
+    const sql = yield* SqlClient.SqlClient;
+    const reader = Option.getOrElse(yield* Effect.serviceOption(SqliteReadClient), () => sql);
+    const selectionOnMain = reader === sql;
+    const passLock = yield* Semaphore.make(1);
 
-  const writeState = (mode: EventLogCompactionMode, state: CompactionState) =>
-    writeLifecycleMarker(compactionStateKey(mode), encodeState(state)).pipe(
-      Effect.provideService(SqlClient.SqlClient, sql),
-    );
+    const readState = (mode: EventLogCompactionMode) =>
+      readCompactionState(mode).pipe(Effect.provideService(SqlClient.SqlClient, sql));
 
-  const firstEventFrom = (from: number, to: number) =>
-    firstEventFromQuery(sql, from, to).pipe(Effect.map((rows) => rows[0]));
+    const writeState = (mode: EventLogCompactionMode, state: CompactionState) =>
+      writeLifecycleMarker(compactionStateKey(mode), encodeState(state)).pipe(
+        Effect.provideService(SqlClient.SqlClient, sql),
+      );
 
-  /** Largest sequence in `[low, head]` whose event is old enough; `low` is known to be settled. */
-  const settledHorizon = (low: number, head: number, cutoffMs: number) =>
-    Effect.gen(function* () {
-      let lo = low;
-      let hi = head;
-      while (lo < hi) {
-        const mid = lo + Math.ceil((hi - lo) / 2);
-        const row = yield* firstEventFrom(mid, hi);
-        if (row === undefined) {
-          hi = mid - 1;
-        } else if (isOlderThan(row.occurredAt, cutoffMs)) {
-          lo = row.sequence;
-        } else {
-          hi = mid - 1;
+    const firstEventFrom = (from: number, to: number) =>
+      firstEventFromQuery(sql, from, to).pipe(Effect.map((rows) => rows[0]));
+
+    /** Largest sequence in `[low, head]` whose event is old enough; `low` is known to be settled. */
+    const settledHorizon = (low: number, head: number, cutoffMs: number) =>
+      Effect.gen(function* () {
+        let lo = low;
+        let hi = head;
+        while (lo < hi) {
+          const mid = lo + Math.ceil((hi - lo) / 2);
+          const row = yield* firstEventFrom(mid, hi);
+          if (row === undefined) {
+            hi = mid - 1;
+          } else if (isOlderThan(row.occurredAt, cutoffMs)) {
+            lo = row.sequence;
+          } else {
+            hi = mid - 1;
+          }
         }
-      }
-      return lo;
-    });
+        return lo;
+      });
 
-  const selectWindow = (from: number, to: number) => compactionWindowQuery(reader, from, to);
+    const selectWindow = (from: number, to: number) => compactionWindowQuery(reader, from, to);
 
-  const runPass: EventLogCompactionShape["runPass"] = (options) =>
-    passLock
-      .withPermits(1)(
-        Effect.gen(function* () {
-          const passStartedMs = performance.now();
-          const nowMs = yield* Clock.currentTimeMillis;
-          const persist = options.persistState !== false;
-          const deleting = options.mode === "delete" && persist;
-          const cutoffMs = nowMs - options.settleAgeMs;
-          let mainThreadMs = 0;
-          const onMain = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
-            Effect.gen(function* () {
-              const startedAt = performance.now();
-              const result = yield* effect;
-              mainThreadMs += performance.now() - startedAt;
-              return result;
+    const runPass: EventLogCompactionShape["runPass"] = (options) =>
+      passLock
+        .withPermits(1)(
+          Effect.gen(function* () {
+            const passStartedMs = performance.now();
+            const nowMs = yield* Clock.currentTimeMillis;
+            const persist = options.persistState !== false;
+            const deleting = options.mode === "delete" && persist;
+            const cutoffMs = nowMs - options.settleAgeMs;
+            let mainThreadMs = 0;
+            const onMain = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
+              Effect.gen(function* () {
+                const startedAt = performance.now();
+                const result = yield* effect;
+                mainThreadMs += performance.now() - startedAt;
+                return result;
+              });
+
+            const initial = persist ? yield* readState(options.mode) : EMPTY_COMPACTION_STATE;
+            const [headRow] = yield* onMain(
+              sql<{
+                readonly head: number | null;
+              }>`SELECT MAX(sequence) AS head FROM orchestration_events`,
+            );
+            const head = Number(headRow?.head ?? 0);
+            // A cursor past the head belongs to another log (a restored or reset file): start over.
+            const storedCursor =
+              initial.compactedThroughSequence > head ? 0 : initial.compactedThroughSequence;
+            const startSequence = options.fromBeginning === true ? 0 : storedCursor;
+            const horizonSequence =
+              options.horizon === "head"
+                ? head
+                : yield* onMain(settledHorizon(startSequence, head, cutoffMs));
+
+            let cursor = startSequence;
+            let receiptCursor = options.fromBeginning === true ? 0 : initial.receiptRowidCursor;
+            let scannedSequences = 0;
+            let selectedEvents = 0;
+            let deletedEvents = 0;
+            let deletedBytes = 0;
+            let skippedBatches = 0;
+            let scannedReceipts = 0;
+            let deletedReceipts = 0;
+            // Cleared only when the receipt walk reaches its end; a pass whose event phase stopped
+            // at a budget never starts it, so its receipts are still waiting too.
+            let receiptBacklog = options.receipts !== null;
+            let maxBatchMs = 0;
+            const batchDurationsMs: Array<number> = [];
+            const receiptBatchDurationsMs: Array<number> = [];
+            let batchSize = Math.max(1, options.deleteBatch.initial);
+            let receiptBatchSize = Math.max(
+              1,
+              Math.min(options.deleteBatch.initial, options.receipts?.deleteBatch ?? 1),
+            );
+            let stopReason: CompactionStopReason = "complete";
+            let sequencesSinceSave = 0;
+            const carry: LatestStateCarry = new Map();
+            const pageSequences = Math.max(
+              1,
+              selectionOnMain && options.exclusive !== true
+                ? Math.min(options.selectionPageSequences, MAIN_CONNECTION_SELECTION_PAGE_SEQUENCES)
+                : options.selectionPageSequences,
+            );
+            const overTime = () => performance.now() - passStartedMs >= options.maxWallMs;
+
+            const stateAt = (input: {
+              readonly completedAt: string | null;
+              readonly lastPass: CompactionState["lastPass"];
+            }): CompactionState => ({
+              version: 1,
+              compactedThroughSequence: cursor,
+              receiptRowidCursor: receiptCursor,
+              lastPassStartedAt: new Date(nowMs).toISOString(),
+              lastPassCompletedAt: input.completedAt ?? initial.lastPassCompletedAt,
+              totals: {
+                scannedSequences: initial.totals.scannedSequences + scannedSequences,
+                deletedEvents: initial.totals.deletedEvents + deletedEvents,
+                deletedBytes: initial.totals.deletedBytes + deletedBytes,
+                deletedReceipts: initial.totals.deletedReceipts + deletedReceipts,
+              },
+              lastPass: input.lastPass ?? initial.lastPass,
             });
-
-          const initial = persist ? yield* readState(options.mode) : EMPTY_COMPACTION_STATE;
-          const [headRow] = yield* onMain(
-            sql<{
-              readonly head: number | null;
-            }>`SELECT MAX(sequence) AS head FROM orchestration_events`,
-          );
-          const head = Number(headRow?.head ?? 0);
-          // A cursor past the head belongs to another log (a restored or reset file): start over.
-          const storedCursor =
-            initial.compactedThroughSequence > head ? 0 : initial.compactedThroughSequence;
-          const startSequence = options.fromBeginning === true ? 0 : storedCursor;
-          const horizonSequence =
-            options.horizon === "head"
-              ? head
-              : yield* onMain(settledHorizon(startSequence, head, cutoffMs));
-
-          let cursor = startSequence;
-          let receiptCursor = options.fromBeginning === true ? 0 : initial.receiptRowidCursor;
-          let scannedSequences = 0;
-          let selectedEvents = 0;
-          let deletedEvents = 0;
-          let deletedBytes = 0;
-          let skippedBatches = 0;
-          let scannedReceipts = 0;
-          let deletedReceipts = 0;
-          // Cleared only when the receipt walk reaches its end; a pass whose event phase stopped
-          // at a budget never starts it, so its receipts are still waiting too.
-          let receiptBacklog = options.receipts !== null;
-          let maxBatchMs = 0;
-          const batchDurationsMs: Array<number> = [];
-          const receiptBatchDurationsMs: Array<number> = [];
-          let batchSize = Math.max(1, options.deleteBatch.initial);
-          let receiptBatchSize = Math.max(
-            1,
-            Math.min(options.deleteBatch.initial, options.receipts?.deleteBatch ?? 1),
-          );
-          let stopReason: CompactionStopReason = "complete";
-          let sequencesSinceSave = 0;
-          const carry: LatestStateCarry = new Map();
-          const pageSequences = Math.max(
-            1,
-            selectionOnMain && options.exclusive !== true
-              ? Math.min(options.selectionPageSequences, MAIN_CONNECTION_SELECTION_PAGE_SEQUENCES)
-              : options.selectionPageSequences,
-          );
-          const overTime = () => performance.now() - passStartedMs >= options.maxWallMs;
-
-          const stateAt = (input: {
-            readonly completedAt: string | null;
-            readonly lastPass: CompactionState["lastPass"];
-          }): CompactionState => ({
-            version: 1,
-            compactedThroughSequence: cursor,
-            receiptRowidCursor: receiptCursor,
-            lastPassStartedAt: new Date(nowMs).toISOString(),
-            lastPassCompletedAt: input.completedAt ?? initial.lastPassCompletedAt,
-            totals: {
-              scannedSequences: initial.totals.scannedSequences + scannedSequences,
-              deletedEvents: initial.totals.deletedEvents + deletedEvents,
-              deletedBytes: initial.totals.deletedBytes + deletedBytes,
-              deletedReceipts: initial.totals.deletedReceipts + deletedReceipts,
-            },
-            lastPass: input.lastPass ?? initial.lastPass,
-          });
-          const saveProgress = Effect.suspend(() =>
-            persist
-              ? writeState(options.mode, stateAt({ completedAt: null, lastPass: null }))
-              : Effect.void,
-          );
-          // Online passes keep the main connection mostly idle: after each delete transaction they
-          // wait at least `interBatchPauseMs` and at least `idleRatio` times as long as it took,
-          // so a slow transaction (a commit-time checkpoint) is followed by a longer pause.
-          const idleRatio = options.idleRatio ?? 0;
-          const pauseAfter = (elapsedMs: number) => {
-            const pauseMs = Math.max(options.interBatchPauseMs, elapsedMs * idleRatio);
-            return pauseMs > 0 ? Effect.sleep(Math.ceil(pauseMs)) : Effect.yieldNow;
-          };
-
-          while (cursor < horizonSequence) {
-            if (scannedSequences >= options.maxScanSequences) {
-              stopReason = "scan-budget";
-              break;
-            }
-            if (overTime()) {
-              stopReason = "time-budget";
-              break;
-            }
-            const windowEnd = Math.min(
-              cursor + pageSequences,
-              horizonSequence,
-              cursor + Math.max(1, options.maxScanSequences - scannedSequences),
+            const saveProgress = Effect.suspend(() =>
+              persist
+                ? writeState(options.mode, stateAt({ completedAt: null, lastPass: null }))
+                : Effect.void,
             );
-            const rows = selectionOnMain
-              ? yield* onMain(selectWindow(cursor, windowEnd))
-              : yield* selectWindow(cursor, windowEnd);
-            const eligible =
-              options.horizon === "settled"
-                ? rows.filter((row) => isOlderThan(row.occurredAt, cutoffMs))
-                : rows;
-            const { deletions } = selectSupersededLatestStateEvents(
-              eligible,
-              carry,
-              options.carryCapacity,
-            );
-            selectedEvents += deletions.length;
-            const windowSequences = windowEnd - cursor;
+            // Online passes keep the main connection mostly idle: after each delete transaction they
+            // wait at least `interBatchPauseMs` and at least `idleRatio` times as long as it took,
+            // so a slow transaction (a commit-time checkpoint) is followed by a longer pause.
+            const idleRatio = options.idleRatio ?? 0;
+            const pauseAfter = (elapsedMs: number) => {
+              const pauseMs = Math.max(options.interBatchPauseMs, elapsedMs * idleRatio);
+              return pauseMs > 0 ? Effect.sleep(Math.ceil(pauseMs)) : Effect.yieldNow;
+            };
 
-            if (!deleting) {
-              for (const deletion of deletions) {
-                deletedEvents += 1;
-                deletedBytes += deletion.bytes;
+            while (cursor < horizonSequence) {
+              if (scannedSequences >= options.maxScanSequences) {
+                stopReason = "scan-budget";
+                break;
               }
-              cursor = windowEnd;
-              scannedSequences += windowSequences;
-            } else if (deletions.length === 0) {
-              cursor = windowEnd;
-              scannedSequences += windowSequences;
-              sequencesSinceSave += windowSequences;
-              if (sequencesSinceSave >= CURSOR_SAVE_INTERVAL_SEQUENCES) {
-                yield* onMain(saveProgress);
-                sequencesSinceSave = 0;
+              if (overTime()) {
+                stopReason = "time-budget";
+                break;
               }
-            } else {
-              let index = 0;
-              while (index < deletions.length) {
-                const batch = deletions.slice(index, index + batchSize);
-                index += batch.length;
-                const isLastBatch = index >= deletions.length;
-                const survivors = [...new Set(batch.map((deletion) => deletion.supersededBy))];
-                // Timed from inside the transaction to its commit: the wait for the connection
-                // while the engine writes is contention, not the cost of this batch.
-                let startedAt = performance.now();
-                const outcome = yield* sql.withTransaction(
-                  Effect.gen(function* () {
-                    startedAt = performance.now();
-                    const [present] = yield* sql<{ readonly count: number }>`
+              const windowEnd = Math.min(
+                cursor + pageSequences,
+                horizonSequence,
+                cursor + Math.max(1, options.maxScanSequences - scannedSequences),
+              );
+              const rows = selectionOnMain
+                ? yield* onMain(selectWindow(cursor, windowEnd))
+                : yield* selectWindow(cursor, windowEnd);
+              const eligible =
+                options.horizon === "settled"
+                  ? rows.filter((row) => isOlderThan(row.occurredAt, cutoffMs))
+                  : rows;
+              const { deletions } = selectSupersededLatestStateEvents(
+                eligible,
+                carry,
+                options.carryCapacity,
+              );
+              selectedEvents += deletions.length;
+              const windowSequences = windowEnd - cursor;
+
+              if (!deleting) {
+                for (const deletion of deletions) {
+                  deletedEvents += 1;
+                  deletedBytes += deletion.bytes;
+                }
+                cursor = windowEnd;
+                scannedSequences += windowSequences;
+              } else if (deletions.length === 0) {
+                cursor = windowEnd;
+                scannedSequences += windowSequences;
+                sequencesSinceSave += windowSequences;
+                if (sequencesSinceSave >= CURSOR_SAVE_INTERVAL_SEQUENCES) {
+                  yield* onMain(saveProgress);
+                  sequencesSinceSave = 0;
+                }
+              } else {
+                let index = 0;
+                while (index < deletions.length) {
+                  const batch = deletions.slice(index, index + batchSize);
+                  index += batch.length;
+                  const isLastBatch = index >= deletions.length;
+                  const survivors = [...new Set(batch.map((deletion) => deletion.supersededBy))];
+                  // Timed from inside the transaction to its commit: the wait for the connection
+                  // while the engine writes is contention, not the cost of this batch.
+                  let startedAt = performance.now();
+                  const outcome = yield* sql.withTransaction(
+                    Effect.gen(function* () {
+                      startedAt = performance.now();
+                      const [present] = yield* sql<{ readonly count: number }>`
                     SELECT count(*) AS count FROM orchestration_events
                     WHERE sequence IN ${sql.in(survivors)}
                   `;
-                    const intact = Number(present?.count ?? 0) === survivors.length;
-                    if (intact) {
-                      const removed = yield* sql<{ readonly sequence: number }>`
+                      const intact = Number(present?.count ?? 0) === survivors.length;
+                      if (intact) {
+                        const removed = yield* sql<{ readonly sequence: number }>`
                       DELETE FROM orchestration_events
                       WHERE sequence IN ${sql.in(batch.map((deletion) => deletion.sequence))}
                         AND event_type = 'thread.activity-appended'
                       RETURNING sequence
                     `;
-                      // Counted here so the state written below includes this batch; a failed
-                      // commit fails the pass, so these numbers are never reported then. Only
-                      // rows this statement removed count, with their own sizes.
-                      const removedSequences = new Set(removed.map((row) => Number(row.sequence)));
-                      deletedEvents += removedSequences.size;
-                      for (const deletion of batch) {
-                        if (removedSequences.has(deletion.sequence)) deletedBytes += deletion.bytes;
+                        // Counted here so the state written below includes this batch; a failed
+                        // commit fails the pass, so these numbers are never reported then. Only
+                        // rows this statement removed count, with their own sizes.
+                        const removedSequences = new Set(
+                          removed.map((row) => Number(row.sequence)),
+                        );
+                        deletedEvents += removedSequences.size;
+                        for (const deletion of batch) {
+                          if (removedSequences.has(deletion.sequence))
+                            deletedBytes += deletion.bytes;
+                        }
                       }
-                    }
-                    if (isLastBatch) {
-                      cursor = windowEnd;
-                      scannedSequences += windowSequences;
-                      sequencesSinceSave = 0;
-                      yield* writeState(
-                        options.mode,
-                        stateAt({ completedAt: null, lastPass: null }),
-                      );
-                    }
-                    return { intact };
-                  }),
-                );
-                const elapsedMs = performance.now() - startedAt;
-                mainThreadMs += elapsedMs;
-                maxBatchMs = Math.max(maxBatchMs, elapsedMs);
-                batchDurationsMs.push(elapsedMs);
-                if (!outcome.intact) {
-                  skippedBatches += 1;
-                  yield* Effect.logWarning(
-                    "event log compaction skipped a batch: an event it keeps was removed meanwhile",
-                    { firstSequence: batch[0]?.sequence, events: batch.length },
-                  );
-                }
-                batchSize = adaptBatchSize(batchSize, elapsedMs, options.deleteBatch);
-                yield* pauseAfter(elapsedMs);
-              }
-            }
-
-            if (options.onProgress !== undefined) {
-              yield* options.onProgress({
-                horizonSequence,
-                compactedThroughSequence: cursor,
-                scannedSequences,
-                deletedEvents,
-                deletedBytes,
-              });
-            }
-            if (selectionOnMain || !deleting) yield* Effect.yieldNow;
-          }
-
-          if (options.receipts !== null && stopReason === "complete") {
-            const receipts = options.receipts;
-            const receiptCutoffMs = nowMs - receipts.cutoffMs;
-            const pageRows = Math.max(1, receipts.pageRows);
-            // A cursor past the largest rowid belongs to another table (a restored file, or a
-            // VACUUM that renumbered the rows): start over, as the event cursor does.
-            const [largest] = yield* onMain(
-              sql<{
-                readonly maxRowid: number | null;
-              }>`SELECT MAX(rowid) AS "maxRowid" FROM orchestration_command_receipts`,
-            );
-            if (receiptCursor > Number(largest?.maxRowid ?? 0)) receiptCursor = 0;
-            while (scannedReceipts < receipts.maxScanRows) {
-              if (overTime()) {
-                stopReason = "time-budget";
-                break;
-              }
-              const readPage = receiptPageQuery(reader, receiptCursor, pageRows);
-              const page = selectionOnMain ? yield* onMain(readPage) : yield* readPage;
-              if (page.length === 0) {
-                receiptBacklog = false;
-                break;
-              }
-              let reachedRecent = false;
-              let lastSettledRowid = receiptCursor;
-              const prunable: Array<number> = [];
-              for (const row of page) {
-                // Only a receipt that may be pruned once old holds the cursor back. Every other
-                // one is kept forever whatever its `accepted_at`, which is the command's own time
-                // (imports and recovered history carry old or odd ones), not the clock's.
-                const candidate = isPrunableReceiptCommandId(row.commandId);
-                if (candidate && !isOlderThan(row.acceptedAt, receiptCutoffMs)) {
-                  reachedRecent = true;
-                  break;
-                }
-                lastSettledRowid = Number(row.rowid);
-                scannedReceipts += 1;
-                if (candidate) prunable.push(Number(row.rowid));
-              }
-              if (!deleting) {
-                deletedReceipts += prunable.length;
-                receiptCursor = lastSettledRowid;
-              } else if (prunable.length === 0) {
-                // Nothing to delete: no transaction. The cursor is an existing rowid, so it
-                // never points past the largest; the pass end (or the next delete) saves it.
-                receiptCursor = lastSettledRowid;
-              } else {
-                let index = 0;
-                while (index < prunable.length) {
-                  const batch = prunable.slice(index, index + receiptBatchSize);
-                  index += batch.length;
-                  const isLastBatch = index >= prunable.length;
-                  let startedAt = performance.now();
-                  yield* sql.withTransaction(
-                    Effect.gen(function* () {
-                      startedAt = performance.now();
-                      yield* sql`DELETE FROM orchestration_command_receipts WHERE rowid IN ${sql.in(batch)}`;
-                      const [changed] = yield* sql<{
-                        readonly changes: number;
-                      }>`SELECT changes() AS changes`;
-                      deletedReceipts += Number(changed?.changes ?? 0);
                       if (isLastBatch) {
-                        // Rowids are reused once the largest is deleted; never point past it.
-                        const [max] = yield* sql<{ readonly maxRowid: number | null }>`
-                        SELECT MAX(rowid) AS "maxRowid" FROM orchestration_command_receipts
-                      `;
-                        receiptCursor = Math.min(lastSettledRowid, Number(max?.maxRowid ?? 0));
+                        cursor = windowEnd;
+                        scannedSequences += windowSequences;
+                        sequencesSinceSave = 0;
                         yield* writeState(
                           options.mode,
                           stateAt({ completedAt: null, lastPass: null }),
                         );
                       }
+                      return { intact };
                     }),
                   );
                   const elapsedMs = performance.now() - startedAt;
                   mainThreadMs += elapsedMs;
                   maxBatchMs = Math.max(maxBatchMs, elapsedMs);
-                  receiptBatchDurationsMs.push(elapsedMs);
-                  receiptBatchSize = adaptBatchSize(receiptBatchSize, elapsedMs, {
-                    ...options.deleteBatch,
-                    max: Math.max(1, receipts.deleteBatch),
-                  });
+                  batchDurationsMs.push(elapsedMs);
+                  if (!outcome.intact) {
+                    skippedBatches += 1;
+                    yield* Effect.logWarning(
+                      "event log compaction skipped a batch: an event it keeps was removed meanwhile",
+                      { firstSequence: batch[0]?.sequence, events: batch.length },
+                    );
+                  }
+                  batchSize = adaptBatchSize(batchSize, elapsedMs, options.deleteBatch);
                   yield* pauseAfter(elapsedMs);
                 }
               }
-              if (reachedRecent || page.length < pageRows) {
-                receiptBacklog = false;
-                break;
+
+              if (options.onProgress !== undefined) {
+                yield* options.onProgress({
+                  horizonSequence,
+                  compactedThroughSequence: cursor,
+                  scannedSequences,
+                  deletedEvents,
+                  deletedBytes,
+                });
+              }
+              if (selectionOnMain || !deleting) yield* Effect.yieldNow;
+            }
+
+            if (options.receipts !== null && stopReason === "complete") {
+              const receipts = options.receipts;
+              const receiptCutoffMs = nowMs - receipts.cutoffMs;
+              const pageRows = Math.max(1, receipts.pageRows);
+              // A cursor past the largest rowid belongs to another table (a restored file, or a
+              // VACUUM that renumbered the rows): start over, as the event cursor does.
+              const [largest] = yield* onMain(
+                sql<{
+                  readonly maxRowid: number | null;
+                }>`SELECT MAX(rowid) AS "maxRowid" FROM orchestration_command_receipts`,
+              );
+              if (receiptCursor > Number(largest?.maxRowid ?? 0)) receiptCursor = 0;
+              while (scannedReceipts < receipts.maxScanRows) {
+                if (overTime()) {
+                  stopReason = "time-budget";
+                  break;
+                }
+                const readPage = receiptPageQuery(reader, receiptCursor, pageRows);
+                const page = selectionOnMain ? yield* onMain(readPage) : yield* readPage;
+                if (page.length === 0) {
+                  receiptBacklog = false;
+                  break;
+                }
+                let reachedRecent = false;
+                let lastSettledRowid = receiptCursor;
+                const prunable: Array<number> = [];
+                for (const row of page) {
+                  // Only a receipt that may be pruned once old holds the cursor back. Every other
+                  // one is kept forever whatever its `accepted_at`, which is the command's own time
+                  // (imports and recovered history carry old or odd ones), not the clock's.
+                  const candidate = isPrunableReceiptCommandId(row.commandId);
+                  if (candidate && !isOlderThan(row.acceptedAt, receiptCutoffMs)) {
+                    reachedRecent = true;
+                    break;
+                  }
+                  lastSettledRowid = Number(row.rowid);
+                  scannedReceipts += 1;
+                  if (candidate) prunable.push(Number(row.rowid));
+                }
+                if (!deleting) {
+                  deletedReceipts += prunable.length;
+                  receiptCursor = lastSettledRowid;
+                } else if (prunable.length === 0) {
+                  // Nothing to delete: no transaction. The cursor is an existing rowid, so it
+                  // never points past the largest; the pass end (or the next delete) saves it.
+                  receiptCursor = lastSettledRowid;
+                } else {
+                  let index = 0;
+                  while (index < prunable.length) {
+                    const batch = prunable.slice(index, index + receiptBatchSize);
+                    index += batch.length;
+                    const isLastBatch = index >= prunable.length;
+                    let startedAt = performance.now();
+                    yield* sql.withTransaction(
+                      Effect.gen(function* () {
+                        startedAt = performance.now();
+                        yield* sql`DELETE FROM orchestration_command_receipts WHERE rowid IN ${sql.in(batch)}`;
+                        const [changed] = yield* sql<{
+                          readonly changes: number;
+                        }>`SELECT changes() AS changes`;
+                        deletedReceipts += Number(changed?.changes ?? 0);
+                        if (isLastBatch) {
+                          // Rowids are reused once the largest is deleted; never point past it.
+                          const [max] = yield* sql<{ readonly maxRowid: number | null }>`
+                        SELECT MAX(rowid) AS "maxRowid" FROM orchestration_command_receipts
+                      `;
+                          receiptCursor = Math.min(lastSettledRowid, Number(max?.maxRowid ?? 0));
+                          yield* writeState(
+                            options.mode,
+                            stateAt({ completedAt: null, lastPass: null }),
+                          );
+                        }
+                      }),
+                    );
+                    const elapsedMs = performance.now() - startedAt;
+                    mainThreadMs += elapsedMs;
+                    maxBatchMs = Math.max(maxBatchMs, elapsedMs);
+                    receiptBatchDurationsMs.push(elapsedMs);
+                    receiptBatchSize = adaptBatchSize(receiptBatchSize, elapsedMs, {
+                      ...options.deleteBatch,
+                      max: Math.max(1, receipts.deleteBatch),
+                    });
+                    yield* pauseAfter(elapsedMs);
+                  }
+                }
+                if (reachedRecent || page.length < pageRows) {
+                  receiptBacklog = false;
+                  break;
+                }
               }
             }
-          }
 
-          const durationMs = performance.now() - passStartedMs;
-          const backlogSequences = Math.max(0, horizonSequence - cursor);
-          if (persist) {
-            yield* onMain(
-              writeState(
-                options.mode,
-                stateAt({
-                  completedAt: new Date(yield* Clock.currentTimeMillis).toISOString(),
-                  lastPass: {
-                    scannedSequences,
-                    deletedEvents,
-                    deletedBytes,
-                    deletedReceipts,
-                    maxBatchMs: Math.round(maxBatchMs * 100) / 100,
-                    mainThreadMs: Math.round(mainThreadMs),
-                    durationMs: Math.round(durationMs),
-                    horizon: horizonSequence,
-                    backlogSequences,
-                    receiptBacklog,
-                  },
-                }),
-              ),
-            );
-          }
+            // Retention after compaction caught up: it stays at or below the compaction cursor.
+            let retention: RetentionPassResult | null = null;
+            if (
+              options.retention != null &&
+              stopReason === "complete" &&
+              (deleting || options.mode === "dry-run")
+            ) {
+              retention = yield* runRetentionPass({
+                options: options.retention,
+                mode: deleting ? "delete" : "dry-run",
+                nowMs,
+                compactedThroughSequence: cursor,
+                overTime,
+                readThreadUsage: deps.readThreadUsage,
+                afterBatch: (elapsedMs) =>
+                  Effect.suspend(() => {
+                    mainThreadMs += elapsedMs;
+                    maxBatchMs = Math.max(maxBatchMs, elapsedMs);
+                    return pauseAfter(elapsedMs);
+                  }),
+              }).pipe(Effect.provideService(SqlClient.SqlClient, sql));
+            }
 
-          return {
-            mode: options.mode,
-            horizon: options.horizon,
-            horizonSequence,
-            headSequence: head,
-            startSequence,
-            compactedThroughSequence: cursor,
-            backlogSequences,
-            scannedSequences,
-            selectedEvents,
-            deletedEvents,
-            deletedBytes,
-            skippedBatches,
-            scannedReceipts,
-            deletedReceipts,
-            receiptBacklog,
-            durationMs,
-            mainThreadMs,
-            maxBatchMs,
-            batchDurationsMs,
-            receiptBatchDurationsMs,
-            stopReason,
-          } satisfies CompactionPassResult;
-        }),
-      )
-      .pipe(Effect.mapError(toPersistenceSqlError("EventLogCompaction.runPass")));
+            const durationMs = performance.now() - passStartedMs;
+            const backlogSequences = Math.max(0, horizonSequence - cursor);
+            if (persist) {
+              yield* onMain(
+                writeState(
+                  options.mode,
+                  stateAt({
+                    completedAt: new Date(yield* Clock.currentTimeMillis).toISOString(),
+                    lastPass: {
+                      scannedSequences,
+                      deletedEvents,
+                      deletedBytes,
+                      deletedReceipts,
+                      maxBatchMs: Math.round(maxBatchMs * 100) / 100,
+                      mainThreadMs: Math.round(mainThreadMs),
+                      durationMs: Math.round(durationMs),
+                      horizon: horizonSequence,
+                      backlogSequences,
+                      receiptBacklog,
+                      ...(retention === null ? {} : { retentionBacklog: retention.backlog }),
+                    },
+                  }),
+                ),
+              );
+            }
 
-  return { runPass, readState } satisfies EventLogCompactionShape;
-});
+            return {
+              mode: options.mode,
+              horizon: options.horizon,
+              horizonSequence,
+              headSequence: head,
+              startSequence,
+              compactedThroughSequence: cursor,
+              backlogSequences,
+              scannedSequences,
+              selectedEvents,
+              deletedEvents,
+              deletedBytes,
+              skippedBatches,
+              scannedReceipts,
+              deletedReceipts,
+              receiptBacklog,
+              retention,
+              durationMs,
+              mainThreadMs,
+              maxBatchMs,
+              batchDurationsMs,
+              receiptBatchDurationsMs,
+              stopReason,
+            } satisfies CompactionPassResult;
+          }),
+        )
+        .pipe(Effect.mapError(toPersistenceSqlError("EventLogCompaction.runPass")));
+
+    return { runPass, readState } satisfies EventLogCompactionShape;
+  });
+
+/** The pass without a usage reader: retention never removes a deleted thread's events. */
+export const makeEventLogCompaction = makeEventLogCompactionWith({});
 
 /**
  * The pass built at once (tests, scripts). The server provides `EventLogCompactionDeferredLive`,

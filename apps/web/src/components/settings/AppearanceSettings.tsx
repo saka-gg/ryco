@@ -22,8 +22,10 @@ import {
 
 import { usePresentationTier } from "../../hooks/usePresentationTier";
 import { COLOR_MODE_OPTIONS, useTheme } from "../../hooks/useTheme";
+import { Select, SelectItem, SelectPopup, SelectTrigger, SelectValue } from "../ui/select";
 import { cn } from "../../lib/utils";
 import {
+  APPEARANCE_CONTRAST_OPTIONS,
   APPEARANCE_PREFERENCES_STORAGE_KEY,
   FONT_FAMILY_MONO_OPTIONS,
   FONT_FAMILY_SANS_OPTIONS,
@@ -44,12 +46,15 @@ import {
   duplicateTheme,
   findTheme,
   generateCustomThemeId,
+  getActiveThemePair,
   getAllThemes,
+  themeEditSlot,
+  themePickSlot,
+  type ThemePickSlot,
   isBuiltInThemeId,
-  setActiveThemeId,
   updateCustomTheme,
 } from "../../themes/registry";
-import { copyThemeToClipboard, downloadTheme, importThemeFromFile } from "../../themes/transport";
+import { copyThemeToClipboard, downloadTheme, importThemesFromFiles } from "../../themes/transport";
 import { isWindowTranslucencySupported } from "../../themes/windowTranslucency";
 import type { ThemeDefinition } from "../../themes/types";
 import {
@@ -74,6 +79,7 @@ import {
   SettingsSection,
 } from "./settingsLayout";
 import { ChatWidthSetting } from "./ChatWidthSetting";
+import { OpenChatTabsSetting } from "./OpenChatTabsSetting";
 import { DiffAppearanceSettings } from "./DiffAppearanceSettings";
 import { WindowTranslucencySettings } from "./WindowTranslucencySettings";
 import { ThemePreview } from "./ThemePreview";
@@ -101,7 +107,19 @@ export function AppearanceSettingsPanel({
   const isHub = surface === "hub";
   // The frozen phone tier keeps the comfortable chat width, so it does not offer the setting.
   const isPhoneTier = usePresentationTier() === "phone";
-  const { theme, setTheme, resolvedTheme, activeThemeId, setActiveTheme } = useTheme();
+  const {
+    theme,
+    setTheme,
+    resolvedTheme,
+    activeThemeId,
+    setActiveTheme,
+    darkThemeId,
+    setDarkTheme,
+    shownThemeId,
+    pickTheme,
+    setThemeInSlot,
+  } = useTheme();
+  const darkPaletteId = darkThemeId ?? activeThemeId;
   const [editingId, setEditingId] = useState<string | null>(null);
   const [draft, setDraft] = useState<ThemeDefinition | null>(null);
   const [pendingDeleteId, setPendingDeleteId] = useState<string | null>(null);
@@ -165,35 +183,43 @@ export function AppearanceSettingsPanel({
     setAppearancePreferencesState(getAppearancePreferences());
   }, []);
 
+  // The pick the theme being edited stands in: its copy and its live preview replace that pick
+  // only, so editing dark mode's palette never replaces light mode's.
+  const [editSlot, setEditSlot] = useState<ThemePickSlot>("both");
+  const beginEditing = useCallback(
+    (theme: ThemeDefinition, slot: ThemePickSlot) => {
+      setThemeInSlot(slot, theme.id);
+      setEditSlot(slot);
+      setEditingId(theme.id);
+      setDraft(theme);
+    },
+    [setThemeInSlot],
+  );
+
   const startEditing = useCallback(
     (target: ThemeDefinition) => {
+      const slot = themeEditSlot(target.id, { resolvedTheme, activeThemeId, darkThemeId });
       if (isBuiltInThemeId(target.id)) {
         const copy = duplicateTheme(target);
         addCustomTheme(copy);
-        setActiveThemeId(copy.id);
-        setActiveTheme(copy.id);
-        setEditingId(copy.id);
-        setDraft(copy);
+        beginEditing(copy, slot);
         refresh();
         return;
       }
-      setActiveTheme(target.id);
-      setEditingId(target.id);
-      setDraft(target);
+      beginEditing(target, slot);
     },
-    [refresh, setActiveTheme],
+    [beginEditing, refresh, resolvedTheme, activeThemeId, darkThemeId],
   );
 
   const handleDuplicate = useCallback(
     (target: ThemeDefinition) => {
       const copy = duplicateTheme(target);
       addCustomTheme(copy);
-      setActiveTheme(copy.id);
-      setEditingId(copy.id);
-      setDraft(copy);
+      // A copy of a pick takes that pick's place; a copy of another theme, the mode on screen's.
+      beginEditing(copy, themeEditSlot(target.id, { resolvedTheme, activeThemeId, darkThemeId }));
       refresh();
     },
-    [refresh, setActiveTheme],
+    [beginEditing, refresh, resolvedTheme, activeThemeId, darkThemeId],
   );
 
   const handleAddNew = useCallback(() => {
@@ -203,27 +229,30 @@ export function AppearanceSettingsPanel({
       builtIn: false,
     };
     addCustomTheme(fresh);
-    setActiveTheme(fresh.id);
-    setEditingId(fresh.id);
-    setDraft(fresh);
+    beginEditing(fresh, themePickSlot({ resolvedTheme, activeThemeId, darkThemeId }));
     refresh();
-  }, [refresh, setActiveTheme]);
+  }, [beginEditing, refresh, resolvedTheme, activeThemeId, darkThemeId]);
 
   const handleSave = useCallback(() => {
     if (!editing) return;
     updateCustomTheme(editing.source.id, editing.draft);
     if (editing.source.id !== editing.draft.id) {
-      setActiveTheme(editing.draft.id);
+      setThemeInSlot(editSlot, editing.draft.id);
     } else {
-      applyThemeToDocument(editing.draft);
+      const pair = getActiveThemePair();
+      applyThemeToDocument(pair.light, pair.dark);
     }
     setEditingId(null);
     setDraft(null);
     refresh();
-  }, [editing, refresh, setActiveTheme]);
+  }, [editSlot, editing, refresh, setThemeInSlot]);
 
   const handleCancel = useCallback(() => {
-    if (editing) applyThemeToDocument(editing.source);
+    if (editing) {
+      // Back to what the document showed: the active theme, and dark mode's own palette.
+      const pair = getActiveThemePair();
+      applyThemeToDocument(pair.light, pair.dark);
+    }
     setEditingId(null);
     setDraft(null);
   }, [editing]);
@@ -274,20 +303,34 @@ export function AppearanceSettingsPanel({
 
   const handleImportChange = useCallback(
     async (event: ChangeEvent<HTMLInputElement>) => {
-      const file = event.target.files?.[0];
+      const files = Array.from(event.target.files ?? []);
       event.target.value = "";
-      if (!file) return;
+      if (files.length === 0) return;
       try {
-        const result = await importThemeFromFile(file, { collision: "rename", activate: true });
-        setActiveTheme(result.theme.id);
+        // The pick for the mode on screen applies it (`themePickSlot`).
+        const { imported, notices } = await importThemesFromFiles(files, { collision: "rename" });
+        const last = imported.at(-1);
+        if (!last) return;
+        pickTheme(last.theme.id);
         refresh();
+        const renamed = imported.filter((result) => result.action === "renamed");
         toastManager.add({
           type: "success",
-          title: `Imported "${result.theme.name}"`,
-          description:
-            result.action === "renamed"
-              ? `An existing theme used the same id, so it was imported as "${result.theme.id}".`
-              : "Theme imported and activated.",
+          title:
+            imported.length === 1
+              ? `Imported "${last.theme.name}"`
+              : `Imported ${imported.length} themes`,
+          description: [
+            imported.length === 1
+              ? "Theme imported and activated."
+              : `"${last.theme.name}" is active.`,
+            ...(renamed.length > 0
+              ? [
+                  `An existing theme used the same id, so ${renamed.map((result) => `"${result.theme.id}"`).join(", ")} got a new one.`,
+                ]
+              : []),
+            ...notices,
+          ].join(" "),
         });
       } catch (error) {
         toastManager.add({
@@ -297,7 +340,7 @@ export function AppearanceSettingsPanel({
         });
       }
     },
-    [refresh, setActiveTheme],
+    [pickTheme, refresh],
   );
 
   return (
@@ -321,12 +364,12 @@ export function AppearanceSettingsPanel({
               <div className="relative overflow-hidden rounded-[min(var(--radius-lg),0.625rem)]">
                 <ThemePreview
                   compact
-                  theme={findTheme(activeThemeId)}
+                  theme={findTheme(option.value === "dark" ? darkPaletteId : activeThemeId)}
                   variant={option.value === "dark" ? "dark" : "light"}
                 />
                 {option.value === "system" && (
                   <div className="absolute inset-0 [clip-path:inset(0_0_0_50%)]">
-                    <ThemePreview compact theme={findTheme(activeThemeId)} variant="dark" />
+                    <ThemePreview compact theme={findTheme(darkPaletteId)} variant="dark" />
                   </div>
                 )}
               </div>
@@ -346,7 +389,8 @@ export function AppearanceSettingsPanel({
             <input
               ref={fileInputRef}
               type="file"
-              accept=".json,application/json"
+              multiple
+              accept=".json,.jsonc,application/json"
               className="sr-only"
               onChange={handleImportChange}
               aria-hidden
@@ -368,7 +412,7 @@ export function AppearanceSettingsPanel({
               variant="ghost"
               onClick={handleImportClick}
               aria-label="Import a theme from file"
-              title="Import a theme from disk"
+              title="Import a Ryco or VS Code theme from disk"
               className="text-muted-foreground"
             >
               <UploadIcon className="size-3.5" />
@@ -379,7 +423,8 @@ export function AppearanceSettingsPanel({
       >
         <div role="radiogroup" aria-label="Theme palette" className="grid gap-3 sm:grid-cols-2">
           {themes.map((entry) => {
-            const isActive = entry.id === activeThemeId;
+            // The grid picks for the mode on screen, so a choice always shows.
+            const isActive = entry.id === shownThemeId;
             const isEditing = editingId === entry.id;
             return (
               <Fragment key={entry.id}>
@@ -387,7 +432,7 @@ export function AppearanceSettingsPanel({
                   role="radio"
                   aria-checked={isActive}
                   tabIndex={isActive ? 0 : -1}
-                  onClick={() => setActiveTheme(entry.id)}
+                  onClick={() => pickTheme(entry.id)}
                   onKeyDown={(event) => {
                     const direction =
                       event.key === "ArrowRight" || event.key === "ArrowDown"
@@ -399,7 +444,7 @@ export function AppearanceSettingsPanel({
                       event.preventDefault();
                       const index = themes.findIndex((theme) => theme.id === entry.id);
                       const next = (index + direction + themes.length) % themes.length;
-                      setActiveTheme(themes[next]!.id);
+                      pickTheme(themes[next]!.id);
                       const radios =
                         event.currentTarget.parentElement?.querySelectorAll<HTMLElement>(
                           '[role="radio"]',
@@ -408,7 +453,7 @@ export function AppearanceSettingsPanel({
                     }
                     if (event.key === " " || event.key === "Enter") {
                       event.preventDefault();
-                      setActiveTheme(entry.id);
+                      pickTheme(entry.id);
                     }
                   }}
                   className={cn(
@@ -501,6 +546,7 @@ export function AppearanceSettingsPanel({
                       onSave={handleSave}
                       onCancel={handleCancel}
                       resolvedVariant={resolvedTheme}
+                      slot={editSlot}
                     />
                   </SettingsCard>
                 ) : null}
@@ -508,6 +554,37 @@ export function AppearanceSettingsPanel({
             );
           })}
         </div>
+        {/* The frozen phone tier keeps one palette (AGENTS.md: the web phone tier is not extended). */}
+        {!isPhoneTier && (
+          <SettingsRow
+            title="Dark mode palette"
+            description="Use another theme's dark colors in dark mode, or the palette above for both."
+            control={
+              <Select
+                value={darkThemeId ?? SAME_AS_LIGHT}
+                onValueChange={(value) =>
+                  setDarkTheme(value === SAME_AS_LIGHT || value === null ? null : value)
+                }
+              >
+                <SelectTrigger size="sm" className="w-full sm:w-48" aria-label="Dark mode palette">
+                  <SelectValue>
+                    {darkThemeId === null ? "Same as light" : findTheme(darkThemeId).name}
+                  </SelectValue>
+                </SelectTrigger>
+                <SelectPopup align="end" alignItemWithTrigger={false}>
+                  <SelectItem hideIndicator value={SAME_AS_LIGHT}>
+                    Same as light
+                  </SelectItem>
+                  {themes.map((entry) => (
+                    <SelectItem hideIndicator key={entry.id} value={entry.id}>
+                      {entry.name}
+                    </SelectItem>
+                  ))}
+                </SelectPopup>
+              </Select>
+            }
+          />
+        )}
       </SettingsSection>
 
       {!isHub && <DiffAppearanceSettings />}
@@ -596,9 +673,41 @@ export function AppearanceSettingsPanel({
             onChange={(value) => handleAppearancePreferenceChange("fontSizeBase", value)}
           />
         </SettingsRow>
+        <SettingsRow
+          title="Contrast"
+          description="Make text and borders stronger, or softer, than the theme draws them."
+          resetAction={
+            hasAppearancePreferenceOverride("contrast") ? (
+              <SettingResetButton
+                label="contrast"
+                onClick={() => handleAppearancePreferenceReset("contrast")}
+              />
+            ) : null
+          }
+          control={
+            <SliderPreferenceValue
+              options={APPEARANCE_CONTRAST_OPTIONS}
+              value={appearancePreferences.contrast}
+              preview={
+                <span className="flex h-8 min-w-12 items-center justify-center gap-1.5 rounded-md border border-border bg-background px-2 shadow-xs/5">
+                  <span className="font-semibold text-foreground">Aa</span>
+                  <span className="text-muted-foreground">Aa</span>
+                </span>
+              }
+            />
+          }
+        >
+          <AppearancePreferenceSlider
+            ariaLabel="Contrast"
+            options={APPEARANCE_CONTRAST_OPTIONS}
+            value={appearancePreferences.contrast}
+            onChange={(value) => handleAppearancePreferenceChange("contrast", value)}
+          />
+        </SettingsRow>
       </SettingsSection>
       <SettingsSection title="Interface">
         {isHub || isPhoneTier ? null : <ChatWidthSetting />}
+        {isHub || isPhoneTier ? null : <OpenChatTabsSetting />}
         <SettingsRow
           title="Primary color"
           description="Theme palettes control buttons by default; enable a custom color to pin one app accent."
@@ -660,6 +769,9 @@ export function AppearanceSettingsPanel({
     </SettingsPageContainer>
   );
 }
+
+/** The Dark mode palette choice that keeps the active theme for both modes. */
+const SAME_AS_LIGHT = "__same-as-light";
 
 const APPEARANCE_TILE_CLASS =
   "min-w-0 rounded-[min(var(--radius-xl),0.875rem)] border bg-card text-left outline-none transition-[background-color,border-color,box-shadow] duration-(--app-motion-duration-chip) focus-visible:ring-2 focus-visible:ring-ring";

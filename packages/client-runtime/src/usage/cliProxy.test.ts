@@ -8,7 +8,9 @@ import { describe, expect, it } from "vite-plus/test";
 import {
   cliProxyAccountDisplayName,
   cliProxyAccountHealth,
+  cliProxyAccountPublicName,
   cliProxyCurrentAccount,
+  cliProxyQuotaNote,
   cliProxyWindowLabel,
   findCliProxyRouteForInstance,
   formatCliProxyPlan,
@@ -271,5 +273,54 @@ describe("cliProxyAccountDisplayName", () => {
       value: "claude",
       sensitive: false,
     });
+  });
+});
+
+describe("cliProxyAccountPublicName", () => {
+  it("never shows an email or an email-like name, numbering those accounts instead", () => {
+    expect(cliProxyAccountPublicName(account({ authIndex: "a", email: "a@x.com" }), 1)).toBe(
+      "Account 1",
+    );
+    expect(
+      cliProxyAccountPublicName(
+        account({ authIndex: "b", name: "claude-bob@example.com.json" }),
+        2,
+      ),
+    ).toBe("Account 2");
+    // Not an address by the display rule, but still email-like.
+    expect(cliProxyAccountPublicName(account({ authIndex: "c", label: "carol@work" }), 3)).toBe(
+      "Account 3",
+    );
+    expect(cliProxyAccountPublicName(account({ authIndex: "d", label: "Team seat" }), 4)).toBe(
+      "Team seat",
+    );
+    expect(cliProxyAccountPublicName(account({ authIndex: "e" }), 5)).toBe("e.json");
+  });
+});
+
+describe("cliProxyQuotaNote", () => {
+  it("says why an account shows no windows", () => {
+    const window = { id: "five-hour", usedPercent: 10, windowDurationMins: 300 };
+    expect(
+      cliProxyQuotaNote(account({ authIndex: "a", quota: { status: "ok", windows: [window] } })),
+    ).toBeNull();
+    expect(cliProxyQuotaNote(account({ authIndex: "b" }))).toBe("No usage windows reported.");
+    expect(
+      cliProxyQuotaNote(
+        account({
+          authIndex: "c",
+          provider: "kimi",
+          quota: { status: "unsupported", windows: [] },
+        }),
+      ),
+    ).toBe("Kimi has no quota API Ryco reads; request counts only.");
+    expect(
+      cliProxyQuotaNote(account({ authIndex: "d", quota: { status: "skipped", windows: [] } })),
+    ).toBe("Disabled on the hub, so its quota is not read.");
+    expect(
+      cliProxyQuotaNote(
+        account({ authIndex: "e", quota: { status: "failed", windows: [], message: "HTTP 401" } }),
+      ),
+    ).toBe("HTTP 401");
   });
 });

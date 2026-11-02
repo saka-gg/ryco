@@ -9,6 +9,7 @@ import { useDeviceName } from "../../../deviceName";
 import { isElectron } from "../../../env";
 import { usePrimaryEnvironmentId } from "../../../environments/primary";
 import { useSavedEnvironmentRegistryStore } from "../../../environments/runtime";
+import { isSavedEnvironmentSwitchedOff } from "@ryco/client-runtime/connection";
 import { useSettings, useUpdateSettings } from "../../../hooks/useSettings";
 import { cn } from "../../../lib/utils";
 import { useDesktopWorkspaceState } from "../../../platform/desktopWorkspace";
@@ -193,7 +194,8 @@ function useKnownDevices(): ReadonlyArray<{
     // The desktop's own Hub alias is this device again; never list it twice.
     const localAlias = isElectron ? desktop.localEnvironmentId : null;
     for (const record of Object.values(saved)) {
-      if (record.environmentId !== localAlias)
+      // Left out while switched off, as in the sidebar.
+      if (record.environmentId !== localAlias && !isSavedEnvironmentSwitchedOff(record))
         devices.push({ environmentId: record.environmentId, label: record.label });
     }
     for (const machine of desktop.machines) {

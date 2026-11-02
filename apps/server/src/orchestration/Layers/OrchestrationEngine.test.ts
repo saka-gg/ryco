@@ -67,6 +67,7 @@ const MockProjectAvatarStoreLive = Layer.succeed(ProjectAvatarStore, {
 });
 import { OrchestrationProjectionSnapshotQueryLive } from "./ProjectionSnapshotQuery.ts";
 import * as ThreadBackgroundLiveness from "../ThreadBackgroundLiveness.ts";
+import * as ThreadSessionModelSelections from "../ThreadSessionModelSelections.ts";
 import { OrchestrationEngineService } from "../Services/OrchestrationEngine.ts";
 import {
   OrchestrationProjectionPipeline,
@@ -99,6 +100,8 @@ async function createOrchestrationSystem(databasePath?: string) {
   ).pipe(
     // The same registry the engine reads (layers are memoized), so tests can feed it.
     Layer.provideMerge(ThreadBackgroundLiveness.layer),
+    // What each session runs, as the provider command reactor would record it.
+    Layer.provideMerge(ThreadSessionModelSelections.layer),
     Layer.provide(MockProjectAvatarStoreLive),
     Layer.provide(OrchestrationEventStoreLive),
     Layer.provide(OrchestrationCommandReceiptRepositoryLive),
@@ -117,9 +120,19 @@ async function createOrchestrationSystem(databasePath?: string) {
     liveness: await runtime.runPromise(
       Effect.service(ThreadBackgroundLiveness.ThreadBackgroundLivenessService),
     ),
+    sessionModelSelections: await runtime.runPromise(
+      Effect.service(ThreadSessionModelSelections.ThreadSessionModelSelectionsService),
+    ),
     sql: await runtime.runPromise(Effect.service(SqlClient.SqlClient)),
     readModel: () => runtime.runPromise(snapshotQuery.getSnapshot()),
     readShell: () => runtime.runPromise(snapshotQuery.getShellSnapshot()),
+    readWindow: (threadId: ThreadId, activities: number) =>
+      runtime.runPromise(
+        snapshotQuery.getThreadWindow!({
+          threadId,
+          limits: { messages: 10, proposedPlans: 10, activities, checkpoints: 10 },
+        }),
+      ),
     // Before any dispatch after a (re)start, this is exactly the engine's bootstrap model.
     commandReadModel: () => runtime.runPromise(snapshotQuery.getCommandReadModel()),
     run: <A, E>(effect: Effect.Effect<A, E>) => runtime.runPromise(effect),
@@ -903,6 +916,166 @@ describe("OrchestrationEngine", () => {
       }
     },
   );
+
+  it("answers an optional question after its turn with one new message and refuses a second answer", async () => {
+    const system = await createOrchestrationSystem();
+    const projectId = ProjectId.make("late-answer-project");
+    const threadId = ThreadId.make("late-answer-thread");
+    const runtimeSessionId = RuntimeSessionId.make("late-answer-runtime");
+    const createdAt = now();
+    const modelSelection = { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5-codex" };
+    const question = (id: string, nonBlocking: boolean) => ({
+      type: "thread.activity.append" as const,
+      commandId: CommandId.make(`open:${id}`),
+      threadId,
+      activity: {
+        id: EventId.make(`asked:${id}`),
+        kind: "user-input.requested",
+        tone: "info" as const,
+        summary: "Optional question",
+        turnId: asTurnId("ended-turn"),
+        payload: {
+          requestId: id,
+          runtimeSessionId,
+          ...(nonBlocking ? { nonBlocking: true, itemId: "item-1" } : {}),
+          questions: [{ id: "0", header: "Audience", question: "Audience?", options: [] }],
+        },
+        createdAt,
+      },
+      createdAt,
+    });
+    const answer = (id: string, attempt: string) => ({
+      type: "thread.turn.start" as const,
+      commandId: CommandId.make(`answer:${attempt}`),
+      threadId,
+      message: {
+        messageId: asMessageId(`answer-message:${attempt}`),
+        role: "user" as const,
+        text: "Reply to your optional questions (item item-1, turn ended-turn):\n\nAudience?\nAnswer: Engineers",
+        attachments: [],
+      },
+      modelSelection,
+      runtimeMode: "full-access" as const,
+      interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+      optionalAnswer: {
+        requestId: ApprovalRequestId.make(id),
+        userInputIdentity: { requestEventId: EventId.make(`asked:${id}`), runtimeSessionId },
+        answers: { "0": "Engineers" },
+      },
+      createdAt,
+    });
+    try {
+      await system.run(
+        system.engine.dispatch({
+          type: "project.create",
+          commandId: CommandId.make("late-answer-project-create"),
+          projectId,
+          title: "Late answer",
+          workspaceRoot: process.cwd(),
+          defaultModelSelection: modelSelection,
+          createdAt,
+        }),
+      );
+      await system.run(
+        system.engine.dispatch({
+          type: "thread.create",
+          commandId: CommandId.make("late-answer-thread-create"),
+          threadId,
+          projectId,
+          title: "Late answer",
+          modelSelection,
+          interactionMode: DEFAULT_PROVIDER_INTERACTION_MODE,
+          runtimeMode: "full-access",
+          branch: null,
+          worktreePath: null,
+          createdAt,
+        }),
+      );
+      await system.run(
+        system.engine.dispatch({
+          type: "thread.session.set",
+          commandId: CommandId.make("late-answer-session"),
+          threadId,
+          session: {
+            threadId,
+            status: "ready",
+            providerName: "codex",
+            runtimeSessionId,
+            runtimeMode: "full-access",
+            activeTurnId: null,
+            lastError: null,
+            updatedAt: createdAt,
+          },
+          createdAt,
+        }),
+      );
+      await system.run(system.engine.dispatch(question("optional:late", true)));
+      await system.run(system.engine.dispatch(question("blocking", false)));
+      for (const index of [1, 2, 3]) {
+        await system.run(
+          system.engine.dispatch({
+            type: "thread.activity.append",
+            commandId: CommandId.make(`later-work:${index}`),
+            threadId,
+            activity: {
+              id: EventId.make(`later-work:${index}`),
+              kind: "tool.completed",
+              tone: "tool",
+              summary: "Ran a command",
+              turnId: asTurnId("ended-turn"),
+              payload: {},
+              // Provider-ordered, after the questions' orchestration sequence.
+              sequence: 1_000 + index,
+              createdAt,
+            },
+            createdAt,
+          }),
+        );
+      }
+      // However much the agent did since, every window brings the open optional question along.
+      const windowIds = (await system.readWindow(threadId, 2)).thread.activities.map(
+        (activity) => activity.id,
+      );
+      expect(windowIds).toEqual(["asked:optional:late", "later-work:2", "later-work:3"]);
+
+      await system.run(system.engine.dispatch(answer("optional:late", "first")));
+      const thread = (await system.readModel()).threads.find((entry) => entry.id === threadId)!;
+      expect(thread.messages.map((message) => message.id)).toEqual(["answer-message:first"]);
+      expect(
+        thread.activities.find(
+          (activity) =>
+            activity.kind === "user-input.resolved" &&
+            (activity.payload as { requestId?: string }).requestId === "optional:late",
+        )?.payload,
+      ).toMatchObject({ answers: { "0": "Engineers" }, runtimeSessionId });
+      const rows = await system.run(
+        system.sql<{ requestId: string; isPending: number; responseState: string | null }>`
+          SELECT request_id AS "requestId", is_pending AS "isPending", response_state AS "responseState"
+          FROM projection_thread_user_input_requests WHERE thread_id = ${threadId}
+          ORDER BY request_id`,
+      );
+      expect(rows).toEqual([
+        { requestId: "blocking", isPending: 1, responseState: null },
+        { requestId: "optional:late", isPending: 0, responseState: "settled" },
+      ]);
+
+      // Another client's answer, or the same one sent twice, finds it answered: nothing is sent.
+      await expect(
+        system.run(system.engine.dispatch(answer("optional:late", "second"))),
+      ).rejects.toThrow("already answered");
+      await expect(
+        system.run(system.engine.dispatch(answer("blocking", "blocking"))),
+      ).rejects.toThrow("Only an optional question");
+      const after = (await system.readModel()).threads.find((entry) => entry.id === threadId)!;
+      expect(after.messages.map((message) => message.id)).toEqual(["answer-message:first"]);
+      // Answered, it no longer rides along.
+      expect(
+        (await system.readWindow(threadId, 1)).thread.activities.map((activity) => activity.id),
+      ).toEqual(["later-work:3"]);
+    } finally {
+      await system.dispose();
+    }
+  });
 
   it("bootstraps command handling from persisted projections without reading the full snapshot", async () => {
     let nextSequence = 8;
@@ -3343,6 +3516,50 @@ describe("model switches past native background work", () => {
           turn("other-model", { instanceId: claude, model: "fixture-2" }, true),
         ),
       );
+    } finally {
+      await system.dispose();
+    }
+  });
+
+  it("keeps asking when a pick stored on the thread differs from what the Claude session runs", async () => {
+    const system = await seedDelegationParent(undefined, { driver: "claudeAgent" });
+    try {
+      const claude = ProviderInstanceId.make("claudeAgent");
+      // The provider command reactor recorded what the live session applied.
+      system.sessionModelSelections.set(DELEGATION_PARENT_ID, {
+        instanceId: claude,
+        model: "fixture",
+      });
+      startBackgroundTask(system, "task-shell");
+      // A client stored the pick when it was made: the thread already names the new model,
+      // and the session takes it at the next turn.
+      const picked = { instanceId: claude, model: "fixture-2" };
+      await system.run(
+        system.engine.dispatch({
+          type: "thread.meta.update",
+          commandId: CommandId.make("composer-pick"),
+          threadId: DELEGATION_PARENT_ID,
+          modelSelection: picked,
+        }),
+      );
+      const send = handoffTo({
+        commandId: CommandId.make("composer-send:picked"),
+        message: {
+          messageId: MessageId.make("picked-message"),
+          role: "user",
+          text: "Keep going",
+          attachments: [],
+        },
+        modelSelection: picked,
+      });
+      // That turn still restarts the session, which would end its background work.
+      const refused = await system.run(Effect.flip(system.engine.dispatch(send)));
+      expect(refused).toBeInstanceOf(OrchestrationModelSwitchBlockedError);
+      expect(refused).toMatchObject({ taskIds: ["task-shell"] });
+
+      // Once the session runs the stored pick, the same turn restarts nothing.
+      system.sessionModelSelections.set(DELEGATION_PARENT_ID, picked);
+      await system.run(system.engine.dispatch(send));
     } finally {
       await system.dispose();
     }

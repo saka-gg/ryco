@@ -383,6 +383,7 @@ describe("Home environment provenance (wave 4)", () => {
           trust: _trust,
           threadSettlementSupported: _threadSettlementSupported,
           threadSnoozeSupported: _threadSnoozeSupported,
+          threadTriageSupported: _threadTriageSupported,
           mutationReady: _mutationReady,
           shellCurrent: _shellCurrent,
           ...rest
@@ -415,7 +416,11 @@ describe("Home environment thread capabilities", () => {
   const reported = (
     entries: ReadonlyArray<readonly [EnvironmentId, ReportedThreadCapabilities]>,
   ): ReadonlyMap<EnvironmentId, ReportedThreadCapabilities> => new Map(entries);
-  const supported: ReportedThreadCapabilities = { threadSettlement: true, threadSnooze: true };
+  const supported: ReportedThreadCapabilities = {
+    threadSettlement: true,
+    threadSnooze: true,
+    threadTriage: true,
+  };
 
   it("uses a node's own capabilities without granting mutation readiness", () => {
     const environmentId = "hosted" as EnvironmentId;
@@ -473,7 +478,7 @@ describe("Home environment thread capabilities", () => {
         hosted: [],
         cachedHubNodes,
         reportedThreadCapabilities: reported([
-          [environmentId, { threadSettlement: false, threadSnooze: false }],
+          [environmentId, { threadSettlement: false, threadSnooze: false, threadTriage: false }],
         ]),
       })[0],
     ).toMatchObject({ threadSettlementSupported: false, threadSnoozeSupported: false });

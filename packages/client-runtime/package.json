@@ -10,13 +10,25 @@
       "types": "./src/state/comparison/index.ts",
       "import": "./src/state/comparison/index.ts"
     },
+    "./commandPalette/search": {
+      "types": "./src/commandPalette/search.ts",
+      "import": "./src/commandPalette/search.ts"
+    },
     "./scoped": {
       "types": "./src/scoped.ts",
       "import": "./src/scoped.ts"
     },
+    "./promptLinks": {
+      "types": "./src/promptLinks.ts",
+      "import": "./src/promptLinks.ts"
+    },
     "./knownEnvironment": {
       "types": "./src/knownEnvironment.ts",
       "import": "./src/knownEnvironment.ts"
+    },
+    "./secretRequests": {
+      "types": "./src/secretRequests.ts",
+      "import": "./src/secretRequests.ts"
     },
     "./sourceControlDiscoveryState": {
       "types": "./src/sourceControlDiscoveryState.ts",
@@ -69,6 +81,10 @@
     "./connection/hubLinkedRoutes": {
       "types": "./src/connection/hubLinkedRoutes.ts",
       "import": "./src/connection/hubLinkedRoutes.ts"
+    },
+    "./connection/savedEnvironmentSwitch": {
+      "types": "./src/connection/savedEnvironmentSwitch.ts",
+      "import": "./src/connection/savedEnvironmentSwitch.ts"
     },
     "./authorization": {
       "types": "./src/authorization/index.ts",
@@ -174,6 +190,10 @@
       "types": "./src/state/providerSignIn/index.ts",
       "import": "./src/state/providerSignIn/index.ts"
     },
+    "./state/sessionImport": {
+      "types": "./src/state/sessionImport/index.ts",
+      "import": "./src/state/sessionImport/index.ts"
+    },
     "./updates": {
       "types": "./src/updates/index.ts",
       "import": "./src/updates/index.ts"
@@ -181,6 +201,10 @@
     "./updates/view": {
       "types": "./src/updates/view.ts",
       "import": "./src/updates/view.ts"
+    },
+    "./updates/clientInteraction": {
+      "types": "./src/updates/clientInteraction.ts",
+      "import": "./src/updates/clientInteraction.ts"
     },
     "./state/orchestration": {
       "types": "./src/state/orchestration/index.ts",
@@ -190,9 +214,17 @@
       "types": "./src/state/threads/index.ts",
       "import": "./src/state/threads/index.ts"
     },
+    "./state/threads/carriedFork": {
+      "types": "./src/state/threads/carriedFork.ts",
+      "import": "./src/state/threads/carriedFork.ts"
+    },
     "./state/threads/interThreadMessage": {
       "types": "./src/state/threads/interThreadMessage.ts",
       "import": "./src/state/threads/interThreadMessage.ts"
+    },
+    "./state/threads/openChatTabs": {
+      "types": "./src/state/threads/openChatTabs.ts",
+      "import": "./src/state/threads/openChatTabs.ts"
     },
     "./state/threads/runningThreads": {
       "types": "./src/state/threads/runningThreads.ts",
@@ -241,6 +273,14 @@
     "./state/settings": {
       "types": "./src/state/settings/index.ts",
       "import": "./src/state/settings/index.ts"
+    },
+    "./state/settings/projectPreferenceEditing": {
+      "types": "./src/state/settings/projectPreferenceEditing.ts",
+      "import": "./src/state/settings/projectPreferenceEditing.ts"
+    },
+    "./state/settings/nodeSettingsFanOut": {
+      "types": "./src/state/settings/nodeSettingsFanOut.ts",
+      "import": "./src/state/settings/nodeSettingsFanOut.ts"
     },
     "./state/terminal": {
       "types": "./src/state/terminal/index.ts",

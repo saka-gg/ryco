@@ -22,6 +22,7 @@ import { RestartContinuationLive } from "./orchestration/Layers/RestartContinuat
 import { CompletionReturnDeliveryLive } from "./agentControl/Layers/CompletionReturnDelivery.ts";
 import { ServerWakeFenceLive } from "./orchestration/Layers/ServerWakeFence.ts";
 import { PullRequestWatchServiceLive } from "./sourceControl/PullRequestWatchService.ts";
+import { CommandWatchServiceLive } from "./commandWatch/CommandWatchService.ts";
 import { ServerQueueDrainLive } from "./orchestration/Layers/ServerQueueDrain.ts";
 import { AgentControlWorkspacesLive } from "./agentControl/workspaceLifecycle.ts";
 import { AutomationCentreLive } from "./agentControl/Layers/AutomationCentre.ts";
@@ -80,6 +81,7 @@ import { OpenLive } from "./open.ts";
 import { layerConfig as SqlitePersistenceLayerLive } from "./persistence/Layers/Sqlite.ts";
 import { DatabaseMaintenanceLive } from "./persistence/Layers/DatabaseMaintenance.ts";
 import { EventLogCompactionDeferredLive } from "./persistence/Layers/EventLogCompactionDeferred.ts";
+import { EventLogCompactionUsageReaderLive } from "./statistics/statisticsRows.ts";
 import { DoctorSuggestionLogLive } from "./persistence/doctorSuggestionLog.ts";
 import { DatabaseOwnerLeaseLive } from "./persistence/databaseOwnerLock.ts";
 import { prefetchProcessIdentity } from "./processLock/processIdentity.ts";
@@ -118,6 +120,7 @@ import { ThreadGitMetadataReactorLive } from "./orchestration/Layers/ThreadGitMe
 import { ThreadDeletionReactorLive } from "./orchestration/Layers/ThreadDeletionReactor.ts";
 import { ThreadPurgeReactorLive } from "./orchestration/Layers/ThreadPurgeReactor.ts";
 import { ProviderRegistryLive } from "./provider/Layers/ProviderRegistry.ts";
+import { ProviderInstallLockLive } from "./provider/Layers/ProviderInstallLock.ts";
 import { ServerSettingsLive } from "./serverSettings.ts";
 import { ProjectFaviconResolverLive } from "./project/Layers/ProjectFaviconResolver.ts";
 import { RepositoryIdentityResolverLive } from "./project/Layers/RepositoryIdentityResolver.ts";
@@ -144,7 +147,11 @@ import { AdvertisedEndpointRegistryLive } from "./remote/AdvertisedEndpointRegis
 import { SleepInhibitorLive } from "./service/sleepInhibitor.ts";
 import { EventLoopMonitorLive } from "./observability/EventLoopMonitor.ts";
 import { HeapSnapshotLive } from "./observability/HeapSnapshotSignal.ts";
-import { makeAgentWorkHoldLayer } from "./agentWorkHold.ts";
+import { makeAgentWorkHoldLayer, ProviderBusyMarkerLive } from "./agentWorkHold.ts";
+import { AgentWorkActivityLive } from "./orchestration/AgentWorkActivity.ts";
+import { ClientInteractionLive } from "./updates/ClientInteraction.ts";
+import { DesktopAppUpdatePolicyLive } from "./updates/desktopAppUpdatePolicy.ts";
+import { UnattendedUpdatesLauncherLive } from "./updates/unattendedUpdatesLauncher.ts";
 import { StartupStallMonitorLive, trackStartupLayer } from "./startupStallMonitor.ts";
 import {
   authBearerBootstrapRouteLayer,
@@ -199,6 +206,7 @@ import { OrchestrationLayerLive } from "./orchestration/runtimeLayer.ts";
 import { OrchestrationCommandApplicationLive } from "./orchestration/Layers/OrchestrationCommandApplication.ts";
 import { UsageLimitRecoveryLive } from "./orchestration/Layers/UsageLimitRecovery.ts";
 import { GoalContinuationLive } from "./orchestration/Layers/GoalContinuation.ts";
+import { SettleWhenIdleLive } from "./orchestration/Layers/SettleWhenIdle.ts";
 import {
   clearPersistedServerRuntimeState,
   makePersistedServerRuntimeState,
@@ -383,6 +391,9 @@ const ProviderSessionDirectoryLayerLive = ProviderSessionDirectoryLive.pipe(
 const ProviderLayerLive = ProviderServiceLive.pipe(
   Layer.provide(ProviderAdapterRegistryLive),
   Layer.provideMerge(ProviderSessionDirectoryLayerLive),
+  // The host-wide provider install lock: ProviderService waits for it before it launches a
+  // provider process, and the maintenance runner takes it around an install.
+  Layer.provideMerge(ProviderInstallLockLive),
 );
 
 const PersistenceLayerLive = Layer.empty.pipe(Layer.provideMerge(SqlitePersistenceLayerLive));
@@ -634,6 +645,12 @@ const PullRequestWatchLayerLive = PullRequestWatchServiceLive.pipe(
   Layer.provideMerge(OrchestrationCommandApplicationLive),
 );
 
+/** Command watches, like the pull request watch: their looks start once commands are admitted. */
+const CommandWatchLayerLive = CommandWatchServiceLive.pipe(
+  Layer.provideMerge(ServerRuntimeStartupLive),
+  Layer.provideMerge(OrchestrationCommandApplicationLive),
+);
+
 // The private Agent Control MCP listener joins the runtime services here:
 // it consumes projections, proposals, provider snapshots, and the session
 // registry from the runtime dependencies, and its endpoint never touches
@@ -642,14 +659,17 @@ const RuntimeServicesLive = Layer.mergeAll(
   DailyRecapQueryLive,
   // Background database upkeep (event-log compaction, free-page reclaim). Server only: CLI
   // layers never build it.
-  DatabaseMaintenanceLive,
+  DatabaseMaintenanceLive.pipe(Layer.provide(EventLogCompactionUsageReaderLive)),
   WorktreeNotesServiceLive,
   // Compaction state for the database report (the same memoized layer the upkeep uses), and the
   // once-per-boot log line suggesting `ryco doctor` when the database could shrink a lot.
   Layer.mergeAll(
     StorageServiceLive.pipe(Layer.provide(ProviderProtectedPathsLive)),
     DoctorSuggestionLogLive,
-  ).pipe(Layer.provide(EventLogCompactionDeferredLive)),
+  ).pipe(
+    Layer.provide(EventLogCompactionDeferredLive),
+    Layer.provide(EventLogCompactionUsageReaderLive),
+  ),
   SessionImportLive,
   // Chat forks: recovery of unfinished forks once commands are admitted. The ledger is provided
   // beneath the services (below), so startup's orphan-chat sweep sees the chats forks still need.
@@ -667,6 +687,9 @@ const RuntimeServicesLive = Layer.mergeAll(
   // The node's own release and one-click update: one state for every connection, and the
   // boot report of an update that restarted this process.
   NodeUpdateServiceLive,
+  // When a person last used a client: every connection reports into one, unattended updates
+  // wait on it.
+  ClientInteractionLive,
   // Provider sign-in flows: shared by every owner connection, ended with the server.
   ProviderSignInLive,
   // Node browser tabs: one browser for every connection and frame socket, ended with the
@@ -708,6 +731,8 @@ const RuntimeServicesLive = Layer.mergeAll(
     Layer.provideMerge(ServerRuntimeStartupLive),
     Layer.provideMerge(OrchestrationCommandApplicationLive),
   ),
+  // Settles a thread the person settled while it worked, once the work ends (loads lazily).
+  SettleWhenIdleLive.pipe(Layer.provideMerge(ServerRuntimeStartupLive)),
   // Each thread's queued follow-ups, sent behind the same wake fence (its runtime loads lazily).
   ServerQueueDrainLive.pipe(
     Layer.provideMerge(ServerRuntimeStartupLive),
@@ -733,6 +758,8 @@ const RuntimeServicesLive = Layer.mergeAll(
   // execution share one instance (its read cache and per-chat lock). First in this list, so
   // the startup it waits on is built with every service below (chat folders, the fork ledger).
   Layer.provideMerge(PullRequestWatchLayerLive),
+  // Command watches, beneath the services too: Agent Control's tools and the stop RPC share one.
+  Layer.provideMerge(CommandWatchLayerLive),
   // "No project" chat folders and the chats capability clients read from the server config.
   // Beneath the services so startup can clean up chats that never got a conversation.
   Layer.provideMerge(ChatFoldersLive),
@@ -918,9 +945,18 @@ export const makeServerLayer = Layer.unwrap(
       runtimeStateLayer,
       tailscaleServeLayer,
       SleepInhibitorLive,
-      // Agent work for sleep holds: Desktop main holds the machine awake from it in desktop
-      // mode, and a headless node without --prevent-sleep holds it itself.
-      makeAgentWorkHoldLayer(config),
+      // One agent-work tracker for the process. Sleep holds: Desktop main holds the machine awake
+      // from it in desktop mode, and a headless node without --prevent-sleep holds it itself.
+      // The busy marker: other Ryco processes on this machine wait for these agents before an
+      // unattended update. Unattended updates, loaded only once a node's owner turns them on.
+      Layer.mergeAll(
+        makeAgentWorkHoldLayer(config),
+        ProviderBusyMarkerLive,
+        UnattendedUpdatesLauncherLive,
+      ).pipe(Layer.provide(AgentWorkActivityLive)),
+      // The desktop app downloads and installs its own updates unattended only while this
+      // node's owner has automatic updates on; it hears that from its own backend alone.
+      config.mode === "desktop" ? DesktopAppUpdatePolicyLive : Layer.empty,
     );
 
     // Shutdown runs these stages in reverse build order; the markers log how

@@ -248,6 +248,7 @@ export class EmbeddedComputerBrowser implements BrowserTransport {
    * every per-page listener that touches the tab returns early unless this page is still current.
    */
   private createPage(entry: TabEntry, existingId?: string): { id: string; page: LivePage } {
+    const agentTab = !entry.project;
     const host = new BrowserWindow({
       width: 1280,
       height: 850,
@@ -265,6 +266,11 @@ export class EmbeddedComputerBrowser implements BrowserTransport {
         // (syncThrottling keeps this current).
         backgroundThrottling: this.heldUntil(entry) <= Date.now(),
         focusOnNavigation: false,
+        // The agent's tabs never show a page dialog: a native box would block the page until a
+        // person answers it, and one answered over CDP stays on screen (Electron never closes it).
+        // Electron answers them at once instead (alert closed, confirm and prompt cancelled), and
+        // CDP still reports each one to the agent. The user's own tabs keep their dialogs.
+        ...(agentTab ? { disableDialogs: true } : {}),
       },
     });
     const wc = view.webContents;
@@ -282,7 +288,8 @@ export class EmbeddedComputerBrowser implements BrowserTransport {
     });
     // Registers its ready step (Page, Network, Runtime, Log) after the focus step.
     const automation = new EmbeddedTabAutomation(wc, cdp, {
-      agentTab: !entry.project,
+      agentTab,
+      dialogsDisabled: agentTab,
       presented: () => this.presented(id),
       focused: () => this.focused(id),
       // Every agent path goes through withAgentCdp, so reads keep the sign-in rules too.

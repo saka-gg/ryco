@@ -6,6 +6,7 @@ import { WorkspaceAccessPolicy } from "../workspace/Services/WorkspaceAccessPoli
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it } from "@effect/vitest";
 import { Effect, FileSystem, Layer, Option } from "effect";
+import { ChildProcessSpawner } from "effect/process";
 import { ServerConfig } from "../config.ts";
 import * as Driver from "./GitVcsDriver.ts";
 import { readGitComparison } from "./GitComparison.ts";
@@ -219,6 +220,140 @@ describe("Git comparison", () => {
       yield* f.write("large.txt", "x".repeat(2_000_100));
       yield* f.commit("large");
       yield* read(f.cwd, f.base).pipe(Effect.flip);
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+});
+
+describe("Git comparison with the working files", () => {
+  const readIndexBytes = (cwd: string) =>
+    Effect.flatMap(FileSystem.FileSystem, (fs) => fs.readFile(`${cwd}/.git/index`));
+  const segmentsOf = (patch: string, file: string) =>
+    patch
+      .split(/(?=^diff --git )/m)
+      .filter((segment) => segment.startsWith(`diff --git a/${file} `));
+
+  it.effect(
+    "diffs untracked, force-added and recreated files against the merge-base, never writing the index",
+    () =>
+      Effect.gen(function* () {
+        const f = yield* fixture;
+        yield* f.write(".gitignore", "dist/\n");
+        yield* f.commit("ignore dist");
+        const fs = yield* FileSystem.FileSystem;
+        yield* fs.makeDirectory(`${f.cwd}/dist`);
+        yield* f.write("dist/forced.js", "built\n");
+        yield* f.git(["add", "-f", "dist/forced.js"]);
+        // The index drops a base path the working tree then recreates.
+        yield* f.git(["rm", "--cached", "--quiet", "shared.txt"]);
+        yield* f.write("shared.txt", "recreated\n");
+        yield* f.write("feature.txt", "feature edited\n");
+        yield* f.write("untracked.txt", "untracked\n");
+        const index = yield* readIndexBytes(f.cwd);
+        const status = (yield* f.git(["status", "--porcelain=v1"])).stdout;
+        const read = (mode: "mergeBase" | "direct") =>
+          readGitComparison(f.driver.execute, {
+            cwd: f.cwd,
+            selection: { ref: "main", mode, target: "workingTree" },
+            ignoreWhitespace: false,
+          });
+
+        const branch = yield* read("mergeBase");
+        expect(branch.selection.target).toBe("workingTree");
+        expect(branch.source.target).toBe("workingTree");
+        expect(branch.source.baseOid).toBe(f.base);
+        expect(branch.patch).not.toContain("main.txt");
+        const [shared, ...duplicates] = segmentsOf(branch.patch, "shared.txt");
+        expect(duplicates).toEqual([]);
+        expect(shared).toContain("-base\n+recreated\n");
+        expect(shared).not.toContain("deleted file mode");
+        expect(segmentsOf(branch.patch, "untracked.txt")[0]).toContain("new file mode 100644\n");
+        expect(segmentsOf(branch.patch, "untracked.txt")[0]).toContain("+untracked\n");
+        expect(segmentsOf(branch.patch, "dist/forced.js")[0]).toContain("+built\n");
+        expect(segmentsOf(branch.patch, ".gitignore")[0]).toContain("+dist/\n");
+        // A committed file the working tree edited again shows its working content.
+        expect(segmentsOf(branch.patch, "feature.txt")[0]).toContain("+feature edited\n");
+
+        const direct = yield* read("direct");
+        expect(segmentsOf(direct.patch, "main.txt")[0]).toContain("deleted file mode");
+        expect(direct.source.revision).not.toBe(branch.source.revision);
+
+        const committed = yield* readGitComparison(f.driver.execute, {
+          cwd: f.cwd,
+          selection: { ref: "main", mode: "mergeBase" },
+          ignoreWhitespace: false,
+        });
+        expect(committed.source.target).toBeUndefined();
+        expect(committed.patch).not.toContain("untracked.txt");
+        expect(committed.source.revision).not.toBe(branch.source.revision);
+
+        expect(yield* readIndexBytes(f.cwd)).toEqual(index);
+        expect((yield* f.git(["status", "--porcelain=v1"])).stdout).toBe(status);
+        yield* f.write("untracked.txt", "changed\n");
+        expect((yield* read("mergeBase")).source.revision).not.toBe(branch.source.revision);
+      }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  it.effect("lists each untracked file once when Git refuses the intent-to-add batch", () =>
+    Effect.gen(function* () {
+      const f = yield* fixture;
+      yield* f.write("untracked.txt", "untracked\n");
+      yield* f.write("other.txt", "other\n");
+      // Records the paths, then reports a refusal (a sparse-checkout path, say).
+      const refusing: Driver.GitVcsDriverShape["execute"] = (input) =>
+        input.args.includes("--intent-to-add")
+          ? f.driver.execute(input).pipe(
+              Effect.map((result) => ({
+                ...result,
+                exitCode: ChildProcessSpawner.ExitCode(128),
+              })),
+            )
+          : f.driver.execute(input);
+      const input = {
+        cwd: f.cwd,
+        selection: { ref: "main", mode: "mergeBase", target: "workingTree" },
+        ignoreWhitespace: false,
+      } as const;
+      const fallback = yield* readGitComparison(refusing, input);
+      expect(segmentsOf(fallback.patch, "untracked.txt")).toHaveLength(1);
+      expect(segmentsOf(fallback.patch, "untracked.txt")[0]).toContain("+untracked\n");
+      expect(segmentsOf(fallback.patch, "other.txt")).toHaveLength(1);
+      const batched = yield* readGitComparison(f.driver.execute, input);
+      expect(segmentsOf(batched.patch, "untracked.txt")).toHaveLength(1);
+    }).pipe(Effect.scoped, Effect.provide(testLayer)),
+  );
+
+  it.effect("reads a conflicted checkout and fails when the index moves during the read", () =>
+    Effect.gen(function* () {
+      const f = yield* fixture;
+      yield* f.write("shared.txt", "feature side\n");
+      yield* f.commit("feature edit");
+      yield* f.git(["checkout", "main"]);
+      yield* f.write("shared.txt", "main side\n");
+      yield* f.commit("main edit");
+      yield* f.git(["checkout", "feature"]);
+      yield* f.git(["merge", "main"]).pipe(Effect.ignore);
+      expect((yield* f.git(["ls-files", "--unmerged"])).stdout).not.toBe("");
+      const input = {
+        cwd: f.cwd,
+        selection: { ref: "main", mode: "direct", target: "workingTree" },
+        ignoreWhitespace: false,
+      } as const;
+      const conflicted = yield* readGitComparison(f.driver.execute, input);
+      expect(segmentsOf(conflicted.patch, "shared.txt")[0]).toContain("+<<<<<<< HEAD\n");
+
+      let moved = false;
+      const moving: Driver.GitVcsDriverShape["execute"] = (command) =>
+        Effect.gen(function* () {
+          const result = yield* f.driver.execute(command);
+          if (command.args.includes("--patch") && !moved) {
+            moved = true;
+            yield* f.write("staged.txt", "staged\n").pipe(Effect.orDie);
+            yield* f.git(["add", "staged.txt"]);
+          }
+          return result;
+        });
+      const error = yield* readGitComparison(moving, input).pipe(Effect.flip);
+      expect(error.detail).toContain("changed during comparison");
     }).pipe(Effect.scoped, Effect.provide(testLayer)),
   );
 });

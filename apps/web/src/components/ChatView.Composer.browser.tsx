@@ -31,6 +31,11 @@ import {
   readEnvironmentApi,
 } from "../environmentApi";
 import { useMessageQueueStore } from "../messageQueueStore";
+import { useSavedEnvironmentRegistryStore } from "../environments/runtime";
+import {
+  readPrimaryEnvironmentDescriptor,
+  writePrimaryEnvironmentDescriptor,
+} from "../environments/primary";
 import { selectThreadByRef, useStore } from "../store";
 import { useUiStateStore } from "../uiStateStore";
 import { useTierOverrideStore } from "../tierOverrideStore";
@@ -52,11 +57,14 @@ import {
   PHONE_VIEWPORT,
   PROJECT_DRAFT_KEY,
   PROJECT_ID,
+  REMOTE_ENVIRONMENT_ID,
   THREAD_ID,
   THREAD_KEY,
   THREAD_REF,
   WIDE_FOOTER_VIEWPORT,
   configureContextHandoffProviders,
+  enableLiveThreadModelSelection,
+  pushThreadModelSelection,
   createBrowserComposerImage,
   createDraftOnlySnapshot,
   createPromptStashEntry,
@@ -165,6 +173,56 @@ function pressComposerEnter(
 
 describe("ChatView Composer (full app)", () => {
   setupChatViewBrowserSuite();
+
+  it("offers Switch on, not Reconnect, when a draft's machine is switched off", async () => {
+    // A draft outlives its machine being switched off (its threads go).
+    setDraftThreadWithoutWorktree();
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot: createDraftOnlySnapshot(),
+    });
+    const previousPrimaryDescriptor = readPrimaryEnvironmentDescriptor();
+
+    try {
+      await waitForComposerEditor();
+      // Re-point the primary so the thread's own environment is a saved
+      // machine, and switch that machine off.
+      expect(previousPrimaryDescriptor).not.toBeNull();
+      writePrimaryEnvironmentDescriptor({
+        ...previousPrimaryDescriptor!,
+        environmentId: REMOTE_ENVIRONMENT_ID,
+      });
+      useSavedEnvironmentRegistryStore.getState().upsert({
+        environmentId: LOCAL_ENVIRONMENT_ID,
+        label: "Workstation",
+        httpBaseUrl: "https://workstation.example.test",
+        wsBaseUrl: "wss://workstation.example.test/ws",
+        createdAt: NOW_ISO,
+        lastConnectedAt: NOW_ISO,
+        disabledAt: NOW_ISO,
+      });
+
+      const banner = page.getByRole("alert").filter({ hasText: "Workstation is switched off" });
+      await expect.element(banner).toBeInTheDocument();
+      // The composer says so too.
+      await expect
+        .element(page.getByText("Workstation is switched off").nth(1))
+        .toBeInTheDocument();
+      await expect
+        .element(page.getByRole("button", { name: "Reconnect", exact: true }))
+        .not.toBeInTheDocument();
+      await page.getByRole("button", { name: "Switch on", exact: true }).click();
+      await vi.waitFor(() => {
+        expect(useSavedEnvironmentRegistryStore.getState().byId[LOCAL_ENVIRONMENT_ID]).toEqual(
+          expect.not.objectContaining({ disabledAt: expect.anything() }),
+        );
+      });
+      await expect.element(banner).not.toBeInTheDocument();
+    } finally {
+      writePrimaryEnvironmentDescriptor(previousPrimaryDescriptor);
+      await mounted.cleanup();
+    }
+  });
 
   it("stashes globally, preserves contexts/model state, merges on keyboard restore, and deletes from the picker", async () => {
     const terminalContext = createTerminalContext({
@@ -2000,6 +2058,84 @@ describe("ChatView Composer (full app)", () => {
         { timeout: 8_000, interval: 16 },
       );
       expect(document.querySelector('[data-pending-context-handoff="true"]')).toBeNull();
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("stores a model pick on the chat at once and shows a pick another client stored", async () => {
+    const codex = ProviderInstanceId.make("codex");
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot: createSnapshotForTargetUser({
+        targetMessageId: "msg-user-live-model-pick" as MessageId,
+        targetText: "live model pick thread",
+      }),
+      configureFixture: (nextFixture) => {
+        configureContextHandoffProviders(nextFixture);
+        enableLiveThreadModelSelection(nextFixture);
+      },
+      resolveRpc: (body) => {
+        if (body._tag === ORCHESTRATION_WS_METHODS.dispatchCommand) {
+          return { sequence: fixture.snapshot.snapshotSequence + 1 };
+        }
+        return undefined;
+      },
+    });
+    const storedPicks = () =>
+      wsRequests.filter(
+        (request) =>
+          request._tag === ORCHESTRATION_WS_METHODS.dispatchCommand &&
+          request.type === "thread.meta.update" &&
+          "modelSelection" in request,
+      );
+
+    try {
+      await waitForServerConfigToApply();
+      const picker = await waitForElement(
+        findComposerProviderModelPicker,
+        "Unable to find provider/model picker for a live model pick.",
+      );
+      await picker.click();
+      await page.getByRole("button", { name: "Codex", exact: true }).click();
+      await page.getByText("GPT-5.1", { exact: true }).click();
+
+      // Stored on the thread without a send, so every client of the node shows it.
+      await vi.waitFor(
+        () => {
+          expect(storedPicks()).toHaveLength(1);
+          expect(storedPicks()[0]).toMatchObject({
+            threadId: THREAD_ID,
+            modelSelection: { instanceId: codex, model: "gpt-5.1" },
+          });
+        },
+        { timeout: 8_000, interval: 16 },
+      );
+      expect(
+        wsRequests.some(
+          (request) =>
+            request._tag === ORCHESTRATION_WS_METHODS.dispatchCommand &&
+            request.type === "thread.turn.start",
+        ),
+      ).toBe(false);
+      pushThreadModelSelection(THREAD_ID, { instanceId: codex, model: "gpt-5.1" });
+
+      // The phone picks GPT-5 again: this composer follows without writing anything back.
+      pushThreadModelSelection(THREAD_ID, { instanceId: codex, model: "gpt-5" });
+      await vi.waitFor(
+        () => {
+          expect(
+            useComposerDraftStore.getState().getComposerDraft(THREAD_REF)?.modelSelectionByProvider[
+              codex
+            ],
+          ).toMatchObject({ model: "gpt-5" });
+          const trigger = findComposerProviderModelPicker();
+          expect(trigger?.textContent).toContain("GPT-5");
+          expect(trigger?.textContent).not.toContain("GPT-5.1");
+        },
+        { timeout: 8_000, interval: 16 },
+      );
+      expect(storedPicks()).toHaveLength(1);
     } finally {
       await mounted.cleanup();
     }

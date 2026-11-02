@@ -18,6 +18,7 @@ import {
   type ReactNode,
 } from "react";
 
+import { visibleSecondTicker } from "~/lib/perf/ticker";
 import { cn } from "~/lib/utils";
 import { subagentAvatarColor } from "../sidebar/SubagentAvatar";
 import {
@@ -234,9 +235,9 @@ function StackedMonogram({
 }
 
 /**
- * Elapsed time for the current activation. Live agents self-tick via DOM
- * writes (zero React commits per tick); settled agents freeze at the run's
- * actual duration.
+ * Elapsed time for the current activation. Live agents tick on the shared
+ * second clock via DOM writes (zero React commits per tick); settled agents
+ * freeze at the run's actual duration.
  */
 export function AgentElapsed({ agent }: { agent: RuntimeSubagent }) {
   const textRef = useRef<HTMLSpanElement>(null);
@@ -247,14 +248,11 @@ export function AgentElapsed({ agent }: { agent: RuntimeSubagent }) {
     if (!live || !startedAt) {
       return;
     }
-    const update = () => {
+    return visibleSecondTicker.subscribe((nowMs) => {
       if (textRef.current) {
-        textRef.current.textContent = elapsedBetween(startedAt, null);
+        textRef.current.textContent = elapsedBetween(startedAt, null, nowMs);
       }
-    };
-    update();
-    const id = setInterval(update, 1000);
-    return () => clearInterval(id);
+    });
   }, [live, startedAt]);
 
   if (!live) {

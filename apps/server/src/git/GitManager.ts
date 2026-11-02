@@ -57,7 +57,10 @@ import type { TextGenerationPolicy } from "../textGeneration/TextGenerationPolic
 import type { ChangeRequestTemplates } from "../sourceControl/changeRequestTemplates.ts";
 import { ProjectSetupScriptRunner } from "../project/Services/ProjectSetupScriptRunner.ts";
 import { ProjectionSnapshotQuery } from "../orchestration/Services/ProjectionSnapshotQuery.ts";
-import { resolveProjectPreferences } from "../project/projectPreferences.ts";
+import {
+  resolveProjectPreferences,
+  resolveProjectPreferenceValue,
+} from "../project/projectPreferences.ts";
 import { extractBranchNameFromRemoteRef } from "./remoteRefs.ts";
 import { ServerSettingsService } from "../serverSettings.ts";
 import type { GitManagerServiceError } from "@ryco/contracts";
@@ -91,6 +94,7 @@ import {
 } from "../sourceControl/repositoryListCache.ts";
 import { inBackgroundProcessLane } from "../processGovernor.ts";
 import { makeCheckoutGenerations } from "./checkoutGenerations.ts";
+import { RestartSensitiveWork } from "../updates/restartSensitiveWork.ts";
 import { readCheckoutHead } from "../vcs/gitCheckoutHead.ts";
 import type { ChangeRequest, PullRequestState, SourceControlProviderError } from "@ryco/contracts";
 
@@ -597,8 +601,11 @@ interface GitWriting {
    * first use and at most once per action, so only generated text pays for its reads.
    */
   readonly policy: Effect.Effect<TextGenerationPolicy | undefined>;
-  /** Generated pull request descriptions follow the repository's template. */
-  readonly pullRequestTemplates: boolean;
+  /**
+   * Generated pull request descriptions follow the repository's template: the checkout's project
+   * may override the node setting. Resolved when the pull request step runs.
+   */
+  readonly pullRequestTemplates: Effect.Effect<boolean>;
 }
 
 /**
@@ -631,6 +638,13 @@ interface CommitAndBranchSuggestion {
 
 /** Which changes a commit records: selected files, every change, or exactly the index. */
 type CommitSelection = Pick<GitRunStackedActionInput, "filePaths" | "stagedOnly">;
+
+/** The user's own pull request text and draft choice, from `prTitle` / `prBody` / `prDraft`. */
+interface PullRequestStepOptions {
+  readonly title?: string;
+  readonly body?: string;
+  readonly draft?: true;
+}
 
 function isCommitAction(
   action: GitStackedAction,
@@ -792,6 +806,8 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* (
 
   const sourceControlProvider = (cwd: string) => sourceControlProviders.resolve({ cwd });
   const serverSettingsService = yield* ServerSettingsService;
+  // A pull request checkout (its fetches, its worktree) cut off by a restart is left half made.
+  const restartWork = yield* RestartSensitiveWork;
 
   const createProgressEmitter = (
     input: { cwd: string; action: GitStackedAction },
@@ -1131,6 +1147,9 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* (
 
     return {
       hasUpstream: details.hasUpstream,
+      upstreamRef: details.upstreamRef,
+      // Read with the counts, so with nothing ahead it is a commit of the upstream.
+      ...(details.headCommit ? { headCommit: details.headCommit } : {}),
       aheadCount: details.aheadCount,
       behindCount: details.behindCount,
       aheadOfDefaultCount: details.aheadOfDefaultCount,
@@ -1899,6 +1918,7 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* (
     fallbackBranch: string | null,
     linkedIssueNumbers: ReadonlyArray<number> | undefined,
     emit: GitActionProgressEmitter,
+    options: PullRequestStepOptions,
   ) {
     const provider = yield* sourceControlProvider(cwd);
     const terms = getChangeRequestTerminologyForKind(provider.kind);
@@ -1935,45 +1955,59 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* (
     }
 
     const baseBranch = yield* resolveBaseBranch(cwd, branch, details.upstreamRef, headContext);
-    yield* emit({
-      kind: "phase_started",
-      phase: "pr",
-      label: `Generating ${terms.shortLabel} content...`,
-    });
-    // A fork's head remote must not supply the target repository's base.
-    const remoteName = headContext.isCrossRepository ? "origin" : headContext.remoteName;
-    // The writing policy (cached when the commit step resolved it) and the base branch's
-    // template overlap the range read.
-    const [rangeContext, policy] = yield* Effect.all(
-      [
-        gitCore.readRangeContext(cwd, baseBranch, { remoteName }),
-        writing.pullRequestTemplates
-          ? withChangeRequestTemplates(
-              (templates) =>
-                templates.withTemplate(writing.policy, {
-                  cwd,
-                  host: provider,
-                  baseBranch,
-                  remoteName,
-                }),
-              writing.policy,
-            )
-          : writing.policy,
-      ],
-      { concurrency: 2 },
-    );
+    // Text the user wrote wins; only what is missing is generated, and nothing when both are given.
+    const content =
+      options.title !== undefined && options.body !== undefined
+        ? { title: options.title, body: options.body }
+        : yield* Effect.gen(function* () {
+            yield* emit({
+              kind: "phase_started",
+              phase: "pr",
+              label: `Generating ${terms.shortLabel} content...`,
+            });
+            // A fork's head remote must not supply the target repository's base.
+            const remoteName = headContext.isCrossRepository ? "origin" : headContext.remoteName;
+            // The writing policy (cached when the commit step resolved it) and the base branch's
+            // template overlap the range read.
+            const [rangeContext, policy] = yield* Effect.all(
+              [
+                gitCore.readRangeContext(cwd, baseBranch, { remoteName }),
+                writing.pullRequestTemplates.pipe(
+                  Effect.flatMap((followTemplate) =>
+                    followTemplate
+                      ? withChangeRequestTemplates(
+                          (templates) =>
+                            templates.withTemplate(writing.policy, {
+                              cwd,
+                              host: provider,
+                              baseBranch,
+                              remoteName,
+                            }),
+                          writing.policy,
+                        )
+                      : writing.policy,
+                  ),
+                ),
+              ],
+              { concurrency: 2 },
+            );
 
-    const generated = yield* textGeneration.generatePrContent({
-      cwd,
-      baseBranch,
-      headBranch: headContext.headBranch,
-      commitSummary: limitContext(rangeContext.commitSummary, 20_000),
-      diffSummary: limitContext(rangeContext.diffSummary, 20_000),
-      diffPatch: limitContext(rangeContext.diffPatch, 60_000),
-      modelSelection: writing.modelSelection,
-      policy,
-    });
-    const body = appendClosingIssueReferences(generated.body, linkedIssueNumbers);
+            const generated = yield* textGeneration.generatePrContent({
+              cwd,
+              baseBranch,
+              headBranch: headContext.headBranch,
+              commitSummary: limitContext(rangeContext.commitSummary, 20_000),
+              diffSummary: limitContext(rangeContext.diffSummary, 20_000),
+              diffPatch: limitContext(rangeContext.diffPatch, 60_000),
+              modelSelection: writing.modelSelection,
+              policy,
+            });
+            return {
+              title: options.title ?? generated.title,
+              body: options.body ?? generated.body,
+            };
+          });
+    const body = appendClosingIssueReferences(content.body, linkedIssueNumbers);
 
     const bodyFile = path.join(tempDir, `ryco-pr-body-${process.pid}-${randomUUID()}.md`);
     yield* fileSystem
@@ -1993,8 +2027,9 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* (
         cwd,
         baseRefName: baseBranch,
         headSelector: headContext.preferredHeadSelector,
-        title: generated.title,
+        title: content.title,
         bodyFile,
+        ...(options.draft === true ? { draft: true } : {}),
       })
       .pipe(Effect.ensuring(fileSystem.remove(bodyFile).pipe(Effect.catch(() => Effect.void))));
 
@@ -2004,7 +2039,7 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* (
         status: "created" as const,
         baseBranch,
         headBranch: headContext.headBranch,
-        title: generated.title,
+        title: content.title,
       };
     }
 
@@ -2466,6 +2501,8 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* (
 
       const worktree = yield* gitCore.createWorktree({
         settingsSnapshot: settings,
+        // Only a pull request known to be this repository's gets the declared local files.
+        copyDeclaredIncludes: pullRequestWithRemoteInfo.isCrossRepository === false,
         projectId: project?.id,
         projectTitle: project?.title,
         initialName: pullRequest.title || localPullRequestBranch,
@@ -2489,7 +2526,7 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* (
         worktreePath: worktree.worktree.path,
         submoduleInitialization: worktree.submoduleInitialization,
       };
-    }).pipe(Effect.ensuring(invalidateStatus(input.cwd)));
+    }).pipe(restartWork.track, Effect.ensuring(invalidateStatus(input.cwd)));
   });
 
   const runFeatureBranchStep = Effect.fn("runFeatureBranchStep")(function* (
@@ -2564,7 +2601,11 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* (
           : input.filePaths
             ? { filePaths: input.filePaths }
             : {};
-        if (input.action === "create_pr" && initialStatus.hasWorkingTreeChanges) {
+        if (
+          input.action === "create_pr" &&
+          initialStatus.hasWorkingTreeChanges &&
+          input.allowDirtyWorkingTree !== true
+        ) {
           return yield* gitManagerError(
             "runStackedAction",
             "Commit local changes before creating a PR.",
@@ -2602,12 +2643,21 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* (
             gitManagerError("runStackedAction", "Failed to get server settings.", cause),
           ),
         );
+        // The checkout's project, looked up at most once per action: the writing policy and the
+        // pull request template setting both read it.
+        const checkoutProjectId = yield* Effect.cached(
+          options?.checkoutProjectId ?? Effect.succeed(null),
+        );
         const writing: GitWriting = {
           modelSelection: settings.textGenerationModelSelection,
           policy: yield* Effect.cached(
-            resolveWritingPolicy(input.cwd, settings, options?.checkoutProjectId),
+            resolveWritingPolicy(input.cwd, settings, checkoutProjectId),
           ),
-          pullRequestTemplates: settings.pullRequestTemplates,
+          pullRequestTemplates: checkoutProjectId.pipe(
+            Effect.map((projectId) =>
+              resolveProjectPreferenceValue(settings, projectId, "pullRequestTemplates"),
+            ),
+          ),
         };
 
         if (input.featureBranch) {
@@ -2708,6 +2758,11 @@ export const makeGitManager = Effect.fn("makeGitManager")(function* (
                     currentBranch,
                     input.linkedIssueNumbers,
                     progress.emit,
+                    {
+                      ...(input.prTitle !== undefined ? { title: input.prTitle } : {}),
+                      ...(input.prBody !== undefined ? { body: input.prBody } : {}),
+                      ...(input.prDraft === true ? { draft: true } : {}),
+                    },
                   ),
                 ),
               )

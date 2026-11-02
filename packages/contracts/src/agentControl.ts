@@ -231,6 +231,13 @@ export const AGENT_CONTROL_CAPABILITIES = {
   manageLocalTasks: AgentControlCapability.make("local-tasks.manage"),
   /** Start or stop the server's pull request watch that wakes a chat with news. */
   watchPullRequests: AgentControlCapability.make("pull-requests.watch"),
+  /** Start, list and stop command watches on the caller's own chat (`ryco_watch_command`). */
+  watchCommands: AgentControlCapability.make("commands.watch"),
+  /**
+   * Ask the user for a secret through a private card (`ryco_request_secret`); the node writes the
+   * answer into a Git-ignored dotenv file of the caller's own checkout.
+   */
+  requestSecrets: AgentControlCapability.make("secrets.request"),
   externalListProjects: AgentControlCapability.make("external.projects.list"),
   externalCreateTask: AgentControlCapability.make("external.tasks.create"),
   externalReadTask: AgentControlCapability.make("external.tasks.read"),
@@ -279,6 +286,7 @@ export const AgentControlActionKind = Schema.Literals([
   "deviceControlConsent",
   "deleteLocalTask",
   "pullRequestWatch",
+  "worktreeHandoff",
 ]);
 export type AgentControlActionKind = typeof AgentControlActionKind.Type;
 
@@ -331,6 +339,7 @@ export const AGENT_CONTROL_ACTION_CAPABILITIES: Record<
   deviceControlConsent: AGENT_CONTROL_CAPABILITIES.controlDevices,
   deleteLocalTask: AGENT_CONTROL_CAPABILITIES.manageLocalTasks,
   pullRequestWatch: AGENT_CONTROL_CAPABILITIES.watchPullRequests,
+  worktreeHandoff: AGENT_CONTROL_CAPABILITIES.manageWorkspaces,
 };
 
 export const AGENT_CONTROL_PLAN_VERSION = 1;
@@ -615,6 +624,11 @@ export const AgentControlProviderUpdateChecksChange = Schema.Struct({
   kind: Schema.Literal("providerUpdateChecks"),
   before: Schema.Boolean,
   after: Schema.Boolean,
+  /**
+   * Turning checks on also starts the node's automatic provider updates (its owner turned
+   * `automaticUpdates` on): Ryco would install provider CLIs on its own, so the owner approves.
+   */
+  startsAutomaticUpdates: Schema.optionalKey(Schema.Literal(true)),
 }).pipe(rejectExcessProperties);
 export type AgentControlProviderUpdateChecksChange =
   typeof AgentControlProviderUpdateChecksChange.Type;
@@ -969,6 +983,47 @@ export const AgentControlPullRequestWatchPlan = Schema.Struct({
 }).pipe(rejectExcessProperties);
 export type AgentControlPullRequestWatchPlan = typeof AgentControlPullRequestWatchPlan.Type;
 
+/** Private-session tools that move the caller's own chat into a worktree (loaded on first use). */
+export const AGENT_CONTROL_WORKTREE_MCP_TOOLS = {
+  handoff: "ryco_worktree_handoff",
+  status: "ryco_worktree_status",
+} as const;
+
+const AgentControlGitRefName = TrimmedNonEmptyString.check(Schema.isMaxLength(256));
+
+/**
+ * Moves the calling chat itself into a new worktree on a new branch, created from `baseRef` (the
+ * branch the project's checkout has when absent), and queues `continuationPrompt` as its next
+ * turn there. Changes in the shared checkout stay there. Provider-session callers only, and only
+ * for their own chat; the defaults are resolved before the plan is made.
+ */
+export const AgentControlWorktreeHandoffPlan = Schema.Struct({
+  kind: Schema.Literal("worktreeHandoff"),
+  threadId: ThreadId,
+  branch: AgentControlGitRefName,
+  baseRef: Schema.optional(AgentControlGitRefName),
+  startFromOrigin: Schema.Boolean,
+  runSetupScript: Schema.Boolean,
+  continuationPrompt: Schema.optional(AgentControlPrompt),
+}).pipe(rejectExcessProperties);
+export type AgentControlWorktreeHandoffPlan = typeof AgentControlWorktreeHandoffPlan.Type;
+
+/** How a handoff went once the chat moved: no paths (the chat reads its own). */
+export const AgentControlWorktreeHandoffOutcome = Schema.Struct({
+  branch: AgentControlGitRefName,
+  baseRef: AgentControlGitRefName,
+  startedFromOrigin: Schema.Boolean,
+  setupScript: Schema.Literals(["started", "no-script", "skipped", "failed"]),
+  /** `held`: queued, with the queue held (the turn that asked was stopped, or Ryco restarted). */
+  continuation: Schema.Literals(["queued", "held", "skipped", "failed"]),
+  /**
+   * Whether the moved chat was linked to the worktree's record (`thread.attach-to-worktree`);
+   * the move stands either way. Absent in outcomes recorded before it was reported.
+   */
+  worktreeAttached: Schema.optional(Schema.Boolean),
+});
+export type AgentControlWorktreeHandoffOutcome = typeof AgentControlWorktreeHandoffOutcome.Type;
+
 export const AgentControlActionPlan = Schema.Union([
   AgentControlCreateThreadsPlan,
   AgentControlSendMessagePlan,
@@ -987,6 +1042,7 @@ export const AgentControlActionPlan = Schema.Union([
   AgentControlDeviceControlConsentPlan,
   AgentControlDeleteLocalTaskPlan,
   AgentControlPullRequestWatchPlan,
+  AgentControlWorktreeHandoffPlan,
 ]);
 export type AgentControlActionPlan = typeof AgentControlActionPlan.Type;
 
@@ -1117,6 +1173,7 @@ export const AgentControlExecutionReceipt = Schema.Struct({
       settledActiveTurnId: Schema.NullOr(TurnId),
     }),
   ),
+  worktreeHandoff: Schema.optional(AgentControlWorktreeHandoffOutcome),
   compensation: Schema.optional(
     Schema.Struct({
       attempted: Schema.Boolean,
@@ -1382,6 +1439,15 @@ export type AgentControlOperationStatus = typeof AgentControlOperationStatus.Typ
 export const AGENT_CONTROL_TERMINAL_OPERATION_STATUSES: ReadonlyArray<AgentControlOperationStatus> =
   ["completed", "failed", "cancelled"];
 
+/** A worktree an operation created and still owns: compensation removes it. */
+export const AgentControlOwnedWorktree = Schema.Struct({
+  worktreeId: WorktreeId,
+  projectId: ProjectId,
+  branch: TrimmedNonEmptyString.check(Schema.isMaxLength(256)),
+  checkoutPath: TrimmedNonEmptyString,
+});
+export type AgentControlOwnedWorktree = typeof AgentControlOwnedWorktree.Type;
+
 /**
  * Resources an operation has created so far. Persisted so restart recovery
  * can prove operation ownership (e.g. of a preflighted worktree) and either
@@ -1398,16 +1464,22 @@ export const AgentControlOperationResources = Schema.Struct({
   threadIds: Schema.Array(ThreadId).pipe(Schema.withDecodingDefault(Effect.succeed([]))),
   ownedThreadIds: Schema.Array(ThreadId).pipe(Schema.withDecodingDefault(Effect.succeed([]))),
   worktreeIds: Schema.Array(WorktreeId).pipe(Schema.withDecodingDefault(Effect.succeed([]))),
-  ownedWorktrees: Schema.Array(
-    Schema.Struct({
-      worktreeId: WorktreeId,
-      projectId: ProjectId,
-      branch: TrimmedNonEmptyString.check(Schema.isMaxLength(256)),
-      checkoutPath: TrimmedNonEmptyString,
-    }),
-  ).pipe(Schema.withDecodingDefault(Effect.succeed([]))),
+  ownedWorktrees: Schema.Array(AgentControlOwnedWorktree).pipe(
+    Schema.withDecodingDefault(Effect.succeed([])),
+  ),
 });
 export type AgentControlOperationResources = typeof AgentControlOperationResources.Type;
+
+/**
+ * The worktree a handoff gave its chat, recorded when the operation gives up owning it: restart
+ * recovery finishes the move when the chat points at it, or takes it back and removes it.
+ */
+export const AgentControlHandoffWorktree = Schema.Struct({
+  ...AgentControlOwnedWorktree.fields,
+  /** The outcome's base (`origin/<base>` when started from origin). */
+  baseRef: AgentControlGitRefName,
+});
+export type AgentControlHandoffWorktree = typeof AgentControlHandoffWorktree.Type;
 
 export const AgentControlOperationState = Schema.Struct({
   completedSteps: Schema.Array(TrimmedNonEmptyString.check(Schema.isMaxLength(128))).pipe(
@@ -1436,6 +1508,8 @@ export const AgentControlOperationState = Schema.Struct({
       settledActiveTurnId: Schema.NullOr(TurnId),
     }),
   ),
+  worktreeHandoff: Schema.optional(AgentControlWorktreeHandoffOutcome),
+  handoffWorktree: Schema.optional(AgentControlHandoffWorktree),
   compensation: Schema.optional(
     Schema.Struct({ attempted: Schema.Boolean, completed: Schema.Boolean }),
   ),

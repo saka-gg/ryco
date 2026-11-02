@@ -44,6 +44,7 @@ function connection(
     sessionEstablished: true,
     sessionRecoveredAfterUnknown: false,
     errorMessage: null,
+    outageFailure: null,
     ...overrides,
   };
 }

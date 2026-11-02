@@ -1,5 +1,12 @@
 import * as NodeHttp from "node:http";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, writeFileSync } from "node:fs";
+import {
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  readdirSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -17,7 +24,7 @@ import * as TestClock from "effect/testing/TestClock";
 import * as TestConsole from "effect/testing/TestConsole";
 import { Command } from "effect/cli";
 
-import { cli } from "./cli.ts";
+import { cli, desktopOwnedNodeRefusal } from "./cli.ts";
 import { deriveServerPaths, ServerConfig, type ServerConfigShape } from "./config.ts";
 import { ProjectionSnapshotQuery } from "./orchestration/Services/ProjectionSnapshotQuery.ts";
 import { OrchestrationLayerLive } from "./orchestration/runtimeLayer.ts";
@@ -1751,6 +1758,215 @@ it.layer(NodeServices.layer)("cli log-level parsing", (it) => {
       assert.equal((error as { readonly _tag?: string })._tag, "TraceSummaryError");
       assert.include((error as Error).message, `No Ryco data directory at ${missingHome}.`);
       assert.isFalse(existsSync(missingHome));
+    }),
+  );
+});
+
+it.layer(NodeServices.layer)("cli service status --ready", (it) => {
+  it.effect("fails unless this home's node answers with its own environment id", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const baseDir = mkdtempSync(join(tmpdir(), "ryco-cli-ready-test-"));
+        const { serverRuntimeStatePath, environmentIdPath } = yield* deriveServerPaths(
+          baseDir,
+          undefined,
+        );
+        const readyArgs = ["service", "status", "--ready", "--json", "--base-dir", baseDir];
+
+        // No server of this home has started.
+        const down = yield* captureStdout(runCli(readyArgs).pipe(Effect.flip));
+        assert.deepEqual(JSON.parse(down.output), {
+          ready: false,
+          reason: "not-running",
+          origin: null,
+        });
+        assert.include(String((down.result as Error).message), "not ready");
+
+        let answeredId = "env-ready-test";
+        const server = NodeHttp.createServer((request, response) => {
+          if (request.url === "/.well-known/ryco/environment") {
+            response.writeHead(200, { "content-type": "application/json" });
+            response.end(JSON.stringify({ environmentId: answeredId, label: "box" }));
+            return;
+          }
+          response.writeHead(404).end();
+        });
+        yield* Effect.acquireRelease(
+          Effect.promise(
+            () => new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve())),
+          ),
+          () => Effect.promise(() => new Promise<void>((resolve) => server.close(() => resolve()))),
+        );
+        const address = server.address();
+        const port = typeof address === "object" && address !== null ? address.port : 0;
+        const origin = `http://127.0.0.1:${port}`;
+        mkdirSync(join(serverRuntimeStatePath, ".."), { recursive: true });
+        writeFileSync(
+          serverRuntimeStatePath,
+          JSON.stringify({
+            version: 1,
+            pid: process.pid,
+            port,
+            origin,
+            startedAt: new Date().toISOString(),
+          }),
+        );
+        writeFileSync(environmentIdPath, "env-ready-test\n");
+
+        const ready = yield* captureStdout(runCli(readyArgs));
+        assert.deepEqual(JSON.parse(ready.output), { ready: true, reason: null, origin });
+        const human = yield* captureStdout(
+          runCli(["service", "status", "--ready", "--base-dir", baseDir]),
+        );
+        assert.equal(human.output, `Ready:      ${origin}`);
+
+        // Another node answering on the recorded port is not this home's node.
+        answeredId = "env-someone-else";
+        const other = yield* captureStdout(runCli(readyArgs).pipe(Effect.flip));
+        assert.deepEqual(JSON.parse(other.output), {
+          ready: false,
+          reason: "other-node",
+          origin,
+        });
+      }),
+    ),
+  );
+});
+
+it.layer(NodeServices.layer)("cli auth pairing create --qr", (it) => {
+  it.effect("prints a QR code only for a link another device can reach", () =>
+    Effect.gen(function* () {
+      const baseDir = mkdtempSync(join(tmpdir(), "ryco-cli-pairing-qr-test-"));
+      const create = (...extra: ReadonlyArray<string>) =>
+        captureStdout(runCli(["auth", "pairing", "create", "--base-dir", baseDir, ...extra]));
+
+      const lan = yield* create("--qr", "--base-url", "http://192.168.1.5:3773");
+      const lanText = lan.lines.join("\n");
+      assert.match(lanText, /Pair URL: http:\/\/192\.168\.1\.5:3773\/pair#token=/u);
+      assert.match(lanText, /[█▀▄]/u);
+      assert.match(lanText, /One-time client link, valid for \d+ minutes?\./u);
+
+      const loopback = yield* create("--qr", "--base-url", "http://127.0.0.1:3773");
+      const loopbackText = loopback.lines.join("\n");
+      assert.include(loopbackText, "Only this computer can reach this node.");
+      assert.notMatch(loopbackText, /[█▀▄]/u);
+
+      // No --base-url and no running node of this home.
+      const noNode = yield* create("--qr");
+      assert.include(noNode.lines.join("\n"), "No running node found; pass --base-url");
+
+      const off = yield* create("--no-qr", "--base-url", "http://192.168.1.5:3773");
+      assert.notMatch(off.lines.join("\n"), /[█▀▄]/u);
+
+      // --json never looks for the node: without --base-url it carries no link.
+      const jsonNoBase = yield* create("--json");
+      assert.notProperty(JSON.parse(jsonNoBase.output), "pairUrl");
+
+      const json = yield* create("--json", "--base-url", "http://192.168.1.5:3773");
+      assert.notMatch(json.output, /[█▀▄]/u);
+      const document = JSON.parse(json.output) as { pairUrl?: string; qrUrl?: string | null };
+      assert.match(document.pairUrl ?? "", /^http:\/\/192\.168\.1\.5:3773\/pair#token=/u);
+      assert.equal(document.qrUrl, document.pairUrl);
+
+      const jsonLoopback = yield* create("--json", "--base-url", "http://localhost:3773");
+      assert.equal((JSON.parse(jsonLoopback.output) as { qrUrl?: string | null }).qrUrl, null);
+    }),
+  );
+});
+
+it.layer(NodeServices.layer)("cli auth pairing create --qr for a running node", (it) => {
+  it.effect("draws no QR code for a node that listens on loopback only", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const baseDir = mkdtempSync(join(tmpdir(), "ryco-cli-pairing-qr-node-test-"));
+        const { serverRuntimeStatePath } = yield* deriveServerPaths(baseDir, undefined);
+        const server = NodeHttp.createServer((request, response) => {
+          response.writeHead(request.url === "/.well-known/ryco/environment" ? 200 : 404, {
+            "content-type": "application/json",
+          });
+          response.end(JSON.stringify({ environmentId: "env-qr-test" }));
+        });
+        yield* Effect.acquireRelease(
+          Effect.promise(
+            () => new Promise<void>((resolve) => server.listen(0, "127.0.0.1", () => resolve())),
+          ),
+          () => Effect.promise(() => new Promise<void>((resolve) => server.close(() => resolve()))),
+        );
+        const address = server.address();
+        const port = typeof address === "object" && address !== null ? address.port : 0;
+        mkdirSync(join(serverRuntimeStatePath, ".."), { recursive: true });
+        // `ryco setup` "this computer only": the node binds 127.0.0.1, without Tailscale Serve.
+        writeFileSync(
+          serverRuntimeStatePath,
+          JSON.stringify({
+            version: 1,
+            pid: process.pid,
+            host: "127.0.0.1",
+            port,
+            origin: `http://127.0.0.1:${port}`,
+            startedAt: new Date().toISOString(),
+          }),
+        );
+
+        const output = yield* captureStdout(
+          runCli(["auth", "pairing", "create", "--base-dir", baseDir, "--qr"]),
+        );
+        const text = output.lines.join("\n");
+        assert.include(text, `Pair URL: http://127.0.0.1:${port}/pair#token=`);
+        assert.include(text, "Only this computer can reach this node.");
+        assert.notMatch(text, /[█▀▄]/u);
+      }),
+    ),
+  );
+});
+
+it.layer(NodeServices.layer)("cli update", (it) => {
+  it.effect("needs a running node of this home (or a paired remote)", () =>
+    Effect.gen(function* () {
+      const baseDir = mkdtempSync(join(tmpdir(), "ryco-cli-update-test-"));
+      const error = yield* runCliWithRuntime(["update", "--base-dir", baseDir, "--check"]).pipe(
+        Effect.flip,
+      );
+      assert.include(String((error as Error).message), "The Ryco server is not running");
+    }),
+  );
+});
+
+it.layer(NodeServices.layer)("cli under Ryco Desktop's ryco command", (it) => {
+  it("refuses a second node for the desktop app's home, and only for it", () => {
+    const home = join(tmpdir(), "ryco-desktop-home");
+    const env = { RYCO_DESKTOP_CLI: home };
+    assert.include(
+      desktopOwnedNodeRefusal(env, home) ?? "",
+      `Ryco Desktop runs the node for ${home}.`,
+    );
+    assert.isNotNull(desktopOwnedNodeRefusal(env, `${home}/`));
+    assert.isNull(desktopOwnedNodeRefusal(env, join(tmpdir(), "another-home")));
+    assert.isNull(desktopOwnedNodeRefusal({}, home));
+    assert.isNull(desktopOwnedNodeRefusal({ RYCO_DESKTOP_CLI: " " }, home));
+
+    // Another spelling of the same folder is the same home.
+    const real = mkdtempSync(join(tmpdir(), "ryco-desktop-real-home-"));
+    const link = `${real}-link`;
+    symlinkSync(real, link);
+    assert.isNotNull(desktopOwnedNodeRefusal({ RYCO_DESKTOP_CLI: real }, link));
+    assert.isNotNull(desktopOwnedNodeRefusal({ RYCO_DESKTOP_CLI: link }, real));
+  });
+
+  it.effect("still runs admin commands against the desktop app's home", () =>
+    Effect.gen(function* () {
+      const baseDir = mkdtempSync(join(tmpdir(), "ryco-cli-desktop-home-test-"));
+      const previous = process.env.RYCO_DESKTOP_CLI;
+      process.env.RYCO_DESKTOP_CLI = baseDir;
+      try {
+        const listed = yield* captureStdout(
+          runCli(["auth", "pairing", "list", "--json", "--base-dir", baseDir]),
+        );
+        assert.deepEqual(JSON.parse(listed.output), []);
+      } finally {
+        if (previous === undefined) delete process.env.RYCO_DESKTOP_CLI;
+        else process.env.RYCO_DESKTOP_CLI = previous;
+      }
     }),
   );
 });

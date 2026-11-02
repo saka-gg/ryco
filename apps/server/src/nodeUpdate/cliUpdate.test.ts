@@ -5,9 +5,12 @@ import { TestClock } from "effect/testing";
 
 import {
   awaitNodeReadyAfterUpdate,
+  awaitNodeReadyOrExit,
   hubConnectorSettledForBoot,
   NODE_BOOT_HUB_WAIT,
+  NODE_NOT_READY_EXIT_CODE,
   nodeUpdatePreflightVerdict,
+  UNATTENDED_BOOT_READY_TIMEOUT,
 } from "./cliUpdate.ts";
 import { NODE_UPDATE_PREFLIGHT_PASSED, NODE_UPDATE_PREFLIGHT_STARTED } from "./updateProtocol.ts";
 
@@ -109,6 +112,61 @@ describe("node readiness after an update", () => {
       expect(fiber.pollUnsafe()).toBeUndefined();
       yield* TestClock.adjust(Duration.seconds(1));
       yield* Fiber.join(fiber);
+    }),
+  );
+});
+
+describe("readiness watchdog after an unattended update", () => {
+  const recordExits = () => {
+    const exits: Array<number> = [];
+    return { exits, exit: (code: number) => Effect.sync(() => exits.push(code)) };
+  };
+
+  it.effect("exits non-zero when the node is not ready 10 minutes after it started", () =>
+    Effect.gen(function* () {
+      const { exits, exit } = recordExits();
+      const fiber = yield* Effect.forkChild(
+        awaitNodeReadyOrExit({ commandReady: Effect.never, hubConnector: null }, exit),
+      );
+      yield* TestClock.adjust(
+        Duration.subtract(UNATTENDED_BOOT_READY_TIMEOUT, Duration.seconds(1)),
+      );
+      expect(exits).toEqual([]);
+      yield* TestClock.adjust(Duration.seconds(1));
+      expect(exits).toEqual([NODE_NOT_READY_EXIT_CODE]);
+      expect(NODE_NOT_READY_EXIT_CODE).not.toBe(0);
+      // It never reports the node ready, so the update is not confirmed.
+      expect(fiber.pollUnsafe()).toBeUndefined();
+      yield* Fiber.interrupt(fiber);
+    }),
+  );
+
+  it.effect("returns once the node is ready in time, and exits at once when startup failed", () =>
+    Effect.gen(function* () {
+      const ready = recordExits();
+      const commandReady = yield* Deferred.make<void>();
+      const fiber = yield* Effect.forkChild(
+        awaitNodeReadyOrExit(
+          { commandReady: Deferred.await(commandReady), hubConnector: null },
+          ready.exit,
+        ),
+      );
+      yield* TestClock.adjust(Duration.minutes(9));
+      yield* Deferred.succeed(commandReady, undefined);
+      yield* Fiber.join(fiber);
+      yield* TestClock.adjust(Duration.hours(1));
+      expect(ready.exits).toEqual([]);
+
+      const failed = recordExits();
+      const failing = yield* Effect.forkChild(
+        awaitNodeReadyOrExit(
+          { commandReady: Effect.die(new Error("migration failed")), hubConnector: null },
+          failed.exit,
+        ),
+      );
+      yield* Effect.yieldNow;
+      expect(failed.exits).toEqual([NODE_NOT_READY_EXIT_CODE]);
+      yield* Fiber.interrupt(failing);
     }),
   );
 });

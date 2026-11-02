@@ -97,13 +97,31 @@ called. This matters for clients such as Codex that cache the initial MCP catalo
   `ryco_update_local_task`, `ryco_add_local_task_file`, `ryco_remove_local_task_file`,
   `ryco_start_local_task_chat`, `ryco_propose_local_task_delete`: the user's Tasks page (see
   [Tasks](#tasks)).
+- `ryco_link_pull_request`: link a pull request the agent opened (or names, by number or URL) to
+  its own chat's workspace, so Ryco shows it beside the chat, follows its state and settles the
+  chat when it merges, without watching it. Same checks as watching: the repository must be the
+  checkout's, and a pull request the user removed from the workspace stays removed. A chat on the
+  project's main checkout is refused (the main workspace's pull requests are not shown with
+  chats; watch the pull request instead). The answer says whether this chat's workspace or
+  another workspace of the project has the link. Needs the pull request grant and an active turn. Thread search (inbox and palette) finds a chat by its
+  workspace's pull requests: `#123`, `owner/repo#123` or the URL.
 - `ryco_watch_pull_request`, `ryco_unwatch_pull_request`: have Ryco wake a chat with a pull
   request's news instead of polling (see [Pull request watches](#pull-request-watches)).
+- `ryco_watch_command`, `ryco_unwatch_command`, `ryco_list_command_watches`: have Ryco run a shell
+  command for the caller's own chat on an interval and wake it only when the output changes (see
+  [Command watches](#command-watches)).
+- `ryco_worktree_handoff`, `ryco_worktree_status`: move the caller's own chat out of the project's
+  shared checkout into a new worktree on a new branch and continue there (see
+  [Worktree handoff](#worktree-handoff)).
+- `ryco_request_secret`: ask the user for a secret (an API key, a token) on a private card
+  instead of in the chat (see [Secret requests](#secret-requests)).
 - `ryco_html_preview`, `ryco_html_render`: check a self-contained HTML page in Ryco's headless
   browser, then show it inline above the reply as a sandboxed page that follows the user's theme,
   with a card at the end of the reply (see [HTML renders](./user/html-renders.md)). Both need the
   `html.render` grant and exact active-turn authority; a render counts toward the turn's attachment
-  budget. Its result, like `ryco_attach_file`'s, names the stored artifact's id.
+  budget. Its result, like `ryco_attach_file`'s, names the stored artifact's id. A published page
+  can call `ryco.send(text)` to send the reader's answer to its thread once they confirm it (see
+  [Answering from a page](./user/html-renders.md#answering-from-a-page)).
 
 Mutation calls return a durable receipt. Reuse `requestId` when retrying the same action, then use
 `ryco_wait_for_control_request` with `waitFor: "terminal"` to get dispatch results and created thread
@@ -168,6 +186,18 @@ chat with one automatic message, a normal queued turn that starts or resumes its
   `message: { messageId, version, offsetChars }` to read up to 20,000 more characters. A message
   that is still streaming has no continuation yet, and a continuation of a message that changed
   since is refused. Offsets count UTF-16 code units and a page never splits a surrogate pair.
+- **Stalled tasks.** A task that still runs but needs attention tells its delegating chat once per
+  episode, with an automatic message that says it is still running and its result comes later:
+  its first message started no turn within 3 minutes (`never-started`), it has waited 5 minutes
+  for the person's approval or answer (`waiting-on-you`), or its provider was reported quiet on
+  its running turn (`silent`, after the 15-minute liveness notice) and nothing happened since.
+  `ryco_task_status` shows the current one as `run.stalled`. The message waits behind the same
+  checks as results (the chat idle, in scope, not reverting, not stopped by the person, the
+  delegating turn not reverted away) and, like a result, may start a chat's ended session through
+  the shared cold-start budget. Stopping the turn a notice started stops that turn only; the
+  task's result still returns. A task sends at most 3 such messages. Ryco never nudges,
+  re-sends, interrupts or answers for a stalled task: that stays with the person or the
+  delegating agent (`ryco_task_cancel`). The thresholds follow Synara's worker health.
 - **Scope of the tools.** They cover only tasks created with `returnToOrigin` by this chat. Local
   Tasks and the standalone integrations' `ryco_read_task` / `ryco_wait_for_task` are separate.
   Return progress is also visible as `completionReturns` on the delegation request
@@ -229,6 +259,165 @@ required checks pass, someone else comments or reviews, or the branch starts to 
   settling, archiving or a user Stop. A wake is news, not a merge decision.
 - **Scope.** Agents cannot turn Auto-fix CI on or off. While Agent Control is off, an agent-started
   watch holds its news. Standalone integrations cannot watch pull requests.
+
+## Command watches
+
+An agent that waits on something that is not a pull request (an issue reply, another
+repository's CI, a deploy, a release) calls `ryco_watch_command` with a read-only check, a label
+and an interval, and ends its turn. Ryco runs the check with no model involved and wakes the chat
+only when its output changes (see [Command watch](./command-watch.md) for the rules and numbers).
+
+- **Own chat only.** The tools take no thread id: a watch always belongs to the caller's chat.
+  Starting or stopping needs the `commands.watch` grant and exact active-turn authority; listing
+  needs the grant. They run at once (no approval) and never reach standalone integrations.
+- **Full access only.** The chat must be in Full access and default mode, because Ryco runs the
+  command later without asking. Leaving either ends its watches.
+- **Delegated chats.** A chat delegated with `returnToOrigin` whose result is still awaited cannot
+  watch; it reports what to watch, and the delegating chat watches it.
+- **Ending.** `ryco_unwatch_command` stops one watch or all of them; call it before handing the
+  work back so the chat can settle. A watch also ends after 10 wakes, 7 days, 8 failed runs in a
+  row or output over 4 KB, and with the chat's Stop, settle, archive or Trash. The user can stop
+  one with the `thread.command-watch.stop` command. A chat's watches wake it at most 30 times a
+  day. While Agent Control is off, no run starts and no wake is sent.
+- **Visibility.** The command is visible to anyone who may replay the chat's events, as the
+  agent's own tool call already is: keep secrets out of it.
+
+## Worktree handoff
+
+An agent that started in the project's shared checkout and finds the work needs its own branch
+calls `ryco_worktree_handoff` with a new `branch`, and optionally `baseRef` (default: the branch
+the shared checkout is on), `startFromOrigin` (fetch the base from origin first; default off),
+`runSetupScript` (default on) and `continuationPrompt` (its next step, up to 120,000 characters).
+`ryco_worktree_status` says whether the chat already works in its own worktree and which branch a
+handoff would start from.
+
+- **Own chat only.** The tools take no thread id. A handoff needs the `workspaces.manage` grant
+  and exact active-turn authority (the status needs the grant). It is a routine request: it runs
+  at once and the tool waits up to 50 seconds for the outcome. Standalone integrations cannot use
+  it, and a delegated chat whose result is still awaited cannot move.
+- **Refusals.** A chat that already has its own worktree, an archived or settled chat, a project
+  that is not a Git repository, a branch that exists already, and a branch name Git rejects or
+  that would shadow another ref. Branch names must be printable ASCII: anything else (accents,
+  emoji, spaces, invisible and text-direction characters, look-alike letters) is refused, so a
+  name never reads differently from what Git stores and never names an existing ref in another
+  Unicode form. Refused as shadowing: names that start with `refs/`, `heads/`, `tags/`, `remotes/`
+  or a configured remote's name and a slash (such as `origin/main`); Git's pseudo-refs (`HEAD` and
+  every `*_HEAD` such as `FETCH_HEAD`, `AUTO_MERGE` and the others Git keeps beside them); names of
+  4 or more hex digits only (they read as abbreviated commit ids); names of an existing branch, tag
+  or remote branch; and names Git already resolves (a commit, `stash`). All of these compare
+  without letter case, because a checkout on macOS or Windows keeps its refs in a file system that
+  ignores case: there `MAIN` is `main`'s ref, and a worktree on it would move the shared
+  checkout's `main` with every commit.
+- **Same worktree as every other.** The worktree is made like a delegated worktree (path policy,
+  setup ownership, `.worktreeinclude`, submodules) and gets its workspace record. The project's
+  setup script starts in a terminal unless the agent skips it or the user turned setup scripts
+  off. Uncommitted changes in the shared checkout stay there.
+- **Order with the turn.** The chat is re-pointed at the worktree (`thread.meta.update` and
+  `thread.attach-to-worktree`), and the continuation joins the chat's follow-up queue as the
+  agent's. The turn that asked keeps running in the shared checkout, so the agent ends it right
+  after the call; the queue sends the continuation once the chat is idle, and that turn starts in
+  the worktree with the conversation carried over (a resume, or a context handoff for providers
+  that keep conversations per directory). Without a continuation the chat waits there for the
+  next message.
+- **Stop.** The handoff checks the turn that asked one last time after the worktree is made and
+  just before the chat moves. A Stop of that turn (or a newer turn in the chat) before that check
+  rolls the handoff back: the worktree and its branch are removed, and nothing is queued. A Stop
+  after it keeps the move, and the continuation is queued with the queue held, with the hold a
+  Stop records (`interrupted`), so nothing starts until the person resumes the queue. The queue
+  decides that hold together with the add (`thread.queue.add`'s `holdIfTurnInterrupted`), so a
+  Stop that lands just before the add is held too; a newer turn pauses the queue instead.
+- **Rollback.** If the chat is archived, settled, moved or deleted while the worktree is made, or
+  the move is refused (the chat's branch changed since the check), the worktree and its branch
+  are removed again. Once the chat points at the worktree, nothing removes it: a later failure
+  (linking the chat to the worktree's record, queueing the continuation, starting the setup
+  script) is reported in the answer. A setup script that fails to start is named in fixed words
+  (such as "the worktree folder was not found"); the error itself goes to the server log. A restart in
+  the middle finishes the move when the chat already points at the worktree (linking it to the
+  worktree's record and queueing the continuation with the queue held, as after every restart),
+  and otherwise removes the worktree and its branch. The worktree stays when the chat is deleted.
+- **Answer.** The receipt plus `worktreePath`, `branch`, `baseRef`, `startedFromOrigin`,
+  `setupScript` (`started`, `no-script`, `skipped`, `failed`), `continuation` (`queued`, `held`,
+  `skipped`, `failed`), `worktreeAttached` (whether the chat was linked to the worktree's record)
+  and a `note` for the agent. The worktree path is the chat's own new
+  checkout; it is read from the chat for the answer, and neither the receipt nor its `note`
+  keeps it. When the outcome is not in within the wait, the answer says so (`timedOut`) and its
+  `note` tells the agent to end its turn. Calling again with the same `requestId` answers with
+  that request's receipt, also once the chat has moved.
+
+## Secret requests
+
+An agent that needs a secret calls `ryco_request_secret` with an environment variable name
+(`key`, `^[A-Z_][A-Z0-9_]{0,127}$`), a one-line `purpose` and a dotenv `file` relative to its own
+thread's checkout (default `.env`). The user answers on a private card (web desktop and the native
+app, not the frozen web phone tier), and the node writes `KEY='value'` into that file
+([Secret requests](./user/secret-requests.md) has the user's side).
+
+- **Grant and authority.** The `secrets.request` grant, issued to private provider sessions like
+  the others, and exact active-turn authority. Never on the standalone endpoint. The card is shown
+  in, and the file written to, the caller's own thread and checkout: there is no `threadId`.
+- **Checked when asked.** The file must be a plain relative dotenv path (`.env`, `.env.*`,
+  `name.env`, `.dev.vars`, not a code or config extension such as `.env.js`) with no `..`, link,
+  trailing-dot or `.git` segment, inside the checkout and in the checkout's own repository (not a
+  nested one or a submodule). Git must ignore it (`git check-ignore`) and track no file of that
+  name in any letter case (`git ls-files ':(icase)<file>'`), and an existing file must be named
+  exactly so. A bad file fails at once and opens no card. A thread holds at most 5 unanswered
+  requests, also when the agent asks in parallel.
+- **Waiting.** The call waits up to `waitMs` (default 30 s, at most 45 s) and answers `pending`,
+  `provided`, `declined` or `expired`, with the key and file, never the value. Calling again with
+  the same `requestId` (and the same key and file) waits on the same card; a `requestId` reused for
+  another key or file is refused. While pending, the agent may end its turn instead.
+- **Recorded.** The thread records only `secret.requested` (key, purpose, file, expiry and an
+  opaque `checkoutId` of the checkout, never its path) and one `secret.resolved` (status)
+  activity. A pending request counts as pending user input: it holds settlement, queued wakes and
+  restart continuation, survives a turn's end and a restart, and expires after 24 hours (the node
+  records the expiry, also after a restart, and retries a failed record with backoff; past its
+  expiry a request no longer counts as pending even unrecorded).
+- **The answer.** `secrets.answerRequest` is owner-only and never replayed. It is written only
+  while the thread's checkout has the recorded `checkoutId` (a removed worktree or a moved thread
+  is refused, never redirected to the project's folder). The node checks the file again and
+  writes it atomically with mode 0600 (other lines kept, the key's old assignment replaced),
+  through a temporary file in the repository's Git directory, one write per file at a time, and
+  only then records `provided`. Values with `$` or a backslash are refused (dotenv-expand and
+  python-dotenv change them even in single quotes). Refusals carry a fixed reason, never the
+  value.
+- **Transport.** The value travels over the answering client's connection, and the node takes it
+  only from a connection it saw as encrypted or as never on a network in the clear. The RPC
+  principal records how the connection reached the node, from the node's own state, never from a
+  client's claim (`RpcPrincipal.connection`, classified by `ws/rpcConnectionPath.ts`):
+  - **Taken:** a relay channel in `e2ee` mode, on every tier (native IK, and web NX, whose records
+    are sealed between the browser and the node, so the Hub relays ciphertext; the Hub still
+    serves the web code, which no transport check can lift); a peer on this machine without
+    forwarding headers: a loopback peer, or one whose address is the node's own end of the socket
+    (the desktop app, a browser on the node, also at the node's LAN address, an SSH port
+    forward); a TLS socket, or a peer on this machine whose forwarding headers say HTTPS
+    (`X-Forwarded-Proto` or `Forwarded` `proto`, the last entry of each, every one present saying
+    `https`), such as Tailscale Serve; a peer in Tailscale's range (`100.64.0.0/10` or
+    `fd7a:115c:a1e0::/48`) that reached the node on one of the node's own Tailscale addresses, as
+    `tailscale status` lists them (read with the answer, cached for a minute). The range alone is
+    not enough: carrier-grade NAT and some cluster pod networks (kops, EKS) are numbered in it
+    too. When the node cannot read its Tailscale addresses (no `tailscale` CLI on its `PATH`),
+    a Tailscale peer is refused.
+  - **Refused** with `SecretRequestError` `unencrypted-connection`, before the value is checked,
+    written or recorded: a relay channel in `legacy` mode (or still negotiating, or closed), plain
+    `ws://` from another machine, a loopback proxy that names a plain protocol or none, and a
+    principal without connection facts. Forwarding headers from a non-loopback peer are ignored.
+  - A decline carries no value and is taken over every connection, so a request can always be
+    closed.
+  - Not covered: the value has already crossed the connection when the node refuses it (the card
+    cannot see the connection's state before it sends); a local proxy that passes a client's own
+    `X-Forwarded-Proto` or `Forwarded` through untouched (one that sets only `X-Forwarded-For`,
+    say), or a plain TCP forwarder on the node (`socat`, say), looks like the case it imitates;
+    Tailscale Serve over plain HTTP is refused (Ryco sets Serve up over HTTPS); a Tailscale
+    subnet router that masquerades (SNAT, its default) makes a client on its remote LAN look like
+    a Tailscale peer, though the hop from that client to the router was plain.
+  - A reverse proxy in front of the node must set the protocol header itself, overwriting
+    whatever the client sent. With nginx: `proxy_set_header X-Forwarded-Proto $scheme;` (and no
+    `Forwarded` passed through). Tailscale Serve already does.
+- **Who else can read it.** Operators of a shared node can read the saved file with
+  `projects.readFile`. Older clients and the web phone tier show the thread as waiting but have
+  no card, so they can neither answer nor decline; the request then waits for its 24 hours.
+- **Instructions.** Agents are told never to ask for secrets in chat, and to load a provided key
+  from the environment without printing it or reading the file to see it.
 
 ## Tasks
 

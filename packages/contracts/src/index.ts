@@ -32,6 +32,7 @@ export * from "./sourceControl.ts";
 export * from "./changeRequestReview.ts";
 export * from "./pullRequestWatch.ts";
 export * from "./pullRequestWatchRpc.ts";
+export * from "./commandWatch.ts";
 export * from "./atlassian.ts";
 export * from "./workItems.ts";
 export * from "./threadGoal.ts";
@@ -54,6 +55,7 @@ export * from "./projectBrowser.ts";
 export * from "./agentControlInspection.ts";
 export * from "./agentControlDelegation.ts";
 export * from "./agentControlQueue.ts";
+export * from "./agentControlPullRequestLink.ts";
 export * from "./agentControlLocalTasks.ts";
 
 export * from "./acpRegistry.ts";
@@ -75,7 +77,9 @@ export * from "./providerSignIn.ts";
 export * from "./cliProxy.ts";
 export * from "./sessionImport.ts";
 export * from "./threadFork.ts";
+export * from "./threadForkCarried.ts";
 export * from "./threadLocalServers.ts";
+export * from "./secretRequest.ts";
 export * from "./claudeCache.ts";
 
 export * from "./storage.ts";

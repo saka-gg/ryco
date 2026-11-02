@@ -39,6 +39,10 @@ export interface UseChatGlobalShortcutsInput {
   /** Null where there is nothing to copy (a draft); `thread.copyReference` acts only otherwise. */
   copyReferenceTarget: ThreadReferenceCopyTarget | null;
   onCopyReference: (target: ThreadReferenceCopyTarget) => void;
+  /** Whether the thread offers a side chat; `sideChat.toggle` acts only then. */
+  sideChatAvailable: boolean;
+  /** Opens the thread's side chat, or minimizes it when it is open. */
+  onToggleSideChat: () => void;
 }
 
 /**
@@ -46,8 +50,9 @@ export interface UseChatGlobalShortcutsInput {
  * to terminal, workspace-panel, model-picker, and project-script actions for
  * the active thread. A workspace-panel shortcut starts the panel's chunks
  * before it navigates, so they load during the route commit rather than after
- * the panel mounts. Stopping the turn and copying the thread's reference also
- * run while typing, since neither edits text.
+ * the panel mounts. Stopping the turn, copying the thread's reference and
+ * opening or minimizing the side chat also run while typing, since none edits
+ * text.
  */
 export function useChatGlobalShortcuts(input: UseChatGlobalShortcutsInput): void {
   const {
@@ -73,6 +78,8 @@ export function useChatGlobalShortcuts(input: UseChatGlobalShortcutsInput): void
     onInterruptTurn,
     copyReferenceTarget,
     onCopyReference,
+    sideChatAvailable,
+    onToggleSideChat,
   } = input;
 
   usePaneEffect(() => {
@@ -106,6 +113,15 @@ export function useChatGlobalShortcuts(input: UseChatGlobalShortcutsInput): void
         event.preventDefault();
         event.stopPropagation();
         if (!event.repeat) onCopyReference(copyReferenceTarget);
+        return;
+      }
+
+      // Also from the side question field, so the key that opened the side chat minimizes it.
+      if (command === "sideChat.toggle") {
+        if (shouldIgnoreSplitViewShortcut(event) || !sideChatAvailable) return;
+        event.preventDefault();
+        event.stopPropagation();
+        if (!event.repeat) onToggleSideChat();
         return;
       }
 
@@ -232,5 +248,7 @@ export function useChatGlobalShortcuts(input: UseChatGlobalShortcutsInput): void
     onInterruptTurn,
     copyReferenceTarget,
     onCopyReference,
+    sideChatAvailable,
+    onToggleSideChat,
   ]);
 }

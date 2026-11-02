@@ -79,7 +79,8 @@ export function findFileLineElement(fileElement: HTMLElement, line: number): HTM
 
 type RenderedLineRange = { readonly min: number; readonly max: number };
 
-function renderedLineRange(
+/** The line numbers pierre has rendered on `side` of a file, null before it draws any. */
+export function renderedLineRange(
   fileElement: HTMLElement,
   side: DiffAnnotationSide,
 ): RenderedLineRange | null {

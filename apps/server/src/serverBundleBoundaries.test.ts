@@ -165,23 +165,33 @@ describe("server boot import boundaries", () => {
     const graph = staticGraph("src/cliMain.ts");
     // Image processing loads on first use (`loadSharp`).
     expect(graph.externals).not.toContain("sharp");
-    // Only the patch parser; the package root pulls in shiki and its grammars.
-    expect(graph.externals).not.toContain("@pierre/diffs");
+    // The patch parser loads with the first turn diff summary; the package root pulls in shiki
+    // and its grammars.
+    expect(graph.externals.filter((specifier) => specifier.startsWith("@pierre/diffs"))).toEqual(
+      [],
+    );
     // Provider SDKs load with their driver's adapter (chat forks read resume cursors from the
     // SDK-free cursor modules).
     expect(graph.externals.filter((specifier) => PROVIDER_SDKS.test(specifier))).toEqual([]);
     // The OpenCode 2 client loads with the 2.x facade.
     expect(graph.externals.filter((specifier) => specifier.startsWith("@opencode/"))).toEqual([]);
-    // Protocol schemas load with the Codex/ACP features that use them. The error classes are
-    // schema-free (chat forks classify Codex request failures with them).
+    // Protocol schemas load with the Codex/ACP features that use them, and so do the error
+    // classes chat forks classify Codex request failures with (with the native fork code).
     expect(
       graph.files.filter((file) => file.startsWith("packages/effect-codex-app-server/")),
-    ).toEqual(["packages/effect-codex-app-server/src/errors.ts"]);
+    ).toEqual([]);
     expect(graph.files.filter((file) => file.startsWith("packages/effect-acp/"))).toEqual([]);
     // `ryco remote` client stores load with that command only.
     expect(
       graph.externals.filter((specifier) => /^(?:react|zustand)(?:\/|$)/u.test(specifier)),
     ).toEqual([]);
+  });
+
+  it("loads the working-tree comparison with its first read", () => {
+    // GitComparison imports it with import(): committed comparisons never build its scratch index.
+    const target = "apps/server/src/vcs/GitWorkingTreeComparison.ts";
+    expect(staticGraph("src/cliMain.ts").files).not.toContain(target);
+    expect(staticGraph("src/cliMain.ts", { dynamic: true }).files).toContain(target);
   });
 
   it("loads the pull request watch fingerprint with the GitHub client", () => {
@@ -215,6 +225,55 @@ describe("server boot import boundaries", () => {
     expect(staticGraph("src/cliMain.ts", { dynamic: true }).files).toContain(
       "apps/server/src/sourceControl/pullRequestWatchSweep.ts",
     );
+  });
+
+  it("loads the command watch runner, its rules, its SQL and its tools after the server serves", () => {
+    // Only the thin service layer and the two loaders are on the serve path; the runner, the
+    // decider's command watch rules, the projection SQL, the Agent Control tools and the shared
+    // run rules (with the output sanitiser) load through import().
+    const lazy =
+      /(?:apps\/server\/src\/(?:commandWatch\/commandWatchRuntime|orchestration\/commandWatchUpdates|persistence\/commandWatchProjection|agentControl\/Mcp\/commandWatchTools)|packages\/shared\/src\/(?:commandWatch|untrustedText))\.ts$/u;
+    const graph = staticGraph("src/cliMain.ts");
+    expect(graph.files.filter((file) => lazy.test(file))).toEqual([]);
+    expect(graph.files).toContain("apps/server/src/commandWatch/CommandWatchService.ts");
+    expect(
+      staticGraph("src/cliMain.ts", { dynamic: true })
+        .files.filter((file) => lazy.test(file))
+        .toSorted(),
+    ).toEqual([
+      "apps/server/src/agentControl/Mcp/commandWatchTools.ts",
+      "apps/server/src/commandWatch/commandWatchRuntime.ts",
+      "apps/server/src/orchestration/commandWatchUpdates.ts",
+      "apps/server/src/persistence/commandWatchProjection.ts",
+      "packages/shared/src/commandWatch.ts",
+      "packages/shared/src/untrustedText.ts",
+    ]);
+  });
+
+  it("loads the native fork copies with the first native fork", () => {
+    // Acceptance needs only the configuration fingerprint; the Codex and Claude copy code loads
+    // with the first native fork, pin or cleanup.
+    const graph = staticGraph("src/cliMain.ts");
+    expect(graph.files).toContain("apps/server/src/threadFork/nativeForkFingerprint.ts");
+    expect(graph.files).not.toContain("apps/server/src/threadFork/nativeFork.ts");
+    expect(staticGraph("src/cliMain.ts", { dynamic: true }).files).toContain(
+      "apps/server/src/threadFork/nativeFork.ts",
+    );
+  });
+
+  it("loads the carried fork checks and acceptance with the first carried fork", () => {
+    // The fork service at boot only hands its helpers over and calls import(); the checks, the
+    // acceptance and the shared carried rules load with the first `threads.forkCarried`.
+    const lazy =
+      /(?:apps\/server\/src\/threadFork\/carriedFork|packages\/shared\/src\/carriedFork)\.ts$/u;
+    const graph = staticGraph("src/cliMain.ts");
+    expect(graph.files.filter((file) => lazy.test(file))).toEqual([]);
+    expect(graph.files).toContain("apps/server/src/threadFork/Layers/ThreadFork.ts");
+    expect(
+      staticGraph("src/cliMain.ts", { dynamic: true })
+        .files.filter((file) => lazy.test(file))
+        .toSorted(),
+    ).toEqual(["apps/server/src/threadFork/carriedFork.ts", "packages/shared/src/carriedFork.ts"]);
   });
 
   it("keeps optional feature stacks off the serve path", () => {
@@ -350,6 +409,72 @@ describe("server boot import boundaries", () => {
     expect(reached(/^apps\/server\/src\/orchestration\/serverQueueDrainRuntime\.ts$/u)).toEqual([]);
     // Delegation slots load with the first queue held for one (a capped ryco_create_threads).
     expect(reached(/^apps\/server\/src\/agentControl\/delegationSlotRuntime\.ts$/u)).toEqual([]);
+    // The provider update runner (with its unattended pinning and release-age rules) loads with
+    // the first update, the host-wide provider install lock (and its busy markers) with the first
+    // install, provider session start or busy period; boot carries their facades.
+    expect(
+      reached(
+        /^apps\/server\/src\/provider\/provider(?:InstallLock|MaintenanceRunnerRuntime|UpdatePinning|ReleaseAge)\.ts$/u,
+      ),
+    ).toEqual([]);
+    expect(graph.files).toContain("apps/server/src/provider/Layers/ProviderInstallLock.ts");
+    expect(graph.files).toContain("apps/server/src/provider/providerMaintenanceRunner.ts");
+    const reachable = staticGraph("src/cliMain.ts", { dynamic: true }).files;
+    expect(reachable).toContain("apps/server/src/provider/providerInstallLock.ts");
+    expect(reachable).toContain("apps/server/src/provider/providerMaintenanceRunnerRuntime.ts");
+    // Forgejo's review, merge readiness and diff line code loads with its pull request page API,
+    // the first time a Forgejo pull request is listed, opened or changed. The eager client keeps
+    // only the draft title rule (forgejoPullRequests.ts).
+    expect(
+      reached(
+        /^apps\/server\/src\/sourceControl\/forgejo(?:PullRequestActivity|PullRequestMutations|PullRequestReadiness|DiffLines)\.ts$/u,
+      ),
+    ).toEqual([]);
+    // The setup guide and node manager load when `ryco setup`, `ryco config edit` or a bare
+    // `ryco` in a terminal opens them; the turn diff parser with the first turn diff summary.
+    expect(
+      reached(/^apps\/server\/src\/(?:cliSetup\/(?:setupFlow|machine)|checkpointing\/Diffs)\.ts$/u),
+    ).toEqual([]);
+    const loadable = staticGraph("src/bin.ts", { dynamic: true }).files;
+    for (const file of [
+      "apps/server/src/sourceControl/forgejoPullRequestMutations.ts",
+      "apps/server/src/cliSetup/setupFlow.ts",
+      "apps/server/src/checkpointing/Diffs.ts",
+    ]) {
+      expect(loadable).toContain(file);
+    }
+    // Unattended updates: boot holds the interaction clock (the RPC writes it), the counter that
+    // clones, checkouts and storage cleanup write, the launcher, which loads the window and the
+    // updaters only once a node's owner turns them on, and the small reporter that tells a
+    // desktop app the setting from the start.
+    expect(reached(/^apps\/server\/src\/updates\//u).toSorted()).toEqual([
+      "apps/server/src/updates/ClientInteraction.ts",
+      "apps/server/src/updates/desktopAppUpdatePolicy.ts",
+      "apps/server/src/updates/restartSensitiveWork.ts",
+      "apps/server/src/updates/unattendedUpdatesLauncher.ts",
+    ]);
+    expect(reachable).toEqual(
+      expect.arrayContaining([
+        "apps/server/src/updates/unattendedUpdates.ts",
+        "apps/server/src/updates/providerAutoUpdater.ts",
+        "apps/server/src/updates/nodeAutoUpdater.ts",
+        "apps/server/src/updates/nodeAutoSkip.ts",
+        "apps/server/src/updates/updateWindow.ts",
+      ]),
+    );
+  });
+
+  it("loads the copy of Ryco's data into Ryco Nightly only when one was asked for", () => {
+    // Boot checks for the request (flavorImportStartup.ts); the copy, its table policy and the
+    // backup code it uses load with import().
+    const graph = staticGraph("src/cliMain.ts");
+    expect(graph.files).toContain("apps/server/src/flavorImportStartup.ts");
+    expect(graph.files.filter((file) => file.startsWith("apps/server/src/flavorImport/"))).toEqual(
+      [],
+    );
+    expect(staticGraph("src/cliMain.ts", { dynamic: true }).files).toContain(
+      "apps/server/src/flavorImport/consumeFlavorImport.ts",
+    );
   });
 
   it("loads the repository clone runner with the first clone", () => {
@@ -396,6 +521,26 @@ describe("server boot import boundaries", () => {
     expect(boot).toContain("apps/server/src/localServers/threadAttributionEnv.ts");
     const reachable = staticGraph("src/cliMain.ts", { dynamic: true }).files;
     expect(monitor.filter((file) => reachable.includes(file))).toEqual(monitor);
+  });
+
+  it("loads secret requests (tool, answer, dotenv writer) on first use, never at boot", () => {
+    // `ryco_request_secret` loads through `withLazyAgentControlTools`, the owner's answer and the
+    // restart's expiry timers through import(); the boot path keeps the activity kinds and the
+    // request derivation the pending-input count reads (`@ryco/shared/secretRequestState`). The
+    // answer's connection check loads with it: boot only records the connection's facts on the
+    // principal.
+    const secretRequests = [
+      "apps/server/src/agentControl/Mcp/secretRequestTools.ts",
+      "apps/server/src/secretRequests/secretRequests.ts",
+      "apps/server/src/secretRequests/dotenvSink.ts",
+      "apps/server/src/ws/rpcConnectionPath.ts",
+      "packages/shared/src/secretRequests.ts",
+    ];
+    const boot = staticGraph("src/cliMain.ts").files;
+    expect(secretRequests.filter((file) => boot.includes(file))).toEqual([]);
+    expect(boot).toContain("apps/server/src/ws/secretRequestRpc.ts");
+    const reachable = staticGraph("src/cliMain.ts", { dynamic: true }).files;
+    expect(secretRequests.filter((file) => reachable.includes(file))).toEqual(secretRequests);
   });
 
   it("loads the agents' usage limits read and its limit presentation on the first call", () => {
@@ -521,6 +666,22 @@ describe.skipIf(!hasCurrentBuild)("built server bundle", () => {
     }
   });
 
+  it("loads the worktree handoff runner and its tools after the server serves", () => {
+    // The executor and the MCP server hold only an import() and the deps they pass in.
+    const lazy =
+      /apps\/server\/src\/(?:agentControl\/(?:worktreeHandoffRuns|Mcp\/worktreeHandoffTools)|orchestration\/threadGitMetadata)\.ts$/u;
+    expect(staticGraph("src/cliMain.ts").files.filter((file) => lazy.test(file))).toEqual([]);
+    expect(
+      staticGraph("src/cliMain.ts", { dynamic: true })
+        .files.filter((file) => lazy.test(file))
+        .toSorted(),
+    ).toEqual([
+      "apps/server/src/agentControl/Mcp/worktreeHandoffTools.ts",
+      "apps/server/src/agentControl/worktreeHandoffRuns.ts",
+      "apps/server/src/orchestration/threadGitMetadata.ts",
+    ]);
+  });
+
   it("keeps the boot chunks within budget", () => {
     const cliChunk = readFileSync(builtEntry, "utf8").match(/import\("(\.\/cliMain[^"]+)"\)/u)?.[1];
     const serve = builtStaticClosure(path.resolve(serverRoot, "dist", cliChunk!));
@@ -533,13 +694,16 @@ describe.skipIf(!hasCurrentBuild)("built server bundle", () => {
     // code loads through import()). 7.101 MB at the end of October 2026: the in-place
     // restore's startup check (1.3 KB) and the sidebar rows' fingerprint revalidation
     // (1.7 KB: the repository list cache's change record, the row read path and the
-    // status poll's rule) passed 7.1 MB.
+    // status poll's rule) passed 7.1 MB. 7.00 MB once Forgejo's review code, the setup guide
+    // and the turn diff parser loaded through import() (-98 KB).
     expect(bytes).toBeLessThan(7_105_000);
     for (const chunk of serve.chunks) {
       const source = readFileSync(chunk, "utf8");
       // Region markers rolldown leaves in the output name the modules each chunk holds.
       expect(source).not.toMatch(/^\/\/#region src\/computer\/CuaComputerBackend\.ts$/mu);
       expect(source).not.toMatch(/^\/\/#region src\/nodeBrowser\/nodeBrowserRuntime\.ts$/mu);
+      // `ryco update` loads when it runs.
+      expect(source).not.toMatch(/^\/\/#region src\/cliNodeUpdate\/updateCommand\.ts$/mu);
       // The terminal QR encoder loads when a command prints a pairing code.
       expect(source).not.toMatch(/^\/\/#region \.\.\/\.\.\/packages\/shared\/src\/qrCode\.ts$/mu);
       expect(source).not.toMatch(/^\/\/#region src\/hubConnector\/HubIdentityRuntime\.ts$/mu);
@@ -551,6 +715,10 @@ describe.skipIf(!hasCurrentBuild)("built server bundle", () => {
       // Loaded the first time a person sets a delegation limit.
       expect(source).not.toMatch(/^\/\/#region src\/agentControl\/delegationLimitCheck\.ts$/mu);
       expect(source).not.toMatch(/^\/\/#region src\/persistence\/delegationTreeQueries\.ts$/mu);
+      // Loaded with the first stall notice a node sends a delegating chat.
+      expect(source).not.toMatch(
+        /^\/\/#region src\/agentControl\/completionReturnStallMessages\.ts$/mu,
+      );
       // Loaded when the external Agent Control integration first starts.
       expect(source).not.toMatch(/^\/\/#region src\/agentControl\/ExternalMcp\/tools\.ts$/mu);
       expect(source).not.toMatch(/^\/\/#region src\/agentControl\/ExternalMcp\/listener\.ts$/mu);
@@ -585,10 +753,30 @@ describe.skipIf(!hasCurrentBuild)("built server bundle", () => {
       // Loaded once an OpenCode server is detected as 2.x.
       expect(source).not.toMatch(/^\/\/#region .*@opencode\//mu);
       expect(source).not.toMatch(/^\/\/#region src\/provider\/openCodeV2\w*\.ts$/mu);
+      // Loaded only on the start of Ryco Nightly after Ryco asked it to copy its data. In case a
+      // module carries no region marker of its own: the copy's refusal text is unique.
+      expect(source).not.toMatch(/^\/\/#region src\/flavorImport\//mu);
+      expect(source).not.toContain("Ryco Nightly copies no links");
       // Loaded with the first provider sign-in call.
       expect(source).not.toMatch(
         /^\/\/#region src\/provider\/signIn\/(?:providerSignInRuntime|codexDeviceCodeSignIn|terminalSignIn|signInCommands|privateDirectory)\.ts$/mu,
       );
+      // Loaded with the first provider update (the lock also with the first session start).
+      expect(source).not.toMatch(
+        /^\/\/#region src\/provider\/provider(?:InstallLock|MaintenanceRunnerRuntime|UpdatePinning)\.ts$/mu,
+      );
+      // Loaded once a node's owner turns on automatic updates.
+      expect(source).not.toMatch(
+        /^\/\/#region src\/updates\/(?:unattendedUpdates|providerAutoUpdater|nodeAutoUpdater|nodeAutoSkip|updateWindow)\.ts$/mu,
+      );
+      // Loaded with Forgejo's pull request page API.
+      expect(source).not.toMatch(
+        /^\/\/#region src\/sourceControl\/forgejo(?:DiffLines|PullRequestReadiness|PullRequestMutations)\.ts$/mu,
+      );
+      // Loaded when a command opens the setup guide.
+      expect(source).not.toMatch(/^\/\/#region src\/cliSetup\/setupFlow\.ts$/mu);
+      // Loaded with the first turn diff summary.
+      expect(source).not.toMatch(/^\/\/#region .*\/@pierre\/diffs\//mu);
     }
   });
 });
@@ -604,6 +792,26 @@ describe.skipIf(!hasCurrentBuild)("built server bundle pull request watches", ()
     expect(boot).toContain("function summarizePullRequestWatches(");
     expect(boot).not.toContain("function decidePullRequestWatch(");
     expect(boot).not.toContain("function renderPullRequestWatchWake(");
+  });
+
+  it("keeps the carried fork checks and acceptance out of the boot chunks", () => {
+    const cliChunk = readFileSync(builtEntry, "utf8").match(/import\("(\.\/cliMain[^"]+)"\)/u)?.[1];
+    const serve = builtStaticClosure(path.resolve(serverRoot, "dist", cliChunk!));
+    for (const chunk of serve.chunks) {
+      expect(readFileSync(chunk, "utf8")).not.toMatch(
+        /^\/\/#region (?:src\/threadFork\/carriedFork|\.\.\/\.\.\/packages\/shared\/src\/carriedFork)\.ts$/mu,
+      );
+    }
+  });
+
+  it("keeps the command watch runner, rules, SQL and tools out of the boot chunks", () => {
+    const cliChunk = readFileSync(builtEntry, "utf8").match(/import\("(\.\/cliMain[^"]+)"\)/u)?.[1];
+    const serve = builtStaticClosure(path.resolve(serverRoot, "dist", cliChunk!));
+    for (const chunk of serve.chunks) {
+      expect(readFileSync(chunk, "utf8")).not.toMatch(
+        /^\/\/#region (?:src\/(?:commandWatch\/commandWatchRuntime|orchestration\/commandWatchUpdates|persistence\/commandWatchProjection|agentControl\/Mcp\/commandWatchTools)|\.\.\/\.\.\/packages\/shared\/src\/(?:commandWatch|untrustedText))\.ts$/mu,
+      );
+    }
   });
 
   it("keeps the watch sweep and its host-read adapters out of the boot chunks", () => {

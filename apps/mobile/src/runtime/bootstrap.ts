@@ -18,7 +18,10 @@ import {
 } from "../connection/hostedConnectionCoordinator";
 import { mobileHostedConnectionScopes } from "../connection/hostedConnectionScopes";
 import { hostedHubStore, type HostedAccountStatus } from "@ryco/client-runtime/authorization";
-import { clearAllProjectIconCaches } from "@ryco/client-runtime/connection";
+import {
+  clearAllProjectIconCaches,
+  isSavedEnvironmentSwitchedOff,
+} from "@ryco/client-runtime/connection";
 import { forgetEnvironmentsServerState } from "@ryco/client-runtime/rpc";
 import type { EnvironmentId } from "@ryco/contracts";
 import { mobileRuntimeStartupBarrier } from "./startupBarrier";
@@ -142,6 +145,8 @@ export function initializeMobileRuntime(): MobileConnectionRegistry {
         await initializeMobileSnapshotPersistence({
           kv: mobileKV,
           hasDirectEnvironment: (environmentId) => registry.catalog.get(environmentId) !== null,
+          isEnvironmentSwitchedOff: (environmentId) =>
+            isSavedEnvironmentSwitchedOff(registry.catalog.get(environmentId)),
           // Debounced snapshot captures are flushed before iOS may suspend us.
           subscribeBackground: (listener) =>
             mobileAppLifecycle.subscribe((event) => {

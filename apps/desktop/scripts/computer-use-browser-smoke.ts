@@ -441,10 +441,38 @@ async function main() {
     assertBackground();
     assert(existsSync(join(uploads.root, pickId)), "the page keeps the chooser upload's copy");
     await shoot("upload-through-chooser");
+
+    // Between actions the agent's tab never shows a native dialog, also while the Browser panel
+    // shows it: Electron answers it at once and the agent's next result reports it. (Without
+    // disableDialogs the page would wait for a native box here until the run's exit guard.) An
+    // inactive window stands in for the Ryco window the panel lives in.
+    const panel = new BrowserWindow({ width: 900, height: 700, show: false });
+    panel.showInactive();
+    transport.surface({ owner: "smoke", tab, x: 0, y: 0, width: 800, height: 600 }, panel);
+    assert.equal(transport.presented(tab), true, "the panel shows the agent's tab");
+    const answered = await webContents
+      .fromId(Number(tab))!
+      .executeJavaScript(
+        "new Promise(resolve => setTimeout(() => resolve(confirm('Between actions?')), 0))",
+      );
+    assert.equal(answered, false, "the page got its answer at once, without a box");
+    parts = content(await execute({ action: "observe", tab }));
+    assert.deepEqual(
+      parts
+        .at(-1)
+        .dialogs.map(
+          ({ kind, message, action, during }: Record<string, string>) =>
+            `${kind}:${message}:${action}:${during}`,
+        ),
+      ["confirm:Between actions?:dismissed:background"],
+    );
+    transport.surface({ owner: "smoke", tab: null, x: 0, y: 0, width: 1, height: 1 }, panel);
+    panel.destroy();
+    assertBackground();
     controller.stop();
     await assert.rejects(execute({ action: "tabs" }), /stopped/);
     console.log(
-      "PASS: hidden Chromium input/navigation stays hidden and unfocused; rejects covered/moving/readonly/disabled targets; fill/type/key/select/click, visible cursor, screenshot, navigation invalidation, waits, console/network diagnostics (first load included), resize/appearance emulation, dialogs without native windows, uploads by ref and through an intercepted file chooser (no native panel), upload copy cleanup on navigation, settle, renderer exit and tab close, and stop.",
+      "PASS: hidden Chromium input/navigation stays hidden and unfocused; rejects covered/moving/readonly/disabled targets; fill/type/key/select/click, visible cursor, screenshot, navigation invalidation, waits, console/network diagnostics (first load included), resize/appearance emulation, dialogs without native windows (also between actions in a shown agent tab), uploads by ref and through an intercepted file chooser (no native panel), upload copy cleanup on navigation, settle, renderer exit and tab close, and stop.",
     );
   } catch (error) {
     console.error(error);

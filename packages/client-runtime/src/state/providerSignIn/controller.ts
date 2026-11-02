@@ -114,7 +114,7 @@ function chunkInput(data: string): string[] {
 
 // CSI, OSC (ended by BEL or ST) and the remaining two-byte escapes.
 const TERMINAL_ESCAPE =
-  // eslint-disable-next-line no-control-regex
+  // eslint-disable-next-line no-control-regex -- terminal escapes start with ESC, and OSC ends with BEL
   /\u001b\[[0-?]*[ -/]*[@-~]|\u001b\][^\u0007\u001b]*(?:\u0007|\u001b\\)|\u001b[@-Z\\-_]/gu;
 // Everything below space except tab and newline; carriage returns are read first.
 // eslint-disable-next-line no-control-regex

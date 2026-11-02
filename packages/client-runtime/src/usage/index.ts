@@ -17,4 +17,5 @@ export * from "./providers.ts";
 export * from "./compatibility.ts";
 
 export * from "./cliProxy.ts";
+export * from "./cliProxyHubReads.ts";
 export * from "./subscriptionLimits.ts";

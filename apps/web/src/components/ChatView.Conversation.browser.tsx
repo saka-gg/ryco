@@ -1,4 +1,6 @@
 import { useSideChatStore } from "../sideChatStore";
+import { getAppKeybindings } from "../appKeybindings";
+import { LazySideChatPanel } from "./chat/chatViewLazySurfaces";
 import { getPreviewFileSession, resetPreviewFileSessionsForTests } from "./previewFileSessions";
 import { createPreviewFileDocument } from "./PreviewFileEditSession";
 import {
@@ -62,6 +64,7 @@ import {
   selectionSnapshot,
   waitForButtonByText,
   waitForButtonContainingText,
+  composerEditorHasFocus,
   waitForComposerEditor,
   waitForElement,
   waitForLayout,
@@ -192,6 +195,62 @@ describe("ChatView Conversation (full app)", () => {
           "My side draft\n\nQuoted assistant text",
         ),
       );
+      await expect.element(page.getByLabelText("Side question")).toBeVisible();
+      expect(
+        wsRequests.some((request) => request._tag === WS_METHODS.textGenerationAskSideQuestion),
+      ).toBe(false);
+    } finally {
+      useSideChatStore.setState({ chatsByThreadKey: {} });
+      await mounted.cleanup();
+    }
+  });
+
+  it("opens the side chat on ⌘⌥S (Ctrl+Alt+S elsewhere) while typing and minimizes it on the same key", async () => {
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot: selectionSnapshot(),
+    });
+    try {
+      // As in the app, where the panel is preloaded while idle.
+      await LazySideChatPanel.preload();
+      const editor = await waitForComposerEditor();
+      await vi.waitFor(() =>
+        expect(getAppKeybindings().some((rule) => rule.command === "sideChat.toggle")).toBe(true),
+      );
+      const mac = isMacPlatform(navigator.platform);
+      const press = () => {
+        const event = new KeyboardEvent("keydown", {
+          // Option+S types "ß" on macOS; the binding matches the physical key.
+          key: mac ? "ß" : "s",
+          code: "KeyS",
+          altKey: true,
+          metaKey: mac,
+          ctrlKey: !mac,
+          bubbles: true,
+          cancelable: true,
+        });
+        (document.activeElement ?? window).dispatchEvent(event);
+        return event.defaultPrevented;
+      };
+      editor.focus();
+      expect(press()).toBe(true);
+      // A new side chat on the thread's model, with the typing in its question field.
+      const threadModel = selectThreadByRef(useStore.getState(), THREAD_REF)?.modelSelection;
+      expect(useSideChatStore.getState().chatsByThreadKey[THREAD_KEY]).toMatchObject({
+        open: true,
+        modelSelection: threadModel,
+      });
+      await vi.waitFor(() =>
+        expect(document.activeElement?.getAttribute("aria-label")).toBe("Side question"),
+      );
+      expect(press()).toBe(true);
+      expect(useSideChatStore.getState().chatsByThreadKey[THREAD_KEY]?.open).toBe(false);
+      await expect
+        .element(page.getByRole("button", { name: "Side chat", exact: true }))
+        .toBeVisible();
+      await vi.waitFor(() => expect(composerEditorHasFocus()).toBe(true));
+      // Reopening keeps the same side conversation.
+      expect(press()).toBe(true);
       await expect.element(page.getByLabelText("Side question")).toBeVisible();
       expect(
         wsRequests.some((request) => request._tag === WS_METHODS.textGenerationAskSideQuestion),

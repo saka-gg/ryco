@@ -295,6 +295,8 @@ const startHold = (
       Effect.provideService(AgentWorkActivity, {
         current: SubscriptionRef.get(ref),
         changes: SubscriptionRef.changes(ref),
+        interruptible: Effect.succeed(false),
+        restartInterruptible: Effect.succeed(false),
       }),
       Effect.provideService(Clock.Clock, clock),
       Scope.provide(scope),

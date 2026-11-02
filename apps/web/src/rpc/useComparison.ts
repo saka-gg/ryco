@@ -1,12 +1,17 @@
-import type { EnvironmentId } from "@ryco/contracts";
+import type { EnvironmentId, ServerConfig } from "@ryco/contracts";
 import {
   createComparisonController,
   comparisonStorageKey,
 } from "@ryco/client-runtime/state/comparison";
 import { useMemo, useSyncExternalStore } from "react";
 import { ensureEnvironmentApi } from "../environmentApi";
+import { useEnvironmentServerConfigSelector } from "../hooks/useChatsAvailability";
 import { webKV } from "../platform/kv";
 import { useRepositoryReadLifecycle } from "./useRepositoryReadLifecycle";
+
+// Module level, so unrelated config pushes (provider probes) never re-render.
+const selectWorkingTreeComparison = (config: ServerConfig | null): boolean =>
+  config?.environment.capabilities.workingTreeComparison === true;
 
 export function useComparison(input: {
   environmentId: EnvironmentId | null;
@@ -40,5 +45,15 @@ export function useComparison(input: {
     enabled && !!repositoryPath,
     controller.hydrate,
   );
-  return { ...state, setSelection: controller.setSelection, refresh: controller.refresh };
+  // Older nodes drop `target` and compare with HEAD; they are not offered the working tree.
+  const workingTreeAvailable = useEnvironmentServerConfigSelector(
+    environmentId,
+    selectWorkingTreeComparison,
+  );
+  return {
+    ...state,
+    workingTreeAvailable,
+    setSelection: controller.setSelection,
+    refresh: controller.refresh,
+  };
 }

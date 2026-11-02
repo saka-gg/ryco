@@ -11,6 +11,7 @@ import {
   resolveQueuedMessageSteerEligibility,
   resolveQueuedMessageSteerOutcome,
   type QueuedMessageSteerAttempt,
+  providerSteering,
 } from "./logic.ts";
 
 const activeSelection = {
@@ -230,5 +231,19 @@ describe("resolveQueuedMessageEditUnavailableReason", () => {
     expect(
       resolveQueuedMessageEditUnavailableReason({ ...editable, composerHasContent: true }),
     ).toBe("Clear the composer to edit a queued message.");
+  });
+});
+
+describe("providerSteering", () => {
+  it("reads native steering, steering by restart, and nothing else", () => {
+    expect(providerSteering({ supportsTurnSteering: true })).toBe("native");
+    expect(providerSteering({ turnSteeringMode: "interrupt-restart" })).toBe("restart");
+    expect(
+      providerSteering({ supportsTurnSteering: true, turnSteeringMode: "interrupt-restart" }),
+    ).toBe("native");
+    // A mode a newer node sends that this client does not know reads as no steering.
+    expect(providerSteering({ turnSteeringMode: "some-future-mode" })).toBeNull();
+    expect(providerSteering({ supportsTurnSteering: false })).toBeNull();
+    expect(providerSteering(undefined)).toBeNull();
   });
 });

@@ -1,6 +1,7 @@
 import path from "node:path";
 
 import type {
+  ModelSelection,
   OrchestrationCommand,
   OrchestrationProject,
   OrchestrationReadModel,
@@ -194,7 +195,9 @@ export function requireThreadIdleForContextHandoff(input: {
  * runtime ends every task with it. Two turn starts replace it: a context handoff the decider
  * planned (another provider instance), and a model or option change that restarts the session
  * on the same instance (`modelSelectionChangeRestartsSession`, compared with the selection the
- * last accepted turn committed, as the provider reactor compares with the one it last applied).
+ * session runs, `sessionModelSelection`, as the provider reactor compares). Clients store a
+ * pick on the thread when it is made, so the thread's own selection may already be the one the
+ * turn asks for; it only stands in while no session selection is known.
  * The decider cannot check this: background liveness is in-memory runtime state
  * (`ThreadBackgroundLiveness`), not part of the read model, so the engine applies this to the
  * events the decider planned. Only tasks the current runtime reported count. Only a turn start
@@ -211,6 +214,8 @@ export function requireNoBackgroundWorkForModelSwitch(input: {
     threadId: ThreadId,
     runtimeSessionId: string | null,
   ) => ReadonlyArray<string>;
+  /** The selection the thread's session last applied (`ThreadSessionModelSelectionsService`). */
+  readonly sessionModelSelection?: (threadId: ThreadId) => ModelSelection | undefined;
 }): Effect.Effect<void, OrchestrationModelSwitchBlockedError> {
   const { command, thread } = input;
   const session = thread?.session;
@@ -227,7 +232,7 @@ export function requireNoBackgroundWorkForModelSwitch(input: {
     input.events.some((event) => event.type === "thread.context-handoff-requested") ||
     modelSelectionChangeRestartsSession({
       driver: session.providerName,
-      previous: thread.modelSelection,
+      previous: input.sessionModelSelection?.(thread.id) ?? thread.modelSelection,
       requested: command.modelSelection,
     });
   if (!replacesRuntime) return Effect.void;

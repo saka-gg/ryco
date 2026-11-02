@@ -1,9 +1,10 @@
 import type * as Http from "node:http";
 import type { AuthSessionId, RelayEffectiveRole, TurnOrigin } from "@ryco/contracts";
+import { isTailscaleAddress } from "@ryco/tailscale";
 import type { HttpServerRequest } from "effect/http";
 
 import type { AuthenticatedSession } from "../auth/Services/ServerAuth.ts";
-import { isDirectLoopbackUpgrade } from "../webSocketCompression.ts";
+import { isDirectLoopbackUpgrade, isLoopbackRangeAddress } from "../webSocketCompression.ts";
 
 export type RpcPrincipalRole = "viewer" | "operator" | "owner";
 
@@ -40,6 +41,60 @@ export type RelayChannelAuthority =
     }
   | { readonly trustSource: "none" };
 
+/**
+ * How a request reached the node, as the node itself saw it: its own relay channel state, or the
+ * direct socket's addresses and TLS state. Never a client's claim. Captured when the connection
+ * is built and classified on demand by `rpcConnectionPath` (`ws/rpcConnectionPath.ts`, loaded
+ * with the first answer that needs it).
+ */
+export type RpcConnectionFacts =
+  | {
+      readonly kind: "relay";
+      /**
+       * Whether the channel's E2EE handshake completed (`e2ee` mode, native IK or web NX), read
+       * per request. A channel that locked `legacy` never becomes `e2ee`, so a request read as
+       * encrypted arrived as an authenticated E2EE record.
+       */
+      readonly endToEndEncrypted: () => boolean;
+    }
+  | {
+      readonly kind: "direct";
+      /** What the peer's socket address is. */
+      readonly remote: RpcSocketAddressKind;
+      /** The peer's socket address, as the runtime reports it. */
+      readonly remoteAddress: string;
+      /**
+       * The node's own end of the socket, as the runtime reports it; absent when it does not
+       * say. Compared with the peer's address and the node's own Tailscale addresses when read.
+       */
+      readonly localAddress: string | undefined;
+      /** The socket itself is TLS. */
+      readonly tls: boolean;
+      /**
+       * The upgrade request's forwarding headers, as sent. They are believed only from a
+       * loopback peer, where they come from a reverse proxy on this machine.
+       */
+      readonly forwarding: {
+        readonly forwardedFor: string | undefined;
+        readonly forwarded: string | undefined;
+        readonly forwardedProto: string | undefined;
+        readonly realIp: string | undefined;
+      };
+    };
+
+/**
+ * What a socket address is: anywhere in the loopback range (IPv4-mapped forms included; the
+ * network cannot deliver a loopback source), a Tailscale address, or anything else.
+ */
+export type RpcSocketAddressKind = "loopback" | "tailscale" | "other";
+
+const socketAddressKind = (address: string): RpcSocketAddressKind =>
+  isLoopbackRangeAddress(address)
+    ? "loopback"
+    : isTailscaleAddress(address)
+      ? "tailscale"
+      : "other";
+
 export interface RpcPrincipal {
   readonly transport: "direct" | "relay";
   readonly role: RpcPrincipalRole;
@@ -61,6 +116,8 @@ export interface RpcPrincipal {
   readonly linkedDeviceFingerprintHex?: string;
   /** Relay channels only; see {@link RelayChannelAuthority}. */
   readonly relayAuthority?: () => RelayChannelAuthority;
+  /** How requests reach the node; absent when unknown, which nothing reads as encrypted. */
+  readonly connection?: RpcConnectionFacts;
 }
 
 /**
@@ -95,12 +152,14 @@ export const relayRpcPrincipal = (
   effectiveRole: RelayEffectiveRole,
   channelId: string,
   relayAuthority: () => RelayChannelAuthority = () => ({ trustSource: "none" }),
+  endToEndEncrypted: () => boolean = () => false,
 ): RpcPrincipal => ({
   transport: "relay",
   role: effectiveRole,
   scopeId: channelId,
   canManageLocalAccess: false,
   relayAuthority,
+  connection: { kind: "relay", endToEndEncrypted },
 });
 
 /** The owner key of a direct pairing's work: see {@link rpcPrincipalOwnerKey}. */
@@ -143,16 +202,39 @@ export const turnOriginOfPrincipal = (principal: RpcPrincipal): TurnOrigin | und
       ? undefined
       : { connection: principal.peer };
 
+const headerText = (value: string | ReadonlyArray<string> | undefined): string | undefined =>
+  typeof value === "string" ? value : value === undefined ? undefined : value.join(", ");
+
 /**
- * The locality of a direct connection's peer, from its upgrade request: a loopback connection
- * without forwarding headers is a process on this machine; a local reverse proxy (Tailscale
- * Serve, say) that relays a remote client marks it with forwarding headers. Nothing when the
- * runtime gives no socket address.
+ * A direct connection's peer and transport, from its upgrade request's socket. The locality: a
+ * loopback connection without forwarding headers is a process on this machine; a local reverse
+ * proxy (Tailscale Serve, say) that relays a remote client marks it with forwarding headers.
+ * Nothing when the runtime gives no socket address.
  */
-export const directPeerOf = (
+export const directConnectionOf = (
   request: HttpServerRequest.HttpServerRequest,
-): Pick<RpcPrincipal, "peer"> => {
+): Pick<RpcPrincipal, "peer" | "connection"> => {
   const source = request.source as Partial<Http.IncomingMessage> | undefined;
-  if (source?.socket?.remoteAddress === undefined || source.headers === undefined) return {};
-  return { peer: isDirectLoopbackUpgrade(source as Http.IncomingMessage) ? "local" : "remote" };
+  const socket = source?.socket as
+    | (Http.IncomingMessage["socket"] & { encrypted?: boolean })
+    | undefined;
+  const remoteAddress = socket?.remoteAddress;
+  const headers = source?.headers;
+  if (remoteAddress === undefined || headers === undefined) return {};
+  return {
+    peer: isDirectLoopbackUpgrade(source as Http.IncomingMessage) ? "local" : "remote",
+    connection: {
+      kind: "direct",
+      remote: socketAddressKind(remoteAddress),
+      remoteAddress,
+      localAddress: socket?.localAddress,
+      tls: socket?.encrypted === true,
+      forwarding: {
+        forwardedFor: headerText(headers["x-forwarded-for"]),
+        forwarded: headerText(headers.forwarded),
+        forwardedProto: headerText(headers["x-forwarded-proto"]),
+        realIp: headerText(headers["x-real-ip"]),
+      },
+    },
+  };
 };

@@ -36,6 +36,8 @@ export interface VerifiedSession {
 
 export type LinkedSessionSelector =
   | { readonly enrollmentId: string }
+  /** Every Hub-linked session: the Hub revoked this node, so none of its links stand. */
+  | { readonly allLinks: true }
   | {
       readonly clientFingerprint: string;
       /** Only links of this trust source. */
@@ -109,8 +111,9 @@ export interface SessionCredentialServiceShape {
     readonly role?: SessionRole;
     readonly client?: AuthClientMetadata;
     /**
-     * A Hub-linked session. It lives at most `LINKED_SESSION_MAX_AGE` from
-     * issue, and rotation never carries its chain past that.
+     * A Hub-linked session. It lives at most `linkedSessionMaxAge` from issue
+     * (four days, a locally verified device's 24 hours), and rotation never
+     * carries its chain past that.
      */
     readonly link?: AuthAccessLink;
   }) => Effect.Effect<IssuedSession, SessionCredentialError>;
@@ -158,8 +161,9 @@ export interface SessionCredentialServiceShape {
   /**
    * Ends Hub-linked sessions of one device: its Hub enrollment was revoked, its
    * local client authorization withdrawn, or its Hub access ended or narrowed
-   * (`accountId` and `roles` narrow the selection). Returns how many pairings
-   * it revoked.
+   * (`accountId` and `roles` narrow the selection); or every one of them, when
+   * the Hub revoked this node. Sessions without a link are never selected.
+   * Returns how many pairings it revoked.
    */
   readonly revokeLinked: (
     selector: LinkedSessionSelector,

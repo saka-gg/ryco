@@ -32,6 +32,7 @@ describe("web bundle splitting boundaries", () => {
       "../routes/pull-requests.tsx",
       "../routes/projects.tsx",
       "../routes/tasks.tsx",
+      "../routes/_chat.new.tsx",
       "../routes/_settings.diagnostics.tsx",
       "../routes/native.authorize.$handoffId.tsx",
       "../routes/pair.tsx",
@@ -163,6 +164,7 @@ describe("web bundle splitting boundaries", () => {
     const pullRequestsRoute = await readSource("../routes/pull-requests.tsx");
     const projectsRoute = await readSource("../routes/projects.tsx");
     const tasksRoute = await readSource("../routes/tasks.tsx");
+    const promptLinkRoute = await readSource("../routes/_chat.new.tsx");
     const settingsRoute = await readSource("../routes/settings.tsx");
     const diagnosticsRoute = await readSource("../routes/_settings.diagnostics.tsx");
     const nativeAuthorizationRoute = await readSource("../routes/native.authorize.$handoffId.tsx");
@@ -182,6 +184,9 @@ describe("web bundle splitting boundaries", () => {
     expect(projectsRoute).not.toContain("components/projects/ProjectsPage");
     expect(tasksRoute).toContain('import("../components/routeViews/TasksRouteView")');
     expect(tasksRoute).not.toContain("components/tasks/TasksPage");
+    // A prompt link's parser and resolver load with its page, not with the boot bundle.
+    expect(promptLinkRoute).toContain('import("../components/routeViews/PromptLinkRouteView")');
+    expect(promptLinkRoute).not.toMatch(/from "@ryco\/(shared|client-runtime)\/promptLinks"/);
     expect(settingsRouteModule).toContain('import("./components/routeViews/SettingsRouteView")');
     expect(settingsRouteModule).not.toContain('from "./components/settings/SettingsPage"');
     expect(settingsRoute).not.toContain("components/settings/SettingsPage");

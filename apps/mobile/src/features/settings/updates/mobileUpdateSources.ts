@@ -1,20 +1,21 @@
 import type { UpdateEverythingEnvironmentSource } from "@ryco/client-runtime/updates";
-import type { EnvironmentId, NodeUpdateState, ServerConfig } from "@ryco/contracts";
+import type { NodeUpdateState, ServerConfig } from "@ryco/contracts";
+
+import type { InboxEnvironment } from "../../inbox/inboxModel";
+import { canChangeNodeSettings } from "../nodeSettingsTargets";
 
 /** The parts of a Home machine row "Update everything" reads. */
-export interface MobileUpdateMachine {
-  readonly environmentId: EnvironmentId;
-  readonly label: string;
-  readonly connectionState: string;
-  readonly role?: string | undefined;
-  readonly mutationReady?: boolean | undefined;
-}
+export type MobileUpdateMachine = Pick<
+  InboxEnvironment,
+  "environmentId" | "label" | "connectionState" | "role" | "mutationReady"
+>;
 
 /**
  * One machine as the planner sees it. Only its owner on a connected,
- * mutation-ready connection may update it, the rule every node maintenance
- * surface on the phone uses; its running chats count only once its shell is
- * current, since cached or held-over rows show nothing running.
+ * mutation-ready connection may update it (`canChangeNodeSettings`, the rule
+ * every node maintenance surface on the phone uses); its running chats count
+ * only once its shell is current, since cached or held-over rows show nothing
+ * running.
  */
 export function mobileUpdateSource(
   machine: MobileUpdateMachine,
@@ -31,7 +32,7 @@ export function mobileUpdateSource(
     connectionLabel: machine.label,
     config: state.config,
     live: connected && state.shellCurrent,
-    canMutate: connected && machine.role === "owner" && machine.mutationReady === true,
+    canMutate: canChangeNodeSettings(machine),
     nodeUpdate: state.nodeUpdate,
   };
 }

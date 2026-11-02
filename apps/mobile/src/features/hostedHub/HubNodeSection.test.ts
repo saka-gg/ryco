@@ -226,6 +226,7 @@ function model(
             sessionEstablished: true,
             sessionRecoveredAfterUnknown: false,
             errorMessage: null,
+            outageFailure: null,
           },
         ]
       : [],
@@ -272,6 +273,67 @@ beforeEach(() => {
 });
 
 describe("Hub node selection guard", () => {
+  it("says since when an offline node was last heard from", () => {
+    const lastHeartbeatAt = new Date(2026, 9, 31, 14, 2).getTime();
+    const offline = node({
+      effectiveRole: "owner",
+      presence: { online: false, lastHeartbeatAt },
+    });
+    const at = (nowMs: number) =>
+      deriveHubNodeSectionModel({
+        state: state({ nodes: [offline] }),
+        available: true,
+        e2eeStatus: "unavailable",
+        actions: hostedMock.controller,
+        onSignIn: navigationMock.navigate,
+        hostFreeze: { lastEventLoopStall: () => undefined, nowMs },
+      }).rows[0]?.detail;
+    expect(at(lastHeartbeatAt + 60 * 60_000)).toBe("Offline since 14:02 · Owner");
+    expect(at(lastHeartbeatAt + 24 * 60 * 60_000)).toBe("Offline since yesterday 14:02 · Owner");
+    // Without a clock (a caller that passes none) it stays as it was.
+    expect(model({ nodes: [offline] }).rows[0]?.detail).toBe("Offline · Owner");
+  });
+
+  it("names the failing part of the way on the selected node's row", () => {
+    const selected = node();
+    const rows = (
+      outageFailure: "dns" | "draining" | null,
+      transportStatus: "online" | "reconnecting",
+    ) =>
+      deriveHubNodeSectionModel({
+        state: state({
+          selectedNode: selected,
+          selectionStatus: "online",
+          transportStatus,
+          sessionStatus: transportStatus === "online" ? "ready" : "closed",
+        }),
+        connections: [
+          {
+            environmentId: selected.environmentId,
+            nodeId: selected.id,
+            effectiveRole: "operator",
+            transportStatus,
+            sessionStatus: transportStatus === "online" ? "ready" : "closed",
+            label: selected.label,
+            generation: 1,
+            lastAccessedAt: 0,
+            attemptPrepared: true,
+            sessionEstablished: true,
+            sessionRecoveredAfterUnknown: false,
+            errorMessage: null,
+            outageFailure,
+          },
+        ],
+        available: true,
+        e2eeStatus: "unavailable",
+        actions: hostedMock.controller,
+        onSignIn: navigationMock.navigate,
+      }).rows;
+    expect(rows("dns", "reconnecting")[0]?.routeNotice).toBe("Can't reach the Hub (DNS)");
+    expect(rows("draining", "reconnecting")[0]?.routeNotice).toBe("Studio Mac is restarting");
+    expect(rows(null, "online")[0]?.routeNotice ?? null).toBeNull();
+  });
+
   it("says on a node's row when it just froze, from the config it sent", () => {
     const selected = node();
     const withStall = (nowMs: number) =>
@@ -626,6 +688,7 @@ describe("node icon settings authorization", () => {
             sessionEstablished: true,
             sessionRecoveredAfterUnknown: false,
             errorMessage: null,
+            outageFailure: null,
           },
         ],
       });
@@ -672,6 +735,7 @@ describe("Hub node rows: linked direct access", () => {
     sessionEstablished: true,
     sessionRecoveredAfterUnknown: false,
     errorMessage: null,
+    outageFailure: null,
   };
   const addDirectAccess = vi.fn();
   const removeDirectAccess = vi.fn();

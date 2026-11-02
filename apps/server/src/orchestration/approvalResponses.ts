@@ -37,6 +37,8 @@ function requireCallbackClaim(input: {
   identity: ApprovalResponseIdentity | undefined;
   row: Option.Option<ProjectionPendingApproval>;
   session: OrchestrationSession | null | undefined;
+  /** An optional question's dismissal: settled by the node alone, it needs no live session. */
+  sessionIndependent?: boolean;
 }) {
   const { command, session } = input;
   const row = Option.getOrUndefined(input.row);
@@ -59,10 +61,11 @@ function requireCallbackClaim(input: {
     );
   }
   if (
-    !session ||
-    !session.runtimeSessionId ||
-    session.status === "stopped" ||
-    session.runtimeSessionId !== row.approvalIdentity.runtimeSessionId
+    input.sessionIndependent !== true &&
+    (!session ||
+      !session.runtimeSessionId ||
+      session.status === "stopped" ||
+      session.runtimeSessionId !== row.approvalIdentity.runtimeSessionId)
   ) {
     return reject(
       "Approval belongs to an inactive provider session. Restart the turn to continue.",
@@ -213,6 +216,10 @@ export function requireUserInputClaim(input: {
     ...input,
     row: Option.map(input.row, questionAsCallback),
     identity: input.command.userInputIdentity,
+    // Dismissing an optional question sends the agent nothing: it needs no live session.
+    sessionIndependent:
+      Option.getOrUndefined(input.row)?.nonBlocking === true &&
+      Object.keys(input.command.answers).length === 0,
   });
 }
 
@@ -227,6 +234,8 @@ export const pendingCallbackInvalidation = Effect.fn("pendingCallbackInvalidatio
     threadId: ThreadId;
     requestId: string;
     kind: "approval" | "user-input";
+    /** An optional question (`derivePendingThreadRequests` marks it). */
+    nonBlocking?: boolean | undefined;
     detail: string;
     source?: {
       runtimeSessionId?: RuntimeSessionId | undefined;
@@ -242,6 +251,14 @@ export const pendingCallbackInvalidation = Effect.fn("pendingCallbackInvalidatio
             .getByRequestId(lookup)
             .pipe(Effect.map(Option.map(questionAsCallback)));
     if (Option.isNone(row) || row.value.status !== "pending") return null;
+    // An optional question outlives its turn: the user can still answer it, and that answer
+    // then starts the next turn. Only one whose answer may already have reached the agent
+    // (submitting or unconfirmed) is cleared, as before.
+    if (
+      input.nonBlocking === true &&
+      (row.value.responseState === undefined || row.value.responseState === "retryable")
+    )
+      return null;
     if (input.source) {
       const identity = row.value.approvalIdentity;
       // A lifecycle snapshot cannot redirect cleanup to a newer callback that

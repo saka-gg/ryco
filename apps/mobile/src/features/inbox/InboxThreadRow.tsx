@@ -7,6 +7,7 @@ import { Pressable, View } from "react-native";
 
 import { AppText as Text } from "../../components/AppText";
 import { ChangeRequestBadge } from "../../components/ChangeRequestBadge";
+import { FollowUpQueueMark } from "../../components/FollowUpQueueMark";
 import { ProviderIcon } from "../../components/ProviderIcon";
 import { relativeTime } from "../../lib/time";
 import type { InboxThreadRow as InboxThreadRowModel, InboxThreadState } from "./inboxModel";
@@ -157,21 +158,7 @@ export const InboxThreadRow = memo(function InboxThreadRow(props: {
           {row.roleLabel ? (
             <Text className="text-xs text-foreground-tertiary">{row.roleLabel}</Text>
           ) : null}
-          {row.followUpQueue ? (
-            <View
-              className={`rounded-full border px-1.5 ${
-                row.followUpQueue.held ? "border-warning" : "border-border"
-              }`}
-            >
-              <Text
-                className={`text-2xs font-ryco-medium ${
-                  row.followUpQueue.held ? "text-warning" : "text-foreground-tertiary"
-                }`}
-              >
-                {row.followUpQueue.label}
-              </Text>
-            </View>
-          ) : null}
+          {row.followUpQueue ? <FollowUpQueueMark badge={row.followUpQueue} /> : null}
           {row.snoozedUntil ? (
             <Text className="text-xs text-foreground-tertiary">
               Until{" "}

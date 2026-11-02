@@ -133,6 +133,7 @@ const READS_THAT_REACH_OUT = [
   WS_METHODS.vcsListRefs,
   WS_METHODS.serverRefreshProviders,
   WS_METHODS.serverTestCliProxyHub,
+  WS_METHODS.serverNoteClientInteraction,
   ORCHESTRATION_WS_METHODS.setThreadHistoryRecovery,
 ] as const;
 

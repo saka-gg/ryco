@@ -12,6 +12,7 @@ import {
 import * as Effect from "effect/Effect";
 import * as Schema from "effect/Schema";
 import * as SchemaTransformation from "effect/SchemaTransformation";
+import * as Struct from "effect/Struct";
 import {
   EnvironmentId,
   TrimmedNonEmptyString,
@@ -144,6 +145,8 @@ export const ClientSettingsSchema = Schema.Struct({
   // restart continuation still leaves such threads for a person to resume.
   claudeResumeReview: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   chatWidth: ChatWidth.pipe(Schema.withDecodingDefault(Effect.succeed(DEFAULT_CHAT_WIDTH))),
+  // Desktop and web: open chats as closable, reorderable tabs in the chat header.
+  openChatTabs: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
   // Model favorites. Historically keyed by provider kind, now
   // widened to `ProviderInstanceId` so users can favorite a specific model
   // on a custom provider instance (e.g. "Codex Personal · gpt-5") without
@@ -703,21 +706,68 @@ export const InitialModelSelection = ModelSelection.check(
   }),
 );
 
+/** Overrides every node with project preferences reports in its effective preferences. */
+const REPORTED_PROJECT_PREFERENCE_VALUES = {
+  defaultThreadEnvMode: ThreadEnvMode,
+  worktreeBranchPrefix: WorktreeBranchPrefix,
+  runSetupScript: Schema.Boolean,
+};
+/**
+ * Overrides added since: an older node's effective preferences omit them, so they are optional
+ * in {@link EffectiveProjectPreferences} and a client hides their rows. New keys go here.
+ */
+const ADDED_PROJECT_PREFERENCE_VALUES = {
+  worktreeBranchChangeTypes: Schema.Boolean,
+  pullRequestTemplates: Schema.Boolean,
+};
+/**
+ * The whole opt-in for project overrides. Each key is the node setting of the same name, with
+ * its plain value schema; a project may set it for itself and otherwise inherits the node's
+ * value. The stored overrides, their patch, the compare-and-set values and the effective
+ * preferences derive from this list, so a key added here reaches every one of them.
+ * Deliberately bounded to creation preferences, never execution authority: no runtime or
+ * interaction mode, approvals, providers, scripts, environment variables or paths.
+ */
+export const PROJECT_PREFERENCE_VALUES = Schema.Struct({
+  ...REPORTED_PROJECT_PREFERENCE_VALUES,
+  ...ADDED_PROJECT_PREFERENCE_VALUES,
+});
+/** A project override that inherits the node setting of the same name. */
+export type ProjectPreferenceValueKey = keyof typeof PROJECT_PREFERENCE_VALUES.fields;
+export const PROJECT_PREFERENCE_VALUE_KEYS = Object.keys(
+  PROJECT_PREFERENCE_VALUES.fields,
+) as ReadonlyArray<ProjectPreferenceValueKey>;
+/**
+ * The overrides an older node's effective preferences omit: a client shows their rows only once
+ * a node's reply has them.
+ */
+export const PROJECT_PREFERENCE_ADDED_KEYS = Object.keys(
+  ADDED_PROJECT_PREFERENCE_VALUES,
+) as ReadonlyArray<ProjectPreferenceValueKey>;
+/**
+ * Every project preference. The initial model is the one special key: null masks a model saved
+ * on the project before project defaults existed, and without a node default it falls back to
+ * Ryco's built-in model.
+ */
+export type ProjectPreferenceKey = "initialModelSelection" | ProjectPreferenceValueKey;
+
+const ProjectInitialModelSelection = Schema.optionalKey(Schema.NullOr(InitialModelSelection));
+
 /** Deliberately bounded: these are creation preferences, never execution authority. */
 export const ProjectPreferences = Schema.Struct({
-  initialModelSelection: Schema.optionalKey(Schema.NullOr(InitialModelSelection)),
-  defaultThreadEnvMode: Schema.optionalKey(ThreadEnvMode),
-  worktreeBranchPrefix: Schema.optionalKey(WorktreeBranchPrefix),
-  runSetupScript: Schema.optionalKey(Schema.Boolean),
+  initialModelSelection: ProjectInitialModelSelection,
+  ...Struct.map(PROJECT_PREFERENCE_VALUES.fields, Schema.optionalKey),
 });
 export type ProjectPreferences = typeof ProjectPreferences.Type;
+/** {@link ProjectPreferenceKey} in order: the initial model, then the registry. */
+export const PROJECT_PREFERENCE_KEYS = /* @__PURE__ */ Object.keys(
+  ProjectPreferences.fields,
+) as ReadonlyArray<ProjectPreferenceKey>;
 
 /** Null resets a single field to inheritance. Model null also masks a legacy project preset. */
 export const ProjectPreferencesPatch = Schema.Struct({
-  initialModelSelection: Schema.optionalKey(Schema.NullOr(InitialModelSelection)),
-  defaultThreadEnvMode: Schema.optionalKey(Schema.NullOr(ThreadEnvMode)),
-  worktreeBranchPrefix: Schema.optionalKey(Schema.NullOr(WorktreeBranchPrefix)),
-  runSetupScript: Schema.optionalKey(Schema.NullOr(Schema.Boolean)),
+  initialModelSelection: ProjectInitialModelSelection,
+  ...Struct.map(Struct.map(PROJECT_PREFERENCE_VALUES.fields, Schema.NullOr), Schema.optionalKey),
 }).pipe(rejectExcessProperties);
 export type ProjectPreferencesPatch = typeof ProjectPreferencesPatch.Type;
 
@@ -732,13 +782,23 @@ export type ProjectPreferencesExpected = typeof ProjectPreferencesExpected.Type;
 
 export const PreferenceSource = Schema.Literals(["project", "legacy-project", "node", "builtin"]);
 export type PreferenceSource = typeof PreferenceSource.Type;
-const sourced = <S extends Schema.Top>(value: S) =>
-  Schema.Struct({ value, source: PreferenceSource });
+type Sourced<S extends Schema.Top> = Schema.Struct<{
+  readonly value: S;
+  readonly source: typeof PreferenceSource;
+}>;
+interface SourcedLambda extends Struct.Lambda {
+  <S extends Schema.Top>(value: S): Sourced<S>;
+  readonly "~lambda.out": this["~lambda.in"] extends Schema.Top
+    ? Sourced<this["~lambda.in"]>
+    : never;
+}
+const sourced = Struct.lambda<SourcedLambda>((value) =>
+  Schema.Struct({ value, source: PreferenceSource }),
+);
 export const EffectiveProjectPreferences = Schema.Struct({
   initialModelSelection: sourced(ModelSelection),
-  defaultThreadEnvMode: sourced(ThreadEnvMode),
-  worktreeBranchPrefix: sourced(WorktreeBranchPrefix),
-  runSetupScript: sourced(Schema.Boolean),
+  ...Struct.map(REPORTED_PROJECT_PREFERENCE_VALUES, sourced),
+  ...Struct.map(Struct.map(ADDED_PROJECT_PREFERENCE_VALUES, sourced), Schema.optionalKey),
   worktreeRoot: sourced(WorktreeRoot),
   overrides: ProjectPreferences.pipe(Schema.withDecodingDefault(Effect.succeed({}))),
 });
@@ -810,6 +870,12 @@ export const ServerSettings = Schema.Struct({
   // entirely (no npm registry contact) instead of merely hiding the update
   // notification — for users who install providers via Nix/nixpkgs/etc.
   enableProviderUpdateChecks: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(true))),
+  // Opt-in: install provider CLI updates unattended while nobody uses a client and no agent works,
+  // and on a CLI service node installed with npm or pnpm also Ryco's own newest release,
+  // restarting only while nothing would be cut off. Effective only with `enableProviderUpdateChecks`; dev servers never act on it.
+  // Node-scoped and owner-only; never part of Agent Control's settings allowlist (an agent must not
+  // let its own CLI, or the node it runs on, be replaced unattended).
+  automaticUpdates: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   // Agent CLIs and everything they start run at a lower CPU priority (nice +5, Below Normal on
   // Windows), read at each agent launch. Node-scoped; deliberately not in Agent Control's
   // settings allowlist (an agent must not raise its own priority).
@@ -1041,6 +1107,7 @@ export const ServerSettingsPatch = Schema.Struct({
    */
   enableLegacyTokenStreaming: Schema.optionalKey(Schema.Boolean),
   enableProviderUpdateChecks: Schema.optionalKey(Schema.Boolean),
+  automaticUpdates: Schema.optionalKey(Schema.Boolean),
   lowerAgentProcessPriority: Schema.optionalKey(Schema.Boolean),
   continueThreadsAfterRestart: Schema.optionalKey(Schema.Boolean),
   autoResumeLimitedThreads: Schema.optionalKey(Schema.Boolean),
@@ -1140,6 +1207,7 @@ export const ClientSettingsPatch = Schema.Struct({
   sendShortcut: Schema.optionalKey(SendShortcut),
   claudeResumeReview: Schema.optionalKey(Schema.Boolean),
   chatWidth: Schema.optionalKey(ChatWidth),
+  openChatTabs: Schema.optionalKey(Schema.Boolean),
   favorites: Schema.optionalKey(Schema.Array(ModelFavorite)),
   providerModelPreferences: Schema.optionalKey(
     Schema.Record(

@@ -61,6 +61,12 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
   projectPreferences: Schema.optionalKey(Schema.Boolean),
   threadSidebarUndo: Schema.optional(Schema.Boolean),
   threadSnooze: Schema.optional(Schema.Boolean),
+  /**
+   * Thread triage: the Hidden shelf (`thread.hide`, `thread.unhide`) and settling a working
+   * thread, which the node settles once its work ends. Absent on older servers, which reject
+   * `thread.settle` while a turn runs.
+   */
+  threadTriage: Schema.optionalKey(Schema.Boolean),
   threadSettlement: Schema.Boolean.pipe(Schema.withDecodingDefault(Effect.succeed(false))),
   /**
    * The node keeps the automatic settlement rule (`threadAutoSettleAfterDays`) and
@@ -89,6 +95,11 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
   localTasks: Schema.optionalKey(Schema.Boolean),
   /** `threads.fork` (chat forking); absent on older servers. */
   threadFork: Schema.optionalKey(Schema.Boolean),
+  /**
+   * `threads.forkCarried` (continue a thread from another node here); absent on older servers,
+   * which clients do not offer as a target.
+   */
+  threadForkCarried: Schema.optionalKey(Schema.Boolean),
   /**
    * `thread.conversation.revert` (rewind the conversation and keep the files); absent on
    * older servers, which offer only the revert that restores files.
@@ -128,6 +139,11 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
   /** `threads.stopLocalServer` for those servers; absent on older servers and false on Windows. */
   threadLocalServerStop: Schema.optionalKey(Schema.Boolean),
   /**
+   * `secrets.answerRequest`: the node writes an agent's requested secret into a dotenv file of the
+   * thread's checkout. Absent on older servers, whose agents cannot ask for one.
+   */
+  secretRequests: Schema.optionalKey(Schema.Boolean),
+  /**
    * CLIProxyAPI hub settings and reads (`server.readCliProxyHubs` / `server.testCliProxyHub`);
    * absent on older servers, which drop `cliProxyHubs` from settings patches.
    */
@@ -155,6 +171,16 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
    */
   stagedOnlyCommit: Schema.optionalKey(Schema.Boolean),
   /**
+   * `git.runStackedAction` honours `prTitle`, `prBody`, `prDraft` and `allowDirtyWorkingTree`;
+   * absent on older servers, which drop them, generate the text and open the pull request ready.
+   */
+  pullRequestOptions: Schema.optionalKey(Schema.Boolean),
+  /**
+   * `vcs.readComparison` honours `selection.target: "workingTree"` (a branch or commit compared
+   * with the working files); absent on older servers, which drop the key and compare with HEAD.
+   */
+  workingTreeComparison: Schema.optionalKey(Schema.Boolean),
+  /**
    * `terminal.write` honours `requireIdle` (types only into a shell it verifies idle, else
    * `TerminalBusyError`); absent on older servers, which drop the key and write unguarded.
    */
@@ -164,6 +190,20 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
    * older servers, which drop the key.
    */
   agentProcessPriority: Schema.optionalKey(Schema.Boolean),
+  /**
+   * The node honours `automaticUpdates` (unattended provider CLI updates in a quiet window, and an
+   * npm or pnpm CLI service node's own updates) and answers `server.noteClientInteraction`; absent
+   * on older servers, which drop the key.
+   */
+  automaticUpdates: Schema.optionalKey(Schema.Boolean),
+  /**
+   * The node is a desktop app's backend, and with `automaticUpdates` on the app also updates
+   * itself: it downloads its updates in the background and installs one when it quits
+   * (`install-on-quit`: Windows, a Linux AppImage named without a version) or when the person
+   * chooses Restart (`restart`: macOS, a Linux AppImage named with its version). Absent on other
+   * nodes, on development builds and on older servers.
+   */
+  desktopAppUpdates: Schema.optionalKey(Schema.Literals(["install-on-quit", "restart"])),
   /**
    * The node prices usage with `usagePriceOverrides` (custom model prices and model mappings);
    * absent on older servers, which drop the key from settings patches.
@@ -175,6 +215,14 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
    * their own queue.
    */
   serverFollowUpQueue: Schema.optionalKey(Schema.Literal(true)),
+  /**
+   * Clients store a chat's model, effort and speed picks on the thread when they are made
+   * (`thread.meta.update`): the session applies a stored pick at its next turn, a turn that names
+   * no selection runs on it, and the background-work check compares a turn's selection with the
+   * one the session runs. Absent on older servers, whose clients keep a pick in the composer
+   * until it is sent.
+   */
+  liveThreadModelSelection: Schema.optionalKey(Schema.Literal(true)),
   fileAttachments: Schema.optional(Schema.Struct({ maxUploadBytes: NonNegativeInt })),
 });
 export type ExecutionEnvironmentCapabilities = typeof ExecutionEnvironmentCapabilities.Type;

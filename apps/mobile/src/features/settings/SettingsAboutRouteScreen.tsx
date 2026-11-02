@@ -1,3 +1,4 @@
+import { useNavigation } from "@react-navigation/native";
 import Constants from "expo-constants";
 import { ScrollView } from "react-native";
 
@@ -12,6 +13,7 @@ function buildStageLabel(): string {
 }
 
 export function SettingsAboutRouteScreen() {
+  const navigation = useNavigation();
   return (
     <ScrollView
       contentInsetAdjustmentBehavior="automatic"
@@ -24,7 +26,12 @@ export function SettingsAboutRouteScreen() {
       </SettingsSection>
 
       <SettingsSection title="Information">
-        <SettingsRow first label="Diagnostics" value="On device" />
+        <SettingsRow
+          first
+          label="Diagnostics"
+          value="On device"
+          onPress={() => navigation.navigate("SettingsDiagnostics" as never)}
+        />
         <SettingsRow label="Privacy" value="Node-owned workspace data" />
         <SettingsRow label="Licenses" value="Open source" />
       </SettingsSection>

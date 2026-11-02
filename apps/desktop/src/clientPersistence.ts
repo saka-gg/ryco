@@ -69,6 +69,7 @@ function isPersistedSavedEnvironmentStorageRecord(
         (value.desktopSsh.username === null || typeof value.desktopSsh.username === "string") &&
         (value.desktopSsh.port === null || typeof value.desktopSsh.port === "number"))) &&
     (value.hubLink === undefined || isSavedEnvironmentHubLink(value.hubLink)) &&
+    (value.disabledAt === undefined || typeof value.disabledAt === "string") &&
     (value.encryptedBearerToken === undefined || typeof value.encryptedBearerToken === "string")
   );
 }

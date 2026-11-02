@@ -18,6 +18,7 @@ const labels = {
   archive: "Thread archived",
   settle: "Thread settled",
   snooze: "Thread snoozed",
+  hide: "Thread hidden",
   unpin: "Thread unpinned",
 };
 const visible = new Map<
@@ -48,6 +49,7 @@ export function presentSidebarUndoNotices(notices: readonly SidebarUndoNotice[])
               archive: "Archiving thread…",
               settle: "Settling thread…",
               snooze: "Snoozing thread…",
+              hide: "Hiding thread…",
               unpin: "Unpinning thread…",
             }[notice.action]
           : labels[notice.action]),

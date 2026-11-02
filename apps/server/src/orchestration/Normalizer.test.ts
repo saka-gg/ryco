@@ -1,6 +1,10 @@
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { mkdir, readFile, writeFile } from "node:fs/promises";
+import { execFile } from "node:child_process";
+import { existsSync } from "node:fs";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import path from "node:path";
+import { promisify } from "node:util";
 import {
   CommandId,
   OrchestrationDispatchCommandError,
@@ -339,6 +343,8 @@ it.effect("persists a validated general file under an opaque path", () =>
 const imageTurnCommand = (input: {
   readonly dataUrl: string;
   readonly sizeBytes: number;
+  readonly name?: string;
+  readonly mimeType?: string;
 }): ClientOrchestrationCommand => ({
   type: "thread.turn.start",
   commandId: CommandId.make("image-attachment-command"),
@@ -350,8 +356,8 @@ const imageTurnCommand = (input: {
     attachments: [
       {
         type: "image" as const,
-        name: "tiny.png",
-        mimeType: "image/png",
+        name: input.name ?? "tiny.png",
+        mimeType: input.mimeType ?? "image/png",
         sizeBytes: input.sizeBytes,
         dataUrl: input.dataUrl,
       },
@@ -438,6 +444,100 @@ it.effect("persists an unparseable image without dimensions", () =>
       expect(persistedNames).toContain(`${attachment.id}.png`);
     }).pipe(Effect.provide(NodeServices.layer)),
   ),
+);
+
+const hasSips = process.platform === "darwin" && existsSync("/usr/bin/sips");
+
+/** A real HEIC photo where sips can make one; elsewhere only its header, which nothing decodes. */
+const heicFixture = async (): Promise<Buffer> => {
+  if (!hasSips) {
+    return Buffer.from("\0\0\0\x18ftypheic\0\0\0\0mif1heic", "latin1");
+  }
+  const directory = await mkdtemp(path.join(tmpdir(), "ryco-normalizer-heic-"));
+  try {
+    const png = path.join(directory, "photo.png");
+    await writeFile(png, Buffer.from(TINY_PNG_BASE64, "base64"));
+    await promisify(execFile)("/usr/bin/sips", [
+      "-s",
+      "format",
+      "heic",
+      png,
+      "--out",
+      `${png}.heic`,
+    ]);
+    return await readFile(`${png}.heic`);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+};
+
+it.effect(
+  "stores a HEIC photo as the JPEG a Mac node converts it to, or refuses it elsewhere",
+  () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const fileSystem = yield* FileSystem.FileSystem;
+        const workspaceAccessRoot = yield* fileSystem.makeTempDirectoryScoped({
+          prefix: "ryco-normalizer-heic-",
+        });
+        const layer = makeNormalizerLayer(workspaceAccessRoot);
+        const heic = yield* Effect.promise(heicFixture);
+
+        const outcome = yield* Effect.gen(function* () {
+          const fileSystem = yield* FileSystem.FileSystem;
+          const config = yield* ServerConfig;
+          const normalized = yield* normalizeDispatchCommand(
+            imageTurnCommand({
+              name: "IMG_0001.HEIC",
+              mimeType: "image/heic",
+              dataUrl: `data:image/heic;base64,${heic.toString("base64")}`,
+              sizeBytes: heic.byteLength,
+            }),
+          );
+          return {
+            normalized,
+            persisted: yield* fileSystem
+              .readDirectory(config.attachmentsDir)
+              .pipe(
+                Effect.flatMap((names) =>
+                  Effect.forEach(names, (name) =>
+                    fileSystem
+                      .readFile(path.join(config.attachmentsDir, name))
+                      .pipe(Effect.map((bytes) => ({ name, bytes }))),
+                  ),
+                ),
+              ),
+          };
+        }).pipe(Effect.provide(layer), Effect.result);
+
+        if (!hasSips) {
+          expect(outcome._tag).toBe("Failure");
+          if (outcome._tag !== "Failure") return;
+          expect(outcome.failure).toBeInstanceOf(OrchestrationDispatchCommandError);
+          expect(outcome.failure.message).toBe(
+            "HEIC photos can be converted only on a Mac node. Convert 'IMG_0001.HEIC' to JPEG first.",
+          );
+          return;
+        }
+        if (outcome._tag !== "Success") throw new Error("Expected the HEIC photo to convert");
+        const { normalized, persisted } = outcome.success;
+        if (normalized.type !== "thread.turn.start") {
+          throw new Error(`Unexpected normalized command: ${normalized.type}`);
+        }
+        const attachment = normalized.message.attachments[0] as ChatImageAttachment | undefined;
+        expect(attachment).toMatchObject({
+          type: "image",
+          name: "IMG_0001.jpg",
+          mimeType: "image/jpeg",
+          width: 1,
+          height: 1,
+        });
+        expect(persisted.map(({ name }) => name)).toEqual([`${attachment?.id}.jpg`]);
+        const stored = persisted[0]!.bytes;
+        expect(attachment?.sizeBytes).toBe(stored.byteLength);
+        expect([...stored.subarray(0, 3)]).toEqual([0xff, 0xd8, 0xff]);
+      }).pipe(Effect.provide(NodeServices.layer)),
+    ),
 );
 
 it.effect("rejects mismatched file MIME and size metadata before persistence", () =>

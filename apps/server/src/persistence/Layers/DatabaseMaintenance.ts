@@ -119,6 +119,7 @@ const passSummary = (result: CompactionPassResult) => ({
   backlogSequences: result.backlogSequences,
   receiptBacklog: result.receiptBacklog,
   stopReason: result.stopReason,
+  ...(result.retention === null ? {} : { retention: result.retention }),
 });
 
 /**

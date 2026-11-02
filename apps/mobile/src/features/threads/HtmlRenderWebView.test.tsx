@@ -12,6 +12,7 @@ import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 const hoisted = vi.hoisted(() => ({
   openURL: vi.fn(async (_url: string) => true),
   setters: [] as Array<ReturnType<typeof vi.fn>>,
+  appState: { currentState: "active" },
 }));
 
 vi.mock("react", async (importOriginal) => {
@@ -30,6 +31,7 @@ vi.mock("react", async (importOriginal) => {
 });
 vi.mock("react-native", () => ({
   ActivityIndicator: "ActivityIndicator",
+  AppState: hoisted.appState,
   Pressable: "Pressable",
   View: "View",
 }));
@@ -144,7 +146,28 @@ const link = (url: string) =>
 beforeEach(() => {
   hoisted.openURL.mockClear();
   hoisted.setters = [];
+  hoisted.appState.currentState = "active";
 });
+
+const message = (text: string, id = "ryco-message-1") =>
+  JSON.stringify({
+    jsonrpc: "2.0",
+    id,
+    method: "ui/message",
+    params: { role: "user", content: [{ type: "text", text }] },
+  });
+
+/** The replies posted into the page, read back from the scripts that carry them. */
+function repliesOf(injectJavaScript: ReturnType<typeof vi.fn>): unknown[] {
+  return injectJavaScript.mock.calls.map(([script]) => {
+    const literal = /^window\.__rycoPost&&window\.__rycoPost\(([\s\S]*)\);true;$/.exec(
+      script as string,
+    )?.[1];
+    return literal === undefined ? script : JSON.parse(literal);
+  });
+}
+
+const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
 
 describe("HtmlRenderWebView", () => {
   it("keeps the WebView free of credentials, storage, files and windows", () => {
@@ -261,6 +284,109 @@ describe("HtmlRenderWebView", () => {
       now.mockRestore();
     }
     expect(hoisted.openURL).not.toHaveBeenCalled();
+  });
+
+  it("tells the page it may send only where the view takes its messages", () => {
+    const hint = (overrides: Partial<Parameters<typeof HtmlRenderWebView>[0]>) =>
+      renderWebView(overrides).props.source.html.includes(
+        escapeHtmlAttributeValue(
+          htmlRenderThemeWindowName(defaultHtmlRenderTheme("dark"), { sendMessages: true }),
+        ),
+      );
+    expect(hint({})).toBe(false);
+    expect(hint({ onSendMessage: async () => undefined })).toBe(true);
+    // The wrapper relays message requests to native.
+    expect(renderWebView().props.source.html).toContain('"ui/message":1');
+  });
+
+  it("hands a page's message to the thread only right after the reader tapped it", async () => {
+    const onSendMessage = vi.fn(async (_text: string) => undefined);
+    const { props, injectJavaScript, tap, scroll } = renderWebView({ onSendMessage });
+    const gesture = {
+      jsonrpc: "2.0",
+      id: "ryco-message-1",
+      error: {
+        code: -32000,
+        message: "Messages send only from a click, key press or tap in the page.",
+      },
+    };
+    // On load, and while the reader scrolls across it, a page asks for nothing.
+    props.onMessage({ nativeEvent: { data: message("Option B") } });
+    scroll("lift");
+    props.onMessage({ nativeEvent: { data: message("Option B") } });
+    expect(onSendMessage).not.toHaveBeenCalled();
+    expect(repliesOf(injectJavaScript)).toEqual([gesture, gesture]);
+
+    tap();
+    props.onMessage({ nativeEvent: { data: message("Option B", "ryco-message-2") } });
+    expect(onSendMessage).toHaveBeenCalledExactlyOnceWith("Option B");
+    await settle();
+    expect(repliesOf(injectJavaScript).at(-1)).toEqual({
+      jsonrpc: "2.0",
+      id: "ryco-message-2",
+      result: {},
+    });
+    // The tap is spent on one request.
+    props.onMessage({ nativeEvent: { data: message("Option C", "ryco-message-3") } });
+    expect(onSendMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it("refuses a page that may not send, one tapped in the background, and one asking twice a second", async () => {
+    const unavailable = renderWebView();
+    unavailable.tap();
+    unavailable.props.onMessage({ nativeEvent: { data: message("Option B") } });
+    expect(repliesOf(unavailable.injectJavaScript)).toEqual([
+      {
+        jsonrpc: "2.0",
+        id: "ryco-message-1",
+        error: { code: -32000, message: "Sending messages is not available here." },
+      },
+    ]);
+
+    const onSendMessage = vi.fn(async (_text: string) => undefined);
+    const view = renderWebView({ onSendMessage });
+    hoisted.appState.currentState = "background";
+    view.tap();
+    view.props.onMessage({ nativeEvent: { data: message("Option B") } });
+    expect(onSendMessage).not.toHaveBeenCalled();
+    hoisted.appState.currentState = "active";
+
+    view.tap();
+    view.props.onMessage({ nativeEvent: { data: message("Option B", "ryco-message-2") } });
+    await settle();
+    view.tap();
+    view.props.onMessage({ nativeEvent: { data: message("Option C", "ryco-message-3") } });
+    expect(onSendMessage).toHaveBeenCalledTimes(1);
+    expect(repliesOf(view.injectJavaScript).at(-1)).toEqual({
+      jsonrpc: "2.0",
+      id: "ryco-message-3",
+      error: { code: -32000, message: "Send at most one message per second." },
+    });
+  });
+
+  it("passes on the reader's cancel and what the text may not hold", async () => {
+    const onSendMessage = vi.fn(async (_text: string) => {
+      throw new Error("You cancelled the message.");
+    });
+    const { props, injectJavaScript, tap } = renderWebView({ onSendMessage });
+    tap();
+    props.onMessage({ nativeEvent: { data: message("/compact") } });
+    expect(onSendMessage).not.toHaveBeenCalled();
+    tap();
+    props.onMessage({ nativeEvent: { data: message("Option B", "ryco-message-2") } });
+    await settle();
+    expect(repliesOf(injectJavaScript)).toEqual([
+      {
+        jsonrpc: "2.0",
+        id: "ryco-message-1",
+        error: { code: -32000, message: "A page cannot send a slash command." },
+      },
+      {
+        jsonrpc: "2.0",
+        id: "ryco-message-2",
+        error: { code: -32000, message: "You cancelled the message." },
+      },
+    ]);
   });
 
   it("restarts a crashed page once, then reports it unavailable", () => {

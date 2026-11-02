@@ -206,7 +206,8 @@ describe("goal continuation", () => {
       assert.include(start.message.text, 'threadId "thread-1" and goalStatus "complete"');
       assert.strictEqual(start.delegationReturnGuard?.source, "goal-continuation");
       assert.strictEqual(start.runtimeMode, "auto-accept-edits");
-      assert.deepStrictEqual(start.modelSelection, shell().modelSelection);
+      // No model: the chat's stored pick applies where the session can take it.
+      assert.notProperty(start, "modelSelection");
 
       // The shell still shows the finished turn until the new one starts: no second turn.
       yield* h.pass(T0 + 30_000);

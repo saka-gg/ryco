@@ -1,6 +1,6 @@
 import { CompletionReturnRepository } from "../../persistence/Layers/AgentControlCompletionReturns.ts";
 import { callbackRepositories, pendingCallbackInvalidation } from "../approvalResponses.ts";
-import { derivePendingThreadRequests } from "@ryco/shared/threadActivity";
+import { derivePendingProviderCallbackRequests } from "@ryco/shared/threadActivity";
 import { ServerConfig } from "../../config.ts";
 import { WorkspaceAccessPolicy } from "../../workspace/Services/WorkspaceAccessPolicy.ts";
 import {
@@ -3470,7 +3470,9 @@ const make = Effect.gen(function* () {
       ) {
         const detailedThread = yield* getLoadedThreadDetail();
         const finishedTurnId = toTurnId(event.turnId);
-        for (const request of derivePendingThreadRequests(detailedThread?.activities ?? [])) {
+        for (const request of derivePendingProviderCallbackRequests(
+          detailedThread?.activities ?? [],
+        )) {
           // New turns supersede requests owned by previous turns. Requests for
           // the new turn (or with unknown ownership) remain actionable.
           if (event.type === "turn.started") {
@@ -3932,7 +3934,7 @@ const make = Effect.gen(function* () {
       const now = new Date(Math.max(Date.now(), Date.parse(thread.updatedAt) + 1)).toISOString();
       const messages = historyMessagesToRestore(thread, input.history, now, userMessageIdsByTurn);
       const activities = missingHistoryActivities(thread, recovered);
-      for (const request of derivePendingThreadRequests(repair.requestActivities)) {
+      for (const request of derivePendingProviderCallbackRequests(repair.requestActivities)) {
         if (
           request.turnId === null ||
           !input.history.completedTurnIds.includes(TurnId.make(request.turnId))

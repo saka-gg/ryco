@@ -104,6 +104,8 @@ import type {
 import type { ExternalIdentitySummary } from "./hostedIdentity.ts";
 import type { RelayEffectiveRole } from "./relay.ts";
 import type { ThreadForkInput, ThreadForkResult } from "./threadFork.ts";
+import type { SecretRequestAnswerInput, SecretRequestAnswerResult } from "./secretRequest.ts";
+import type { ThreadForkCarriedInput } from "./threadForkCarried.ts";
 import type {
   ThreadLocalServerList,
   ThreadStopLocalServerInput,
@@ -403,6 +405,11 @@ export interface DesktopUpdateState {
   canRetry: boolean;
   /** Absent or `null` unless another device asked this app to update. */
   remoteInstall?: DesktopRemoteInstallState | null;
+  /**
+   * The version this app ran before an update it installed took effect, on the first launch
+   * after it (`currentVersion` is the one it updated to). Absent or `null` otherwise.
+   */
+  updatedFromVersion?: string | null;
 }
 
 export interface DesktopUpdateActionResult {
@@ -479,6 +486,12 @@ export interface PersistedSavedEnvironmentRecord {
   lastConnectedAt: string | null;
   desktopSsh?: DesktopSshEnvironmentTarget;
   hubLink?: SavedEnvironmentHubLink;
+  /**
+   * When the user switched the machine off (ISO time). A switched-off machine
+   * stays saved with its credential but never connects until switched on.
+   * Absent means on, so an app that predates the field keeps it on.
+   */
+  disabledAt?: string;
 }
 
 export type DesktopServerExposureMode = "local-only" | "network-accessible";
@@ -799,6 +812,40 @@ export type DesktopHubOriginValidation =
 
 export type DesktopQuitShortcutMode = "press-twice" | "hold" | "immediately";
 
+/** Where the desktop app's `ryco` terminal command stands (`desktopCliCommand.ts`). */
+export interface DesktopCliCommandState {
+  /** macOS and Linux, installed app only. */
+  readonly supported: boolean;
+  /** `ryco`, or `ryco-nightly` for Ryco Nightly. */
+  readonly commandName: string;
+  /** The link on a PATH folder this app made, if any. */
+  readonly installedPath: string | null;
+  /** A new terminal runs this app's launcher for `commandName`. */
+  readonly onPath: boolean;
+  /** Another command of that name a new terminal runs first. */
+  readonly shadowedBy?: string;
+  /** The launcher itself, which runs without a PATH entry. */
+  readonly launcherPath: string | null;
+}
+
+/** Ryco and Ryco Nightly, as each app sees the other (`nightlyHandoff.ts`). */
+export interface DesktopNightlyState {
+  /** Which app this is. */
+  readonly flavor: "stable" | "nightly";
+  /** The other app is installed where this one looks for it (macOS Applications folders). */
+  readonly otherAppInstalled: boolean;
+  /** Ryco: Ryco Nightly's node is running now, so it cannot take a copy until it quits. */
+  readonly nightlyRunning: boolean;
+  /** Ryco Nightly: how the last copy of Ryco's data went; null when none was asked for. */
+  readonly lastImport: {
+    readonly completedAt: string;
+    readonly ok: boolean;
+    readonly error?: string;
+  } | null;
+  /** Where both apps are downloaded. */
+  readonly releasesUrl: string;
+}
+
 /**
  * What a chat that quitting would stop is doing. Only `working` chats can be continued after a
  * restart: chats waiting for a person are never continued.
@@ -855,6 +902,20 @@ export const DESKTOP_NAVIGATE_FORWARD_MENU_ACTION = "navigate-forward";
 
 export interface DesktopBridge {
   saveThreadExport?: (input: DesktopThreadExportInput) => Promise<DesktopThreadExportResult>;
+  /** Install the `ryco` command for terminals. Absent in desktop builds that predate it. */
+  cliCommand?: {
+    getState(): Promise<DesktopCliCommandState>;
+    install(): Promise<DesktopCliCommandState>;
+    uninstall(): Promise<DesktopCliCommandState>;
+  };
+  /** Try Ryco Nightly from Ryco, and switch back. Absent in desktop builds that predate it. */
+  nightly?: {
+    getState(): Promise<DesktopNightlyState>;
+    /** Ryco only. With `copyData`, Ryco Nightly takes a copy of Ryco's data when it starts. */
+    open(input: { readonly copyData: boolean }): Promise<void>;
+    /** Ryco Nightly only. Opens Ryco; nothing is copied back. */
+    switchBack(): Promise<void>;
+  };
   quitShortcut?: {
     getMode(): Promise<DesktopQuitShortcutMode>;
     setMode(mode: DesktopQuitShortcutMode): Promise<void>;
@@ -1142,7 +1203,6 @@ export interface DesktopBridge {
   /** The machine woke from sleep or the screen was unlocked; live sockets may be dead. */
   onSystemResume?: (listener: () => void) => () => void;
   getUpdateState: () => Promise<DesktopUpdateState>;
-  setUpdateChannel: (channel: DesktopUpdateChannel) => Promise<DesktopUpdateState>;
   checkForUpdate: () => Promise<DesktopUpdateCheckResult>;
   downloadUpdate: () => Promise<DesktopUpdateActionResult>;
   installUpdate: () => Promise<DesktopUpdateActionResult>;
@@ -1644,6 +1704,11 @@ export interface EnvironmentApi {
     /** Optional so clients can feature-detect against older environments. */
     fork?: (input: ThreadForkInput) => Promise<ThreadForkResult>;
     /**
+     * Continues a conversation carried from another node here (`threads.forkCarried`). Present
+     * when the client can send it; offer it only for nodes that advertise `threadForkCarried`.
+     */
+    forkCarried?: (input: ThreadForkCarriedInput) => Promise<ThreadForkResult>;
+    /**
      * The servers a thread started (`threads.subscribeLocalServers`), current list first. Clients
      * call it only when the node's config advertises `threadLocalServers`; `watchThreadLocalServers`
      * shares one subscription per thread. `onError`: the stream stopped for good.
@@ -1655,6 +1720,11 @@ export interface EnvironmentApi {
     ) => () => void;
     /** Only for nodes that advertise `threadLocalServerStop`. */
     stopLocalServer?: (input: ThreadStopLocalServerInput) => Promise<ThreadStopLocalServerResult>;
+    /**
+     * The owner's answer to an agent's secret request (`secrets.answerRequest`), on nodes that
+     * advertise `secretRequests`. Never retried: a repeat finds the request already answered.
+     */
+    answerSecretRequest?: (input: SecretRequestAnswerInput) => Promise<SecretRequestAnswerResult>;
   };
   orchestration: {
     dispatchCommand: (command: ClientOrchestrationCommand) => Promise<{ sequence: number }>;

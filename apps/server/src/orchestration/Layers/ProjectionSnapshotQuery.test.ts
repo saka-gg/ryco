@@ -1,5 +1,5 @@
 import { encodeMessageTextFallback, messageTextForSearch } from "../../persistence/messageText.ts";
-import { derivePendingThreadRequestState } from "@ryco/shared/threadActivity";
+import { derivePendingThreadRequestState } from "@ryco/shared/pendingThreadRequests";
 import {
   CheckpointRef,
   DEFAULT_AGENT_TOKEN_MODE,

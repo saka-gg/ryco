@@ -365,7 +365,7 @@ describe("formatTraceSummary", () => {
       limit: 25,
       summary: summary.finish(),
     });
-    // eslint-disable-next-line no-control-regex
+    // eslint-disable-next-line no-control-regex -- the test asserts the output has no raw control characters
     expect(text).not.toMatch(/[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/u);
     expect(text).toContain(
       "\\u001b]52;c;ZWNobyBwd25lZA==\\u0007\\u001b[2J\\u001b[Hspan.fake\\u009b31m\\u007f",

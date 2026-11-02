@@ -44,7 +44,6 @@ import { decodeJsonResult } from "@ryco/shared/schemaJson";
 import { ForgejoApiError, forgejoErrorMessage, isForgejoApiError } from "./forgejoApiError.ts";
 import { forgeHttpFailureFields } from "./forgeHttpRateLimit.ts";
 import * as ForgejoIssues from "./forgejoIssues.ts";
-import { forgejoWorkInProgressTitle } from "./forgejoPullRequestMutations.ts";
 import * as ForgejoPullRequests from "./forgejoPullRequests.ts";
 import type { ForgejoPageHttp, ForgejoRequestSpec } from "./ForgejoPullRequestPageApi.ts";
 import * as SourceControlProvider from "./SourceControlProvider.ts";
@@ -1193,7 +1192,9 @@ export const make = Effect.fn("makeForgejoApi")(function* () {
             HttpClientRequest.bodyJsonUnsafe({
               // Forgejo drafts are work-in-progress title prefixes.
               title:
-                input.draft === true ? forgejoWorkInProgressTitle(input.title, true) : input.title,
+                input.draft === true
+                  ? ForgejoPullRequests.forgejoWorkInProgressTitle(input.title, true)
+                  : input.title,
               body,
               head,
               base: input.target?.refName ?? input.baseBranch,

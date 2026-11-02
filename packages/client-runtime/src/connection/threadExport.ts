@@ -6,6 +6,8 @@ import {
   type ThreadExportActivity,
 } from "@ryco/shared/threadExport";
 
+import { collectThreadHistory, type ThreadHistoryCopy } from "./threadHistory.ts";
+
 export const THREAD_EXPORT_MAX_RECORDS = 20_000;
 export const THREAD_EXPORT_MAX_BYTES = 16 * 1024 * 1024;
 const overLimit = () =>
@@ -22,6 +24,7 @@ function projectMessage(item: OrchestrationThread["messages"][number]): ThreadEx
     attachmentCount: item.attachments?.length ?? 0,
   };
 }
+/** The thread's metadata as exported; its messages and activities are collected page by page. */
 function projectThread(thread: OrchestrationThread): ThreadExportSource {
   if (thread.messages.length + thread.activities.length > THREAD_EXPORT_MAX_RECORDS)
     throw overLimit();
@@ -38,13 +41,24 @@ function projectThread(thread: OrchestrationThread): ThreadExportSource {
       instanceId: thread.modelSelection.instanceId,
       model: thread.modelSelection.model,
     },
-    messages: thread.messages.map(projectMessage),
-    activities: thread.activities.map(projectThreadExportActivity),
+    messages: [],
+    activities: [],
   };
 }
 
 export const THREAD_EXPORT_RETRY =
   "Conversation or connection changed during export. Wait for activity to settle, reconnect if needed, and retry. No file was saved.";
+
+const EXPORT_HISTORY_COPY: ThreadHistoryCopy = {
+  cancelled: "Export cancelled.",
+  changed: THREAD_EXPORT_RETRY,
+  timedOut: "History request timed out. No file was saved; reconnect and retry.",
+  unsupported: "This server cannot export complete retained history. Update the server and retry.",
+  stalled: "History pagination stalled. No file was saved; retry or update the server.",
+  overlapping: (collection) =>
+    `History contains overlapping ${collection === "messages" ? "messages" : "activities"}. No file was saved; retry.`,
+  emptyPage: "History page was empty before exhaustion. No file was saved; retry.",
+};
 
 /** No UI-store mutation and no provider calls. Every page must belong to one revision. */
 export async function loadThreadForExport(input: {
@@ -53,50 +67,8 @@ export async function loadThreadForExport(input: {
   signal: AbortSignal;
   isCurrent: () => boolean;
 }): Promise<ThreadExportSource> {
-  const check = () => {
-    if (input.signal.aborted) throw new Error("Export cancelled.");
-    if (!input.isCurrent()) throw new Error(THREAD_EXPORT_RETRY);
-  };
-  const request = <T>(promise: Promise<T>): Promise<T> =>
-    new Promise((resolve, reject) => {
-      const abort = () => finish(() => reject(new Error("Export cancelled.")));
-      const timer = setTimeout(
-        () =>
-          finish(() =>
-            reject(new Error("History request timed out. No file was saved; reconnect and retry.")),
-          ),
-        30_000,
-      );
-      const finish = (settle: () => void) => {
-        clearTimeout(timer);
-        input.signal.removeEventListener("abort", abort);
-        settle();
-      };
-      input.signal.addEventListener("abort", abort, { once: true });
-      promise.then(
-        (value) => finish(() => resolve(value)),
-        (error) => finish(() => reject(error)),
-      );
-      if (input.signal.aborted) abort();
-    });
-  const { getThreadWindow, getThreadHistoryPage } = input.api.orchestration;
-  if (!getThreadWindow || !getThreadHistoryPage)
-    throw new Error(
-      "This server cannot export complete retained history. Update the server and retry.",
-    );
-  const limits = { messages: 100, activities: 100, proposedPlans: 1, checkpoints: 1 };
-  check();
-  const snapshot = await request(
-    getThreadWindow({ threadId: input.threadId, limits }).then((raw) => ({
-      snapshotSequence: raw.snapshotSequence,
-      history: raw.history,
-      thread: projectThread(raw.thread),
-    })),
-  );
-  check();
-  if (snapshot.thread.id !== input.threadId) throw new Error(THREAD_EXPORT_RETRY);
-  const messages = new Map<string, ThreadExportMessage>();
-  const activities = new Map<string, ThreadExportActivity>();
+  const messages: ThreadExportMessage[] = [];
+  const activities: ThreadExportActivity[] = [];
   let retainedBytes = 0;
   let retainedRecords = 0;
   const account = (fields: readonly (string | null | undefined)[], record = false) => {
@@ -105,93 +77,50 @@ export async function loadThreadForExport(input: {
     if (retainedBytes > THREAD_EXPORT_MAX_BYTES || retainedRecords > THREAD_EXPORT_MAX_RECORDS)
       throw overLimit();
   };
-  const addMessage = (item: ThreadExportMessage) => {
-    if (messages.has(item.id))
-      throw new Error("History contains overlapping messages. No file was saved; retry.");
-    account([item.id, item.role, item.text, item.createdAt], true);
-    messages.set(item.id, item);
-  };
-  const addActivity = (item: ThreadExportActivity) => {
-    if (activities.has(item.id))
-      throw new Error("History contains overlapping activities. No file was saved; retry.");
-    account(
-      [
-        item.id,
-        item.createdAt,
-        item.kind,
-        item.summary,
-        item.boundary,
-        item.forkOrigin,
-        // Questions and answer text; the serialized length bounds the strings it holds.
-        item.userInput ? JSON.stringify(item.userInput) : undefined,
-      ],
-      true,
-    );
-    activities.set(item.id, item);
-  };
-  const metadata = snapshot.thread;
-  account([
-    metadata.id,
-    metadata.projectId,
-    metadata.title,
-    metadata.branch,
-    metadata.worktreePath,
-    metadata.worktreeId,
-    metadata.createdAt,
-    metadata.updatedAt,
-    metadata.modelSelection.instanceId,
-    metadata.modelSelection.model,
-  ]);
-  snapshot.thread.messages.forEach(addMessage);
-  snapshot.thread.activities.forEach(addActivity);
-  for (const collection of ["messages", "activities"] as const) {
-    let page = snapshot.history[collection];
-    const cursors = new Set<string>();
-    while (page.hasMoreBefore) {
-      check();
-      const cursor = page.oldestCursor;
-      if (!cursor || cursors.has(cursor))
-        throw new Error(
-          "History pagination stalled. No file was saved; retry or update the server.",
+  const metadata = await collectThreadHistory({
+    ...input,
+    collections: ["messages", "activities"],
+    copy: EXPORT_HISTORY_COPY,
+    project: (thread) => {
+      const projected = projectThread(thread);
+      account([
+        projected.id,
+        projected.projectId,
+        projected.title,
+        projected.branch,
+        projected.worktreePath,
+        projected.worktreeId,
+        projected.createdAt,
+        projected.updatedAt,
+        projected.modelSelection.instanceId,
+        projected.modelSelection.model,
+      ]);
+      return projected;
+    },
+    onItem: (entry) => {
+      if (entry.collection === "messages") {
+        const item = projectMessage(entry.item);
+        account([item.id, item.role, item.text, item.createdAt], true);
+        messages.push(item);
+      } else if (entry.collection === "activities") {
+        const item = projectThreadExportActivity(entry.item);
+        account(
+          [
+            item.id,
+            item.createdAt,
+            item.kind,
+            item.summary,
+            item.boundary,
+            item.forkOrigin,
+            // Questions and answer text; the serialized length bounds the strings it holds.
+            item.userInput ? JSON.stringify(item.userInput) : undefined,
+          ],
+          true,
         );
-      account([cursor]);
-      cursors.add(cursor);
-      const result = await request(
-        getThreadHistoryPage({
-          threadId: input.threadId,
-          collection,
-          mode: { kind: "before", cursor },
-          limit: 100,
-        }),
-      );
-      check();
-      if (result.snapshotSequence !== snapshot.snapshotSequence || result.collection !== collection)
-        throw new Error(THREAD_EXPORT_RETRY);
-      if (result.page.oldestCursor && cursors.has(result.page.oldestCursor))
-        throw new Error(
-          "History pagination stalled. No file was saved; retry or update the server.",
-        );
-      if (!result.items.length)
-        throw new Error("History page was empty before exhaustion. No file was saved; retry.");
-      if (result.collection === "messages")
-        for (const item of result.items) addMessage(projectMessage(item));
-      if (result.collection === "activities")
-        for (const item of result.items) addActivity(projectThreadExportActivity(item));
-      page = result.page;
-    }
-  }
-  const final = await request(
-    getThreadWindow({
-      threadId: input.threadId,
-      limits: { messages: 1, activities: 1, proposedPlans: 1, checkpoints: 1 },
-    }),
-  );
-  check();
-  if (final.thread.id !== input.threadId || final.snapshotSequence !== snapshot.snapshotSequence)
-    throw new Error(THREAD_EXPORT_RETRY);
-  return {
-    ...snapshot.thread,
-    messages: [...messages.values()],
-    activities: [...activities.values()],
-  };
+        activities.push(item);
+      }
+    },
+    onCursor: (cursor) => account([cursor]),
+  });
+  return { ...metadata, messages, activities };
 }

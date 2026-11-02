@@ -84,6 +84,8 @@ interface ComposerQueuedMessagesProps {
   onMove: (row: FollowUpQueueRow, direction: "up" | "down") => void;
   showSteerAction: boolean;
   getSteerUnavailableReason: (row: FollowUpQueueRow) => string | null;
+  /** The running turn's provider steers by stopping the turn and sending the message next. */
+  steerRestarts?: boolean;
   onSteer: (row: FollowUpQueueRow) => void;
   /** The node's entry the composer is editing; saving the composer saves it. */
   editingId?: string | null | undefined;
@@ -128,6 +130,7 @@ export const ComposerQueuedMessages = memo(function ComposerQueuedMessages({
   onRetry,
   showSteerAction,
   getSteerUnavailableReason,
+  steerRestarts = false,
   onSteer,
   editingId = null,
   editingAttachments,
@@ -254,8 +257,17 @@ export const ComposerQueuedMessages = memo(function ComposerQueuedMessages({
                   className={cn(textButtonClass, "gap-1")}
                   disabled={steerUnavailableReason !== null || isSteering || busy}
                   onClick={() => onSteer(row)}
-                  aria-label={`Steer ${rowLabel} into the active turn`}
-                  title={steerUnavailableReason ?? "Send this message into the active turn"}
+                  aria-label={
+                    steerRestarts
+                      ? `Stop the running turn and send ${rowLabel} next`
+                      : `Steer ${rowLabel} into the active turn`
+                  }
+                  title={
+                    steerUnavailableReason ??
+                    (steerRestarts
+                      ? "Stop the running turn and send this message next"
+                      : "Send this message into the active turn")
+                  }
                 >
                   {isSteering ? (
                     <LoaderCircleIcon className="size-3 animate-spin" />

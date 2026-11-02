@@ -1,14 +1,9 @@
-import {
-  applyAutoSettleRuleToNodes,
-  describeAutoSettleRuleApplyResult,
-} from "@ryco/client-runtime/state/settings";
 import { DEFAULT_SERVER_SETTINGS, EnvironmentId, type ServerConfig } from "@ryco/contracts";
 import { describe, expect, it, vi } from "vite-plus/test";
 
 import {
   autoSettleRuleModelNote,
   buildAutoSettleRuleModel,
-  buildAutoSettleRuleTargets,
   changeAutoSettleRuleModel,
 } from "./autoSettleRuleModel";
 
@@ -118,30 +113,5 @@ describe("buildAutoSettleRuleModel", () => {
       changeAutoSettleRuleModel(built, 3, { writeNode: vi.fn(), writeDevice }),
     ).resolves.toBe("device");
     expect(writeDevice).toHaveBeenCalledWith(3);
-  });
-});
-
-describe("buildAutoSettleRuleTargets", () => {
-  it("writes to every node it can and reports the unreachable, older and read-only ones", async () => {
-    const write = vi.fn(async () => undefined);
-    const targets = buildAutoSettleRuleTargets({
-      environmentIds: [STUDIO, LAPTOP, OLD_BOX, EnvironmentId.make("away"), STUDIO],
-      configs: new Map([
-        [STUDIO, config({ nodeAutoSettlement: true })],
-        [LAPTOP, config({ nodeAutoSettlement: true })],
-        [OLD_BOX, config({ nodeAutoSettlement: false })],
-      ]),
-      labelOf: (environmentId) => labels[environmentId] ?? "Away",
-      isOwner: (environmentId) => environmentId !== LAPTOP,
-      isConnected: (environmentId) => environmentId !== EnvironmentId.make("away"),
-      write,
-    });
-    const result = await applyAutoSettleRuleToNodes(30, targets);
-
-    expect(write).toHaveBeenCalledTimes(1);
-    expect(write).toHaveBeenCalledWith(STUDIO, { threadAutoSettleAfterDays: 30 });
-    expect(describeAutoSettleRuleApplyResult(result)).toBe(
-      "Applied to Studio. Not changed: Laptop (only its owner can change it), Old box (needs an update), Away (not connected).",
-    );
   });
 });

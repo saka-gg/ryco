@@ -372,6 +372,8 @@ export const makeOrchestrationStreamHelpers = (deps: {
   readonly probeResume?: OrchestrationEventStoreShape["probeResume"];
   /** One thread's events through the stream index; without it thread replay scans global pages. */
   readonly readStreamEventsPage?: OrchestrationEventStoreShape["readStreamEventsPage"];
+  /** Retention's replay floors; without it a resumed replay is never re-checked. */
+  readonly readReplayFloor?: OrchestrationEventStoreShape["readReplayFloor"];
 }) => {
   const { orchestrationEngine, projectionSnapshotQuery, repositoryIdentityResolver } = deps;
 
@@ -478,6 +480,12 @@ export const makeOrchestrationStreamHelpers = (deps: {
     readonly errorMessage: string;
     /** Pages to replay; the whole event log by default. */
     readonly readPage?: ReplayPageReader;
+    /**
+     * A resumed replay's floor: checked after each page is read and before it is sent. Retention
+     * raises a floor in the transaction that removes events below it, so a floor still at or
+     * below the resume point after a read means that page has no gap.
+     */
+    readonly replayFloor?: Effect.Effect<number, OrchestrationEventStoreError>;
   }): Stream.Stream<OrchestrationEvent, OrchestrationGetSnapshotError> => {
     const readReplayPage: ReplayPageReader =
       input.readPage ?? ((from, limit) => orchestrationEngine.readEventsPage(from, limit));
@@ -506,6 +514,19 @@ export const makeOrchestrationStreamHelpers = (deps: {
                 }),
             ),
           );
+          if (input.replayFloor !== undefined) {
+            const floor = yield* input.replayFloor.pipe(
+              Effect.mapError(
+                (cause) =>
+                  new OrchestrationGetSnapshotError({ message: input.errorMessage, cause }),
+              ),
+            );
+            if (floor > input.snapshotSequence) {
+              return yield* new OrchestrationGetSnapshotError({
+                message: `${input.errorMessage}: events after the resume point were removed`,
+              });
+            }
+          }
           const upperBound = Option.isSome(upperBoundBeforeRead)
             ? upperBoundBeforeRead
             : yield* input.captureReplayUpperBound;
@@ -774,6 +795,9 @@ export const makeOrchestrationStreamHelpers = (deps: {
           snapshotSequence,
           captureReplayUpperBound: replayBoundary.captureReplayUpperBound,
           errorMessage: "Failed to replay orchestration shell events",
+          ...(resumed && deps.readReplayFloor !== undefined
+            ? { replayFloor: deps.readReplayFloor({ aggregateKind: "log", streamId: "" }) }
+            : {}),
         }).pipe(tapArray((events) => replayMetrics.recordReplayEvent(lastSequenceOf(events))));
         const liveStream = drainLiveQueue({ liveQueue, queuedBytesRef, replayMetrics });
 
@@ -862,6 +886,11 @@ export const makeOrchestrationStreamHelpers = (deps: {
           snapshotSequence,
           captureReplayUpperBound: replayBoundary.captureReplayUpperBound,
           errorMessage: "Failed to replay orchestration thread events",
+          ...(resumed && deps.readReplayFloor !== undefined
+            ? {
+                replayFloor: deps.readReplayFloor({ aggregateKind: "thread", streamId: threadId }),
+              }
+            : {}),
           ...(readStreamEventsPage === undefined
             ? {}
             : {

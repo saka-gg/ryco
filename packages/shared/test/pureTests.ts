@@ -83,6 +83,7 @@ export const SHARED_PURE_TEST_FILES = [
   "src/runtimeEnv.test.ts",
   "src/schemaJson.test.ts",
   "src/searchRanking.test.ts",
+  "src/secretRequests.test.ts",
   "src/serverSettings.test.ts",
   "src/settingsSecrets.test.ts",
   "src/sourceControl.test.ts",

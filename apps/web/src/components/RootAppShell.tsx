@@ -1,5 +1,6 @@
 import { type ServerLifecycleWelcomePayload, WS_METHODS } from "@ryco/contracts";
 import { scopedProjectKey, scopeProjectRef } from "@ryco/client-runtime/scoped";
+import { isSavedEnvironmentSwitchedOff } from "@ryco/client-runtime/connection";
 import { Outlet, useLocation, useNavigate } from "@tanstack/react-router";
 import { useEffect, useEffectEvent, useRef, useState } from "react";
 
@@ -16,6 +17,7 @@ import { ContextMenuActionSheetHost } from "./shell/phone/ContextMenuActionSheet
 import { SshPasswordPromptDialog } from "./desktop/SshPasswordPromptDialog";
 import { WorkspaceReviewDialog } from "./worktrees/WorkspaceReviewDialog";
 import { useAutomationsDialogStore } from "./automations/automationsDialogStore";
+import { useProjectImportDialogStore } from "./projectImport/projectImportDialogStore";
 import { usePromoteChatDialogStore } from "./chat/promoteChatDialogStore";
 import { useForkThreadDialogStore } from "./chat/forkThreadDialogStore";
 import { ProviderUpdateLaunchNotification } from "./ProviderUpdateLaunchNotification";
@@ -153,6 +155,7 @@ export function RootAppShell({ authGateState }: RootAppShellProps) {
         {chatAvailable ? <AutomationsDialogMount /> : null}
         {chatAvailable ? <PromoteChatDialogMount /> : null}
         {chatAvailable ? <ForkThreadDialogMount /> : null}
+        {chatAvailable ? <ProjectImportDialogMount /> : null}
         {chatAvailable ? <MissedAutomationRunsNotice /> : null}
         {ownsThreadAlerts ? <ThreadAlertsBootstrap /> : null}
         {authGateState.status === "hosted-static" ? <HostedStaticEnvironmentBootstrap /> : null}
@@ -160,7 +163,7 @@ export function RootAppShell({ authGateState }: RootAppShellProps) {
           <EventRouter hosted={authGateState.status === "hosted-hub"} />
         ) : null}
         {primaryEnvironmentAuthenticated ? <RoleAwareProviderUpdateLaunchNotification /> : null}
-        {isElectron ? <DeferredRemoteInstallCountdown /> : null}
+        {isElectron ? <DeferredDesktopUpdateNotices /> : null}
         {isElectron && primaryEnvironmentAuthenticated ? <DeferredRunningThreadKeepAlive /> : null}
         {recoveryOwner ? <WebSocketConnectionCoordinator recoveryOwner={recoveryOwner} /> : null}
         <ShellIdlePreloads authGateStatus={authGateState.status} />
@@ -226,6 +229,20 @@ function ForkThreadDialogMount() {
   const ready = useLazyComponentReady(ForkThreadDialog, hasOpened);
   if (!hasOpened || !ready) return null;
   return <ForkThreadDialog />;
+}
+
+const ProjectImportDialog = preloadableLazy(() =>
+  import("./projectImport/ProjectImportDialog").then((module) => module.ProjectImportDialog),
+);
+
+/** "Import from Codex or Claude Code" loads the first time something opens it, then stays mounted. */
+function ProjectImportDialogMount() {
+  const open = useProjectImportDialogStore((state) => state.open);
+  const [hasOpened, setHasOpened] = useState(open);
+  if (open && !hasOpened) setHasOpened(true);
+  const ready = useLazyComponentReady(ProjectImportDialog, hasOpened);
+  if (!hasOpened || !ready) return null;
+  return <ProjectImportDialog />;
 }
 
 const THREAD_ROUTE_ID = "/_chat/$environmentId/$threadId";
@@ -295,8 +312,12 @@ function RoleAwareProviderUpdateLaunchNotification() {
 }
 
 function HostedStaticEnvironmentBootstrap() {
-  const savedEnvironmentCount = useSavedEnvironmentRegistryStore(
-    (state) => Object.keys(state.byId).length,
+  // The machines switched on: switching one off or on changes it too.
+  const switchedOnEnvironmentKey = useSavedEnvironmentRegistryStore((state) =>
+    Object.values(state.byId)
+      .filter((record) => !isSavedEnvironmentSwitchedOff(record))
+      .map((record) => record.environmentId)
+      .join("\n"),
   );
 
   useEffect(() => {
@@ -309,13 +330,15 @@ function HostedStaticEnvironmentBootstrap() {
       return;
     }
 
-    const firstSavedEnvironment = listSavedEnvironmentRecords()[0];
+    const firstSavedEnvironment = listSavedEnvironmentRecords().find(
+      (record) => !isSavedEnvironmentSwitchedOff(record),
+    );
     if (!firstSavedEnvironment) {
       return;
     }
 
     useStore.getState().setActiveEnvironmentId(firstSavedEnvironment.environmentId);
-  }, [savedEnvironmentCount]);
+  }, [switchedOnEnvironmentKey]);
 
   return null;
 }
@@ -333,9 +356,10 @@ function AuthenticatedTracingBootstrap() {
   return null;
 }
 
-// Only desktop apps get update requests from other devices; the web build never loads it.
-const LazyRemoteInstallCountdown = preloadableLazy(() =>
-  import("../updates/RemoteInstallCountdown").then((module) => module.RemoteInstallCountdown),
+// Only desktop apps update themselves or get update requests from other devices; the web build
+// never loads these.
+const LazyDesktopUpdateNotices = preloadableLazy(() =>
+  import("../updates/DesktopUpdateNotices").then((module) => module.DesktopUpdateNotices),
 );
 
 const LazyRunningThreadKeepAlive = preloadableLazy(() =>
@@ -350,11 +374,11 @@ function DeferredRunningThreadKeepAlive() {
   return ready ? <LazyRunningThreadKeepAlive /> : null;
 }
 
-function DeferredRemoteInstallCountdown() {
-  const ready = useLazyComponentReady(LazyRemoteInstallCountdown, true, {
-    onLoadError: (error) => console.warn("Remote install countdown failed to load.", error),
+function DeferredDesktopUpdateNotices() {
+  const ready = useLazyComponentReady(LazyDesktopUpdateNotices, true, {
+    onLoadError: (error) => console.warn("Desktop update notices failed to load.", error),
   });
-  return ready ? <LazyRemoteInstallCountdown /> : null;
+  return ready ? <LazyDesktopUpdateNotices /> : null;
 }
 
 function EnvironmentConnectionManagerBootstrap() {
@@ -365,14 +389,22 @@ function EnvironmentConnectionManagerBootstrap() {
     // off the shell's critical path, like the update pill that shows it.
     let disposed = false;
     let stopNodeUpdates: (() => void) | null = null;
+    let stopInteractionReports: (() => void) | null = null;
     void import("../updates/nodeUpdateStore")
       .then(({ startNodeUpdateWiring }) => {
         if (!disposed) stopNodeUpdates = startNodeUpdateWiring();
       })
       .catch((error: unknown) => console.warn("Node update following failed to load.", error));
+    // Nodes that update themselves unattended wait while someone uses this app.
+    void import("../updates/clientInteractionReporting")
+      .then(({ startClientInteractionReporting }) => {
+        if (!disposed) stopInteractionReports = startClientInteractionReporting();
+      })
+      .catch((error: unknown) => console.warn("Interaction reports failed to load.", error));
     return () => {
       disposed = true;
       stopNodeUpdates?.();
+      stopInteractionReports?.();
       stopDesktopWorkspace();
       stopEnvironmentConnections();
     };

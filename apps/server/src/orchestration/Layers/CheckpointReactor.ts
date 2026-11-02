@@ -13,7 +13,6 @@ import { Cause, Deferred, Effect, Layer, Option, Stream } from "effect";
 import { makeKeyedSerialWorker } from "@ryco/shared/KeyedSerialWorker";
 import { losslessBackpressureQueuePolicy } from "@ryco/shared/QueuePolicy";
 
-import { parseTurnDiffFilesFromUnifiedDiff } from "../../checkpointing/Diffs.ts";
 import {
   checkpointRefForThreadTurn,
   resolveThreadWorkspaceCwd,
@@ -35,6 +34,9 @@ import { isGitRepository } from "../../git/Utils.ts";
 import { LocalDiagnosticsMetrics } from "../../observability/Services/LocalDiagnosticsMetrics.ts";
 import { VcsStatusBroadcaster } from "../../vcs/VcsStatusBroadcaster.ts";
 import { WorkspaceEntries } from "../../workspace/Services/WorkspaceEntries.ts";
+
+// The unified diff parser (`@pierre/diffs`) loads with the first turn diff summary, not at boot.
+const loadTurnDiffParser = Effect.promise(() => import("../../checkpointing/Diffs.ts"));
 
 /** The domain events this reactor handles; all of them name their thread. */
 type CheckpointDomainEvent = Extract<
@@ -395,13 +397,15 @@ const make = Effect.fn("makeCheckpointReactor")(function* (options: CheckpointRe
         ignoreWhitespace: false,
       })
       .pipe(
-        Effect.map((diff) =>
-          parseTurnDiffFilesFromUnifiedDiff(diff).map((file) => ({
-            path: file.path,
-            kind: file.kind,
-            additions: file.additions,
-            deletions: file.deletions,
-          })),
+        Effect.flatMap((diff) =>
+          Effect.map(loadTurnDiffParser, ({ parseTurnDiffFilesFromUnifiedDiff }) =>
+            parseTurnDiffFilesFromUnifiedDiff(diff).map((file) => ({
+              path: file.path,
+              kind: file.kind,
+              additions: file.additions,
+              deletions: file.deletions,
+            })),
+          ),
         ),
         Effect.tapError((error) =>
           appendCaptureFailureActivity({

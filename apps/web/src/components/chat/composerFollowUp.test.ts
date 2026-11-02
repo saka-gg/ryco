@@ -267,3 +267,29 @@ describe("describeRunningFollowUp", () => {
     ).toBe("Send a message to decline and redirect · ⇧⌘↵ to queue instead");
   });
 });
+
+describe("describeRunningFollowUp on a provider that steers by stopping the turn", () => {
+  it("says a steer stops the turn and sends the message next", () => {
+    expect(
+      describeRunningFollowUp({
+        followUpBehavior: "steer",
+        steerUnavailableReason: null,
+        surfaceAllowsSteer: true,
+        platform: MAC,
+        steerRestarts: true,
+      }),
+    ).toEqual({
+      effective: "steer",
+      placeholder: "Stop this turn and send this next · ⌘↵ to queue instead",
+    });
+    expect(
+      describeRunningFollowUp({
+        followUpBehavior: "queue",
+        steerUnavailableReason: null,
+        surfaceAllowsSteer: true,
+        platform: MAC,
+        steerRestarts: true,
+      }).placeholder,
+    ).toBe("Queue a follow-up · ⌘↵ to stop this turn and send");
+  });
+});

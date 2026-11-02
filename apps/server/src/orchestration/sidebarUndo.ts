@@ -15,7 +15,7 @@ type PlannedEvent = Omit<OrchestrationEvent, "sequence">;
 type Receipt = {
   before: Pick<
     Thread,
-    "updatedAt" | "settledOverride" | "settledAt" | "snoozedUntil" | "snoozedAt"
+    "updatedAt" | "settledOverride" | "settledAt" | "snoozedUntil" | "snoozedAt" | "hiddenAt"
   > & {
     /** Settle and archive end the thread's watches; their Undo starts them again. */
     readonly pullRequestWatchState: ThreadPullRequestWatches | undefined;
@@ -25,13 +25,13 @@ type Receipt = {
   restoredUpdatedAt: string;
   project: OrchestrationReadModel["projects"][number] | undefined;
   worktree: NonNullable<OrchestrationReadModel["worktrees"]>[number] | undefined;
-  type: "thread.archive" | "thread.settle" | "thread.snooze";
+  type: "thread.archive" | "thread.settle" | "thread.snooze" | "thread.hide";
   expiresAt: number;
 };
 
 // These commands are provider/internal-only. Client actions always invalidate the prior receipt.
-// A pull request watch update without a wake only records watch progress (a wake starts a turn,
-// which changes the sidebar state anyway).
+// A pull request or command watch update without a wake only records watch progress (a wake
+// starts a turn, which changes the sidebar state anyway).
 function isProviderProgress(command: OrchestrationCommand) {
   return (
     command.type === "thread.message.assistant.delta" ||
@@ -39,7 +39,9 @@ function isProviderProgress(command: OrchestrationCommand) {
     command.type === "thread.activity.append" ||
     command.type === "thread.turn.diff.complete" ||
     command.type === "thread.proposed-plan.upsert" ||
-    (command.type === "thread.pull-request-watch.update" && command.wake === undefined) ||
+    ((command.type === "thread.pull-request-watch.update" ||
+      command.type === "thread.command-watch.update") &&
+      command.wake === undefined) ||
     // A hold the node records on the follow-up queue, which the sidebar does not show.
     command.type === "thread.queue.hold.record"
   );
@@ -81,7 +83,9 @@ function sameSidebarState(before: Thread, after: Thread) {
     before.settledOverride === after.settledOverride &&
     before.settledAt === after.settledAt &&
     before.snoozedUntil === after.snoozedUntil &&
-    before.snoozedAt === after.snoozedAt
+    before.snoozedAt === after.snoozedAt &&
+    (before.hiddenAt ?? null) === (after.hiddenAt ?? null) &&
+    (before.settleWhenIdleAt ?? null) === (after.settleWhenIdleAt ?? null)
   );
 }
 
@@ -129,7 +133,8 @@ export function createSidebarUndoReceipts(now = Date.now) {
       if (
         command.type !== "thread.archive" &&
         command.type !== "thread.settle" &&
-        command.type !== "thread.snooze"
+        command.type !== "thread.snooze" &&
+        command.type !== "thread.hide"
       )
         return;
       const previous = before.threads.find((thread) => thread.id === command.threadId);
@@ -142,6 +147,7 @@ export function createSidebarUndoReceipts(now = Date.now) {
           settledAt: previous.settledAt,
           snoozedUntil: previous.snoozedUntil ?? null,
           snoozedAt: previous.snoozedAt ?? null,
+          hiddenAt: previous.hiddenAt ?? null,
           pullRequestWatchState: previous.pullRequestWatchState,
         },
         threadId: current.id,
@@ -178,7 +184,11 @@ export function createSidebarUndoReceipts(now = Date.now) {
       // hidden/settled state after new requests, queued work or goal authority.
       const restoresSettled = receipt.before.settledOverride === "settled";
       const restoresSnooze = Date.parse(receipt.before.snoozedUntil ?? "") > now();
-      if (receipt.type !== "thread.archive" && (restoresSettled || restoresSnooze)) {
+      if (
+        receipt.type !== "thread.archive" &&
+        receipt.type !== "thread.hide" &&
+        (restoresSettled || restoresSnooze)
+      ) {
         const eligibility = threadSettlementInput(model, after, occurredAt);
         if (
           after.goal?.status === "active" ||
@@ -206,17 +216,29 @@ export function createSidebarUndoReceipts(now = Date.now) {
         snoozedAt: receipt.before.snoozedAt ?? null,
       };
       const restoredEvent: PlannedEvent =
-        receipt.type === "thread.archive"
-          ? { ...base, type: "thread.unarchived", payload }
-          : receipt.type === "thread.settle"
-            ? {
+        receipt.type === "thread.hide"
+          ? receipt.before.hiddenAt == null
+            ? { ...base, type: "thread.unhidden", payload }
+            : {
                 ...base,
-                type: "thread.unsettled",
-                payload: { ...payload, reason: "user", restoredSidebarState },
+                type: "thread.hidden",
+                payload: { ...payload, hiddenAt: receipt.before.hiddenAt },
               }
-            : { ...base, type: "thread.unsnoozed", payload: { ...payload, restoredSidebarState } };
+          : receipt.type === "thread.archive"
+            ? { ...base, type: "thread.unarchived", payload }
+            : receipt.type === "thread.settle"
+              ? {
+                  ...base,
+                  type: "thread.unsettled",
+                  payload: { ...payload, reason: "user", restoredSidebarState },
+                }
+              : {
+                  ...base,
+                  type: "thread.unsnoozed",
+                  payload: { ...payload, restoredSidebarState },
+                };
       const watches =
-        receipt.type === "thread.snooze"
+        receipt.type === "thread.snooze" || receipt.type === "thread.hide"
           ? null
           : restoredPullRequestWatches(
               receipt.before.pullRequestWatchState,

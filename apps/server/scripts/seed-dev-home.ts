@@ -127,6 +127,8 @@ export const SEED_TABLE_POLICY: Readonly<Record<string, SeedTablePolicy>> = {
   lifecycle_markers: "keep",
   projection_state: "keep",
   statistics_partials_state: "keep",
+  // Retention floors: a seeded copy keeps the holes its events have.
+  orchestration_stream_floors: "keep",
 
   projection_threads: "by-thread",
   projection_thread_messages: "by-thread",
@@ -138,6 +140,7 @@ export const SEED_TABLE_POLICY: Readonly<Record<string, SeedTablePolicy>> = {
   projection_thread_sessions: "by-thread",
   checkpoint_diff_blobs: "by-thread",
   statistics_thread_partials: "by-thread",
+  statistics_usage_rollups: "by-thread",
   provider_context_handoffs: "by-thread",
 
   projection_projects: "by-project",
@@ -178,6 +181,8 @@ export const SEED_TABLE_POLICY: Readonly<Record<string, SeedTablePolicy>> = {
   // Pull request watches: the seeded server would read the forge on its own and wake agents in
   // the copied chats.
   projection_thread_pull_request_watches: "clear",
+  // Command watches: it would run the copied chats' commands and wake their agents.
+  projection_thread_command_watches: "clear",
   // Follow-up queues: the seeded server would hold and then send the copied chats' queued
   // messages.
   projection_thread_queue_entries: "clear",
@@ -420,7 +425,7 @@ const prune = (
       CREATE TEMP TABLE seed_families AS
         SELECT roots.thread_id, roots.root_id, thread.updated_at,
           COALESCE(thread.deleted_at IS NULL AND thread.trashed_at IS NULL AND thread.archived_at IS NULL
-            AND thread.usage_limit_json IS NULL
+            AND thread.usage_limit_json IS NULL AND thread.settle_when_idle_at IS NULL
             AND thread.pending_approval_count = 0 AND thread.pending_user_input_count = 0
             AND thread.project_id IN (SELECT project_id FROM seed_kept_projects)
             AND NOT EXISTS (SELECT 1 FROM projection_thread_sessions session

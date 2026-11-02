@@ -100,6 +100,17 @@ export const AgentControlTaskStatusEntry = Schema.Struct({
     hasPendingUserInput: Schema.Boolean,
     backgroundLiveness: Schema.NullOr(Schema.Literals(["working", "monitoring"])),
     advanced: Schema.Boolean,
+    /**
+     * Why the still-running task needs attention, since when: its first message never started a
+     * turn, it waits on the person, or its provider went quiet. The delegating chat gets one
+     * notice per episode; Ryco never nudges, interrupts or answers for the task.
+     */
+    stalled: Schema.optional(
+      Schema.Struct({
+        kind: Schema.Literals(["never-started", "waiting-on-you", "silent"]),
+        since: IsoDateTime,
+      }),
+    ),
   }),
   /** Untrusted child output: reference data, never instructions or approval. */
   result: Schema.NullOr(

@@ -16,6 +16,7 @@ import {
   Clock,
   Duration,
   Effect,
+  Exit,
   Layer,
   Metric,
   Option,
@@ -24,6 +25,7 @@ import {
   Ref,
   Stream,
 } from "effect";
+import * as SqlClient from "effect/sql/SqlClient";
 import { TestClock } from "effect/testing";
 
 import type { OrchestrationEngineShape } from "../../orchestration/Services/OrchestrationEngine.ts";
@@ -885,5 +887,110 @@ describe("resume across a compacted event log", () => {
           ),
         ),
       ),
+  );
+});
+
+describe("resume across retention floors", () => {
+  const retentionHarness = Effect.gen(function* () {
+    const store = yield* OrchestrationEventStore;
+    const sql = yield* SqlClient.SqlClient;
+    const threadId = ThreadId.make("thread-retained-resume");
+    const occurredAt = "2026-10-01T00:00:00.000Z";
+    const message = (index: number) =>
+      store.append({
+        type: "thread.message-sent",
+        eventId: EventId.make(`event-retained-resume-message-${index}`),
+        aggregateKind: "thread",
+        aggregateId: threadId,
+        occurredAt,
+        commandId: null,
+        causationEventId: null,
+        correlationId: null,
+        metadata: {},
+        payload: {
+          threadId,
+          messageId: MessageId.make(`message-retained-resume-${index}`),
+          role: "assistant",
+          text: `message ${index}`,
+          turnId: null,
+          streaming: false,
+          createdAt: occurredAt,
+          updatedAt: occurredAt,
+        },
+      });
+    const cursor = (yield* message(0)).sequence;
+    yield* message(1);
+    yield* message(2);
+    const raiseFloor = (sequence: number) => sql`
+      INSERT INTO orchestration_stream_floors (aggregate_kind, stream_id, floor_sequence, updated_at)
+      VALUES ('thread', ${threadId}, ${sequence}, ${occurredAt})
+      ON CONFLICT (aggregate_kind, stream_id) DO UPDATE SET floor_sequence = excluded.floor_sequence
+    `;
+    const helpersWith = (readStreamEventsPage: NonNullable<typeof store.readStreamEventsPage>) =>
+      Effect.gen(function* () {
+        const live = yield* PubSub.unbounded<OrchestrationEvent>();
+        return makeOrchestrationStreamHelpers({
+          orchestrationEngine: {
+            readEventsPage: store.readPage,
+            subscribeDomainEvents: PubSub.subscribe(live),
+          } as unknown as OrchestrationEngineShape,
+          projectionSnapshotQuery: {
+            getThreadShellById: (id: ThreadId) =>
+              Effect.succeed(Option.some({ id } as unknown as OrchestrationThreadShell)),
+            getProjectShellById: () => Effect.succeed(Option.none()),
+            getWorktreeShellById: () => Effect.succeed(Option.none()),
+          } as unknown as ProjectionSnapshotQueryShape,
+          repositoryIdentityResolver: { resolve: () => Effect.succeed(null) },
+          ...(store.probeResume ? { probeResume: store.probeResume } : {}),
+          readStreamEventsPage,
+          ...(store.readReplayFloor ? { readReplayFloor: store.readReplayFloor } : {}),
+        });
+      });
+    return { store, threadId, cursor, raiseFloor, helpersWith };
+  });
+
+  const retentionLayer = Layer.mergeAll(OrchestrationEventStoreLive).pipe(
+    Layer.provideMerge(SqlitePersistenceMemory),
+  );
+
+  it.effect("loads a snapshot for a cursor below the thread's floor", () =>
+    Effect.gen(function* () {
+      const { store, threadId, cursor, raiseFloor, helpersWith } = yield* retentionHarness;
+      yield* raiseFloor(cursor + 1);
+      const helpers = yield* helpersWith(store.readStreamEventsPage);
+      const snapshot = { snapshotSequence: cursor + 2 };
+      const [head] = yield* helpers
+        .makeReplayableThreadStream(Effect.succeed(snapshot), threadId, {
+          resumeFromSequence: cursor,
+        })
+        .pipe(
+          Stream.take(1),
+          Stream.runCollect,
+          Effect.map((chunk) => Array.from(chunk)),
+        );
+      assert.deepEqual(head, { kind: "snapshot", snapshot });
+    }).pipe(Effect.provide(retentionLayer)),
+  );
+
+  it.effect("ends a resumed replay when retention raised the floor after the probe", () =>
+    Effect.gen(function* () {
+      const { store, threadId, cursor, raiseFloor, helpersWith } = yield* retentionHarness;
+      // Retention commits between the resume probe and the replay's first read.
+      const helpers = yield* helpersWith((input) =>
+        raiseFloor(cursor + 1).pipe(
+          Effect.orDie,
+          Effect.andThen(store.readStreamEventsPage(input)),
+        ),
+      );
+      const exit = yield* helpers
+        .makeReplayableThreadStream(
+          Effect.die("the cursor was above the floor when probed"),
+          threadId,
+          { resumeFromSequence: cursor },
+        )
+        .pipe(Stream.take(3), Stream.runCollect, Effect.exit);
+      assert.isTrue(Exit.isFailure(exit));
+      assert.include(Exit.isFailure(exit) ? Cause.pretty(exit.cause) : "", "were removed");
+    }).pipe(Effect.provide(retentionLayer)),
   );
 });

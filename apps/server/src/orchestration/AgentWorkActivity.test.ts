@@ -4,7 +4,7 @@ import type {
   OrchestrationThread,
 } from "@ryco/contracts";
 import { assert, describe, it } from "@effect/vitest";
-import { Deferred, Effect, Fiber, Logger, PubSub, Stream } from "effect";
+import { Clock, Deferred, Effect, Fiber, Logger, PubSub, Stream } from "effect";
 import { TestClock } from "effect/testing";
 
 import {
@@ -16,7 +16,9 @@ import {
   AGENT_WORK_RECONCILE_INTERVAL_MS,
   AGENT_WORK_RELEASE_DEBOUNCE_MS,
   type AgentWorkState,
+  hasInterruptibleWork,
   hasLiveBackgroundWork,
+  hasRestartContinuationCandidate,
   hasRunningTurn,
   isAgentWorkTrigger,
   isTurnRunning,
@@ -27,6 +29,7 @@ import {
   OrchestrationEngineService,
   type OrchestrationEngineShape,
 } from "./Services/OrchestrationEngine.ts";
+import { restartCandidateShape } from "./restartContinuationPolicy.ts";
 import * as ThreadBackgroundLiveness from "./ThreadBackgroundLiveness.ts";
 
 const session = (
@@ -47,13 +50,38 @@ const session = (
 
 const thread = (
   id: string,
-  options: { session?: OrchestrationSession | null; deletedAt?: string | null } = {},
+  options: {
+    session?: OrchestrationSession | null;
+    deletedAt?: string | null;
+    archivedAt?: string | null;
+    activities?: ReadonlyArray<unknown>;
+    latestTurn?: { turnId: string; state: string } | null;
+  } = {},
 ): OrchestrationThread =>
   ({
     id,
     deletedAt: options.deletedAt ?? null,
+    archivedAt: options.archivedAt ?? null,
     session: options.session ?? null,
+    activities: options.activities ?? [],
+    latestTurn: options.latestTurn ?? null,
+    messages: [],
   }) as unknown as OrchestrationThread;
+
+/** A request the provider raised, as the thread's activity log records it. */
+const requested = (
+  kind: "approval.requested" | "user-input.requested",
+  requestId: string,
+  payload: Record<string, unknown> = {},
+) => ({
+  id: `activity-${requestId}`,
+  kind,
+  tone: "info",
+  summary: kind,
+  turnId: "turn-1",
+  payload: { requestId, ...payload },
+  createdAt: "2026-10-24T10:00:00.000Z",
+});
 
 const running = (id = "thread", runtimeSessionId?: string) =>
   thread(id, { session: session("running", "turn-1", runtimeSessionId) });
@@ -185,6 +213,166 @@ describe("agent work predicates", () => {
     assert.isFalse(hasLiveBackgroundWork({ threads: [idle("other")] }, liveness));
   });
 
+  it("counts what an update would interrupt beyond running turns: the client's INTERRUPTIBLE", () => {
+    const waiting = session("ready", null);
+    // Connecting: the provider session is starting.
+    assert.isTrue(
+      hasInterruptibleWork({ threads: [thread("a", { session: session("starting", null) })] }),
+    );
+    // Waiting on an approval or a question, whatever the session says.
+    assert.isTrue(
+      hasInterruptibleWork({
+        threads: [
+          thread("a", { session: waiting, activities: [requested("approval.requested", "r1")] }),
+        ],
+      }),
+    );
+    assert.isTrue(
+      hasInterruptibleWork({
+        threads: [thread("a", { activities: [requested("user-input.requested", "r2")] })],
+      }),
+    );
+    // A question that does not block the turn, and an answered approval, wait on nobody.
+    assert.isFalse(
+      hasInterruptibleWork({
+        threads: [
+          thread("a", {
+            activities: [requested("user-input.requested", "r3", { nonBlocking: true })],
+          }),
+          thread("b", {
+            activities: [
+              requested("approval.requested", "r4"),
+              {
+                ...requested("approval.requested", "r4"),
+                id: "resolved",
+                kind: "approval.resolved",
+              },
+            ],
+          }),
+        ],
+      }),
+    );
+    // Idle, archived and deleted threads never count, as on the client.
+    assert.isFalse(hasInterruptibleWork({ threads: [idle("a"), thread("b")] }));
+    assert.isFalse(
+      hasInterruptibleWork({
+        threads: [
+          thread("archived", {
+            session: session("starting", null),
+            archivedAt: "2026-10-24T10:00:00.000Z",
+          }),
+          thread("deleted", {
+            activities: [requested("approval.requested", "r5")],
+            deletedAt: "2026-10-24T10:00:00.000Z",
+          }),
+        ],
+      }),
+    );
+  });
+
+  describe("a restart nobody asked for", () => {
+    const completed = { turnId: "turn-1", state: "completed" };
+    /** Background tasks of `runtimeSessionId`, as a checkpoint in the thread's activity log. */
+    const backgroundCheckpoint = (runtimeSessionId: string) => ({
+      kind: "background-work.checkpoint",
+      payload: {
+        version: 1,
+        runtimeSessionId,
+        ended: false,
+        tasks: [
+          {
+            id: "watch-1",
+            title: "watch the build",
+            status: "running",
+            runtimeSessionId,
+            startedAt: "2026-10-24T10:00:00.000Z",
+            updatedAt: "2026-10-24T10:00:00.000Z",
+          },
+        ],
+      },
+      createdAt: "2026-10-24T10:00:00.000Z",
+    });
+    /** What would close the restart window: the same predicates `restartInterruptible` reads. */
+    const restartWaitsFor = (
+      threads: ReadonlyArray<OrchestrationThread>,
+      liveness: ThreadBackgroundLiveness.ThreadBackgroundLivenessService["Service"],
+    ) =>
+      hasRunningTurn({ threads }) ||
+      hasLiveBackgroundWork({ threads }, liveness) ||
+      hasInterruptibleWork({ threads }) ||
+      hasRestartContinuationCandidate({ threads }, new Set(liveness.listLiveThreadIds()));
+    /**
+     * What the next start's capture (`RestartContinuation`) makes of the thread: no session is
+     * live yet, and the shutdown hint names the threads the liveness registry holds.
+     */
+    const continuedAfterRestart = (
+      candidate: OrchestrationThread,
+      liveness: ThreadBackgroundLiveness.ThreadBackgroundLivenessService["Service"],
+    ) => {
+      const hint = liveness.listLiveThreadIds().includes(candidate.id)
+        ? { hasBackgroundWork: true, recordedAt: "2026-10-24T10:00:00.000Z" }
+        : undefined;
+      return restartCandidateShape(candidate, new Set(), hint);
+    };
+
+    it("leaves RestartContinuation nothing to continue in any state the window admits", () => {
+      const liveness = ThreadBackgroundLiveness.make();
+      // Tasks of a replaced runtime stay in the registry; capture finds none for the new one.
+      startTask(liveness, "replaced", "runtime-1");
+      const admitted = [
+        thread("settled", { session: session("ready", null), latestTurn: completed }),
+        thread("stopped", { session: session("stopped", null), latestTurn: completed }),
+        thread("failed", {
+          session: session("error", null),
+          latestTurn: { turnId: "turn-1", state: "error" },
+        }),
+        thread("never-ran"),
+        thread("replaced", { session: session("ready", null, "runtime-2"), latestTurn: completed }),
+        // Trashed with its session left running: its provider was stopped.
+        thread("trashed", {
+          session: session("running", "turn-1"),
+          latestTurn: { turnId: "turn-1", state: "running" },
+          deletedAt: "2026-10-24T10:00:00.000Z",
+        }),
+      ];
+      for (const candidate of admitted) {
+        assert.isFalse(restartWaitsFor([candidate], liveness), candidate.id);
+        const shape = continuedAfterRestart(candidate, liveness);
+        // A background-only candidate without tasks of its runtime is dropped at capture.
+        assert.isTrue(
+          shape === null || (shape.kind === "background-only" && candidate.id === "replaced"),
+          candidate.id,
+        );
+      }
+    });
+
+    it("waits for every thread the next start would continue, beyond what an install waits for", () => {
+      const liveness = ThreadBackgroundLiveness.make();
+      startTask(liveness, "background", "runtime-1");
+      const continued = [
+        // An active turn whose session no longer says running.
+        thread("active-turn", {
+          session: session("ready", "turn-1"),
+          latestTurn: completed,
+        }),
+        // Background tasks of the current runtime that the registry lost track of.
+        thread("background", {
+          session: session("ready", null, "runtime-2"),
+          latestTurn: completed,
+          activities: [backgroundCheckpoint("runtime-2")],
+        }),
+      ];
+      for (const candidate of continued) {
+        // An install would not wait for these, a restart must.
+        assert.isFalse(hasRunningTurn({ threads: [candidate] }), candidate.id);
+        assert.isFalse(hasLiveBackgroundWork({ threads: [candidate] }, liveness), candidate.id);
+        assert.isFalse(hasInterruptibleWork({ threads: [candidate] }), candidate.id);
+        assert.isNotNull(continuedAfterRestart(candidate, liveness), candidate.id);
+        assert.isTrue(restartWaitsFor([candidate], liveness), candidate.id);
+      }
+    });
+  });
+
   it("wakes only on the events that change sessions or deletion", () => {
     for (const type of [
       "thread.session-set",
@@ -266,6 +454,112 @@ describe("agent work predicates", () => {
 });
 
 describe("AgentWorkActivity", () => {
+  it.effect("is interruptible until the first report and while work or its tail lasts", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const harness = yield* makeHarness();
+        // Before the startup command gate opens nothing is known: never interrupt.
+        assert.isTrue(yield* harness.activity.interruptible);
+        yield* harness.openGate;
+        assert.isFalse(yield* harness.activity.interruptible);
+
+        harness.setThreads([running()]);
+        yield* harness.publish("thread.session-set");
+        assert.isTrue(yield* harness.activity.interruptible);
+        harness.setThreads([idle()]);
+        yield* harness.publish("thread.session-set");
+        yield* harness.advance(AGENT_WORK_RELEASE_DEBOUNCE_MS - 1);
+        assert.isTrue(yield* harness.activity.interruptible);
+        yield* harness.advance(1);
+        assert.isFalse(yield* harness.activity.interruptible);
+
+        // A session starting needs no domain event to count: it is read at the call.
+        harness.setThreads([thread("thread", { session: session("starting", null) })]);
+        assert.isTrue(yield* harness.activity.interruptible);
+      }),
+    ),
+  );
+
+  it.effect("waits before a restart for a thread the next start would continue", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const harness = yield* makeHarness();
+        assert.isTrue(yield* harness.activity.restartInterruptible);
+        yield* harness.openGate;
+        assert.isFalse(yield* harness.activity.restartInterruptible);
+        harness.setThreads([
+          thread("thread", {
+            session: session("ready", "turn-1"),
+            latestTurn: { turnId: "turn-1", state: "completed" },
+          }),
+        ]);
+        assert.isFalse(yield* harness.activity.interruptible);
+        assert.isTrue(yield* harness.activity.restartInterruptible);
+        // Whatever `interruptible` waits for, a restart waits for too.
+        harness.setThreads([running()]);
+        assert.isTrue(yield* harness.activity.restartInterruptible);
+        harness.state.failReads = 1;
+        harness.setThreads([idle()]);
+        yield* harness.advance(AGENT_WORK_RELEASE_DEBOUNCE_MS);
+        harness.state.failReads = 1;
+        assert.isTrue(yield* harness.activity.restartInterruptible);
+      }),
+    ),
+  );
+
+  it.effect("reads a turn that just started at the call, before any report says so", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const harness = yield* makeHarness();
+        yield* harness.openGate;
+        // No domain event yet: the tracker has not recomputed, and still reports idle.
+        harness.setThreads([running()]);
+        assert.isFalse((yield* harness.activity.current).working);
+        assert.isTrue(yield* harness.activity.interruptible);
+      }),
+    ),
+  );
+
+  it.effect("keeps the tail after work on the monotonic clock, whatever the wall clock does", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const harness = yield* makeHarness();
+        yield* harness.openGate;
+        harness.setThreads([running()]);
+        yield* harness.publish("thread.session-set");
+        harness.setThreads([idle()]);
+        yield* harness.publish("thread.session-set");
+        // The wall clock moves back an hour (a clock correction): the tail still ends 2 minutes
+        // after the work did.
+        yield* TestClock.setTime((yield* Clock.currentTimeMillis) - 3_600_000);
+        yield* harness.advance(AGENT_WORK_RELEASE_DEBOUNCE_MS - 1);
+        assert.isTrue(yield* harness.activity.interruptible);
+        yield* harness.advance(1);
+        assert.isFalse(yield* harness.activity.interruptible);
+      }),
+    ),
+  );
+
+  it.effect("counts a failed recompute or a failed read as something to interrupt", () =>
+    Effect.scoped(
+      Effect.gen(function* () {
+        const harness = yield* makeHarness();
+        yield* harness.openGate;
+        harness.setThreads([idle()]);
+        harness.state.failReads = 1;
+        yield* harness.publish("thread.session-set");
+        // The recompute failed and reports idle; the window must not trust that for 2 minutes.
+        assert.isFalse((yield* harness.activity.current).keepAwake);
+        assert.isTrue(yield* harness.activity.interruptible);
+        yield* harness.advance(AGENT_WORK_RELEASE_DEBOUNCE_MS);
+        assert.isFalse(yield* harness.activity.interruptible);
+        // A read that fails at the call cannot tell either.
+        harness.state.failReads = 1;
+        assert.isTrue(yield* harness.activity.interruptible);
+      }),
+    ),
+  );
+
   it.effect("reports nothing until the startup command gate opens", () =>
     Effect.scoped(
       Effect.gen(function* () {

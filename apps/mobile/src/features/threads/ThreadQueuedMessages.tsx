@@ -36,6 +36,8 @@ export function ThreadQueuedMessages(props: {
   readonly onPause?: () => void;
   readonly getSteerUnavailableReason: (row: FollowUpQueueRow) => string | null;
   readonly onSteer: (row: FollowUpQueueRow) => void;
+  /** The running turn's provider steers by stopping the turn and sending the message next. */
+  readonly steerRestarts?: boolean;
   readonly onRetryReview?: (messageId: string) => void;
   /** Retries a message held after a steer the provider may have received. */
   readonly onRetryHeld?: (messageId: string) => void;
@@ -174,7 +176,11 @@ export function ThreadQueuedMessages(props: {
                   accessibilityRole="button"
                   accessibilityLabel={
                     unavailableReason ??
-                    (steering ? "Steering queued message" : "Steer queued message into active turn")
+                    (steering
+                      ? "Steering queued message"
+                      : props.steerRestarts
+                        ? "Stop the running turn and send this queued message next"
+                        : "Steer queued message into active turn")
                   }
                   disabled={unavailableReason !== null || steering}
                   onPress={() => props.onSteer(row)}

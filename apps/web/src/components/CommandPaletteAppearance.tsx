@@ -68,8 +68,9 @@ function ThemeSwatch(props: {
 export function buildAppearancePaletteItems(
   input: AppearancePaletteInput,
 ): readonly [CommandPaletteSubmenuItem, CommandPaletteSubmenuItem] {
+  // The theme the mode on screen shows: a choice sets that mode's pick (`pickTheme`).
   const activeTheme =
-    input.themes.find((theme) => theme.id === input.activeThemeId) ?? DEFAULT_THEME;
+    input.themes.find((theme) => theme.id === input.shownThemeId) ?? DEFAULT_THEME;
   const themeItems = input.themes.map((theme): CommandPaletteActionItem => ({
     kind: "action",
     value: `theme:${theme.id}`,
@@ -78,7 +79,7 @@ export function buildAppearancePaletteItems(
     icon: <ThemeSwatch theme={theme} mode={input.resolvedTheme} />,
     titleTrailingContent: theme.id === activeTheme.id ? CURRENT_MARKER : null,
     run: async () => {
-      input.setActiveTheme(theme.id);
+      input.pickTheme(theme.id);
     },
   }));
   const colorModeItems = COLOR_MODE_OPTIONS.map((option): CommandPaletteActionItem => ({

@@ -1022,7 +1022,9 @@ describe("manual backups", () => {
       );
       assert.match(
         NodePath.basename(result.path),
-        new RegExp(`^state-v0${LATEST}-manual-\\d{8}T\\d{9}Z\\.sqlite\\.zst$`),
+        new RegExp(
+          `^state-v${String(LATEST).padStart(3, "0")}-manual-\\d{8}T\\d{9}Z\\.sqlite\\.zst$`,
+        ),
       );
       assert.equal(result.schema, LATEST);
       assert.equal(result.codec, "zst");

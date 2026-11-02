@@ -55,6 +55,15 @@ describe("shared RPC access policy", () => {
     expect(rpcDeliveryEffectFor(WS_METHODS.providerSignInStart)).toBe("mutation");
     expect(rpcDeliveryEffectFor(WS_METHODS.providerSignInRespond)).toBe("mutation");
   });
+  it("lets any role report client use, which only delays unattended updates", () => {
+    for (const role of ["viewer", "operator", "owner"] as const) {
+      expect(hostedRoleAllows(role, WS_METHODS.serverNoteClientInteraction)).toBe(true);
+    }
+    expect(hostedRoleAllows("owner", WS_METHODS.serverNoteClientInteraction, false)).toBe(false);
+    expect(rpcDeliveryEffectFor(WS_METHODS.serverNoteClientInteraction)).toBe("read");
+    // Whether a node updates unattended is a node setting only its owner may change.
+    expect(rpcAccessFor(WS_METHODS.serverUpdateSettings)).toBe("owner");
+  });
   it("classifies every current and legacy RPC method", () => {
     expect(new Set(Object.keys(RPC_ACCESS_POLICY))).toEqual(
       new Set([
@@ -206,6 +215,11 @@ describe("shared RPC access policy", () => {
     expect(hostedRoleAllows("viewer", WS_METHODS.threadsStopLocalServer)).toBe(false);
     expect(hostedRoleAllows("operator", WS_METHODS.threadsStopLocalServer)).toBe(true);
     expect(rpcDeliveryEffectFor(WS_METHODS.threadsStopLocalServer)).toBe("mutation");
+    // An agent's requested secret: only the owner types it in, and it is never replayed.
+    expect(hostedRoleAllows("operator", WS_METHODS.secretsAnswerRequest)).toBe(false);
+    expect(hostedRoleAllows("viewer", WS_METHODS.secretsAnswerRequest)).toBe(false);
+    expect(hostedRoleAllows("owner", WS_METHODS.secretsAnswerRequest)).toBe(true);
+    expect(rpcDeliveryEffectFor(WS_METHODS.secretsAnswerRequest)).toBe("mutation");
     // Long-lived read streams outside the session-sync set.
     expect(rpcDeliveryEffectFor(AGENT_CONTROL_WS_METHODS.subscribeProposals)).toBe("read");
     expect(rpcDeliveryEffectFor(DEVICE_WS_METHODS.subscribeEvents)).toBe("read");

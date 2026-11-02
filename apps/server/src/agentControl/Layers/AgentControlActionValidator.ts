@@ -121,6 +121,7 @@ const targetThreadIds = (plan: AgentControlActionPlan): ReadonlyArray<string> =>
     case "updateThread":
     case "deviceControlConsent":
     case "pullRequestWatch":
+    case "worktreeHandoff":
       return [plan.threadId];
     case "createAutomation":
     case "updateAutomation":
@@ -397,6 +398,18 @@ const validateBaseRef = (baseRef: string | undefined) => {
   }
   return Effect.void;
 };
+
+/**
+ * A handoff moves the caller's own chat and never another one. Whether the chat can move (open,
+ * in the shared checkout) the executor decides right before it moves it.
+ */
+const validateWorktreeHandoff = (
+  plan: Extract<AgentControlActionPlan, { kind: "worktreeHandoff" }>,
+  callerThreadId: string,
+) =>
+  plan.threadId !== callerThreadId
+    ? fail("project-scope", "A chat can move only itself into a worktree.")
+    : validateBaseRef(plan.baseRef);
 
 const validatePlanAgainstSnapshot = (input: {
   readonly plan: AgentControlActionPlan;
@@ -733,7 +746,8 @@ export const makeAgentControlActionValidatorFromDeps = (deps: {
    * one Ryco then wakes) decides whether to watch it. Read from the completion-return ledger.
    */
   const refuseAwaitedDelegation = (plan: AgentControlActionPlan, callerThreadId: ThreadId) =>
-    plan.kind !== "pullRequestWatch" || !plan.watching || deps.delegatedReturnPending === undefined
+    (plan.kind !== "worktreeHandoff" && (plan.kind !== "pullRequestWatch" || !plan.watching)) ||
+    deps.delegatedReturnPending === undefined
       ? Effect.void
       : Effect.forEach(
           [...new Set([callerThreadId, plan.threadId])],
@@ -744,9 +758,12 @@ export const makeAgentControlActionValidatorFromDeps = (deps: {
                   ? Effect.void
                   : fail(
                       "delegated-return-pending",
-                      threadId === callerThreadId
-                        ? "This chat was delegated by another chat that waits for its result. Report the pull request in your result; the delegating chat decides whether to watch it."
-                        : "That chat was delegated by another chat that waits for its result: it reports its pull request, and the delegating chat watches it.",
+                      // Its result returns with this turn, before the moved chat's next one.
+                      plan.kind === "worktreeHandoff"
+                        ? "This chat was delegated by another chat that waits for its result, so it cannot move into a worktree."
+                        : threadId === callerThreadId
+                          ? "This chat was delegated by another chat that waits for its result. Report the pull request in your result; the delegating chat decides whether to watch it."
+                          : "That chat was delegated by another chat that waits for its result: it reports its pull request, and the delegating chat watches it.",
                     ),
               ),
             ),
@@ -862,6 +879,9 @@ export const makeAgentControlActionValidatorFromDeps = (deps: {
             requireBaseRef,
           });
         }
+      } else if (input.plan.kind === "worktreeHandoff") {
+        yield* validateWorktreeHandoff(input.plan, caller.id);
+        yield* refuseAwaitedDelegation(input.plan, caller.id);
       } else if (input.plan.kind === "changeSettings") {
         // Closed schema: only non-secret boolean preferences are supported.
       } else if (input.plan.kind === "deleteLocalTask") {
@@ -946,10 +966,10 @@ export const makeAgentControlActionValidatorFromDeps = (deps: {
             "External integrations cannot manage the node's Tasks.",
           );
         }
-        if (input.plan.kind === "pullRequestWatch") {
+        if (input.plan.kind === "pullRequestWatch" || input.plan.kind === "worktreeHandoff") {
           return yield* fail(
             "privilege-escalation",
-            "External integrations cannot watch pull requests.",
+            "External integrations cannot watch pull requests or move chats.",
           );
         }
         if (isAgentControlDevicePlan(input.plan) || input.plan.kind === "deviceControlConsent") {
@@ -1213,10 +1233,13 @@ export const makeAgentControlActionValidatorFromDeps = (deps: {
         yield* validateHandoffArtifacts(proposal.plan, principal.threadId);
         yield* refuseAwaitedDelegation(proposal.plan, principal.threadId);
         yield* refuseOverDelegationLimits(proposal.plan, principal.threadId, 0);
-      } else if (proposal.plan.kind === "pullRequestWatch") {
+      } else if (
+        proposal.plan.kind === "pullRequestWatch" ||
+        proposal.plan.kind === "worktreeHandoff"
+      ) {
         return yield* fail(
           "privilege-escalation",
-          "Only an originating provider thread can watch pull requests.",
+          "Only an originating provider thread can watch pull requests or move itself.",
         );
       } else if (startsLocalTaskChats(proposal.plan) || proposal.plan.kind === "deleteLocalTask") {
         return yield* fail(
@@ -1300,6 +1323,10 @@ export const makeAgentControlActionValidatorFromDeps = (deps: {
       }
       if (proposal.plan.kind === "deleteLocalTask") {
         yield* validateLocalTaskDelete(proposal.plan);
+        return;
+      }
+      if (proposal.plan.kind === "worktreeHandoff" && principal.kind === "provider-session") {
+        yield* validateWorktreeHandoff(proposal.plan, principal.threadId);
         return;
       }
       if (

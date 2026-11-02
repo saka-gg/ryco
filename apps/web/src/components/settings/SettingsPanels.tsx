@@ -13,14 +13,15 @@ import { ComposerSettings } from "./ComposerSettings";
 import { QuitShortcutSetting } from "./QuitShortcutSetting";
 import { ThreadNotificationSettings } from "./ThreadNotificationSettings";
 import { WindowCaptureSettings } from "./WindowCaptureSettings";
+import { CliCommandSettings } from "./CliCommandSettings";
 import { UsageLimitSettings } from "./UsageLimitSettings";
 import { UsagePriceSettings } from "./UsagePriceSettings";
 import { ResponseStreamingSettings } from "./ResponseStreamingSettings";
+import { ApplyToAllNodes } from "./ApplyToAllNodes";
 import { ArchiveIcon, ArchiveX, MessageCircleDashedIcon } from "lucide-react";
 import { useCallback, useMemo, useState } from "react";
 import {
   ORCHESTRATION_WS_METHODS,
-  type DesktopUpdateChannel,
   EDITORS,
   type EditorId,
   type EnvironmentId,
@@ -28,7 +29,11 @@ import {
 } from "@ryco/contracts";
 import { scopeThreadRef } from "@ryco/client-runtime/scoped";
 import { CHAT_PROJECT_LABEL } from "@ryco/client-runtime/state/composer";
-import { DEFAULT_UNIFIED_SETTINGS, WorktreeBranchPrefix } from "@ryco/contracts/settings";
+import {
+  DEFAULT_UNIFIED_SETTINGS,
+  type ServerSettings,
+  WorktreeBranchPrefix,
+} from "@ryco/contracts/settings";
 import { APP_BASE_NAME, APP_VERSION } from "../../branding";
 import {
   canCheckForUpdate,
@@ -78,6 +83,8 @@ import { LIFECYCLE_RETENTION_COPY } from "@ryco/client-runtime/state/lifecycle";
 import { ProjectFavicon } from "../ProjectFavicon";
 import { RycoLetterMark } from "../RycoLetterMark";
 import { useServerAvailableEditors, useServerObservability } from "../../rpc/serverState";
+import { describeDesktopUpdateTrack } from "./desktopUpdateTrack";
+import { NightlyAppSettings } from "./NightlyAppSettings";
 import { getEditorIcon, getEditorLabel } from "./SettingsPanels.editor";
 import { isNodeSettingsTargetReadOnly, settingsScopeLabel } from "./settingsSections.logic";
 import { useSettingsEditingScope, useSettingsTarget } from "../../settingsTarget";
@@ -104,6 +111,11 @@ function AboutVersionTitle() {
 }
 
 const REPOSITORY_URL = "https://github.com/saka-gg/ryco";
+
+const selectBranchChangeTypes = (settings: ServerSettings): boolean =>
+  settings.worktreeBranchChangeTypes;
+const formatBranchChangeTypes = (byType: boolean): string =>
+  byType ? "By change type" : "By prefix";
 
 function openExternalLink(url: string) {
   void ensureLocalApi()
@@ -142,43 +154,11 @@ function AboutBrandingHeader() {
 
 function AboutVersionSection({ scopeLabel }: { readonly scopeLabel: string }) {
   const updateState = useDesktopUpdateState();
-  const [isChangingUpdateChannel, setIsChangingUpdateChannel] = useState(false);
 
-  const hasDesktopBridge = typeof window !== "undefined" && Boolean(window.desktopBridge);
-  const selectedUpdateChannel = updateState?.channel ?? "latest";
-
-  const handleUpdateChannelChange = useCallback(
-    (channel: DesktopUpdateChannel) => {
-      const bridge = window.desktopBridge;
-      if (
-        !bridge ||
-        typeof bridge.setUpdateChannel !== "function" ||
-        channel === selectedUpdateChannel
-      ) {
-        return;
-      }
-
-      setIsChangingUpdateChannel(true);
-      void bridge
-        .setUpdateChannel(channel)
-        .then((state) => {
-          setDesktopUpdateState(state);
-        })
-        .catch((error: unknown) => {
-          toastManager.add(
-            stackedThreadToast({
-              type: "error",
-              title: "Could not change update track",
-              description: error instanceof Error ? error.message : "Update track change failed.",
-            }),
-          );
-        })
-        .finally(() => {
-          setIsChangingUpdateChannel(false);
-        });
-    },
-    [selectedUpdateChannel],
-  );
+  const updateTrack = describeDesktopUpdateTrack({
+    channel: updateState?.channel ?? "latest",
+    currentVersion: updateState?.currentVersion ?? "",
+  });
 
   const handleButtonClick = useCallback(() => {
     const bridge = window.desktopBridge;
@@ -304,35 +284,9 @@ function AboutVersionSection({ scopeLabel }: { readonly scopeLabel: string }) {
       />
       <SettingsRow
         title="Update track"
-        description="Stable follows full releases. Nightly follows the nightly desktop channel and can switch back to stable immediately."
+        description={updateTrack.description}
         scope={scopeLabel}
-        control={
-          <Select
-            value={selectedUpdateChannel}
-            onValueChange={(value) => {
-              handleUpdateChannelChange(value as DesktopUpdateChannel);
-            }}
-          >
-            <SelectTrigger
-              size="sm"
-              className="w-full sm:w-40"
-              aria-label="Update track"
-              disabled={!hasDesktopBridge || isChangingUpdateChannel}
-            >
-              <SelectValue>
-                {selectedUpdateChannel === "nightly" ? "Nightly" : "Stable"}
-              </SelectValue>
-            </SelectTrigger>
-            <SelectPopup align="end" alignItemWithTrigger={false}>
-              <SelectItem hideIndicator value="latest">
-                Stable
-              </SelectItem>
-              <SelectItem hideIndicator value="nightly">
-                Nightly
-              </SelectItem>
-            </SelectPopup>
-          </Select>
-        }
+        control={<span className="text-sm text-muted-foreground">{updateTrack.label}</span>}
       />
     </>
   );
@@ -741,39 +695,47 @@ export function GeneralSettingsPanel() {
                 }
               />
             )}
-
-            {!isPhoneTier && (
-              <SettingsRow
-                title="Name branches by change type"
-                description="Generated worktree branches start with the kind of change, such as fix/ or feat/, instead of the prefix. The prefix still names a new worktree's temporary branch until its first message is named."
-                owner="node"
-                scope={nodeScopeLabel}
-                resetAction={
-                  settings.worktreeBranchChangeTypes !==
-                  DEFAULT_UNIFIED_SETTINGS.worktreeBranchChangeTypes ? (
-                    <SettingResetButton
-                      label="change type branch names"
-                      onClick={() =>
-                        updateSettings({
-                          worktreeBranchChangeTypes:
-                            DEFAULT_UNIFIED_SETTINGS.worktreeBranchChangeTypes,
-                        })
-                      }
-                    />
-                  ) : null
-                }
-                control={
-                  <Switch
-                    checked={settings.worktreeBranchChangeTypes}
-                    onCheckedChange={(checked) =>
-                      updateSettings({ worktreeBranchChangeTypes: Boolean(checked) })
-                    }
-                    aria-label="Name worktree branches by change type"
-                  />
-                }
-              />
-            )}
           </>
+        )}
+
+        {/* Every node has it, also one with project defaults, where a project may override it. */}
+        {!isPhoneTier && (
+          <SettingsRow
+            title="Name branches by change type"
+            description="Generated worktree branches start with the kind of change, such as fix/ or feat/, instead of the prefix. The prefix still names a new worktree's temporary branch until its first message is named."
+            owner="node"
+            scope={nodeScopeLabel}
+            status={
+              <ApplyToAllNodes
+                label="change type branch names"
+                select={selectBranchChangeTypes}
+                format={formatBranchChangeTypes}
+                patch={{ worktreeBranchChangeTypes: settings.worktreeBranchChangeTypes }}
+              />
+            }
+            resetAction={
+              settings.worktreeBranchChangeTypes !==
+              DEFAULT_UNIFIED_SETTINGS.worktreeBranchChangeTypes ? (
+                <SettingResetButton
+                  label="change type branch names"
+                  onClick={() =>
+                    updateSettings({
+                      worktreeBranchChangeTypes: DEFAULT_UNIFIED_SETTINGS.worktreeBranchChangeTypes,
+                    })
+                  }
+                />
+              ) : null
+            }
+            control={
+              <Switch
+                checked={settings.worktreeBranchChangeTypes}
+                onCheckedChange={(checked) =>
+                  updateSettings({ worktreeBranchChangeTypes: Boolean(checked) })
+                }
+                aria-label="Name worktree branches by change type"
+              />
+            }
+          />
         )}
 
         {!isPhoneTier && (
@@ -932,6 +894,8 @@ export function GeneralSettingsPanel() {
         <WindowCaptureSettings scope={deviceScopeLabel} />
       )}
 
+      {!isPhoneTier && editingScope !== "node" && <CliCommandSettings scope={deviceScopeLabel} />}
+
       <SettingsSection title="About">
         {editingScope !== "node" && <AboutBrandingHeader />}
         {isElectron && editingScope !== "node" ? (
@@ -943,6 +907,9 @@ export function GeneralSettingsPanel() {
             owner="client"
             scope={localScopeLabel}
           />
+        )}
+        {isElectron && !isPhoneTier && editingScope !== "node" && (
+          <NightlyAppSettings scope={deviceScopeLabel} />
         )}
         <SettingsRow
           title="Diagnostics"

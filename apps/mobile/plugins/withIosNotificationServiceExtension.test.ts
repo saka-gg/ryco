@@ -1,9 +1,16 @@
-import { execFileSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
+
+import {
+  IOSConfig,
+  phaseFiles,
+  settingsOf,
+  templateProject,
+  withTemporaryDirectory,
+  type XcodeProject,
+} from "./lib/xcodeTestProject";
 
 const require = createRequire(import.meta.url);
 const plugin = require("./withIosNotificationServiceExtension.cjs") as ((
@@ -27,26 +34,6 @@ const plugin = require("./withIosNotificationServiceExtension.cjs") as ((
     config: Record<string, unknown>,
   ) => void;
 };
-const { IOSConfig } = require("expo/config-plugins") as {
-  readonly IOSConfig: {
-    readonly XcodeUtils: { getPbxproj: (projectRoot: string) => XcodeProject };
-    readonly Version: {
-      readonly getVersion: (config: Record<string, unknown>) => string;
-      readonly getBuildNumber: (config: Record<string, unknown>) => string;
-    };
-  };
-};
-
-interface XcodeProject {
-  readonly hash: { readonly project: { readonly objects: Record<string, Record<string, any>> } };
-  readonly pbxTargetByName: (name: string) => Record<string, any> | null;
-  readonly getFirstTarget: () => {
-    readonly uuid: string;
-    readonly firstTarget: Record<string, any>;
-  };
-  readonly pbxNativeTargetSection: () => Record<string, any>;
-  readonly writeSync: () => string;
-}
 
 const BUNDLE_ID = "dev.ryco.app.dev";
 const CONFIG = {
@@ -55,48 +42,6 @@ const CONFIG = {
   scheme: "ryco-dev",
   ios: { bundleIdentifier: BUNDLE_ID, buildNumber: "7" },
 };
-
-/** Expo's own prebuild template project, as `expo prebuild` starts from it. */
-function templateProject(directory: string): XcodeProject {
-  const template = require.resolve("expo/template.tgz");
-  execFileSync("tar", [
-    "-xzf",
-    template,
-    "-C",
-    directory,
-    "--strip-components=1",
-    "package/ios/HelloWorld.xcodeproj/project.pbxproj",
-  ]);
-  return IOSConfig.XcodeUtils.getPbxproj(directory);
-}
-
-function withTemporaryDirectory<T>(use: (directory: string) => T): T {
-  const directory = mkdtempSync(join(tmpdir(), "ryco-nse-plugin-"));
-  try {
-    return use(directory);
-  } finally {
-    rmSync(directory, { recursive: true, force: true });
-  }
-}
-
-function settingsOf(project: XcodeProject, name: string): Record<string, Record<string, unknown>> {
-  const objects = project.hash.project.objects;
-  const target = project.pbxTargetByName(name);
-  const list = objects.XCConfigurationList[target?.buildConfigurationList];
-  return Object.fromEntries(
-    (list.buildConfigurations as Array<{ value: string }>).map(({ value }) => [
-      objects.XCBuildConfiguration[value].name,
-      objects.XCBuildConfiguration[value].buildSettings,
-    ]),
-  );
-}
-
-function phaseFiles(project: XcodeProject, phaseId: string, isa: string): string[] {
-  const objects = project.hash.project.objects;
-  return (objects[isa][phaseId].files as Array<{ comment: string }>).map((file) =>
-    file.comment.replaceAll('"', ""),
-  );
-}
 
 describe("the push keychain group", () => {
   it("keeps the app's own group first, so its other secrets stay out of the extension's reach", () => {

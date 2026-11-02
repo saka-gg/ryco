@@ -469,6 +469,8 @@ function mapThread(thread: OrchestrationThread, environmentId: EnvironmentId): T
     settledAt: thread.settledAt,
     snoozedUntil: thread.snoozedUntil ?? null,
     snoozedAt: thread.snoozedAt ?? null,
+    hiddenAt: thread.hiddenAt ?? null,
+    settleWhenIdleAt: thread.settleWhenIdleAt ?? null,
     usageLimit: thread.usageLimit ?? null,
     updatedAt: thread.updatedAt,
     latestTurn: thread.latestTurn,
@@ -511,6 +513,8 @@ function mapThreadShell(
     settledAt: thread.settledAt,
     snoozedUntil: thread.snoozedUntil ?? null,
     snoozedAt: thread.snoozedAt ?? null,
+    hiddenAt: thread.hiddenAt ?? null,
+    settleWhenIdleAt: thread.settleWhenIdleAt ?? null,
     usageLimit: thread.usageLimit ?? null,
     updatedAt: thread.updatedAt,
     branch: thread.branch,
@@ -556,6 +560,8 @@ function mapThreadSummary(
     settledAt: thread.settledAt,
     snoozedUntil: thread.snoozedUntil ?? null,
     snoozedAt: thread.snoozedAt ?? null,
+    hiddenAt: thread.hiddenAt ?? null,
+    settleWhenIdleAt: thread.settleWhenIdleAt ?? null,
     usageLimit: thread.usageLimit ?? null,
     updatedAt: thread.updatedAt,
     latestTurn: thread.latestTurn,
@@ -574,6 +580,9 @@ function mapThreadSummary(
     ...(thread.pullRequestWatches === undefined
       ? {}
       : { pullRequestWatches: thread.pullRequestWatches }),
+    ...(thread.commandWatchCount === undefined
+      ? {}
+      : { commandWatchCount: thread.commandWatchCount }),
     ...(thread.followUpQueueSummary === undefined
       ? {}
       : { followUpQueueSummary: thread.followUpQueueSummary }),
@@ -687,6 +696,8 @@ function toThreadShell(thread: Thread): ThreadShell {
     settledAt: thread.settledAt,
     snoozedUntil: thread.snoozedUntil ?? null,
     snoozedAt: thread.snoozedAt ?? null,
+    hiddenAt: thread.hiddenAt ?? null,
+    settleWhenIdleAt: thread.settleWhenIdleAt ?? null,
     usageLimit: thread.usageLimit ?? null,
     updatedAt: thread.updatedAt,
     branch: thread.branch,
@@ -803,6 +814,8 @@ function sidebarThreadSummariesEqual(
     left.settledAt === right.settledAt &&
     left.snoozedUntil === right.snoozedUntil &&
     left.snoozedAt === right.snoozedAt &&
+    (left.hiddenAt ?? null) === (right.hiddenAt ?? null) &&
+    (left.settleWhenIdleAt ?? null) === (right.settleWhenIdleAt ?? null) &&
     threadUsageLimitsEqual(left.usageLimit, right.usageLimit) &&
     left.updatedAt === right.updatedAt &&
     latestTurnsEqual(left.latestTurn, right.latestTurn) &&
@@ -822,6 +835,7 @@ function sidebarThreadSummariesEqual(
     // shell whose only change is its watches must still compare unequal here. Plain wire data,
     // compared whole so a field the summary gains later can never be missed.
     plainDataEqual(left.pullRequestWatches, right.pullRequestWatches) &&
+    left.commandWatchCount === right.commandWatchCount &&
     // Queue events do not move `updatedAt` either.
     plainDataEqual(left.followUpQueueSummary, right.followUpQueueSummary)
   );
@@ -869,6 +883,8 @@ function threadShellsEqual(left: ThreadShellOrStub | undefined, right: ThreadShe
     left.settledAt === right.settledAt &&
     left.snoozedUntil === right.snoozedUntil &&
     left.snoozedAt === right.snoozedAt &&
+    (left.hiddenAt ?? null) === (right.hiddenAt ?? null) &&
+    (left.settleWhenIdleAt ?? null) === (right.settleWhenIdleAt ?? null) &&
     threadUsageLimitsEqual(left.usageLimit, right.usageLimit) &&
     left.updatedAt === right.updatedAt &&
     left.branch === right.branch &&
@@ -1852,12 +1868,20 @@ function updateThreadShellTimestamp(
   };
 }
 
+type ThreadSidebarStatePatch = Partial<
+  Pick<
+    ThreadShell,
+    "settledOverride" | "settledAt" | "snoozedUntil" | "snoozedAt" | "hiddenAt" | "settleWhenIdleAt"
+  >
+> & {
+  readonly updatedAt: string;
+};
+
+/** Patches the Inbox fields of a shell and its summary; an absent field stays as it is. */
 function updateThreadSettlementState(
   state: EnvironmentState,
   threadId: ThreadId,
-  patch: Pick<ThreadShell, "settledOverride" | "settledAt" | "snoozedUntil" | "snoozedAt"> & {
-    readonly updatedAt: string;
-  },
+  input: ThreadSidebarStatePatch,
 ): EnvironmentState {
   // A stub has no settlement fields to patch; the full upsert that follows replaces it.
   const storedShell = state.threadShellById[threadId];
@@ -1867,21 +1891,15 @@ function updateThreadSettlementState(
   if (!shell && !summary) {
     return state;
   }
-
-  const shellUnchanged =
-    !shell ||
-    (shell.settledOverride === patch.settledOverride &&
-      shell.settledAt === patch.settledAt &&
-      (patch.snoozedUntil === undefined || shell.snoozedUntil === patch.snoozedUntil) &&
-      (patch.snoozedAt === undefined || shell.snoozedAt === patch.snoozedAt) &&
-      shell.updatedAt === patch.updatedAt);
-  const summaryUnchanged =
-    !summary ||
-    (summary.settledOverride === patch.settledOverride &&
-      summary.settledAt === patch.settledAt &&
-      (patch.snoozedUntil === undefined || summary.snoozedUntil === patch.snoozedUntil) &&
-      (patch.snoozedAt === undefined || summary.snoozedAt === patch.snoozedAt) &&
-      summary.updatedAt === patch.updatedAt);
+  const patch = Object.fromEntries(
+    Object.entries(input).filter(([, value]) => value !== undefined),
+  ) as ThreadSidebarStatePatch;
+  const unchanged = (current: Partial<Record<keyof ThreadSidebarStatePatch, unknown>>) =>
+    (Object.keys(patch) as Array<keyof ThreadSidebarStatePatch>).every(
+      (key) => (current[key] ?? null) === (patch[key] ?? null),
+    );
+  const shellUnchanged = !shell || unchanged(shell);
+  const summaryUnchanged = !summary || unchanged(summary);
   if (shellUnchanged && summaryUnchanged) {
     return state;
   }
@@ -2977,6 +2995,7 @@ function applyEnvironmentOrchestrationEvent(
       return updateThreadState(state, event.payload.threadId, (thread) => ({
         ...thread,
         archivedAt: event.payload.archivedAt,
+        settleWhenIdleAt: null,
         updatedAt: event.payload.updatedAt,
       }));
 
@@ -2993,6 +3012,7 @@ function applyEnvironmentOrchestrationEvent(
         settledAt: null,
         snoozedUntil: event.payload.snoozedUntil,
         snoozedAt: event.payload.snoozedAt,
+        settleWhenIdleAt: null,
         updatedAt: event.payload.updatedAt,
       });
     case "thread.unsnoozed":
@@ -3009,6 +3029,7 @@ function applyEnvironmentOrchestrationEvent(
         settledOverride: "settled",
         snoozedUntil: null,
         snoozedAt: null,
+        settleWhenIdleAt: null,
         settledAt: event.payload.settledAt,
         updatedAt: event.payload.updatedAt,
       });
@@ -3017,8 +3038,24 @@ function applyEnvironmentOrchestrationEvent(
       return updateThreadSettlementState(state, event.payload.threadId, {
         settledOverride: event.payload.reason === "user" ? "active" : null,
         settledAt: null,
+        settleWhenIdleAt: null,
         updatedAt: event.payload.updatedAt,
         ...event.payload.restoredSidebarState,
+      });
+
+    case "thread.settle-deferred":
+      return updateThreadSettlementState(state, event.payload.threadId, {
+        settleWhenIdleAt: event.payload.settleWhenIdleAt,
+        snoozedUntil: null,
+        snoozedAt: null,
+        updatedAt: event.payload.updatedAt,
+      });
+
+    case "thread.hidden":
+    case "thread.unhidden":
+      return updateThreadSettlementState(state, event.payload.threadId, {
+        hiddenAt: event.type === "thread.hidden" ? event.payload.hiddenAt : null,
+        updatedAt: event.payload.updatedAt,
       });
 
     case "thread.meta-updated":

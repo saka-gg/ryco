@@ -1,8 +1,12 @@
 import { resolveAutoSettleAfterDays } from "@ryco/shared/threadSettlement";
 import {
-  applyAutoSettleRuleToNodes,
-  describeAutoSettleRuleApplyResult,
+  nodeAutoSettleRulePatch,
+  nodeOwnsAutoSettleRule,
 } from "@ryco/client-runtime/state/settings";
+import {
+  applyNodeSettingsPatch,
+  describeNodeSettingsApplyResult,
+} from "@ryco/client-runtime/state/settings/nodeSettingsFanOut";
 import type { EnvironmentId } from "@ryco/contracts";
 import {
   SIDEBAR_AUTO_SETTLE_DAY_OPTIONS,
@@ -25,9 +29,9 @@ import { useSavedEnvironments } from "../connection/useConnectionController";
 import {
   autoSettleRuleModelNote,
   buildAutoSettleRuleModel,
-  buildAutoSettleRuleTargets,
   changeAutoSettleRuleModel,
 } from "./autoSettleRuleModel";
+import { buildNodeSettingsTargets } from "./nodeSettingsTargets";
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : "An unexpected error occurred.";
@@ -116,7 +120,7 @@ export function SettingsInboxRouteScreen() {
   const applyRuleToAllNodes = () => {
     setRuleBusy(true);
     setRuleStatus(null);
-    const targets = buildAutoSettleRuleTargets({
+    const targets = buildNodeSettingsTargets({
       environmentIds: [...nodeLabels.keys(), ...configs.keys()],
       configs,
       labelOf: (environmentId) =>
@@ -127,8 +131,10 @@ export function SettingsInboxRouteScreen() {
       isConnected: isNodeConnected,
       write: updateEnvironmentServerSettings,
     });
-    void applyAutoSettleRuleToNodes(ruleModel.value, targets)
-      .then((result) => setRuleStatus(describeAutoSettleRuleApplyResult(result)))
+    void applyNodeSettingsPatch(targets, nodeAutoSettleRulePatch(ruleModel.value), {
+      supported: nodeOwnsAutoSettleRule,
+    })
+      .then((result) => setRuleStatus(describeNodeSettingsApplyResult(result)))
       .finally(() => setRuleBusy(false));
   };
 

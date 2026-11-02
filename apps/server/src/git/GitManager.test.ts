@@ -69,6 +69,7 @@ import {
 } from "../sourceControl/forgeRateLimit.ts";
 import { pausedUntilOf } from "../sourceControl/lastGoodWhilePaused.ts";
 import { inBackgroundProcessLane } from "../processGovernor.ts";
+import { makeRestartSensitiveWork, RestartSensitiveWork } from "../updates/restartSensitiveWork.ts";
 import * as VcsDriverRegistry from "../vcs/VcsDriverRegistry.ts";
 import { makeGitManager, type MakeGitManagerOptions } from "./GitManager.ts";
 import { ServerConfig } from "../config.ts";
@@ -697,6 +698,7 @@ function createGitHubCliWithFakeGh(scenario: FakeGhScenario = {}): {
                 input.title,
                 "--body-file",
                 input.bodyFile,
+                ...(input.draft ? ["--draft"] : []),
               ],
             }),
           ),
@@ -819,6 +821,10 @@ function runStackedAction(
     filePaths?: readonly string[];
     stagedOnly?: { readonly expectedRevision: string };
     linkedIssueNumbers?: readonly number[];
+    prTitle?: string;
+    prBody?: string;
+    prDraft?: boolean;
+    allowDirtyWorkingTree?: boolean;
   },
   options?: Parameters<GitManagerShape["runStackedAction"]>[1],
 ) {
@@ -1066,6 +1072,41 @@ const GitManagerTestLayer = GitVcsDriver.layer.pipe(
 );
 
 it.layer(GitManagerTestLayer)("GitManager", (it) => {
+  it.effect("counts a pull request checkout as work a restart waits for", () =>
+    Effect.gen(function* () {
+      const fixture = yield* makePreferencePullRequestFixture();
+      const restartWork = makeRestartSensitiveWork();
+      // Its fetches and its worktree run past the counted git workflow; the setup script starts
+      // once they are done, still inside the checkout.
+      const countedAtSetup: Array<number> = [];
+      const { manager } = yield* makeManager({
+        ghScenario: fixture.ghScenario,
+        project: fixture.project,
+        settingsPatch: { runSetupScript: true },
+        setupScriptRunner: {
+          runForThread: () =>
+            restartWork.count.pipe(
+              Effect.map((count) => {
+                countedAtSetup.push(count);
+                return { status: "no-script" as const };
+              }),
+            ),
+        },
+      }).pipe(Effect.provideService(RestartSensitiveWork, restartWork));
+      const result = yield* preparePullRequestThread(manager, {
+        cwd: fixture.repoDir,
+        reference: "991",
+        mode: "worktree",
+        worktreesDir: fixture.worktreesDir,
+        threadId: asThreadId("pr-restart-work"),
+        projectId: fixture.project.id,
+      });
+      expect(result.worktreePath).not.toBeNull();
+      expect(countedAtSetup).toEqual([1]);
+      expect(yield* restartWork.count).toBe(0);
+    }),
+  );
+
   it.effect(
     "PR preferences: resolved project submodule policy survives by-root and explicit creation",
     () =>
@@ -1622,6 +1663,34 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
       );
       expect(commands).toContain("rev-list --left-right --count @{upstream}...HEAD");
       expect(commands.filter(isWorkingTreeScan)).toEqual([]);
+    }),
+  );
+
+  it.effect("names the upstream and the commit its counts were read at", () =>
+    Effect.gen(function* () {
+      const { repoDir } = yield* makeRemoteAheadFixture;
+      const head = (yield* runGit(repoDir, ["rev-parse", "HEAD"])).stdout.trim();
+      const { manager } = yield* makeManager();
+
+      const remote = yield* manager.remoteStatus({ cwd: repoDir }, { fetch: true });
+      expect(remote).toMatchObject({
+        hasUpstream: true,
+        upstreamRef: "origin/feature/tracked",
+        headCommit: head,
+        aheadCount: 0,
+        behindCount: 1,
+      });
+      expect(yield* manager.status({ cwd: repoDir })).toMatchObject({
+        upstreamRef: "origin/feature/tracked",
+        headCommit: head,
+      });
+
+      yield* runGit(repoDir, ["checkout", "-b", "feature/unpublished"]);
+      yield* manager.invalidateStatus(repoDir);
+      expect(yield* manager.remoteStatus({ cwd: repoDir })).toMatchObject({
+        hasUpstream: false,
+        upstreamRef: null,
+      });
     }),
   );
 
@@ -4040,6 +4109,7 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
     options: {
       readonly settingsPatch?: ServerSettingsPatch;
       readonly gitOperations?: Array<string>;
+      readonly checkoutProjectId?: string;
     } = {},
   ) =>
     Effect.gen(function* () {
@@ -4058,7 +4128,13 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
           },
         },
       });
-      const result = yield* runStackedAction(manager, { cwd: repoDir, action: "commit_push_pr" });
+      const result = yield* runStackedAction(
+        manager,
+        { cwd: repoDir, action: "commit_push_pr" },
+        options.checkoutProjectId === undefined
+          ? undefined
+          : { checkoutProjectId: Effect.succeed(options.checkoutProjectId) },
+      );
       expect(result.pr.status).toBe("created");
       expect(prPolicies).toHaveLength(1);
       return { policy: prPolicies[0], manager };
@@ -4110,6 +4186,41 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
       expect(
         gitOperations.filter((operation) => operation.startsWith("changeRequestTemplates.")),
       ).toEqual([]);
+    }),
+  );
+
+  it.effect("follows the checkout's project when it turns pull request templates off", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTemplateFixture({
+        ".github/pull_request_template.md": "## What changed\n",
+      });
+      const gitOperations: Array<string> = [];
+      const { policy } = yield* createPullRequestWithTemplates(repoDir, {
+        settingsPatch: {
+          pullRequestTemplates: true,
+          gitWritingStyle: "default",
+          projectPreferences: { "project-without-templates": { pullRequestTemplates: false } },
+        },
+        gitOperations,
+        checkoutProjectId: "project-without-templates",
+      });
+      expect(policy).toBeUndefined();
+      expect(
+        gitOperations.filter((operation) => operation.startsWith("changeRequestTemplates.")),
+      ).toEqual([]);
+
+      // Another project of the node keeps the node's setting.
+      const other = yield* createPullRequestWithTemplates(
+        yield* makeTemplateFixture({ ".github/pull_request_template.md": "## What changed\n" }),
+        {
+          settingsPatch: {
+            gitWritingStyle: "default",
+            projectPreferences: { "project-without-templates": { pullRequestTemplates: false } },
+          },
+          checkoutProjectId: "another-project",
+        },
+      );
+      expect(other.policy?.changeRequestTemplate?.path).toBe(".github/pull_request_template.md");
     }),
   );
 
@@ -4320,6 +4431,132 @@ it.layer(GitManagerTestLayer)("GitManager", (it) => {
       expect(result.pr.status).toBe("created");
       expect(createdPrBodies).toHaveLength(1);
       expect(createdPrBodies[0]).toContain("Fixes #123");
+    }),
+  );
+
+  const pushedFeatureBranch = (branch: string) =>
+    Effect.gen(function* () {
+      const repoDir = yield* makeTempDir("ryco-git-manager-");
+      yield* initRepo(repoDir);
+      yield* runGit(repoDir, ["checkout", "-b", branch]);
+      const remoteDir = yield* createBareRemote();
+      yield* runGit(repoDir, ["remote", "add", "origin", remoteDir]);
+      fs.writeFileSync(path.join(repoDir, "changes.txt"), "change\n");
+      yield* runGit(repoDir, ["add", "changes.txt"]);
+      yield* runGit(repoDir, ["commit", "-m", "Feature commit"]);
+      yield* runGit(repoDir, ["push", "-u", "origin", branch]);
+      yield* runGit(repoDir, ["config", `branch.${branch}.gh-merge-base`, "main"]);
+      return repoDir;
+    });
+  const createdPrList = (branch: string) =>
+    JSON.stringify([
+      {
+        number: 90,
+        title: "Created",
+        url: "https://github.com/pingdotgg/codething-mvp/pull/90",
+        baseRefName: "main",
+        headRefName: branch,
+      },
+    ]);
+
+  it.effect("opens a draft PR with the user's title and body without generating text", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* pushedFeatureBranch("feature-own-text");
+      let generated = 0;
+      const { manager, ghCalls, createdPrBodies } = yield* makeManager({
+        ghScenario: { prListSequence: ["[]", createdPrList("feature-own-text")] },
+        textGeneration: {
+          generatePrContent: () => {
+            generated += 1;
+            return Effect.succeed({ title: "Generated title", body: "Generated body" });
+          },
+        },
+      });
+      const stages: string[] = [];
+      const result = yield* runStackedAction(
+        manager,
+        {
+          cwd: repoDir,
+          action: "create_pr",
+          prTitle: "My own title",
+          prBody: "My own body",
+          prDraft: true,
+          linkedIssueNumbers: [7],
+        },
+        {
+          progressReporter: {
+            publish: (event) =>
+              Effect.sync(() => {
+                if (event.kind === "phase_started") stages.push(event.label);
+              }),
+          },
+        },
+      );
+
+      expect(result.pr.status).toBe("created");
+      expect(generated).toBe(0);
+      expect(stages.some((label) => label.startsWith("Generating"))).toBe(false);
+      const create = ghCalls.find((call) => call.startsWith("pr create "));
+      expect(create).toContain("--title My own title");
+      expect(create?.endsWith("--draft")).toBe(true);
+      expect(createdPrBodies).toEqual([expect.stringContaining("My own body")]);
+      expect(createdPrBodies[0]).toContain("Fixes #7");
+    }),
+  );
+
+  it.effect("generates only the PR text the user left empty and opens it ready", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* pushedFeatureBranch("feature-own-title");
+      let generated = 0;
+      const { manager, ghCalls, createdPrBodies } = yield* makeManager({
+        ghScenario: { prListSequence: ["[]", createdPrList("feature-own-title")] },
+        textGeneration: {
+          generatePrContent: () => {
+            generated += 1;
+            return Effect.succeed({ title: "Generated title", body: "Generated body" });
+          },
+        },
+      });
+      const result = yield* runStackedAction(manager, {
+        cwd: repoDir,
+        action: "create_pr",
+        prTitle: "My own title",
+      });
+
+      expect(result.pr.status).toBe("created");
+      expect(generated).toBe(1);
+      const create = ghCalls.find((call) => call.startsWith("pr create "));
+      expect(create).toContain("--title My own title");
+      expect(create).not.toContain("--draft");
+      expect(createdPrBodies).toEqual(["Generated body"]);
+    }),
+  );
+
+  it.effect("creates a PR from committed work and leaves local changes out when asked", () =>
+    Effect.gen(function* () {
+      const repoDir = yield* pushedFeatureBranch("feature-dirty-pr");
+      fs.writeFileSync(path.join(repoDir, "changes.txt"), "local edit\n");
+      const { manager, ghCalls } = yield* makeManager({
+        ghScenario: { prListSequence: ["[]", createdPrList("feature-dirty-pr")] },
+      });
+
+      const refused = yield* runStackedAction(manager, {
+        cwd: repoDir,
+        action: "create_pr",
+      }).pipe(Effect.flip);
+      expect(refused.message).toContain("Commit local changes before creating a PR.");
+
+      const result = yield* runStackedAction(manager, {
+        cwd: repoDir,
+        action: "create_pr",
+        allowDirtyWorkingTree: true,
+      });
+      expect(result.commit.status).toBe("skipped_not_requested");
+      expect(result.pr.status).toBe("created");
+      expect(ghCalls.some((call) => call.startsWith("pr create "))).toBe(true);
+      expect(fs.readFileSync(path.join(repoDir, "changes.txt"), "utf8")).toBe("local edit\n");
+      const status = yield* runGit(repoDir, ["status", "--porcelain"]);
+      expect(status.stdout).toContain("changes.txt");
     }),
   );
 

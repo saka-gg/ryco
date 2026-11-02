@@ -26,6 +26,7 @@ import {
   JSON_RPC_ERROR_CODES,
   jsonRpcError,
   jsonRpcResult,
+  mcpToolCallResult,
   parseJsonRpcMessage,
   type JsonRpcResponse,
 } from "./jsonRpc.ts";
@@ -64,12 +65,16 @@ export const AGENT_CONTROL_MCP_INITIALIZE_INSTRUCTIONS =
   "destructive and security-sensitive actions wait for user approval. Never approve your own requests. " +
   "Use ryco_wait_for_control_request for dispatch receipts. After delegating with returnToOrigin, end your turn; " +
   "Ryco wakes you with the results (use ryco_task_status instead of polling). " +
+  "After opening a pull request, link it to this chat with ryco_link_pull_request. " +
   "To follow a pull request's checks and reviews, call ryco_watch_pull_request instead of polling. " +
+  "To move this chat out of the shared checkout into a new worktree and continue there, call ryco_worktree_handoff last in your turn. " +
   "When available, ryco_computer and ryco_browser execute under separate opt-in desktop/app permissions; " +
   "these tools act directly and require an exact active turn. " +
   "When available, ryco_attach_file directly delivers a workspace file to this thread's timeline under exact active-turn authority. " +
   "The user's Tasks page (their to-do list) is read and edited with the ryco_*_local_task tools; " +
   "deleting a task waits for user approval. They are not the runs ryco_task_status reports. " +
+  "Never ask for secrets (API keys, tokens, passwords) in chat; use ryco_request_secret, which " +
+  "asks the user on a private card and writes the value to a Git-ignored .env file without showing it to you. " +
   `${AGENT_CONTROL_HTML_RENDER_INSTRUCTIONS} ` +
   "Respect local denials and verify results.";
 
@@ -324,7 +329,7 @@ const makeRequestHandler = (deps: AgentControlMcpListenerDeps) => {
             deps.tools.callTool(session.value, toolName, call.arguments),
             { signal: controller.signal },
           );
-          endJson(response, 200, jsonRpcResult(id ?? null, result));
+          endJson(response, 200, jsonRpcResult(id ?? null, mcpToolCallResult(result)));
         } catch {
           endJson(
             response,

@@ -1,3 +1,8 @@
+import { execFileSync, spawnSync } from "node:child_process";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 import { describe, expect, it } from "vite-plus/test";
 
 import {
@@ -94,6 +99,7 @@ describe("createUnsignedMacUpdateInstallScript", () => {
   it("creates a quoted installer script that extracts, copies, unquarantines, and opens the app", () => {
     const script = createUnsignedMacUpdateInstallScript({
       appLabel: "Laurin's Ryco",
+      expectedBundleId: "com.laurinfrank.ryco",
       updateZipPath: "/tmp/Ryco update.zip",
       targetAppPath: "/Applications/Ryco.app",
       waitPid: 123,
@@ -105,6 +111,73 @@ describe("createUnsignedMacUpdateInstallScript", () => {
     expect(script).toContain("WAIT_PID=123");
     expect(script).toContain('/usr/bin/ditto -x -k "$UPDATE_ZIP" "$STAGING_DIR"');
     expect(script).toContain("/usr/bin/xattr -dr com.apple.quarantine");
-    expect(script).toContain('/usr/bin/open "$TARGET_APP"');
+    expect(script).toContain("OPEN_COMMAND='/usr/bin/open'");
+    expect(script).toContain('"$OPEN_COMMAND" "$TARGET_APP"');
+    // The bundle id check runs before anything is copied over the app.
+    expect(script).toContain("EXPECTED_BUNDLE_ID='com.laurinfrank.ryco'");
+    expect(script.indexOf('"$SOURCE_BUNDLE_ID" != "$EXPECTED_BUNDLE_ID"')).toBeGreaterThan(-1);
+    expect(script.indexOf('"$SOURCE_BUNDLE_ID" != "$EXPECTED_BUNDLE_ID"')).toBeLessThan(
+      script.indexOf('/usr/bin/ditto "$SOURCE_APP" "$TEMP_TARGET"'),
+    );
+  });
+});
+
+describe.runIf(process.platform === "darwin")("the unsigned macOS installer script", () => {
+  const installWith = (bundleId: string) => {
+    const root = mkdtempSync(join(tmpdir(), "ryco-unsigned-installer-"));
+    const app = join(root, "src", "Ryco Nightly.app", "Contents");
+    mkdirSync(app, { recursive: true });
+    writeFileSync(
+      join(app, "Info.plist"),
+      `<?xml version="1.0" encoding="UTF-8"?>\n<plist version="1.0"><dict><key>CFBundleIdentifier</key><string>${bundleId}</string></dict></plist>\n`,
+    );
+    const zip = join(root, "update.zip");
+    execFileSync("/usr/bin/ditto", [
+      "-c",
+      "-k",
+      "--keepParent",
+      join(root, "src", "Ryco Nightly.app"),
+      zip,
+    ]);
+    const target = join(root, "Applications", "Ryco.app");
+    mkdirSync(join(target, "Contents"), { recursive: true });
+    writeFileSync(join(target, "Contents", "marker"), "stable");
+    const scriptPath = join(root, "install.zsh");
+    const opened = join(root, "open.zsh");
+    writeFileSync(
+      opened,
+      `#!/bin/zsh\nprint -r -- "$1" >> ${JSON.stringify(join(root, "opened.log"))}\n`,
+    );
+    chmodSync(opened, 0o755);
+    writeFileSync(
+      scriptPath,
+      createUnsignedMacUpdateInstallScript({
+        appLabel: "Ryco",
+        expectedBundleId: "com.laurinfrank.ryco",
+        updateZipPath: zip,
+        targetAppPath: target,
+        // A pid that is not running, so the script does not wait.
+        waitPid: 999_999,
+        // Records instead of launching anything.
+        openCommand: opened,
+        logPath: join(root, "install.log"),
+      }),
+    );
+    const result = spawnSync("/bin/zsh", [scriptPath], { encoding: "utf8" });
+    return {
+      result,
+      target,
+      log: () => readFileSync(join(root, "install.log"), "utf8"),
+      opened: () => readFileSync(join(root, "opened.log"), "utf8").trim(),
+    };
+  };
+
+  it("refuses a downloaded bundle of another app and leaves this one in place", () => {
+    const { result, target, log, opened } = installWith("com.laurinfrank.ryco.nightly");
+    expect(result.status).toBe(1);
+    expect(readFileSync(join(target, "Contents", "marker"), "utf8")).toBe("stable");
+    expect(log()).toContain("refusing to replace this app with another one");
+    // The app quit for the install comes back as it was.
+    expect(opened()).toBe(target);
   });
 });

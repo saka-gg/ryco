@@ -9,6 +9,7 @@ import { ChildProcessSpawner } from "effect/process";
 import { GitCommandError, type SourceControlProviderError } from "@ryco/contracts";
 
 import { ServerConfig } from "../config.ts";
+import { makeRestartSensitiveWork, RestartSensitiveWork } from "../updates/restartSensitiveWork.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import { WorkspaceAccessPolicyLayer } from "../workspace/Layers/WorkspaceAccessPolicy.ts";
 import { CLONE_CONCURRENCY } from "./gitCloneRun.ts";
@@ -427,6 +428,48 @@ it.live("keeps cloning when the request goes away, and the same request joins it
           },
         }),
       ),
+    );
+  }).pipe(Effect.provide(NodeServices.layer)),
+);
+
+it.live("counts a clone as work a restart waits for, for as long as it runs", () =>
+  Effect.gen(function* () {
+    const fs = yield* FileSystem.FileSystem;
+    const parent = yield* fs.makeTempDirectoryScoped({
+      prefix: "ryco-source-control-clone-parent-",
+    });
+    const release = yield* Deferred.make<void>();
+    const restartWork = makeRestartSensitiveWork();
+    const running = () => Effect.runSync(restartWork.count);
+    let cloneCalls = 0;
+
+    yield* Effect.gen(function* () {
+      const service = yield* SourceControlRepositoryService.SourceControlRepositoryService;
+      const request = { remoteUrl: CLONE_URLS.url, destinationPath: `${parent}/ryco` };
+      const first = yield* service.cloneRepository(request).pipe(Effect.forkChild);
+      yield* waitUntil(() => cloneCalls === 1);
+      assert.strictEqual(running(), 1);
+      // The request goes away; the clone does not, and neither does its count.
+      yield* Fiber.interrupt(first);
+      assert.strictEqual(running(), 1);
+      yield* Deferred.succeed(release, undefined);
+      yield* waitUntil(() => running() === 0);
+    }).pipe(
+      Effect.provide(
+        makeLayer({
+          git: {
+            execute: (input) =>
+              Effect.sync(() => {
+                cloneCalls += 1;
+              }).pipe(
+                Effect.andThen(Deferred.await(release)),
+                Effect.andThen(writeClonedRepository(input)),
+                Effect.as(processOutput()),
+              ),
+          },
+        }),
+      ),
+      Effect.provideService(RestartSensitiveWork, restartWork),
     );
   }).pipe(Effect.provide(NodeServices.layer)),
 );

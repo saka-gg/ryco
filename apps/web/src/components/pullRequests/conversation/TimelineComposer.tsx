@@ -93,7 +93,7 @@ export function TimelineComposer(props: {
         requestAnimationFrame(() => textarea.setSelectionRange(next.length, next.length));
       },
     }),
-    // oxlint-disable-next-line react-hooks/exhaustive-deps
+    // oxlint-disable-next-line react-hooks/exhaustive-deps -- setDraft reads no changing value except props.draftKey
     [props.draftKey],
   );
 

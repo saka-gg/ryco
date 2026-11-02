@@ -43,7 +43,12 @@ import {
   SessionImportResult,
   SessionImportError,
 } from "./sessionImport.ts";
-import { ThreadForkError, ThreadForkInput, ThreadForkResult } from "./threadFork.ts";
+import {
+  ThreadForkCarriedRequest,
+  ThreadForkError,
+  ThreadForkInput,
+  ThreadForkResult,
+} from "./threadFork.ts";
 import {
   ThreadLocalServerList,
   ThreadLocalServersError,
@@ -52,6 +57,11 @@ import {
   ThreadStopLocalServerResult,
   ThreadSubscribeLocalServersInput,
 } from "./threadLocalServers.ts";
+import {
+  SecretRequestAnswerInput,
+  SecretRequestAnswerResult,
+  SecretRequestError,
+} from "./secretRequest.ts";
 import {
   ProviderSignInError,
   ProviderSignInInput,
@@ -556,8 +566,10 @@ export const WS_METHODS = {
   threadsSetManualBucket: "threads.setManualBucket",
   threadsSetManualPosition: "threads.setManualPosition",
   threadsFork: "threads.fork",
+  threadsForkCarried: "threads.forkCarried",
   threadsSubscribeLocalServers: "threads.subscribeLocalServers",
   threadsStopLocalServer: "threads.stopLocalServer",
+  secretsAnswerRequest: "secrets.answerRequest",
   worktreesSetManualPosition: "worktrees.setManualPosition",
   projectsInitializeGit: "projects.initializeGit",
   projectsPromoteChatPreview: "projects.promoteChatPreview",
@@ -610,6 +622,7 @@ export const WS_METHODS = {
   providerPrewarmSession: "provider.prewarmSession",
   providerReadProjectCommands: "provider.readProjectCommands",
   serverUpdateProvider: "server.updateProvider",
+  serverNoteClientInteraction: "server.noteClientInteraction",
   serverSubscribeNodeUpdate: "server.subscribeNodeUpdate",
   serverCheckNodeUpdate: "server.checkNodeUpdate",
   serverUpdateNode: "server.updateNode",
@@ -1130,6 +1143,18 @@ export const WsServerUpdateProviderRpc = Rpc.make(WS_METHODS.serverUpdateProvide
   payload: ServerProviderUpdateInput,
   success: ServerProviderUpdatedPayload,
   error: Schema.Union([ServerProviderUpdateError, AuthRpcError]),
+});
+
+/**
+ * A person is using a client of this node (input in the app). Clients send it at most every 30 s
+ * while there is input, and only to nodes with `automaticUpdates` on; the node keeps the newest
+ * time (at most one per 15 s per session) so unattended updates wait for a quiet window. It can
+ * only delay an update, never start or allow one.
+ */
+export const WsServerNoteClientInteractionRpc = Rpc.make(WS_METHODS.serverNoteClientInteraction, {
+  payload: Schema.Struct({}),
+  success: EmptyRpcResult,
+  error: AuthRpcError,
 });
 
 export const WsServerSubscribeNodeUpdateRpc = Rpc.make(WS_METHODS.serverSubscribeNodeUpdate, {
@@ -2139,6 +2164,16 @@ export const WsThreadsForkRpc = Rpc.make(WS_METHODS.threadsFork, {
   error: Schema.Union([ThreadForkError, AuthRpcError]),
 });
 
+/**
+ * Creates a fork on this node from a conversation the client carried from another node. Only on
+ * nodes that advertise `threadForkCarried`; see `ThreadForkCarriedRequest`.
+ */
+export const WsThreadsForkCarriedRpc = Rpc.make(WS_METHODS.threadsForkCarried, {
+  payload: ThreadForkCarriedRequest,
+  success: ThreadForkResult,
+  error: Schema.Union([ThreadForkError, AuthRpcError]),
+});
+
 /** Only on nodes that advertise `threadLocalServers`; see `ThreadLocalServerList`. */
 export const WsThreadsSubscribeLocalServersRpc = Rpc.make(WS_METHODS.threadsSubscribeLocalServers, {
   payload: ThreadSubscribeLocalServersInput,
@@ -2152,6 +2187,16 @@ export const WsThreadsStopLocalServerRpc = Rpc.make(WS_METHODS.threadsStopLocalS
   payload: ThreadStopLocalServerInput,
   success: ThreadStopLocalServerResult,
   error: Schema.Union([ThreadStopLocalServerError, AuthRpcError]),
+});
+
+/**
+ * The user's answer to an agent's `ryco_request_secret` (owner only, on nodes that advertise
+ * `secretRequests`). The value is written into the request's dotenv file and goes nowhere else.
+ */
+export const WsSecretsAnswerRequestRpc = Rpc.make(WS_METHODS.secretsAnswerRequest, {
+  payload: SecretRequestAnswerInput,
+  success: SecretRequestAnswerResult,
+  error: Schema.Union([SecretRequestError, AuthRpcError]),
 });
 
 export const WsSearchThreadMessagesRpc = Rpc.make(WS_METHODS.searchThreadMessages, {
@@ -2735,6 +2780,7 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   | typeof WsProviderPrewarmSessionRpc
   | typeof WsProviderReadProjectCommandsRpc
   | typeof WsServerUpdateProviderRpc
+  | typeof WsServerNoteClientInteractionRpc
   | typeof WsServerSubscribeNodeUpdateRpc
   | typeof WsServerCheckNodeUpdateRpc
   | typeof WsServerUpdateNodeRpc
@@ -2857,8 +2903,10 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   | typeof WsLifecycleSummarizeChangesRpc
   | typeof WsThreadsSetManualBucketRpc
   | typeof WsThreadsForkRpc
+  | typeof WsThreadsForkCarriedRpc
   | typeof WsThreadsSubscribeLocalServersRpc
   | typeof WsThreadsStopLocalServerRpc
+  | typeof WsSecretsAnswerRequestRpc
   | typeof WsThreadsSetManualPositionRpc
   | typeof WsSearchThreadMessagesRpc
   | typeof WsWorktreesSetManualPositionRpc
@@ -2976,6 +3024,7 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   WsProviderPrewarmSessionRpc,
   WsProviderReadProjectCommandsRpc,
   WsServerUpdateProviderRpc,
+  WsServerNoteClientInteractionRpc,
   WsServerSubscribeNodeUpdateRpc,
   WsServerCheckNodeUpdateRpc,
   WsServerUpdateNodeRpc,
@@ -3098,8 +3147,10 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   WsLifecycleSummarizeChangesRpc,
   WsThreadsSetManualBucketRpc,
   WsThreadsForkRpc,
+  WsThreadsForkCarriedRpc,
   WsThreadsSubscribeLocalServersRpc,
   WsThreadsStopLocalServerRpc,
+  WsSecretsAnswerRequestRpc,
   WsThreadsSetManualPositionRpc,
   WsSearchThreadMessagesRpc,
   WsWorktreesSetManualPositionRpc,

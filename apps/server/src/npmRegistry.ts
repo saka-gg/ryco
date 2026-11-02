@@ -19,11 +19,16 @@ const DistTagManifest = Schema.Struct({ version: Schema.String });
 const decodeDistTagManifest = Schema.decodeUnknownEffect(DistTagManifest);
 
 /**
- * The registry URL of `packageName@distTag`. npm convention: a scoped name keeps its
- * `@` literal and only `/` is encoded (some proxies reject an encoded `@`).
+ * The registry URL of `packageName`'s document. npm convention: a scoped name keeps its `@`
+ * literal and only `/` is encoded (some proxies reject an encoded `@`).
  */
+export function npmPackageUrl(packageName: string): string {
+  return `${NPM_REGISTRY_ORIGIN}/${packageName.replaceAll("/", "%2f")}`;
+}
+
+/** The registry URL of `packageName@distTag`. */
 export function npmDistTagUrl(packageName: string, distTag: string): string {
-  return `${NPM_REGISTRY_ORIGIN}/${packageName.replaceAll("/", "%2f")}/${encodeURIComponent(distTag)}`;
+  return `${npmPackageUrl(packageName)}/${encodeURIComponent(distTag)}`;
 }
 
 /** The version `distTag` (e.g. `latest`, `nightly`) points at, or `null` when it is unknown. */

@@ -133,8 +133,9 @@ describe("restart continuation guard", () => {
     const start = list[1];
     expect(start?.type === "thread.turn-start-requested" ? start.payload : null).toMatchObject({
       messageId: restartContinuationIds(threadId, sourceTurnId).messageId,
-      modelSelection: reconciledThread().modelSelection,
     });
+    // It names no model: the chat's stored pick applies where the session can take it.
+    expect(start?.payload).not.toHaveProperty("modelSelection");
     expect(start?.payload).not.toHaveProperty("contextHandoff");
     expect(start?.payload).not.toHaveProperty("restartContinuationGuard");
   });

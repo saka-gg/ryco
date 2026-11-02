@@ -36,6 +36,7 @@ import type {
 import {
   buildThreadInbox,
   planDelegatedNesting,
+  resolveThreadHideAvailability,
   resolveThreadLifecycleAvailability,
   resolveThreadWorkspacePullRequestLink,
   type DelegatedNestingItem,
@@ -86,7 +87,8 @@ export type InboxSidebarSectionKey =
   | "needs-input"
   | "recent"
   | "settled"
-  | "snoozed";
+  | "snoozed"
+  | "hidden";
 export type InboxSidebarStatusFilter = "all" | InboxSidebarSectionKey;
 
 export interface InboxSidebarEnvironment {
@@ -110,6 +112,8 @@ export interface InboxSidebarEnvironment {
   /** The environment's own answer; see `resolveEnvironmentThreadCapabilities`. */
   readonly threadSettlementSupported: ThreadCapabilitySupport;
   readonly threadSnoozeSupported?: ThreadCapabilitySupport | undefined;
+  /** The Hidden shelf and settling a working thread (`threadTriage`). */
+  readonly threadTriageSupported?: ThreadCapabilitySupport | undefined;
   /** The node's own auto-settle rule; undefined lists its threads by this client's rule. */
   readonly autoSettleAfterDays?: SidebarAutoSettleAfterDays | undefined;
   readonly mutationReady: boolean;
@@ -251,6 +255,16 @@ export interface InboxSidebarRow {
    */
   readonly followUpQueue: FollowUpQueueBadge | null;
   readonly settled: boolean;
+  /** Settled while it works: the node settles it when the work ends. */
+  readonly filed: boolean;
+  /** Settle would file the working thread now ("Settle when done"). */
+  readonly settleWhenDone: boolean;
+  /** On the Hidden shelf: it needs nothing from the person now. */
+  readonly hidden: boolean;
+  /** The person hid it: its toggle shows it in the Inbox again, else it hides it. */
+  readonly hiddenByUser: boolean;
+  /** Whether Hide (or Show in Inbox) can run now; false on a node without the Hidden shelf. */
+  readonly hideActionEnabled: boolean;
   readonly snoozedUntil: string | null;
   /**
    * When an awake, unsettled thread woke from its snooze by the timer; the row
@@ -272,7 +286,14 @@ export interface InboxSidebarRow {
 
 export interface InboxSidebarSection {
   readonly key: InboxSidebarSectionKey;
-  readonly title: "Pinned" | "Active now" | "Needs input" | "Recent" | "Settled" | "Snoozed";
+  readonly title:
+    | "Pinned"
+    | "Active now"
+    | "Needs input"
+    | "Recent"
+    | "Settled"
+    | "Snoozed"
+    | "Hidden";
   readonly rows: ReadonlyArray<InboxSidebarRow>;
 }
 
@@ -313,11 +334,15 @@ function capabilityFields(
   capabilities: EnvironmentThreadCapabilities,
 ): Pick<
   InboxSidebarEnvironment,
-  "threadSettlementSupported" | "threadSnoozeSupported" | "autoSettleAfterDays"
+  | "threadSettlementSupported"
+  | "threadSnoozeSupported"
+  | "threadTriageSupported"
+  | "autoSettleAfterDays"
 > {
   return {
     threadSettlementSupported: capabilities.threadSettlement,
     threadSnoozeSupported: capabilities.threadSnooze,
+    threadTriageSupported: capabilities.threadTriage,
     ...(capabilities.autoSettleAfterDays === undefined
       ? {}
       : { autoSettleAfterDays: capabilities.autoSettleAfterDays }),
@@ -821,11 +846,13 @@ function nestDelegatedRows(
     threadId: row.threadId,
     lineage: row.lineage,
     pinned: row.pinned,
-    urgency: row.snoozedUntil
-      ? "snoozed"
-      : row.settled
-        ? "settled"
-        : sectionKey(row.placementState),
+    urgency: row.hidden
+      ? "hidden"
+      : row.snoozedUntil
+        ? "snoozed"
+        : row.settled
+          ? "settled"
+          : sectionKey(row.placementState),
   }));
   const plan = planDelegatedNesting(items, { lineageByKey });
   if (plan.hostByChildKey.size === 0) return [...rows];
@@ -977,6 +1004,7 @@ function toThreadInboxEnvironment(environment: InboxSidebarEnvironment): ThreadI
     label: environment.label,
     threadSettlementSupported: environment.threadSettlementSupported,
     threadSnoozeSupported: environment.threadSnoozeSupported,
+    threadTriageSupported: environment.threadTriageSupported,
     autoSettleAfterDays: environment.autoSettleAfterDays,
     connected: environment.connectionState === "connected",
     mutationReady: environment.mutationReady,
@@ -1024,7 +1052,7 @@ export function resolveCurrentThreadLifecycle(
     autoSettleAfterDays: input.autoSettleAfterDays,
     nowMs: input.nowMs,
   });
-  const entry = inbox.active[0] ?? inbox.settled[0] ?? inbox.snoozed[0];
+  const entry = inbox.active[0] ?? inbox.settled[0] ?? inbox.snoozed[0] ?? inbox.hidden[0];
   if (entry === undefined) return null;
   return {
     target: entry.ref,
@@ -1072,7 +1100,7 @@ export function buildInboxSidebarModel(input: BuildInboxSidebarInput): InboxSide
   );
   const singleProject = threadProjectNames.size <= 1;
   const rows: InboxSidebarRow[] = [];
-  for (const entry of [...inbox.active, ...inbox.settled, ...inbox.snoozed]) {
+  for (const entry of [...inbox.active, ...inbox.settled, ...inbox.snoozed, ...inbox.hidden]) {
     const thread = entry.thread;
     if (!thread) continue;
     const environment = environmentById.get(thread.environmentId);
@@ -1093,7 +1121,9 @@ export function buildInboxSidebarModel(input: BuildInboxSidebarInput): InboxSide
     const usageLimit = state === "limited" ? deriveUsageLimitStatus(thread, nowMs) : null;
     const settled = entry.lifecycle.classification === "settled";
     const snoozed = entry.lifecycle.classification === "snoozed";
+    const hidden = entry.lifecycle.classification === "hidden";
     const availability = resolveThreadLifecycleAvailability(entry);
+    const hideAvailability = resolveThreadHideAvailability(entry);
     const providerDriver = resolveProviderDriver(thread);
     const rowPullRequests = resolveRowPullRequests(thread, worktree);
     rows.push({
@@ -1166,8 +1196,13 @@ export function buildInboxSidebarModel(input: BuildInboxSidebarInput): InboxSide
       roleLabel: environment?.role === "viewer" ? "Viewer" : null,
       followUpQueue: followUpQueueBadgeOf(thread.followUpQueueSummary),
       settled,
+      filed: entry.lifecycle.filed === true,
+      settleWhenDone: !settled && entry.lifecycle.settleFiles === true,
+      hidden,
+      hiddenByUser: hideAvailability.hidden,
+      hideActionEnabled: hideAvailability.enabled,
       snoozedUntil: snoozed ? (thread.snoozedUntil ?? null) : null,
-      wokeAt: snoozed || settled ? null : threadSnoozeWokeAt(thread, nowMs),
+      wokeAt: snoozed || settled || hidden ? null : threadSnoozeWokeAt(thread, nowMs),
       // The snooze toggle: Snooze on an awake row, Unsnooze on a snoozed one.
       canSnooze: !snoozed && availability.snooze.enabled,
       canUnsnooze: snoozed && availability.snooze.enabled,
@@ -1186,8 +1221,11 @@ export function buildInboxSidebarModel(input: BuildInboxSidebarInput): InboxSide
     input.nestDelegated !== false && input.filters.query.trim() === ""
       ? nestDelegatedRows(rows, input.threads)
       : rows;
-  const pinned = topLevelRows.filter((row) => row.pinned).toSorted(compareRecent);
-  const unpinnedRows = topLevelRows.filter((row) => !row.pinned);
+  // The Hidden shelf holds its rows whatever their pin: they need nothing now.
+  const hiddenRows = topLevelRows.filter((row) => row.hidden);
+  const listedRows = topLevelRows.filter((row) => !row.hidden);
+  const pinned = listedRows.filter((row) => row.pinned).toSorted(compareRecent);
+  const unpinnedRows = listedRows.filter((row) => !row.pinned);
   const unsettledRows = unpinnedRows.filter((row) => !row.settled && !row.snoozedUntil);
   const active = unsettledRows
     .filter((row) => sectionKey(row.placementState) === "active")
@@ -1223,6 +1261,9 @@ export function buildInboxSidebarModel(input: BuildInboxSidebarInput): InboxSide
         ]
       : []),
     ...(settled.length > 0 ? [{ key: "settled", title: "Settled", rows: settled } as const] : []),
+    ...(hiddenRows.length > 0
+      ? [{ key: "hidden", title: "Hidden", rows: hiddenRows.toSorted(compareRecent) } as const]
+      : []),
   ];
 
   const status = input.filters.status;

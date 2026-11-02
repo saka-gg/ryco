@@ -38,6 +38,8 @@ export type TailscaleStatusJson = typeof TailscaleStatusJson.Type;
 export interface TailscaleStatus {
   readonly magicDnsName: string | null;
   readonly tailnetIpv4Addresses: readonly string[];
+  /** Every Tailscale address of this machine, IPv4 and IPv6, as Tailscale reports them. */
+  readonly tailnetAddresses: readonly string[];
 }
 
 const collectStdout = <E>(stream: Stream.Stream<Uint8Array, E>): Effect.Effect<string, E> =>
@@ -102,6 +104,21 @@ export function isTailscaleIpv4Address(address: string): boolean {
   return first === 100 && second >= 64 && second <= 127;
 }
 
+/** Tailscale's own IPv6 range, `fd7a:115c:a1e0::/48`. */
+const TAILSCALE_IPV6_PREFIX = "fd7a:115c:a1e0:";
+
+/**
+ * Whether a socket address is a Tailscale address: IPv4 in `100.64.0.0/10` (IPv4-mapped IPv6
+ * forms included, as Node reports them on a dual-stack listener) or IPv6 in
+ * `fd7a:115c:a1e0::/48`.
+ */
+export function isTailscaleAddress(address: string): boolean {
+  const normalized = address.toLowerCase();
+  if (normalized.startsWith("::ffff:")) return isTailscaleIpv4Address(normalized.slice(7));
+  if (normalized.includes(":")) return normalized.startsWith(TAILSCALE_IPV6_PREFIX);
+  return isTailscaleIpv4Address(normalized);
+}
+
 export const parseTailscaleStatus = (
   rawStatusJson: string,
 ): Effect.Effect<TailscaleStatus, TailscaleStatusParseError> =>
@@ -109,15 +126,16 @@ export const parseTailscaleStatus = (
     Effect.mapError((cause) => new TailscaleStatusParseError({ cause })),
     Effect.map((parsed) => {
       const rawIps = parsed.Self?.TailscaleIPs;
-      const tailnetIpv4Addresses = Array.isArray(rawIps)
+      const tailnetAddresses = Array.isArray(rawIps)
         ? rawIps
             .filter((address): address is string => typeof address === "string")
-            .filter(isTailscaleIpv4Address)
+            .filter(isTailscaleAddress)
         : [];
 
       return {
         magicDnsName: normalizeMagicDnsName(parsed),
-        tailnetIpv4Addresses,
+        tailnetIpv4Addresses: tailnetAddresses.filter(isTailscaleIpv4Address),
+        tailnetAddresses,
       };
     }),
   );

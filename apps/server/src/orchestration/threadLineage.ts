@@ -122,7 +122,10 @@ const LINK_WORDING = {
  *   delegated anything.
  * - Forked: the parent's root, or the parent when it has none (provenance of the whole chain).
  */
-function childRootThreadId(parent: OrchestrationThread, link: ChildThreadLink): ThreadId {
+/** What lineage resolution reads of a parent; a carried fork's placeholder source has only this. */
+type LineageParent = Pick<OrchestrationThread, "id" | "lineage">;
+
+function childRootThreadId(parent: LineageParent, link: ChildThreadLink): ThreadId {
   if (link.relationship === DELEGATED_THREAD_RELATIONSHIP) {
     return parent.lineage?.relationship === DELEGATED_THREAD_RELATIONSHIP
       ? parent.lineage.rootThreadId
@@ -140,7 +143,7 @@ function childRootThreadId(parent: OrchestrationThread, link: ChildThreadLink): 
  */
 export function resolveChildThreadLineage(input: {
   readonly readModel: OrchestrationReadModel;
-  readonly parent: OrchestrationThread;
+  readonly parent: LineageParent;
   readonly childThreadId: ThreadId;
   readonly link: ChildThreadLink;
 }): ResolveChildThreadLineageResult {
@@ -153,7 +156,7 @@ export function resolveChildThreadLineage(input: {
     };
   }
   const rootThreadId = childRootThreadId(parent, link);
-  let cursor: OrchestrationThread | undefined = parent;
+  let cursor: LineageParent | undefined = parent;
   let depth = 0;
   while (cursor !== undefined) {
     depth += 1;

@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useRef, useState, type RefObject } from "react";
 import { MenuView } from "@react-native-menu/menu";
 import { Keyboard, Pressable, TextInput, View } from "react-native";
 import { useKeyboardState } from "react-native-keyboard-controller";
@@ -19,8 +19,11 @@ export function HomeBottomToolbar(props: {
   readonly selectedMachine: EnvironmentId | null;
   readonly onSelectMachine: (environmentId: EnvironmentId | null) => void;
   readonly onNewTask: () => void;
+  /** Lets Home focus the search field from a hardware keyboard (Command-F). */
+  readonly searchInputRef?: RefObject<TextInput | null>;
 }) {
-  const searchRef = useRef<TextInput>(null);
+  const localSearchRef = useRef<TextInput>(null);
+  const searchRef = props.searchInputRef ?? localSearchRef;
   const [searchActive, setSearchActive] = useState(false);
   const searching = searchActive || props.query.length > 0;
   const insets = useSafeAreaInsets();

@@ -12,7 +12,7 @@
 import { request } from "node:http";
 
 import { THREAD_LOCAL_SERVER_TITLE_MAX_CHARS } from "@ryco/contracts";
-import { sanitizeDisplayText } from "@ryco/shared/displayText";
+import { sanitizeUntrustedLine } from "@ryco/shared/untrustedText";
 
 export const TITLE_TIMEOUT_MS = 650;
 export const TITLE_MAX_BYTES = 128 * 1024;
@@ -66,13 +66,13 @@ function decodeEntity(match: string, entity: string): string {
     : match;
 }
 
-/** One line of page text: tags dropped, entities decoded, then `sanitizeDisplayText`. */
+/** One line of page text: tags dropped, entities decoded, then `sanitizeUntrustedLine`. */
 export function normalizePageTitle(input: string): string | null {
   const text = input
     .slice(0, TITLE_SOURCE_MAX_CHARS)
     .replace(/<[^<>]*>/gu, " ")
     .replace(ENTITY, decodeEntity);
-  return sanitizeDisplayText(text, THREAD_LOCAL_SERVER_TITLE_MAX_CHARS) || null;
+  return sanitizeUntrustedLine(text, THREAD_LOCAL_SERVER_TITLE_MAX_CHARS) || null;
 }
 
 function metaContent(html: string, names: ReadonlyArray<string>): string | null {

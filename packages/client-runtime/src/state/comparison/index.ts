@@ -15,6 +15,19 @@ import type { KVService } from "../../platform/index.ts";
 export function comparisonStorageKey(environmentId: string, repositoryPath: string): string {
   return `ryco:comparison:v1:${JSON.stringify([environmentId, repositoryPath])}`;
 }
+/** Whether the comparison's right side is the working files rather than a commit. */
+export function comparesWorkingTree(value: GitComparisonSelection | GitComparisonSource): boolean {
+  return value.target === "workingTree";
+}
+
+/**
+ * The sides line blame can attribute. A working-tree comparison's right side is no commit:
+ * its line numbers belong to working files, so only the base side has an immutable revision.
+ */
+export function comparisonBlameSides(source: GitComparisonSource): readonly ("base" | "head")[] {
+  return comparesWorkingTree(source) ? ["base"] : ["base", "head"];
+}
+
 /** Task06 readers must use the returned OID for the requested side, never a symbolic ref. */
 export function comparisonFileKey(
   environmentId: string,
@@ -73,6 +86,14 @@ export function createComparisonController(input: {
     publish({ ...state, error: null, isLoading: true, refMoved: false });
     const request = Promise.resolve()
       .then(() => input.read(selection))
+      .then((data) => {
+        // Older nodes drop `target` and compare with HEAD; never label that as working files.
+        if (comparesWorkingTree(selection) !== comparesWorkingTree(data.selection))
+          throw new Error(
+            "This node cannot compare with the working files. Update it, or compare with HEAD.",
+          );
+        return data;
+      })
       .then(
         (data) => {
           if (!disposed && ticket === generation)

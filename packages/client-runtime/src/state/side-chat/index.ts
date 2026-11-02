@@ -17,6 +17,29 @@ export function parseSideQuestionCommand(text: string): string | null {
   return match ? quoteCitationsToPlainText((match[1] ?? "").trim()) : null;
 }
 
+/** What "Continue as thread" says, on web and native alike. */
+export const SIDE_CHAT_CONTINUE_COPY = {
+  action: "Continue as thread",
+  /** Shown in the fork dialog: where the side chat goes, and that nothing is sent. */
+  seedNote: (count: number) =>
+    `This side chat (${count === 1 ? "1 question" : `${count} questions`}) goes into the fork's composer as a draft. Nothing is sent until you send it.`,
+  noReply: "There's no finished reply in this thread to continue from yet.",
+} as const;
+
+/**
+ * The side chat as a ready-to-edit message for a thread that continues it: each question and its
+ * answer as plain text, under a line that says where they come from, then a blank line to type
+ * after. Only successful exchanges are side history, so a pending or failed question is left out.
+ */
+export function sideChatThreadSeed(
+  exchanges: ReadonlyArray<{ readonly question: string; readonly answer: string }>,
+): string {
+  const pairs = exchanges.map(
+    ({ question, answer }) => `Q: ${question.trim()}\nA: ${answer.trim()}`,
+  );
+  return `From a side chat about this thread:\n\n${pairs.join("\n\n")}\n\n`;
+}
+
 export interface SideChatApi {
   askSideQuestion(input: SideQuestionInput): Promise<SideQuestionResult>;
   cancelSideQuestion(input: { requestId: string }): Promise<unknown>;
@@ -35,6 +58,11 @@ export interface SideChatState {
   readonly chatsByThreadKey: Readonly<Record<string, SideChat>>;
   open(key: string, modelSelection: ModelSelection, question?: string): void;
   close(key: string): void;
+  /**
+   * Minimizes an open side chat, else opens it (a new one with `modelSelection`). Returns whether
+   * it is open now. Minimizing never stops a pending answer.
+   */
+  toggle(key: string, modelSelection: ModelSelection): boolean;
   setDraft(key: string, draft: string): void;
   restoreFailedQuestion(key: string): void;
   discardFailedQuestion(key: string): void;
@@ -95,6 +123,14 @@ export function createSideChatStore() {
         }));
       },
       close: (key) => update(key, { open: false }),
+      toggle: (key, modelSelection) => {
+        if (get().chatsByThreadKey[key]?.open) {
+          get().close(key);
+          return false;
+        }
+        get().open(key, modelSelection);
+        return true;
+      },
       setDraft: (key, draft) => update(key, { draft }),
       restoreFailedQuestion: (key) => {
         const chat = get().chatsByThreadKey[key];

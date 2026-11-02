@@ -282,15 +282,54 @@ function heldDraft(
   replaces: ReadonlyArray<string> = [],
 ): FollowUpQueueEventDraft | null {
   const merged = replacedHold(hold, input, replaces, occurredAt);
-  if (queueHoldsEqual(merged, hold)) return null;
+  return queueHoldsEqual(merged, hold) ? null : heldEventDraft(threadId, merged, occurredAt);
+}
+
+/** The queue's hold after each of `inputs`, in one event, or null when it already covers them. */
+function heldDraftOf(
+  threadId: ThreadId,
+  hold: FollowUpQueueHold | null,
+  inputs: ReadonlyArray<FollowUpQueueHoldInput>,
+  occurredAt: string,
+): FollowUpQueueEventDraft | null {
+  const merged = inputs.reduce<FollowUpQueueHold | null>(
+    (current, input) => mergeQueueHold(current, input, occurredAt),
+    hold,
+  );
+  return merged === null || queueHoldsEqual(merged, hold)
+    ? null
+    : heldEventDraft(threadId, merged, occurredAt);
+}
+
+function heldEventDraft(
+  threadId: ThreadId,
+  hold: FollowUpQueueHold,
+  occurredAt: string,
+): FollowUpQueueEventDraft {
   return {
     type: "thread.queue-held",
-    payload: {
-      threadId,
-      hold: { ...merged, causeKeys: [...merged.causeKeys] },
-      updatedAt: occurredAt,
-    },
+    payload: { threadId, hold: { ...hold, causeKeys: [...hold.causeKeys] }, updatedAt: occurredAt },
   };
+}
+
+/**
+ * The hold a Stop of `holdIfTurnInterrupted` records, when that turn is the thread's latest and
+ * ended interrupted (`thread.queue.add`): the Stop held nothing while the queue was empty.
+ */
+function interruptedTurnHold(
+  thread: Thread,
+  command: ThreadQueueAddCommand,
+): FollowUpQueueHoldInput | undefined {
+  const turnId = command.holdIfTurnInterrupted;
+  if (
+    turnId === undefined ||
+    thread.latestTurn?.turnId !== turnId ||
+    thread.latestTurn.state !== "interrupted"
+  ) {
+    return undefined;
+  }
+  const stop = createInterruptQueueHold(turnId, command.createdAt);
+  return { reason: stop.reason, causeKeys: stop.causeKeys, detail: stop.detail };
 }
 
 /** Releases `causeKeys` of the hold: a smaller hold, its end, or nothing when none matched. */
@@ -353,8 +392,13 @@ function removedDrafts(
   return drafts;
 }
 
-function addedEntry(command: ThreadQueueAddCommand): QueuedFollowUp {
+/** Model selections compare as the decider's wake fence compares them. */
+const sameSelection = (left: QueuedFollowUp["modelSelection"], right: Thread["modelSelection"]) =>
+  JSON.stringify(left) === JSON.stringify(right);
+
+function addedEntry(command: ThreadQueueAddCommand, thread: Thread): QueuedFollowUp {
   const { entry } = command;
+  const author = command.author ?? "user";
   return {
     messageId: entry.messageId,
     text: entry.text,
@@ -372,7 +416,9 @@ function addedEntry(command: ThreadQueueAddCommand): QueuedFollowUp {
     revision: 1,
     status: entry.failure === undefined ? "queued" : "failed",
     ...(entry.failure === undefined ? {} : { failure: entry.failure }),
-    author: command.author ?? "user",
+    author,
+    // A person's entry remembers the chat's selection it was queued over (see the field).
+    ...(author === "user" ? { queuedOverModelSelection: thread.modelSelection } : {}),
     // Only an agent's entry names the chat that queued it.
     ...(command.author === "agent" && command.queuedBy !== undefined
       ? { queuedBy: command.queuedBy }
@@ -494,15 +540,20 @@ function decideQueueCommand(
         type: "thread.queue-entry-added",
         payload: {
           threadId: thread.id,
-          entry: addedEntry(command),
+          entry: addedEntry(command, thread),
           beforeMessageId:
             command.position === "head" ? (queue.entries[0]?.messageId ?? null) : null,
         },
       };
-      const held =
-        command.hold === undefined
-          ? null
-          : heldDraft(thread.id, queue.hold, command.hold, command.createdAt);
+      // The hold the add carries, and a Stop of the caller's turn its own read could not see.
+      const held = heldDraftOf(
+        thread.id,
+        queue.hold,
+        [command.hold, interruptedTurnHold(thread, command)].filter(
+          (hold): hold is FollowUpQueueHoldInput => hold !== undefined,
+        ),
+        command.createdAt,
+      );
       return held === null ? record(added) : record(added, held);
     }
 
@@ -557,6 +608,14 @@ function decideQueueCommand(
             status: entry.status,
             ...(entry.failure === undefined ? {} : { failure: entry.failure }),
             author: entry.author,
+            // An edit to another model is queued over the chat's selection of now.
+            ...(entry.author !== "user"
+              ? {}
+              : !sameSelection(command.modelSelection, entry.modelSelection)
+                ? { queuedOverModelSelection: thread.modelSelection }
+                : entry.queuedOverModelSelection === undefined
+                  ? {}
+                  : { queuedOverModelSelection: entry.queuedOverModelSelection }),
             // A person's edit makes the text theirs: the agent no longer changes it.
             ...(entry.queuedBy === undefined || command.queuedBy === undefined
               ? {}
@@ -786,7 +845,17 @@ export function followUpQueueDispatchModes(
       payload: { threadId: thread.id, tokenMode: modes.tokenMode, updatedAt: at },
     });
   }
-  return { modes, drafts };
+  // A person's entry: the selection its turn may replace (`queuedOverModelSelection`).
+  const head = followUpQueueOf(thread).entries[0];
+  const queuedOverModelSelection =
+    head?.author === "user" && head.messageId === command.queueDispatch?.messageId
+      ? head.queuedOverModelSelection
+      : undefined;
+  return {
+    modes,
+    drafts,
+    ...(queuedOverModelSelection === undefined ? {} : { queuedOverModelSelection }),
+  };
 }
 
 // ── holds and removals other commands record ─────────────────────────────
@@ -909,6 +978,25 @@ export function followUpQueueFollowOns(
                   },
                 },
               },
+          // Its provider stopped the turn to take it (interrupt-restart): it goes next, ahead of
+          // anything queued before it.
+          ...(payload.restartedTurn === true && queue.entries[0]?.messageId !== entry.messageId
+            ? [
+                {
+                  type: "thread.queue-reordered" as const,
+                  payload: {
+                    threadId,
+                    order: [
+                      entry.messageId,
+                      ...queue.entries
+                        .map((candidate) => candidate.messageId)
+                        .filter((messageId) => messageId !== entry.messageId),
+                    ],
+                    updatedAt: event.occurredAt,
+                  },
+                },
+              ]
+            : []),
         ]);
         break;
       }

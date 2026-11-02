@@ -53,6 +53,8 @@ export type ThreadCapabilitySupport = boolean | "unknown";
 export interface ReportedThreadCapabilities {
   readonly threadSettlement: boolean;
   readonly threadSnooze: boolean;
+  /** The Hidden shelf and settling a working thread (`threadTriage`). */
+  readonly threadTriage: boolean;
   /**
    * The node's own automatic settlement rule, present only when the node keeps
    * one (`nodeAutoSettlement`). A node without it leaves the rule to each client.
@@ -63,6 +65,7 @@ export interface ReportedThreadCapabilities {
 export interface EnvironmentThreadCapabilities {
   readonly threadSettlement: ThreadCapabilitySupport;
   readonly threadSnooze: ThreadCapabilitySupport;
+  readonly threadTriage: ThreadCapabilitySupport;
   /**
    * The environment's automatic settlement rule, the same on every client.
    * Undefined while this client knows none (a node that predates node-owned
@@ -105,12 +108,16 @@ function configAutoSettleRule(
 /** Records the node's answer; returns whether it changed. */
 function recordReportedThreadCapabilities(
   environmentId: EnvironmentId,
-  capabilities: Pick<ExecutionEnvironmentCapabilities, "threadSettlement" | "threadSnooze">,
+  capabilities: Pick<
+    ExecutionEnvironmentCapabilities,
+    "threadSettlement" | "threadSnooze" | "threadTriage"
+  >,
   autoSettleAfterDays: SidebarAutoSettleAfterDays | undefined,
 ): boolean {
   // A node's config without a flag comes from a node that predates the feature.
   const threadSettlement = capabilities.threadSettlement === true;
   const threadSnooze = capabilities.threadSnooze === true;
+  const threadTriage = capabilities.threadTriage === true;
   const current = reportedThreadCapabilities.get(environmentId);
   // The node's live answer supersedes what a snapshot carried.
   const supersededShellRule = shellSettlementRules.has(environmentId);
@@ -122,6 +129,7 @@ function recordReportedThreadCapabilities(
   if (
     current?.threadSettlement === threadSettlement &&
     current.threadSnooze === threadSnooze &&
+    current.threadTriage === threadTriage &&
     current.autoSettleAfterDays === autoSettleAfterDays
   ) {
     return supersededShellRule;
@@ -130,6 +138,7 @@ function recordReportedThreadCapabilities(
   next.set(environmentId, {
     threadSettlement,
     threadSnooze,
+    threadTriage,
     ...(autoSettleAfterDays === undefined ? {} : { autoSettleAfterDays }),
   });
   reportedThreadCapabilities = next;
@@ -198,6 +207,7 @@ export function getShellSettlementRulesSnapshot(): ReadonlyMap<
 export interface ThreadCapabilityStatement {
   readonly threadSettlement?: boolean | undefined;
   readonly threadSnooze?: boolean | undefined;
+  readonly threadTriage?: boolean | undefined;
 }
 
 export interface EnvironmentThreadCapabilitySources {
@@ -210,7 +220,7 @@ export interface EnvironmentThreadCapabilitySources {
    * session's primary). Never a hosted placeholder built from the directory.
    */
   readonly descriptor?:
-    | Pick<ExecutionEnvironmentCapabilities, "threadSettlement" | "threadSnooze">
+    | Pick<ExecutionEnvironmentCapabilities, "threadSettlement" | "threadSnooze" | "threadTriage">
     | null
     | undefined;
   /** Directory metadata, honored only for the flags it states. */
@@ -247,11 +257,13 @@ function resolveUnreportedThreadCapabilities(
     return {
       threadSettlement: sources.descriptor.threadSettlement === true,
       threadSnooze: sources.descriptor.threadSnooze === true,
+      threadTriage: sources.descriptor.threadTriage === true,
     };
   }
   return {
     threadSettlement: sources.directory?.threadSettlement ?? "unknown",
     threadSnooze: sources.directory?.threadSnooze ?? "unknown",
+    threadTriage: sources.directory?.threadTriage ?? "unknown",
   };
 }
 

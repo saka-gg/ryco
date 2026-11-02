@@ -39,8 +39,8 @@ import {
   PULL_REQUEST_WATCH_MAX_REJECTED_UPDATES,
   PULL_REQUEST_WATCHES_PER_THREAD,
 } from "./pullRequestWatchSummary.ts";
-import { sanitizeDisplayText } from "./displayText.ts";
 import { truncateUnicodeSafe } from "./String.ts";
+import { sanitizeUntrustedLine } from "./untrustedText.ts";
 
 /** Numbers, each with its source. */
 export const PULL_REQUEST_WATCH_LIMITS = {
@@ -248,10 +248,14 @@ export type PullRequestWatchDecision =
 // ── Host text ─────────────────────────────────────────────────────────
 
 /**
- * The one sanitiser for every host-sourced string a message quotes (check names, paths, logins,
- * branches, links, comment text): `sanitizeDisplayText`, shared with other untrusted text.
+ * The one sanitiser for every host-sourced string a message quotes (check
+ * names, paths, logins, branches, links, comment text): one line, see
+ * `sanitizeUntrustedLine`. One line means host text can never start a line
+ * of its own, so it cannot pose as Ryco's framing.
  */
-export const sanitizeForgeText = sanitizeDisplayText;
+export function sanitizeForgeText(value: string | null | undefined, maxChars: number): string {
+  return sanitizeUntrustedLine(value, maxChars);
+}
 
 /** A host link a message may show: one http(s) token, else null. */
 export function sanitizeForgeUrl(value: string | null | undefined): string | null {

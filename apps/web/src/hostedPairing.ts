@@ -10,7 +10,8 @@ export interface HostedPairingRequest {
   readonly label: string;
 }
 
-function configuredHostedAppUrl(): string {
+/** The hosted app's origin this build is configured for. */
+export function configuredHostedAppUrl(): string {
   return import.meta.env.VITE_HOSTED_APP_URL?.trim() || DEFAULT_HOSTED_APP_ORIGIN;
 }
 

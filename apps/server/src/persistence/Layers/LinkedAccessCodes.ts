@@ -24,14 +24,20 @@ function toPersistenceSqlOrDecodeError(sqlOperation: string, decodeOperation: st
       : toPersistenceSqlError(sqlOperation)(cause);
 }
 
-/** A device's codes: by Hub enrollment, or by client key narrowed like its sessions. */
+/**
+ * A device's codes: by Hub enrollment, or by client key narrowed like its sessions; or every
+ * linked code, when the Hub revoked this node.
+ */
 export type LinkedCodeSelector =
   | { readonly enrollmentId: string }
+  | { readonly allLinks: true }
   | {
       readonly clientFingerprint: string;
       readonly trustSource?: AuthAccessLink["trustSource"];
       readonly enrollmentId?: string | null;
       readonly accountId?: string | null;
+      /** Only codes linked at one of these roles; every role when absent. */
+      readonly roles?: ReadonlyArray<AuthAccessLink["role"]>;
     };
 
 export interface LinkedAccessCodes {
@@ -121,8 +127,11 @@ export const makeLinkedAccessCodes = Effect.gen(function* () {
                       ? sql`link_account_id IS NULL`
                       : sql`link_account_id = ${selector.accountId}`,
                   ]),
+              ...(selector.roles === undefined ? [] : [sql.in("link_role", selector.roles)]),
             ]
-          : [sql`link_enrollment_id = ${selector.enrollmentId}`];
+          : "allLinks" in selector
+            ? [sql`link_trust_source IS NOT NULL`]
+            : [sql`link_enrollment_id = ${selector.enrollmentId}`];
       const rows = yield* sql<{ readonly id: string }>`
         UPDATE auth_pairing_links
         SET revoked_at = ${revokedAt}

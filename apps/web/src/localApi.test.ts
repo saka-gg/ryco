@@ -265,9 +265,6 @@ function makeDesktopBridge(overrides: Partial<DesktopBridge> = {}): DesktopBridg
     getUpdateState: async () => {
       throw new Error("getUpdateState not implemented in test");
     },
-    setUpdateChannel: async () => {
-      throw new Error("setUpdateChannel not implemented in test");
-    },
     checkForUpdate: async () => {
       throw new Error("checkForUpdate not implemented in test");
     },
@@ -703,6 +700,7 @@ describe("wsApi", () => {
       sendShortcut: "enter" as const,
       claudeResumeReview: false,
       chatWidth: "comfortable" as const,
+      openChatTabs: true,
       favorites: [],
       providerModelPreferences: {},
       sidebarProjectGroupingMode: "repository_path" as const,
@@ -777,6 +775,7 @@ describe("wsApi", () => {
       sendShortcut: "enter" as const,
       claudeResumeReview: false,
       chatWidth: "comfortable" as const,
+      openChatTabs: true,
       favorites: [],
       providerModelPreferences: {},
       sidebarProjectGroupingMode: "repository_path" as const,

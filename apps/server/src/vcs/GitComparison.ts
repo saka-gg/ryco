@@ -9,7 +9,10 @@ import {
 } from "@ryco/contracts";
 import { INTERNAL_PATCH_DIFF_ARGS, type GitVcsDriverShape } from "./GitVcsDriver.ts";
 
-/** Read-only, bounded comparison of two immutable commits. Never runs external diff/textconv. */
+/**
+ * Read-only, bounded comparison of two immutable commits, or of a commit and the working
+ * files (`selection.target`). Never runs external diff/textconv.
+ */
 export const readGitComparison = Effect.fn("readGitComparison")(function* (
   execute: GitVcsDriverShape["execute"],
   input: GitReadComparisonInput,
@@ -67,17 +70,32 @@ export const readGitComparison = Effect.fn("readGitComparison")(function* (
     }
     baseOid = bases[0]!;
   }
-  const patch = (yield* run(
-    [
-      ...INTERNAL_PATCH_DIFF_ARGS,
-      "--no-renames",
-      ...(input.ignoreWhitespace ? ["--ignore-all-space"] : []),
-      baseOid,
-      headOid,
-      "--",
-    ],
-    2_000_000,
-  )).stdout;
+  const workingTree = input.selection.target === "workingTree";
+  // The working-tree read builds a scratch index; it loads with its first use.
+  const { patch, identity } = workingTree
+    ? yield* Effect.promise(() => import("./GitWorkingTreeComparison.ts")).pipe(
+        Effect.flatMap(({ readWorkingTreeComparisonPatch }) =>
+          readWorkingTreeComparisonPatch(execute, {
+            root: worktreePath,
+            baseOid,
+            ignoreWhitespace: input.ignoreWhitespace,
+          }),
+        ),
+      )
+    : {
+        patch: (yield* run(
+          [
+            ...INTERNAL_PATCH_DIFF_ARGS,
+            "--no-renames",
+            ...(input.ignoreWhitespace ? ["--ignore-all-space"] : []),
+            baseOid,
+            headOid,
+            "--",
+          ],
+          2_000_000,
+        )).stdout,
+        identity: null,
+      };
   // Do not label an old snapshot with a ref/HEAD that moved during this read.
   if ((yield* resolve(input.selection.ref)) !== refOid || (yield* resolve("HEAD")) !== headOid) {
     return yield* fail(
@@ -87,7 +105,7 @@ export const readGitComparison = Effect.fn("readGitComparison")(function* (
   const revision = createHash("sha256")
     .update(
       JSON.stringify([
-        "git-comparison-v1",
+        workingTree ? "git-comparison-working-tree-v1" : "git-comparison-v1",
         repositoryPath,
         worktreePath,
         input.selection.mode,
@@ -95,13 +113,22 @@ export const readGitComparison = Effect.fn("readGitComparison")(function* (
         baseOid,
         headOid,
         input.ignoreWhitespace,
+        ...(workingTree ? [identity] : []),
         patch,
       ]),
     )
     .digest("hex");
   return {
     selection: input.selection,
-    source: { repositoryPath, worktreePath, refOid, headOid, baseOid, revision },
+    source: {
+      repositoryPath,
+      worktreePath,
+      refOid,
+      headOid,
+      baseOid,
+      ...(workingTree ? { target: "workingTree" as const } : {}),
+      revision,
+    },
     patch,
   };
 });

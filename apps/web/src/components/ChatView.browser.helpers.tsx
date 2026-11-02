@@ -3,6 +3,7 @@ import { replaceAppKeybindings } from "../appKeybindingsEditing";
 import { serializeShortcut } from "../lib/shortcutCapture";
 import { serializeWhenAst } from "../lib/keybindingWhenPresets";
 import { useChatPanesStore } from "../chatPanesStore";
+import { useOpenChatTabsStore } from "../openChatTabsStore";
 
 import { resetPreviewFileSessionsForTests } from "./previewFileSessions";
 import { useInboxFilterStore } from "./inboxSidebar/inboxFilterStore";
@@ -742,6 +743,34 @@ function enableThreadLifecycle(nextFixture: TestFixture): void {
     ...nextFixture.welcome,
     environment: { ...nextFixture.welcome.environment, capabilities },
   };
+}
+
+/** A `configureFixture` for a node that stores composer picks on the thread when they are made. */
+function enableLiveThreadModelSelection(nextFixture: TestFixture): void {
+  for (const key of ["serverConfig", "welcome"] as const) {
+    const environment = nextFixture[key].environment;
+    Object.assign(nextFixture[key], {
+      environment: {
+        ...environment,
+        capabilities: { ...environment.capabilities, liveThreadModelSelection: true },
+      },
+    });
+  }
+}
+
+/** The node pushes the thread with a model selection a client stored on it. */
+function pushThreadModelSelection(
+  threadId: ThreadId,
+  modelSelection: OrchestrationReadModel["threads"][number]["modelSelection"],
+): void {
+  fixture.snapshot = {
+    ...fixture.snapshot,
+    snapshotSequence: fixture.snapshot.snapshotSequence + 1,
+    threads: fixture.snapshot.threads.map((thread) =>
+      thread.id === threadId ? { ...thread, modelSelection } : thread,
+    ),
+  };
+  sendShellThreadUpsert(threadId);
 }
 
 function toShellThread(thread: OrchestrationReadModel["threads"][number]) {
@@ -2799,6 +2828,7 @@ export function setupChatViewBrowserSuite() {
     await setViewport(DEFAULT_VIEWPORT);
     localStorage.clear();
     useChatPanesStore.setState({ root: null, activeRef: null });
+    useOpenChatTabsStore.setState({ refs: [] });
     usePromptStashStore.setState({ entries: [] });
     document.body.innerHTML = "";
     wsRequests.length = 0;
@@ -2981,6 +3011,8 @@ export {
   enableChatNewLocalShortcut,
   enableComposerStashShortcut,
   configureContextHandoffProviders,
+  enableLiveThreadModelSelection,
+  pushThreadModelSelection,
   openCommandPaletteFromTrigger,
   openNewWorkspaceDraft,
   createDraftFromChatNewLocalShortcut,

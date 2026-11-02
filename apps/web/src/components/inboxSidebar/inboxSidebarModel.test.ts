@@ -102,7 +102,7 @@ function environment(
   };
 }
 
-const SUPPORTED = { threadSettlement: true, threadSnooze: true } as const;
+const SUPPORTED = { threadSettlement: true, threadSnooze: true, threadTriage: true } as const;
 
 const ALL_FILTERS: InboxSidebarFilters = {
   query: "",
@@ -130,6 +130,7 @@ describe("buildPrimaryInboxSidebarEnvironment", () => {
       deliveryUnknown: false,
       threadSettlementSupported: true,
       threadSnoozeSupported: true,
+      threadTriageSupported: true,
       mutationReady: true,
       shellCurrent: true,
     });
@@ -2186,5 +2187,69 @@ describe("current thread lifecycle", () => {
         "snooze",
       ),
     ).toBe("Confirm message delivery before snoozing.");
+  });
+});
+
+describe("Hidden shelf and settling a working thread", () => {
+  const triage = environment(ENV_A, { threadSnoozeSupported: true, threadTriageSupported: true });
+  const runningSession = {
+    provider: "codex",
+    status: "running",
+    orchestrationStatus: "running",
+    activeTurnId: "turn-running",
+    createdAt: "2026-08-23T10:00:00.000Z",
+    updatedAt: "2026-08-23T10:00:00.000Z",
+  } as unknown as SidebarThreadSummary["session"];
+  const runningTurn = {
+    turnId: "turn-running",
+    state: "running",
+    requestedAt: "2026-08-23T10:00:00.000Z",
+    startedAt: "2026-08-23T10:00:00.000Z",
+    completedAt: null,
+    assistantMessageId: null,
+  } as unknown as SidebarThreadSummary["latestTurn"];
+
+  it("lists hidden threads last, in their own Hidden section, whatever their pin", () => {
+    const hidden = thread("hidden", { hiddenAt: "2026-08-23T11:00:00.000Z" });
+    const sections = build({
+      threads: [hidden, thread("shown")],
+      environments: [triage],
+      pinnedThreadKeys: new Set([`${ENV_A}:hidden`]),
+    });
+    expect(sections.map((section) => section.key)).toEqual(["recent", "hidden"]);
+    expect(sections.at(-1)).toMatchObject({ title: "Hidden" });
+    expect(sections.at(-1)?.rows[0]).toMatchObject({
+      key: `${ENV_A}:hidden`,
+      hidden: true,
+      hiddenByUser: true,
+      hideActionEnabled: true,
+    });
+    expect(sections[0]?.rows[0]).toMatchObject({ hiddenByUser: false, hideActionEnabled: true });
+  });
+
+  it("brings a hidden thread that asks for an approval back to Needs input", () => {
+    const sections = build({
+      threads: [
+        thread("asking", { hiddenAt: "2026-08-23T11:00:00.000Z", hasPendingApprovals: true }),
+      ],
+      environments: [triage],
+    });
+    expect(sections.map((section) => section.key)).toEqual(["needs-input"]);
+    expect(sections[0]?.rows[0]).toMatchObject({ hidden: false, hiddenByUser: true });
+  });
+
+  it("offers Settle when done on a working thread, and lists a filed one as settled", () => {
+    const working = thread("working", { session: runningSession, latestTurn: runningTurn });
+    const [active] = build({ threads: [working], environments: [triage] });
+    expect(active?.rows[0]).toMatchObject({
+      settleWhenDone: true,
+      settlementActionEnabled: true,
+      settled: false,
+    });
+
+    const filed = { ...working, settleWhenIdleAt: "2026-08-23T10:30:00.000Z" };
+    const sections = build({ threads: [filed], environments: [triage] });
+    expect(sections.map((section) => section.key)).toEqual(["settled"]);
+    expect(sections[0]?.rows[0]).toMatchObject({ filed: true, settled: true, state: "working" });
   });
 });

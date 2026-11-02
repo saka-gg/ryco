@@ -70,6 +70,36 @@ export function directConnectActionLabel(input: {
   return input.needsRepair || input.connectionState === "error" ? "Retry" : "Connect";
 }
 
+export type DirectNodeAction =
+  | "re-pair"
+  | "connect"
+  | "disconnect"
+  | "switch-off"
+  | "switch-on"
+  | "rename"
+  | "forget";
+
+/**
+ * The actions of a machine paired directly, in display order. A switched-off
+ * machine offers only switching it on, renaming and forgetting it: connecting
+ * or pairing again would not reach it while it is off.
+ */
+export function directNodeActions(input: {
+  readonly connectionState: "connecting" | "connected" | "disconnected" | "error";
+  readonly needsRepair: boolean;
+  readonly selected: boolean;
+  readonly switchedOff: boolean;
+}): ReadonlyArray<DirectNodeAction> {
+  if (input.switchedOff) return ["switch-on", "rename", "forget"];
+  const isConnected = input.connectionState === "connected";
+  const actions: DirectNodeAction[] = [];
+  if (input.needsRepair) actions.push("re-pair");
+  if (!input.selected || !isConnected) actions.push("connect");
+  if (isConnected || input.connectionState === "connecting") actions.push("disconnect");
+  actions.push("switch-off", "rename", "forget");
+  return actions;
+}
+
 export function directRoleLabel(
   role: "owner" | "client" | null,
 ): "Owner" | "Client" | "Role pending" {

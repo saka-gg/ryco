@@ -1,6 +1,6 @@
 import "../../index.css";
 import { render } from "vitest-browser-react";
-import { page } from "vite-plus/test/browser";
+import { page, userEvent } from "vite-plus/test/browser";
 import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import {
   DEFAULT_SERVER_SETTINGS,
@@ -21,6 +21,8 @@ const harness = vi.hoisted(() => ({
   canManage: true,
   canMutate: true,
   projects: [{ id: "p", name: "Fixture project", environmentId: "fixture-node" }],
+  /** Whether the node reports the overrides added since effective preferences existed. */
+  reportsAddedKeys: false,
   read: vi.fn(),
   update: vi.fn(),
   local: vi.fn(),
@@ -64,6 +66,8 @@ vi.mock("../../environments/runtime", () => ({
   updateEnvironmentServerSettings: (...args: unknown[]) => harness.update(...args),
 }));
 vi.mock("../../localApi", () => ({ ensureLocalApi: harness.local }));
+// One node here; writing a default to every node is ApplyToAllNodes.browser.tsx's.
+vi.mock("./ApplyToAllNodes", () => ({ ApplyToAllNodes: () => null }));
 
 const FIXTURE_PROJECT_CHOICES = [{ id: "p", title: "Fixture project" }];
 
@@ -71,6 +75,7 @@ beforeEach(() => {
   harness.connected = true;
   harness.canManage = true;
   harness.canMutate = true;
+  harness.reportsAddedKeys = false;
   harness.projects = [{ id: "p", name: "Fixture project", environmentId: "fixture-node" }];
   harness.config = {
     environment: {
@@ -100,6 +105,15 @@ beforeEach(() => {
         value: overrides.runSetupScript ?? true,
         source: overrides.runSetupScript === undefined ? "node" : "project",
       },
+      ...(harness.reportsAddedKeys
+        ? {
+            worktreeBranchChangeTypes: {
+              value: overrides.worktreeBranchChangeTypes ?? true,
+              source: overrides.worktreeBranchChangeTypes === undefined ? "node" : "project",
+            },
+            pullRequestTemplates: { value: true, source: "node" },
+          }
+        : {}),
       overrides,
     } as EffectiveProjectPreferences;
   });
@@ -149,6 +163,109 @@ describe("project inheritance controls", () => {
         },
       ]);
     expect(harness.local).not.toHaveBeenCalled();
+  });
+  it("lets a project override generated branch names and pull request templates", async () => {
+    harness.reportsAddedKeys = true;
+    await render(
+      <SettingsCard>
+        <ProjectPreferenceSettings projectId="p" projects={FIXTURE_PROJECT_CHOICES} />
+      </SettingsCard>,
+    );
+    await expect
+      .element(page.getByRole("combobox", { name: "Pull request template" }))
+      .toBeEnabled();
+    await page.getByRole("combobox", { name: "Generated branch names" }).click();
+    await page.getByRole("option", { name: "By prefix" }).click();
+    await expect
+      .poll(() => harness.update.mock.calls)
+      .toEqual([
+        [
+          "fixture-node",
+          {
+            projectPreferences: { p: { worktreeBranchChangeTypes: false } },
+            expectedProjectPreferences: { p: { worktreeBranchChangeTypes: null } },
+          },
+        ],
+      ]);
+    await page
+      .getByRole("button", { name: "Use device default for generated branch names" })
+      .click();
+    await expect
+      .poll(() => harness.update.mock.calls[1])
+      .toEqual([
+        "fixture-node",
+        {
+          projectPreferences: { p: { worktreeBranchChangeTypes: null } },
+          expectedProjectPreferences: { p: { worktreeBranchChangeTypes: false } },
+        },
+      ]);
+  });
+  it("waits for the node's reply before it shows the overrides added since", async () => {
+    harness.read.mockImplementation(() => new Promise(() => {}));
+    await render(
+      <SettingsCard>
+        <ProjectPreferenceSettings projectId="p" projects={FIXTURE_PROJECT_CHOICES} />
+      </SettingsCard>,
+    );
+    await expect.element(page.getByRole("combobox", { name: "Worktree setup" })).toBeVisible();
+    expect(page.getByRole("combobox", { name: "Generated branch names" }).elements()).toEqual([]);
+    expect(page.getByRole("combobox", { name: "Pull request template" }).elements()).toEqual([]);
+  });
+  it("hides the added overrides for an older node, and their node defaults keep their own rows", async () => {
+    const older = await render(
+      <SettingsCard>
+        <ProjectPreferenceSettings projectId="p" projects={FIXTURE_PROJECT_CHOICES} />
+      </SettingsCard>,
+    );
+    await expect.element(page.getByRole("combobox", { name: "Worktree setup" })).toBeEnabled();
+    expect(page.getByRole("combobox", { name: "Generated branch names" }).elements()).toEqual([]);
+    expect(page.getByRole("combobox", { name: "Pull request template" }).elements()).toEqual([]);
+    await older.unmount();
+
+    harness.reportsAddedKeys = true;
+    await render(<ProjectDefaultsSection />);
+    await expect.element(page.getByRole("combobox", { name: "Default thread mode" })).toBeEnabled();
+    expect(page.getByRole("combobox", { name: "Generated branch names" }).elements()).toEqual([]);
+    expect(page.getByRole("combobox", { name: "Pull request template" }).elements()).toEqual([]);
+  });
+  it("guards a node default with the value the editor showed", async () => {
+    await render(<ProjectDefaultsSection />);
+    await expect.element(page.getByRole("combobox", { name: "Default thread mode" })).toBeEnabled();
+    await page.getByRole("combobox", { name: "Default thread mode" }).click();
+    await page.getByRole("option", { name: "New worktree" }).click();
+    await expect
+      .poll(() => harness.update.mock.calls)
+      .toEqual([
+        [
+          "fixture-node",
+          {
+            defaultThreadEnvMode: "worktree",
+            expectedNodePreferences: { defaultThreadEnvMode: "local" },
+          },
+        ],
+      ]);
+  });
+  it("saves a trimmed project branch prefix and refuses one Git would reject", async () => {
+    await render(<ProjectPreferenceSettings projectId="p" projects={FIXTURE_PROJECT_CHOICES} />);
+    const input = page.getByRole("textbox", { name: "Worktree branch prefix" });
+    await expect.element(input).toBeEnabled();
+    await input.fill("team/");
+    await userEvent.keyboard("{Enter}");
+    await expect.element(page.getByRole("alert")).toMatchTextContent("valid Git namespace");
+    expect(harness.update).not.toHaveBeenCalled();
+    await input.fill(" team/tasks ");
+    await userEvent.keyboard("{Enter}");
+    await expect
+      .poll(() => harness.update.mock.calls)
+      .toEqual([
+        [
+          "fixture-node",
+          {
+            projectPreferences: { p: { worktreeBranchPrefix: "team/tasks" } },
+            expectedProjectPreferences: { p: { worktreeBranchPrefix: null } },
+          },
+        ],
+      ]);
   });
   it("keeps disconnected, read-only and hosted-unready targets disabled without reading another node", async () => {
     harness.connected = false;

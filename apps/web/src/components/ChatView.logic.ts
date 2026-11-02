@@ -41,6 +41,40 @@ export const MAX_HIDDEN_MOUNTED_TERMINAL_THREADS = 10;
 
 export const LastInvokedScriptByProjectSchema = Schema.Record(ProjectId, Schema.String);
 
+/** Why the chat's saved machine cannot take messages now. */
+export interface EnvironmentUnavailableState {
+  readonly environmentId: EnvironmentId;
+  readonly label: string;
+  readonly connectionState: "connecting" | "disconnected" | "error" | "switched-off";
+}
+
+/**
+ * The chat's saved machine, when it cannot take messages now; null when it
+ * can (or the chat is on no saved machine). A machine switched off says so:
+ * it refuses every connect until it is switched on, so Reconnect is no answer.
+ */
+export function resolveSavedEnvironmentUnavailableState(input: {
+  readonly environmentId: EnvironmentId | null;
+  readonly label: string | null;
+  readonly switchedOff: boolean;
+  readonly connectionState: "connecting" | "connected" | "disconnected" | "error";
+}): EnvironmentUnavailableState | null {
+  if (!input.environmentId || !input.label) return null;
+  if (input.switchedOff) {
+    return {
+      environmentId: input.environmentId,
+      label: input.label,
+      connectionState: "switched-off",
+    };
+  }
+  if (input.connectionState === "connected") return null;
+  return {
+    environmentId: input.environmentId,
+    label: input.label,
+    connectionState: input.connectionState,
+  };
+}
+
 export function resolveHeaderLiveAgentCount(input: {
   readonly liveCount: number;
   readonly workspacePanelOpen: boolean;

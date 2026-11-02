@@ -231,7 +231,7 @@ function FileDiffViewer(props: { patch: string | null; isLoading: boolean; error
       <pre className="font-mono text-[11px] leading-snug">
         {parsedLines.map((line, index) => (
           <DiffLineRow
-            // eslint-disable-next-line react/no-array-index-key
+            // eslint-disable-next-line react/no-array-index-key -- patch lines have no id, and each row is stateless
             key={index}
             line={line}
             gutterCh={gutterCh}

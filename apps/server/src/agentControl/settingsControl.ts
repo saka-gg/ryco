@@ -59,14 +59,21 @@ export const agentControlSettingsPlan = (
           after: change.value,
         },
       };
-    case "providerUpdateChecks":
+    case "providerUpdateChecks": {
+      const before = settings.enableProviderUpdateChecks;
       return {
         kind: "changeSettings",
         change: {
           kind: change.kind,
-          before: settings.enableProviderUpdateChecks,
+          before,
           after: change.value,
+          // The setting itself stays out of the summary and out of reach; only this approval
+          // gate reads it.
+          ...(!before && change.value && settings.automaticUpdates
+            ? { startsAutomaticUpdates: true as const }
+            : {}),
         },
       };
+    }
   }
 };

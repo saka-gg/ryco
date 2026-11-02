@@ -20,6 +20,19 @@ import {
 import type { RelayCloseReason, RelayEffectiveRole } from "@ryco/contracts/relay";
 import { Option, Schema } from "effect";
 
+import type { LinkedSessionSelector } from "../auth/Services/SessionCredentialService.ts";
+import { base64UrlEncode } from "../auth/utils.ts";
+import type { RelayChannelAuthority } from "../ws/RpcPrincipal.ts";
+
+/** A relay channel that authenticated a device. */
+export type RelayChannelDevice = Exclude<RelayChannelAuthority, { readonly trustSource: "none" }>;
+
+/** A device's own links: its key and trust source, and its enrollment and account when it names them. */
+export type ChannelDeviceLinks = Extract<
+  LinkedSessionSelector,
+  { readonly clientFingerprint: string }
+>;
+
 /** A device holding live linked sessions, at the highest role any of them has. */
 export interface LinkedAccessDevice {
   readonly trustSource: "account-enrolled" | "locally-verified";
@@ -59,6 +72,40 @@ const ROLES: ReadonlyArray<RelayEffectiveRole> = ["viewer", "operator", "owner"]
 /** The roles above `role`: the sessions an answer of `role` revokes. */
 export function rolesAbove(role: RelayEffectiveRole): ReadonlyArray<RelayEffectiveRole> {
   return ROLES.filter((candidate) => ROLE_RANK[candidate] > ROLE_RANK[role]);
+}
+
+/**
+ * The links of the device a relay channel authenticated, under the channel's
+ * own enrollment and account when it names one: an account-enrolled key that
+ * several accounts share on one install never selects another account's links.
+ * A locally verified link records no account, so it is selected by key alone.
+ */
+export function channelDeviceLinks(device: RelayChannelDevice): ChannelDeviceLinks {
+  return {
+    clientFingerprint: base64UrlEncode(device.clientIdentityFingerprint),
+    trustSource: device.trustSource,
+    ...(device.trustSource === "account-enrolled"
+      ? {
+          enrollmentId: device.enrollmentId,
+          ...(device.accountId === undefined ? {} : { accountId: device.accountId }),
+        }
+      : {}),
+  };
+}
+
+/**
+ * A device opened a relay channel at `device.role`: the Hub's current grant
+ * intersected with the device's own ceiling (`relayChannelAuthority`). Its links
+ * above that role end, whatever its trust source, so a member the Hub lowered
+ * cannot keep the higher role on a direct route until the link ends. A link at
+ * or below it stays and nothing is raised; a promoted member gets the new role
+ * at their next link. `null` when no link can be above it.
+ */
+export function linkedAccessOpenNarrowing(
+  device: RelayChannelDevice,
+): (ChannelDeviceLinks & { readonly roles: ReadonlyArray<RelayEffectiveRole> }) | null {
+  const roles = rolesAbove(device.role);
+  return roles.length === 0 ? null : { ...channelDeviceLinks(device), roles };
 }
 
 /**

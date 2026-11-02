@@ -19,6 +19,7 @@ import {
   type UpdateEverythingEnvironmentInput,
   type UpdateEverythingLocalApp,
 } from "./plan.ts";
+import { describeDeviceCard } from "./view.ts";
 
 const localApp = (
   overrides: Partial<NonNullable<UpdateEverythingLocalApp>> = {},
@@ -37,6 +38,20 @@ function planOne(input: UpdateEverythingEnvironmentInput, app: UpdateEverythingL
 }
 
 describe("buildUpdateEverythingPlan nodes", () => {
+  it("shows why the node's own automatic updates leave a release alone", () => {
+    const note =
+      "Automatic update: Ryco 0.1.36 is left alone because an automatic update to it did not finish: it failed, was rolled back, or was postponed too often. Update it yourself to try it again.";
+    const device = planOne(
+      environment("Server", { nodeUpdate: nodeState({ automaticUpdateNote: note }) }),
+    );
+    expect(device.automaticUpdateNote).toBe(note);
+    // One click still updates it; the card says why it did not update on its own.
+    expect(device.node.kind).toBe("one-click");
+    const card = describeDeviceCard({ environmentId: device.environmentId, device, run: null });
+    expect(card.notes).toContain(note);
+    expect("automaticUpdateNote" in planOne(environment("Other"))).toBe(false);
+  });
+
   it("plans a one-click update through the package manager or the remote desktop app", () => {
     expect(planOne(environment("Server")).node).toEqual({
       kind: "one-click",

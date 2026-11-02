@@ -68,6 +68,7 @@ const withRoute = <A, E, R>(
             { httpBaseUrl: `${ORIGIN}/` },
             { httpBaseUrl: "http://100.64.0.2:3773" },
           ] as never),
+          tailscaleAddresses: Effect.succeed(undefined),
         }),
       ),
       Layer.provideMerge(

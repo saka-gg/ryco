@@ -24,6 +24,7 @@ import {
   normalizeInteractionModeForProviderTarget,
   reconcileMountedTerminalThreadIds,
   resolveHeaderLiveAgentCount,
+  resolveSavedEnvironmentUnavailableState,
   resolveSendEnvMode,
   resolveChatSendWorktreePlan,
   shouldShowNewThreadSurface,
@@ -56,6 +57,55 @@ const idleProviderSelectionPolicyInput = {
   environmentAvailable: true,
   isPhoneTier: false,
 };
+
+describe("resolveSavedEnvironmentUnavailableState", () => {
+  const environmentId = EnvironmentId.make("env-studio");
+
+  it("offers Switch on, not Reconnect, for a machine switched off", () => {
+    // Its runtime state is gone with its session: it reads as disconnected.
+    expect(
+      resolveSavedEnvironmentUnavailableState({
+        environmentId,
+        label: "Studio Mac",
+        switchedOff: true,
+        connectionState: "disconnected",
+      }),
+    ).toEqual({ environmentId, label: "Studio Mac", connectionState: "switched-off" });
+    expect(
+      resolveSavedEnvironmentUnavailableState({
+        environmentId,
+        label: "Studio Mac",
+        switchedOff: true,
+        connectionState: "connected",
+      })?.connectionState,
+    ).toBe("switched-off");
+  });
+
+  it("reports a machine that is on by its connection", () => {
+    const state = (connectionState: "connecting" | "connected" | "disconnected" | "error") =>
+      resolveSavedEnvironmentUnavailableState({
+        environmentId,
+        label: "Studio Mac",
+        switchedOff: false,
+        connectionState,
+      })?.connectionState ?? null;
+    expect(state("connected")).toBeNull();
+    expect(state("connecting")).toBe("connecting");
+    expect(state("disconnected")).toBe("disconnected");
+    expect(state("error")).toBe("error");
+  });
+
+  it("is null for a chat on no saved machine", () => {
+    expect(
+      resolveSavedEnvironmentUnavailableState({
+        environmentId: null,
+        label: null,
+        switchedOff: false,
+        connectionState: "connected",
+      }),
+    ).toBeNull();
+  });
+});
 
 describe("resolveHeaderLiveAgentCount", () => {
   it("suppresses only the redundant badge while the Agents roster is visible", () => {

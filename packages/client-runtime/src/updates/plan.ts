@@ -88,6 +88,8 @@ export interface UpdateEverythingDevicePlan {
   readonly skippedReason: string | null;
   readonly runningChatCount: number;
   readonly continuesChatsAfterRestart: boolean;
+  /** Why the node's own automatic updates leave a release alone ("Automatic update: …"). */
+  readonly automaticUpdateNote?: string;
 }
 
 export interface UpdateEverythingPlan {
@@ -334,6 +336,9 @@ function planDevice(
     skippedReason,
     runningChatCount: environment.runningChatCount,
     continuesChatsAfterRestart: environment.continueThreadsAfterRestart,
+    ...(environment.nodeUpdate?.automaticUpdateNote
+      ? { automaticUpdateNote: environment.nodeUpdate.automaticUpdateNote }
+      : {}),
   });
 }
 

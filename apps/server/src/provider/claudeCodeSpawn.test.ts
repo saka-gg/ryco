@@ -256,7 +256,7 @@ describe.skipIf(!realProcesses)("prepareClaudeCodeSpawn (real processes)", () =>
       );
       const abortController = new AbortController();
       const sdkQuery = runClaudeSdkQuery({
-        // oxlint-disable-next-line require-yield
+        // oxlint-disable-next-line require-yield -- a prompt stream that stays open and never sends a message
         prompt: (async function* (): AsyncGenerator<SDKUserMessage> {
           await new Promise<never>(() => undefined);
         })(),

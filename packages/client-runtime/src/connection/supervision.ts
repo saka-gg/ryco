@@ -29,6 +29,7 @@ import {
   type ThreadBodyResidencyEntry,
   type ThreadBodyUsage,
 } from "../state/threads/threadBodyResidency.ts";
+import { isSavedEnvironmentSwitchedOff } from "./catalog.ts";
 import type { EnvironmentConnection } from "./connection.ts";
 import type { EnvironmentStateSink } from "./environmentStateSink.ts";
 import { createArchivedThreadShellLoader } from "./archivedThreadShellLoader.ts";
@@ -116,6 +117,11 @@ export interface EnvironmentSupervisorInput<SavedEnvironmentRecord> {
   readonly createInvalidationThrottle: () => EnvironmentSupervisorThrottle;
   readonly resetProviderInvalidation: () => void;
   readonly createPrimaryConnection: () => EnvironmentConnection | null;
+  /**
+   * Every saved machine, switched off ones included: a record whose
+   * `disabledAt` is set is left unconnected by every path here
+   * (`isSavedEnvironmentSwitchedOff`).
+   */
   readonly listSavedEnvironmentRecords: () => ReadonlyArray<SavedEnvironmentRecord>;
   readonly hasSavedEnvironmentRegistryHydrated: () => boolean;
   readonly waitForSavedEnvironmentRegistryHydration: () => Promise<void>;
@@ -213,6 +219,19 @@ export class SavedEnvironmentCredentialError extends Error {
   constructor(message: string, options?: { readonly cause?: unknown }) {
     super(message, options);
     this.name = "SavedEnvironmentCredentialError";
+  }
+}
+
+/**
+ * The user switched the saved machine off. A cancellation like any other: the
+ * retry ladder stops and nothing reports it as a connection failure. Every
+ * connect path rejects with it until the machine is switched on again.
+ */
+export class SavedEnvironmentSwitchedOffError extends SavedEnvironmentConnectionCancelledError {
+  constructor(environmentId: EnvironmentId) {
+    super(environmentId);
+    this.message = `Saved environment ${environmentId} is switched off.`;
+    this.name = "SavedEnvironmentSwitchedOffError";
   }
 }
 
@@ -446,6 +465,7 @@ export function createEnvironmentConnectionSupervisor<
   SavedEnvironmentRecord extends {
     readonly environmentId: EnvironmentId;
     readonly lastConnectedAt?: string | null;
+    readonly disabledAt?: string | undefined;
   },
 >(input: EnvironmentSupervisorInput<SavedEnvironmentRecord>): EnvironmentConnectionSupervisor {
   const connections = new Map<EnvironmentId, EnvironmentConnection>();
@@ -1215,10 +1235,22 @@ export function createEnvironmentConnectionSupervisor<
     if (connection?.kind !== "primary") return;
     if (connection) await remove(connection.environmentId).catch(() => false);
   };
+  /** Read from the registry now, never from a record a caller kept. */
+  const isSwitchedOff = (environmentId: EnvironmentId) =>
+    input
+      .listSavedEnvironmentRecords()
+      .some(
+        (record) => record.environmentId === environmentId && isSavedEnvironmentSwitchedOff(record),
+      );
   const ensureSavedEnvironmentConnection = (
     record: { readonly environmentId: EnvironmentId },
     connect: (isCancelled: () => boolean, signal: AbortSignal) => Promise<EnvironmentConnection>,
   ) => {
+    // A resume, a network change, a stray Connect or a renewal never reaches a
+    // machine the user switched off.
+    if (isSwitchedOff(record.environmentId)) {
+      return Promise.reject(new SavedEnvironmentSwitchedOffError(record.environmentId));
+    }
     const existing = read(record.environmentId);
     if (existing) return Promise.resolve(existing);
     const pending = pendingSavedEnvironmentConnections.get(record.environmentId);
@@ -1236,6 +1268,15 @@ export function createEnvironmentConnectionSupervisor<
         connection = await connect(() => state.cancelled, controller.signal);
       } catch (error) {
         if (state.abandonedWith !== null) throw state.abandonedWith;
+        // Switched off while it connected: whatever the attempt hit on its way
+        // out (the switch-off's own cancellation, a dropped tunnel), its
+        // waiters learn the machine is off, not that it failed or was merely
+        // cancelled.
+        if (isSwitchedOff(record.environmentId)) {
+          throw error instanceof SavedEnvironmentSwitchedOffError
+            ? error
+            : new SavedEnvironmentSwitchedOffError(record.environmentId);
+        }
         // A cancelled attempt's failure is not the environment's: a disconnect
         // or a new pairing replaced it, and that owner reports the outcome.
         if (state.cancelled && !(error instanceof SavedEnvironmentConnectionCancelledError)) {
@@ -1245,11 +1286,20 @@ export function createEnvironmentConnectionSupervisor<
         }
         throw error;
       }
-      if (state.cancelled) {
+      // Switched off while it connected: what it opened goes at once. This
+      // fallback only sees a machine that is still off when the attempt lands.
+      // One switched off and on again meanwhile relies on the switch-off having
+      // cancelled the attempt (`state.cancelled`): every switch path does, in
+      // its session teardown (web and mobile `teardownSavedEnvironmentSession`).
+      const switchedOff = isSwitchedOff(record.environmentId);
+      if (state.cancelled || switchedOff) {
         const removed = await remove(connection.environmentId).catch(() => false);
         if (!removed) await connection.dispose().catch(NOOP);
         throw (
-          state.abandonedWith ?? new SavedEnvironmentConnectionCancelledError(record.environmentId)
+          state.abandonedWith ??
+          (switchedOff
+            ? new SavedEnvironmentSwitchedOffError(record.environmentId)
+            : new SavedEnvironmentConnectionCancelledError(record.environmentId))
         );
       }
       return connection;
@@ -1432,7 +1482,12 @@ export function createEnvironmentConnectionSupervisor<
     emitShellAcceptance({ kind: "snapshot", environmentId });
   };
   const syncSaved = async () => {
-    const records = input.listSavedEnvironmentRecords();
+    // A switched-off machine is saved but never connected: its live connection
+    // is stale and its retry stops. An attempt under way drops what it opened
+    // when it lands (`ensureSavedEnvironmentConnection`).
+    const records = input
+      .listSavedEnvironmentRecords()
+      .filter((record) => !isSavedEnvironmentSwitchedOff(record));
     const expected = new Set(records.map((record) => record.environmentId));
     // Desktop's Hub relay connections register as `saved` without a registry
     // record. A registry write must not drop them: they are owned by main's

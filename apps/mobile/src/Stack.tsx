@@ -36,6 +36,7 @@ import {
   SettingsAboutRouteScreen,
   SettingsAppearanceRouteScreen,
   SettingsClientStorageRouteScreen,
+  SettingsDiagnosticsRouteScreen,
   SettingsHubRouteScreen,
   SettingsInboxRouteScreen,
   SettingsProviderAccountsRouteScreen,
@@ -232,6 +233,11 @@ const SettingsSheetStack = createNativeStackNavigator({
       linking: MVP_SETTINGS_SHEET_ROUTES.SettingsClientStorage.linking,
       options: settingsRouteOptions("SettingsClientStorage", "Client Storage"),
     }),
+    SettingsDiagnostics: createNativeStackScreen({
+      screen: SettingsDiagnosticsRouteScreen,
+      linking: MVP_SETTINGS_SHEET_ROUTES.SettingsDiagnostics.linking,
+      options: settingsRouteOptions("SettingsDiagnostics", "Diagnostics"),
+    }),
     SettingsAbout: createNativeStackScreen({
       screen: SettingsAboutRouteScreen,
       linking: MVP_SETTINGS_SHEET_ROUTES.SettingsAbout.linking,
@@ -307,12 +313,14 @@ function RootStackLayout(props: {
   useThreadOutboxDrain();
   // New tasks written while their machine was away start once it is live.
   useNewTaskOutboxDrain();
-  // Full pathname (sheets included) for keyboard-command scoping.
+  // Full pathname (sheets included) and the screen beneath any sheets, for
+  // keyboard-command scoping.
   const path = getPathFromState(props.state, navigationPathConfig);
   const pathname = path.startsWith("/") ? path : `/${path}`;
+  const workspacePathname = workspacePathFromState(props.state);
 
   return (
-    <HardwareKeyboardCommandProvider pathname={pathname}>
+    <HardwareKeyboardCommandProvider pathname={pathname} workspacePathname={workspacePathname}>
       <ThreadWorkspaceLayout>{props.children}</ThreadWorkspaceLayout>
     </HardwareKeyboardCommandProvider>
   );

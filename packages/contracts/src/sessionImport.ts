@@ -28,6 +28,12 @@ export const SessionImportCandidate = Schema.Struct({
   source: SessionImportSource,
   title: Schema.String,
   cwd: Schema.String,
+  /**
+   * The recorded folder as the node resolves it today: its real path when it is
+   * an existing directory there, null when it is unknown, gone or no directory.
+   * Project import groups conversations by it. Older nodes leave it out.
+   */
+  canonicalCwd: Schema.optional(Schema.NullOr(Schema.String)),
   archived: Schema.Boolean,
   messageCount: Schema.Int,
   importedThreadId: Schema.NullOr(ThreadId),

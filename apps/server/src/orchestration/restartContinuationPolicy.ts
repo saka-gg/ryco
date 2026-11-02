@@ -19,7 +19,7 @@ import {
   type TurnId,
 } from "@ryco/contracts";
 import { sameModelSelection } from "@ryco/shared/model";
-import { derivePendingThreadRequests } from "@ryco/shared/threadActivity";
+import { derivePendingThreadRequests } from "@ryco/shared/pendingThreadRequests";
 import { applicableUsageLimit } from "@ryco/shared/usageLimit";
 
 import {

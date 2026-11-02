@@ -6,13 +6,18 @@ import { withArtifactTools } from "../Mcp/artifactTools.ts";
 import { withDelegationTools } from "../Mcp/delegationTools.ts";
 import { withLocalTaskTools } from "../Mcp/localTaskTools.ts";
 import { withLazyAgentControlTools } from "../Mcp/lazyTools.ts";
+import { PullRequestWatchService } from "../../sourceControl/PullRequestWatchService.ts";
 import { toMcpFollowUpQueue } from "../Mcp/threadTranscript.ts";
 import { findThreadInArray } from "../../orchestration/threadIndex.ts";
 import { extractThreadReferences } from "@ryco/shared/threadMentions";
 import { AGENT_CONTROL_DEVICE_TOOL } from "../../providerTools/deviceToolGateway.ts";
 import { LocalTaskService } from "../../tasks/LocalTaskService.ts";
 import { makeDelegatedTaskControl } from "../delegatedTaskControl.ts";
-import { CompletionReturnRepository } from "../../persistence/Layers/AgentControlCompletionReturns.ts";
+import {
+  CompletionReturnRepository,
+  isPendingCompletionReturn,
+} from "../../persistence/Layers/AgentControlCompletionReturns.ts";
+import { CommandWatchService } from "../../commandWatch/CommandWatchService.ts";
 import { AgentControlProposalRepository } from "../../persistence/Services/AgentControlProposals.ts";
 import * as SqlClient from "effect/sql/SqlClient";
 import { TerminalManager } from "../../terminal/Services/Manager.ts";
@@ -34,7 +39,16 @@ import { TerminalManager } from "../../terminal/Services/Manager.ts";
  *
  * @module AgentControlMcpServer
  */
-import { AGENT_CONTROL_CAPABILITIES, AGENT_CONTROL_QUEUE_MCP_TOOLS } from "@ryco/contracts";
+import {
+  AGENT_CONTROL_CAPABILITIES,
+  AGENT_CONTROL_COMMAND_WATCH_MCP_TOOLS,
+  AGENT_CONTROL_LINK_PULL_REQUEST_TOOL,
+  AGENT_CONTROL_MCP_WAIT_TIMEOUT_MS_MAX,
+  AGENT_CONTROL_QUEUE_MCP_TOOLS,
+  AGENT_CONTROL_WORKTREE_MCP_TOOLS,
+  AGENT_CONTROL_SECRET_REQUEST_MCP_TOOL,
+} from "@ryco/contracts";
+import { threadWakeSource, waitUntil } from "../eventDrivenWait.ts";
 import { Effect, Exit, Layer, Option, Scope, Stream } from "effect";
 import { ServerConfig } from "../../config.ts";
 import { CliProxyService } from "../../cliProxy/CliProxyService.ts";
@@ -47,6 +61,8 @@ import { OrchestrationEngineService } from "../../orchestration/Services/Orchest
 import * as Semaphore from "effect/Semaphore";
 
 import { ProjectionSnapshotQuery } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
+import { GitWorkflowService } from "../../git/GitWorkflowService.ts";
+import { waitForControlRequestReceipt } from "../Mcp/proposalReads.ts";
 import { DeviceService } from "../../device/Services/DeviceService.ts";
 import { ProviderRegistry } from "../../provider/Services/ProviderRegistry.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
@@ -55,6 +71,8 @@ import { makeAgentControlMcpListener } from "../Mcp/listener.ts";
 import {
   AGENT_CONTROL_DEVICE_IMAGE_MAX_BASE64_CHARS,
   makeAgentControlMcpTools,
+  proposalVisibleToSession,
+  replayedAgentControlMutation,
   submitAgentControlMutation,
   withCompleteAgentControlCatalog,
 } from "../Mcp/tools.ts";
@@ -99,6 +117,9 @@ const makeAgentControlMcpServer = Effect.gen(function* () {
   const sql = yield* Effect.serviceOption(SqlClient.SqlClient);
   const localTasks = yield* Effect.serviceOption(LocalTaskService);
   const cliProxy = yield* Effect.serviceOption(CliProxyService);
+  const commandWatches = yield* Effect.serviceOption(CommandWatchService);
+  const pullRequestWatch = yield* Effect.serviceOption(PullRequestWatchService);
+  const git = yield* Effect.serviceOption(GitWorkflowService);
   const toolDeps = {
     policy,
     proposals,
@@ -225,19 +246,36 @@ const makeAgentControlMcpServer = Effect.gen(function* () {
         }),
       ),
   });
+  // An agent links the pull requests it opens to its chat's workspace. Loads on first use.
+  const pullRequestTools = Option.isSome(pullRequestWatch)
+    ? withLazyAgentControlTools(queueTools, {
+        names: [AGENT_CONTROL_LINK_PULL_REQUEST_TOOL],
+        writeNames: [AGENT_CONTROL_LINK_PULL_REQUEST_TOOL],
+        mayUse: (session) =>
+          session.grantedCapabilities.includes(AGENT_CONTROL_CAPABILITIES.watchPullRequests),
+        load: () =>
+          import("../Mcp/pullRequestLinkTools.ts").then((module) =>
+            module.withPullRequestLinkTools(queueTools, {
+              policy,
+              registry,
+              pullRequestWatch: pullRequestWatch.value,
+            }),
+          ),
+      })
+    : queueTools;
   // Routine device input under per-task consent, where devices exist. Its
   // module (consent index, driving guide) loads the first time a session that
   // may drive devices lists or calls tools, never at boot.
   const deviceTools =
     Option.isSome(deviceService) && deviceService.value.supported
-      ? withLazyAgentControlTools(queueTools, {
+      ? withLazyAgentControlTools(pullRequestTools, {
           names: [AGENT_CONTROL_DEVICE_TOOL],
           writeNames: [AGENT_CONTROL_DEVICE_TOOL],
           mayUse: (session) =>
             session.grantedCapabilities.includes(AGENT_CONTROL_CAPABILITIES.controlDevices),
           load: () =>
             import("../Mcp/deviceRoutineTools.ts").then((module) =>
-              module.withDeviceRoutineTools(queueTools, {
+              module.withDeviceRoutineTools(pullRequestTools, {
                 policy,
                 registry,
                 proposals,
@@ -255,8 +293,87 @@ const makeAgentControlMcpServer = Effect.gen(function* () {
               }),
             ),
         })
-      : queueTools;
-  const tools = withCompleteAgentControlCatalog(deviceTools);
+      : pullRequestTools;
+  // Command watches on the caller's own chat. Their module loads the first time a session that
+  // may watch commands lists or calls tools, never at boot.
+  const watchTools = Option.isSome(commandWatches)
+    ? withLazyAgentControlTools(deviceTools, {
+        names: Object.values(AGENT_CONTROL_COMMAND_WATCH_MCP_TOOLS),
+        writeNames: [
+          AGENT_CONTROL_COMMAND_WATCH_MCP_TOOLS.watch,
+          AGENT_CONTROL_COMMAND_WATCH_MCP_TOOLS.unwatch,
+        ],
+        mayUse: (session) =>
+          session.grantedCapabilities.includes(AGENT_CONTROL_CAPABILITIES.watchCommands),
+        load: () =>
+          import("../Mcp/commandWatchTools.ts").then((module) =>
+            module.withCommandWatchTools(deviceTools, {
+              policy,
+              registry,
+              projections,
+              watches: commandWatches.value,
+              completionReturns: Option.getOrUndefined(completionReturns),
+              isPendingCompletionReturn,
+            }),
+          ),
+      })
+    : deviceTools;
+  // An agent's move of its own chat into a new worktree. Its module loads the first time a
+  // session that may manage workspaces lists or calls tools, never at boot.
+  const handoffTools = withLazyAgentControlTools(watchTools, {
+    names: Object.values(AGENT_CONTROL_WORKTREE_MCP_TOOLS),
+    writeNames: [AGENT_CONTROL_WORKTREE_MCP_TOOLS.handoff],
+    mayUse: (session) =>
+      session.grantedCapabilities.includes(AGENT_CONTROL_CAPABILITIES.manageWorkspaces),
+    load: () =>
+      import("../Mcp/worktreeHandoffTools.ts").then((module) =>
+        module.withWorktreeHandoffTools(watchTools, {
+          policy,
+          registry,
+          projections,
+          submitMutation: (input) =>
+            submitAgentControlMutation(
+              { proposals, ...(Option.isSome(validator) ? { validator: validator.value } : {}) },
+              input,
+            ),
+          waitForTerminal: (session, proposalId) =>
+            waitForControlRequestReceipt({
+              proposals,
+              proposalEvents,
+              proposalId,
+              waitFor: "terminal",
+              timeoutMs: AGENT_CONTROL_MCP_WAIT_TIMEOUT_MS_MAX,
+              visible: (proposal) => proposalVisibleToSession(proposal, session),
+            }),
+          replay: (session, requestId, plan) =>
+            replayedAgentControlMutation(proposals, session, requestId, plan),
+          ...(Option.isSome(git)
+            ? { checkoutBranch: (cwd) => git.value.localStatus({ cwd }) }
+            : {}),
+        }),
+      ),
+  });
+  // `ryco_request_secret`: a private card for a secret the agent needs, written into a
+  // Git-ignored dotenv file of its own checkout. Its module (and the dotenv writer) loads the
+  // first time a session that may ask lists or calls tools, never at boot.
+  const secretTools = withLazyAgentControlTools(handoffTools, {
+    names: [AGENT_CONTROL_SECRET_REQUEST_MCP_TOOL],
+    writeNames: [AGENT_CONTROL_SECRET_REQUEST_MCP_TOOL],
+    mayUse: (session) =>
+      session.grantedCapabilities.includes(AGENT_CONTROL_CAPABILITIES.requestSecrets),
+    load: () =>
+      import("../Mcp/secretRequestTools.ts").then((module) =>
+        module.withSecretRequestTools(handoffTools, {
+          policy,
+          registry,
+          engine,
+          projections,
+          ...(Option.isSome(workspaceAccess) ? { workspaceAccess: workspaceAccess.value } : {}),
+          helpers: { findThreadInArray, waitUntil, threadWakeSource },
+        }),
+      ),
+  });
+  const tools = withCompleteAgentControlCatalog(secretTools);
 
   // Start/stop transitions are serialized so a rapid settings flip cannot
   // interleave a start with a teardown. `shuttingDown` latches inside the

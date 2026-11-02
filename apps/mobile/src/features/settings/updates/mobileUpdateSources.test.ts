@@ -1,9 +1,9 @@
 import { EnvironmentId } from "@ryco/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
-import { mobileUpdateSource } from "./mobileUpdateSources";
+import { mobileUpdateSource, type MobileUpdateMachine } from "./mobileUpdateSources";
 
-const machine = {
+const machine: MobileUpdateMachine = {
   environmentId: EnvironmentId.make("node"),
   label: "Build box",
   connectionState: "connected",
@@ -17,7 +17,9 @@ describe("mobileUpdateSource", () => {
     expect(mobileUpdateSource(machine, state)).toMatchObject({ live: true, canMutate: true });
     expect(mobileUpdateSource({ ...machine, role: "operator" }, state).canMutate).toBe(false);
     expect(mobileUpdateSource({ ...machine, mutationReady: false }, state).canMutate).toBe(false);
-    expect(mobileUpdateSource({ ...machine, connectionState: "connecting" }, state)).toMatchObject({
+    expect(
+      mobileUpdateSource({ ...machine, connectionState: "reconnecting" }, state),
+    ).toMatchObject({
       live: false,
       canMutate: false,
     });

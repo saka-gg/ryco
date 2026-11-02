@@ -3,7 +3,10 @@ import { renderToStaticMarkup } from "react-dom/server";
 import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 const { localApi, addToast } = vi.hoisted(() => ({
-  localApi: { server: { updateSettings: vi.fn(), getSettings: vi.fn() } },
+  localApi: {
+    server: { updateSettings: vi.fn(), getSettings: vi.fn() },
+    persistence: { setClientSettings: vi.fn() },
+  },
   addToast: vi.fn(),
 }));
 vi.mock("~/localApi", () => ({ ensureLocalApi: () => localApi }));
@@ -15,7 +18,9 @@ import {
   resetServerStateForTests,
   setServerConfigSnapshot,
 } from "~/rpc/serverState";
-import { useUpdateSettings } from "./useSettings";
+import { DEFAULT_CLIENT_SETTINGS } from "@ryco/contracts/settings";
+import { getClientSettingsSnapshot, replaceClientSettingsSnapshot } from "./clientSettingsStore";
+import { persistClientSettingsUpdate, useUpdateSettings } from "./useSettings";
 
 const RELOAD_FAILURE = "[SETTINGS] could not reload settings after a failed update";
 
@@ -94,5 +99,24 @@ describe("useUpdateSettings on the primary node", () => {
       expect(consoleError).toHaveBeenCalledWith(RELOAD_FAILURE, expect.anything()),
     );
     expect(getServerConfig()?.settings.worktreeBranchPrefix).toBe("second");
+  });
+});
+
+describe("persistClientSettingsUpdate", () => {
+  it("puts back only its own keys when the save fails, keeping a change made meanwhile", async () => {
+    replaceClientSettingsSnapshot(DEFAULT_CLIENT_SETTINGS);
+    let fail: (error: Error) => void = () => {};
+    localApi.persistence.setClientSettings.mockReturnValueOnce(
+      new Promise<void>((_, reject) => {
+        fail = reject;
+      }),
+    );
+    const saving = persistClientSettingsUpdate({ chatWidth: "full" });
+    expect(getClientSettingsSnapshot().chatWidth).toBe("full");
+    replaceClientSettingsSnapshot({ ...getClientSettingsSnapshot(), diffWordWrap: true });
+    fail(new Error("disk full"));
+    await expect(saving).rejects.toThrow("disk full");
+    expect(getClientSettingsSnapshot().chatWidth).toBe(DEFAULT_CLIENT_SETTINGS.chatWidth);
+    expect(getClientSettingsSnapshot().diffWordWrap).toBe(true);
   });
 });

@@ -121,6 +121,7 @@ import {
 import { type ComposerPromptEditorHandle } from "../ComposerPromptEditor";
 import { type ComposerCommandItem } from "./ComposerCommandMenu";
 import { ComposerPrimaryActions } from "./ComposerPrimaryActions";
+import { useLiveThreadModelSelection } from "./liveThreadModelSelection";
 import { ApprovalCard } from "./ApprovalCard";
 import { ComposerPendingUserInputPanel } from "./ComposerPendingUserInputPanel";
 import { ComposerPlanFollowUpBanner } from "./ComposerPlanFollowUpBanner";
@@ -375,7 +376,7 @@ export interface ChatComposerProps {
   isWorktreeSetupRunning?: boolean;
   environmentUnavailable: {
     readonly label: string;
-    readonly connectionState: "connecting" | "disconnected" | "error";
+    readonly connectionState: "connecting" | "disconnected" | "error" | "switched-off";
   } | null;
 
   // Pending approvals / inputs
@@ -474,6 +475,8 @@ export interface ChatComposerProps {
 
   // Follow-up while a turn runs (desktop and tablet; the frozen phone tier always queues)
   followUpSurfaceAllowsSteer: boolean;
+  /** The running turn's provider steers by stopping the turn and sending the message next. */
+  followUpSteerRestarts?: boolean;
   getFollowUpSteerUnavailableReason: (snapshot: {
     readonly modelSelection: ModelSelection;
     readonly runtimeMode: RuntimeMode;
@@ -581,6 +584,9 @@ function useSetPromptFromTraits(input: {
 const selectProjectProviderCommandsSupported = (config: ServerConfig | null): boolean =>
   config?.environment.capabilities.providerProjectCommands === true;
 
+const selectLiveThreadModelSelectionSupported = (config: ServerConfig | null): boolean =>
+  config?.environment.capabilities.liveThreadModelSelection === true;
+
 export const ChatComposer = memo(
   forwardRef<ChatComposerHandle, ChatComposerProps>(function ChatComposer(props, ref) {
     const {
@@ -594,7 +600,7 @@ export const ChatComposer = memo(
       activeThreadEnvironmentId: _activeThreadEnvironmentId,
       activeThreadSessionProviderInstanceId,
       activeThreadStarted,
-      isServerThread: _isServerThread,
+      isServerThread,
       isLocalDraftThread: _isLocalDraftThread,
       activeThreadGoal,
       phase,
@@ -646,6 +652,7 @@ export const ChatComposer = memo(
       scheduleStickToBottom,
       followUpSurfaceAllowsSteer,
       getFollowUpSteerUnavailableReason,
+      followUpSteerRestarts = false,
       onSend,
       onInterrupt,
       onImplementPlanInNewThread,
@@ -932,6 +939,17 @@ export const ChatComposer = memo(
         createModelSelection(selectedInstanceId, selectedModel, selectedModelOptionsForDispatch),
       [selectedInstanceId, selectedModel, selectedModelOptionsForDispatch],
     );
+    // A started chat's model, effort and speed follow the selection its node stores, live.
+    const liveThreadModelSelectionSupported = useEnvironmentServerConfigSelector(
+      environmentId,
+      selectLiveThreadModelSelectionSupported,
+    );
+    useLiveThreadModelSelection({
+      threadRef: routeKind === "server" && isServerThread ? routeThreadRef : null,
+      enabled: liveThreadModelSelectionSupported,
+      serverModelSelection: activeThreadModelSelection,
+      composerModelSelection: selectedModelSelection,
+    });
     const selectedModelForPicker = selectedModel;
     // Instance-keyed option list so the picker can show each configured
     // instance (built-in + custom) as a first-class sidebar entry. The
@@ -2207,6 +2225,7 @@ export const ChatComposer = memo(
         steerUnavailableReason,
         surfaceAllowsSteer: followUpSurfaceAllowsSteer,
         sendShortcut: composerSendShortcut,
+        steerRestarts: followUpSteerRestarts,
         // The same decision the send makes, from the same inputs.
         approvalRedirect: resolveApprovalRedirect({
           approvals: pendingApprovals,
@@ -2224,6 +2243,7 @@ export const ChatComposer = memo(
       activeTurnId,
       approvalRedirectedTurnId,
       composerSendShortcut,
+      followUpSteerRestarts,
       followUpSurfaceAllowsSteer,
       getFollowUpSteerUnavailableReason,
       interactionMode,

@@ -327,6 +327,128 @@ describe("HubConnector", () => {
     expect(clock.timers.size).toBe(0);
   });
 
+  it.each([
+    ["node_revoked", "while authenticating"],
+    ["revoked", "while authenticating"],
+    ["node_revoked", "while online"],
+    ["revoked", "while online"],
+  ] as const)(
+    "reports a Hub refusal %s %s as the node's revocation, once per terminal state",
+    async (code, when) => {
+      const clock = scheduler();
+      const socket = new FakeSocket();
+      let revocations = 0;
+      const connector = new HubConnector({
+        config: enabledConfig,
+        identity: identity(),
+        transport: { open: () => socket },
+        channels: { open: async () => Promise.reject(new Error("unused")) },
+        enrollmentMetadata,
+        livenessWatch: false,
+        scheduler: clock.value,
+        onRevoked: () => {
+          revocations += 1;
+        },
+      });
+      const starting = connector.start();
+      await settle();
+      socket.emit("open", {} as Event);
+      if (when === "while online") {
+        socket.emit("message", {
+          data: encoded({
+            type: "ready",
+            protocolMajor: 1,
+            protocolMinor: 2,
+            limits: RELAY_INITIAL_LIMITS,
+          }),
+        } as MessageEvent);
+        await starting;
+        expect(connector.status().state).toBe("online");
+        expect(revocations).toBe(0);
+      }
+      socket.emit("message", {
+        data: encoded({
+          type: "error",
+          protocolMajor: 1,
+          protocolMinor: 2,
+          code,
+          fatal: true,
+        }),
+      } as MessageEvent);
+      await starting;
+      await settle();
+      expect(connector.status().state).toBe("revoked");
+      expect(revocations).toBe(1);
+      // Terminal: nothing retries, so nothing reports it again.
+      await connector.resume();
+      await clock.advance(24 * 60 * 60_000);
+      expect(revocations).toBe(1);
+      await connector.stop();
+      expect(revocations).toBe(1);
+    },
+  );
+
+  it.each([
+    "authentication_failed",
+    "connection_replaced",
+    "rate_limited",
+    "server_draining",
+    "internal_error",
+    "network",
+  ] as const)("never reports a %s failure as the node's revocation", async (failure) => {
+    const clock = scheduler();
+    const sockets: FakeSocket[] = [];
+    let revocations = 0;
+    const connector = new HubConnector({
+      config: enabledConfig,
+      identity: identity(),
+      transport: {
+        open: () => {
+          const socket = new FakeSocket();
+          sockets.push(socket);
+          return socket;
+        },
+      },
+      channels: { open: async () => Promise.reject(new Error("unused")) },
+      enrollmentMetadata,
+      livenessWatch: false,
+      scheduler: clock.value,
+      onRevoked: () => {
+        revocations += 1;
+      },
+    });
+    const starting = connector.start();
+    await settle();
+    sockets[0]!.emit("open", {} as Event);
+    sockets[0]!.emit("message", {
+      data: encoded({
+        type: "ready",
+        protocolMajor: 1,
+        protocolMinor: 2,
+        limits: RELAY_INITIAL_LIMITS,
+      }),
+    } as MessageEvent);
+    await starting;
+    if (failure === "network") {
+      sockets[0]!.emit("close", { code: 1006, reason: "" } as CloseEvent);
+    } else {
+      sockets[0]!.emit("message", {
+        data: encoded({
+          type: "error",
+          protocolMajor: 1,
+          protocolMinor: 2,
+          code: failure,
+          fatal: true,
+        }),
+      } as MessageEvent);
+    }
+    await settle();
+    expect(connector.status().state).toBe("degraded");
+    expect(revocations).toBe(0);
+    await connector.stop();
+    expect(revocations).toBe(0);
+  });
+
   it.each(["close", "error", "opening"] as const)(
     "cannot disrupt a replacement connection when old %s cleanup finishes late",
     async (failure) => {

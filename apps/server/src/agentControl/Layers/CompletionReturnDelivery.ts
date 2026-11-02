@@ -21,7 +21,7 @@ import {
 } from "@ryco/contracts";
 import { QUEUED_TURN_START_GRACE_MS } from "@ryco/shared/threadSettlement";
 import { applicableUsageLimit } from "@ryco/shared/usageLimit";
-import { Clock, Context, Effect, Layer, Option, Semaphore } from "effect";
+import { Clock, Context, Effect, Exit, Layer, Option, Semaphore } from "effect";
 import { isPersistableChatAttachment } from "../../attachmentStore.ts";
 import { ServerConfig } from "../../config.ts";
 import {
@@ -33,6 +33,8 @@ import {
   type CompletionReturnCapture,
   type CompletionReturnOutcome,
   type CompletionReturnRecord,
+  type CompletionReturnStallKind,
+  type CompletionReturnStallNotice,
 } from "../../persistence/Layers/AgentControlCompletionReturns.ts";
 import { AgentControlProposalRepository } from "../../persistence/Services/AgentControlProposals.ts";
 import { OrchestrationCommandReceiptRepository } from "../../persistence/Services/OrchestrationCommandReceipts.ts";
@@ -49,6 +51,9 @@ import {
   WAITING_EXPIRY_MS,
   MAX_DELIVERY_ATTEMPTS,
   MAX_REPLAYS,
+  MAX_STALL_NOTICES,
+  STALL_NEVER_STARTED_MS,
+  STALL_WAITING_ON_YOU_MS,
   buildDelegationReturnCommand,
   compareCodeUnits,
   delegationWakeIds,
@@ -220,6 +225,19 @@ export const makeCompletionReturnDelivery = Effect.gen(function* () {
     ThreadId,
     { readonly sequence: number; readonly checkedMs: number }
   >();
+  /**
+   * Child → when this process first saw its initial turn waiting on the person (an approval or a
+   * question). Lost on restart, so a wait is timed again from the next scan; the notice itself is
+   * recorded on the row and never sent twice.
+   */
+  const waitingOnYouSince = new Map<
+    ThreadId,
+    { readonly sinceMs: number; readonly checkedMs: number }
+  >();
+  /** Stall notices' texts and commands, loaded with the first notice this node sends. */
+  const stallMessages = yield* Effect.cached(
+    Effect.promise(() => import("../completionReturnStallMessages.ts")),
+  );
 
   const publish = (proposalIds: Iterable<AgentControlProposalId>) =>
     Effect.forEach(
@@ -246,7 +264,10 @@ export const makeCompletionReturnDelivery = Effect.gen(function* () {
   ) =>
     Effect.gen(function* () {
       const next = patch(record, fields, now);
-      if (next.status !== "waiting") waitingStopCheckedThrough.delete(next.childThreadId);
+      if (next.status !== "waiting") {
+        waitingStopCheckedThrough.delete(next.childThreadId);
+        waitingOnYouSince.delete(next.childThreadId);
+      }
       if (!(yield* repository.save(record, next))) return false;
       if (visibleChange(record, next)) yield* publish([next.proposalId]);
       return true;
@@ -819,9 +840,170 @@ export const makeCompletionReturnDelivery = Effect.gen(function* () {
         if (sessionEnded || initialState === "interrupted" || initialState === "error")
           return yield* notice(record, "stopped", ctx);
       }
-      // Never infer completion from a message/checkpoint; wait for ingestion's ack.
-      return yield* hold(record, ctx.now);
+      // Never infer completion from a message/checkpoint; wait for ingestion's ack. A task that
+      // stalls meanwhile tells its delegating chat once (`watchStall`).
+      return yield* watchStall(record, yield* currentStall(record, child, initial, ctx), ctx);
     });
+
+  /**
+   * Why a task's initial run needs attention now, or null (Synara's worker health, adapted):
+   * its first message went out and no turn took it, its turn waits on the person, or its
+   * provider went quiet on it. Ryco never nudges, re-sends, interrupts or answers for it.
+   */
+  const currentStall = (
+    record: CompletionReturnRecord,
+    child: OrchestrationThreadShell,
+    initial: TurnId | null,
+    ctx: ScanContext,
+  ) =>
+    Effect.gen(function* () {
+      const stall = (kind: CompletionReturnStallKind, sinceMs: number) => ({
+        kind,
+        since: new Date(sinceMs).toISOString(),
+        forMs: ctx.nowMs - sinceMs,
+      });
+      if (initial === null) {
+        waitingOnYouSince.delete(child.id);
+        const sentMs = record.startedAt ? Date.parse(record.startedAt) : Number.NaN;
+        return Number.isFinite(sentMs) && ctx.nowMs - sentMs >= STALL_NEVER_STARTED_MS
+          ? stall("never-started", sentMs)
+          : null;
+      }
+      if (child.session?.activeTurnId !== initial) {
+        waitingOnYouSince.delete(child.id);
+        return null;
+      }
+      if (child.hasPendingApprovals || child.hasPendingUserInput) {
+        const sinceMs = waitingOnYouSince.get(child.id)?.sinceMs ?? ctx.nowMs;
+        waitingOnYouSince.set(child.id, { sinceMs, checkedMs: ctx.nowMs });
+        return ctx.nowMs - sinceMs >= STALL_WAITING_ON_YOU_MS
+          ? stall("waiting-on-you", sinceMs)
+          : null;
+      }
+      waitingOnYouSince.delete(child.id);
+      const quietSince = yield* repository.silentTurnSince(child.id, initial);
+      const quietMs = quietSince === null ? Number.NaN : Date.parse(quietSince);
+      return Number.isFinite(quietMs) ? stall("silent", quietMs) : null;
+    });
+
+  /**
+   * Records a stall episode on the row (at most `MAX_STALL_NOTICES` per task, one per episode),
+   * offers its notice to the delegating chat, and clears the episode once the task moves again.
+   * The row stays `waiting` throughout: a notice is never the task's result.
+   */
+  const watchStall = (
+    record: CompletionReturnRecord,
+    stall: {
+      readonly kind: CompletionReturnStallKind;
+      readonly since: string;
+      readonly forMs: number;
+    } | null,
+    ctx: ScanContext,
+  ) =>
+    Effect.gen(function* () {
+      const previous: CompletionReturnStallNotice = record.stallNotice ?? {
+        count: 0,
+        current: null,
+      };
+      let next = previous;
+      if (stall === null) {
+        if (previous.current !== null) next = { ...previous, current: null };
+      } else if (previous.current?.kind !== stall.kind) {
+        next =
+          previous.count >= MAX_STALL_NOTICES
+            ? { ...previous, current: { kind: stall.kind, since: stall.since, state: "dropped" } }
+            : {
+                count: previous.count + 1,
+                current: { kind: stall.kind, since: stall.since, state: "pending" },
+              };
+      }
+      if (stall !== null && next.current?.state === "pending") {
+        const outcome = yield* sendStallNotice(record, next.count, stall, ctx);
+        if (outcome !== "held") next = { ...next, current: { ...next.current, state: outcome } };
+      }
+      return yield* next === previous
+        ? hold(record, ctx.now)
+        : save(record, { stallNotice: next }, ctx.now).pipe(Effect.asVoid);
+    });
+
+  /**
+   * One stall notice as its own wake, behind the same fence as results: the delegating chat must
+   * be idle, in scope and not reverting, the delegating turn must not have been reverted away,
+   * and its person must not have stopped it. A chat whose session ended takes a cold slot from the
+   * shared budget, as a result does (a delegating chat is usually reaped long before a task has
+   * waited on the person for five minutes). `held` retries on the next scan; `dropped` never
+   * sends. Its ids are fixed per notice, so a retry after a restart or a lost receipt cannot send
+   * it twice.
+   */
+  const sendStallNotice = (
+    record: CompletionReturnRecord,
+    notice: number,
+    stall: { readonly kind: CompletionReturnStallKind; readonly forMs: number },
+    ctx: ScanContext,
+  ) => {
+    let reserved: MessageId | null = null;
+    return Effect.gen(function* () {
+      const parent = yield* readShell(record.parentThreadId);
+      if (Option.isNone(parent)) return "dropped" as const;
+      if (!(yield* policy.isEnabled)) return "held" as const;
+      if (!inScope(record, parent.value)) return "dropped" as const;
+      if ((yield* parentHoldDetail(parent.value, ctx)) !== null) return "held" as const;
+      const { cold, budgetFull } = yield* fence.coldStart(record.parentThreadId, ctx.nowMs);
+      if (cold && budgetFull) return "held" as const;
+      const cache = stopCache();
+      const bounded = yield* withStopBound(record, cache);
+      if (yield* userStopped(bounded, bounded.sinceSequence ?? 0, cache)) return "dropped" as const;
+      if (
+        yield* repository.turnDroppedByRevert({
+          threadId: record.parentThreadId,
+          turnId: record.parentTurnId,
+          sinceSequence: bounded.sinceSequence ?? 0,
+        })
+      )
+        return "dropped" as const;
+      if (yield* parentReverting(record.parentThreadId, ctx)) return "held" as const;
+      const { buildStallNoticeCommand, renderStallNotice } = yield* stallMessages;
+      const command = buildStallNoticeCommand({
+        parent: parent.value,
+        latestUserMessageId: yield* fence.latestUserMessageId(record.parentThreadId),
+        childThreadId: record.childThreadId,
+        notice,
+        section: renderStallNotice(record, stall.kind, stall.forMs),
+        now: ctx.now,
+      });
+      const messageId = command.message.messageId;
+      if (
+        cold &&
+        !(yield* reserveColdSlot(record.parentThreadId, messageId, ctx, () => {
+          reserved = messageId;
+        }))
+      )
+        return "held" as const;
+      wakesAppliedHere.set(messageId, ctx.nowMs);
+      const applied = yield* Effect.exit(commands.apply(command));
+      if (Exit.isSuccess(applied)) {
+        if (cold) yield* fence.noteColdWake(record.parentThreadId, messageId, ctx.nowMs);
+        return "sent" as const;
+      }
+      // A rejection is final; a failure that left no receipt (a storage error) is retried with
+      // the same ids on the next scan.
+      const receipt = yield* receipts
+        .getByCommandId({ commandId: command.commandId })
+        .pipe(Effect.catch(() => Effect.succeed(Option.none())));
+      if (Option.isSome(receipt) && receipt.value.status === "accepted") {
+        if (cold) yield* fence.noteColdWake(record.parentThreadId, messageId, ctx.nowMs);
+        return "sent" as const;
+      }
+      return Option.isSome(receipt) ? ("dropped" as const) : ("held" as const);
+    }).pipe(
+      // An accepted wake's slot was noted; any other outcome gives it back.
+      Effect.ensuring(
+        Effect.suspend(() =>
+          reserved === null ? Effect.void : fence.releaseColdSlot(record.parentThreadId, reserved),
+        ),
+      ),
+    );
+  };
 
   /**
    * The child's own newest delegation wake (delivered after `record` began), when `settled`
@@ -1150,6 +1332,10 @@ export const makeCompletionReturnDelivery = Effect.gen(function* () {
         for (const [childThreadId, checked] of waitingStopCheckedThrough)
           if (ctx.nowMs - checked.checkedMs > STOP_CHECK_FORGET_MS)
             waitingStopCheckedThrough.delete(childThreadId);
+        // A row that ended elsewhere (`ryco_task_cancel`) while its task waited on the person.
+        for (const [childThreadId, waiting] of waitingOnYouSince)
+          if (ctx.nowMs - waiting.checkedMs > STOP_CHECK_FORGET_MS)
+            waitingOnYouSince.delete(childThreadId);
         for (const record of yield* repository.listDue(now)) {
           yield* processDue(record, ctx).pipe(
             Effect.catch(() =>

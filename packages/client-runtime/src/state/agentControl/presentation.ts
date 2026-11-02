@@ -268,6 +268,21 @@ function planPresentation(proposal: AgentControlProposal): {
         runtimeLabel: null,
         detailSections: [{ heading: "Message", lines: [`Thread: ${plan.threadId}`, plan.text] }],
       };
+    case "worktreeHandoff":
+      return {
+        actionLabel: "Move chat into a worktree",
+        targetLabel: `thread ${shortId(plan.threadId)}`,
+        runtimeLabel: null,
+        detailSections: [
+          {
+            heading: "Worktree",
+            lines: [
+              `Branch: ${plan.branch}`,
+              ...(plan.continuationPrompt === undefined ? [] : [plan.continuationPrompt]),
+            ],
+          },
+        ],
+      };
     case "pullRequestWatch":
       return {
         actionLabel: plan.watching ? "Watch pull request" : "Stop watching pull request",

@@ -2,6 +2,7 @@ import { networkInterfaces } from "node:os";
 
 import type { AdvertisedEndpoint } from "@ryco/contracts";
 import { DEFAULT_HOSTED_APP_ORIGIN } from "@ryco/shared/hostedApp";
+import { isLoopbackHost, isWildcardHost, pairingQrUrl } from "@ryco/shared/pairingQr";
 import { buildDirectPairingUrl, buildHostedPairingUrl } from "@ryco/shared/pairingUrl";
 import { isTailscaleIpv4Address } from "@ryco/tailscale";
 import { DateTime, Effect } from "effect";
@@ -25,6 +26,8 @@ export interface HeadlessServeAccessInfo {
    */
   readonly token?: string;
   readonly pairingUrl?: string;
+  /** What the QR code holds: `pairingUrl`, or null when only this computer can reach it. */
+  readonly qrUrl?: string | null;
   /** Minutes until the one-time token expires, when known. */
   readonly tokenExpiresInMinutes?: number;
   /** Further ways to reach this server, beyond `pairingUrl`. */
@@ -35,22 +38,15 @@ export interface HeadlessServeAccessInfo {
 
 type NetworkInterfacesMap = ReturnType<typeof networkInterfaces>;
 
-export const isLoopbackHost = (host: string | undefined): boolean => {
-  if (!host || host.length === 0) {
-    return true;
-  }
+// The loopback rule lives with the pairing links, so the web's QR codes follow it too.
+export { isLoopbackHost, isWildcardHost, pairingQrUrl };
 
-  return (
-    host === "localhost" ||
-    host === "127.0.0.1" ||
-    host === "::1" ||
-    host === "[::1]" ||
-    host.startsWith("127.")
-  );
-};
-
-export const isWildcardHost = (host: string | undefined): boolean =>
-  host === "0.0.0.0" || host === "::" || host === "[::]";
+/**
+ * Printed instead of a QR code when the only pairing link is a loopback address: a
+ * phone scanning it would reach itself, not this node.
+ */
+export const LOOPBACK_ONLY_PAIRING_NOTE =
+  "Only this computer can reach this node. Turn on network access or Tailscale Serve to pair another device.";
 
 /**
  * Does the listener accept connections on every interface? An unset host does:
@@ -187,7 +183,11 @@ export const formatHeadlessServeOutput = (
           `Hub relay: enabled via ${accessInfo.hubOrigin}. Link this node to your account with \`ryco hub login\` (or \`ryco hub enroll\`); check it with \`ryco hub status\`.`,
         ]),
     "",
-    renderQrCode(accessInfo.pairingUrl),
+    ...(accessInfo.qrUrl === undefined
+      ? [renderQrCode(accessInfo.pairingUrl)]
+      : accessInfo.qrUrl === null
+        ? [LOOPBACK_ONLY_PAIRING_NOTE]
+        : [renderQrCode(accessInfo.qrUrl)]),
     "",
   ].join("\n");
 };
@@ -209,6 +209,8 @@ export const resolveHeadlessServeLinks = (input: {
 }): {
   readonly connectionString: string;
   readonly pairingUrl: string;
+  /** `pairingUrl` unless it is a loopback address (the fallback, or a loopback `--base-url`). */
+  readonly qrUrl: string | null;
   readonly alternativeLinks: ReadonlyArray<HeadlessServeAccessLink>;
 } => {
   const reachable = input.endpoints.filter(
@@ -237,9 +239,11 @@ export const resolveHeadlessServeLinks = (input: {
       });
     }
   }
+  const pairingUrl = buildPairingUrl(connectionString, input.credential);
   return {
     connectionString,
-    pairingUrl: buildPairingUrl(connectionString, input.credential),
+    pairingUrl,
+    qrUrl: pairingQrUrl(pairingUrl),
     alternativeLinks,
   };
 };

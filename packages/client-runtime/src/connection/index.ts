@@ -5,6 +5,7 @@ export * from "./catalog.ts";
 export * from "./environmentRoutes.ts";
 export * from "./environmentRouteUpgrader.ts";
 export * from "./hostFreeze.ts";
+export * from "./nodeRoute.ts";
 export * from "./hubLinkedDirectAccess.ts";
 export * from "./hubLinkedDirectTarget.ts";
 export * from "./environmentStateSink.ts";

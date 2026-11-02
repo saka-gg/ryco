@@ -19,6 +19,7 @@ const actionsMock = vi.hoisted(() => ({
   disconnectSavedEnvironment: vi.fn(() => Promise.resolve()),
   removeSavedEnvironment: vi.fn(() => Promise.resolve()),
   renameSavedEnvironment: vi.fn(),
+  setSavedEnvironmentEnabled: vi.fn(() => Promise.resolve()),
 }));
 const rowsMock = vi.hoisted(() => ({
   rows: [] as ReadonlyArray<unknown>,
@@ -145,12 +146,14 @@ function savedRow(
   environmentId: string,
   label: string,
   connectionState: "connected" | "disconnected" | "error" = "connected",
+  switchedOff = false,
 ) {
   return {
     record: { environmentId, label, httpBaseUrl: "https://mac.local:44342" },
     runtime: { connectionState, authState: "authenticated", role: "owner" },
     tone: { label: "Connected", pillClassName: "bg-success-bg", textClassName: "text-success" },
-    statusLabel: "Connected",
+    statusLabel: switchedOff ? "Switched off" : "Connected",
+    switchedOff,
   };
 }
 
@@ -188,6 +191,7 @@ beforeEach(() => {
   actionsMock.disconnectSavedEnvironment.mockClear();
   actionsMock.removeSavedEnvironment.mockClear();
   actionsMock.renameSavedEnvironment.mockClear();
+  actionsMock.setSavedEnvironmentEnabled.mockClear();
   confirmMock.mockClear();
   hostedMock.ensureMobileHostedSession.mockClear();
   hostedMock.controller.selectNode.mockClear();
@@ -245,6 +249,36 @@ describe("Machines — direct plane", () => {
     expect(actionsMock.reconnectSavedEnvironment).toHaveBeenCalledWith("env-1");
   });
 
+  it("switches a machine off without forgetting it", () => {
+    const tree = ConnectionsRouteScreen();
+    expect(render(tree).some((node) => String(node.props.className).includes("opacity-45"))).toBe(
+      false,
+    );
+    buttons(tree)
+      .find((button) => button.label === "Switch off")
+      ?.press();
+    expect(actionsMock.setSavedEnvironmentEnabled).toHaveBeenCalledWith("env-1", false);
+    expect(actionsMock.removeSavedEnvironment).not.toHaveBeenCalled();
+  });
+
+  it("lists a switched-off machine dimmed, offering only to switch it on, rename or forget it", () => {
+    rowsMock.rows = [savedRow("env-1", "Studio Mac", "disconnected", true)];
+    const tree = ConnectionsRouteScreen();
+    expect(texts(tree)).toContain("Switched off");
+    expect(render(tree).some((node) => String(node.props.className).includes("opacity-45"))).toBe(
+      true,
+    );
+    expect(
+      buttons(tree)
+        .map((button) => button.label)
+        .filter((label) => label !== "Pair directly"),
+    ).toEqual(["Switch on", "Rename", "Forget"]);
+    buttons(tree)
+      .find((button) => button.label === "Switch on")
+      ?.press();
+    expect(actionsMock.setSavedEnvironmentEnabled).toHaveBeenCalledWith("env-1", true);
+  });
+
   it("still renders the empty state with no saved environments", () => {
     rowsMock.rows = [];
     const rendered = texts(ConnectionsRouteScreen());
@@ -260,7 +294,14 @@ describe("Machines — hosted mode absent", () => {
     const labels = buttons(tree).map((button) => button.label);
     // Settings is no longer here — it moved to the Home header gear. The row
     // verbs stay in the transport register; only the CTA took wave 4's noun.
-    expect(labels).toEqual(["Pair directly", "Use", "Disconnect", "Rename", "Forget"]);
+    expect(labels).toEqual([
+      "Pair directly",
+      "Use",
+      "Disconnect",
+      "Switch off",
+      "Rename",
+      "Forget",
+    ]);
     expect(texts(tree)).toContain("Hub nodes unavailable");
   });
 });

@@ -5,7 +5,7 @@ import * as NodePath from "node:path";
 import { DatabaseSync } from "node:sqlite";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
-import { afterEach, describe, expect, it } from "@effect/vitest";
+import { afterEach, describe, expect, it, vi } from "@effect/vitest";
 import { Effect } from "effect";
 
 import {
@@ -19,6 +19,12 @@ import {
   serveStateDirectory,
 } from "./bootGuard.ts";
 import { type NodeUpdateMarker, readNodeUpdateMarker, writeNodeUpdateMarker } from "./marker.ts";
+import {
+  armNodeBootWatchdog,
+  disarmNodeBootWatchdog,
+  isNodeBootWatchdogArmed,
+  UNATTENDED_BOOT_READY_TIMEOUT_MS,
+} from "./updateProtocol.ts";
 
 const startedAt = "2026-10-21T10:00:00.000Z";
 const nowMs = Date.parse(startedAt) + 60_000;
@@ -34,6 +40,7 @@ const guarded = (overrides: Partial<GuardedNodeUpdateMarker> = {}): GuardedNodeU
   targetVersion: "0.1.36",
   startedAt,
   bootAttempts: 0,
+  unattended: false,
   settled: false,
   rollback: plan,
   ...overrides,
@@ -293,6 +300,40 @@ describe("node update rollback", () => {
     }).pipe(Effect.provide(NodeServices.layer)),
   );
 
+  it.effect("arms the readiness watchdog at start after an update nobody asked for", () =>
+    Effect.gen(function* () {
+      const node = makeNode({});
+      let armed = 0;
+      const start = () =>
+        runNodeUpdateBootGuard({
+          markerPath: node.markerPath,
+          runningVersion: () => "0.1.36",
+          log: (line) => node.lines.push(line),
+          armWatchdog: () => {
+            armed += 1;
+          },
+        });
+      yield* writeNodeUpdateMarker(node.markerPath, { ...node.marker, unattended: true });
+      // Both starts the next one can still roll back.
+      expect(start()).toBe("boot");
+      expect(start()).toBe("boot");
+      expect(armed).toBe(2);
+      // Past the rollback tries the release starts as it is: exiting would only restart it.
+      yield* writeNodeUpdateMarker(node.markerPath, {
+        ...node.marker,
+        unattended: true,
+        bootAttempts: NODE_UPDATE_MAX_BOOT_ATTEMPTS + NODE_UPDATE_ROLLBACK_TRIES,
+      });
+      expect(start()).toBe("boot");
+      expect(armed).toBe(2);
+      // An update a person ran is left to them.
+      yield* writeNodeUpdateMarker(node.markerPath, node.marker);
+      expect(start()).toBe("boot");
+      expect(armed).toBe(2);
+      node.live.close();
+    }).pipe(Effect.provide(NodeServices.layer)),
+  );
+
   it.effect("stops counting once the server marked the release ready", () =>
     Effect.gen(function* () {
       const node = makeNode({});
@@ -344,4 +385,33 @@ describe("node update rollback", () => {
       expect(marker?.rolledBack?.databaseError).toContain("pre-0.1.35.sqlite is missing");
     }).pipe(Effect.provide(NodeServices.layer)),
   );
+});
+
+describe("node boot readiness watchdog", () => {
+  afterEach(() => {
+    disarmNodeBootWatchdog();
+    vi.useRealTimers();
+  });
+
+  it("ends the start only when nothing disarmed it in time", () => {
+    vi.useFakeTimers();
+    let timedOut = 0;
+    armNodeBootWatchdog(() => {
+      timedOut += 1;
+    });
+    expect(isNodeBootWatchdogArmed()).toBe(true);
+    vi.advanceTimersByTime(UNATTENDED_BOOT_READY_TIMEOUT_MS - 1);
+    expect(timedOut).toBe(0);
+    vi.advanceTimersByTime(1);
+    expect(timedOut).toBe(1);
+
+    armNodeBootWatchdog(() => {
+      timedOut += 1;
+    });
+    vi.advanceTimersByTime(UNATTENDED_BOOT_READY_TIMEOUT_MS - 1);
+    disarmNodeBootWatchdog();
+    expect(isNodeBootWatchdogArmed()).toBe(false);
+    vi.advanceTimersByTime(UNATTENDED_BOOT_READY_TIMEOUT_MS);
+    expect(timedOut).toBe(1);
+  });
 });

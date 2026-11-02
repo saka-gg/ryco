@@ -4,17 +4,24 @@ import {
 } from "@ryco/shared/retiredFeatures";
 import { canSnoozeThread } from "@ryco/shared/threadSnooze";
 import { isChatProject, projectKindOf } from "@ryco/shared/projectKind";
-import { forkContextHandoffPending } from "@ryco/shared/threadFork";
+import {
+  CARRIED_FORK_SOURCE_ID_SUFFIX,
+  forkContextHandoffPending,
+  isCarriedForkSourceThreadId,
+} from "@ryco/shared/threadFork";
 import { applicableUsageLimit } from "@ryco/shared/usageLimit";
 import type {
   AgentTokenMode,
   CommandId,
+  DelegationReturnGuard,
   MessageId,
   OrchestrationCommand,
   OrchestrationEvent,
   OrchestrationMessage,
   OrchestrationReadModel,
   PullRequestWatchEndReason,
+  ServerWakeSource,
+  ThreadCommandWatchUpdatedPayload,
   ThreadForkCreateCommand,
   ThreadLineage,
   ThreadUsageLimit,
@@ -40,7 +47,11 @@ import {
   initialPullRequestLinks,
   readWorktreePullRequestLinks,
 } from "@ryco/shared/worktreePullRequests";
-import { canSettleThread, type ThreadSettlementBlocker } from "@ryco/shared/threadSettlement";
+import {
+  canFileThreadForSettlement,
+  canSettleThread,
+  type ThreadSettlementBlocker,
+} from "@ryco/shared/threadSettlement";
 import { endPullRequestWatches } from "@ryco/shared/pullRequestWatchSummary";
 import {
   TURN_STEER_FAILED_ACTIVITY_KIND,
@@ -82,6 +93,7 @@ import {
   requireThreadReadyForCheckpointRevert,
 } from "./checkpointRevertPolicy.ts";
 import { isUserOriginatedCommandId } from "./commandOrigin.ts";
+import { loadCommandWatchRules } from "./commandWatchLoader.ts";
 import type { FollowUpQueueDraft, FollowUpQueueRules } from "./followUpQueue.ts";
 import {
   followUpQueueConcernedBy,
@@ -192,6 +204,13 @@ const decideThreadCreated = Effect.fn("decideThreadCreated")(function* ({
     command,
     threadId: fields.threadId,
   });
+  // Reserved for carried forks' placeholder sources, which must never name a thread here.
+  if (isCarriedForkSourceThreadId(fields.threadId)) {
+    return yield* new OrchestrationCommandInvariantError({
+      commandType: command.type,
+      detail: `Thread ids ending in '${CARRIED_FORK_SOURCE_ID_SUFFIX}' are reserved for forks carried from another machine.`,
+    });
+  }
   const tokenMode = normalizeTokenMode(fields.tokenMode);
   const event: PlannedOrchestrationEvent = {
     ...withEventBase({
@@ -288,6 +307,27 @@ function forkInheritedHistoryBlocker(command: ThreadForkCreateCommand): string |
   return null;
 }
 
+/**
+ * Why a fork carried from another node (`forked.origin`) cannot be published, or null. Its
+ * source lives on that node: here the source id is a placeholder that must name no thread, and
+ * the carried text arrives only as inherited user and assistant messages (and plans), for a
+ * fresh session to receive by context handoff. No activity and no shared checkout. (Attachments
+ * of inherited messages must be the fork's own copies, `forkInheritedHistoryBlocker`; a carried
+ * fork has none.)
+ */
+function carriedForkBlocker(
+  readModel: OrchestrationReadModel,
+  command: ThreadForkCreateCommand,
+): string | null {
+  return findThreadById(readModel, command.sourceThreadId) !== undefined ||
+    command.forked.providerContext !== "handoff" ||
+    command.activities.length > 0 ||
+    (command.worktreeId !== null && command.newWorktree === null) ||
+    command.messages.some((message) => message.role !== "user" && message.role !== "assistant")
+    ? "A carried fork has no local source, inherits only user and assistant text, has a checkout of its own and continues by handoff."
+    : null;
+}
+
 const STEER_TURN_ENDED_ERROR =
   "The turn finished before this message could be steered. It stays queued and is sent next.";
 
@@ -305,9 +345,13 @@ function planTurnSteerRejection(input: {
   readonly reason: TurnSteerRejectionReason;
   /** The provider may have received it: clients hold the message for an explicit retry. */
   readonly deliveryUncertain?: boolean | undefined;
+  /** The provider stopped the turn to take it: the queue sends it next. */
+  readonly restartedTurn?: boolean | undefined;
   readonly occurredAt: string;
 }): ReadonlyArray<PlannedOrchestrationEvent> {
   const deliveryUncertain = input.deliveryUncertain === true ? { deliveryUncertain: true } : {};
+  const restartedTurn =
+    input.reason === "deferred" && input.restartedTurn === true ? { restartedTurn: true } : {};
   const rejectedEvent: PlannedOrchestrationEvent = {
     ...withEventBase({
       aggregateKind: "thread",
@@ -323,6 +367,7 @@ function planTurnSteerRejection(input: {
       error: input.error,
       reason: input.reason,
       ...deliveryUncertain,
+      ...restartedTurn,
       resolvedAt: input.occurredAt,
     },
   };
@@ -437,6 +482,29 @@ function activityUnsettledEvent(input: {
   };
 }
 
+/**
+ * A person's message to a thread they settled while it was working takes the settle back: the
+ * thread stays active (T3 Code #18606). Server wakes (delegated results, pull request news, goal
+ * turns) and Agent Control messages continue the filed work, so they keep it.
+ */
+function settleIntentClearedEvent(input: {
+  readonly command: OrchestrationCommand;
+  readonly thread: OrchestrationReadModel["threads"][number];
+  readonly occurredAt: string;
+}): PlannedOrchestrationEvent | null {
+  if (input.thread.settleWhenIdleAt == null) return null;
+  return {
+    ...withEventBase({
+      aggregateKind: "thread",
+      aggregateId: input.thread.id,
+      occurredAt: input.occurredAt,
+      commandId: input.command.commandId,
+    }),
+    type: "thread.unsettled",
+    payload: { threadId: input.thread.id, reason: "activity", updatedAt: input.occurredAt },
+  };
+}
+
 function usageLimitClearedEvent(input: {
   readonly command: OrchestrationCommand;
   readonly thread: OrchestrationReadModel["threads"][number];
@@ -526,12 +594,90 @@ function pullRequestWatchesEndedEvent(input: {
   };
 }
 
-/** `decided` followed by `ended` when there is one. */
-const withPullRequestWatchesEnded = (
+/**
+ * Ends the thread's active command watches (`watchId` only, when given) inside the command that
+ * ends them, like `pullRequestWatchesEndedEvent`. Their rules load only for a thread with one.
+ */
+const commandWatchesEndedEvent = Effect.fnUntraced(function* (
+  command: OrchestrationCommand,
+  thread: OrchestrationReadModel["threads"][number],
+  reason: "settled" | "archived" | "trashed" | "stopped" | "scope-changed",
+  occurredAt: string,
+) {
+  if ((thread.commandWatchState?.active.length ?? 0) === 0) return null;
+  return commandWatchEvent(
+    command,
+    occurredAt,
+    (yield* loadCommandWatchRules).endedPayload(thread, reason, occurredAt),
+  );
+});
+
+const commandWatchEvent = (
+  command: OrchestrationCommand,
+  occurredAt: string,
+  payload: ThreadCommandWatchUpdatedPayload | null,
+) =>
+  payload === null
+    ? null
+    : ({
+        ...withEventBase({
+          aggregateKind: "thread",
+          aggregateId: payload.threadId,
+          occurredAt,
+          commandId: command.commandId,
+        }),
+        type: "thread.command-watch-updated",
+        payload,
+      } satisfies PlannedOrchestrationEvent);
+
+/** A lifecycle command's end of the thread's pull request and command watches. */
+const watchesEnded = Effect.fnUntraced(function* (
+  command: OrchestrationCommand,
+  thread: OrchestrationReadModel["threads"][number],
+  reason: "settled" | "archived" | "trashed" | "stopped",
+  occurredAt: string,
+) {
+  return [
+    pullRequestWatchesEndedEvent({ command, thread, reason, occurredAt }),
+    yield* commandWatchesEndedEvent(command, thread, reason, occurredAt),
+  ];
+});
+
+/** `decided` followed by the `ended` events there are. */
+const withWatchesEnded = (
   decided: DecideOrchestrationCommandResult,
-  ended: PlannedOrchestrationEvent | null,
-): DecideOrchestrationCommandResult =>
-  ended === null ? decided : [...plannedEventList(decided), ended];
+  ended: ReadonlyArray<PlannedOrchestrationEvent | null>,
+): DecideOrchestrationCommandResult => {
+  const events = ended.filter((event) => event !== null);
+  return events.length === 0 ? decided : [...plannedEventList(decided), ...events];
+};
+
+/**
+ * A settle: hands the work back, so it also ends the thread's pull request and command watches
+ * (a watched chat never settles on its own; T3 Code 51f7f77f87).
+ */
+const threadSettledEvents = Effect.fnUntraced(function* (input: {
+  readonly command: OrchestrationCommand;
+  readonly thread: OrchestrationReadModel["threads"][number];
+  readonly settledAt: string;
+  readonly updatedAt: string;
+  readonly occurredAt: string;
+}) {
+  const { command, thread, occurredAt } = input;
+  return withWatchesEnded(
+    {
+      ...withEventBase({
+        aggregateKind: "thread",
+        aggregateId: thread.id,
+        occurredAt,
+        commandId: command.commandId,
+      }),
+      type: "thread.settled",
+      payload: { threadId: thread.id, settledAt: input.settledAt, updatedAt: input.updatedAt },
+    },
+    yield* watchesEnded(command, thread, "settled", occurredAt),
+  );
+});
 
 /**
  * A planned event as the projector sees it once committed. `Omit` over the event union loses
@@ -603,6 +749,57 @@ const decideCommandSequence = Effect.fn("decideCommandSequence")(function* ({
   }
 
   return plannedEvents;
+});
+
+/**
+ * A watch update's events: the watch event, then (with a wake) the wake's turn start. The wake
+ * is a queued turn start like a delegated result's: the same decision (active turn, usage
+ * limit, wake guard, pending revert, lifecycle) under the same command id. The watch event goes
+ * first, so the turn's events already see the recorded progress. Any refusal rejects the whole
+ * command: no progress without its wake.
+ */
+const withWatchWake = Effect.fnUntraced(function* (
+  readModel: OrchestrationReadModel,
+  thread: OrchestrationReadModel["threads"][number],
+  command: {
+    readonly commandId: CommandId;
+    readonly threadId: ThreadId;
+    readonly createdAt: string;
+    readonly wake?:
+      | {
+          readonly messageId: MessageId;
+          readonly text: string;
+          readonly guard: DelegationReturnGuard;
+        }
+      | undefined;
+  },
+  source: ServerWakeSource,
+  watchEvent: PlannedOrchestrationEvent,
+) {
+  const wake = command.wake;
+  if (wake === undefined) return watchEvent;
+  const turnEvents = yield* decideCommand({
+    readModel,
+    command: {
+      type: "thread.turn.start",
+      commandId: command.commandId,
+      threadId: command.threadId,
+      message: {
+        messageId: wake.messageId,
+        role: "user",
+        text: wake.text,
+        attachments: [],
+      },
+      // No model: the chat's stored pick applies where the session can take it
+      // (`threadContinuation.ts`).
+      runtimeMode: thread.runtimeMode,
+      interactionMode: thread.interactionMode,
+      ...(thread.tokenMode === undefined ? {} : { tokenMode: thread.tokenMode }),
+      delegationReturnGuard: { ...wake.guard, source },
+      createdAt: command.createdAt,
+    },
+  });
+  return [watchEvent, ...plannedEventList(turnEvents)];
 });
 
 /**
@@ -980,14 +1177,22 @@ const decideCommand = Effect.fn("decideOrchestrationCommand.command")(function* 
       } = command;
       const reject = (detail: string) =>
         new OrchestrationCommandInvariantError({ commandType: command.type, detail });
-      const source = yield* requireThread({ readModel, command, threadId: sourceThreadId });
+      // A carried fork's source is on another node: nothing of it is looked up here.
+      const carriedBlocker =
+        forked.origin === undefined ? null : carriedForkBlocker(readModel, command);
+      if (carriedBlocker !== null) return yield* reject(carriedBlocker);
+      const source =
+        forked.origin === undefined
+          ? yield* requireThread({ readModel, command, threadId: sourceThreadId })
+          : null;
       // The boundary was pinned when the fork was accepted: the source may have moved to
       // Trash or been archived since, but its history must still exist.
-      if (!isThreadLive(source) && !isThreadTrashed(source)) {
+      if (source !== null && !isThreadLive(source) && !isThreadTrashed(source)) {
         return yield* reject(`Source thread '${sourceThreadId}' was deleted permanently.`);
       }
       // A fork stays in its source's project. Only a chat forks into a new chat.
       if (
+        source !== null &&
         source.projectId !== fields.projectId &&
         !(
           isChatProject(findProjectById(readModel, source.projectId)) &&
@@ -1030,7 +1235,8 @@ const decideCommand = Effect.fn("decideOrchestrationCommand.command")(function* 
       }
       const resolved = resolveChildThreadLineage({
         readModel,
-        parent: source,
+        // A carried fork's source is a placeholder: no thread here, so no lineage of its own.
+        parent: source ?? { id: sourceThreadId, lineage: null },
         childThreadId: fields.threadId,
         link: { relationship: FORKED_THREAD_RELATIONSHIP, sourceMessageId, sourceTurnId },
       });
@@ -1197,9 +1403,9 @@ const decideCommand = Effect.fn("decideOrchestrationCommand.command")(function* 
         occurredAt,
       });
       // A chat in Trash takes no turns, so its watches could never deliver anything.
-      return withPullRequestWatchesEnded(
+      return withWatchesEnded(
         limitCleared === null ? trashedEvent : [trashedEvent, limitCleared],
-        pullRequestWatchesEndedEvent({ command, thread, reason: "trashed", occurredAt }),
+        yield* watchesEnded(command, thread, "trashed", occurredAt),
       );
     }
 
@@ -1275,9 +1481,9 @@ const decideCommand = Effect.fn("decideOrchestrationCommand.command")(function* 
         reason: "archived",
         occurredAt,
       });
-      return withPullRequestWatchesEnded(
+      return withWatchesEnded(
         limitCleared === null ? archivedEvent : [archivedEvent, limitCleared],
-        pullRequestWatchesEndedEvent({ command, thread: target, reason: "archived", occurredAt }),
+        yield* watchesEnded(command, target, "archived", occurredAt),
       );
     }
 
@@ -1353,6 +1559,32 @@ const decideCommand = Effect.fn("decideOrchestrationCommand.command")(function* 
         type: "thread.unsnoozed",
         payload: { threadId: command.threadId, updatedAt: occurredAt },
       };
+    }
+    case "thread.hide":
+    case "thread.unhide": {
+      const thread = yield* requireThread({ readModel, command, threadId: command.threadId });
+      if (
+        command.type === "thread.hide" &&
+        (thread.archivedAt !== null || thread.deletedAt !== null)
+      ) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `Thread '${command.threadId}' is archived or deleted.`,
+        });
+      }
+      // Not thread activity, so its recency stays. Hiding again restarts the shelf time, so a
+      // failure seen before it stays hidden.
+      const occurredAt = nowIso();
+      const base = withEventBase({
+        aggregateKind: "thread",
+        aggregateId: command.threadId,
+        occurredAt,
+        commandId: command.commandId,
+      });
+      const payload = { threadId: command.threadId, updatedAt: thread.updatedAt };
+      return command.type === "thread.hide"
+        ? { ...base, type: "thread.hidden", payload: { ...payload, hiddenAt: occurredAt } }
+        : { ...base, type: "thread.unhidden", payload };
     }
     case "thread.usage-limit.record": {
       const thread = yield* requireThread({ readModel, command, threadId: command.threadId });
@@ -1434,29 +1666,36 @@ const decideCommand = Effect.fn("decideOrchestrationCommand.command")(function* 
         command,
         threadId: command.threadId,
       });
+      const occurredAt = nowIso();
       if (thread.settledOverride === "settled" && thread.settledAt !== null) {
-        const occurredAt = nowIso();
-        return withPullRequestWatchesEnded(
-          {
-            ...withEventBase({
-              aggregateKind: "thread",
-              aggregateId: command.threadId,
-              occurredAt,
-              commandId: command.commandId,
-            }),
-            type: "thread.settled",
-            payload: {
-              threadId: command.threadId,
-              settledAt: thread.settledAt,
-              updatedAt: thread.updatedAt,
-            },
-          },
-          pullRequestWatchesEndedEvent({ command, thread, reason: "settled", occurredAt }),
-        );
+        return yield* threadSettledEvents({
+          command,
+          thread,
+          settledAt: thread.settledAt,
+          updatedAt: thread.updatedAt,
+          occurredAt,
+        });
       }
 
-      const occurredAt = nowIso();
-      const eligibility = canSettleThread(threadSettlementInput(readModel, thread, occurredAt));
+      const settlement = threadSettlementInput(readModel, thread, occurredAt);
+      const eligibility = canSettleThread(settlement);
+      if (!eligibility.canSettle && canFileThreadForSettlement(settlement)) {
+        // Still working: file it, and the node settles it when the work ends.
+        return {
+          ...withEventBase({
+            aggregateKind: "thread",
+            aggregateId: command.threadId,
+            occurredAt,
+            commandId: command.commandId,
+          }),
+          type: "thread.settle-deferred",
+          payload: {
+            threadId: command.threadId,
+            settleWhenIdleAt: thread.settleWhenIdleAt ?? occurredAt,
+            updatedAt: thread.updatedAt,
+          },
+        };
+      }
       if (!eligibility.canSettle) {
         return yield* new OrchestrationCommandInvariantError({
           commandType: command.type,
@@ -1467,26 +1706,56 @@ const decideCommand = Effect.fn("decideOrchestrationCommand.command")(function* 
           }.`,
         });
       }
+      // A filed thread keeps its place on the shelf when it settles.
+      return yield* threadSettledEvents({
+        command,
+        thread,
+        settledAt: thread.settleWhenIdleAt ?? occurredAt,
+        updatedAt: occurredAt,
+        occurredAt,
+      });
+    }
 
-      // Settling hands the work back: a watched chat never settles on its own, so a manual
-      // settle ends its watches (T3 Code 51f7f77f87).
-      return withPullRequestWatchesEnded(
-        {
-          ...withEventBase({
-            aggregateKind: "thread",
-            aggregateId: command.threadId,
-            occurredAt,
-            commandId: command.commandId,
-          }),
-          type: "thread.settled",
-          payload: {
-            threadId: command.threadId,
-            settledAt: occurredAt,
-            updatedAt: occurredAt,
-          },
-        },
-        pullRequestWatchesEndedEvent({ command, thread, reason: "settled", occurredAt }),
+    case "thread.settle-when-idle": {
+      const thread = yield* requireThread({ readModel, command, threadId: command.threadId });
+      const filedAt = thread.settleWhenIdleAt;
+      if (filedAt == null) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `Thread '${command.threadId}' is not waiting to settle.`,
+        });
+      }
+      // A failed or stopped turn needs the person: the thread stays active, unfiled.
+      const sessionStatus = thread.session?.status ?? null;
+      const turnState = thread.latestTurn?.state;
+      if (
+        sessionStatus !== "running" &&
+        sessionStatus !== "starting" &&
+        turnState !== "running" &&
+        (turnState === "error" || turnState === "interrupted" || sessionStatus === "error")
+      ) {
+        return settleIntentClearedEvent({ command, thread, occurredAt: command.createdAt })!;
+      }
+      const eligibility = canSettleThread(
+        threadSettlementInput(readModel, thread, command.createdAt),
       );
+      if (!eligibility.canSettle) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: `Thread '${command.threadId}' cannot settle yet because ${
+            eligibility.blocker === null
+              ? "its current state is ineligible"
+              : settlementBlockerDetail(eligibility.blocker)
+          }.`,
+        });
+      }
+      return yield* threadSettledEvents({
+        command,
+        thread,
+        settledAt: filedAt,
+        updatedAt: command.createdAt,
+        occurredAt: command.createdAt,
+      });
     }
 
     case "thread.unsettle": {
@@ -1547,49 +1816,61 @@ const decideCommand = Effect.fn("decideOrchestrationCommand.command")(function* 
     }
 
     case "thread.runtime-mode.set": {
-      yield* requireThread({
+      const thread = yield* requireThread({
         readModel,
         command,
         threadId: command.threadId,
       });
       const occurredAt = nowIso();
-      return {
-        ...withEventBase({
-          aggregateKind: "thread",
-          aggregateId: command.threadId,
-          occurredAt,
-          commandId: command.commandId,
-        }),
-        type: "thread.runtime-mode-set",
-        payload: {
-          threadId: command.threadId,
-          runtimeMode: command.runtimeMode,
-          updatedAt: occurredAt,
+      // Command watches run unattended only in Full access: leaving it ends them (T3 Code).
+      return withWatchesEnded(
+        {
+          ...withEventBase({
+            aggregateKind: "thread",
+            aggregateId: command.threadId,
+            occurredAt,
+            commandId: command.commandId,
+          }),
+          type: "thread.runtime-mode-set",
+          payload: {
+            threadId: command.threadId,
+            runtimeMode: command.runtimeMode,
+            updatedAt: occurredAt,
+          },
         },
-      };
+        command.runtimeMode === "full-access"
+          ? []
+          : [yield* commandWatchesEndedEvent(command, thread, "scope-changed", occurredAt)],
+      );
     }
 
     case "thread.interaction-mode.set": {
-      yield* requireThread({
+      const thread = yield* requireThread({
         readModel,
         command,
         threadId: command.threadId,
       });
       const occurredAt = nowIso();
-      return {
-        ...withEventBase({
-          aggregateKind: "thread",
-          aggregateId: command.threadId,
-          occurredAt,
-          commandId: command.commandId,
-        }),
-        type: "thread.interaction-mode-set",
-        payload: {
-          threadId: command.threadId,
-          interactionMode: command.interactionMode,
-          updatedAt: occurredAt,
+      // And in default mode only.
+      return withWatchesEnded(
+        {
+          ...withEventBase({
+            aggregateKind: "thread",
+            aggregateId: command.threadId,
+            occurredAt,
+            commandId: command.commandId,
+          }),
+          type: "thread.interaction-mode-set",
+          payload: {
+            threadId: command.threadId,
+            interactionMode: command.interactionMode,
+            updatedAt: occurredAt,
+          },
         },
-      };
+        command.interactionMode === "default"
+          ? []
+          : [yield* commandWatchesEndedEvent(command, thread, "scope-changed", occurredAt)],
+      );
     }
 
     case "thread.token-mode.set": {
@@ -1791,7 +2072,7 @@ const decideCommand = Effect.fn("decideOrchestrationCommand.command")(function* 
           detail: blocker,
         });
       }
-      const watchEvent: PlannedOrchestrationEvent = {
+      return yield* withWatchWake(readModel, thread, command, "pull-request-watch", {
         ...withEventBase({
           aggregateKind: "thread",
           aggregateId: command.threadId,
@@ -1810,34 +2091,26 @@ const decideCommand = Effect.fn("decideOrchestrationCommand.command")(function* 
           ],
           updatedAt: command.createdAt,
         },
-      };
-      const wake = command.wake;
-      if (wake === undefined) return watchEvent;
-      // The wake is a queued turn start like a delegated result's: the same decision (active
-      // turn, usage limit, wake guard, pending revert, lifecycle) under the same command id.
-      // The watch event goes first, so the turn's events already see the recorded progress.
-      // Any refusal rejects the whole command: no progress without its wake.
-      const turnEvents = yield* decideCommand({
-        readModel,
-        command: {
-          type: "thread.turn.start",
-          commandId: command.commandId,
-          threadId: command.threadId,
-          message: {
-            messageId: wake.messageId,
-            role: "user",
-            text: wake.text,
-            attachments: [],
-          },
-          modelSelection: thread.modelSelection,
-          runtimeMode: thread.runtimeMode,
-          interactionMode: thread.interactionMode,
-          ...(thread.tokenMode === undefined ? {} : { tokenMode: thread.tokenMode }),
-          delegationReturnGuard: { ...wake.guard, source: "pull-request-watch" },
-          createdAt: command.createdAt,
-        },
       });
-      return [watchEvent, ...plannedEventList(turnEvents)];
+    }
+
+    // The user's stop, and the command watch service's revision-fenced change (with its wake).
+    // Agents start watches through Agent Control; no client command can.
+    case "thread.command-watch.stop":
+    case "thread.command-watch.update": {
+      const thread = yield* requireThread({ readModel, command, threadId: command.threadId });
+      const decision = (yield* loadCommandWatchRules).decide(readModel, thread, command);
+      if ("refused" in decision) {
+        return yield* new OrchestrationCommandInvariantError({
+          commandType: command.type,
+          detail: decision.refused,
+        });
+      }
+      const event = commandWatchEvent(command, command.createdAt, decision.payload);
+      if (event === null) return [];
+      return command.type === "thread.command-watch.stop"
+        ? event
+        : yield* withWatchWake(readModel, thread, command, "command-watch", event);
     }
 
     case "thread.queue.add":
@@ -2174,6 +2447,9 @@ const decideCommand = Effect.fn("decideOrchestrationCommand.command")(function* 
           ...(command.delegationReturnGuard
             ? { delegationReturnGuard: command.delegationReturnGuard }
             : {}),
+          ...(queueDispatch?.queuedOverModelSelection !== undefined
+            ? { queuedOverModelSelection: queueDispatch.queuedOverModelSelection }
+            : {}),
           ...(command.computerUse ? { computerUse: command.computerUse } : {}),
           ...(command.modelSelection !== undefined
             ? { modelSelection: command.modelSelection }
@@ -2206,11 +2482,21 @@ const decideCommand = Effect.fn("decideOrchestrationCommand.command")(function* 
               turnStartRequestedEvent,
             ]
           : [userMessageEvent, turnStartRequestedEvent];
-      const unsettledEvent = activityUnsettledEvent({
-        command,
-        thread: targetThread,
-        occurredAt: command.createdAt,
-      });
+      const startGuard = command.delegationReturnGuard;
+      const unsettledEvent =
+        activityUnsettledEvent({
+          command,
+          thread: targetThread,
+          occurredAt: command.createdAt,
+        }) ??
+        (isUserOriginatedCommandId(command.commandId) &&
+        (startGuard === undefined || serverWakeSource(startGuard) === "follow-up-queue")
+          ? settleIntentClearedEvent({
+              command,
+              thread: targetThread,
+              occurredAt: command.createdAt,
+            })
+          : null);
       const goalEvents =
         command.goal === undefined
           ? []
@@ -2279,6 +2565,23 @@ const decideCommand = Effect.fn("decideOrchestrationCommand.command")(function* 
         ...modeEvents,
         ...(unsettledEvent === null ? turnEvents : [unsettledEvent, ...turnEvents]),
         ...(autoResumedActivity === null ? [] : [autoResumedActivity]),
+        // An answer to an optional question whose turn ended: the engine claims the question in
+        // this commit's transaction, and this settles it with the message that carries it.
+        ...(command.optionalAnswer === undefined
+          ? []
+          : [
+              (yield* Effect.promise(
+                () => import("./optionalQuestionAnswers.ts"),
+              )).optionalAnswerResolvedEvent(
+                withEventBase({
+                  aggregateKind: "thread",
+                  aggregateId: command.threadId,
+                  occurredAt: command.createdAt,
+                  commandId: command.commandId,
+                }),
+                { ...command, optionalAnswer: command.optionalAnswer },
+              ),
+            ]),
       ];
     }
 
@@ -2308,7 +2611,14 @@ const decideCommand = Effect.fn("decideOrchestrationCommand.command")(function* 
           occurredAt: command.requestedAt,
         });
       }
-      return {
+      const steerIntentCleared = isUserOriginatedCommandId(command.commandId)
+        ? settleIntentClearedEvent({
+            command,
+            thread: targetThread,
+            occurredAt: command.requestedAt,
+          })
+        : null;
+      const steerRequested: PlannedOrchestrationEvent = {
         ...withEventBase({
           aggregateKind: "thread",
           aggregateId: command.threadId,
@@ -2326,6 +2636,7 @@ const decideCommand = Effect.fn("decideOrchestrationCommand.command")(function* 
           requestedAt: command.requestedAt,
         },
       };
+      return steerIntentCleared === null ? steerRequested : [steerIntentCleared, steerRequested];
     }
 
     case "thread.turn.interrupt": {
@@ -2337,7 +2648,7 @@ const decideCommand = Effect.fn("decideOrchestrationCommand.command")(function* 
       const resolvedTurnId = command.turnId ?? targetThread.session?.activeTurnId ?? undefined;
       // The user's Stop also stops watching (T3 Code): the agent is no longer to act on
       // pull request news. Agent Control and the node's own interrupts leave watches alone.
-      return withPullRequestWatchesEnded(
+      return withWatchesEnded(
         {
           ...withEventBase({
             aggregateKind: "thread",
@@ -2355,13 +2666,8 @@ const decideCommand = Effect.fn("decideOrchestrationCommand.command")(function* 
           },
         },
         isUserOriginatedCommandId(command.commandId)
-          ? pullRequestWatchesEndedEvent({
-              command,
-              thread: targetThread,
-              reason: "stopped",
-              occurredAt: command.createdAt,
-            })
-          : null,
+          ? yield* watchesEnded(command, targetThread, "stopped", command.createdAt)
+          : [],
       );
     }
 
@@ -2553,7 +2859,7 @@ const decideCommand = Effect.fn("decideOrchestrationCommand.command")(function* 
       });
       // Only the explicit "Stop session" action ends watches: a workspace switch and the
       // node's own stops (archive, checkout removal, chat promotion) also stop sessions.
-      return withPullRequestWatchesEnded(
+      return withWatchesEnded(
         {
           ...withEventBase({
             aggregateKind: "thread",
@@ -2568,13 +2874,8 @@ const decideCommand = Effect.fn("decideOrchestrationCommand.command")(function* 
           },
         },
         command.userStop === true && isUserOriginatedCommandId(command.commandId)
-          ? pullRequestWatchesEndedEvent({
-              command,
-              thread,
-              reason: "stopped",
-              occurredAt: command.createdAt,
-            })
-          : null,
+          ? yield* watchesEnded(command, thread, "stopped", command.createdAt)
+          : [],
       );
     }
 
@@ -3478,6 +3779,7 @@ const decideCommand = Effect.fn("decideOrchestrationCommand.command")(function* 
         error: command.resolution.error,
         reason: command.resolution.reason ?? "failed",
         deliveryUncertain: command.resolution.deliveryUncertain,
+        restartedTurn: command.resolution.restartedTurn,
         occurredAt: resolvedAt,
       });
     }

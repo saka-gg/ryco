@@ -8,10 +8,18 @@
 //        retries, outcomes and lifecycle: `createThreadForkAttemptController`),
 //        destinations, copy and the guarded call are the shared client
 //        runtime's (`@ryco/client-runtime/state/threads`), as in the native
-//        app; this file only renders them. The node decides everything.
+//        app; this file only renders them. The node decides everything. A
+//        request may carry a draft seed ("Continue as thread" from the side
+//        chat), which lands in the fork's composer, unsent, once it exists.
+//        "Another machine" (`CarriedForkBody.tsx`, same lazy chunk) carries the
+//        conversation to another of the user's machines instead.
 // Motion: the dialog grows out of the reply's fork button and folds back into it.
 
 import { scopeProjectRef, scopeThreadRef } from "@ryco/client-runtime/scoped";
+import {
+  CARRIED_FORK_COPY,
+  type CarriedForkTarget,
+} from "@ryco/client-runtime/state/threads/carriedFork";
 import { captureReviewedSendReadiness } from "@ryco/client-runtime/state/composer";
 import {
   alignThreadForkSelection,
@@ -27,6 +35,7 @@ import {
   THREAD_FORK_COPY,
   threadForkAttemptView,
   threadForkReplyExcerpt,
+  threadForkSeededPrompt,
   threadForkShellPorts,
   type ThreadForkAttemptControllerPorts,
   type ThreadForkAttemptNotice,
@@ -36,6 +45,7 @@ import {
 import {
   WS_METHODS,
   type EnvironmentId,
+  type ScopedThreadRef,
   type ThreadForkKey,
   type ThreadForkResult,
 } from "@ryco/contracts";
@@ -43,8 +53,9 @@ import { isChatProject } from "@ryco/shared/projectKind";
 import { Radio as RadioPrimitive } from "@base-ui/react/radio";
 import { useNavigate } from "@tanstack/react-router";
 import { AlertTriangleIcon, GitForkIcon } from "lucide-react";
-import { useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
+import { type ReactNode, useEffect, useMemo, useRef, useState, useSyncExternalStore } from "react";
 
+import { useComposerDraftStore } from "../../composerDraftStore";
 import { readEnvironmentApi } from "../../environmentApi";
 import { readEnvironmentConnection } from "../../environments/runtime";
 import { useHostedRpcCapability } from "../../hostedHub/capabilities";
@@ -71,6 +82,7 @@ import { Input } from "../ui/input";
 import { RadioGroup } from "../ui/radio-group";
 import { Spinner } from "../ui/spinner";
 import { stackedThreadToast, toastManager } from "../ui/toast";
+import { CarriedForkBody, useCarriedForkTargets } from "./CarriedForkBody";
 import { forkDialogNotices, forkSourceGitCwd } from "./ForkThreadDialog.logic";
 import {
   closeForkThreadDialog,
@@ -98,6 +110,13 @@ function webForkDialogPorts(environmentId: EnvironmentId): ThreadForkAttemptCont
     resolveApi: () => resolveThreadForkApi(() => readEnvironmentApi(environmentId)),
     ...threadForkShellPorts(environmentId),
   };
+}
+
+/** Adds the seed to the fork's composer draft, after any text there, once per fork. */
+function seedForkComposerDraft(forkRef: ScopedThreadRef, seed: string): void {
+  const drafts = useComposerDraftStore.getState();
+  const prompt = threadForkSeededPrompt(drafts.getComposerDraft(forkRef)?.prompt ?? "", seed);
+  if (prompt !== null) drafts.setPrompt(forkRef, prompt);
 }
 
 /* ───────── Host ───────── */
@@ -137,9 +156,75 @@ export function ForkThreadDialog() {
 
 /* ───────── Body ───────── */
 
+/**
+ * "This machine" forks on the source's node (the shared attempt controller); "Another machine"
+ * carries the conversation to a machine that has the same project (`CarriedForkBody`). The choice
+ * shows only while another machine qualifies, and cannot change while a request is in flight.
+ * Nor can the machine list: one that drops off it meanwhile must not unmount the body that is
+ * sending to it, or change which machine it reports on.
+ */
 function ForkThreadDialogBody(props: {
   readonly request: ForkThreadDialogRequest;
   readonly onBusyChange: (busy: boolean) => void;
+}) {
+  const { request, onBusyChange } = props;
+  const liveTargets = useCarriedForkTargets(request);
+  const [frozenTargets, setFrozenTargets] = useState<ReadonlyArray<CarriedForkTarget> | null>(null);
+  // A side chat's "Continue as thread" seeds the fork's composer on this machine; carrying it
+  // elsewhere would drop that draft, so it stays here.
+  const targets = request.draftSeed ? [] : (frozenTargets ?? liveTargets);
+  const [machine, setMachine] = useState<"this" | "other">("this");
+  const [busy, setBusy] = useState(false);
+  const handleBusyChange = useEvent((next: boolean) => {
+    setBusy(next);
+    setFrozenTargets(next ? targets : null);
+    onBusyChange(next);
+  });
+  const other = machine === "other" && targets.length > 0;
+  const machineSwitch =
+    targets.length > 0 ? (
+      <ForkOptionGroup
+        id="fork-thread-machine"
+        heading={CARRIED_FORK_COPY.machineHeading}
+        options={[
+          {
+            kind: "this",
+            label: CARRIED_FORK_COPY.thisMachine,
+            description: CARRIED_FORK_COPY.thisMachineDescription,
+            enabled: true,
+          },
+          {
+            kind: "other",
+            label: CARRIED_FORK_COPY.otherMachine,
+            description: CARRIED_FORK_COPY.otherMachineDescription,
+            enabled: true,
+          },
+        ]}
+        value={other ? "other" : "this"}
+        disabled={busy}
+        onChange={setMachine}
+      />
+    ) : null;
+  return other ? (
+    <CarriedForkBody
+      request={request}
+      targets={targets}
+      machineSwitch={machineSwitch}
+      onBusyChange={handleBusyChange}
+    />
+  ) : (
+    <LocalForkBody
+      request={request}
+      onBusyChange={handleBusyChange}
+      machineSwitch={machineSwitch}
+    />
+  );
+}
+
+function LocalForkBody(props: {
+  readonly request: ForkThreadDialogRequest;
+  readonly onBusyChange: (busy: boolean) => void;
+  readonly machineSwitch: ReactNode;
 }) {
   const { request, onBusyChange } = props;
   const { sourceThreadRef } = request;
@@ -190,6 +275,8 @@ function ForkThreadDialogBody(props: {
   // so a fork that is still on its way is announced with a link instead.
   const openFork = useEvent((result: ThreadForkResult, arrived: boolean) => {
     const forkRef = scopeThreadRef(environmentId, result.threadId);
+    // Ready to edit before the fork shows: the composer reads its draft as it opens.
+    if (request.draftSeed) seedForkComposerDraft(forkRef, request.draftSeed.text);
     const open = () => {
       void navigate({ to: "/$environmentId/$threadId", params: buildThreadRouteParams(forkRef) });
     };
@@ -353,6 +440,13 @@ function ForkThreadDialogBody(props: {
               {excerpt.length > 0 ? excerpt : "(reply without text)"}
             </blockquote>
           </figure>
+
+          {request.draftSeed ? (
+            <p className="text-xs text-muted-foreground" data-testid="fork-thread-draft-seed">
+              {request.draftSeed.note}
+            </p>
+          ) : null}
+          {props.machineSwitch}
 
           {forkDialogNotices({ view, blocked }).map(({ kind, notice }) =>
             kind === "attempt" ? (

@@ -1,10 +1,12 @@
 "use client";
 
 import { useAppKeybindings } from "../appKeybindings";
+import { isSavedEnvironmentSwitchedOff } from "@ryco/client-runtime/connection";
 
 import { usePresentationTier } from "../hooks/usePresentationTier";
 import { useSettingsPageTarget } from "../hooks/useSettingsPageTarget";
 import { useThreadExportAction } from "../hooks/useThreadExportAction";
+import { usePromptLinkPaletteItems } from "./promptLinks/usePromptLinkPaletteItems";
 
 import { DeviceIcon } from "./DeviceIcon";
 
@@ -52,6 +54,7 @@ import {
   FolderIcon,
   FolderTreeIcon,
   FoldersIcon,
+  FolderInputIcon,
   FolderPlusIcon,
   FolderSymlinkIcon,
   LinkIcon,
@@ -102,6 +105,8 @@ import {
 } from "../lib/chatThreadActions";
 import { CHAT_PROJECT_LABEL, projectPlaceLabel } from "../composerDraftStore";
 import { excludeChatProjects, isChatProject } from "@ryco/shared/projectKind";
+import { pullRequestLinkSearchTerms } from "@ryco/shared/worktreePullRequests";
+import { createThreadWorktreeResolver } from "@ryco/client-runtime/state/threads";
 import {
   appendBrowsePathSegment,
   canNavigateUp,
@@ -111,7 +116,6 @@ import {
   getBrowseLeafPathSegment,
   getBrowseParentPath,
   hasTrailingPathSeparator,
-  inferProjectTitleFromPath,
   isExplicitRelativeProjectPath,
   isFilesystemBrowseQuery,
   isSameFilesystemPath,
@@ -122,15 +126,17 @@ import {
 import { notifySurfaceLoadFailure } from "./ui/surfaceLoadFailure";
 import { useLazyComponentReady } from "../lib/preloadableLazy";
 import { getLatestThreadForProject } from "../lib/threadSort";
-import { cn, isMacPlatform, isWindowsPlatform, newCommandId, newProjectId } from "../lib/utils";
+import { cn, isMacPlatform, isWindowsPlatform, newProjectId } from "../lib/utils";
+import { buildProjectCreateCommand } from "../lib/projectCreateCommand";
 import { deriveLogicalProjectKeyFromSettings } from "../logicalProject";
 import {
   selectProjectsAcrossEnvironments,
   selectSidebarThreadsAcrossEnvironments,
+  selectSidebarWorktreesAcrossEnvironments,
   useStore,
 } from "../store";
 import { requestCustomSnooze } from "../threadLifecycleCommands";
-import { isUnarchivedThreadEntry } from "../types";
+import { isUnarchivedThreadEntry, type SidebarThreadSummary } from "../types";
 import { buildThreadRouteParams } from "../threadRoutes";
 import { useUiStateStore } from "../uiStateStore";
 import {
@@ -196,6 +202,7 @@ import { useComposerHandleContext } from "../composerHandleContext";
 import { useHostedRpcCapability, type HostedRpcCapability } from "../hostedHub/capabilities";
 import { hostedCapabilityCopy, hostedSwitchTargetLabel } from "../hostedHub/switchTarget";
 import { openAutomationsDialog } from "./automations/automationsDialogStore";
+import { openProjectImportDialog } from "./projectImport/projectImportDialogStore";
 import { openPromoteChatDialog, useCanPromoteChat } from "./chat/promoteChatDialogStore";
 import { getPresentationTier } from "../lib/presentationTier";
 import { buildProjectsPageLocation } from "../projectsRoute";
@@ -502,6 +509,8 @@ function OpenCommandPaletteDialog() {
   // hosted-capability: routed node
   const statisticsCapability = useHostedRpcCapability(WS_METHODS.serverGetStatistics, null);
   // hosted-capability: routed node
+  const sessionImportCapability = useHostedRpcCapability(WS_METHODS.sessionImportRun, null);
+  // hosted-capability: routed node
   const pullRequestsCapability = useHostedRpcCapability(
     WS_METHODS.sourceControlListChangeRequests,
     null,
@@ -556,6 +565,18 @@ function OpenCommandPaletteDialog() {
   // (title, project), while thread actions list only unarchived threads.
   const threads = useStore(useShallow(selectSidebarThreadsAcrossEnvironments));
   const unarchivedThreads = useMemo(() => threads.filter(isUnarchivedThreadEntry), [threads]);
+  const worktrees = useStore(useShallow(selectSidebarWorktreesAcrossEnvironments));
+  // A thread is found by its workspace's pull requests too (`#123`, `owner/repo#123`, the URL),
+  // as one search field so a workspace with many pull requests does not sink their rank.
+  const threadPullRequestSearchTerms = useMemo(() => {
+    const worktreeOf = createThreadWorktreeResolver(worktrees);
+    return (thread: SidebarThreadSummary): ReadonlyArray<string> => {
+      const pullRequests = worktreeOf(thread)?.pullRequests;
+      return pullRequests && pullRequests.length > 0
+        ? [pullRequestLinkSearchTerms(pullRequests).join(" ")]
+        : [];
+    };
+  }, [worktrees]);
   const keybindings = useAppKeybindings();
   const [viewStack, setViewStack] = useState<CommandPaletteView[]>([]);
   const currentView = viewStack.at(-1) ?? null;
@@ -597,6 +618,7 @@ function OpenCommandPaletteDialog() {
 
     for (const record of Object.values(savedEnvironmentRegistry)) {
       if (
+        isSavedEnvironmentSwitchedOff(record) ||
         seenEnvironmentIds.has(record.environmentId) ||
         isLocalHubAlias(
           record.environmentId,
@@ -1120,6 +1142,7 @@ function OpenCommandPaletteDialog() {
         icon: <MessageSquareIcon className={ITEM_ICON_CLASS} />,
         renderLeadingContent: (thread) => <ThreadRowLeadingStatus thread={thread} />,
         renderTrailingContent: (thread) => <ThreadRowTrailingStatus thread={thread} />,
+        extraSearchTerms: threadPullRequestSearchTerms,
         runThread: async (thread) => {
           await navigate({
             to: "/$environmentId/$threadId",
@@ -1132,6 +1155,7 @@ function OpenCommandPaletteDialog() {
       navigate,
       projectTitleById,
       settings.sidebarThreadSortOrder,
+      threadPullRequestSearchTerms,
       unarchivedThreads,
     ],
   );
@@ -1532,9 +1556,10 @@ function OpenCommandPaletteDialog() {
     activeThread ? scopeThreadRef(activeThread.environmentId, activeThread.id) : null,
   );
   const appearanceItems = useAppearancePaletteItems();
+  const promptLinkItems = usePromptLinkPaletteItems();
   const presentationTier = usePresentationTier();
   const actionItems: Array<CommandPaletteActionItem | CommandPaletteSubmenuItem> =
-    presentationTier === "phone" ? [] : [exportAction];
+    presentationTier === "phone" ? [] : [exportAction, ...promptLinkItems];
 
   actionItems.push(
     {
@@ -1745,6 +1770,29 @@ function OpenCommandPaletteDialog() {
   });
 
   if (getPresentationTier() !== "phone") {
+    actionItems.push({
+      kind: "action",
+      value: "action:import-projects",
+      searchTerms: [
+        "import",
+        "codex",
+        "claude",
+        "claude code",
+        "conversations",
+        "history",
+        "sessions",
+        "projects",
+        "migrate",
+      ],
+      title: "Import from Codex or Claude Code…",
+      ...unavailableDescription(sessionImportCapability, routedNodeLabel),
+      disabled: !sessionImportCapability.allowed,
+      icon: <FolderInputIcon className={ITEM_ICON_CLASS} />,
+      run: async () => {
+        setOpen(false);
+        openProjectImportDialog({ environmentId: settingsPageTarget.environmentId });
+      },
+    });
     actionItems.push({
       kind: "action",
       value: "action:statistics",
@@ -2079,16 +2127,13 @@ function OpenCommandPaletteDialog() {
 
       try {
         const projectId = newProjectId();
-        await api.orchestration.dispatchCommand({
-          type: "project.create",
-          commandId: newCommandId(),
-          projectId,
-          title: inferProjectTitleFromPath(cwd),
-          workspaceRoot: cwd,
-          projectMetadataDir: ".ryco",
-          createWorkspaceRootIfMissing: true,
-          createdAt: new Date().toISOString(),
-        });
+        await api.orchestration.dispatchCommand(
+          buildProjectCreateCommand({
+            projectId,
+            workspaceRoot: cwd,
+            createWorkspaceRootIfMissing: true,
+          }),
+        );
         await handleNewThread(scopeProjectRef(environmentId, projectId), {
           envMode: settings.defaultThreadEnvMode,
         }).catch(() => undefined);

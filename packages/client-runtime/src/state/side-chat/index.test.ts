@@ -2,7 +2,13 @@ import { describe, expect, it, vi } from "vitest";
 import { ProviderInstanceId, ThreadId } from "@ryco/contracts";
 import { EnvironmentId, MessageId } from "@ryco/contracts/base-schemas";
 import { createQuoteCitation, serializeQuoteCitation } from "@ryco/shared/quoteCitations";
-import { createSideChatStore, parseSideQuestionCommand, type SideChatApi } from "./index.ts";
+import {
+  createSideChatStore,
+  parseSideQuestionCommand,
+  SIDE_CHAT_CONTINUE_COPY,
+  sideChatThreadSeed,
+  type SideChatApi,
+} from "./index.ts";
 
 const selection = {
   instanceId: ProviderInstanceId.make("codex"),
@@ -57,6 +63,54 @@ describe("ephemeral side conversations", () => {
     expect(parseSideQuestionCommand(`/btw what does this mean? ${token} `)).toBe(
       "what does this mean? [Quote 1]\n\n[Quote 1]\n> 你好，世界\nComment:\n  Which world?",
     );
+  });
+  it("toggles a side chat open on its own model, and minimizes it without stopping the answer", async () => {
+    const { store, next, api, ask, chat } = setup();
+    const pending = ask();
+    expect(store.getState().toggle("environment/thread", { ...selection, model: "other" })).toBe(
+      false,
+    );
+    expect(chat()).toMatchObject({ open: false, pending: { question: "Why?" } });
+    expect(api.cancelSideQuestion).not.toHaveBeenCalled();
+    // Reopening keeps the side chat's own model; only a new one takes the given selection.
+    expect(store.getState().toggle("environment/thread", { ...selection, model: "other" })).toBe(
+      true,
+    );
+    expect(chat()).toMatchObject({ open: true, modelSelection: selection });
+    next.resolve({ requestId: "request", answer: "Because." });
+    await pending;
+    expect(chat().exchanges).toHaveLength(1);
+    expect(store.getState().toggle("new/thread", { ...selection, model: "other" })).toBe(true);
+    expect(store.getState().chatsByThreadKey["new/thread"]).toMatchObject({
+      open: true,
+      draft: "",
+      exchanges: [],
+      modelSelection: { model: "other" },
+    });
+  });
+  it("seeds a continued thread with each answered question as plain lines", () => {
+    expect(
+      sideChatThreadSeed([
+        { question: " Why does it retry? ", answer: "Because the node said so.\n\n- once\n" },
+        { question: "How often?", answer: "Three times." },
+      ]),
+    ).toBe(
+      [
+        "From a side chat about this thread:",
+        "",
+        "Q: Why does it retry?",
+        "A: Because the node said so.",
+        "",
+        "- once",
+        "",
+        "Q: How often?",
+        "A: Three times.",
+        "",
+        "",
+      ].join("\n"),
+    );
+    expect(SIDE_CHAT_CONTINUE_COPY.seedNote(1)).toContain("(1 question)");
+    expect(SIDE_CHAT_CONTINUE_COPY.seedNote(3)).toContain("(3 questions)");
   });
   it("isolates concurrent threads and retains only completed successful side history", async () => {
     const { store, next, api, ask, chat } = setup();

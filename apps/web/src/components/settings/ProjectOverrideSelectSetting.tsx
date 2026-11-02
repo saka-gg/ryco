@@ -10,6 +10,7 @@ import { useSettingsEditingScope, useSettingsTarget } from "../../settingsTarget
 import { isNodeSettingsTargetReadOnly } from "./settingsSections.logic";
 import { updateEnvironmentServerSettings } from "../../environments/runtime";
 import { ensureLocalApi } from "../../localApi";
+import { ApplyToAllNodes } from "./ApplyToAllNodes";
 import { SettingsRow } from "./settingsLayout";
 import { SettingsSelect } from "./SettingsSelect";
 
@@ -39,6 +40,11 @@ export interface ProjectOverrideSelectSpec<Value extends string> {
     projectId: string,
   ) => { readonly node: Value; readonly override: Value | null };
   readonly patch: (projectId: string | null, value: Value | null) => ServerSettingsPatch;
+  /**
+   * Offers the node default to every node ("Apply to all nodes"), named this
+   * way in a sentence. A project's override never goes to other nodes.
+   */
+  readonly applyToAllNodesLabel?: string;
   readonly unsupportedStatus: string;
   readonly inheritStatus: (node: Value) => string;
   readonly saveFailed: string;
@@ -113,6 +119,17 @@ export function ProjectOverrideSelectEditor<Value extends string>({
     setSaving(false);
   }
 
+  const applyToAllNodes =
+    spec.applyToAllNodesLabel !== undefined && !projectId ? (
+      <ApplyToAllNodes
+        label={spec.applyToAllNodesLabel}
+        select={(settings) => spec.select(settings, "").node}
+        format={(style) => spec.options.find((option) => option.value === style)?.label ?? style}
+        patch={spec.patch(null, node)}
+        supported={(nodeConfig) => spec.supported(nodeConfig.environment.capabilities)}
+        disabled={editingDisabled || saving}
+      />
+    ) : null;
   const options = [
     ...(projectId ? [{ value: INHERIT, label: "Inherit" }] : []),
     ...spec.options.map((option) => ({ value: option.value, label: option.label })),
@@ -124,19 +141,22 @@ export function ProjectOverrideSelectEditor<Value extends string>({
       owner="node"
       scope={target?.nodeLabel ?? "This node"}
       status={
-        error ? (
-          <span role="alert" className="text-destructive-foreground">
-            {error}
-          </span>
-        ) : saving ? (
-          <span role="status">Saving…</span>
-        ) : !supported ? (
-          spec.unsupportedStatus
-        ) : value === INHERIT ? (
-          spec.inheritStatus(node)
-        ) : (
-          spec.options.find((option) => option.value === value)?.description
-        )
+        <>
+          {error ? (
+            <span role="alert" className="text-destructive-foreground">
+              {error}
+            </span>
+          ) : saving ? (
+            <span role="status">Saving…</span>
+          ) : !supported ? (
+            spec.unsupportedStatus
+          ) : value === INHERIT ? (
+            spec.inheritStatus(node)
+          ) : (
+            spec.options.find((option) => option.value === value)?.description
+          )}
+          {applyToAllNodes}
+        </>
       }
       control={
         <SettingsSelect

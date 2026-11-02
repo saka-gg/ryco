@@ -1,6 +1,16 @@
 import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
-import { EnvironmentId, USAGE_CONTRACT_VERSION } from "@ryco/contracts";
+import {
+  AuthRpcError,
+  EnvironmentId,
+  USAGE_CONTRACT_VERSION,
+  type ServerConfig,
+} from "@ryco/contracts";
 import { usageSummaryCache } from "@ryco/client-runtime/usage";
+import { mobileCliProxyHubReads } from "../../../state/cliProxyHubReads";
+import {
+  resetEnvironmentServerConfigsForTests,
+  writeEnvironmentServerConfig,
+} from "../../../state/environmentServerConfigs";
 import {
   cachedNodeUsage,
   deriveStatisticsView,
@@ -9,7 +19,12 @@ import {
   type NodeAnswer,
 } from "./useStatisticsData";
 const rpc = vi.hoisted(() => ({
-  server: { getStatistics: vi.fn(), getUsageSummary: vi.fn(), refreshProviders: vi.fn() },
+  server: {
+    getStatistics: vi.fn(),
+    getUsageSummary: vi.fn(),
+    refreshProviders: vi.fn(),
+    readCliProxyHubs: vi.fn(),
+  },
 }));
 vi.mock("../../../connection/environmentApi", () => ({ readRpcClient: () => rpc }));
 const environment = {
@@ -21,6 +36,8 @@ const environment = {
 beforeEach(() => {
   vi.resetAllMocks();
   usageSummaryCache.clear();
+  mobileCliProxyHubReads.clear();
+  resetEnvironmentServerConfigsForTests();
 });
 describe("mobile statistics loading", () => {
   it("does not query offline devices or nodes without owner access", async () => {
@@ -34,6 +51,8 @@ describe("mobile statistics loading", () => {
     expect(viewer.error).toContain("owner access");
     expect(rpc.server.getUsageSummary).not.toHaveBeenCalled();
     expect(rpc.server.refreshProviders).not.toHaveBeenCalled();
+    expect(rpc.server.readCliProxyHubs).not.toHaveBeenCalled();
+    expect(viewer.hubs).toBeUndefined();
   });
   it("retains partial source coverage and sends the desktop date contract", async () => {
     rpc.server.getUsageSummary.mockResolvedValue({
@@ -95,6 +114,46 @@ describe("mobile statistics loading", () => {
     expect(rpc.server.getUsageSummary).not.toHaveBeenCalled();
     expect(rpc.server.getStatistics).not.toHaveBeenCalled();
   });
+  it("reads an owner's CLIProxyAPI hubs with the limits", async () => {
+    const hubs = [{ hubId: "home", label: "Home hub" }];
+    rpc.server.refreshProviders.mockResolvedValue({ providers: [] });
+    rpc.server.readCliProxyHubs.mockResolvedValue({ hubs });
+    const result = await loadNodeStatistics(environment, "limits", "30d");
+    expect(result.hubs).toMatchObject({ status: "ok", hubs });
+    expect(rpc.server.readCliProxyHubs).toHaveBeenCalledWith({});
+    // Reopening the tab within 30 s reuses the read; an explicit refresh asks past the node's cache.
+    await loadNodeStatistics(environment, "limits", "30d");
+    expect(rpc.server.readCliProxyHubs).toHaveBeenCalledTimes(1);
+    await loadNodeStatistics(environment, "limits", "30d", { fresh: true });
+    expect(rpc.server.readCliProxyHubs).toHaveBeenLastCalledWith({ refresh: true });
+  });
+
+  it("keeps the limits when the hubs cannot be read, and reads a refusal as no hubs", async () => {
+    rpc.server.refreshProviders.mockResolvedValue({ providers: [{ instanceId: "codex" }] });
+    rpc.server.readCliProxyHubs.mockRejectedValue(new Error("Hub unreachable"));
+    const failed = await loadNodeStatistics(environment, "limits", "30d");
+    expect(failed.error).toBeUndefined();
+    expect(failed.providers).toHaveLength(1);
+    expect(failed.hubs).toMatchObject({ status: "failed", hubs: [], message: "Hub unreachable" });
+
+    rpc.server.readCliProxyHubs.mockRejectedValue(
+      new AuthRpcError({ message: "Owner access required.", status: 403 }),
+    );
+    const refused = await loadNodeStatistics(environment, "limits", "30d");
+    expect(refused.hubs).toMatchObject({ status: "ok", hubs: [] });
+  });
+
+  it("does not ask a node that predates hubs", async () => {
+    writeEnvironmentServerConfig(environment.environmentId, {
+      environment: { capabilities: {} },
+    } as unknown as ServerConfig);
+    rpc.server.refreshProviders.mockResolvedValue({ providers: [] });
+    const result = await loadNodeStatistics(environment, "limits", "30d");
+    expect(result.hubs).toMatchObject({ status: "unsupported", hubs: [] });
+    expect(result.hubs?.message).toContain("Update Ryco");
+    expect(rpc.server.readCliProxyHubs).not.toHaveBeenCalled();
+  });
+
   it("surfaces server errors", async () => {
     rpc.server.getStatistics.mockRejectedValue(new Error("Owner access required"));
     expect((await loadNodeStatistics(environment, "activity", "7d")).error).toBe(

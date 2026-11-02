@@ -22,6 +22,10 @@
  * A reinstall that fails is tried again on the next {@link NODE_UPDATE_ROLLBACK_TRIES} starts;
  * after those the guard lets the release boot as it would have without it.
  *
+ * After an update nobody asked for (the marker's `unattended`), a counted start arms the readiness
+ * watchdog right here, before anything else loads, as long as the next start still rolls back:
+ * the process exits when the server has not reported it ready in time, wherever it hangs.
+ *
  * @module nodeUpdate/bootGuard
  */
 import { spawnSync } from "node:child_process";
@@ -40,15 +44,18 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 
 import {
+  armNodeBootWatchdog,
+  NODE_NOT_READY_EXIT_CODE,
   NODE_UPDATE_MARKER_FILE_NAME,
   NODE_UPDATE_MARKER_MAX_AGE_MS,
+  NODE_UPDATE_MAX_BOOT_ATTEMPTS,
   NODE_UPDATE_OUTPUT_MAX_CHARS,
+  NODE_UPDATE_ROLLBACK_TRIES,
+  nodeUpdateNextStartRollsBack,
+  UNATTENDED_BOOT_READY_TIMEOUT_MS,
 } from "./updateProtocol.ts";
 
-/** Starts of the target release that may end before it is ready; the next one rolls back. */
-export const NODE_UPDATE_MAX_BOOT_ATTEMPTS = 2;
-/** Further starts that retry a rollback whose reinstall failed, before the guard gives up. */
-export const NODE_UPDATE_ROLLBACK_TRIES = 3;
+export { NODE_UPDATE_MAX_BOOT_ATTEMPTS, NODE_UPDATE_ROLLBACK_TRIES };
 
 /** A command an update recorded for the rollback, as `spawnSync` runs it. */
 export interface NodeUpdateRecordedCommand {
@@ -70,6 +77,8 @@ export interface GuardedNodeUpdateMarker {
   readonly targetVersion: string;
   readonly startedAt: string;
   readonly bootAttempts: number;
+  /** Nobody asked for the update: the node ran it on its own (the marker's `unattended`). */
+  readonly unattended: boolean;
   /** `readyAt` or `rolledBack` is set: the update is settled. */
   readonly settled: boolean;
   /** `null` for markers without one (desktop updates, releases before the rollback). */
@@ -114,6 +123,7 @@ export function readGuardedNodeUpdateMarker(value: unknown): GuardedNodeUpdateMa
       typeof bootAttempts === "number" && Number.isSafeInteger(bootAttempts) && bootAttempts > 0
         ? bootAttempts
         : 0,
+    unattended: marker.unattended === true,
     settled: marker.readyAt !== undefined || marker.rolledBack !== undefined,
     rollback: rollbackPlan(marker.rollback),
   };
@@ -323,6 +333,12 @@ export interface NodeUpdateBootGuardOptions {
   readonly runningVersion: () => string | null;
   readonly nowMs?: number;
   readonly log?: (line: string) => void;
+  /**
+   * Called for a start an unattended update restarted into while the next start still rolls
+   * back. The default arms the readiness watchdog (`armNodeBootWatchdog`): this process exits
+   * when the server has not disarmed it in time.
+   */
+  readonly armWatchdog?: () => void;
 }
 
 /**
@@ -351,6 +367,20 @@ export function runNodeUpdateBootGuard(options: NodeUpdateBootGuardOptions): "bo
   // Counted before anything else, so a start that dies during a rollback moves on as well.
   writeMarkerAtomically(options.markerPath, { ...record, bootAttempts: decision.bootAttempts });
   if (decision.action === "count") {
+    // Nobody watches an update nobody asked for: a start that hangs before it serves (in a
+    // migration, waiting for the database) must end too, so the next start can roll back.
+    if (marker.unattended && nodeUpdateNextStartRollsBack(decision.bootAttempts)) {
+      (
+        options.armWatchdog ??
+        (() =>
+          armNodeBootWatchdog(() => {
+            log(
+              `Ryco ${marker.targetVersion} did not get ready within ${Math.round(UNATTENDED_BOOT_READY_TIMEOUT_MS / 60_000)} minutes of starting after an automatic update. Exiting so the service manager starts it again.`,
+            );
+            process.exit(NODE_NOT_READY_EXIT_CODE);
+          }))
+      )();
+    }
     if (decision.bootAttempts === NODE_UPDATE_MAX_BOOT_ATTEMPTS + NODE_UPDATE_ROLLBACK_TRIES + 1) {
       log(
         `Ryco ${marker.targetVersion} has not finished starting since the update, and reinstalling ${marker.fromVersion} failed ${NODE_UPDATE_ROLLBACK_TRIES} times. Starting it anyway.`,

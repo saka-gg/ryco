@@ -8,6 +8,7 @@ import {
   AGENT_CONTROL_LOCAL_TASK_MCP_TOOLS,
   AGENT_CONTROL_MCP_TOOLS,
   AGENT_CONTROL_QUEUE_MCP_TOOLS,
+  AGENT_CONTROL_SECRET_REQUEST_MCP_TOOL,
   AgentControlProposalId,
   AgentControlRequestId,
   ProviderInstanceId,
@@ -896,6 +897,15 @@ it.live("installs the HTML render tools on the private listener when the service
       );
       assert.include(ungranted.listed, "ryco_attach_file");
       assert.notInclude(ungranted.listed, "ryco_html_render");
+      // `ryco_request_secret` loads lazily and is offered only with its own grant.
+      assert.notInclude(ungranted.listed, AGENT_CONTROL_SECRET_REQUEST_MCP_TOOL);
+      const asker = yield* listFor(
+        withRender,
+        [AGENT_CONTROL_CAPABILITIES.read, AGENT_CONTROL_CAPABILITIES.requestSecrets],
+        "runtime-secret-granted",
+      );
+      assert.include(asker.listed, AGENT_CONTROL_SECRET_REQUEST_MCP_TOOL);
+      assert.include(asker.advertised ?? [], AGENT_CONTROL_SECRET_REQUEST_MCP_TOOL);
 
       const withoutRender = yield* Layer.build(makeDeliveryLayer(settings));
       const missing = yield* listFor(

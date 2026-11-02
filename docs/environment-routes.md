@@ -63,6 +63,10 @@ Running the relay's E2EE over the direct socket would let them in; it is not bui
 | direct | `tailnet-https`, `tailnet`, `lan`, `public` | the linked bearer (4 days, renewed over relay) |
 | relay  | —                                           | the relay's own E2EE session and tickets       |
 
+A locally verified device's linked bearer lives 24 hours. The client still renews at three days, so
+in between the node refuses the bearer, the attempt falls back to the relay, and the refusal renews
+the link there.
+
 - Order: tailnet HTTPS, tailnet, LAN, public, then the relay. Routes of one reach keep their order.
 - Credentials never cross route kinds. The linked bearer is node-wide, so every direct address of
   the machine shares it.

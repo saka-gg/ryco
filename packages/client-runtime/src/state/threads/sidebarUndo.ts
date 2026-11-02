@@ -17,10 +17,10 @@ const SIDEBAR_UNDO_APPLYING_LIMIT_MS = 25_000;
 export const SIDEBAR_UNDO_BATCH_LIMIT = 100;
 /** A node keeps its newest 256 Undo receipts and drops the oldest first. */
 const SIDEBAR_UNDO_NODE_RECEIPTS = 256;
-export type SidebarUndoAction = "archive" | "settle" | "snooze" | "unpin";
+export type SidebarUndoAction = "archive" | "settle" | "snooze" | "hide" | "unpin";
 export type SidebarUndoCommand = Extract<
   DispatchableClientOrchestrationCommand,
-  { type: "thread.archive" | "thread.settle" | "thread.snooze" }
+  { type: "thread.archive" | "thread.settle" | "thread.snooze" | "thread.hide" }
 >;
 export type SidebarActionCommand = Extract<
   DispatchableClientOrchestrationCommand,
@@ -31,7 +31,9 @@ export type SidebarActionCommand = Extract<
       | "thread.settle"
       | "thread.unsettle"
       | "thread.snooze"
-      | "thread.unsnooze";
+      | "thread.unsnooze"
+      | "thread.hide"
+      | "thread.unhide";
   }
 >;
 export interface SidebarUndoContext {
@@ -106,6 +108,8 @@ export function sidebarUndoThreadRevision(thread: SidebarThreadOrStub): string {
     thread.settledAt,
     thread.snoozedUntil,
     thread.snoozedAt,
+    thread.hiddenAt ?? null,
+    thread.settleWhenIdleAt ?? null,
     thread.branch,
     thread.worktreePath,
     thread.worktreeId,
@@ -291,7 +295,8 @@ export function createSidebarUndoHistory(deps: {
         context.supported &&
         (command.type === "thread.archive" ||
           command.type === "thread.settle" ||
-          command.type === "thread.snooze")
+          command.type === "thread.snooze" ||
+          command.type === "thread.hide")
           ? add({
               members: [target],
               threadTitle: context.threadTitle,

@@ -71,6 +71,10 @@ function createDiffWorkerPool(themeName: DiffThemeName): WorkerPoolManager {
     {
       theme: themeName,
       tokenizeMaxLineLength: SYNTAX_TOKENIZE_MAX_LINE_LENGTH,
+      // Word-level highlighting of changed line pairs. While the pool runs, pierre renders
+      // every diff with these options instead of the component's, one file at a time as the
+      // virtualizer draws it, and caches the result under the file's own content key.
+      lineDiffType: "word-alt",
       preferredHighlighter,
     },
   );

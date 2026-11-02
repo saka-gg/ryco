@@ -71,6 +71,34 @@ you changed. The defaults come from two lists: the frozen node list,
 The app list starts from the node list, may replace some of its rules, and adds the defaults of
 newer commands. Nodes only ever send the node list.
 
+## iPad keyboard
+
+The iOS app has its own fixed shortcuts for a hardware keyboard. They are not edited in
+**App preferences → Keybindings**. Hold **Command** to see them.
+
+| Shortcut                  | What it does                                                                   |
+| ------------------------- | ------------------------------------------------------------------------------ |
+| `Cmd+1` … `Cmd+9`         | Open the first nine threads the Inbox shows, in its current order and filters. |
+| `Cmd+K`                   | Open the command palette: actions, projects and threads. `Cmd+K` closes it.    |
+| `Cmd+F`                   | Search the Inbox or Projects list.                                             |
+| `Cmd+N`                   | Start a new task.                                                              |
+| `Cmd+[`                   | Go back.                                                                       |
+| `Cmd+Shift+F` / `T` / `R` | On a thread: open its files, terminal or review, when the thread has them.     |
+| `Return`                  | Send the message. `Shift+Return` starts a new line; `Cmd+Return` also sends.   |
+
+Thread jumps count only the thread rows you can see: a collapsed Snoozed or Settled
+section is skipped. They work from the Inbox and from a thread, and close any open sheet
+first; the thread you jump to replaces the open one, so **Back** still returns to the
+Inbox. In the Projects list there are no thread rows to jump to.
+
+In the palette, the arrow keys move the highlight, `Return` runs it, `Cmd+1` … `Cmd+9`
+pick a numbered result and `Escape` closes it. Type to search projects and threads; start
+with `>` to show only actions. Search and ranking match the web command palette.
+
+The palette and thread jumps are iPad shortcuts; on an iPhone with a keyboard, `Cmd+K`
+searches instead. While an input method is composing text, the palette's keys and `Return`
+belong to it.
+
 ## Configuration
 
 ### Rule Shape
@@ -99,6 +127,10 @@ Invalid imports are rejected without changing local preferences. The same shared
 - `workspace.terminal`: open the thread terminal view
 - `workspace.simulator`: open the thread iOS Simulator view
 - `diff.toggle`: toggle the diff panel
+- `diff.hunk.next` / `diff.hunk.previous`: jump to the next or previous hunk of the diff panel while
+  focus is inside it. They default to `alt+arrowdown` and `alt+arrowup` outside the terminal. A
+  text field in the panel keeps those keys for moving the caret. The defaults live in the app, not
+  on the node, so older apps have no key for them.
 
 #### Palette and sidebar
 
@@ -217,6 +249,30 @@ These defaults live in the app, not on the node, so older apps have no keys for 
 browser tab keeps `mod+w` and `mod+shift+t` for itself and never passes them to Ryco, so there use
 `mod+alt+w` and `mod+alt+shift+t`. The desktop app and an installed web app get all four.
 
+#### Side chat
+
+- `sideChat.toggle`: open the current thread's [side chat](docs/side-chat.md), or minimize it when
+  it is open (`mod+alt+s` outside the terminal: ⌘⌥S on macOS, Ctrl+Alt+S elsewhere). A new side
+  chat starts on the thread's model, as from the workspace launcher. Opening moves the typing into
+  the side question; minimizing moves it back to the composer and never stops a pending answer. It
+  also works while you type, in the composer and in the side question, but not in a dialog. Where
+  the thread has no side chat (a draft, the frozen phone layout, or no access to side questions on
+  its machine), the key goes to the focused control.
+
+This default lives in the app, not on the node, so older apps have no key for it.
+
+#### Chat tabs
+
+- `threadTab.next` / `threadTab.previous`: show the next or previous open chat tab in the chat
+  header, wrapping at either end like a browser. On macOS they default to `mod+ctrl+arrowright` /
+  `mod+ctrl+arrowleft` (⌃⌘→ / ⌃⌘←), which also work from the terminal; elsewhere to
+  `ctrl+pagedown` / `ctrl+pageup` outside the terminal. A regular browser tab on Windows and Linux
+  keeps Ctrl+PageUp/PageDown for its own tabs, so there bind other keys or use the desktop app.
+  They also work while you type in the composer. With the tabs turned off (Settings > Appearance >
+  Open chat tabs) or no other tab open, the keys do nothing.
+
+These defaults live in the app, not on the node, so older apps have no keys for them.
+
 #### Scripts
 
 - `projectScript.{environment}/{project}/{id}.run`: a locally assigned script shortcut. The app constructs these scoped IDs; legacy `script.{id}.run` rules are supported only through explicit import.
@@ -260,6 +316,7 @@ Currently available context keys:
 - `modelPickerOpen` — the model picker dialog is open
 - `commandPaletteOpen` — the command palette is open
 - `composerFocus` — the message composer (main chat input) is focused
+- `isMac` — the app runs on macOS, for defaults that need another chord there
 
 Enter in the focused composer is reserved. The **Send shortcut** setting (Settings > General >
 Composer controls) decides when it sends: `enter` always, `mod+enter` for multiline prompts, or

@@ -43,7 +43,9 @@ export function buildInboxAttentionCandidates(
   });
   const candidates: ThreadAttentionCandidate[] = [];
   for (const section of model.sections) {
-    if (section.key === "settled" || section.key === "snoozed") continue;
+    // Resting rows, and the Hidden shelf, ask for nothing.
+    if (section.key === "settled" || section.key === "snoozed" || section.key === "hidden")
+      continue;
     for (const row of section.rows) {
       const reason = resolveThreadAttentionReason({
         state: row.placementState,

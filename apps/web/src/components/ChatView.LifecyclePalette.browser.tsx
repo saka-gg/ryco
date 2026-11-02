@@ -88,7 +88,9 @@ describe("ChatView command palette lifecycle actions (full app)", () => {
       const palette = await searchPalette("snooze");
       await palette.getByText("Snooze current thread…", { exact: true }).click();
       await expect.element(palette.getByText("Snooze until", { exact: true })).toBeInTheDocument();
-      await palette.getByText("Next week", { exact: true }).click();
+      // Always offered: on a Sunday "Next week" is the same time as "Tomorrow morning" and the
+      // submenu drops the duplicate.
+      await palette.getByText("Tomorrow morning", { exact: true }).click();
       await vi.waitFor(() => expect(dispatchedCommandTypes()).toContain("thread.snooze"));
     } finally {
       await mounted.cleanup();

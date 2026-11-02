@@ -55,6 +55,8 @@ function model(pullRequestWatch: ThreadHeaderModel["pullRequestWatch"]): ThreadH
     settlementAction: null,
     compactAction: null,
     pullRequestWatch,
+    copyReference: { kind: "thread", value: "thread-ci" },
+    taskId: "thread-ci",
   };
 }
 

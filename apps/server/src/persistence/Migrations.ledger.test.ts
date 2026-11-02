@@ -193,6 +193,10 @@ const undoRepairEffect: Record<string, string | ReadonlyArray<string>> = {
   "pull-request-watches": "DROP INDEX idx_projection_thread_pull_request_watches_active",
   "follow-up-queue": "DROP INDEX idx_projection_thread_queue_entries_position",
   "auth-access-link-account": "ALTER TABLE auth_sessions DROP COLUMN link_account_id",
+  "command-watches": "DROP INDEX idx_projection_thread_command_watches_active",
+  "event-retention": "DROP TABLE statistics_usage_rollups",
+  "thread-fork-origin": "ALTER TABLE thread_forks DROP COLUMN origin_json",
+  "projection-thread-triage": "ALTER TABLE projection_threads DROP COLUMN settle_when_idle_at",
 };
 
 it.effect("finds exactly the repair whose effect a database from before the records lacks", () =>

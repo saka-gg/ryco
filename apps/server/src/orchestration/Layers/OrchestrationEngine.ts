@@ -67,6 +67,7 @@ import {
   requireNoBackgroundWorkForModelSwitch,
 } from "../commandInvariants.ts";
 import { ThreadBackgroundLivenessService } from "../ThreadBackgroundLiveness.ts";
+import { ThreadSessionModelSelectionsService } from "../ThreadSessionModelSelections.ts";
 import { createSidebarUndoReceipts } from "../sidebarUndo.ts";
 import { decideOrchestrationCommand } from "../decider.ts";
 import { createWorkspaceCommitFence } from "../workspaceCommitFence.ts";
@@ -126,6 +127,9 @@ function commandToAggregateRef(command: OrchestrationCommand): {
     case "thread.unarchive":
     case "thread.snooze":
     case "thread.unsnooze":
+    case "thread.hide":
+    case "thread.unhide":
+    case "thread.settle-when-idle":
     case "thread.usage-limit.record":
     case "thread.usage-limit.configure":
     case "thread.settle":
@@ -161,6 +165,8 @@ function commandToAggregateRef(command: OrchestrationCommand): {
     case "thread.activity.append":
     case "thread.revert.complete":
     case "thread.pull-request-watch.update":
+    case "thread.command-watch.update":
+    case "thread.command-watch.stop":
     case "thread.queue.add":
     case "thread.queue.edit":
     case "thread.queue.move":
@@ -209,6 +215,11 @@ const makeOrchestrationEngine = Effect.fnUntraced(function* (
   // background-work model-switch check instead of requiring the registry.
   const backgroundLiveness = Option.getOrUndefined(
     yield* Effect.serviceOption(ThreadBackgroundLivenessService),
+  );
+  // What each session runs, as the provider command reactor applied it: a pick a client stored
+  // on the thread since then still restarts a Claude session at the next turn.
+  const sessionModelSelections = Option.getOrUndefined(
+    yield* Effect.serviceOption(ThreadSessionModelSelectionsService),
   );
 
   const sidebarUndo = createSidebarUndoReceipts();
@@ -397,8 +408,9 @@ const makeOrchestrationEngine = Effect.fnUntraced(function* (
                       storageCommand.type === "thread.turn.start" ||
                       storageCommand.type === "thread.turn.steer" ||
                       storageCommand.type === "thread.goal.set" ||
-                      // A pull request update's wake starts a turn in the thread's checkout.
-                      (storageCommand.type === "thread.pull-request-watch.update" &&
+                      // A watch update's wake starts a turn in the thread's checkout.
+                      ((storageCommand.type === "thread.pull-request-watch.update" ||
+                        storageCommand.type === "thread.command-watch.update") &&
                         storageCommand.wake !== undefined)
                     ? storageThreadPaths
                     : [];
@@ -508,6 +520,9 @@ const makeOrchestrationEngine = Effect.fnUntraced(function* (
               events: eventBases,
               thread: findThreadInArray(commandReadModel.threads, envelope.command.threadId),
               liveTaskIds: backgroundLiveness.listLiveTaskIds,
+              ...(sessionModelSelections !== undefined
+                ? { sessionModelSelection: sessionModelSelections.get }
+                : {}),
             });
           }
           workspaceCommitFence.begin(eventBases);
@@ -535,6 +550,30 @@ const makeOrchestrationEngine = Effect.fnUntraced(function* (
                     }),
                     session: findThreadInArray(commandReadModel.threads, command.threadId)?.session,
                   });
+                }
+                // The message answers an optional question whose turn ended: the question is
+                // claimed here, in the commit's transaction, so a second answer is refused.
+                const turnStart =
+                  envelope.command.type === "thread.turn.start" ? envelope.command : undefined;
+                const answer = turnStart?.optionalAnswer;
+                if (turnStart && answer) {
+                  const row = yield* questions.getByRequestId({
+                    threadId: turnStart.threadId,
+                    requestId: answer.requestId,
+                  });
+                  const blocker = (yield* Effect.promise(
+                    () => import("../optionalQuestionAnswers.ts"),
+                  )).optionalAnswerClaimBlocker(
+                    Option.getOrUndefined(row),
+                    turnStart.threadId,
+                    answer,
+                  );
+                  if (blocker !== null) {
+                    return yield* new OrchestrationCommandInvariantError({
+                      commandType: turnStart.type,
+                      detail: blocker,
+                    });
+                  }
                 }
                 const committedEvents: OrchestrationEvent[] = [];
                 const postCommitEffects: Array<Effect.Effect<void>> = [];

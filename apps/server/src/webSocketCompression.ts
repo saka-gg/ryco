@@ -49,7 +49,9 @@ export const WEBSOCKET_PER_MESSAGE_DEFLATE = {
 
 /**
  * Whether a peer address is anywhere in the loopback range (all of 127/8, or
- * `::1`, IPv4-mapped forms included). A compression heuristic only: access
+ * `::1`, IPv4-mapped forms included). The network cannot deliver a loopback
+ * source, so a peer in it is a process on this machine; the RPC principal's
+ * connection facts read it too (`RpcSocketAddressKind`). Host-name access
  * decisions use the exact-match loopback checks of their own modules.
  */
 export function isLoopbackRangeAddress(address: string | undefined): boolean {

@@ -16,6 +16,17 @@ export interface ChatHeaderBreadcrumbProps {
   projectIcon?: ChatHeaderBreadcrumbProjectIcon | null | undefined;
   sessionTitle: string;
   onSelectProject?: (() => void) | undefined;
+  /** The open chat tabs, in place of the chat's title; they take the rest of the row. */
+  sessionTabs?: ReactNode;
+}
+
+/** The chat's title as the header shows it, also the tab strip's stand-in while it has no tab. */
+export function ChatHeaderSessionTitle(props: { title: string }) {
+  return (
+    <span className="min-w-0 truncate text-foreground/85" title={props.title}>
+      {props.title}
+    </span>
+  );
 }
 
 export const ChatHeaderBreadcrumb = memo(function ChatHeaderBreadcrumb(
@@ -23,6 +34,7 @@ export const ChatHeaderBreadcrumb = memo(function ChatHeaderBreadcrumb(
 ) {
   const projectName = props.projectName?.trim() || null;
   const projectIcon = props.projectIcon ?? null;
+  const tabs = props.sessionTabs ?? null;
 
   // A chevron only ever separates two segments: never one in front of the
   // first, so a missing project leaves no empty step behind.
@@ -51,11 +63,9 @@ export const ChatHeaderBreadcrumb = memo(function ChatHeaderBreadcrumb(
   }
   segments.push({
     key: "session",
-    node: (
-      <span className="min-w-0 truncate text-foreground/85" title={props.sessionTitle}>
-        {props.sessionTitle}
-      </span>
-    ),
+    // The tab strip shows the chat's title in its active tab, or this same title while it has
+    // no tab to show.
+    node: tabs ?? <ChatHeaderSessionTitle title={props.sessionTitle} />,
   });
 
   return (

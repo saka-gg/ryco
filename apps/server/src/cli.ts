@@ -1,4 +1,5 @@
 import { spawn as spawnChild } from "node:child_process";
+import { realpathSync } from "node:fs";
 import NodePath from "node:path";
 
 import { DEFAULT_HOSTED_APP_ORIGIN } from "@ryco/shared/hostedApp";
@@ -20,10 +21,12 @@ import {
   type ClientOrchestrationCommand,
 } from "@ryco/contracts";
 import {
+  Clock,
   Config,
   Console,
   type Context,
   Data,
+  DateTime,
   Duration,
   Effect,
   Exit,
@@ -77,6 +80,7 @@ import {
   E2eeSessionListView,
 } from "./hubConnector/e2eeOperatorContract.ts";
 import { expandHomePath, resolveBaseDir } from "./os-jank.ts";
+import { runRequestedFlavorImport } from "./flavorImportStartup.ts";
 import { runServer } from "./server.ts";
 import { loadTerminalQrCode } from "./startupAccess.ts";
 import {
@@ -100,15 +104,13 @@ import {
   readCliPreferences,
   writeCliPreferences,
 } from "./cliSetup/preferences.ts";
+import { SetupError } from "./cliSetup/setupError.ts";
+import type { SetupContext, SetupOperations } from "./cliSetup/setupFlow.ts";
 import {
-  editNodeConfigFile,
-  runFirstTimeSetup,
-  runNodeManager,
-  runSetup,
-  SetupError,
-  type SetupContext,
-  type SetupOperations,
-} from "./cliSetup/setupFlow.ts";
+  discoverPairingLinks,
+  formatPairingQrBlock,
+  pairingLinksForBaseUrl,
+} from "./cliSetup/pairingQr.ts";
 import { cliCommandPrefix, dim, isInteractiveTerminal } from "./cliSetup/ui.ts";
 import { makeDbCommand } from "./cliDb/dbCommand.ts";
 import {
@@ -151,6 +153,8 @@ import { ProjectAvatarStoreLive } from "./project/Layers/ProjectAvatarStore.ts";
 import { RepositoryIdentityResolverLive } from "./project/Layers/RepositoryIdentityResolver.ts";
 import {
   clearPersistedServerRuntimeStateIfStale,
+  isPersistedServerRunning,
+  type PersistedServerRuntimeState,
   readPersistedServerRuntimeState,
 } from "./serverRuntimeState.ts";
 import { WorkspacePaths } from "./workspace/Services/WorkspacePaths.ts";
@@ -205,6 +209,14 @@ const BootstrapEnvelopeSchema = Schema.Struct({
    * `process.env` before any layer is built; unknown names are ignored.
    */
   shellEnvironment: Schema.optional(Schema.Record(Schema.String, Schema.String)),
+  /**
+   * Ryco Nightly only: the one Ryco data home this backend may copy from when Ryco left a copy
+   * request in its home (flavorImportStartup.ts), and the token of the launch Ryco opened it
+   * with (only that launch's request is taken). Honoured only in desktop mode.
+   */
+  flavorImport: Schema.optional(
+    Schema.Struct({ allowedSourceHome: Schema.String, requestToken: Schema.String }),
+  ),
 });
 
 const modeFlag = Flag.Literals("mode", RuntimeMode.literals).pipe(
@@ -865,6 +877,9 @@ export const resolveServerConfig = (
       ...(mode === "desktop" && bootstrap?.computerUseBridge
         ? { computerUseBridge: bootstrap.computerUseBridge }
         : {}),
+      ...(mode === "desktop" && bootstrap?.flavorImport
+        ? { flavorImport: bootstrap.flavorImport }
+        : {}),
       autoBootstrapProjectFromCwd,
       logWebSocketEvents,
       tailscaleServeEnabled,
@@ -913,6 +928,45 @@ class NodeConfigLoadError extends Data.TaggedError("NodeConfigLoadError")<{
   readonly message: string;
   readonly cause?: unknown;
 }> {}
+
+/**
+ * Set by Ryco Desktop's `ryco` command launcher to the home of the app's own
+ * node (apps/desktop/src/desktopCliCommand.ts).
+ */
+const DESKTOP_CLI_HOME_ENV = "RYCO_DESKTOP_CLI";
+
+class DesktopOwnedNodeError extends Data.TaggedError("DesktopOwnedNodeError")<{
+  readonly message: string;
+}> {}
+
+/**
+ * The desktop's command runs admin commands against the app's node; starting a
+ * second node, or a service, for that home would fight the app over its data.
+ * Returns the refusal, or `null` when `baseDir` is not the desktop app's home.
+ */
+/** The folder's real path, so another spelling of it (a link, letter case on APFS) is the same. */
+const canonicalPath = (path: string) => {
+  const resolved = NodePath.resolve(path);
+  try {
+    return realpathSync.native(resolved);
+  } catch {
+    return resolved;
+  }
+};
+
+export const desktopOwnedNodeRefusal = (
+  env: Readonly<Record<string, string | undefined>>,
+  baseDir: string,
+): string | null => {
+  const desktopHome = env[DESKTOP_CLI_HOME_ENV]?.trim();
+  if (!desktopHome || canonicalPath(desktopHome) !== canonicalPath(baseDir)) return null;
+  return `Ryco Desktop runs the node for ${baseDir}. Open Ryco to start it; \`ryco --help\` lists the commands that work with it.`;
+};
+
+const refuseDesktopOwnedNode = (baseDir: string) => {
+  const message = desktopOwnedNodeRefusal(process.env, baseDir);
+  return message === null ? Effect.void : Effect.fail(new DesktopOwnedNodeError({ message }));
+};
 
 const resolveCliAuthConfig = (
   flags: CliAuthLocationFlags,
@@ -1051,9 +1105,12 @@ const quietly = <A, E, R>(
 ): Effect.Effect<A, E, R> =>
   quiet ? Effect.provideService(effect, References.MinimumLogLevel, "Error") : effect;
 
-const runWithAuthControlPlane = <A, E>(
+const runWithAuthControlPlane = <A, E, R = never>(
   flags: CliAuthLocationFlags,
-  run: (authControlPlane: AuthControlPlaneShape) => Effect.Effect<A, E>,
+  run: (
+    authControlPlane: AuthControlPlaneShape,
+    config: ServerConfigShape,
+  ) => Effect.Effect<A, E, R>,
   options?: {
     readonly quietLogs?: boolean;
   },
@@ -1067,7 +1124,7 @@ const runWithAuthControlPlane = <A, E>(
       const minimumLogLevel = quiet ? "Error" : adminCommandLogLevel(logLevel, config.logLevel);
       return yield* Effect.gen(function* () {
         const authControlPlane = yield* AuthControlPlane;
-        return yield* run(authControlPlane);
+        return yield* run(authControlPlane, config);
       }).pipe(
         Effect.provide(
           Layer.mergeAll(AuthControlPlaneRuntimeLive).pipe(
@@ -1638,18 +1695,28 @@ const tokenOnlyFlag = Flag.Boolean("token-only").pipe(
   Flag.withDefault(false),
 );
 
+const qrFlag = Flag.Boolean("qr").pipe(
+  Flag.withDescription(
+    "Print the pairing link as a QR code (default when the output is a terminal, never with --json; `--no-qr` turns it off).",
+  ),
+  Flag.optional,
+);
+
+const PAIRING_QR_NO_NODE_NOTE = "No running node found; pass --base-url to print a QR code.";
+
 const pairingCreateCommand = Command.make("create", {
   ...authLocationFlags,
   ttl: ttlFlag,
   label: labelFlag,
   baseUrl: baseUrlFlag,
   json: jsonFlag,
+  qr: qrFlag,
 }).pipe(
   Command.withDescription("Issue a new client pairing token."),
   Command.withHandler((flags) =>
     runWithAuthControlPlane(
       flags,
-      (authControlPlane) =>
+      (authControlPlane, config) =>
         Effect.gen(function* () {
           const issued = yield* authControlPlane.createPairingLink({
             role: "client",
@@ -1657,11 +1724,73 @@ const pairingCreateCommand = Command.make("create", {
             ...(Option.isSome(flags.ttl) ? { ttl: flags.ttl.value } : {}),
             ...(Option.isSome(flags.label) ? { label: flags.label.value } : {}),
           });
-          const output = formatIssuedPairingCredential(issued, {
-            json: flags.json,
-            ...(Option.isSome(flags.baseUrl) ? { baseUrl: flags.baseUrl.value } : {}),
+          // `--json` never draws a QR and never looks for the node: with `--base-url` it reports
+          // the link a QR would hold, as before plus `qrUrl`.
+          const wantsQr = !flags.json && Option.getOrElse(flags.qr, () => isInteractiveTerminal());
+          if (!wantsQr) {
+            yield* Console.log(
+              formatIssuedPairingCredential(issued, {
+                json: flags.json,
+                ...(Option.isSome(flags.baseUrl)
+                  ? (() => {
+                      const links = pairingLinksForBaseUrl(issued.credential, flags.baseUrl.value);
+                      return { pairUrl: links.pairingUrl, qrUrl: links.qrUrl };
+                    })()
+                  : {}),
+              }),
+            );
+            return;
+          }
+          const runtime = Option.isSome(flags.baseUrl)
+            ? null
+            : yield* probeLocalServerRuntime(config.serverRuntimeStatePath);
+          // The node's own bind host (its runtime file) and its saved Tailscale Serve settings:
+          // the QR must hold an address that node really listens on.
+          const savedNode =
+            runtime === null
+              ? null
+              : yield* Effect.promise(() => readNodeConfig(nodeConfigPath(config.stateDir)));
+          const links = Option.isSome(flags.baseUrl)
+            ? pairingLinksForBaseUrl(issued.credential, flags.baseUrl.value)
+            : runtime === null
+              ? null
+              : yield* Effect.promise(() =>
+                  discoverPairingLinks({
+                    credential: issued.credential,
+                    origin: runtime.origin,
+                    host: runtime.host,
+                    tailscaleServeEnabled:
+                      config.tailscaleServeEnabled || savedNode?.tailscaleServe === true,
+                    tailscaleServePort: savedNode?.tailscaleServePort ?? config.tailscaleServePort,
+                  }),
+                ).pipe(Effect.orElseSucceed(() => null));
+          const summary = formatIssuedPairingCredential(issued, {
+            ...(links === null ? {} : { pairUrl: links.pairingUrl }),
           });
-          yield* Console.log(output);
+          if (links === null) {
+            yield* Console.log(`${summary}${PAIRING_QR_NO_NODE_NOTE}\n`);
+            return;
+          }
+          const minutes = Math.max(
+            1,
+            Math.round(
+              (DateTime.toEpochMillis(issued.expiresAt) - (yield* Clock.currentTimeMillis)) /
+                60_000,
+            ),
+          );
+          const renderQrCode = yield* loadTerminalQrCode;
+          yield* Console.log(
+            `${summary}${formatPairingQrBlock({
+              links,
+              renderQrCode,
+              footer: [
+                `One-time client link, valid for ${minutes} minute${minutes === 1 ? "" : "s"}.`,
+              ],
+              // The summary above already printed it as "Pair URL".
+              showPairingUrl: false,
+              dim,
+            })}`,
+          );
         }),
       {
         quietLogs: flags.json,
@@ -3406,9 +3535,12 @@ const runServerCommand = (
   Effect.gen(function* () {
     const logLevel = yield* GlobalFlag.LogLevel;
     const config = yield* resolveServerConfig(flags, logLevel, { ...options, useNodeConfig: true });
+    yield* refuseDesktopOwnedNode(config.baseDir);
     // resolveServerConfig has started the desktop pipe watch this race reads
-    // (initializeDesktopResourceTelemetry), so it must stay ahead of it.
-    return yield* runServer.pipe(
+    // (initializeDesktopResourceTelemetry), so it must stay ahead of it. A copy of Ryco's data
+    // that Ryco Nightly was asked for replaces its database before the server opens it.
+    return yield* runRequestedFlavorImport(config).pipe(
+      Effect.andThen(runServer),
       Effect.provideService(ServerConfig, config),
       withDesktopParentLifetime,
     );
@@ -3482,6 +3614,7 @@ const serviceInstallCommand = Command.make("install", {
   Command.withHandler((flags) =>
     Effect.gen(function* () {
       const { platform, config, label, logPath } = yield* resolveServiceContext(flags.baseDir);
+      yield* refuseDesktopOwnedNode(config.baseDir);
       const configPath = nodeConfigPath(config.stateDir);
       const saved = yield* serviceProcess(() => readNodeConfig(configPath));
       const settings = applyNodeSettings(saved ?? EMPTY_NODE_CONFIG, {
@@ -3587,13 +3720,65 @@ const serviceRestartCommand = Command.make("restart", { ...serviceLocationFlags 
   ),
 );
 
+/**
+ * `ryco service status --ready`: probe the node this home runs (as a service or
+ * a foreground `ryco serve`) instead of the service manager, and fail (exit 1)
+ * unless it answers as this home's node. For scripts and health checks.
+ */
+const probeServiceReadiness = Effect.fn("probeServiceReadiness")(function* (flags: {
+  readonly baseDir: Option.Option<string>;
+  readonly json: boolean;
+}) {
+  const logLevel = yield* GlobalFlag.LogLevel;
+  const config = yield* resolveCliAuthConfig({ baseDir: flags.baseDir }, logLevel);
+  const fileSystem = yield* FileSystem.FileSystem;
+  const runtime = yield* readPersistedServerRuntimeState(config.serverRuntimeStatePath).pipe(
+    Effect.map(Option.getOrUndefined),
+    Effect.orElseSucceed(() => undefined),
+  );
+  const environmentId = yield* fileSystem
+    .readFileString(config.environmentIdPath)
+    .pipe(Effect.orElseSucceed(() => undefined));
+  const { describeServerReadiness, probeServerReadiness } = yield* Effect.promise(
+    () => import("./cliStatus/readiness.ts"),
+  );
+  const readiness = yield* Effect.promise(() =>
+    probeServerReadiness({
+      runtime,
+      environmentId,
+      isRunning: (state) => isPersistedServerRunning(state),
+    }),
+  );
+  const description = describeServerReadiness(readiness);
+  yield* Console.log(
+    flags.json
+      ? JSON.stringify({
+          ready: readiness.ready,
+          reason: readiness.reason,
+          origin: readiness.origin,
+        })
+      : readiness.ready
+        ? `Ready:      ${readiness.origin}`
+        : `Ready:      no (${description.replace(/^not ready: /u, "")})`,
+  );
+  if (!readiness.ready) {
+    return yield* Effect.fail(new Error(description));
+  }
+});
+
 const serviceStatusCommand = Command.make("status", {
   ...serviceLocationFlags,
   json: jsonFlag,
+  ready: Flag.Boolean("ready").pipe(
+    Flag.withDescription(
+      "Only check that this home's node answers as itself within 3 seconds; exit 1 when it does not.",
+    ),
+  ),
 }).pipe(
   Command.withDescription("Show whether the background service is installed and running."),
   Command.withHandler((flags) =>
     Effect.gen(function* () {
+      if (flags.ready) return yield* probeServiceReadiness(flags);
       const { platform, config, label, logPath } = yield* resolveServiceContext(flags.baseDir);
       const status = yield* serviceProcess(() => readNodeServiceStatus(platform, label));
       const runtime = yield* readPersistedServerRuntimeState(config.serverRuntimeStatePath).pipe(
@@ -3855,6 +4040,32 @@ const remoteThreadsCommand = Command.make("threads", {
 // Loads only for `ryco thread` and `ryco remote send`, never on the `serve` path.
 const loadThreadCli = Effect.promise(() => import("./cliThread/threadCommands.ts"));
 
+/**
+ * What reaching this machine's node takes (`ThreadCliLocal`): its address from the runtime file
+ * and its auth control plane, which issues the short-lived owner session.
+ */
+const localNodeAccess = (
+  flags: { readonly baseDir: Option.Option<string>; readonly json: boolean },
+  logLevel: Option.Option<LogLevel.LogLevel>,
+  fileSystem: FileSystem.FileSystem,
+) =>
+  Effect.map(resolveCliAuthConfig(flags, logLevel), (config) => ({
+    readOrigin: readPersistedServerRuntimeState(config.serverRuntimeStatePath).pipe(
+      Effect.map((state) => (Option.isSome(state) ? state.value.origin : null)),
+      Effect.orElseSucceed(() => null),
+      Effect.provideService(FileSystem.FileSystem, fileSystem),
+    ),
+    authControlPlane: AuthControlPlaneRuntimeLive.pipe(
+      Layer.provide(Layer.succeed(ServerConfig, config)),
+      Layer.provide(
+        Layer.succeed(
+          References.MinimumLogLevel,
+          flags.json ? "Error" : adminCommandLogLevel(logLevel, config.logLevel),
+        ),
+      ),
+    ),
+  }));
+
 const runThreadCli = (
   flags: {
     readonly baseDir: Option.Option<string>;
@@ -3873,22 +4084,7 @@ const runThreadCli = (
         json: flags.json,
         remote: flags.remote,
         loadRemote: (name) => loadRemote(flags.baseDir, name),
-        local: Effect.map(resolveCliAuthConfig(flags, logLevel), (config) => ({
-          readOrigin: readPersistedServerRuntimeState(config.serverRuntimeStatePath).pipe(
-            Effect.map((state) => (Option.isSome(state) ? state.value.origin : null)),
-            Effect.orElseSucceed(() => null),
-            Effect.provideService(FileSystem.FileSystem, fileSystem),
-          ),
-          authControlPlane: AuthControlPlaneRuntimeLive.pipe(
-            Layer.provide(Layer.succeed(ServerConfig, config)),
-            Layer.provide(
-              Layer.succeed(
-                References.MinimumLogLevel,
-                flags.json ? "Error" : adminCommandLogLevel(logLevel, config.logLevel),
-              ),
-            ),
-          ),
-        })),
+        local: localNodeAccess(flags, logLevel, fileSystem),
         transcript: { toReadThreadResult, readThreadMessageLimit },
       });
     }),
@@ -3997,6 +4193,83 @@ const threadReadCommand = Command.make("read", {
   Command.withHandler((flags) => runThreadCli(flags, { kind: "read", ...flags })),
 );
 
+const loadNodeUpdateCli = Effect.promise(() => import("./cliNodeUpdate/updateCommand.ts"));
+
+const updateCommand = Command.make("update", {
+  baseDir: baseDirFlag,
+  remote: Flag.String("remote").pipe(
+    Flag.withDescription("Update a paired remote (`ryco remote add`) instead of this node."),
+    Flag.optional,
+  ),
+  channel: Flag.Literals("channel", ["latest", "nightly"]).pipe(
+    Flag.withDescription(
+      "Move the node to this release channel. It never installs an older release than it runs.",
+    ),
+    Flag.optional,
+  ),
+  check: Flag.Boolean("check").pipe(
+    Flag.withDescription("Only show the node's version, the newest release and the last update."),
+    Flag.withDefault(false),
+  ),
+  yes: Flag.Boolean("yes").pipe(
+    Flag.withAlias("y"),
+    Flag.withDescription("Update without asking (needed when the output is not a terminal)."),
+    Flag.withDefault(false),
+  ),
+  json: jsonFlag,
+}).pipe(
+  Command.withDescription(
+    "Update this node, or a paired remote, through its own one-click update: checked against a copy of its database, restarted, and rolled back if the new release fails to start.",
+  ),
+  Command.withHandler((flags) =>
+    quietly(
+      flags.json,
+      Effect.scoped(
+        Effect.gen(function* () {
+          const logLevel = yield* GlobalFlag.LogLevel;
+          const fileSystem = yield* FileSystem.FileSystem;
+          const threadCli = yield* loadThreadCli;
+          const updateCli = yield* loadNodeUpdateCli;
+          const target = Option.isSome(flags.remote)
+            ? threadCli.remoteThreadTarget(yield* loadRemote(flags.baseDir, flags.remote.value))
+            : yield* threadCli.localThreadTarget({
+                local: yield* localNodeAccess(flags, logLevel, fileSystem),
+                timeout: null,
+                // The follow ends within 10 minutes; a session this older CLI cannot revoke
+                // after the node migrated its database expires soon after.
+                sessionTtl: Duration.minutes(30),
+                sessionLabel: "ryco update",
+              });
+          const nodeLabel = Option.isSome(flags.remote) ? `"${flags.remote.value}"` : "this node";
+          if (flags.check) {
+            return yield* updateCli.runUpdateCheck({
+              target,
+              nodeLabel,
+              json: flags.json,
+              channel: Option.getOrNull(flags.channel),
+              fetchLatestOnChannel: updateCli.fetchLatestRycoRelease,
+            });
+          }
+          yield* updateCli.runUpdateCli({
+            target,
+            nodeLabel,
+            channel: Option.getOrNull(flags.channel),
+            yes: flags.yes,
+            json: flags.json,
+            interactive: isInteractiveTerminal(),
+            confirm: (message) =>
+              Prompt.run(Prompt.Confirm({ message, initial: false })).pipe(
+                Effect.catch(() => Effect.succeed(false)),
+              ),
+            fetchLatestOnChannel: updateCli.fetchLatestRycoRelease,
+            requestId: `cli-${crypto.randomUUID()}`,
+          });
+        }),
+      ),
+    ),
+  ),
+);
+
 const threadCommand = Command.make("thread").pipe(
   Command.withDescription("Start, message, wait for and read threads, here or on a paired remote."),
   Command.withSubcommands([
@@ -4055,6 +4328,9 @@ const remoteCommand = Command.make("remote").pipe(
 
 // ─── ryco setup / ryco config ─────────────────────────────────────────────────
 
+// The setup guide and the node manager load when a command opens them, never on the `serve` path.
+const loadSetupFlow = Effect.promise(() => import("./cliSetup/setupFlow.ts"));
+
 const resolveSetupContext = (baseDir: Option.Option<string>) =>
   Effect.gen(function* () {
     const logLevel = yield* GlobalFlag.LogLevel;
@@ -4073,20 +4349,26 @@ const resolveSetupContext = (baseDir: Option.Option<string>) =>
   });
 
 /** The running node's origin, when a server recorded one and actually answers there. */
-const probeLocalServer = (serverRuntimeStatePath: string) =>
+/** The runtime file of this home's node, when that node answers. */
+const probeLocalServerRuntime = (serverRuntimeStatePath: string) =>
   readPersistedServerRuntimeState(serverRuntimeStatePath).pipe(
     Effect.flatMap((state) =>
       Option.isNone(state)
-        ? Effect.succeed<string | null>(null)
+        ? Effect.succeed<PersistedServerRuntimeState | null>(null)
         : Effect.tryPromise(async () => {
             const response = await fetch(
               new URL("/.well-known/ryco/environment", state.value.origin),
               { signal: AbortSignal.timeout(1_500) },
             );
-            return response.ok ? state.value.origin : null;
+            return response.ok ? state.value : null;
           }),
     ),
     Effect.orElseSucceed(() => null),
+  );
+
+const probeLocalServer = (serverRuntimeStatePath: string) =>
+  probeLocalServerRuntime(serverRuntimeStatePath).pipe(
+    Effect.map((state) => state?.origin ?? null),
   );
 
 const emptyServerFlags = (baseDir: Option.Option<string>): CliServerFlags => ({
@@ -4206,8 +4488,11 @@ const setupCommand = Command.make("setup", { baseDir: baseDirFlag }).pipe(
         });
       }
       const { config, context } = yield* resolveSetupContext(flags.baseDir);
+      yield* refuseDesktopOwnedNode(config.baseDir);
       const operations = yield* makeSetupOperations(flags, config.serverRuntimeStatePath);
-      yield* setupClosed(runSetup(context, operations));
+      yield* setupClosed(
+        Effect.flatMap(loadSetupFlow, (flow) => flow.runSetup(context, operations)),
+      );
     }),
   ),
 );
@@ -4332,7 +4617,9 @@ const configEditCommand = Command.make("edit", { ...configLocationFlags }).pipe(
         });
       }
       const { context } = yield* resolveSetupContext(flags.baseDir);
-      const changed = yield* editNodeConfigFile(context).pipe(
+      const changed = yield* Effect.flatMap(loadSetupFlow, (flow) =>
+        flow.editNodeConfigFile(context),
+      ).pipe(
         Effect.catchIf(
           (error) => error._tag === "QuitError",
           () => Effect.succeed(false),
@@ -4393,6 +4680,7 @@ const runBareCommand = (flags: CliServerFlags) =>
     if (!offerSetup) return yield* runServerCommand(flags);
 
     const { config, context } = yield* resolveSetupContext(Option.none());
+    yield* refuseDesktopOwnedNode(config.baseDir);
     const operations = yield* makeSetupOperations(
       { baseDir: Option.none() },
       config.serverRuntimeStatePath,
@@ -4409,7 +4697,9 @@ const runBareCommand = (flags: CliServerFlags) =>
               readNodeServiceStatus(context.platform!, context.serviceLabel),
             ).pipe(Effect.orElseSucceed(() => null));
       if (running || service?.installed) {
-        return yield* setupClosed(runNodeManager(context, operations));
+        return yield* setupClosed(
+          Effect.flatMap(loadSetupFlow, (flow) => flow.runNodeManager(context, operations)),
+        );
       }
       return yield* runServerCommand(flags);
     }
@@ -4438,7 +4728,9 @@ const runBareCommand = (flags: CliServerFlags) =>
     ).pipe(Effect.catchTag("QuitError", () => Effect.succeed("quit" as const)));
     if (choice === "quit") return;
     if (choice === "setup") {
-      return yield* setupClosed(runFirstTimeSetup(context, operations));
+      return yield* setupClosed(
+        Effect.flatMap(loadSetupFlow, (flow) => flow.runFirstTimeSetup(context, operations)),
+      );
     }
     if (choice === "always-open") {
       yield* Effect.promise(() =>
@@ -4482,6 +4774,7 @@ export const cli = Command.make("ryco", { ...sharedServerCommandFlags }).pipe(
     serviceCommand,
     remoteCommand,
     threadCommand,
+    updateCommand,
     makeDbCommand({
       locationFlags: sharedServerLocationFlags,
       jsonFlag,

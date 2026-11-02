@@ -39,6 +39,27 @@ export const jsonRpcResult = (id: JsonRpcId, result: unknown): JsonRpcResponse =
   result,
 });
 
+/**
+ * A `tools/call` result as MCP requires it: `structuredContent` must be a JSON object, so a
+ * tool whose value is an array (thread search results) or a scalar has it wrapped as
+ * `{ result }`. Clients validating the result schema rejected the bare array outright.
+ */
+export const mcpToolCallResult = (result: unknown): unknown => {
+  if (typeof result !== "object" || result === null || !("structuredContent" in result)) {
+    return result;
+  }
+  const { structuredContent } = result as { readonly structuredContent: unknown };
+  if (
+    structuredContent === undefined ||
+    (typeof structuredContent === "object" &&
+      structuredContent !== null &&
+      !Array.isArray(structuredContent))
+  ) {
+    return result;
+  }
+  return { ...result, structuredContent: { result: structuredContent } };
+};
+
 export const jsonRpcError = (id: JsonRpcId, code: number, message: string): JsonRpcResponse => ({
   jsonrpc: "2.0",
   id,

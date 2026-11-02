@@ -753,6 +753,39 @@ describe("follow-up queue decider: steer", () => {
     });
   });
 
+  it("sends a steer its provider stopped the turn for next, ahead of earlier follow-ups", async () => {
+    const steered = await apply(await queued(["a", "b", "c"], running), steer("c"));
+    const deferred = (restartedTurn: boolean): OrchestrationCommand => ({
+      type: "thread.turn.steer.resolve",
+      commandId: nextCommandId("resolve"),
+      requestCommandId: steered.events[1]!.commandId!,
+      threadId,
+      expectedTurnId: runningTurn,
+      message: { messageId: MessageId.make("c"), role: "user", text: "text c", attachments: [] },
+      createdAt: at(2),
+      requestedAt: at(2),
+      resolution: {
+        status: "rejected",
+        error: "Cursor can't take a message mid-turn, so Ryco stopped the turn.",
+        reason: "deferred",
+        ...(restartedTurn ? { restartedTurn: true } : {}),
+        resolvedAt: at(3),
+      },
+    });
+    const restarted = await apply(steered.model, deferred(true));
+    expect(types(restarted.events)).toContain("thread.queue-reordered");
+    expect(
+      queueOf(restarted.model)?.entries.map((entry) => [entry.messageId, entry.status]),
+    ).toEqual([
+      ["c", "queued"],
+      ["a", "queued"],
+      ["b", "queued"],
+    ]);
+    // A plain deferral (the turn ended first) keeps its place.
+    const plain = await apply(steered.model, deferred(false));
+    expect(queueOf(plain.model)?.entries.map((entry) => entry.messageId)).toEqual(["a", "b", "c"]);
+  });
+
   it("leaves the entry queued when the turn it targets is no longer running", async () => {
     expect(await decide(await queued(["a"], running), steer("a", TurnId.make("old")))).toEqual([]);
     expect(await decide(await queued(["a"]), steer("a"))).toEqual([]);
@@ -884,6 +917,61 @@ describe("follow-up queue decider: dispatch", () => {
     expect(watchWake.detail).toContain("pull request update");
   });
 
+  it("remembers the chat's selection a person's entry was queued over, and hands it to its turn", async () => {
+    const chat = baseThread.modelSelection;
+    const model = await queued(["a"]);
+    expect(queueOf(model)?.entries[0]?.queuedOverModelSelection).toEqual(chat);
+    const claude = { instanceId: CLAUDE, model: "sonnet" };
+    // Edited to another model while the chat holds another pick: queued over that pick now.
+    const picked = { instanceId: CODEX, model: "gpt-5.5" };
+    const { model: repicked } = await apply(model, {
+      type: "thread.meta.update",
+      commandId: nextCommandId("pick"),
+      threadId,
+      modelSelection: picked,
+    });
+    const editTo = (modelSelection: typeof claude, revision: number): OrchestrationCommand => ({
+      type: "thread.queue.edit",
+      commandId: nextCommandId("edit"),
+      threadId,
+      messageId: MessageId.make("a"),
+      expectedRevision: revision,
+      text: "edited",
+      attachments: [],
+      modelSelection,
+      runtimeMode: "approval-required",
+      interactionMode: "plan",
+      createdAt: at(3),
+    });
+    const { model: edited } = await apply(repicked, editTo(claude, 1));
+    expect(queueOf(edited)?.entries[0]?.queuedOverModelSelection).toEqual(picked);
+    // A text-only edit keeps what the model was queued over.
+    const { model: textOnly } = await apply(
+      await apply(edited, {
+        type: "thread.meta.update",
+        commandId: nextCommandId("pick-again"),
+        threadId,
+        modelSelection: chat,
+      }).then((result) => result.model),
+      editTo(claude, 2),
+    );
+    expect(queueOf(textOnly)?.entries[0]?.queuedOverModelSelection).toEqual(picked);
+    const events = await decide(
+      textOnly,
+      dispatch({ messageId: MessageId.make("a"), revision: 3 }, { modelSelection: claude }),
+    );
+    const start = events.find((event) => event.type === "thread.turn-start-requested");
+    expect(start?.payload).toMatchObject({ queuedOverModelSelection: picked });
+    // An agent's entry records none: it runs on the chat's own selection.
+    const { model: agentQueued } = await apply(
+      modelWith(),
+      addCommand("b", { author: "agent" } as Partial<
+        Extract<OrchestrationCommand, { type: "thread.queue.add" }>
+      >),
+    );
+    expect(queueOf(agentQueued)?.entries[0]).not.toHaveProperty("queuedOverModelSelection");
+  });
+
   it("an older client's own send of a queued id takes it out of the queue", async () => {
     const model = await queued(["a"]);
     const { events, model: next } = await apply(model, {
@@ -977,6 +1065,49 @@ describe("follow-up queue decider: holds other commands record", () => {
     expect(types(await decide(modelWith(running), interrupt(true)))).toEqual([
       "thread.turn-interrupt-requested",
     ]);
+  });
+
+  it("an add for a turn a Stop ended while the queue was empty holds it as that Stop would", async () => {
+    // The Stop found nothing to hold; the add that comes after it still must not start a turn.
+    const { model: stopped } = await apply(modelWith(running), interrupt(true));
+    expect(queueOf(stopped)).toBeUndefined();
+    const guarded = (messageId: string, turnId: TurnId = runningTurn) =>
+      addCommand(messageId, { holdIfTurnInterrupted: turnId, author: "agent" } as Partial<
+        Extract<OrchestrationCommand, { type: "thread.queue.add" }>
+      >);
+
+    const { events, model } = await apply(stopped, guarded("continuation"));
+    expect(types(events)).toEqual(["thread.queue-entry-added", "thread.queue-held"]);
+    expect(queueOf(model)?.hold).toEqual({
+      reason: "interrupted",
+      detail: null,
+      causeKeys: [`interrupt:${runningTurn}`],
+      heldAt: at(1),
+    });
+
+    // Merged with a hold the add carries, in the same event.
+    const both = await decide(
+      stopped,
+      addCommand("both", {
+        holdIfTurnInterrupted: runningTurn,
+        hold: { reason: "paused", detail: "Wait.", causeKeys: ["paused:other"] },
+      } as Partial<Extract<OrchestrationCommand, { type: "thread.queue.add" }>>),
+    );
+    expect(types(both)).toEqual(["thread.queue-entry-added", "thread.queue-held"]);
+    const bothHold = (both[1] as Extract<OrchestrationEvent, { type: "thread.queue-held" }>).payload
+      .hold;
+    expect(bothHold.causeKeys).toEqual(["paused:other", `interrupt:${runningTurn}`]);
+    // The higher-ranked reason shows, as when the two holds come one after the other.
+    expect(bothHold.reason).toBe("paused");
+
+    // The turn still runs, another turn was stopped, or nothing asks: queued as usual.
+    expect(types(await decide(modelWith(running), guarded("running")))).toEqual([
+      "thread.queue-entry-added",
+    ]);
+    expect(types(await decide(stopped, guarded("other", TurnId.make("turn-other"))))).toEqual([
+      "thread.queue-entry-added",
+    ]);
+    expect(types(await decide(stopped, addCommand("plain")))).toEqual(["thread.queue-entry-added"]);
   });
 
   it("a usage limit holds the queue until it clears, unless the head targets another instance", async () => {

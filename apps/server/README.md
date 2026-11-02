@@ -19,6 +19,15 @@ npm install -g ryco-cli
 ryco
 ```
 
+### From Ryco Desktop
+
+Ryco Desktop on macOS and Linux installs the same CLI from **Settings → General → Command line**: it
+links `ryco` (`ryco-nightly` for Ryco Nightly) into a folder on your `PATH`, running the app's
+bundled CLI against the app's own node. Admin commands (`auth`, `hub`, `e2ee`, `thread`, `remote`,
+`doctor`, …) work as usual. Commands that would start a second node for the app's home (`ryco`,
+`start`, `serve`, `setup`, `service install`) refuse, because the app already runs it. Install never
+replaces a file it did not write and refuses when another `ryco` runs first in a new terminal.
+
 On Linux, installing compiles the terminal backend (`node-pty` ships no Linux prebuild), so the
 machine needs a C/C++ toolchain and Python first (Debian/Ubuntu: `sudo apt install build-essential
 python3`). A node whose `node-pty` could not be built still starts; it logs why and its terminals
@@ -100,9 +109,18 @@ ryco service install --tailscale-serve --hub ~/code
 ryco service status
 ```
 
+For scripts and health checks, `ryco service status --ready` asks the node this home runs (as a
+service or under `ryco serve`) for its identity, within 3 seconds, and exits 1 unless it answers as
+this home's node. `--json` prints `{ "ready", "reason", "origin" }`.
+
 A node that runs as a service updates itself from the apps. It checks the new release against a
 copy of its database before it restarts into it, and rolls back a release that fails to start,
 database included. See [node-updates.md](../../docs/node-updates.md).
+
+From a terminal, `ryco update` runs that same update on this node (or `--remote <name>` on a
+paired one): it shows the versions, asks (or `--yes`), and follows the update through the restart.
+`ryco update --check` only shows where the node stands, and `--channel nightly` moves it to
+nightly builds; a channel switch never installs an older release.
 
 Link the node to your Ryco account so the apps reach it from anywhere through the Hub relay:
 
@@ -159,7 +177,8 @@ ryco setup
 ryco config [show | path | edit | set <key> <value> | unset <key>]
 
 ryco service install [serve flags] [cwd]
-ryco service status | logs [-f] | restart | stop | start | uninstall
+ryco service status [--ready] | logs [-f] | restart | stop | start | uninstall
+ryco update [--check] [--channel latest|nightly] [--yes] [--remote <name>] [--json]
 
 ryco hub login | enroll | status | pending | cancel | resume | leave
 

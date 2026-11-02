@@ -35,13 +35,42 @@ export const NODE_INSTALL_TIMEOUT = Duration.minutes(10);
 export const NODE_VERIFY_TIMEOUT = Duration.seconds(60);
 
 /**
+ * What an install nobody asked for leaves out: dependency releases published less than the
+ * minimum release age ago. The `ryco-cli` release itself is that old already (the updater checks
+ * it); its dependencies resolve at install time, install scripts included, so they are held back
+ * too: npm takes nothing published after `publishedBeforeMs` (`--before`), pnpm 10.16+ nothing
+ * younger than `minimumReleaseAgeMinutes` (`minimumReleaseAge`). bun installs without either, so
+ * an unattended update never runs with bun.
+ */
+export interface NodeInstallHoldBack {
+  readonly publishedBeforeMs: number;
+  readonly minimumReleaseAgeMinutes: number;
+}
+
+export const nodeInstallHoldBack = (
+  nowMs: number,
+  minimumReleaseAge: Duration.Input,
+): NodeInstallHoldBack => {
+  const ageMs = Duration.toMillis(minimumReleaseAge);
+  return {
+    publishedBeforeMs: nowMs - ageMs,
+    minimumReleaseAgeMinutes: Math.ceil(ageMs / 60_000),
+  };
+};
+
+/** pnpm reads `minimumReleaseAge` from 10.16 on; older releases ignore it. */
+export const PNPM_MINIMUM_RELEASE_AGE_RANGE = ">=10.16.0";
+
+/**
  * Installs exactly `version` into the installation this process runs from: npm into its
- * own prefix (not whichever `npm` the PATH finds first), bun with the running bun.
+ * own prefix (not whichever `npm` the PATH finds first), bun with the running bun. With
+ * `holdBack` (an unattended update), recent dependency releases stay out; `null` for bun then.
  */
 export function nodeInstallCommand(
   installation: DetectedNodeInstallation,
   version: string,
   execPath: string,
+  holdBack?: NodeInstallHoldBack,
 ): NodeUpdateCommand | null {
   const target = `${RYCO_CLI_PACKAGE}@${version}`;
   switch (installation.kind) {
@@ -50,10 +79,20 @@ export function nodeInstallCommand(
         ? null
         : {
             command: "npm",
-            args: ["install", "-g", "--prefix", installation.npmPrefix, target],
+            args: [
+              "install",
+              "-g",
+              "--prefix",
+              installation.npmPrefix,
+              ...(holdBack === undefined
+                ? []
+                : [`--before=${new Date(holdBack.publishedBeforeMs).toISOString()}`]),
+              target,
+            ],
             timeout: NODE_INSTALL_TIMEOUT,
           };
     case "bun-global": {
+      if (holdBack !== undefined) return null;
       const runtime = execPath.split(/[\\/]/u).at(-1) ?? "";
       return {
         command: /^bun(?:\.exe)?$/iu.test(runtime) ? execPath : "bun",
@@ -62,7 +101,18 @@ export function nodeInstallCommand(
       };
     }
     case "pnpm-global":
-      return { command: "pnpm", args: ["add", "-g", target], timeout: NODE_INSTALL_TIMEOUT };
+      return {
+        command: "pnpm",
+        args: [
+          "add",
+          "-g",
+          ...(holdBack === undefined
+            ? []
+            : [`--config.minimumReleaseAge=${holdBack.minimumReleaseAgeMinutes}`]),
+          target,
+        ],
+        timeout: NODE_INSTALL_TIMEOUT,
+      };
     default:
       return null;
   }
@@ -128,8 +178,13 @@ export interface NodeUpdateCommandResult {
   readonly stderr: string;
 }
 
+/**
+ * Runs `command`. `onSpawned` gets the child's pid once it runs (an installer records it with its
+ * install lock); when it fails, the child is stopped and the result is a spawn error.
+ */
 export type NodeUpdateCommandRunner = (
   command: NodeUpdateCommand,
+  onSpawned?: (pid: number) => Effect.Effect<void, Error>,
 ) => Effect.Effect<NodeUpdateCommandResult>;
 
 export const commandSucceeded = (result: NodeUpdateCommandResult) =>
@@ -174,12 +229,13 @@ const textTail = (stream: ChildProcessSpawner.ChildProcessHandle["stdout"]) =>
 /** Runs commands through the platform spawner; never fails, every failure is in the result. */
 export const makeNodeUpdateCommandRunner =
   (spawner: ChildProcessSpawner.ChildProcessSpawner["Service"]): NodeUpdateCommandRunner =>
-  (command) =>
+  (command, onSpawned) =>
     Effect.gen(function* () {
       const child = yield* spawner.spawn(
         ChildProcess.make(command.command, [...command.args], { stdin: "ignore" }),
       );
       yield* Effect.addFinalizer(() => child.kill().pipe(Effect.ignore));
+      if (onSpawned !== undefined) yield* onSpawned(child.pid);
       const [stdout, stderr, exitCode] = yield* Effect.all(
         [textTail(child.stdout), textTail(child.stderr), child.exitCode],
         { concurrency: "unbounded" },

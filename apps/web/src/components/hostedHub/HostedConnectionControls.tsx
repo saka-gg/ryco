@@ -51,6 +51,7 @@ import { usePresentationTier } from "../../hooks/usePresentationTier";
 import {
   deriveHostedConnectionChip,
   deriveHostedEnvironmentConnectionChip,
+  deriveHostedEnvironmentRouteNotice,
   hostedConnectionAnnouncement,
   hostedConnectionChipQuiet,
   hostedConnectionStatusPresentation,
@@ -193,25 +194,40 @@ function useHostedConnectionChip(): HostedConnectionChip | null {
  * selected, its own session record otherwise, and its own channel always.
  * Null while the directory does not list its node.
  */
-function useHostedEnvironmentConnectionChip(
-  environmentId: EnvironmentId,
-): HostedConnectionChip | null {
+function useHostedEnvironmentConnectionChip(environmentId: EnvironmentId): {
+  readonly chip: HostedConnectionChip | null;
+  /** Which part of the way to the node failed (`deriveHostedEnvironmentRouteNotice`). */
+  readonly routeNotice: string | null;
+} {
   const source = useHostedHubStore(useShallow(selectHostedConnectionChipSource));
   const other = source.selectedNode?.environmentId !== environmentId;
-  const record = useHostedEnvironmentRecord(other ? environmentId : null);
+  // Its own record, which the chip reads only while it is not the selected environment and the
+  // route line always reads for the failure its transport is waiting out.
+  const ownRecord = useHostedEnvironmentRecord(environmentId);
   const deliveryUnknown = useHostedEnvironmentDeliveryUnknown(other ? environmentId : null);
   const e2eeStatus = useWebE2eeChannelStatusFor(environmentId);
-  return useMemo(
-    () =>
-      deriveHostedEnvironmentConnectionChip({
+  return useMemo(() => {
+    const record = other ? ownRecord : undefined;
+    return {
+      chip: deriveHostedEnvironmentConnectionChip({
         ...source,
         environmentId,
         record,
         deliveryUnknown,
         e2eeStatus,
       }),
-    [deliveryUnknown, e2eeStatus, environmentId, record, source],
-  );
+      // "since 14:02" reads the clock only for the day: a render a day later is off by a word.
+      routeNotice: deriveHostedEnvironmentRouteNotice({
+        ...source,
+        environmentId,
+        record,
+        deliveryUnknown,
+        e2eeStatus,
+        ownRecord,
+        nowMs: Date.now(),
+      }),
+    };
+  }, [deliveryUnknown, e2eeStatus, environmentId, other, ownRecord, source]);
 }
 
 /** The delivery-unknown warning and its replay-gated acknowledgement. */
@@ -320,7 +336,7 @@ export function HostedThreadConnectionBadge({
 }: {
   readonly environmentId: EnvironmentId;
 }) {
-  const chip = useHostedEnvironmentConnectionChip(environmentId);
+  const { chip, routeNotice } = useHostedEnvironmentConnectionChip(environmentId);
   const selected = useHostedHubStore(
     (state) => state.selectedNode?.environmentId === environmentId,
   );
@@ -370,6 +386,7 @@ export function HostedThreadConnectionBadge({
           <p className="mt-0.5 text-xs capitalize text-muted-foreground">
             {role ?? "Role unavailable"} · {statusText}
           </p>
+          {routeNotice ? <p className="mt-1 text-xs text-muted-foreground">{routeNotice}</p> : null}
           <p className="sr-only" aria-live="polite">
             {hostedConnectionAnnouncement(node.label, statusText)}
           </p>

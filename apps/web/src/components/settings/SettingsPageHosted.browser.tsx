@@ -13,7 +13,7 @@
 // cursor itself follows the last opened thread across the pages no node owns.
 import "../../index.css";
 
-import { EnvironmentId } from "@ryco/contracts";
+import { DEFAULT_SERVER_SETTINGS, EnvironmentId, type ServerConfig } from "@ryco/contracts";
 import { page } from "vite-plus/test/browser";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { render } from "vitest-browser-react";
@@ -58,6 +58,8 @@ import {
   useHostedHubStore,
 } from "../../hostedHub/state";
 import type { HostedHubNode } from "../../hostedHub/types";
+import { AppAtomRegistryProvider } from "../../rpc/atomRegistry";
+import { resetServerStateForTests, setServerConfigSnapshot } from "../../rpc/serverState";
 import { useSettingsDialogStore } from "../../settingsDialogStore";
 import { createFakeHistoryWindow, type FakeHistoryWindow } from "../../../test/fakeHistoryWindow";
 import { SidebarProvider } from "../ui/sidebar";
@@ -336,5 +338,177 @@ describe("hosted settings choose their device", () => {
     await expect
       .element(page.getByRole("menuitemradio", { name: laptop.label }))
       .toHaveAttribute("aria-disabled", "true");
+  });
+});
+
+describe("the scope sentence names the node a section changes", () => {
+  afterEach(() => {
+    resetServerStateForTests();
+  });
+
+  /**
+   * Hosted on Studio, with the node's config in: its node sections are listed
+   * (the ones without a config are not).
+   */
+  function signInOnStudio(overrides: Partial<ReturnType<typeof useHostedHubStore.getState>> = {}) {
+    setServerConfigSnapshot({
+      environment: {
+        environmentId: studio.environmentId,
+        label: studio.label,
+        platform: { os: "linux", arch: "x64" },
+        serverVersion: "0.9.0",
+        capabilities: { repositoryIdentity: false, threadSettlement: false },
+      },
+      auth: {
+        policy: "loopback-browser",
+        bootstrapMethods: ["one-time-token"],
+        sessionMethods: ["browser-session-cookie", "bearer-session-token"],
+        sessionCookieName: "ryco_session",
+      },
+      cwd: "/repo",
+      keybindingsConfigPath: "/repo/.ryco-keybindings.json",
+      keybindings: [],
+      issues: [],
+      providers: [],
+      availableEditors: [],
+      observability: {
+        logsDirectoryPath: "/repo/.ryco/logs",
+        localTracingEnabled: false,
+        otlpTracesEnabled: false,
+        otlpMetricsEnabled: false,
+      },
+      settings: DEFAULT_SERVER_SETTINGS,
+    } satisfies ServerConfig);
+    useHostedHubStore.setState({
+      accountStatus: "authenticated",
+      account,
+      session,
+      directoryStatus: "ready",
+      browserStatus: "current",
+      nodes: [studio, laptop, revoked],
+      selectedNode: studio,
+      selectionStatus: "online",
+      effectiveRole: "owner",
+      transportStatus: "online",
+      sessionStatus: "ready",
+      sessionEstablished: true,
+      ...overrides,
+    });
+    writePrimary(studio);
+  }
+  const scopeLabel = () =>
+    document.querySelector('[data-testid="settings-scope-label"]')?.textContent ?? null;
+
+  it("switches the node through the nav's own menu, and the section's rows follow", async () => {
+    await page.viewport(1_280, 720);
+    signInOnStudio();
+    fakeWindow = createFakeHistoryWindow("/settings");
+    installHostedNodeHistory(fakeWindow as unknown as Window & typeof globalThis);
+    const selectNode = selectingNode();
+    stopOrchestrator = startHostedNodeRouteOrchestrator();
+
+    mounted = await render(
+      <AppAtomRegistryProvider>
+        <SidebarProvider>
+          <SettingsPage />
+        </SidebarProvider>
+      </AppAtomRegistryProvider>,
+    );
+    await expect.element(page.getByText("Changes apply to", { exact: true })).toBeVisible();
+    const menu = page.getByRole("button", { name: `${studio.label}, switch device` });
+    await expect.element(menu).toBeVisible();
+    const panelBefore = document.querySelector(".settings-panel-enter");
+    expect(panelBefore).not.toBeNull();
+
+    await menu.click();
+    // The nav's own list: every node this browser may open, and no revoked one.
+    await expect.element(page.getByRole("menuitemradio", { name: laptop.label })).toBeVisible();
+    await expect
+      .element(page.getByRole("menuitemradio", { name: revoked.label }))
+      .not.toBeInTheDocument();
+    await page.getByRole("menuitemradio", { name: laptop.label }).click();
+
+    // The selection cursor moves, staying on settings, and the sentence follows it.
+    await vi.waitFor(() => expect(selectNode).toHaveBeenCalledWith(laptop.id));
+    expect(fakeWindow.location.pathname).toBe("/settings");
+    await vi.waitFor(() => expect(scopeLabel()).toBe(laptop.label));
+    await expect
+      .element(page.getByRole("button", { name: `${laptop.label}, switch device` }))
+      .toBeVisible();
+    await expect
+      .element(page.getByTestId("settings-destination-description"))
+      .toHaveTextContent("Identity, imports, updates, and project defaults for this device.");
+    // The section is mounted again for the node it now shows, so its rows reload.
+    expect(document.querySelector(".settings-panel-enter")).not.toBe(panelBefore);
+  });
+
+  it("offers a node only when the nav would, and says which nodes are offline", async () => {
+    await page.viewport(1_280, 720);
+    const offline = {
+      ...node("node_dddddddddddddddddddddd", "Garage box"),
+      presence: { online: false, lastHeartbeatAt: 1 },
+    };
+    signInOnStudio({ browserStatus: "suspended", nodes: [studio, laptop, offline] });
+
+    mounted = await render(
+      <AppAtomRegistryProvider>
+        <SidebarProvider>
+          <SettingsPage />
+        </SidebarProvider>
+      </AppAtomRegistryProvider>,
+    );
+    await page.getByRole("button", { name: `${studio.label}, switch device` }).click();
+    // The directory's own rule for opening a node holds for this menu too.
+    await expect
+      .element(page.getByRole("menuitemradio", { name: laptop.label }))
+      .toHaveAttribute("aria-disabled", "true");
+    await expect
+      .element(page.getByRole("menuitemradio", { name: /^Garage box/ }))
+      .toHaveTextContent(`${offline.label}Offline`);
+  });
+
+  it("searches the devices when there are more than six", async () => {
+    await page.viewport(1_280, 720);
+    const more = ["e", "f", "g", "h", "i"].map((letter, index) =>
+      node(`node_${letter.repeat(22)}`, `Rack ${index + 1}`),
+    );
+    signInOnStudio({ nodes: [studio, laptop, ...more] });
+    const selectNode = selectingNode();
+
+    mounted = await render(
+      <AppAtomRegistryProvider>
+        <SidebarProvider>
+          <SettingsPage />
+        </SidebarProvider>
+      </AppAtomRegistryProvider>,
+    );
+    // A searchable list: its trigger is a combobox.
+    await page.getByRole("combobox", { name: `${studio.label}, switch device` }).click();
+    const search = page.getByRole("combobox", { name: "Search devices" });
+    await expect.element(search).toBeVisible();
+    await search.fill("rack 3");
+    await expect.element(page.getByRole("option", { name: "Rack 3" })).toBeVisible();
+    await expect.element(page.getByRole("option", { name: "Rack 2" })).not.toBeInTheDocument();
+    await page.getByRole("option", { name: "Rack 3" }).click();
+    await vi.waitFor(() => expect(selectNode).toHaveBeenCalledWith(more[2]!.id));
+  });
+
+  it("shows no sentence on this app's own sections", async () => {
+    await page.viewport(1_280, 720);
+    signInOnStudio();
+    useSettingsDialogStore.setState({ section: "appearance", editingScope: "client" });
+
+    mounted = await render(
+      <AppAtomRegistryProvider>
+        <SidebarProvider>
+          <SettingsPage />
+        </SidebarProvider>
+      </AppAtomRegistryProvider>,
+    );
+    await expect
+      .element(page.getByTestId("settings-destination-description"))
+      .toHaveTextContent("Theme, typography, and interface details for this app.");
+    await expect.element(page.getByText("Changes apply to")).not.toBeInTheDocument();
+    expect(document.querySelector('[data-testid="settings-scope-sentence"]')).toBeNull();
   });
 });

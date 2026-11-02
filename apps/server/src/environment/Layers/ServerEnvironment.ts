@@ -9,6 +9,7 @@ import { ServerConfig } from "../../config.ts";
 import { ServerEnvironment, type ServerEnvironmentShape } from "../Services/ServerEnvironment.ts";
 import packageJson from "../../../package.json" with { type: "json" };
 import { resolveServerEnvironmentLabel } from "./ServerEnvironmentLabel.ts";
+import { desktopAppAutomaticUpdateMode } from "@ryco/shared/desktopResourceTelemetry";
 import { inferEnvironmentMachineKind } from "@ryco/shared/environmentIcon";
 
 function platformOs(): ExecutionEnvironmentDescriptor["platform"]["os"] {
@@ -78,6 +79,15 @@ export const makeServerEnvironment = Effect.fn("makeServerEnvironment")(function
   // A thread's servers are found by the marker in their launch environment, which only macOS
   // (`ps -E`) and Linux (`/proc/<pid>/environ`) let the node read (docs/thread-servers.md).
   const readsThreadServers = process.platform === "darwin" || process.platform === "linux";
+  // A desktop app's backend: what the app does with its own updates under `automaticUpdates`.
+  // Development builds never update themselves.
+  const desktopAppUpdates =
+    serverConfig.mode === "desktop" && serverConfig.devUrl === undefined
+      ? desktopAppAutomaticUpdateMode({
+          platform: process.platform,
+          appImage: process.env.APPIMAGE,
+        })
+      : null;
   const descriptor: ExecutionEnvironmentDescriptor = {
     environmentId,
     label,
@@ -96,6 +106,7 @@ export const makeServerEnvironment = Effect.fn("makeServerEnvironment")(function
       threadSettlement: true,
       nodeAutoSettlement: true,
       threadSnooze: true,
+      threadTriage: true,
       storageManagement: true,
       threadSidebarUndo: true,
       projectIcons: true,
@@ -109,6 +120,7 @@ export const makeServerEnvironment = Effect.fn("makeServerEnvironment")(function
       nodeSelfUpdate: true,
       terminalWriteRequireIdle: true,
       threadFork: true,
+      threadForkCarried: true,
       conversationRevert: true,
       threadBranchAdoption: true,
       filesRevert: true,
@@ -121,12 +133,18 @@ export const makeServerEnvironment = Effect.fn("makeServerEnvironment")(function
       projectFileWatch: true,
       threadLocalServers: readsThreadServers,
       threadLocalServerStop: readsThreadServers,
+      secretRequests: true,
       cliProxyHubs: true,
       cliProxyCloudflareAccess: true,
       stagedOnlyCommit: true,
+      pullRequestOptions: true,
+      workingTreeComparison: true,
       agentProcessPriority: true,
+      automaticUpdates: true,
+      ...(desktopAppUpdates === null ? {} : { desktopAppUpdates }),
       usagePriceOverrides: true,
       serverFollowUpQueue: true,
+      liveThreadModelSelection: true,
       fileAttachments: { maxUploadBytes: PROVIDER_SEND_TURN_MAX_FILE_BYTES },
     },
   };

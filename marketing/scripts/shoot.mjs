@@ -68,7 +68,6 @@ try {
       });
       await sleep(900); // let entrance animations settle
       await page.screenshot({ path: `${OUT}${slug}-${label}.png`, fullPage: label === "desktop" });
-      // eslint-disable-next-line no-console
       console.log(`shot ${slug}-${label}`);
     }
     await ctx.close();

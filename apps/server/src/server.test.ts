@@ -142,6 +142,7 @@ import {
   type ProviderRegistryShape,
 } from "./provider/Services/ProviderRegistry.ts";
 import { makeManualOnlyProviderMaintenanceCapabilities } from "./provider/providerMaintenance.ts";
+import { makeProviderInstallLockLive } from "./provider/Layers/ProviderInstallLock.ts";
 import { ServerLifecycleEvents, type ServerLifecycleEventsShape } from "./serverLifecycleEvents.ts";
 import { ServerRuntimeStartup, type ServerRuntimeStartupShape } from "./serverRuntimeStartup.ts";
 import { ServerSettingsService, type ServerSettingsShape } from "./serverSettings.ts";
@@ -584,6 +585,9 @@ const buildAppUnderTest = (options?: {
   Effect.gen(function* () {
     const fileSystem = yield* FileSystem.FileSystem;
     const tempBaseDir = yield* fileSystem.makeTempDirectoryScoped({ prefix: "ryco-router-test-" });
+    const providerInstallLockDir = yield* fileSystem.makeTempDirectoryScoped({
+      prefix: "ryco-install-lock-test-",
+    });
     const baseDir = options?.config?.baseDir ?? tempBaseDir;
     const devUrl = options?.config?.devUrl;
     const derivedPaths = yield* deriveServerPaths(baseDir, devUrl);
@@ -796,6 +800,8 @@ const buildAppUnderTest = (options?: {
             streamChanges: Stream.empty,
             ...options?.layers?.keybindings,
           }),
+          // Never the host's shared lock folder.
+          makeProviderInstallLockLive(providerInstallLockDir),
         ),
       ),
       Layer.provide(

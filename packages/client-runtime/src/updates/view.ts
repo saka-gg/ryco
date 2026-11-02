@@ -371,6 +371,7 @@ function deviceNotes(device: UpdateEverythingDevicePlan, manualCount: number): s
   if (device.node.kind === "unknown" && device.node.reason !== device.skippedReason) {
     notes.push(device.node.reason);
   }
+  if (device.automaticUpdateNote !== undefined) notes.push(device.automaticUpdateNote);
   if (
     notes.length === 0 &&
     device.node.kind === "current" &&

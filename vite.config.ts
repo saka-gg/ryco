@@ -1,6 +1,8 @@
 import * as path from "node:path";
 import { defineConfig, mergeConfig } from "vite-plus";
 
+import { REAL_TIME_WAIT_LEGACY_FILES } from "./scripts/oxlint-plugin/legacy/realTimeWaitFiles.ts";
+
 /**
  * `effect`'s root re-exports every module. Metro does not tree-shake, so one
  * root import anywhere in the mobile graph evaluates all of them at startup.
@@ -145,6 +147,8 @@ const rootConfig = {
       "**/routeTree.gen.ts",
     ],
     plugins: ["eslint", "oxc", "react", "unicorn", "typescript"],
+    // Ryco's own rules, reported as `ryco/<rule>` (scripts/oxlint-plugin).
+    jsPlugins: ["./scripts/oxlint-plugin/index.ts"],
     categories: {
       correctness: "warn",
       suspicious: "warn",
@@ -158,8 +162,17 @@ const rootConfig = {
       "react/no-object-type-as-default-prop": "off",
       "react/no-unstable-nested-components": "off",
       "unicorn/consistent-function-scoping": "off",
+      "ryco/no-partial-runtime-mock-in-browser-tests": "error",
+      "ryco/no-raw-mcp-dispatch": "error",
+      "ryco/no-real-time-wait-in-tests": "error",
+      "ryco/require-suppression-reason": "error",
     },
     overrides: [
+      {
+        // Waited on the real clock before the rule existed; the list only shrinks.
+        files: [...REAL_TIME_WAIT_LEGACY_FILES],
+        rules: { "ryco/no-real-time-wait-in-tests": "off" },
+      },
       {
         files: ["packages/client-runtime/src/**/*.{ts,tsx}"],
         rules: {

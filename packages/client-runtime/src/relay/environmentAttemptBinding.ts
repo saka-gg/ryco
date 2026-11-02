@@ -158,15 +158,13 @@ export function createHostedEnvironmentAttemptFactory(
       ? record
       : undefined;
   };
-  // The kind of this generation's last failure since its transport was last
-  // online: what the current outage, if any, is waiting out.
-  let outageFailure: HostedRelayFailureKind | null = null;
   const subscribePresenceWake = createHostedPresenceWake({
     sessions,
     environmentId,
     generation,
     shouldReconnect: (attemptGeneration) => binding.shouldReconnect(attemptGeneration),
-    outageFailure: () => outageFailure,
+    // What this generation's current outage, if any, is waiting out: its record keeps it.
+    outageFailure: () => currentRecord(generation)?.outageFailure ?? null,
   });
 
   const binding: HostedRelayAttemptBinding = {
@@ -221,15 +219,12 @@ export function createHostedEnvironmentAttemptFactory(
         (isDemanded?.() ?? true)
       );
     },
-    transportStatus: (attemptGeneration, status) => {
-      if (status === "online" && attemptGeneration === generation) outageFailure = null;
-      sessions.transportStatus(environmentId, attemptGeneration, status);
-    },
+    transportStatus: (attemptGeneration, status) =>
+      sessions.transportStatus(environmentId, attemptGeneration, status),
     sessionStatus: (attemptGeneration, status) =>
       sessions.sessionStatus(environmentId, attemptGeneration, status),
     role: (attemptGeneration, role) => sessions.role(environmentId, attemptGeneration, role),
     failure(attemptGeneration, failure) {
-      if (attemptGeneration === generation) outageFailure = failure.kind;
       // The record fails closed first: a broken platform hook can neither keep
       // it from doing so nor break the transport's own failure handling.
       sessions.failure(environmentId, attemptGeneration, failure);

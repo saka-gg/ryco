@@ -57,8 +57,11 @@ import {
   ThreadMetaUpdatedPayload,
   ThreadProposedPlanUpsertedPayload,
   ThreadRuntimeModeSetPayload,
+  ThreadHiddenPayload,
+  ThreadSettleDeferredPayload,
   ThreadSettledPayload,
   ThreadSnoozedPayload,
+  ThreadUnhiddenPayload,
   ThreadUnsnoozedPayload,
   ThreadUsageLimitClearedPayload,
   ThreadUsageLimitSetPayload,
@@ -66,6 +69,7 @@ import {
   ThreadGoalUpdatedPayload,
   ThreadGoalClearedPayload,
   ThreadPullRequestWatchUpdatedPayload,
+  ThreadCommandWatchUpdatedPayload,
   ThreadQueueEntriesRemovedPayload,
   ThreadQueueEntryAddedPayload,
   ThreadQueueEntryEditedPayload,
@@ -528,6 +532,7 @@ export function projectEvent(
             updatedAt: payload.deletedAt,
             // The projection drops the row too; a later incarnation starts without watches.
             pullRequestWatchState: undefined,
+            commandWatchState: undefined,
             followUpQueue: undefined,
           }),
         })),
@@ -565,6 +570,7 @@ export function projectEvent(
           ...nextBase,
           threads: updateThread(nextBase.threads, payload.threadId, {
             archivedAt: payload.archivedAt,
+            settleWhenIdleAt: null,
             updatedAt: payload.updatedAt,
           }),
         })),
@@ -588,6 +594,7 @@ export function projectEvent(
           threads: updateThread(nextBase.threads, payload.threadId, {
             settledOverride: "active",
             settledAt: null,
+            settleWhenIdleAt: null,
             snoozedUntil: payload.snoozedUntil,
             snoozedAt: payload.snoozedAt,
             updatedAt: payload.updatedAt,
@@ -618,7 +625,43 @@ export function projectEvent(
             settledOverride: "settled",
             snoozedUntil: null,
             snoozedAt: null,
+            settleWhenIdleAt: null,
             settledAt: payload.settledAt,
+            updatedAt: payload.updatedAt,
+          }),
+        })),
+      );
+
+    case "thread.settle-deferred":
+      return decodeForEvent(ThreadSettleDeferredPayload, event.payload, event.type, "payload").pipe(
+        Effect.map((payload) => ({
+          ...nextBase,
+          threads: updateThread(nextBase.threads, payload.threadId, {
+            settleWhenIdleAt: payload.settleWhenIdleAt,
+            snoozedUntil: null,
+            snoozedAt: null,
+            updatedAt: payload.updatedAt,
+          }),
+        })),
+      );
+
+    case "thread.hidden":
+      return decodeForEvent(ThreadHiddenPayload, event.payload, event.type, "payload").pipe(
+        Effect.map((payload) => ({
+          ...nextBase,
+          threads: updateThread(nextBase.threads, payload.threadId, {
+            hiddenAt: payload.hiddenAt,
+            updatedAt: payload.updatedAt,
+          }),
+        })),
+      );
+
+    case "thread.unhidden":
+      return decodeForEvent(ThreadUnhiddenPayload, event.payload, event.type, "payload").pipe(
+        Effect.map((payload) => ({
+          ...nextBase,
+          threads: updateThread(nextBase.threads, payload.threadId, {
+            hiddenAt: null,
             updatedAt: payload.updatedAt,
           }),
         })),
@@ -631,6 +674,7 @@ export function projectEvent(
           threads: updateThread(nextBase.threads, payload.threadId, {
             settledOverride: payload.reason === "user" ? "active" : null,
             settledAt: null,
+            settleWhenIdleAt: null,
             updatedAt: payload.updatedAt,
             ...payload.restoredSidebarState,
           }),
@@ -757,6 +801,22 @@ export function projectEvent(
           ...nextBase,
           threads: updateThread(nextBase.threads, payload.threadId, {
             pullRequestWatchState: payload.watches,
+          }),
+        })),
+      );
+
+    case "thread.command-watch-updated":
+      // Like the pull request watch's: not thread activity, so `updatedAt` stays.
+      return decodeForEvent(
+        ThreadCommandWatchUpdatedPayload,
+        event.payload,
+        event.type,
+        "payload",
+      ).pipe(
+        Effect.map((payload) => ({
+          ...nextBase,
+          threads: updateThread(nextBase.threads, payload.threadId, {
+            commandWatchState: payload.watches,
           }),
         })),
       );

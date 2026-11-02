@@ -264,6 +264,27 @@ describe("standard build static import graph", () => {
     }
   });
 
+  it("loads the desktop account prompt and its relaunch dialog on demand", () => {
+    // Only the desktop app's empty state shows the prompt, after its bridge
+    // confirms native sign-in; boot renders no alert dialog. (This walk names
+    // installed packages, not their entry points: `bun run perf:bundle-budget`
+    // checks Base UI's alert dialog on the build.)
+    for (const entry of BOOT_GRAPH_ENTRIES) {
+      expect(
+        forbiddenChains(entry, [
+          /^apps\/web\/src\/components\/DesktopAccountConnect\.tsx$/u,
+          /^apps\/web\/src\/components\/settings\/useDesktopRelaunchGuard\.tsx$/u,
+          /^apps\/web\/src\/components\/ui\/alert-dialog\.tsx$/u,
+        ]),
+      ).toEqual([]);
+    }
+    expect(
+      parseImports(path.join(srcRoot, "components/NoActiveThreadState.tsx")).dynamicImports.map(
+        display,
+      ),
+    ).toContain("apps/web/src/components/DesktopAccountConnect.tsx");
+  });
+
   it("imports Effect modules by subpath in boot code", () => {
     // The boot vendor chunk follows package barrels: one value import of
     // `effect` or `effect/reactivity` from boot code brings every module

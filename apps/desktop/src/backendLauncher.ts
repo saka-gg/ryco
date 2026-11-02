@@ -91,9 +91,17 @@ export function createDesktopBackendChildEnv(
     readonly isPackaged: boolean;
     readonly platform: NodeJS.Platform;
     readonly resourcesPath: string;
+    /**
+     * Ryco Nightly's data home. The CLI prefers `RYCO_HOME` over the home the
+     * bootstrap envelope names and otherwise falls back to `~/.ryco`, so a
+     * Nightly child pins it here: never the stable app's data, whatever the
+     * login shell exports.
+     */
+    readonly nightlyHome?: string;
   },
 ): NodeJS.ProcessEnv {
   const env = { ...base };
+  if (input.nightlyHome !== undefined) env.RYCO_HOME = input.nightlyHome;
   deleteEnv(env, "RYCO_PORT");
   deleteEnv(env, "RYCO_MODE");
   deleteEnv(env, "RYCO_NO_BROWSER");
@@ -104,6 +112,8 @@ export function createDesktopBackendChildEnv(
   deleteEnv(env, "RYCO_DESKTOP_HTTPS_ENDPOINTS");
   deleteEnv(env, "RYCO_TAILSCALE_SERVE");
   deleteEnv(env, "RYCO_TAILSCALE_SERVE_PORT");
+  // Set by the `ryco` command launcher for the CLI it runs; the backend is never that CLI.
+  deleteEnv(env, "RYCO_DESKTOP_CLI");
   // The desktop is the single owner of these values: it persists them and passes
   // them on the bootstrap channel. Leaving the environment able to override
   // would give the settings panel a toggle that silently does nothing, guarded

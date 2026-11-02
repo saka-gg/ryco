@@ -112,6 +112,35 @@ describe("deriveConnectionRows", () => {
     ]);
   });
 
+  it("lists a switched-off node as switched off, whatever it last reported", () => {
+    const rows = deriveConnectionRows({
+      records: {
+        ...records,
+        [STUDIO]: { ...records[STUDIO], disabledAt: "2026-10-31T09:00:00.000Z" },
+      },
+      runtimeById: {
+        [STUDIO]: runtime({ connectionState: "error", authState: "requires-auth" }),
+        [LAPTOP]: runtime({}),
+      },
+      statuses: new Map([
+        [STUDIO, status("connected")],
+        [LAPTOP, status("connected")],
+      ]),
+    });
+
+    expect(
+      rows.map((row) => [
+        row.record.label,
+        row.statusLabel,
+        row.switchedOff,
+        row.runtime.connectionState,
+      ]),
+    ).toEqual([
+      ["laptop", "Connected", false, "connected"],
+      ["Studio", "Switched off", true, "disconnected"],
+    ]);
+  });
+
   it("reads a node the runtime store has not seen as disconnected", () => {
     const rows = deriveConnectionRows({
       records: { [STUDIO]: records[STUDIO] },

@@ -144,9 +144,10 @@ describe("planUsageLimitRecovery", () => {
       commandId: ids.commandId,
       threadId: "thread-a",
       message: { messageId: ids.messageId, text: "Continue where you left off." },
-      modelSelection: { instanceId: claude },
       usageLimitResumeGuard: { limitId: limitFor("thread-a").limitId, origin: "auto" },
     });
+    // No model: the chat's stored pick applies where the session can take it.
+    expect(action.command).not.toHaveProperty("modelSelection");
   });
 
   it("resumes one thread per provider instance per sweep, oldest limit first", () => {

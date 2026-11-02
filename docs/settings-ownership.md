@@ -13,6 +13,13 @@ the destination is stated once instead of on every row:
   Only sections permitted by the current node role are offered. Node security is
   its own Security section. The device name and icon live in its General section.
 
+A node section says which device it changes above its title: "Changes apply
+to [device]". Its menu is the nav header's own device menu (the same devices,
+the same rule for which ones a hosted browser may open, and the same switch),
+with a search field above six devices; a device that is not reachable shows
+Offline or Connecting. This app's sections, and browser or device sections,
+keep their one-line label instead.
+
 Hub account and device enrollment remain on the Hub account pages. Browser
 appearance on those pages is still local to that browser.
 
@@ -33,6 +40,44 @@ session/directory/relay readiness checks.
 desktop, and native mobile using the shared settings schema. Mobile retains its
 own native screens and the same persistence ownership. The legacy web phone
 presentation remains frozen.
+
+## Applying a node setting to every node
+
+With two or more nodes known, some node defaults offer **Apply to all nodes**:
+auto-settle, New threads, worktree branch prefix and setup, branch names by
+change type, the Git writing style, commit and pull request instructions, pull
+request templates, and response streaming. It is a bulk edit, not a synced
+global: the value shown is written once to every connected node this client may
+change, each through its own connection, and offline nodes keep their value. The
+result names every node left out and why. A row whose value differs on another
+connected node shows **Mixed**, with each node's value in its tooltip; nodes
+that are not connected never count.
+
+Each node's write carries that node's own compare-and-set values, read from its
+own last known config, never the values of the node on screen. Hosted mode asks
+each node's own session whether it may change settings. Project overrides, the
+initial model (provider instances differ per node), providers, MCP, security,
+diagnostics, storage cleanup, paths and execution authority (Agent Control,
+process priority, continue after restart) are never written across nodes.
+`@ryco/client-runtime/state/settings/nodeSettingsFanOut` holds the shared
+mechanism for web and mobile.
+
+## A chat's model, effort and speed
+
+In a started chat, the model, effort and speed belong to the chat on its node, not to the
+client. A pick is stored on the thread when it is made, so every client of that node (web,
+desktop, a hosted browser, the native app) shows it at once; the last stored pick wins, and a
+client's own pick that is still being written wins over a change that arrives meanwhile. The
+session applies a stored pick at its next turn and never restarts or interrupts a running one.
+A pick of another provider is a handoff and stays in the composer until it is sent. Nodes
+without the `liveThreadModelSelection` capability keep a pick in the composer until it is sent.
+Turns the node starts by itself (goal continuations, usage-limit resumes, delegated results,
+watch updates, an agent's or an automation's queued follow-up) name no model: they take the
+stored pick only where the session can, and keep the session's model when it cannot switch
+models or when a restart would end its background work. A person's queued follow-up runs with
+the model it was queued with, and that model becomes the chat's only while nobody stored another
+pick since it was queued (an older client stores a pick only by sending or queueing it).
+New-chat defaults (the last model per provider) stay in each client for now.
 
 ## Project inheritance
 

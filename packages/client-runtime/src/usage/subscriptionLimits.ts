@@ -42,6 +42,14 @@ export function subscriptionProviderForDriver(driver: string): string {
   return DRIVER_PROVIDERS[driver] ?? driver;
 }
 
+/** The driver whose accounts a hub provider slug names (`claude` → `claudeAgent`), e.g. for its icon. */
+export function subscriptionDriverForProvider(provider: string): string {
+  for (const [driver, slug] of Object.entries(DRIVER_PROVIDERS)) {
+    if (slug === provider) return driver;
+  }
+  return provider;
+}
+
 /** An instance's reported windows, labelled (`rateLimitWindowList`). */
 export function providerLimitWindows(provider: ServerProvider): LabelledLimitWindow[] {
   return rateLimitWindowList(provider.rateLimits);

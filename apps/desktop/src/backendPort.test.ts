@@ -138,6 +138,16 @@ describe("desktop backend port selection", () => {
     ).toBe(LEGACY_DESKTOP_BACKEND_PORT);
   });
 
+  it("starts Ryco Nightly at its own default port", () => {
+    expect(
+      resolveDesktopBackendStartPort({
+        persistedPort: null,
+        hasPriorRendererState: false,
+        defaultPort: 7936,
+      }),
+    ).toBe(7936);
+  });
+
   it("gives new installations a Ryco-specific port that T3 Code does not use", () => {
     expect(DEFAULT_DESKTOP_BACKEND_PORT).not.toBe(LEGACY_DESKTOP_BACKEND_PORT);
     expect(

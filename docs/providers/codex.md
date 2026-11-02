@@ -239,28 +239,50 @@ should use the shared-home plus shadow-home setup instead.
 
 When Codex emits a native asynchronous question, Ryco displays an **Optional question** card
 on desktop, web, and the native mobile app. The composer remains available. Open the card,
-choose an option or write an answer, then explicitly submit. Closing the web card preserves
-its draft; suggested options are never submitted automatically. **Dismiss** closes the card
-without sending an answer or granting permission.
+choose an option or write an answer, then explicitly submit. Suggested options are never
+submitted automatically. **Dismiss** closes the card without sending an answer or granting
+permission, during the turn or after it.
 
-Cards are available only while their originating turn is live. Completion, interruption,
-superseding turns, or replacement of the provider process invalidate unanswered cards.
-Late answers never start a new turn. A disconnected client cannot submit; reconnect restores
-the persisted question and delivery state. Draft text is local to the mounted form.
+While the question's turn runs, your answer reaches that turn. After the turn ends, the card
+stays: your answer is sent as a new message and starts the next turn, resuming the session if
+it stopped. Once answered, the card leaves every client, and a second answer (from another
+device, or a second press) is refused. While a later turn runs, the card waits: you can answer
+once that turn ends, or dismiss it. Open questions stay available after a reconnect or a node
+restart, however much the agent did since.
+
+An answer sent after the turn can carry files and images, on web and desktop. They use the same
+upload as files attached to a message, and the agent gets them as attached files with their
+saved paths. Send stays disabled while a file is uploading or failed to upload. An answer that
+reaches a running turn cannot carry files, so the card offers files only once the turn ended.
+
+Drafts belong to the question, not to the card: switching threads, collapsing the card or a
+reconnect keeps what you wrote, on web and in the native app. They are kept in memory, so
+reloading the page or quitting the app clears them.
 
 Ryco admits one answer per question generation. Validation failures before dispatch permit
 correction; an unconfirmed delivery remains claimed and is never automatically retried.
-The card explains this state. Starting a new turn does not resend the old answer.
+The card explains this state, and such a question is cleared once a later turn starts. An
+answer that could not reach the turn because it had just ended can be sent again; it then
+starts a new turn.
 
 ### Protocol and capability boundary
 
 Native `request_user_input_async` emits an `agentMessage` item with `delivery: "async"` and
 structured `questions`, then returns immediately. It does not create a pending JSON-RPC
-answer request. Ryco replies as ordinary user input through `turn/steer`, supplying the
-original provider thread and `expectedTurnId`; the reply text identifies the question item.
-The runtime validates these identities again at dispatch. The existing durable question
-ledger owns client claims and settlement; process-local authority is never restored after
-restart. Only `turn/completed` settles the provider turn.
+answer request. While the turn runs, Ryco replies as ordinary user input through
+`turn/steer`, supplying the original provider thread and `expectedTurnId`; the reply text
+identifies the question item. The runtime validates these identities again at dispatch. The
+existing durable question ledger owns client claims and settlement; process-local authority
+is never restored after restart. Only `turn/completed` settles the provider turn.
+
+After the turn, a client sends the same reply text as the message of an ordinary
+`thread.turn.start`, through the shared send engine, with an `optionalAnswer` that names the
+question. The node claims the question in that command's transaction and records it answered
+in the same commit, so the message and the settlement land together or not at all. Turn ends,
+superseding turns, session exits and restarts leave an optional question open unless an answer
+to it may already have reached the agent. A dismissal is settled by the node itself and never
+reaches the provider. Thread windows and the activity cap keep open optional questions however
+much activity follows them.
 
 Support is gated by the explicit native payload, not a model name, version guess, feature
 flag, timeout, or question text. Older versions and other providers retain their blocking

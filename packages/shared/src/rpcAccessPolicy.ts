@@ -193,6 +193,10 @@ export const RPC_ACCESS_POLICY = {
   [WS_METHODS.providerSignInStart]: "owner",
   [WS_METHODS.providerSignInRespond]: "owner",
   [WS_METHODS.serverUpdateProvider]: "owner",
+  // Anyone using a client of the node counts as someone an unattended update must not disturb.
+  // It only delays updates (a node-side timestamp, rate-limited per session); it never starts,
+  // allows or reads one.
+  [WS_METHODS.serverNoteClientInteraction]: "viewer",
   [WS_METHODS.serverSubscribeNodeUpdate]: "viewer",
   [WS_METHODS.serverCheckNodeUpdate]: "owner",
   [WS_METHODS.serverUpdateNode]: "owner",
@@ -263,12 +267,18 @@ export const RPC_ACCESS_POLICY = {
   [WS_METHODS.threadsSetManualPosition]: "operator",
   // Creates a thread (and possibly a worktree) without starting a turn, like dispatchCommand.
   [WS_METHODS.threadsFork]: "operator",
+  // The same tier as a fork on the node itself: the caller's own role on this node decides, never
+  // anything the carried conversation says about its source.
+  [WS_METHODS.threadsForkCarried]: "operator",
   // The servers a thread's agents and terminals started: ports, pids, process names and page
   // titles, which an operator who can open the thread's terminal sees there anyway.
   [WS_METHODS.threadsSubscribeLocalServers]: "operator",
   // Stops only a server the node attributes to that thread again at stop time, never the node,
   // an agent CLI or a terminal shell: no more than closing the thread's terminal does.
   [WS_METHODS.threadsStopLocalServer]: "operator",
+  // Carries a secret the owner types for an agent's request and writes it into the thread's
+  // checkout: owners only, like the account and integration tokens they save.
+  [WS_METHODS.secretsAnswerRequest]: "owner",
   // Starts the provider process a send by the same operator would start.
   [WS_METHODS.providerPrewarmSession]: "operator",
   // Starts the provider's CLI in the directory (project settings and hooks apply), as a send does.
@@ -492,6 +502,8 @@ export const RPC_DELIVERY_EFFECT_POLICY = {
   [WS_METHODS.providerSignInStart]: "mutation",
   [WS_METHODS.providerSignInRespond]: "mutation",
   [WS_METHODS.serverUpdateProvider]: "mutation",
+  // Sets the node's last-interaction time to now: losing or repeating one is harmless.
+  [WS_METHODS.serverNoteClientInteraction]: "read",
   [WS_METHODS.serverSubscribeNodeUpdate]: "read",
   // Asks the registry (or the desktop updater) again; it changes nothing on the node.
   [WS_METHODS.serverCheckNodeUpdate]: "read",
@@ -557,9 +569,13 @@ export const RPC_DELIVERY_EFFECT_POLICY = {
   [WS_METHODS.threadsSetManualPosition]: "mutation",
   // Idempotent by forkKey: a dropped request is retried with the same key after acknowledgement.
   [WS_METHODS.threadsFork]: "mutation",
+  // Idempotent by forkKey and the carried conversation's digest, like `threads.fork`.
+  [WS_METHODS.threadsForkCarried]: "mutation",
   [WS_METHODS.threadsSubscribeLocalServers]: "read",
   // Signals a process group: never replayed (a repeat finds the server gone).
   [WS_METHODS.threadsStopLocalServer]: "mutation",
+  // Writes a file and closes the request: never replayed (a repeat finds it answered).
+  [WS_METHODS.secretsAnswerRequest]: "mutation",
   // Idempotent per thread: a repeat finds the session it already started.
   [WS_METHODS.providerPrewarmSession]: "read",
   [WS_METHODS.providerReadProjectCommands]: "read",

@@ -1,5 +1,5 @@
 import { assert, describe, it, vi } from "@effect/vitest";
-import { Effect, Layer } from "effect";
+import { Deferred, Effect, Fiber, Layer } from "effect";
 import os from "node:os";
 import path from "node:path";
 
@@ -8,6 +8,7 @@ import * as GitManager from "./GitManager.ts";
 import * as GitWorkflowService from "./GitWorkflowService.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import * as VcsDriverRegistry from "../vcs/VcsDriverRegistry.ts";
+import { makeRestartSensitiveWork, RestartSensitiveWork } from "../updates/restartSensitiveWork.ts";
 
 function makeLayer(input: { readonly detect: VcsDriverRegistry.VcsDriverRegistryShape["detect"] }) {
   return GitWorkflowService.layer.pipe(
@@ -22,6 +23,60 @@ function makeLayer(input: { readonly detect: VcsDriverRegistry.VcsDriverRegistry
 }
 
 describe("GitWorkflowService", () => {
+  it.effect("counts worktree checkouts as work a restart waits for", () =>
+    Effect.gen(function* () {
+      const restartWork = makeRestartSensitiveWork();
+      // Each git call waits for the test: `started` once it runs, `release` to let it end.
+      let gate = { started: yield* Deferred.make<void>(), release: yield* Deferred.make<void>() };
+      const hold = Effect.suspend(() =>
+        Deferred.succeed(gate.started, undefined).pipe(
+          Effect.andThen(Deferred.await(gate.release)),
+        ),
+      );
+      yield* Effect.gen(function* () {
+        const workflow = yield* GitWorkflowService.GitWorkflowService;
+        for (const run of [
+          workflow.createWorktree({
+            cwd: "/repo",
+            refName: "main",
+            newRefName: "ryco/1",
+            path: "/worktrees/1",
+          } as never),
+          workflow.prefetchWorktreeBase({ cwd: "/repo", refName: "main" } as never),
+          workflow.removeWorktree({ cwd: "/repo", path: "/worktrees/1" } as never),
+        ]) {
+          gate = { started: yield* Deferred.make<void>(), release: yield* Deferred.make<void>() };
+          const fiber = yield* Effect.forkChild(run);
+          yield* Deferred.await(gate.started);
+          assert.strictEqual(yield* restartWork.count, 1);
+          yield* Deferred.succeed(gate.release, undefined);
+          yield* Fiber.join(fiber);
+          assert.strictEqual(yield* restartWork.count, 0);
+        }
+      }).pipe(
+        Effect.provide(
+          GitWorkflowService.layer.pipe(
+            Layer.provide(
+              Layer.mock(VcsDriverRegistry.VcsDriverRegistry)({
+                resolve: () =>
+                  Effect.succeed({ kind: "git" } as unknown as VcsDriverRegistry.VcsDriverHandle),
+              }),
+            ),
+            Layer.provide(
+              Layer.mock(GitVcsDriver.GitVcsDriver)({
+                createWorktree: () => hold.pipe(Effect.as({} as never)),
+                prefetchWorktreeBase: () => hold.pipe(Effect.as({} as never)),
+                removeWorktree: () => hold,
+              }),
+            ),
+            Layer.provide(Layer.mock(GitManager.GitManager)({})),
+          ),
+        ),
+        Effect.provideService(RestartSensitiveWork, restartWork),
+      );
+    }),
+  );
+
   it.effect("returns an empty local status when no VCS repository is detected", () =>
     Effect.gen(function* () {
       const workflow = yield* GitWorkflowService.GitWorkflowService;

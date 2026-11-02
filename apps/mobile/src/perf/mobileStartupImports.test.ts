@@ -279,6 +279,21 @@ describe("mobile launch graph boundaries", () => {
     expect(reachable).not.toContain("apps/mobile/src/features/threads/ThreadDetailScreen.tsx");
   });
 
+  it("loads the command palette and its search the first time Command-K opens it", () => {
+    const provider = read("features/keyboard/HardwareKeyboardCommandProvider.tsx");
+    expect(provider).toContain('require("./CommandPalette")');
+    const reachable = [...staticGraph(LAUNCH_ENTRY).keys()].map(display);
+    expect(reachable).toContain(
+      "apps/mobile/src/features/keyboard/HardwareKeyboardCommandProvider.tsx",
+    );
+    expect(
+      chainsTo(LAUNCH_ENTRY, [
+        /^apps\/mobile\/src\/features\/keyboard\/(?:CommandPalette\.tsx|commandPaletteModel\.ts)$/u,
+        /^packages\/client-runtime\/src\/commandPalette\//u,
+      ]),
+    ).toEqual([]);
+  });
+
   it("parses no shiki grammar or theme until a highlighter is needed", () => {
     const highlighter = read("features/review/shikiReviewHighlighter.ts");
     expect(
@@ -324,6 +339,54 @@ describe("mobile launch graph boundaries", () => {
     ).toEqual([]);
   });
 
+  it("loads the widgets runtime only once the app is idle", () => {
+    const reachable = [...staticGraph(LAUNCH_ENTRY).keys()].map(display);
+    expect(reachable).toContain("apps/mobile/src/widgets/WidgetsBridge.tsx");
+    // The walker follows the bridge's own imports, so an empty result is not a blind spot.
+    expect(reachable).toContain("apps/mobile/src/navigation/idlePrewarm.ts");
+    expect(chainsTo(LAUNCH_ENTRY, [/^apps\/mobile\/src\/widgets\/(?!WidgetsBridge)/u])).toEqual([]);
+    expect(
+      chainsTo("src/widgets/mobileWidgetsRuntime.tsx", [
+        /^apps\/mobile\/src\/widgets\/widgetsRuntime\.ts$/u,
+      ]),
+    ).not.toEqual([]);
+    // The sign-in screen empties the widgets with a module that loads none of their models.
+    expect([...staticGraph("src/widgets/clearWidgets.ts").keys()].map(display)).toContain(
+      "apps/mobile/src/widgets/rycoWidgetsNative.ts",
+    );
+    expect(
+      chainsTo("src/widgets/clearWidgets.ts", [
+        /^apps\/mobile\/src\/widgets\/(?:subscriptionUsageSnapshot|widgetsRuntime|mobileWidgetsRuntime)\.tsx?$/u,
+        /^packages\/client-runtime\/src\/usage\//u,
+      ]),
+    ).toEqual([]);
+  });
+
+  it("loads the Live Activity only after idle, once its switch was turned on", () => {
+    const reachable = [...staticGraph(LAUNCH_ENTRY).keys()].map(display);
+    expect(reachable).toContain("apps/mobile/src/liveActivity/LiveActivityBridge.tsx");
+    expect(
+      chainsTo(LAUNCH_ENTRY, [/^apps\/mobile\/src\/liveActivity\/(?!LiveActivityBridge)/u]),
+    ).toEqual([]);
+    // The walker sees the lazy module's own graph, so an empty result is not a blind spot.
+    expect(
+      chainsTo("src/liveActivity/mobileLiveActivity.tsx", [
+        /^apps\/mobile\/src\/liveActivity\/liveActivityRuntime\.ts$/u,
+      ]),
+    ).not.toEqual([]);
+    // The sign-in screen ends the cards with a module that loads neither the runtime nor the Inbox.
+    expect([...staticGraph("src/liveActivity/endLiveActivities.ts").keys()].map(display)).toContain(
+      "apps/mobile/src/widgets/rycoWidgetsNative.ts",
+    );
+    expect(
+      chainsTo("src/liveActivity/endLiveActivities.ts", [
+        /^apps\/mobile\/src\/liveActivity\/(?!endLiveActivities)/u,
+        /^apps\/mobile\/src\/features\//u,
+        /^packages\/client-runtime\/src\/state\//u,
+      ]),
+    ).toEqual([]);
+  });
+
   it("checks the push key at every launch without loading push alerts", () => {
     // ThreadAlertsBridge imports the install check lazily, on every launch; the
     // check itself must stay a keychain call and a storage read.
@@ -352,6 +415,18 @@ describe("mobile launch graph boundaries", () => {
         /^packages\/client-runtime\/src\/relay\/index\.ts$/u,
       ]),
     ).toEqual([]);
+  });
+
+  it("installs the crash recorder at launch without loading its file store or expo-updates", () => {
+    const reachable = [...staticGraph(LAUNCH_ENTRY).keys()].map(display);
+    expect(reachable).toEqual(
+      expect.arrayContaining([
+        "apps/mobile/src/diagnostics/fatalErrorRecorderEntry.ts",
+        "apps/mobile/src/diagnostics/FatalRenderErrorBoundary.tsx",
+        "apps/mobile/src/diagnostics/crashTextRedaction.ts",
+      ]),
+    );
+    expect(chainsTo(LAUNCH_ENTRY, [/^pkg:expo-file-system$/u, /^pkg:expo-updates$/u])).toEqual([]);
   });
 
   it("keeps relay E2EE crypto (noble curves/hashes, CBOR) out of the pre-first-frame graph", () => {

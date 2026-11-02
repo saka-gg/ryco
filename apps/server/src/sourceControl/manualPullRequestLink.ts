@@ -66,6 +66,11 @@ export const linkPullRequestToWorkspace = (input: {
   readonly dispatch: (
     update: PullRequestLinkUpdate,
   ) => Effect.Effect<void, SourceControlProviderError>;
+  /**
+   * Bring back a link the user removed (default). An agent's link passes false, so a removal
+   * that lands while the host is read still wins.
+   */
+  readonly restore?: boolean;
 }): Effect.Effect<WorktreePullRequestLink, SourceControlProviderError> =>
   Effect.gen(function* () {
     const { cwd, operation } = input;
@@ -137,7 +142,7 @@ export const linkPullRequestToWorkspace = (input: {
       headRefName: changeRequest.headRefName,
       baseRefName: changeRequest.baseRefName,
       source: "manual" as const,
-      restore: true,
+      restore: input.restore !== false,
     };
     yield* input.dispatch({ worktreeId: input.worktree.worktreeId, upserts: [upsert] });
     const linked = applyPullRequestLinkChanges(

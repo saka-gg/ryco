@@ -15,6 +15,8 @@
     },
     "./worktreeSubmodules": "./src/worktreeSubmodules.ts",
     "./gitWritingStyle": "./src/gitWritingStyle.ts",
+    "./projectPreferences": "./src/projectPreferences.ts",
+    "./promptLinks": "./src/promptLinks.ts",
     "./terminalPaste": "./src/terminalPaste.ts",
     "./terminalReports": "./src/terminalReports.ts",
     "./cliProxyHubUrl": "./src/cliProxyHubUrl.ts",
@@ -324,10 +326,6 @@
       "types": "./src/String.ts",
       "import": "./src/String.ts"
     },
-    "./displayText": {
-      "types": "./src/displayText.ts",
-      "import": "./src/displayText.ts"
-    },
     "./projectScripts": {
       "types": "./src/projectScripts.ts",
       "import": "./src/projectScripts.ts"
@@ -379,6 +377,10 @@
     "./relayCodec": {
       "types": "./src/relayCodec.ts",
       "import": "./src/relayCodec.ts"
+    },
+    "./nightlyFeatures": {
+      "types": "./src/nightlyFeatures.ts",
+      "import": "./src/nightlyFeatures.ts"
     },
     "./nodeIdentity": {
       "types": "./src/nodeIdentity.ts",
@@ -436,6 +438,10 @@
       "types": "./src/delegationSlot.ts",
       "import": "./src/delegationSlot.ts"
     },
+    "./sharedClock": {
+      "types": "./src/sharedClock.ts",
+      "import": "./src/sharedClock.ts"
+    },
     "./interThreadMessage": {
       "types": "./src/interThreadMessage.ts",
       "import": "./src/interThreadMessage.ts"
@@ -443,6 +449,18 @@
     "./threadSettlement": {
       "types": "./src/threadSettlement.ts",
       "import": "./src/threadSettlement.ts"
+    },
+    "./secretRequests": {
+      "types": "./src/secretRequests.ts",
+      "import": "./src/secretRequests.ts"
+    },
+    "./secretRequestState": {
+      "types": "./src/secretRequestState.ts",
+      "import": "./src/secretRequestState.ts"
+    },
+    "./pendingThreadRequests": {
+      "types": "./src/pendingThreadRequests.ts",
+      "import": "./src/pendingThreadRequests.ts"
     },
     "./worktreePullRequests": {
       "types": "./src/worktreePullRequests.ts",
@@ -459,6 +477,14 @@
     "./pullRequestWatchSummary": {
       "types": "./src/pullRequestWatchSummary.ts",
       "import": "./src/pullRequestWatchSummary.ts"
+    },
+    "./commandWatch": {
+      "types": "./src/commandWatch.ts",
+      "import": "./src/commandWatch.ts"
+    },
+    "./untrustedText": {
+      "types": "./src/untrustedText.ts",
+      "import": "./src/untrustedText.ts"
     },
     "./providerCapabilities": {
       "types": "./src/providerCapabilities.ts",
@@ -480,6 +506,10 @@
       "types": "./src/threadExport.ts",
       "import": "./src/threadExport.ts"
     },
+    "./carriedFork": {
+      "types": "./src/carriedFork.ts",
+      "import": "./src/carriedFork.ts"
+    },
     "./threadFork": {
       "types": "./src/threadFork.ts",
       "import": "./src/threadFork.ts"
@@ -495,6 +525,10 @@
     "./userInputExchange": {
       "types": "./src/userInputExchange.ts",
       "import": "./src/userInputExchange.ts"
+    },
+    "./optionalQuestionAnswer": {
+      "types": "./src/optionalQuestionAnswer.ts",
+      "import": "./src/optionalQuestionAnswer.ts"
     },
     "./computerFrame": {
       "types": "./src/computerFrame.ts",
@@ -515,6 +549,14 @@
     "./cuaDriverProtocol": {
       "types": "./src/cuaDriverProtocol.ts",
       "import": "./src/cuaDriverProtocol.ts"
+    },
+    "./desktopFlavor": {
+      "types": "./src/desktopFlavor.ts",
+      "import": "./src/desktopFlavor.ts"
+    },
+    "./flavorImport": {
+      "types": "./src/flavorImport.ts",
+      "import": "./src/flavorImport.ts"
     },
     "./desktopIdentity": {
       "types": "./src/desktopIdentity.ts",
@@ -543,6 +585,10 @@
     "./computerAuditFile": "./src/computerAuditFile.ts",
     "./computerAuditHistory": "./src/computerAuditHistory.ts",
     "./regularFile": "./src/regularFile.ts",
+    "./pairingQr": {
+      "types": "./src/pairingQr.ts",
+      "import": "./src/pairingQr.ts"
+    },
     "./pairingUrl": {
       "types": "./src/pairingUrl.ts",
       "import": "./src/pairingUrl.ts"

@@ -21,6 +21,7 @@ import type {
 } from "@ryco/contracts";
 
 import { toastManager } from "./components/ui/toast";
+import { desktopInvokeErrorMessage } from "./lib/desktopInvokeError";
 import {
   composerDraftImageDedupKey,
   type ComposerDraftStoreState,
@@ -127,13 +128,8 @@ export function windowCaptureFile(capture: DesktopAppSnapCapture): File {
   });
 }
 
-/** Strips Electron's invoke wrapper so the main-process message reads plainly. */
 export function windowCaptureErrorMessage(error: unknown): string {
-  const message = error instanceof Error ? error.message : String(error);
-  return (
-    message.replace(/^Error invoking remote method '[^']+':\s*(?:Error:\s*)?/u, "").trim() ||
-    "Window capture failed."
-  );
+  return desktopInvokeErrorMessage(error, "Window capture failed.");
 }
 
 function draftHasAttachment(

@@ -13,8 +13,8 @@ function twoDigits(value: number): string {
   return value < 10 ? `0${value}` : String(value);
 }
 
-/** Local wall-clock time, without Intl: full ICU is not guaranteed on Hermes. */
-function clock(ms: number): string {
+/** Local wall-clock time ("14:02"), without Intl: full ICU is not guaranteed on Hermes. */
+export function localClockTime(ms: number): string {
   const date = new Date(ms);
   return `${twoDigits(date.getHours())}:${twoDigits(date.getMinutes())}`;
 }
@@ -50,7 +50,7 @@ export function describeHostFreeze(
     return null;
   }
   const seconds = Math.max(1, Math.round(stall.durationMs / 1_000));
-  const at = (options.formatTime ?? clock)(startedAtMs);
+  const at = (options.formatTime ?? localClockTime)(startedAtMs);
   const load =
     stall.loadAverage1m === undefined
       ? ""

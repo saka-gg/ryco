@@ -775,6 +775,67 @@ describe("PullRequestWatchService", () => {
     expect((await linkOf())?.dismissedAt).toBeNull();
   });
 
+  it("links a pull request an agent names to its chat's workspace without watching it", async () => {
+    const h = await harness();
+    addPullRequest(h.forge, 12);
+    const { projectId, root } = await h.seedProject("link-only");
+    const { worktreeId, worktreePath } = await h.seedWorkspace({ key: "link-only", projectId });
+    const threadId = await h.seedThread({ key: "link-only", projectId, worktreePath });
+
+    const unnamed = await h.run(h.watch.linkPullRequest({ threadId }).pipe(Effect.exit));
+    expect(Exit.isFailure(unnamed) && JSON.stringify(unnamed.cause)).toContain("Name the pull");
+    const foreign = await h.run(
+      h.watch
+        .linkPullRequest({ threadId, url: "https://github.com/other/repo/pull/12" })
+        .pipe(Effect.exit),
+    );
+    expect(Exit.isFailure(foreign) && JSON.stringify(foreign.cause)).toContain("wrong-repository");
+
+    const linked = await h.run(h.watch.linkPullRequest({ threadId, number: 12 }));
+    expect(linked).toMatchObject({ number: 12, alreadyLinked: false, linkedTo: "this-chat" });
+    expect((await h.workspaceLinks(worktreeId)).find((link) => link.number === 12)?.source).toBe(
+      "manual",
+    );
+    expect((await h.watches(threadId)).active).toHaveLength(0);
+    expect(await h.run(h.watch.linkPullRequest({ threadId, number: 12 }))).toMatchObject({
+      alreadyLinked: true,
+      linkedTo: "this-chat",
+    });
+
+    // A chat on the main checkout is refused: the main workspace's links are not shown with it.
+    const { worktreeId: mainId } = await h.seedWorkspace({
+      key: "link-main",
+      projectId,
+      origin: "main",
+      root,
+    });
+    const mainThread = await h.seedThread({ key: "link-main", projectId, worktreePath: null });
+    const refused = await h.run(
+      h.watch.linkPullRequest({ threadId: mainThread, number: 13 }).pipe(Effect.exit),
+    );
+    expect(Exit.isFailure(refused) && JSON.stringify(refused.cause)).toContain("main checkout");
+    expect(await h.workspaceLinks(mainId)).toEqual([]);
+  });
+
+  it("never lets an agent link again a pull request the user removed", async () => {
+    const h = await harness();
+    const pr = addPullRequest(h.forge, 12);
+    const { threadId, worktreeId } = await h.seedWatchedSetup("link-removed", pr);
+    await h.dispatch({
+      type: "worktree.pull-requests.update",
+      commandId: h.commandId("dismiss-link"),
+      worktreeId,
+      dismissals: [12],
+      updatedAt: new Date(h.clock.now()).toISOString(),
+    });
+    const refused = await h.run(
+      h.watch.linkPullRequest({ threadId, number: 12 }).pipe(Effect.exit),
+    );
+    expect(Exit.isFailure(refused) && JSON.stringify(refused.cause)).toContain("removed #12");
+    const link = (await h.workspaceLinks(worktreeId)).find((entry) => entry.number === 12);
+    expect(link?.dismissedAt).not.toBeNull();
+  });
+
   it("refuses another repository's URL that matches a link without a URL by number", async () => {
     const h = await harness();
     addPullRequest(h.forge, 34);

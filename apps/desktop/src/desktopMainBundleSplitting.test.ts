@@ -73,6 +73,8 @@ const LAZY_FROM_MAIN = [
   "./sshEnvironment.ts",
   "./tailscaleEndpointProvider.ts",
   "./bundledGuide.ts",
+  "./desktopCliCommand.ts",
+  "./nightlyHandoff.ts",
   // Computer use: started during bootstrap, after Electron is ready.
   "./computerUse/desktopStack.ts",
   "./computerUse/runtime.ts",
@@ -134,7 +136,8 @@ describe("desktop main bundle splitting", () => {
         specifier.startsWith("node:") ||
           specifier === "electron" ||
           specifier === "@ryco/shared/shellEnvironment" ||
-          specifier === "@ryco/shared/runtimeEnv",
+          specifier === "@ryco/shared/runtimeEnv" ||
+          specifier === "@ryco/shared/desktopFlavor",
         specifier,
       ).toBe(true);
     }

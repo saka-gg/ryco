@@ -88,7 +88,8 @@ export function readNodeRole(environmentId: EnvironmentId): NodeRole {
 export const relayRoleOf = (role: NodeRole): RelayEffectiveRole | null =>
   role === "client" ? "viewer" : (role ?? null);
 
-const subscribeNodeRoles = (listener: () => void) => {
+/** Calls `listener` whenever {@link readNodeRole} may answer differently for some node. */
+export const subscribeNodeRoles = (listener: () => void) => {
   const unsubscribers = [
     subscribePrimarySessionRole(listener),
     subscribeDesktopWorkspaceState(listener),

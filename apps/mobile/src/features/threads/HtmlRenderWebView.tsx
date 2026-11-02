@@ -1,3 +1,4 @@
+import { createHtmlRenderMessageGate } from "@ryco/client-runtime/state/session";
 import {
   htmlRenderResult,
   htmlRenderThemeMessage,
@@ -5,7 +6,7 @@ import {
 } from "@ryco/shared/htmlRender";
 import * as Linking from "expo-linking";
 import { useEffect, useRef, useState } from "react";
-import { ActivityIndicator, Pressable, View } from "react-native";
+import { ActivityIndicator, AppState, Pressable, View } from "react-native";
 import Animated, { useAnimatedStyle, useSharedValue, withTiming } from "react-native-reanimated";
 import { WebView, type WebViewMessageEvent } from "react-native-webview";
 
@@ -45,8 +46,16 @@ export function HtmlRenderWebView(props: {
   readonly onContentHeight?: (height: number) => void;
   /** The page failed to load, or its web process died again after one restart. */
   readonly onFailure: () => void;
+  /**
+   * Where the page's `ryco.send` goes once a request passed this view's
+   * checks: the confirmation, then the thread's outbox. Absent where the page
+   * may not send; whether it is present must not change while the view lives,
+   * since the page's frame name tells it.
+   */
+  readonly onSendMessage?: ((text: string) => Promise<void>) | undefined;
 }) {
   const inline = props.variant === "inline";
+  const sendMessages = props.onSendMessage !== undefined;
   const theme = useMobileHtmlRenderTheme();
   // The page keeps its first document for its lifetime; a theme change is
   // posted into it rather than reloading it. A restart takes the theme then.
@@ -58,6 +67,7 @@ export function HtmlRenderWebView(props: {
       title: props.title,
       theme,
       zoomable: !inline,
+      sendMessages,
     }),
   }));
   const webView = useRef<WebView>(null);
@@ -66,6 +76,16 @@ export function HtmlRenderWebView(props: {
   const crashes = useRef(0);
   // Only the reader's tap on the frame lets the page open a link.
   const [linkGate] = useState(createHtmlRenderLinkGate);
+  // ...or ask to send a message: a tap of its own, spent on one request, in the
+  // app the reader is using; the gate allows one request at a time and one a
+  // second, and the reader still confirms each one.
+  const [sendGate] = useState(createHtmlRenderLinkGate);
+  const sendMessage = useRef(props.onSendMessage);
+  useEffect(() => {
+    sendMessage.current = props.onSendMessage;
+  }, [props.onSendMessage]);
+  // Made on the page's first request and kept, so a re-render cannot reset its limit.
+  const messageGate = useRef<ReturnType<typeof createHtmlRenderMessageGate> | null>(null);
   const revealed = useRef(false);
   const opacity = useSharedValue(0);
   const fadeStyle = useAnimatedStyle(() => ({ opacity: opacity.get() }));
@@ -106,6 +126,7 @@ export function HtmlRenderWebView(props: {
         title: props.title,
         theme,
         zoomable: !inline,
+        sendMessages,
       }),
     }));
   };
@@ -117,6 +138,18 @@ export function HtmlRenderWebView(props: {
       props.onContentHeight?.(message.height);
       return;
     }
+    if (message.kind === "message") {
+      if (messageGate.current === null) {
+        messageGate.current = createHtmlRenderMessageGate({
+          available: () => sendMessage.current !== undefined,
+          takeGesture: () => sendGate.consume(Date.now()) && AppState.currentState === "active",
+          deliver: (text) => sendMessage.current?.(text) ?? Promise.reject(new Error()),
+          reply: post,
+        });
+      }
+      messageGate.current(message.request);
+      return;
+    }
     if (!linkGate.consume(Date.now())) return;
     void Linking.openURL(message.url).catch(() => undefined);
     post(htmlRenderResult(message.id));
@@ -126,11 +159,23 @@ export function HtmlRenderWebView(props: {
   return (
     <View
       style={{ flex: 1 }}
-      onTouchStart={(event) => linkGate.touchStart(event.nativeEvent, Date.now())}
-      onTouchMove={(event) => linkGate.touchMove(event.nativeEvent, Date.now())}
-      onTouchEnd={(event) => linkGate.touchEnd(event.nativeEvent, Date.now())}
+      onTouchStart={(event) => {
+        linkGate.touchStart(event.nativeEvent, Date.now());
+        sendGate.touchStart(event.nativeEvent, Date.now());
+      }}
+      onTouchMove={(event) => {
+        linkGate.touchMove(event.nativeEvent, Date.now());
+        sendGate.touchMove(event.nativeEvent, Date.now());
+      }}
+      onTouchEnd={(event) => {
+        linkGate.touchEnd(event.nativeEvent, Date.now());
+        sendGate.touchEnd(event.nativeEvent, Date.now());
+      }}
       // The feed's scroll view taking the gesture cancels it.
-      onTouchCancel={linkGate.touchCancel}
+      onTouchCancel={() => {
+        linkGate.touchCancel();
+        sendGate.touchCancel();
+      }}
     >
       <Animated.View style={[{ flex: 1 }, fadeStyle]}>
         <WebView

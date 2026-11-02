@@ -18,13 +18,16 @@ import { EmptyState } from "../../components/EmptyState";
 import type { InboxEmptyState, InboxSection, InboxThreadRow } from "./inboxModel";
 import {
   flattenInboxSections,
+  inboxThreadAtPosition,
   MOBILE_SETTLED_PAGE_SIZE,
   type InboxListItem,
 } from "./inboxListModel";
 import { InboxThreadRow as ThreadRow } from "./InboxThreadRow";
 import { requestCustomSnooze } from "./customSnoozeModel";
+import { copyTextWithHaptic } from "../../lib/copyTextWithHaptic";
 import {
   buildInboxRowMenuActions,
+  COPY_TASK_ID_ACTION_ID,
   CUSTOM_SNOOZE_ACTION_ID,
   resolveSnoozeMenuPresets,
   snoozeMenuPresetsFromKey,
@@ -32,6 +35,12 @@ import {
   type InboxSnoozeMenuPreset,
 } from "./inboxRowActions";
 import { HOME_LIST_PADDING_BOTTOM } from "../home/homeChromeModel";
+import {
+  THREAD_JUMP_COMMANDS,
+  threadJumpIndex,
+  useHardwareKeyboardCommand,
+  type HardwareKeyboardCommand,
+} from "../keyboard/hardwareKeyboardCommands";
 import { WorkspaceConnectionStatus } from "../home/WorkspaceConnectionStatus";
 
 const EMPTY_COPY: Readonly<
@@ -64,6 +73,10 @@ const EMPTY_COPY: Readonly<
 };
 
 function dispatchRowMenuAction(row: InboxThreadRow, event: string): void {
+  if (event === COPY_TASK_ID_ACTION_ID) {
+    copyTextWithHaptic(row.threadId, { target: "task ID" });
+    return;
+  }
   if (event === "settle" || event === "unsettle") {
     if (!row.mutationEnabled || !row.canSettle) return;
     void (async () => {
@@ -84,6 +97,27 @@ function dispatchRowMenuAction(row: InboxThreadRow, event: string): void {
         await sidebarUndo.dispatch(
           { environmentId: row.environmentId, threadId: row.threadId },
           command,
+        );
+      } catch (error) {
+        Alert.alert(
+          "Could not update task",
+          error instanceof Error ? error.message : "The request failed.",
+        );
+      }
+    })();
+    return;
+  }
+  if (event === "hide" || event === "unhide") {
+    if (!row.hideActionEnabled) return;
+    void (async () => {
+      try {
+        await sidebarUndo.dispatch(
+          { environmentId: row.environmentId, threadId: row.threadId },
+          {
+            type: event === "hide" ? "thread.hide" : "thread.unhide",
+            threadId: row.threadId,
+            commandId: newCommandId(),
+          },
         );
       } catch (error) {
         Alert.alert(
@@ -185,6 +219,7 @@ export const InboxScreen = memo(function InboxScreen(props: {
   const { nowMs, onOpenThread, onScrollOffset } = props;
   const [snoozedOpen, setSnoozedOpen] = useState(false);
   const [settledOpen, setSettledOpen] = useState(false);
+  const [hiddenOpen, setHiddenOpen] = useState(false);
   const [settledVisibleCount, setSettledVisibleCount] = useState(MOBILE_SETTLED_PAGE_SIZE);
   const data = useMemo(
     () =>
@@ -192,10 +227,20 @@ export const InboxScreen = memo(function InboxScreen(props: {
         sections: props.sections,
         settledOpen,
         snoozedOpen,
+        hiddenOpen,
         settledVisibleCount,
       }),
-    [props.sections, settledOpen, settledVisibleCount, snoozedOpen],
+    [props.sections, settledOpen, settledVisibleCount, snoozedOpen, hiddenOpen],
   );
+  // Command-1…9 open the first nine thread rows as this list shows them now.
+  const jumpToThread = useCallback(
+    (command: HardwareKeyboardCommand) => {
+      const row = inboxThreadAtPosition(data, threadJumpIndex(command));
+      if (row) onOpenThread(row);
+    },
+    [data, onOpenThread],
+  );
+  useHardwareKeyboardCommand(THREAD_JUMP_COMMANDS, jumpToThread);
   const empty = props.emptyState ? EMPTY_COPY[props.emptyState] : null;
   // Resolved per clock tick rather than per row and render, and kept by value
   // so rows keep their menus until a preset actually appears or lapses.
@@ -211,7 +256,11 @@ export const InboxScreen = memo(function InboxScreen(props: {
   const renderItem = useCallback(
     ({ item }: LegendListRenderItemProps<InboxListItem>) => {
       if (item.kind === "section") {
-        if (item.sectionKey === "settled" || item.sectionKey === "snoozed") {
+        if (
+          item.sectionKey === "settled" ||
+          item.sectionKey === "snoozed" ||
+          item.sectionKey === "hidden"
+        ) {
           return (
             <Pressable
               accessibilityRole="button"
@@ -221,7 +270,9 @@ export const InboxScreen = memo(function InboxScreen(props: {
               onPress={() =>
                 item.sectionKey === "snoozed"
                   ? setSnoozedOpen((open) => !open)
-                  : setSettledOpen((open) => !open)
+                  : item.sectionKey === "hidden"
+                    ? setHiddenOpen((open) => !open)
+                    : setSettledOpen((open) => !open)
               }
             >
               <SymbolView

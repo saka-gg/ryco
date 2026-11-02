@@ -1825,6 +1825,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
         : null;
 
     let refName: string | null = null;
+    let headCommit: string | null = null;
     let upstreamRef: string | null = null;
     let aheadCount = 0;
     let behindCount = 0;
@@ -1836,6 +1837,12 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
       if (line.startsWith("# branch.head ")) {
         const value = line.slice("# branch.head ".length).trim();
         refName = value.startsWith("(") ? null : value;
+        continue;
+      }
+      if (line.startsWith("# branch.oid ")) {
+        const value = line.slice("# branch.oid ".length).trim();
+        // `(initial)` on an unborn branch.
+        headCommit = /^(?:[0-9a-f]{40}|[0-9a-f]{64})$/.test(value) ? value : null;
         continue;
       }
       if (line.startsWith("# branch.upstream ")) {
@@ -1927,6 +1934,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
       hasOriginRemote: hasPrimaryRemote,
       isDefaultBranch,
       branch: refName,
+      ...(headCommit !== null ? { headCommit } : {}),
       upstreamRef,
       hasWorkingTreeChanges,
       workingTree: {
@@ -2030,6 +2038,8 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
         workingTree: details.workingTree,
         ...(details.committed ? { committed: details.committed } : {}),
         hasUpstream: details.hasUpstream,
+        upstreamRef: details.upstreamRef,
+        ...(details.headCommit ? { headCommit: details.headCommit } : {}),
         aheadCount: details.aheadCount,
         behindCount: details.behindCount,
         aheadOfDefaultCount: details.aheadOfDefaultCount,
@@ -2588,7 +2598,12 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     Effect.gen(function* () {
       const key = worktreeBaseKey(input.cwd, input.refName);
       const existing = reusableWorktreeBasePrefetch(key);
-      if (existing) return yield* Fiber.join(existing.fiber).pipe(Effect.asVoid);
+      if (existing && input.fresh !== true) {
+        return yield* Fiber.join(existing.fiber).pipe(Effect.asVoid);
+      }
+      // A fresh fetch waits for one still running (two fetches of a ref at once can fail on its
+      // lock), then fetches again whatever that one found.
+      if (existing && existing.settledAt === null) yield* Fiber.await(existing.fiber);
       for (const [candidate, entry] of worktreeBasePrefetches) {
         if (
           entry.settledAt !== null &&
@@ -2616,6 +2631,17 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
       worktreeBasePrefetches.set(key, entry);
       yield* Fiber.join(entry.fiber).pipe(Effect.asVoid);
     });
+
+  const isAncestorCommit: GitVcsDriver.GitVcsDriverShape["isAncestorCommit"] = (input) =>
+    executeGit(
+      "GitVcsDriver.isAncestorCommit",
+      input.cwd,
+      ["merge-base", "--is-ancestor", input.ancestor, input.descendant],
+      { allowNonZeroExit: true, readOnly: true, timeoutMs: 15_000 },
+    ).pipe(
+      // 1: not an ancestor; anything else: Git does not know one of the commits.
+      Effect.map((result) => (result.exitCode === 0 ? true : result.exitCode === 1 ? false : null)),
+    );
 
   const notARepositoryRefs = {
     exitCode: ChildProcessSpawner.ExitCode(128),
@@ -2937,6 +2963,56 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     );
 
   /**
+   * The gitignored files the source checkout's `.worktreeinclude` names (`.env`, local config),
+   * copied into a new worktree. Without the file this costs one stat; the copy module loads only
+   * when there is one. Never fails the worktree: what could not be copied is logged.
+   */
+  const copyDeclaredWorktreeIncludes = (cwd: string, worktreePath: string) =>
+    Effect.gen(function* () {
+      const includeFile = path.join(cwd, ".worktreeinclude");
+      const declared = yield* fileSystem.stat(includeFile).pipe(
+        Effect.map((info) => info.type === "File"),
+        Effect.orElseSucceed(() => false),
+      );
+      if (!declared) return;
+      const include = yield* Effect.promise(() => import("./worktreeInclude.ts"));
+      const list = (args: ReadonlyArray<string>) =>
+        executeGit("GitVcsDriver.createWorktree.listIncluded", cwd, ["ls-files", ...args, "-z"], {
+          maxOutputBytes: include.WORKTREE_INCLUDE_MAX_LIST_BYTES,
+        });
+      const [included, ignored] = yield* Effect.all(
+        [
+          list(["--others", "--ignored", `--exclude-from=${includeFile}`]),
+          list(["--others", "--ignored", "--exclude-standard"]),
+        ],
+        { concurrency: 2 },
+      );
+      if (included.exitCode !== 0 || ignored.exitCode !== 0) {
+        return yield* Effect.logWarning(
+          "The worktree was created without the files .worktreeinclude names: git could not list them.",
+          { detail: `${included.stderr.trim()} ${ignored.stderr.trim()}`.trim() },
+        );
+      }
+      const result = yield* include.copyWorktreeIncludedFiles({
+        sourceRoot: cwd,
+        worktreePath,
+        paths: include.parseWorktreeIncludePaths(included.stdout, ignored.stdout),
+      });
+      if (result.failed.length > 0) {
+        yield* Effect.logWarning(
+          "Some files .worktreeinclude names were not copied into the new worktree.",
+          { failed: result.failed.slice(0, 20) },
+        );
+      }
+    }).pipe(
+      Effect.catch((error) =>
+        Effect.logWarning("The worktree was created without the files .worktreeinclude names.", {
+          detail: error.message,
+        }),
+      ),
+    );
+
+  /**
    * Whether recreating the missing checkout `worktreePath` on `branch` must replace Git's
    * registration of that path (`missingRegistrationReplacement` decides; a refusal fails here,
    * before anything changes).
@@ -3232,6 +3308,10 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
                     ),
                   ),
                 );
+              }
+
+              if (input.copyDeclaredIncludes !== false) {
+                yield* copyDeclaredWorktreeIncludes(input.cwd, worktreePath);
               }
 
               if (input.dependencyHydration === "copyInstallDirs") {
@@ -3625,6 +3705,7 @@ export const makeGitVcsDriverCore = Effect.fn("makeGitVcsDriverCore")(function* 
     invalidateRefListing,
     createWorktree,
     prefetchWorktreeBase,
+    isAncestorCommit,
     assertWorktreeSetupComplete: (checkoutPath) =>
       worktreePolicy
         .assertExistingPath({ path: checkoutPath, operation: "GitVcsDriver.worktreeSetup" })

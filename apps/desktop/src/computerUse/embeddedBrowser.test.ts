@@ -833,11 +833,21 @@ describe("agent automation", () => {
     });
   });
 
-  it("answers dialogs between actions only in the agent's own hidden tabs", async () => {
+  it("lets Electron answer every page dialog in the agent's tabs, and only there", async () => {
     const browser = newBrowser();
     const agentTab = await browser.open("https://example.com/", false, signal());
     const userTab = await browser.open("https://example.org/", false, signal(), "project");
+    // Electron then never shows a native box for the agent's tabs; the user's keep theirs.
+    expect(fakeTab(agentTab.id).view.options.webPreferences?.disableDialogs).toBe(true);
+    expect(fakeTab(userTab.id).view.options.webPreferences).not.toHaveProperty("disableDialogs");
+    // The agent's tab is shown in the panel: its dialog is still reported, never left pending.
+    browser.surface(
+      { owner: "owner", tab: agentTab.id, x: 0, y: 0, width: 800, height: 600 },
+      fakeOwnerWindow() as unknown as BrowserWindow,
+    );
+    expect(browser.presented(agentTab.id)).toBe(true);
     await browser.send(userTab.id, "Runtime.evaluate", { expression: "1" }, signal());
+    await browser.send(agentTab.id, "Runtime.evaluate", { expression: "1" }, signal());
     for (const { id } of [agentTab, userTab])
       fakeTab(id).contents.debugger.message("Page.javascriptDialogOpening", {
         type: "confirm",
@@ -848,8 +858,11 @@ describe("agent automation", () => {
       fakeTab(id).contents.debugger.commands.some(
         ({ method }) => method === "Page.handleJavaScriptDialog",
       );
-    expect(answered(agentTab.id)).toBe(true);
+    expect(answered(agentTab.id)).toBe(false);
     expect(automationOf(browser, agentTab.id).pendingDialog()).toBeNull();
+    expect(automationOf(browser, agentTab.id).takeBacklog()).toEqual([
+      expect.objectContaining({ message: "timer", action: "dismissed", during: "background" }),
+    ]);
     expect(answered(userTab.id)).toBe(false);
     expect(automationOf(browser, userTab.id).pendingDialog()).toEqual(
       expect.objectContaining({ message: "timer" }),

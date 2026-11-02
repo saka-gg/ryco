@@ -4,7 +4,10 @@ import { useSideChatStore } from "../sideChatStore";
 import { LazyBrowserPanel } from "../browser/LazyBrowserPanel";
 import { useNavigate, useParams, useSearch } from "@tanstack/react-router";
 import { scopedThreadKey, scopeProjectRef, scopeThreadRef } from "@ryco/client-runtime/scoped";
-import type { ThreadPageArtifact } from "@ryco/client-runtime/state/session";
+import {
+  canHtmlRenderSendFromMessage,
+  type ThreadPageArtifact,
+} from "@ryco/client-runtime/state/session";
 import { type MessageId, type ScopedThreadRef, type ThreadId } from "@ryco/contracts";
 import { projectScriptCwd } from "@ryco/shared/projectScripts";
 import {
@@ -808,6 +811,10 @@ function WorkspaceLauncher(props: {
     () => shortcutLabelForCommand(keybindings, "workspace.simulator"),
     [keybindings],
   );
+  const sideChatShortcutLabel = useMemo(
+    () => shortcutLabelForCommand(keybindings, "sideChat.toggle"),
+    [keybindings],
+  );
   const agentTabs = props.tabs.filter((tab) => tab.mode === "agent");
   const compact = !props.isPhoneSurface;
 
@@ -826,6 +833,7 @@ function WorkspaceLauncher(props: {
         label="Side chat"
         description="Start a side conversation"
         icon={MessageSquarePlusIcon}
+        shortcutLabel={props.isPhoneSurface ? null : sideChatShortcutLabel}
         compact={compact}
         disabled={props.isPhoneSurface || !props.activeThread}
         onClick={props.onOpenSideChat}
@@ -1109,6 +1117,22 @@ export default function ThreadWorkspacePanel(props: {
     renderKey,
     lookUp: activeMode === "render" && !isPhoneSurface,
   });
+  // Only a page the thread's own agent published, on a message the thread has
+  // loaded, may send the reader's answers.
+  const renderMessageId = renderKey ? parseWorkspaceRenderKey(renderKey)?.messageId : undefined;
+  const threadMessages = activeThread?.messages;
+  const renderAttachment =
+    workspaceRender.status === "found" ? workspaceRender.render.attachment : undefined;
+  const renderCanSendMessages = useMemo(() => {
+    const message = renderMessageId
+      ? threadMessages?.find((candidate) => candidate.id === renderMessageId)
+      : undefined;
+    return (
+      message !== undefined &&
+      renderAttachment !== undefined &&
+      canHtmlRenderSendFromMessage(message, renderAttachment)
+    );
+  }, [renderMessageId, threadMessages, renderAttachment]);
   const renderTitle =
     renderKey && parseWorkspaceRenderKey(renderKey)
       ? workspaceRender.status === "found"
@@ -1673,6 +1697,7 @@ export default function ThreadWorkspacePanel(props: {
               threadId={workspaceThreadRef ? (workspaceThreadRef.threadId as ThreadId) : null}
               renderKey={renderKey}
               resolution={workspaceRender}
+              canSendMessages={renderCanSendMessages}
             />
           ) : activeMode === "agent" ? (
             <AgentThreadPanel subagent={activeAgent} agentKey={agentKey} />

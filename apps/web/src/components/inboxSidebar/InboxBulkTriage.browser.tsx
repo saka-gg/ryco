@@ -26,6 +26,7 @@ const lifecycle = vi.hoisted(() => ({
 vi.mock("../../threadLifecycleCommands", () => ({
   dispatchThreadSettlement: vi.fn(async () => true),
   dispatchThreadSnooze: vi.fn(async () => undefined),
+  dispatchThreadHidden: vi.fn(async () => undefined),
   dispatchThreadSettlementBatch: lifecycle.settlementBatch,
   dispatchThreadSnoozeBatch: lifecycle.snoozeBatch,
   presentSkippedThreads: lifecycle.skipped,

@@ -110,6 +110,10 @@ export interface ForkHarnessOptions {
   readonly service?: ThreadForkTestOptions;
   /** Wraps the real Git driver, e.g. to record or fail calls. */
   readonly gitWorkflow?: (git: GitWorkflowFns) => GitWorkflowFns;
+  /** Wraps the fetch of a carried fork's branch (default: the real Git driver's). */
+  readonly prefetchWorktreeBase?: (
+    real: GitWorkflowServiceShape["prefetchWorktreeBase"],
+  ) => GitWorkflowServiceShape["prefetchWorktreeBase"];
   /** Offers chats rooted here. */
   readonly chatsRoot?: string;
   /** Wraps the filesystem the fork service sees (the rest of the harness keeps the real one). */
@@ -199,7 +203,13 @@ export async function createForkHarness(options: ForkHarnessOptions = {}) {
         removeWorktree: driver.removeWorktree,
         deleteBranch: driver.deleteBranch,
       };
-      return (options.gitWorkflow?.(git) ?? git) as unknown as GitWorkflowServiceShape;
+      return {
+        ...(options.gitWorkflow?.(git) ?? git),
+        prefetchWorktreeBase:
+          options.prefetchWorktreeBase?.(driver.prefetchWorktreeBase) ??
+          driver.prefetchWorktreeBase,
+        isAncestorCommit: driver.isAncestorCommit,
+      } as unknown as GitWorkflowServiceShape;
     }),
   );
   const stubs = Layer.mergeAll(

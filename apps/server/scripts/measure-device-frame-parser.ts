@@ -46,7 +46,7 @@ for (const mib of [1, 2, 4, 8]) {
     };
     result = parse(wire);
   } finally {
-    // eslint-disable-next-line no-extend-native
+    // eslint-disable-next-line no-extend-native -- puts back the native set the copy counter replaced
     Uint8Array.prototype.set = originalSet;
   }
   assert.equal(copiedBytes, wire.length, "each wire byte must be copied exactly once");

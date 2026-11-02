@@ -28,6 +28,16 @@ export interface ForkThreadDialogRequest {
   readonly boundaryText: string;
   /** The reply's turn has a checkpoint a new worktree can start from (shared rule). */
   readonly checkpointAvailable: boolean;
+  /**
+   * Text the fork's composer draft gets once the fork exists ("Continue as thread" puts the side
+   * chat there), and the note the dialog shows about it. Never sent on its own.
+   */
+  readonly draftSeed?: ForkThreadDraftSeed | undefined;
+}
+
+export interface ForkThreadDraftSeed {
+  readonly text: string;
+  readonly note: string;
 }
 
 export interface ForkThreadDialogState {

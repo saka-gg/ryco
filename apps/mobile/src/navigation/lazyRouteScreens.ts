@@ -143,6 +143,13 @@ export const SettingsAboutRouteScreen = lazyScreen(
       require("../features/settings/SettingsAboutRouteScreen") as typeof import("../features/settings/SettingsAboutRouteScreen")
     ).SettingsAboutRouteScreen,
 );
+export const SettingsDiagnosticsRouteScreen = lazyScreen(
+  "SettingsDiagnosticsRouteScreen",
+  () =>
+    (
+      require("../features/settings/SettingsDiagnosticsRouteScreen") as typeof import("../features/settings/SettingsDiagnosticsRouteScreen")
+    ).SettingsDiagnosticsRouteScreen,
+);
 export const SettingsClientStorageRouteScreen = lazyScreen(
   "SettingsClientStorageRouteScreen",
   () =>

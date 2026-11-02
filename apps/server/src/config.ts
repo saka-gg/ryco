@@ -310,6 +310,14 @@ export interface ServerConfigShape extends ServerDerivedPaths {
   /** Process-private credential for Desktop main's loopback control channel. */
   readonly desktopControlToken?: string | undefined;
   readonly computerUseBridge?: ComputerUseBridgeConfig | undefined;
+  /**
+   * Ryco Nightly's desktop backend only: the one Ryco data home it may copy from when Ryco left a
+   * copy request in this home (flavorImportStartup.ts), and the token of the launch Ryco opened
+   * it with. Only the desktop envelope sets it.
+   */
+  readonly flavorImport?:
+    | { readonly allowedSourceHome: string; readonly requestToken: string }
+    | undefined;
   readonly autoBootstrapProjectFromCwd: boolean;
   readonly logWebSocketEvents: boolean;
   readonly tailscaleServeEnabled: boolean;

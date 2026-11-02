@@ -38,6 +38,7 @@ export type ThreadAutoSettlementBlocker =
   | "pinned"
   | "background-work"
   | "pull-request-watch"
+  | "command-watch"
   | "pull-request-open"
   | "pull-request-unknown";
 
@@ -68,6 +69,8 @@ export interface ThreadSettlementInput {
    * ends the watch).
    */
   readonly pullRequestWatched: boolean;
+  /** The node runs a command watch for this thread (it wakes the agent on new output): same rule. */
+  readonly commandWatched: boolean;
   readonly prNumber: number | null;
   readonly prState: PullRequestState | null;
   /**
@@ -141,6 +144,26 @@ export function canSettleThread(input: ThreadSettlementInput): CanSettleThreadRe
   if (input.deliveryUnknown) return blocked("delivery-unknown");
   if (hasQueuedTurnStart(input)) return blocked("queued-turn");
   return { canSettle: true, blocker: null };
+}
+
+/**
+ * Whether settling a thread now files it instead (T3 Code #18606): its running turn is the only
+ * thing keeping it from settling, so the node records the intent and settles it once the work
+ * ends. Requests waiting on the user and undelivered work still block, as for a settle.
+ */
+export function canFileThreadForSettlement(input: ThreadSettlementInput): boolean {
+  const eligibility = canSettleThread(input);
+  if (eligibility.blocker !== "session-running" && eligibility.blocker !== "session-starting") {
+    return false;
+  }
+  return canSettleThread({
+    ...input,
+    sessionStatus:
+      input.sessionStatus === "running" || input.sessionStatus === "starting"
+        ? null
+        : input.sessionStatus,
+    latestTurnState: input.latestTurnState === "running" ? null : input.latestTurnState,
+  }).canSettle;
 }
 
 export type QueuedTurnIdleBlocker =
@@ -228,6 +251,7 @@ export function getThreadAutoSettlementBlocker(
   if (input.pinned) return "pinned";
   if (input.backgroundLiveness === "working") return "background-work";
   if (input.pullRequestWatched) return "pull-request-watch";
+  if (input.commandWatched) return "command-watch";
   if (input.prState === "open") return "pull-request-open";
   if (input.prState === null && input.prNumber !== null) return "pull-request-unknown";
   return null;

@@ -1,6 +1,15 @@
 import "../../index.css";
 
-import type { EnvironmentId, NodeUpdateState } from "@ryco/contracts";
+import {
+  resetEnvironmentServerConfigsForTests,
+  writeEnvironmentServerConfig,
+} from "@ryco/client-runtime/rpc";
+import {
+  DEFAULT_SERVER_SETTINGS,
+  type EnvironmentId,
+  type NodeUpdateState,
+  type ServerConfig,
+} from "@ryco/contracts";
 import { page } from "vite-plus/test/browser";
 import { afterEach, describe, expect, it, vi } from "vite-plus/test";
 import { render } from "vitest-browser-react";
@@ -22,6 +31,9 @@ import {
   EMPTY_PLAN,
   FULL_PLAN,
   LINUX_DEVICE,
+  LINUX_ID,
+  OFFLINE_ID,
+  THIS_MAC_ID,
   M4_DEVICE,
   M4_ID,
   runDevice,
@@ -54,7 +66,79 @@ describe("Settings → Updates", () => {
     await mounted?.unmount();
     mounted = null;
     mock.nodeUpdates.clear();
+    resetEnvironmentServerConfigsForTests();
     document.body.innerHTML = "";
+  });
+
+  it("lets each node's owner turn on automatic provider updates", async () => {
+    const nodeConfig = (
+      settings: Partial<ServerConfig["settings"]>,
+      supported = true,
+      desktopAppUpdates?: "install-on-quit" | "restart",
+    ) =>
+      ({
+        environment: {
+          capabilities: supported
+            ? { automaticUpdates: true, ...(desktopAppUpdates ? { desktopAppUpdates } : {}) }
+            : {},
+        },
+        settings: { ...DEFAULT_SERVER_SETTINGS, ...settings },
+      }) as unknown as ServerConfig;
+    writeEnvironmentServerConfig(M4_ID, nodeConfig({ automaticUpdates: true }));
+    writeEnvironmentServerConfig(
+      THIS_MAC_ID,
+      nodeConfig({ automaticUpdates: true, enableProviderUpdateChecks: false }, true, "restart"),
+    );
+    writeEnvironmentServerConfig(
+      LINUX_ID,
+      nodeConfig({ enableProviderUpdateChecks: false }, true, "install-on-quit"),
+    );
+    // Too old to update unattended: no switch at all.
+    writeEnvironmentServerConfig(OFFLINE_ID, nodeConfig({}, false));
+    setController();
+    mounted = await render(<UpdatesSettings />);
+
+    const toggle = (name: string) =>
+      page.getByRole("switch", { name: `Update ${name} automatically`, exact: true });
+    await expect.element(toggle("MacBook Pro M4")).toBeChecked();
+    await expect.element(toggle("MacBook Pro M4")).toBeEnabled();
+    // Unattended updates act only with provider update checks on: the switch shows the real
+    // value, and can still be turned off.
+    await expect.element(toggle("This Mac")).toBeChecked();
+    await expect.element(toggle("This Mac")).toBeEnabled();
+    await expect
+      .element(
+        page.getByText(
+          "Does nothing while provider update checks are off for this node (General settings).",
+        ),
+      )
+      .toBeVisible();
+    await expect.element(toggle("Linux box")).not.toBeChecked();
+    await expect.element(toggle("Linux box")).toBeDisabled();
+    await expect
+      .element(
+        page.getByText(
+          "Acts only while provider update checks are on. Turn them on for this node first (General settings).",
+        ),
+      )
+      .toBeVisible();
+    expect(toggle("Studio PC").elements()).toHaveLength(0);
+    // Desktop app nodes say what the app does with its own updates; CLI nodes say nothing.
+    await expect
+      .element(
+        page.getByText(
+          "This desktop app also downloads its own updates in the background. One installs only when you choose Restart.",
+        ),
+      )
+      .toBeVisible();
+    await expect
+      .element(
+        page.getByText(
+          "This desktop app also downloads its own updates in the background and installs one when you quit it. It never restarts by itself.",
+        ),
+      )
+      .toBeVisible();
+    expect(page.getByText(/^This desktop app also downloads/).elements()).toHaveLength(2);
   });
 
   it("lists every device and updates one, all, or checks again", async () => {

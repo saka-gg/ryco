@@ -1,4 +1,8 @@
 import "./polyfills";
+// Second, and bare, so it evaluates before every other module of the app and a crash anywhere
+// after it is kept for Settings > About > Diagnostics (metroStartupConfig.test.ts). Its file
+// store loads only when an error is fatal (mobileStartupImports.test.ts).
+import "./src/diagnostics/fatalErrorRecorderEntry";
 // Import-time registrations. Metro inlines requires (metro.config.js), so a
 // module is evaluated at its first use; bare imports are never inlined, which
 // keeps these lazy configurators registered at startup, before any runtime

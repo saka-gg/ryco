@@ -8,6 +8,7 @@ import type { AdvertisedEndpoint, AdvertisedEndpointProvider } from "@ryco/contr
 import { isTailscaleIpv4Address } from "@ryco/tailscale";
 import {
   readCachedTailscaleMagicDnsName,
+  readCachedTailscaleStatus,
   resolveTailscaleIpAdvertisedEndpoints,
   resolveTailscaleMagicDnsAdvertisedEndpoint,
 } from "@ryco/tailscale/endpoints";
@@ -177,6 +178,9 @@ export const makeAdvertisedEndpointRegistry = Effect.fn("makeAdvertisedEndpointR
 
     return {
       list,
+      tailscaleAddresses: Effect.promise(() =>
+        readCachedTailscaleStatus().then((status) => status?.tailnetAddresses),
+      ),
     } satisfies AdvertisedEndpointRegistryShape;
   },
 );

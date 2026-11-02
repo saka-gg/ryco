@@ -8,11 +8,18 @@ export const isRoutineAgentControlAction = (
   if (principal.kind !== "provider-session") return false;
   switch (plan.kind) {
     case "changeSettings":
+      // Turning provider update checks on while the owner's automatic updates are on would let
+      // Ryco install provider CLIs on its own: that waits for the owner.
+      return (
+        plan.change.kind !== "providerUpdateChecks" || plan.change.startsAutomaticUpdates !== true
+      );
     case "createThreads":
     case "sendMessage":
     case "interruptThread":
     case "pullRequestWatch":
-      // The validator checks caller runtime privileges and worktree isolation.
+    case "worktreeHandoff":
+      // The validator checks caller runtime privileges and worktree isolation (and keeps a
+      // handoff to the caller's own chat, out of the shared checkout into a new worktree).
       return true;
     case "updateThread":
       return plan.runtimeMode === undefined && plan.archived !== true;

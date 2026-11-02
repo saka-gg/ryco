@@ -5,7 +5,7 @@ import type {
   ServerSettings,
   SidebarAutoSettleAfterDays,
 } from "@ryco/contracts";
-import { derivePendingThreadRequestState } from "@ryco/shared/threadActivity";
+import { derivePendingThreadRequestState } from "@ryco/shared/pendingThreadRequests";
 import {
   resolveAutoSettleAfterDays,
   type ThreadSettlementInput,
@@ -42,7 +42,12 @@ export function threadSettlementInput(
   thread: OrchestrationReadModel["threads"][number],
   occurredAt: string,
 ) {
-  const pendingRequests = derivePendingThreadRequestState(thread.activities);
+  // At `occurredAt`: a secret request past its expiry no longer holds the thread, even if its
+  // expiry was not recorded.
+  const pendingRequests = derivePendingThreadRequestState(
+    thread.activities,
+    Date.parse(occurredAt),
+  );
   const worktree = threadWorktree(readModel, thread);
   return {
     threadSettlementSupported: true,
@@ -65,6 +70,7 @@ export function threadSettlementInput(
     pinned: false,
     backgroundLiveness: null,
     pullRequestWatched: (thread.pullRequestWatchState?.active.length ?? 0) > 0,
+    commandWatched: (thread.commandWatchState?.active.length ?? 0) > 0,
     prNumber: worktree?.prNumber ?? null,
     prState: worktree?.prState ?? null,
     prTerminalAt: worktree?.prTerminalAt ?? null,
@@ -106,6 +112,7 @@ export function threadShellSettlementInput(
     pinned: false,
     backgroundLiveness: shell.backgroundLiveness ?? null,
     pullRequestWatched: (shell.pullRequestWatches?.active.length ?? 0) > 0,
+    commandWatched: shell.commandWatchCount !== undefined,
     prNumber: null,
     prState: null,
     prTerminalAt: null,

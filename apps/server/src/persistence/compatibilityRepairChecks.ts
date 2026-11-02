@@ -259,6 +259,17 @@ const checks: Record<CompatibilityRepairKey, (c: SchemaCatalog) => RepairApplied
   "auth-access-link-account": (c) =>
     c.hasColumns("auth_pairing_links", ["link_account_id"]) &&
     c.hasColumns("auth_sessions", ["link_account_id"]),
+  // Floors and usage rollups; no backfill.
+  "event-retention": (c) =>
+    c.has("table", "orchestration_stream_floors") && c.has("table", "statistics_usage_rollups"),
+  // The table and its partial index; no backfill.
+  "command-watches": (c) =>
+    c.has("table", "projection_thread_command_watches") &&
+    c.has("index", "idx_projection_thread_command_watches_active"),
+  // The column only, on the table 084 creates.
+  "thread-fork-origin": (c) => columnsUnlessAbsent(c, "thread_forks", ["origin_json"]),
+  "projection-thread-triage": (c) =>
+    columnsUnlessAbsent(c, "projection_threads", ["hidden_at", "settle_when_idle_at"]),
 };
 
 /** Of `keys`, the repairs whose effect this database already has, read without writing. */

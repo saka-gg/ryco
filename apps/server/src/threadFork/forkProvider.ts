@@ -21,7 +21,8 @@ import { readPersistedCwd } from "../provider/runtimeCwd.ts";
 import type { ProviderRuntimeBinding } from "../provider/Services/ProviderSessionDirectory.ts";
 import type { ForkBoundary } from "./forkBoundary.ts";
 import type { ThreadForkNativeDriver, ThreadForkProviderPlan } from "./forkLedger.ts";
-import { type ClaudeCutoffPin, nativeForkConfigFingerprint } from "./nativeFork.ts";
+import type { ClaudeCutoffPin } from "./nativeFork.ts";
+import { nativeForkConfigFingerprint } from "./nativeForkFingerprint.ts";
 
 type ClaudeProviderPlan = Extract<ThreadForkProviderPlan, { readonly driver: "claudeAgent" }>;
 

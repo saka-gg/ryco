@@ -5,6 +5,7 @@ import { LocalTaskService } from "../tasks/LocalTaskService.ts";
 import { PullRequestWatchService } from "../sourceControl/PullRequestWatchService.ts";
 import { WorktreeNotesService } from "../notes/WorktreeNotesService.ts";
 import { NodeUpdateService } from "../nodeUpdate/NodeUpdateService.ts";
+import { ClientInteraction } from "../updates/ClientInteraction.ts";
 import { ProviderSignIn } from "../provider/signIn/ProviderSignIn.ts";
 import { NodeBrowser } from "../nodeBrowser/NodeBrowser.ts";
 import { NodePushRegistry } from "../push/NodePushRegistry.ts";
@@ -284,6 +285,7 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
     const worktreeNotesService = yield* Effect.serviceOption(WorktreeNotesService);
     // Optional for the route-test reason above; production provides it with the runtime.
     const nodeUpdate = yield* Effect.serviceOption(NodeUpdateService);
+    const clientInteraction = yield* Effect.serviceOption(ClientInteraction);
     const providerSignIn = yield* Effect.serviceOption(ProviderSignIn);
     const nodeBrowser = yield* Effect.serviceOption(NodeBrowser);
     const nodePushRegistry = yield* Effect.serviceOption(NodePushRegistry);
@@ -1329,6 +1331,14 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
         .refreshStatus(cwd)
         .pipe(Effect.ignoreCause({ log: true }), Effect.forkDetach, Effect.asVoid);
 
+    // The whole log's retention floor (`EventLogRetention`); 0 without an event store.
+    const readLogReplayFloor = Option.match(orchestrationEventStore, {
+      onNone: () => Effect.succeed(0),
+      onSome: (eventStore) =>
+        eventStore.readReplayFloor === undefined
+          ? Effect.succeed(0)
+          : eventStore.readReplayFloor({ aggregateKind: "log", streamId: "" }),
+    });
     const { enrichOrchestrationEvents, makeReplayableShellStream, makeReplayableThreadStream } =
       makeOrchestrationStreamHelpers({
         orchestrationEngine,
@@ -1338,6 +1348,7 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
           onNone: () => ({}),
           onSome: (eventStore) => ({
             ...(eventStore.probeResume ? { probeResume: eventStore.probeResume } : {}),
+            ...(eventStore.readReplayFloor ? { readReplayFloor: eventStore.readReplayFloor } : {}),
             readStreamEventsPage: eventStore.readStreamEventsPage,
           }),
         }),
@@ -1450,9 +1461,12 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
       pullRequestWatch,
       worktreeNotesService,
       nodeUpdate,
+      clientInteraction,
       providerSignIn,
       nodeBrowser,
       nodePushRegistry,
+      /** How this connection's requests reach the node (`RpcPrincipal.connection`). */
+      connection: principal.connection,
       /** Who this relay channel's handshake authenticated; `none` off the relay. */
       relayAuthority: (): RelayChannelAuthority =>
         principal.relayAuthority?.() ?? { trustSource: "none" },
@@ -1500,9 +1514,12 @@ export const makeWsRpcContext = (principal: RpcPrincipal) =>
       enrichOrchestrationEvents,
       makeReplayableShellStream,
       makeReplayableThreadStream,
+      readLogReplayFloor,
       loadServerConfig,
       streamChatsConfigSnapshots,
       loadAdvertisedEndpoints,
+      /** This machine's own Tailscale addresses (`tailscale status`), for the secret answer. */
+      readNodeTailscaleAddresses: advertisedEndpointRegistry.tailscaleAddresses,
       issueLinkedDirectAccessForChannel,
       loadDiagnosticsMetrics,
       loadDiagnosticsSnapshot,

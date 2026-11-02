@@ -69,6 +69,16 @@ describe("app default keybindings", () => {
     }
   });
 
+  it("gives the side chat toggle a client-only mod+alt+s, apart from snooze's mod+alt+shift+s", () => {
+    expect(NODE_DEFAULT_KEYBINDINGS.some((rule) => rule.command === "sideChat.toggle")).toBe(false);
+    expect(APP_DEFAULT_KEYBINDINGS).toContainEqual({
+      key: "mod+alt+s",
+      command: "sideChat.toggle",
+      when: "!terminalFocus",
+    });
+    expect(APP_DEFAULT_KEYBINDINGS.filter((rule) => rule.key === "mod+alt+s")).toHaveLength(1);
+  });
+
   it("gives quick open mod+p, find in files mod+shift+f and the Files panel mod+shift+e in this app only", () => {
     const nodeFilesRule = { key: "mod+p", command: "workspace.files", when: "!terminalFocus" };
     // Nodes keep serving mod+p for the Files panel to apps that predate quick open.
@@ -95,6 +105,28 @@ describe("app default keybindings", () => {
       command: "workspace.files",
       when: "!terminalFocus",
     });
+  });
+
+  it("gives the open chat tabs Synara's next and previous keys in this app only", () => {
+    const tabRules = [
+      { key: "mod+ctrl+arrowright", command: "threadTab.next", when: "isMac" },
+      { key: "mod+ctrl+arrowleft", command: "threadTab.previous", when: "isMac" },
+      { key: "ctrl+pagedown", command: "threadTab.next", when: "!terminalFocus && !isMac" },
+      { key: "ctrl+pageup", command: "threadTab.previous", when: "!terminalFocus && !isMac" },
+    ] as const;
+    for (const rule of tabRules) {
+      expect(NODE_DEFAULT_KEYBINDINGS.some((nodeRule) => nodeRule.command === rule.command)).toBe(
+        false,
+      );
+      expect(APP_DEFAULT_KEYBINDINGS).toContainEqual(rule);
+    }
+    // No other default claims these chords.
+    const tabKeys = new Set(tabRules.map((rule) => rule.key));
+    expect(
+      APP_DEFAULT_KEYBINDINGS.filter(
+        (rule) => tabKeys.has(rule.key as never) && !rule.command.startsWith("threadTab."),
+      ),
+    ).toEqual([]);
   });
 
   it("resolves the app defaults and stores nothing for an untouched editor", () => {

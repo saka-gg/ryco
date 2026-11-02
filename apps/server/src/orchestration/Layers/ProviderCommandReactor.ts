@@ -10,6 +10,7 @@ import { computerToolInstructions } from "../../computer/tools/computerGuidance.
 import type { ComputerTurnIntent } from "@ryco/contracts";
 import { stageComputerTurn, computerTurnPlan } from "../../computer/computerTurnLifecycle.ts";
 import { parseComputerInvocation } from "@ryco/shared/computerInvocation";
+import { sameModelSelection } from "@ryco/shared/model";
 import {
   hasRetiredProjectMemory,
   REMOVED_PROJECT_MEMORY_MESSAGE,
@@ -139,6 +140,8 @@ import {
 import { ContextHandoffCoordinator } from "../Services/ContextHandoffCoordinator.ts";
 import { CheckpointReactor } from "../Services/CheckpointReactor.ts";
 import { ProviderRuntimeIngestionService } from "../Services/ProviderRuntimeIngestion.ts";
+import { ThreadBackgroundLivenessService } from "../ThreadBackgroundLiveness.ts";
+import { ThreadSessionModelSelectionsService } from "../ThreadSessionModelSelections.ts";
 import {
   makeResumeFallbackRequestedActivity,
   type ResumeFallbackReason,
@@ -510,7 +513,10 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
       ),
     );
 
-  const threadModelSelections = new Map<string, ModelSelection>();
+  // What each session runs, shared with the engine's background-work check on turn starts.
+  const threadModelSelections = yield* ThreadSessionModelSelectionsService;
+  // Optional: without it a turn that names no selection never counts as stopping background work.
+  const backgroundLiveness = yield* Effect.serviceOption(ThreadBackgroundLivenessService);
   /** `threadId:runtimeSessionId` of runtimes that reported no goal, and whether goals are native there. */
   const goallessRuntimes = new Map<string, "native" | "unsupported">();
   const rememberGoallessRuntime = (runtimeKey: string, kind: "native" | "unsupported") => {
@@ -1425,6 +1431,9 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
     const { goal, native } = yield* reconcileThreadGoal(input.threadId);
     if (input.modelSelection !== undefined) {
       threadModelSelections.set(input.threadId, input.modelSelection);
+    } else if (threadModelSelections.get(input.threadId) === undefined) {
+      // A session this process has no record for started on the thread's stored selection.
+      threadModelSelections.set(input.threadId, thread.modelSelection);
     }
     const normalizedInput = withTurnOriginLine(
       appendThreadReferenceContext(
@@ -1692,7 +1701,7 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
         ),
       );
       if (Option.isNone(settings)) return;
-      const { textGenerationModelSelection, worktreeBranchChangeTypes } = settings.value;
+      const { textGenerationModelSelection } = settings.value;
       // A signed-out or failing provider would only retry its errors in the
       // background: generation moves to a ready provider, or is skipped.
       const modelSelection = Option.isSome(providerRegistry)
@@ -1709,10 +1718,13 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
         return;
       }
       // The temporary branch was named with the project's effective prefix.
-      const worktreeBranchPrefix = resolveProjectPreferences({
+      const effective = resolveProjectPreferences({
         settings: settings.value,
         ...(input.project !== undefined ? { project: input.project } : {}),
-      }).worktreeBranchPrefix.value;
+      });
+      const worktreeBranchPrefix = effective.worktreeBranchPrefix.value;
+      const worktreeBranchChangeTypes =
+        effective.worktreeBranchChangeTypes?.value ?? settings.value.worktreeBranchChangeTypes;
       const wantsTitle = canReplaceThreadTitle(thread.title, input.titleSeed);
       const oldBranch = thread.branch;
       const worktreePath = thread.worktreePath;
@@ -2021,6 +2033,15 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
         ),
       ),
     ).pipe(Effect.ensuring(laneControl.endTurnOwnership(threadId)));
+    // The coordinator started the target session on the handoff's selection, or restored the
+    // source: then the thread's selection stands in for what it runs.
+    const target = event.payload.modelSelection;
+    const live = yield* findThreadSession(providerService, threadId);
+    if (target !== undefined && live?.providerInstanceId === target.instanceId) {
+      threadModelSelections.set(threadId, target);
+    } else {
+      threadModelSelections.forget(threadId);
+    }
   });
 
   /**
@@ -2194,6 +2215,30 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
       );
   };
 
+  /**
+   * The chat's stored selection for a turn that names none (`implicitTurnModelSelection`), or
+   * undefined to run on what the session applied last. Clients store a pick on the thread when
+   * it is made; a model change never restarts or interrupts the session then, the next turn
+   * applies it.
+   */
+  const resolveImplicitTurnModelSelection = (thread: OrchestrationThreadShell) => {
+    const applied = threadModelSelections.get(thread.id);
+    if (applied === undefined || sameModelSelection(applied, thread.modelSelection)) {
+      return Effect.succeed(undefined);
+    }
+    return Effect.promise(() => import("../implicitTurnModelSelection.ts")).pipe(
+      Effect.flatMap((module) =>
+        module.resolveImplicitTurnModelSelection({
+          thread,
+          applied,
+          providerService,
+          backgroundLiveness: Option.getOrUndefined(backgroundLiveness),
+          changeRestartsSession: modelSelectionChangeRestartsSession,
+        }),
+      ),
+    );
+  };
+
   const prepareAndSubmitTurnStart = Effect.fn("prepareAndSubmitTurnStart")(function* (
     event: TurnStartRequestedEvent,
     fenceSequence: number,
@@ -2295,6 +2340,8 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
       projectionSnapshotQuery,
       event.payload.threadReferences,
     );
+    const turnModelSelection =
+      event.payload.modelSelection ?? (yield* resolveImplicitTurnModelSelection(thread));
     const prepared = yield* buildSendTurnRequestForThread({
       threadId: event.payload.threadId,
       thread,
@@ -2306,9 +2353,7 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
       ...(event.payload.origin !== undefined ? { origin: event.payload.origin } : {}),
       ...(event.payload.computerUse ? { computerUse: event.payload.computerUse } : {}),
       ...(message.attachments !== undefined ? { attachments: message.attachments } : {}),
-      ...(event.payload.modelSelection !== undefined
-        ? { modelSelection: event.payload.modelSelection }
-        : {}),
+      ...(turnModelSelection !== undefined ? { modelSelection: turnModelSelection } : {}),
       interactionMode: event.payload.interactionMode,
       tokenMode: event.payload.tokenMode,
       createdAt: event.payload.createdAt,
@@ -2360,15 +2405,35 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
       }).pipe(Effect.ensuring(Scope.close(generationScope, Exit.void)), Effect.forkScoped);
     }
 
-    const commitAcceptedModelSelection: Effect.Effect<unknown, OrchestrationDispatchError> =
-      event.payload.modelSelection !== undefined &&
-      !Equal.equals(thread.modelSelection, event.payload.modelSelection)
-        ? orchestrationEngine.dispatch({
-            type: "thread.meta.update",
-            commandId: serverCommandId("accepted-model-selection"),
-            threadId: event.payload.threadId,
-            modelSelection: event.payload.modelSelection,
-          })
+    // The thread's stored selection is the chat's: clients store a pick when it is made, and
+    // the session takes it at its next turn. A turn's own selection becomes the chat's when it
+    // differs (an older client stores a pick only by sending it, or by queueing it), but never
+    // over a pick stored since the turn was started: since this turn started for a send, since
+    // the entry was queued for a person's queued follow-up (`queuedOverModelSelection`; absent
+    // on entries queued before it was recorded, which then keep the chat's pick). Server wakes
+    // name no selection, so they never change the chat's.
+    const acceptedModelSelection = event.payload.modelSelection;
+    const startedOverModelSelection =
+      serverWakeSource(event.payload.delegationReturnGuard) === "follow-up-queue"
+        ? event.payload.queuedOverModelSelection
+        : thread.modelSelection;
+    const commitAcceptedModelSelection =
+      acceptedModelSelection !== undefined &&
+      startedOverModelSelection !== undefined &&
+      !Equal.equals(thread.modelSelection, acceptedModelSelection)
+        ? resolveThread(threadId).pipe(
+            Effect.flatMap((current) =>
+              current !== undefined &&
+              sameModelSelection(current.modelSelection, startedOverModelSelection)
+                ? orchestrationEngine.dispatch({
+                    type: "thread.meta.update",
+                    commandId: serverCommandId("accepted-model-selection"),
+                    threadId: event.payload.threadId,
+                    modelSelection: acceptedModelSelection,
+                  })
+                : Effect.void,
+            ),
+          )
         : Effect.void;
 
     // A Stop that arrived while the session was prepared, or while the baseline
@@ -2761,6 +2826,7 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
           readonly error: string;
           readonly reason: TurnSteerRejectionReason;
           readonly deliveryUncertain?: boolean;
+          readonly restartedTurn?: true;
           readonly resolvedAt: string;
         },
     commandId: CommandId = serverCommandId("turn-steer-resolve"),
@@ -2838,6 +2904,7 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
                   status: "rejected",
                   error: classified.error,
                   reason: classified.reason,
+                  ...(classified.restartedTurn ? { restartedTurn: true as const } : {}),
                   resolvedAt: new Date().toISOString(),
                 });
               }),
@@ -2862,9 +2929,10 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
         : { userInputIdentity: identity }
       : {};
     const key = { threadId: event.payload.threadId, requestId: event.payload.requestId };
+    const question = isApproval ? Option.none() : yield* questions.getByRequestId(key);
     const claim = isApproval
       ? yield* approvals.getByRequestId(key)
-      : Option.map(yield* questions.getByRequestId(key), questionAsCallback);
+      : Option.map(question, questionAsCallback);
     if (
       Option.isNone(claim) ||
       claim.value.status !== "pending" ||
@@ -2872,6 +2940,40 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
       !matchesApprovalAttempt(claim.value, identity, event.commandId)
     )
       return;
+    const optional = Option.isSome(question) && question.value.nonBlocking === true;
+    const settle = (summary: string) =>
+      orchestrationEngine.dispatch({
+        type: "thread.activity.append",
+        commandId: serverCommandId(`${kind}-settled`),
+        threadId: key.threadId,
+        activity: {
+          id: EventId.make(`${kind}-settled:${event.commandId}`),
+          kind: `${kind}.resolved`,
+          tone: "info",
+          summary,
+          payload: {
+            requestId: key.requestId,
+            ...identityPayload,
+            runtimeSessionId: identity?.runtimeSessionId,
+            responseAttemptId: event.commandId,
+            ...(event.type === "thread.approval-response-requested"
+              ? { decision: event.payload.decision }
+              : { answers: event.payload.answers }),
+          },
+          turnId: null,
+          createdAt: new Date().toISOString(),
+        },
+        createdAt: new Date().toISOString(),
+      });
+    // Dismissing an optional question sends the agent nothing: the node settles it itself,
+    // during its turn or after it, whatever became of the session.
+    if (
+      optional &&
+      event.type === "thread.user-input-response-requested" &&
+      Object.keys(event.payload.answers).length === 0
+    ) {
+      return yield* settle("Question dismissed");
+    }
     const fail = (detail: string, responseState: ApprovalResponseState) =>
       appendProviderFailureActivity({
         ...key,
@@ -2884,13 +2986,18 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
         ...(event.commandId ? { responseAttemptId: event.commandId } : {}),
         responseState,
       });
+    // An optional question's steer that never went out leaves the question open: once its
+    // turn ended, the answer is sent again as a new message, which starts the next turn.
+    const failNotSent = optional
+      ? fail("The turn ended before this answer reached it. Send it again.", "retryable")
+      : fail(stalePendingRequestDetail(kind, key.requestId), "invalidated");
     const thread = yield* resolveThread(key.threadId);
     if (
       !thread?.session ||
       thread.session.status === "stopped" ||
       thread.session.runtimeSessionId !== identity?.runtimeSessionId
     ) {
-      return yield* fail(stalePendingRequestDetail(kind, key.requestId), "invalidated");
+      return yield* failNotSent;
     }
     const runtime = identity?.runtimeSessionId
       ? { expectedRuntimeSessionId: identity.runtimeSessionId }
@@ -2910,6 +3017,20 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
     yield* respond.pipe(
       Effect.matchCauseEffect({
         onFailure: (cause) => {
+          // The process-local authority no longer holds an optional question once its turn
+          // ended: nothing was sent, so its answer may go again, as a new message.
+          if (
+            optional &&
+            (isUnknownPendingUserInputRequestError(cause) ||
+              cause.reasons.some(
+                (reason) =>
+                  Cause.isFailReason(reason) &&
+                  (Schema.is(ProviderSessionNotFoundError)(reason.error) ||
+                    Schema.is(ProviderAdapterSessionNotFoundError)(reason.error)),
+              ))
+          ) {
+            return failNotSent;
+          }
           const stale =
             (isApproval
               ? isUnknownPendingApprovalRequestError(cause)
@@ -2944,30 +3065,7 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
             ),
           );
         },
-        onSuccess: () =>
-          orchestrationEngine.dispatch({
-            type: "thread.activity.append",
-            commandId: serverCommandId(`${kind}-settled`),
-            threadId: key.threadId,
-            activity: {
-              id: EventId.make(`${kind}-settled:${event.commandId}`),
-              kind: `${kind}.resolved`,
-              tone: "info",
-              summary: `${label} response delivered`,
-              payload: {
-                requestId: key.requestId,
-                ...identityPayload,
-                runtimeSessionId: identity?.runtimeSessionId,
-                responseAttemptId: event.commandId,
-                ...(event.type === "thread.approval-response-requested"
-                  ? { decision: event.payload.decision }
-                  : { answers: event.payload.answers }),
-              },
-              turnId: null,
-              createdAt: new Date().toISOString(),
-            },
-            createdAt: new Date().toISOString(),
-          }),
+        onSuccess: () => settle(`${label} response delivered`),
       }),
     );
   });
@@ -3014,6 +3112,8 @@ const makeProviderCommandReactor = Effect.fnUntraced(function* (
       return yield* providerEffectIntents.settle({ sequence: event.sequence });
     }
 
+    // A stopped session runs nothing: the next turn starts one on the chat's stored selection.
+    threadModelSelections.forget(threadId);
     const now = input.at === "now" ? new Date().toISOString() : event.payload.createdAt;
     if (Option.isNone(outOfBand) && thread.session && thread.session.status !== "stopped") {
       // Bounded inside ProviderService; a timed-out stop is retried by the reaper.

@@ -3,6 +3,8 @@ import { ClaudeCacheDetails } from "./ClaudeCacheDetails";
 import { mobileClaudeCacheReview } from "./claudeCacheReview";
 import { mobileConfirmStopBackgroundWork } from "./stopBackgroundWork";
 import { prewarmThreadProviderSession } from "./threadSessionPrewarm";
+import { liveThreadModelSelectionSupported } from "./liveThreadModelSelection";
+import { useLiveThreadModelSelection } from "./useLiveThreadModelSelection";
 import {
   readServerFollowUpQueueWaiting,
   readThreadOutboxEnvironment,
@@ -74,6 +76,7 @@ import {
   selectFilesRevertSupported,
   subscribeCheckpointReverts,
   type PendingApproval,
+  type PendingUserInput,
   type TimelineEntry,
 } from "@ryco/client-runtime/state/session";
 import {
@@ -95,6 +98,7 @@ import {
   resolveQueuedMessageEditUnavailableReason,
   resolveFollowUpQueueEditState,
   resolveQueuedMessageSteerEligibility,
+  providerSteering,
   selectServerFollowUpQueueSupported,
   selectThreadFollowUpQueue,
   shouldQueueFollowUpOnServer,
@@ -116,6 +120,7 @@ import {
   deriveUndoTurnCountByTurnId,
   isArchivedThreadStub,
   readThreadForkApi,
+  resolveThreadWorkspacePullRequestLink,
   CONTINUE_AFTER_FAILURE_PROMPT,
   failedTurnNotice,
   restartInterruptionNotice,
@@ -214,6 +219,7 @@ import {
   useStore,
 } from "../../state/threadsRuntime";
 import { useHomeEnvironments } from "../home/useHomeEnvironments";
+import { useHardwareKeyboardCommand } from "../keyboard/hardwareKeyboardCommands";
 import { TerminalHeaderButton } from "../terminal/TerminalHeaderButton";
 import { useRepositoryStatus } from "../newTask/useNewTaskRepository";
 import { NewTaskLaunchCard } from "../newTask/NewTaskLaunchCard";
@@ -237,6 +243,12 @@ import {
 import { executeSendTurn } from "./executeSendTurn";
 import { PendingApprovalCard } from "./PendingApprovalCard";
 import { PendingUserInputCard } from "./PendingUserInputCard";
+import {
+  resolveOptionalAnswerRoute,
+  sendOptionalAnswerAsMessage,
+} from "@ryco/client-runtime/state/user-input";
+import { SecretRequestCard } from "./SecretRequestCard";
+import { mobileSecretRequestCards } from "./secretRequestCardModel";
 import { sendThreadTurn } from "./sendThreadTurn";
 import { runUndoFileChanges } from "./undoFileChanges";
 import {
@@ -913,6 +925,7 @@ export function ThreadDetailScreen(props: {
     settlementModel?.active[0] ??
     settlementModel?.settled[0] ??
     settlementModel?.snoozed[0] ??
+    settlementModel?.hidden[0] ??
     null;
   const cachedView = useMemo(
     () =>
@@ -945,6 +958,10 @@ export function ThreadDetailScreen(props: {
             thread,
             project,
             worktree,
+            pullRequestUrl:
+              sidebarThread && !isArchivedThreadStub(sidebarThread)
+                ? resolveThreadWorkspacePullRequestLink(sidebarThread, worktree ?? null)?.url
+                : null,
             nodeLabel,
             hasPendingApproval: pendingApprovals.length > 0,
             hasPendingUserInput: pendingUserInputs.length > 0,
@@ -957,10 +974,11 @@ export function ThreadDetailScreen(props: {
               ? {
                   settlement: {
                     attentionState:
-                      settlementEntry.lifecycle.classification === "snoozed"
-                        ? "active"
-                        : settlementEntry.lifecycle.classification,
-                    canSettle: settlementEntry.lifecycle.eligibility.canSettle,
+                      settlementEntry.lifecycle.classification === "settled" ? "settled" : "active",
+                    // A working task files: the node settles it when the work ends.
+                    canSettle:
+                      settlementEntry.lifecycle.eligibility.canSettle ||
+                      settlementEntry.lifecycle.settleFiles === true,
                     settlementBlocker: settlementEntry.lifecycle.settlementBlocker,
                     mutationEnabled: settlementEntry.mutationEnabled,
                     mutationBlocker: settlementEntry.mutationBlocker,
@@ -978,6 +996,7 @@ export function ThreadDetailScreen(props: {
       pullRequestWatchAvailable,
       pullRequestWatches,
       settlementEntry,
+      sidebarThread,
       thread,
       worktree,
     ],
@@ -993,6 +1012,16 @@ export function ThreadDetailScreen(props: {
   const providers = useMemo(() => serverConfig?.providers ?? [], [serverConfig]);
   const canonicalModelSelection = thread?.modelSelection ?? null;
   const selectedModelSelection = stagedModelSelection ?? canonicalModelSelection;
+  // The model, effort and speed follow the selection the node stores, live with its other clients.
+  const noteModelSelectionPicked = useLiveThreadModelSelection({
+    environmentId,
+    threadId,
+    enabled: liveThreadModelSelectionSupported(serverConfig),
+    serverModelSelection: canonicalModelSelection,
+    composerModelSelection: selectedModelSelection,
+    updateStaged: setStagedModelSelection,
+    reportFailure: setSendError,
+  });
   const sideChatReady = !cachedView.actionsDisabled && connectionUiState === "connected";
   useEffect(() => {
     if (!sideChatReady) sideChatStore.getState().disconnect(sideChatKey);
@@ -1052,6 +1081,40 @@ export function ThreadDetailScreen(props: {
     if (!instanceId) return null;
     return providers.find((provider) => provider.instanceId === instanceId)?.driver ?? null;
   }, [providers, selectedModelSelection?.instanceId]);
+  // An optional question answered after its turn ended: a new message on the thread's own model
+  // and modes, through the shared send engine, which starts the next turn.
+  const sendOptionalAnswer = useCallback(
+    async (userInput: PendingUserInput, answers: Record<string, string | string[]>) => {
+      const current = selectThreadByRef(
+        useStore.getState(),
+        scopeThreadRef(environmentId, threadId),
+      );
+      if (!current) throw new Error("Thread is not loaded yet.");
+      await sendOptionalAnswerAsMessage({
+        api: ensureEnvironmentApi(environmentId),
+        threadId,
+        userInput,
+        answers,
+        attachments: [],
+        thread: {
+          title: current.title,
+          modelSelection: current.modelSelection,
+          runtimeMode: current.runtimeMode,
+          interactionMode: current.interactionMode,
+          tokenMode: current.tokenMode ?? DEFAULT_AGENT_TOKEN_MODE,
+        },
+        providerDriver: current.session?.provider ?? null,
+        assertMutationReady: captureReviewedSendReadiness(
+          environmentId,
+          () => createMobileConnectionRegistry().driver.supervisor.read(environmentId),
+          "The connection changed. Reconnect and send the answer again; your draft is kept.",
+        ),
+        newCommandId,
+        newMessageId,
+      });
+    },
+    [environmentId, threadId],
+  );
 
   useEffect(() => {
     setStagedModelSelection(null);
@@ -1112,6 +1175,25 @@ export function ThreadDetailScreen(props: {
     ],
   );
   const threadActivities = thread?.activities;
+  const secretRequests = useMemo(
+    () =>
+      mobileSecretRequestCards({
+        activities: threadActivities,
+        nowMs: settlementNowMs,
+        nodeSupports: environmentServerConfig?.environment.capabilities.secretRequests === true,
+        role: environmentRow?.role,
+        mutationReady: environmentRow?.mutationReady ?? false,
+        promptsDisabled: cachedView.promptsDisabled,
+      }),
+    [
+      cachedView.promptsDisabled,
+      environmentRow?.mutationReady,
+      environmentRow?.role,
+      environmentServerConfig,
+      settlementNowMs,
+      threadActivities,
+    ],
+  );
   const pillFastEnabled = modelPicker?.pillFastEnabled === true;
   const fastModeNotice = useMemo(
     () =>
@@ -1362,7 +1444,7 @@ export function ThreadDetailScreen(props: {
         mutationReady: connectionUiState === "connected" && hydratedFromCacheAt === null,
         turnRunning: thread?.latestTurn?.state === "running",
         activeTurnId: thread?.session?.activeTurnId,
-        supportsTurnSteering: provider?.supportsTurnSteering === true,
+        supportsTurnSteering: providerSteering(provider) !== null,
         queuedModelSelection: message.modelSelection,
         activeModelSelection: activeSelection,
         queuedRuntimeMode: message.runtimeMode,
@@ -1546,6 +1628,7 @@ export function ThreadDetailScreen(props: {
   const stageModelSelection = useCallback(
     (next: ModelSelection) => {
       setStagedModelSelection(next);
+      noteModelSelectionPicked();
       if (!thread) return;
       const targetProvider = providers.find((provider) => provider.instanceId === next.instanceId);
       const normalizedMode = normalizeInteractionModeForProviderTarget(
@@ -1558,7 +1641,7 @@ export function ThreadDetailScreen(props: {
         );
       }
     },
-    [applyPolicy, environmentId, providers, thread, threadId],
+    [applyPolicy, environmentId, noteModelSelectionPicked, providers, thread, threadId],
   );
 
   // One lookup for the open thread only. See useThreadChecks for why the inbox
@@ -1587,6 +1670,14 @@ export function ThreadDetailScreen(props: {
     [environmentId, navigation, threadId],
   );
 
+  // A steer on the running turn's provider stops the turn and sends the message next.
+  const activeProviderSteering = providerSteering(
+    providers.find(
+      (entry) =>
+        entry.instanceId ===
+        (thread?.session?.providerInstanceId ?? thread?.modelSelection?.instanceId),
+    ),
+  );
   const openTerminal = useCallback(
     () =>
       navigation.navigate("ThreadTerminal", {
@@ -1599,6 +1690,12 @@ export function ThreadDetailScreen(props: {
     () => navigation.navigate("ThreadDevice", { environmentId, threadId }),
     [environmentId, navigation, threadId],
   );
+
+  // A hardware keyboard opens the same tools as the header buttons, only while
+  // they show (Command-Shift-F, -T and -R).
+  useHardwareKeyboardCommand("review", headerModel?.reviewVisible ? openReview : undefined);
+  useHardwareKeyboardCommand("files", headerModel?.filesVisible ? openFiles : undefined);
+  useHardwareKeyboardCommand("terminal", headerModel?.terminalVisible ? openTerminal : undefined);
 
   useLayoutEffect(() => {
     navigation.setOptions({
@@ -2469,6 +2566,7 @@ export function ThreadDetailScreen(props: {
     pendingApprovals.length > 0 ||
     pendingUserInputs.length > 0 ||
     optionalUserInputs.length > 0 ||
+    secretRequests.requests.length > 0 ||
     agentControlProposals.length > 0;
   // While approvals wait on a turn this message could steer, a send declines them and
   // redirects it: the same decision the send makes, from the composer's current selection.
@@ -2676,7 +2774,18 @@ export function ThreadDetailScreen(props: {
               environmentId={environmentId}
               threadId={threadId}
               userInput={userInput}
+              route={resolveOptionalAnswerRoute({ userInput, session: thread?.session })}
+              onSendAsMessage={sendOptionalAnswer}
               disabled={cachedView.promptsDisabled}
+            />
+          ))}
+          {secretRequests.requests.map((request) => (
+            <SecretRequestCard
+              key={request.requestId}
+              environmentId={environmentId}
+              threadId={threadId}
+              request={request}
+              disabledReason={secretRequests.access.reason}
             />
           ))}
           {agentControlProposals.map((proposal) => (
@@ -2695,6 +2804,7 @@ export function ThreadDetailScreen(props: {
       )}
 
       <ThreadQueuedMessages
+        steerRestarts={activeProviderSteering === "restart"}
         rows={queueView.rows}
         localMessages={localQueuedMessages}
         hold={queueView.hold}

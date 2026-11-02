@@ -287,7 +287,11 @@ export const InboxThreadRow = memo(function InboxThreadRow(props: {
     ],
   );
 
-  const actionLabel = row.settled ? "Move to Active" : "Settle";
+  const actionLabel = row.settled
+    ? "Move to Active"
+    : row.settleWhenDone
+      ? "Settle when done"
+      : "Settle";
   const actionEnabled = row.settlementActionEnabled && !pending;
   const actionTitle = actionEnabled
     ? actionLabel
@@ -366,6 +370,7 @@ export const InboxThreadRow = memo(function InboxThreadRow(props: {
       settleEnabled={actionEnabled}
       settleLabel={actionLabel}
       showFilters={!isPhone}
+      offerHide={!isPhone}
       snoozePresets={snoozePresets}
       threadActions={props.threadActions}
       onOpenPullRequest={(url) => openExternalLink(url, "Unable to open pull request link")}

@@ -39,6 +39,7 @@ import {
   ThreadPullRequestWatches,
   ThreadPullRequestWatchShell,
 } from "./pullRequestWatch.ts";
+import { CommandWatchEndReason, ThreadCommandWatch, ThreadCommandWatches } from "./commandWatch.ts";
 import {
   IssueState,
   PullRequestState,
@@ -888,6 +889,13 @@ export type TurnSteerRejectionReason = typeof TurnSteerRejectionReason.Type;
  */
 export const TurnSteerDeliveryUncertain = Schema.optionalKey(Schema.Boolean);
 
+/**
+ * Set on a `deferred` steer rejection of a provider that steers by stopping the turn
+ * (interrupt-restart): the turn was stopped to take this message, so the follow-up queue moves
+ * it to its head and sends it as the next turn. An optional flag, like `deliveryUncertain`.
+ */
+export const TurnSteerRestartedTurn = Schema.optionalKey(Schema.Boolean);
+
 export const OrchestrationMessage = Schema.Struct({
   id: MessageId,
   role: OrchestrationMessageRole,
@@ -1202,6 +1210,13 @@ export const QueuedFollowUp = Schema.Struct({
    * the `ryco_queue_*` tools. Absent on entries queued before it was recorded.
    */
   queuedBy: Schema.optional(ThreadId),
+  /**
+   * Server-only, a person's entry: the chat's stored model selection when the entry got its model
+   * (queued, or edited to another model). Its turn makes the entry's model the chat's only while
+   * the chat still has this one, so a pick stored since (on any device) is kept. Absent on
+   * entries queued before it was recorded.
+   */
+  queuedOverModelSelection: Schema.optional(ModelSelection),
 });
 export type QueuedFollowUp = typeof QueuedFollowUp.Type;
 
@@ -1253,6 +1268,17 @@ export const OrchestrationThread = Schema.Struct({
   settledAt: Schema.NullOr(IsoDateTime).pipe(Schema.withDecodingDefault(Effect.succeed(null))),
   snoozedUntil: Schema.optional(Schema.NullOr(IsoDateTime)),
   snoozedAt: Schema.optional(Schema.NullOr(IsoDateTime)),
+  /**
+   * When the thread was put on the Hidden shelf: it leaves the Inbox until it needs the user
+   * (an approval, an answer, a plan to review, a failure since). Optional so mixed-version
+   * snapshots decode; older clients strip it and list the thread as before.
+   */
+  hiddenAt: Schema.optional(Schema.NullOr(IsoDateTime)),
+  /**
+   * When the user settled the thread while it was still working: the node settles it once
+   * that work ends (`thread.settle-deferred`). Optional, like `hiddenAt`.
+   */
+  settleWhenIdleAt: Schema.optional(Schema.NullOr(IsoDateTime)),
   /** Optional so mixed-version snapshots decode; older clients strip it. */
   usageLimit: Schema.optional(Schema.NullOr(ThreadUsageLimit)),
   /**
@@ -1260,6 +1286,8 @@ export const OrchestrationThread = Schema.Struct({
    * carries it; clients read the summary (`OrchestrationThreadShell.pullRequestWatches`).
    */
   pullRequestWatchState: Schema.optional(ThreadPullRequestWatches),
+  /** The thread's command watches, full state (the command read model only, like the above). */
+  commandWatchState: Schema.optional(ThreadCommandWatches),
   /**
    * The server-owned follow-up queue, full entries: the command read model, thread detail and
    * the thread window carry it, never shells. Absent while empty and from older servers.
@@ -1348,6 +1376,17 @@ export const OrchestrationThreadShell = Schema.Struct({
   settledAt: Schema.NullOr(IsoDateTime).pipe(Schema.withDecodingDefault(Effect.succeed(null))),
   snoozedUntil: Schema.optional(Schema.NullOr(IsoDateTime)),
   snoozedAt: Schema.optional(Schema.NullOr(IsoDateTime)),
+  /**
+   * When the thread was put on the Hidden shelf: it leaves the Inbox until it needs the user
+   * (an approval, an answer, a plan to review, a failure since). Optional so mixed-version
+   * snapshots decode; older clients strip it and list the thread as before.
+   */
+  hiddenAt: Schema.optional(Schema.NullOr(IsoDateTime)),
+  /**
+   * When the user settled the thread while it was still working: the node settles it once
+   * that work ends (`thread.settle-deferred`). Optional, like `hiddenAt`.
+   */
+  settleWhenIdleAt: Schema.optional(Schema.NullOr(IsoDateTime)),
   /** Optional so mixed-version snapshots decode; older clients strip it. */
   usageLimit: Schema.optional(Schema.NullOr(ThreadUsageLimit)),
   session: Schema.NullOr(OrchestrationSession),
@@ -1370,6 +1409,11 @@ export const OrchestrationThreadShell = Schema.Struct({
    * within a day, so shells of other threads do not grow. Absent from older servers.
    */
   pullRequestWatches: Schema.optionalKey(ThreadPullRequestWatchShell),
+  /**
+   * How many command watches the node runs for the thread: present only while one does (it keeps
+   * the thread from settling on its own). Never the commands. Absent from older servers.
+   */
+  commandWatchCount: Schema.optionalKey(PositiveInt),
   /**
    * The server-owned follow-up queue's summary: present only while it holds an entry, so shells
    * of other threads do not grow. Absent from older servers. (Thread detail carries the
@@ -2032,6 +2076,18 @@ const ThreadUnsnoozeCommand = Schema.Struct({
   threadId: ThreadId,
 });
 
+/** Puts a thread on the Hidden shelf until it needs the user. Hiding again restarts the shelf time. */
+const ThreadHideCommand = Schema.Struct({
+  type: Schema.Literal("thread.hide"),
+  commandId: CommandId,
+  threadId: ThreadId,
+});
+const ThreadUnhideCommand = Schema.Struct({
+  type: Schema.Literal("thread.unhide"),
+  commandId: CommandId,
+  threadId: ThreadId,
+});
+
 /** Per-thread auto-resume override for the thread's current usage limit. */
 const ThreadUsageLimitConfigureCommand = Schema.Struct({
   type: Schema.Literal("thread.usage-limit.configure"),
@@ -2181,6 +2237,7 @@ export const ServerWakeSource = Schema.Literals([
   "pull-request-watch",
   "goal-continuation",
   "follow-up-queue",
+  "command-watch",
 ]);
 export type ServerWakeSource = typeof ServerWakeSource.Type;
 
@@ -2248,9 +2305,10 @@ export type TurnOrigin = typeof TurnOrigin.Type;
  * result waking its parent (`delegation-result:`), Agent Control sends
  * (`message-agent-control-<operation>-<step>`; `-send-message` is an agent's message to an
  * existing thread, naming its sender as `-from:<thread>` before the suffix, see
- * `@ryco/shared/interThreadMessage`), the next turn toward a thread's goal (`goal-continuation:`) and a pull
- * request watch's update (`pull-request-watch:<thread>:<uuid>`). Clients render them by origin
- * and may never send or queue them.
+ * `@ryco/shared/interThreadMessage`), the next turn toward a thread's goal (`goal-continuation:`),
+ * a pull request watch's update (`pull-request-watch:<thread>:<uuid>`) and a command watch's
+ * (`command-watch:<thread>:<uuid>`). Clients render them by origin and may never send or queue
+ * them.
  */
 export const DELEGATION_RESULT_MESSAGE_ID_PREFIX = "delegation-result:";
 export const AGENT_CONTROL_MESSAGE_ID_PREFIX = "message-agent-control-";
@@ -2258,11 +2316,13 @@ export const AGENT_SENT_MESSAGE_ID_SUFFIX = "-send-message";
 /** The server's goal continuation module keeps its own copy (it imports no values). */
 export const GOAL_CONTINUATION_MESSAGE_ID_PREFIX = "goal-continuation:";
 export const PULL_REQUEST_WATCH_WAKE_MESSAGE_PREFIX = "pull-request-watch:";
+export const COMMAND_WATCH_WAKE_MESSAGE_PREFIX = "command-watch:";
 export const SERVER_MINTED_MESSAGE_ID_PREFIXES: ReadonlyArray<string> = [
   DELEGATION_RESULT_MESSAGE_ID_PREFIX,
   AGENT_CONTROL_MESSAGE_ID_PREFIX,
   GOAL_CONTINUATION_MESSAGE_ID_PREFIX,
   PULL_REQUEST_WATCH_WAKE_MESSAGE_PREFIX,
+  COMMAND_WATCH_WAKE_MESSAGE_PREFIX,
 ];
 
 /**
@@ -2292,6 +2352,19 @@ export const FollowUpQueueDispatch = Schema.Struct({
   revision: PositiveInt,
 });
 export type FollowUpQueueDispatch = typeof FollowUpQueueDispatch.Type;
+
+/**
+ * A `thread.turn.start` whose message answers a Codex optional question after the question's
+ * turn ended. The node records the question answered in the same commit as the message, so the
+ * card leaves every client and a second answer is refused. While the question's turn still runs,
+ * clients answer with `thread.user-input.respond` instead, which steers that turn.
+ */
+export const OptionalQuestionTurnAnswer = Schema.Struct({
+  requestId: ApprovalRequestId,
+  userInputIdentity: ApprovalResponseIdentity,
+  answers: ProviderUserInputAnswers,
+});
+export type OptionalQuestionTurnAnswer = typeof OptionalQuestionTurnAnswer.Type;
 
 export const ThreadTurnStartCommand = Schema.Struct({
   claudeResumeGuard: Schema.optional(ClaudeResumeGuard),
@@ -2323,6 +2396,7 @@ export const ThreadTurnStartCommand = Schema.Struct({
   sourceProposedPlan: Schema.optional(SourceProposedPlanReference),
   sourceControlContexts: Schema.optional(Schema.Array(ComposerSourceControlContext)),
   threadReferences: Schema.optional(ThreadReferences),
+  optionalAnswer: Schema.optional(OptionalQuestionTurnAnswer),
   keepBackgroundWork: KeepBackgroundWork,
   stopBackgroundWork: StopBackgroundWork,
   origin: Schema.optional(TurnOrigin),
@@ -2357,6 +2431,7 @@ export const ClientThreadTurnStartCommand = Schema.Struct({
   sourceProposedPlan: Schema.optional(SourceProposedPlanReference),
   sourceControlContexts: Schema.optional(Schema.Array(ComposerSourceControlContext)),
   threadReferences: Schema.optional(ThreadReferences),
+  optionalAnswer: Schema.optional(OptionalQuestionTurnAnswer),
   keepBackgroundWork: KeepBackgroundWork,
   stopBackgroundWork: StopBackgroundWork,
   createdAt: IsoDateTime,
@@ -2439,6 +2514,12 @@ export const ThreadQueueAddCommand = Schema.Struct({
   queuedBy: Schema.optional(ThreadId),
   /** Server-only: normalization found `entry.messageId` already a message of the thread. */
   alreadySent: Schema.optional(Schema.Literal(true)),
+  /**
+   * Server-only: also holds the queue as a Stop of this turn does (`interrupt:<turnId>`) when it
+   * is the thread's latest turn and ended interrupted. Decided with the add, so a Stop that lands
+   * after the caller's own read of the thread is never lost (a Stop holds only a non-empty queue).
+   */
+  holdIfTurnInterrupted: Schema.optional(TurnId),
 });
 export type ThreadQueueAddCommand = typeof ThreadQueueAddCommand.Type;
 const ClientThreadQueueAddCommand = Schema.Struct({
@@ -2780,6 +2861,20 @@ const ThreadStatusBucketOverrideCommand = Schema.Struct({
   changedAt: IsoDateTime,
 });
 
+/**
+ * The user's stop of a command watch (`watchId`), or of every command watch of the thread. A
+ * client may only stop watches: agents start them through Agent Control. Stopping what already
+ * ended is an accepted no-op.
+ */
+const ThreadCommandWatchStopCommand = Schema.Struct({
+  type: Schema.Literal("thread.command-watch.stop"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  watchId: Schema.optional(TrimmedNonEmptyString),
+  createdAt: IsoDateTime,
+});
+export type ThreadCommandWatchStopCommand = typeof ThreadCommandWatchStopCommand.Type;
+
 const ThreadManualPositionSetCommand = Schema.Struct({
   type: Schema.Literal("thread.manual-position.set"),
   commandId: CommandId,
@@ -2810,6 +2905,8 @@ const DispatchableClientOrchestrationCommand = Schema.Union([
   ThreadUnarchiveCommand,
   ThreadSnoozeCommand,
   ThreadUnsnoozeCommand,
+  ThreadHideCommand,
+  ThreadUnhideCommand,
   ThreadUsageLimitConfigureCommand,
   ThreadSettleCommand,
   ThreadUnsettleCommand,
@@ -2846,6 +2943,7 @@ const DispatchableClientOrchestrationCommand = Schema.Union([
   ThreadStatusBucketOverrideCommand,
   ThreadManualPositionSetCommand,
   WorktreeManualPositionSetCommand,
+  ThreadCommandWatchStopCommand,
 ]);
 export type DispatchableClientOrchestrationCommand =
   typeof DispatchableClientOrchestrationCommand.Type;
@@ -2864,6 +2962,8 @@ export const ClientOrchestrationCommand = Schema.Union([
   ThreadUnarchiveCommand,
   ThreadSnoozeCommand,
   ThreadUnsnoozeCommand,
+  ThreadHideCommand,
+  ThreadUnhideCommand,
   ThreadUsageLimitConfigureCommand,
   ThreadSettleCommand,
   ThreadUnsettleCommand,
@@ -2900,6 +3000,7 @@ export const ClientOrchestrationCommand = Schema.Union([
   ThreadStatusBucketOverrideCommand,
   ThreadManualPositionSetCommand,
   WorktreeManualPositionSetCommand,
+  ThreadCommandWatchStopCommand,
 ]);
 export type ClientOrchestrationCommand = typeof ClientOrchestrationCommand.Type;
 
@@ -3023,6 +3124,7 @@ const ThreadTurnSteerResolveCommand = Schema.Union([
       status: Schema.Literal("rejected"),
       error: TrimmedNonEmptyString.check(Schema.isMaxLength(1_000)),
       reason: Schema.optionalKey(TurnSteerRejectionReason),
+      restartedTurn: TurnSteerRestartedTurn,
       deliveryUncertain: TurnSteerDeliveryUncertain,
       resolvedAt: IsoDateTime,
     }),
@@ -3071,13 +3173,10 @@ const ThreadGoalProviderClearCommand = Schema.Struct({
 });
 
 /**
- * Server-only (the pull request watch service). One revision-fenced change of one watch and,
- * optionally, the wake it sends, decided and committed together: the watch event first, then
- * the wake's own turn start, which passes the same decision as any `thread.turn.start`. A
- * refusal rejects both, so progress is never recorded without its wake or the reverse.
+ * What every revision-fenced watch update carries (pull request and command watches), besides
+ * the watch after the change (`next`) and an end's reason.
  */
-const ThreadPullRequestWatchUpdateCommand = Schema.Struct({
-  type: Schema.Literal("thread.pull-request-watch.update"),
+const WatchUpdateFields = {
   commandId: CommandId,
   threadId: ThreadId,
   watchId: TrimmedNonEmptyString,
@@ -3089,9 +3188,6 @@ const ThreadPullRequestWatchUpdateCommand = Schema.Struct({
    * a stale pass from a current one.
    */
   expectedStartedAt: Schema.NullOr(IsoDateTime),
-  /** The watch after the change; null ends it with `endReason`. */
-  next: Schema.NullOr(ThreadPullRequestWatch),
-  endReason: Schema.optional(PullRequestWatchEndReason),
   /** The queued turn this change sends to the thread's agent. */
   wake: Schema.optional(
     Schema.Struct({
@@ -3101,8 +3197,35 @@ const ThreadPullRequestWatchUpdateCommand = Schema.Struct({
     }),
   ),
   createdAt: IsoDateTime,
+};
+
+/**
+ * Server-only (the pull request watch service). One revision-fenced change of one watch and,
+ * optionally, the wake it sends, decided and committed together: the watch event first, then
+ * the wake's own turn start, which passes the same decision as any `thread.turn.start`. A
+ * refusal rejects both, so progress is never recorded without its wake or the reverse.
+ */
+const ThreadPullRequestWatchUpdateCommand = Schema.Struct({
+  type: Schema.Literal("thread.pull-request-watch.update"),
+  ...WatchUpdateFields,
+  /** The watch after the change; null ends it with `endReason`. */
+  next: Schema.NullOr(ThreadPullRequestWatch),
+  endReason: Schema.optional(PullRequestWatchEndReason),
 });
 export type ThreadPullRequestWatchUpdateCommand = typeof ThreadPullRequestWatchUpdateCommand.Type;
+
+/**
+ * Server-only (the command watch service): start, record, wake or end one command watch, fenced
+ * like the pull request watch's update. Clients never send it: the agent starts a watch through
+ * Agent Control, and the user's stop is the client command `thread.command-watch.stop`.
+ */
+const ThreadCommandWatchUpdateCommand = Schema.Struct({
+  type: Schema.Literal("thread.command-watch.update"),
+  ...WatchUpdateFields,
+  next: Schema.NullOr(ThreadCommandWatch),
+  endReason: Schema.optional(CommandWatchEndReason),
+});
+export type ThreadCommandWatchUpdateCommand = typeof ThreadCommandWatchUpdateCommand.Type;
 
 /**
  * Server-only (the follow-up queue drain): records a hold the node itself causes (a restart, a
@@ -3152,7 +3275,20 @@ const ThreadForkCreateCommand = Schema.Struct({
 });
 export type ThreadForkCreateCommand = typeof ThreadForkCreateCommand.Type;
 
+/**
+ * Server-only (the settle-when-idle runtime): settles a thread the user settled while it was
+ * working, once its work ended. The decider checks the thread again: a failed or stopped turn
+ * clears the intent instead, and a thread that is busy again waits.
+ */
+const ThreadSettleWhenIdleCommand = Schema.Struct({
+  type: Schema.Literal("thread.settle-when-idle"),
+  commandId: CommandId,
+  threadId: ThreadId,
+  createdAt: IsoDateTime,
+});
+
 const InternalOrchestrationCommand = Schema.Union([
+  ThreadSettleWhenIdleCommand,
   ThreadDelegatedCreateCommand,
   ThreadForkCreateCommand,
   Schema.Struct({
@@ -3191,6 +3327,7 @@ const InternalOrchestrationCommand = Schema.Union([
   WorktreePullRequestsUpdateCommand,
   WorktreeRelocateCommand,
   ThreadPullRequestWatchUpdateCommand,
+  ThreadCommandWatchUpdateCommand,
   ThreadQueueHoldRecordCommand,
 ]);
 export type InternalOrchestrationCommand = typeof InternalOrchestrationCommand.Type;
@@ -3216,6 +3353,9 @@ export const OrchestrationEventType = Schema.Literals([
   "thread.unsnoozed",
   "thread.settled",
   "thread.unsettled",
+  "thread.settle-deferred",
+  "thread.hidden",
+  "thread.unhidden",
   "thread.usage-limit-set",
   "thread.usage-limit-cleared",
   "thread.meta-updated",
@@ -3225,6 +3365,7 @@ export const OrchestrationEventType = Schema.Literals([
   "thread.goal-updated",
   "thread.goal-cleared",
   "thread.pull-request-watch-updated",
+  "thread.command-watch-updated",
   "thread.queue-entry-added",
   "thread.queue-entry-edited",
   "thread.queue-reordered",
@@ -3386,6 +3527,24 @@ export const ThreadUnsettledPayload = Schema.Struct({
   restoredSidebarState: Schema.optional(ThreadSidebarRestoreState),
 });
 
+/** A settle of a working thread: the node settles it when its work ends. */
+export const ThreadSettleDeferredPayload = Schema.Struct({
+  threadId: ThreadId,
+  settleWhenIdleAt: IsoDateTime,
+  updatedAt: IsoDateTime,
+});
+
+export const ThreadHiddenPayload = Schema.Struct({
+  threadId: ThreadId,
+  hiddenAt: IsoDateTime,
+  updatedAt: IsoDateTime,
+});
+
+export const ThreadUnhiddenPayload = Schema.Struct({
+  threadId: ThreadId,
+  updatedAt: IsoDateTime,
+});
+
 export const ThreadUsageLimitSetPayload = Schema.Struct({
   threadId: ThreadId,
   usageLimit: ThreadUsageLimit,
@@ -3456,6 +3615,17 @@ export const ThreadPullRequestWatchUpdatedPayload = Schema.Struct({
   updatedAt: IsoDateTime,
 });
 export type ThreadPullRequestWatchUpdatedPayload = typeof ThreadPullRequestWatchUpdatedPayload.Type;
+
+/** A thread's command watches after a change, like the pull request watch's payload. */
+export const ThreadCommandWatchUpdatedPayload = Schema.Struct({
+  threadId: ThreadId,
+  watches: ThreadCommandWatches,
+  changed: Schema.Array(
+    Schema.Struct({ watchId: TrimmedNonEmptyString, ended: Schema.NullOr(CommandWatchEndReason) }),
+  ),
+  updatedAt: IsoDateTime,
+});
+export type ThreadCommandWatchUpdatedPayload = typeof ThreadCommandWatchUpdatedPayload.Type;
 
 /**
  * Follow-up queue events. Only `added` and `edited` carry an entry (the full entry, so
@@ -3565,6 +3735,7 @@ export const ThreadTurnSteerRejectedPayload = Schema.Struct({
   error: TrimmedNonEmptyString.check(Schema.isMaxLength(1_000)),
   reason: Schema.optionalKey(TurnSteerRejectionReason),
   deliveryUncertain: TurnSteerDeliveryUncertain,
+  restartedTurn: TurnSteerRestartedTurn,
   resolvedAt: IsoDateTime,
 });
 export type ThreadTurnSteerRejectedPayload = typeof ThreadTurnSteerRejectedPayload.Type;
@@ -3584,6 +3755,8 @@ export type ThreadContextHandoffRequestedPayload = typeof ThreadContextHandoffRe
 
 export const ThreadTurnStartRequestedPayload = Schema.Struct({
   delegationReturnGuard: Schema.optional(DelegationReturnGuard),
+  /** A person's queued follow-up: its `QueuedFollowUp.queuedOverModelSelection`. */
+  queuedOverModelSelection: Schema.optional(ModelSelection),
   computerUse: Schema.optionalKey(ComputerTurnIntent),
   // Decode historical records without enabling recall or persisting rendered text.
   projectMemory: Schema.optional(Schema.Unknown),
@@ -3892,6 +4065,21 @@ export const OrchestrationEvent = Schema.Union([
   }),
   Schema.Struct({
     ...EventBaseFields,
+    type: Schema.Literal("thread.settle-deferred"),
+    payload: ThreadSettleDeferredPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("thread.hidden"),
+    payload: ThreadHiddenPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("thread.unhidden"),
+    payload: ThreadUnhiddenPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
     type: Schema.Literal("thread.usage-limit-set"),
     payload: ThreadUsageLimitSetPayload,
   }),
@@ -3934,6 +4122,11 @@ export const OrchestrationEvent = Schema.Union([
     ...EventBaseFields,
     type: Schema.Literal("thread.pull-request-watch-updated"),
     payload: ThreadPullRequestWatchUpdatedPayload,
+  }),
+  Schema.Struct({
+    ...EventBaseFields,
+    type: Schema.Literal("thread.command-watch-updated"),
+    payload: ThreadCommandWatchUpdatedPayload,
   }),
   Schema.Struct({
     ...EventBaseFields,

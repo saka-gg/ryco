@@ -6,6 +6,12 @@ branch, the commit list and your commit or pull request instructions. Ryco uses 
 directly: it commits with the generated message, and opens the pull request with the
 generated title and description.
 
+**Create PR** in the git menu opens a dialog first. Write a title, a description or both;
+whatever you leave empty is generated, and nothing is generated when you write both. The
+dialog commits and pushes local changes before it opens the pull request (untick **Commit
+and push local changes** to open it from committed work only), and **Create draft PR** opens
+it as a draft. Nodes older than this dialog keep the one-click Create PR.
+
 The diff and other repository text can contain instructions aimed at the model, so these
 requests run without tools: the model can only answer. It cannot run commands, read files,
 browse the web or call MCP servers, with one Codex exception described below.
