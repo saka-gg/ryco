@@ -36,6 +36,7 @@ import { type ComposerCommandItem } from "./ComposerCommandMenu";
 import { ComposerPrimaryActions } from "./ComposerPrimaryActions";
 import { buildExpandedImagePreview, type ExpandedImagePreview } from "./ExpandedImagePreview";
 import { ComposerReferenceChip } from "./FileReferenceChip";
+import { SendGlyph } from "./SendGlyph";
 import { SourceControlContextChip } from "./SourceControlContextChip";
 import { Button } from "../ui/button";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
@@ -429,15 +430,7 @@ export const ComposerPromptShell = memo(function ComposerPromptShell(
               onCollapsedSend();
             }}
           >
-            <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
-              <path
-                d="M8 3L8 13M8 3L4 7M8 3L12 7"
-                stroke="currentColor"
-                strokeWidth="2"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              />
-            </svg>
+            <SendGlyph className="size-4" />
           </button>
         ) : null}
         {showMobilePendingAnswerActions ? (

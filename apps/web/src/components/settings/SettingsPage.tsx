@@ -456,7 +456,7 @@ function SettingsNav({
         <span
           aria-hidden
           className={cn(
-            "pointer-events-none absolute inset-x-0 -z-10 rounded-[min(var(--radius-md),0.5rem)] bg-accent",
+            "pointer-events-none absolute inset-x-0 -z-10 rounded-lg bg-accent",
             animate &&
               "transition-[transform,height,opacity] duration-(--app-motion-duration-stack) ease-(--app-motion-ease)",
             rect ? "opacity-100" : "opacity-0",
@@ -500,7 +500,7 @@ function SettingsNav({
                     onFocus={() => void preloadSettingsSection(item.id)}
                     aria-current={active ? "page" : undefined}
                     className={cn(
-                      "group/nav flex h-8 w-full items-center gap-2.5 rounded-[min(var(--radius-md),0.5rem)] px-2.5 text-left text-[13px] outline-hidden transition-colors duration-150 focus-visible:ring-2 focus-visible:ring-ring",
+                      "group/nav flex h-8 w-full items-center gap-2.5 rounded-lg px-2.5 text-left text-[13px] outline-hidden transition-colors duration-150 focus-visible:ring-2 focus-visible:ring-ring",
                       active
                         ? "font-medium text-foreground"
                         : "text-muted-foreground hover:bg-accent/50 hover:text-foreground",
@@ -656,7 +656,7 @@ function SearchResults({
           onPointerEnter={() => void preloadSettingsSection(entry.section)}
           onFocus={() => void preloadSettingsSection(entry.section)}
           style={{ "--i": Math.min(index, 12) } as CSSProperties}
-          className="settings-search-result group/result flex min-w-0 items-start gap-4 rounded-[min(var(--radius-lg),0.625rem)] px-3 py-2.5 text-left outline-hidden ring-ring transition-colors hover:bg-accent/60 focus-visible:ring-2"
+          className="settings-search-result group/result flex min-w-0 items-start gap-4 rounded-lg px-3 py-2.5 text-left outline-hidden ring-ring transition-colors hover:bg-accent/60 focus-visible:ring-2"
         >
           <span className="min-w-0 flex-1">
             <span className="block text-[13px] font-medium text-foreground">{entry.title}</span>
@@ -878,7 +878,7 @@ export function SettingsPage() {
         closeSettings();
         navigateHub({ kind: "account", section: "overview" });
       }}
-      className="group/nav flex h-8 w-full items-center gap-2.5 rounded-[min(var(--radius-md),0.5rem)] px-2.5 text-left text-[13px] text-muted-foreground outline-hidden transition-colors hover:bg-accent/50 hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
+      className="group/nav flex h-8 w-full items-center gap-2.5 rounded-lg px-2.5 text-left text-[13px] text-muted-foreground outline-hidden transition-colors hover:bg-accent/50 hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
     >
       <UserRoundIcon className="size-4 shrink-0 text-muted-foreground/70" />
       <span className="min-w-0 flex-1 truncate">Hub account</span>
@@ -925,7 +925,7 @@ export function SettingsPage() {
                   }}
                   placeholder="Search settings"
                   aria-label="Search settings"
-                  className="h-8 w-full rounded-[min(var(--radius-lg),0.625rem)] border border-transparent bg-muted/60 pr-9 pl-8 text-[13px] outline-hidden transition-[background-color,border-color,box-shadow] placeholder:text-muted-foreground/70 hover:bg-muted focus-visible:border-ring focus-visible:bg-background focus-visible:ring-[3px] focus-visible:ring-ring/20 [&::-webkit-search-cancel-button]:appearance-none"
+                  className="h-8 w-full rounded-lg border border-transparent bg-muted/60 pr-9 pl-8 text-[13px] outline-hidden transition-[background-color,border-color,box-shadow] placeholder:text-muted-foreground/70 hover:bg-muted focus-visible:border-ring focus-visible:bg-background focus-visible:ring-[3px] focus-visible:ring-ring/20 [&::-webkit-search-cancel-button]:appearance-none"
                 />
                 {searchQuery ? (
                   <button

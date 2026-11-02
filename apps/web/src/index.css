@@ -502,7 +502,11 @@
 
 :root {
   color-scheme: light;
-  --radius: 0.625rem;
+  /* The one corner radius. It is fixed, not a preference: every surface's
+     rounding derives from it through the `--radius-*` ramp in `@theme`, so
+     nested corners (a menu and its items, a dialog and its footer) stay
+     concentric. Keep `RYCO_DEFAULT_RADIUS` in `@ryco/shared` in step. */
+  --radius: 1.125rem;
   --font-family-sans:
     "DM Sans", -apple-system, BlinkMacSystemFont, "Segoe UI", system-ui, sans-serif;
   --font-family-mono: "SF Mono", "SFMono-Regular", Consolas, "Liberation Mono", Menlo, monospace;
@@ -2581,13 +2585,13 @@ label:has(> select#reasoning-effort) select {
   left: 0;
   width: calc(100% - 36px);
   height: 30px;
-  padding: 0 5px 0 2px;
+  padding: 0 6px 0 3px;
 }
 
 .sidebar-fold[data-folded="true"] .sidebar-fold-field {
   top: 3px;
   width: 30px;
-  padding: 0 0 0 2px;
+  padding: 0 0 0 3px;
   border-color: transparent;
   background-color: transparent;
   box-shadow: none;
@@ -2801,7 +2805,7 @@ label:has(> select#reasoning-effort) select {
 
 .sidebar-omnifield-menu {
   position: absolute;
-  top: 34px;
+  top: 36px;
   right: 0;
   left: 0;
   z-index: 20;
@@ -3743,16 +3747,19 @@ label:has(> select#reasoning-effort) select {
     var(--app-glass-raised-surface);
 }
 
-/* The Crown rail's docked islands sit in their own gutter with only the coat
-   behind them, so the always-dark mat thins to smoked glass. Light windows keep
-   it denser: its light icons need a dark ground over the white coat. Its
-   flyouts float over the transcript and keep the solid mat. */
+/* The Crown rail and its island (with its alerts) float over the transcript
+   in a chat with content, so the always-dark mat stays dense rather than
+   following the glass opacity: smoked glass, not a window onto the text under
+   it. Its flyouts keep the solid mat. */
 :root[data-window-translucency="window"] :is(.crown-rail, .crown-island).crown-mat {
-  background: color-mix(in srgb, #0d0d0e var(--app-glass-raised-dark-alpha, 50%), transparent);
+  background: color-mix(in srgb, #0d0d0e 90%, transparent);
 }
 
-:root:not(.dark)[data-window-translucency="window"] :is(.crown-rail, .crown-island).crown-mat {
-  background: color-mix(in srgb, #0d0d0e 82%, transparent);
+/* Opened as a card, the island leaves the gutter and covers the transcript:
+   a near-solid mat so the text under it never reads through. No backdrop
+   blur: on a translucent window it paints an opaque box over the glass. */
+:root[data-window-translucency="window"] .crown-island.crown-mat[data-mode="card"] {
+  background: color-mix(in srgb, #0d0d0e 94%, transparent);
 }
 
 /* ─── Floating overlays on a translucent window ─────────────────────────────

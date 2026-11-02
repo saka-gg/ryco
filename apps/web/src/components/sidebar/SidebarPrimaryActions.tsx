@@ -146,7 +146,7 @@ export const SidebarPrimaryActions = memo(function SidebarPrimaryActions(
               onPointerEnter={preloadDraftRoute}
               onFocus={preloadDraftRoute}
               data-testid="sidebar-new-thread-button"
-              className="sidebar-fold-item sidebar-fold-new grid cursor-pointer place-items-center rounded-[10px] bg-primary text-primary-foreground outline-hidden ring-ring hover:shadow-[0_0_0_4px_color-mix(in_srgb,var(--primary)_10%,transparent)] focus-visible:ring-2 active:scale-90 disabled:pointer-events-none disabled:opacity-50"
+              className="sidebar-fold-item sidebar-fold-new grid cursor-pointer place-items-center rounded-full bg-primary text-primary-foreground outline-hidden ring-ring hover:shadow-[0_0_0_4px_color-mix(in_srgb,var(--primary)_10%,transparent)] focus-visible:ring-2 active:scale-90 disabled:pointer-events-none disabled:opacity-50"
             />
           }
         >

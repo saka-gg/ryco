@@ -146,7 +146,11 @@ export function SourceControlPreferences() {
                 }
               }}
             >
-              <SelectTrigger className="w-full sm:w-40" aria-label="Git status polling interval">
+              <SelectTrigger
+                size="sm"
+                className="w-full sm:w-40"
+                aria-label="Git status polling interval"
+              >
                 <SelectValue>
                   {GIT_STATUS_POLL_INTERVAL_LABELS[settings.gitStatusPollIntervalMs]}
                 </SelectValue>
@@ -187,7 +191,11 @@ export function SourceControlPreferences() {
                 if (mode !== null) updateSettings({ sourceControlRefreshMode: mode });
               }}
             >
-              <SelectTrigger className="w-full sm:w-40" aria-label="PR and workflow update mode">
+              <SelectTrigger
+                size="sm"
+                className="w-full sm:w-40"
+                aria-label="PR and workflow update mode"
+              >
                 <SelectValue>
                   {SOURCE_CONTROL_REFRESH_MODE_LABELS[settings.sourceControlRefreshMode]}
                 </SelectValue>
@@ -228,7 +236,11 @@ export function SourceControlPreferences() {
                 if (target !== null) updateSettings({ changeRequestLinkTarget: target });
               }}
             >
-              <SelectTrigger className="w-full sm:w-40" aria-label="Where pull request links open">
+              <SelectTrigger
+                size="sm"
+                className="w-full sm:w-40"
+                aria-label="Where pull request links open"
+              >
                 <SelectValue>
                   {CHANGE_REQUEST_LINK_TARGET_LABELS[settings.changeRequestLinkTarget]}
                 </SelectValue>

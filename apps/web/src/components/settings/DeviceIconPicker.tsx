@@ -47,6 +47,7 @@ export function DeviceIconPicker() {
           onValueChange={save}
         >
           <SelectTrigger
+            size="sm"
             aria-label={`Device icon for ${target.nodeLabel}`}
             className={SETTINGS_CONTROL_WIDTH.md}
           >

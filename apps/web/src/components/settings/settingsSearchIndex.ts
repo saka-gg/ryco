@@ -306,13 +306,6 @@ export const SETTINGS_SEARCH_INDEX: ReadonlyArray<SettingsSearchEntry> = [
   },
   {
     section: "appearance",
-    title: "Corner radius",
-    owner: "client",
-    description: "Rounding for panels, buttons, inputs, and menus.",
-    keywords: "round square",
-  },
-  {
-    section: "appearance",
     title: "Primary color",
     owner: "client",
     description: "Accent color for links, focus rings, and actions.",

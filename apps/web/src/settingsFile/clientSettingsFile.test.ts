@@ -104,7 +104,11 @@ describe("the client settings file", () => {
   it("reproduces the exported preferences when imported elsewhere", async () => {
     const source: ClientSettingsFileState = {
       client: { ...DEFAULT_CLIENT_SETTINGS, chatWidth: "wide", confirmThreadArchive: true },
-      appearance: { ...DEFAULT_APPEARANCE_PREFERENCES, fontSizeBase: "15px", radius: "0.375rem" },
+      appearance: {
+        ...DEFAULT_APPEARANCE_PREFERENCES,
+        fontSizeBase: "15px",
+        windowTranslucencyBlurStrength: "40",
+      },
       colorMode: "dark",
       activeThemeId: "custom-sunset",
       customThemes: [sunset],

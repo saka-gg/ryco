@@ -87,7 +87,7 @@ export function AutoSettleSettingsSection(props: {
                 }
               }}
             >
-              <SelectTrigger className="w-48" aria-label="Auto-settle inactive tasks">
+              <SelectTrigger size="sm" className="w-48" aria-label="Auto-settle inactive tasks">
                 <SelectValue>{autoSettleLabel(value)}</SelectValue>
               </SelectTrigger>
               <SelectPopup align="end" alignItemWithTrigger={false}>

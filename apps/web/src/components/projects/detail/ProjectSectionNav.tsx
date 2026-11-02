@@ -28,7 +28,7 @@ export function ProjectSectionNav(props: {
         <span
           aria-hidden
           className={cn(
-            "pointer-events-none absolute inset-x-0 -z-10 rounded-[min(var(--radius-md),0.5rem)] bg-accent",
+            "pointer-events-none absolute inset-x-0 -z-10 rounded-lg bg-accent",
             animate &&
               "transition-[transform,height,opacity] duration-(--app-motion-duration-stack) ease-(--app-motion-spring-gentle) motion-reduce:transition-none",
             rect ? "opacity-100" : "opacity-0",
@@ -70,7 +70,7 @@ export function ProjectSectionNav(props: {
                       props.onSelect(section);
                     }}
                     className={cn(
-                      "flex h-7 items-center rounded-[min(var(--radius-md),0.5rem)] px-2.5 text-[13px] outline-hidden transition-colors duration-(--app-motion-duration-chip) focus-visible:ring-2 focus-visible:ring-ring",
+                      "flex h-7 items-center rounded-lg px-2.5 text-[13px] outline-hidden transition-colors duration-(--app-motion-duration-chip) focus-visible:ring-2 focus-visible:ring-ring",
                       current
                         ? "font-medium text-foreground"
                         : "text-muted-foreground hover:bg-accent/50 hover:text-foreground",

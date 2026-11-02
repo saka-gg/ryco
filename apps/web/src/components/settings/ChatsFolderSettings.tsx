@@ -200,6 +200,7 @@ export function ChatFolderCleanupEditor({ disabled }: { readonly disabled: boole
           }}
         >
           <SelectTrigger
+            size="sm"
             className={SETTINGS_CONTROL_WIDTH.md}
             aria-label="Remove empty chat folders"
           >

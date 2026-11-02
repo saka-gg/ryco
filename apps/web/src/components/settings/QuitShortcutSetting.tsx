@@ -52,7 +52,7 @@ export function QuitShortcutSetting() {
               .finally(() => setSaving(false));
           }}
         >
-          <SelectTrigger aria-label="Quit shortcut" className="w-full sm:w-44">
+          <SelectTrigger size="sm" aria-label="Quit shortcut" className="w-full sm:w-44">
             <SelectValue>{mode ? labels[mode] : "Loading…"}</SelectValue>
           </SelectTrigger>
           <SelectPopup>

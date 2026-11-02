@@ -53,6 +53,8 @@ import { usePhoneThreadSurfaceReady } from "../shell/phone/usePhoneThreadSurface
 import { tokenModeOptions, tokenModePresentation } from "../../tokenModePresentation";
 
 const SELECT_OPEN_SUPPRESSION_MS = 300;
+/** The secondary line under each mode option's label: a step below the label. */
+const MODE_OPTION_DESCRIPTION_CLASS_NAME = "text-[11px] leading-3.5 text-muted-foreground";
 
 export const ComposerFooterModeControls = memo(function ComposerFooterModeControls(props: {
   showInteractionModeToggle: boolean;
@@ -195,7 +197,7 @@ export const ComposerFooterModeControls = memo(function ComposerFooterModeContro
             </SelectTrigger>
             <SelectPopup
               alignItemWithTrigger={false}
-              className="w-56 p-0.5 [&_[data-slot=select-item]]:min-h-7"
+              className="w-56 [&_[data-slot=select-item]]:min-h-7"
             >
               {interactionModeOptions.map((mode) => {
                 const option = interactionModeConfig[mode];
@@ -214,7 +216,7 @@ export const ComposerFooterModeControls = memo(function ComposerFooterModeContro
                         <OptionIcon className="size-3.5 shrink-0 text-muted-foreground" />
                         {option.label}
                       </span>
-                      <span className="text-muted-foreground text-xs leading-4">
+                      <span className={MODE_OPTION_DESCRIPTION_CLASS_NAME}>
                         {unsupported ? ASK_MODE_UNSUPPORTED_DESCRIPTION : option.description}
                       </span>
                     </div>
@@ -267,7 +269,7 @@ export const ComposerFooterModeControls = memo(function ComposerFooterModeContro
         </SelectTrigger>
         <SelectPopup
           alignItemWithTrigger={false}
-          className="w-56 p-0.5 [&_[data-slot=select-item]]:min-h-7"
+          className="w-56 [&_[data-slot=select-item]]:min-h-7"
         >
           {runtimeModeOptions.map((mode) => {
             const option = runtimeModeConfig[mode];
@@ -299,7 +301,7 @@ export const ComposerFooterModeControls = memo(function ComposerFooterModeContro
                   </span>
                   <span
                     className={cn(
-                      "text-muted-foreground text-xs leading-4",
+                      MODE_OPTION_DESCRIPTION_CLASS_NAME,
                       mode === CAUTION_RUNTIME_MODE && CAUTION_RUNTIME_MODE_CLASS_NAME,
                     )}
                     data-runtime-mode-option-description={mode}
@@ -356,7 +358,7 @@ export const ComposerFooterModeControls = memo(function ComposerFooterModeContro
         </SelectTrigger>
         <SelectPopup
           alignItemWithTrigger={false}
-          className="w-60 p-0.5 [&_[data-slot=select-item]]:min-h-7"
+          className="w-60 [&_[data-slot=select-item]]:min-h-7"
         >
           {tokenModeOptions.map((mode) => {
             const option = tokenModePresentation[mode];
@@ -373,9 +375,7 @@ export const ComposerFooterModeControls = memo(function ComposerFooterModeContro
                     <OptionIcon className="size-3.5 shrink-0 text-muted-foreground" />
                     {option.label}
                   </span>
-                  <span className="text-muted-foreground text-xs leading-4">
-                    {option.description}
-                  </span>
+                  <span className={MODE_OPTION_DESCRIPTION_CLASS_NAME}>{option.description}</span>
                 </div>
               </SelectItem>
             );

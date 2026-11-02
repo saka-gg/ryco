@@ -995,9 +995,6 @@ export default function ChatView(props: ChatViewProps) {
   const [planSidebarOpen, setPlanSidebarOpen] = useState(() =>
     overviewOpensByDefault(shouldUseRightPanelSheet, presentationTier),
   );
-  // Set once the user opens the overview from the new-thread surface, so the
-  // empty-thread suppression below yields to an explicit request.
-  const [overviewOpenedOnEmptyThread, setOverviewOpenedOnEmptyThread] = useState(false);
   // With the thread sidebar collapsed this header owns the workspace's
   // top-left corner, so it reserves the room the shell's floating
   // show-sidebar control (and the native window controls) need there.
@@ -3924,12 +3921,6 @@ export default function ChatView(props: ChatViewProps) {
     providerStatuses,
     selectedProvider,
   ]);
-  // The new-thread surface reads as its own page. The overview describes a
-  // thread's history — checks, changes, plan — and an empty thread has none,
-  // so suppress it until the user asks for it. This is a display-time override
-  // rather than a `planSidebarOpen` reset so the rail reappears on its own the
-  // moment the first turn lands, with no second state machine to keep in sync.
-  const overviewSuppressedForEmptyThread = showNewThreadSurface && !overviewOpenedOnEmptyThread;
   const setOverviewSidebarOpen = useCallback(
     (open: boolean) => {
       setPlanSidebarOpen(open);
@@ -3944,19 +3935,9 @@ export default function ChatView(props: ChatViewProps) {
   }, [setOverviewSidebarOpen]);
   const toggleOverviewSidebar = useCallback(
     (nextOpen?: boolean) => {
-      // While the thread is empty the overview reads as closed regardless of
-      // `planSidebarOpen`, so the toggle has to invert the *visible* state or
-      // the first click would be a no-op.
-      const wantsOpen =
-        typeof nextOpen === "boolean"
-          ? nextOpen
-          : overviewSuppressedForEmptyThread
-            ? true
-            : !planSidebarOpen;
-      setOverviewSidebarOpen(wantsOpen);
-      setOverviewOpenedOnEmptyThread(wantsOpen);
+      setOverviewSidebarOpen(typeof nextOpen === "boolean" ? nextOpen : !planSidebarOpen);
     },
-    [overviewSuppressedForEmptyThread, planSidebarOpen, setOverviewSidebarOpen],
+    [planSidebarOpen, setOverviewSidebarOpen],
   );
 
   const persistThreadSettingsForNextTurn = useCallback(
@@ -6992,16 +6973,12 @@ export default function ChatView(props: ChatViewProps) {
     [openForkDialogAt],
   );
 
-  useEffect(() => {
-    setOverviewOpenedOnEmptyThread(false);
-  }, [activeThread?.id]);
-
   // One open state for every presentation. Desktop docks the Crown rail beside
   // the chat column, also while the workspace panel is open, at every width;
   // the phone tier promotes the overview to a full-screen surface, which (as
   // before the rail, the web phone tier is frozen) waits for the full-screen
   // workspace sheet to close.
-  const overviewVisible = planSidebarOpen && !overviewSuppressedForEmptyThread;
+  const overviewVisible = planSidebarOpen;
   const isPhoneTier = presentationTier === "phone";
   const showCrownRail = overviewVisible && !isPhoneTier;
   const showPhoneOverviewSheet = overviewVisible && !workspacePanelOpen && isPhoneTier;
@@ -7010,8 +6987,8 @@ export default function ChatView(props: ChatViewProps) {
   const renderCrownRail = useDelayedUnmount(showCrownRail, reducedMotion ? 0 : CROWN_RAIL_EXIT_MS);
   // Conditional surfaces load the first time they are wanted (see
   // `chatViewLazySurfaces`) and mount only once loaded, so none commits a
-  // Suspense fallback; an empty thread or a draft never loads the overview
-  // stack. A failed chunk says so with a Retry: the rail and the side chat
+  // Suspense fallback; a closed overview never loads its stack. A failed
+  // chunk says so with a Retry: the rail and the side chat
   // stay wanted and retry in place, while dialogs and the handoff inspector
   // close (so nothing sits open and empty) and the Retry reopens them.
   const overviewPanelReady = useLazyComponentReady(

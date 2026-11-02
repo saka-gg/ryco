@@ -17,7 +17,6 @@ export const APPEARANCE_PREFERENCE_KEYS = [
   "fontFamilySans",
   "fontFamilyMono",
   "fontSizeBase",
-  "radius",
   "primaryColorMode",
   "primaryColor",
   "surfaceTransparency",
@@ -26,7 +25,7 @@ export const APPEARANCE_PREFERENCE_KEYS = [
   "diffLayout",
   "windowTranslucency",
   "windowTranslucencyOpacity",
-  "windowTranslucencyBlur",
+  "windowTranslucencyBlurStrength",
   "contrast",
 ] as const;
 
@@ -115,14 +114,6 @@ export const FONT_SIZE_OPTIONS = [
   { value: "20px", label: "Display", description: "20 px" },
 ] as const satisfies ReadonlyArray<AppearancePreferenceOption>;
 
-export const RADIUS_OPTIONS = [
-  { value: "0rem", label: "Square", description: "0 px" },
-  { value: "0.375rem", label: "Tight", description: "6 px" },
-  { value: "0.625rem", label: "Default", description: "10 px" },
-  { value: "0.875rem", label: "Soft", description: "14 px" },
-  { value: "1.125rem", label: "Round", description: "18 px" },
-] as const satisfies ReadonlyArray<AppearancePreferenceOption>;
-
 /**
  * The material steps of the frozen web phone tier's Material control. The
  * desktop tier has no transparency step: it is always {@link
@@ -194,6 +185,25 @@ export const WINDOW_TRANSLUCENCY_OPTIONS = [
 /** Thinnest glass coat: below this the window reads as see-through rather than as glass. */
 export const WINDOW_TRANSLUCENCY_OPACITY_MIN = 15;
 export const WINDOW_TRANSLUCENCY_OPACITY_MAX = 100;
+
+/**
+ * Desktop blur strength, 0-100 %, spread over the radii the window server can
+ * actually show: 0 % is the lightest blur, 100 % the strongest.
+ */
+export const WINDOW_TRANSLUCENCY_BLUR_STRENGTH_MIN = 0;
+export const WINDOW_TRANSLUCENCY_BLUR_STRENGTH_MAX = 100;
+
+/** The native blur radius, in points, for a blur strength in percent. */
+export function desktopBlurRadiusForStrength(strength: number): number {
+  const span = DESKTOP_WINDOW_BLUR_RADIUS_MAX - DESKTOP_WINDOW_BLUR_RADIUS_MIN;
+  return Math.round(DESKTOP_WINDOW_BLUR_RADIUS_MIN + (strength / 100) * span);
+}
+
+/** The blur strength, in percent, of a native blur radius in points. */
+function blurStrengthForDesktopRadius(radius: number): number {
+  const span = DESKTOP_WINDOW_BLUR_RADIUS_MAX - DESKTOP_WINDOW_BLUR_RADIUS_MIN;
+  return Math.round(((radius - DESKTOP_WINDOW_BLUR_RADIUS_MIN) / span) * 100);
+}
 
 export const MOTION_OPTIONS = [
   { value: "system", label: "System", description: "Follow OS" },
@@ -285,7 +295,6 @@ export const DEFAULT_APPEARANCE_PREFERENCES: AppearancePreferences = {
   fontFamilySans: FONT_FAMILY_SANS_OPTIONS[0].value,
   fontFamilyMono: FONT_FAMILY_MONO_OPTIONS[0].value,
   fontSizeBase: "16px",
-  radius: "0.625rem",
   primaryColorMode: "theme",
   primaryColor: PRIMARY_COLOR_OPTIONS[0].value,
   surfaceTransparency: "default",
@@ -294,19 +303,9 @@ export const DEFAULT_APPEARANCE_PREFERENCES: AppearancePreferences = {
   diffLayout: "stacked",
   windowTranslucency: "off",
   windowTranslucencyOpacity: "80",
-  windowTranslucencyBlur: String(DESKTOP_WINDOW_BLUR_RADIUS_MAX),
+  windowTranslucencyBlurStrength: String(WINDOW_TRANSLUCENCY_BLUR_STRENGTH_MAX),
   contrast: String(APPEARANCE_CONTRAST_DEFAULT),
 };
-
-const RADIUS_TOKEN_OFFSETS_PX = {
-  sm: -4,
-  md: -2,
-  lg: 0,
-  xl: 4,
-  "2xl": 8,
-  "3xl": 12,
-  "4xl": 16,
-} as const;
 
 /** Integer-valued keys, stored as decimal strings and validated against a range. */
 const NUMERIC_RANGES: Partial<
@@ -316,9 +315,9 @@ const NUMERIC_RANGES: Partial<
     min: WINDOW_TRANSLUCENCY_OPACITY_MIN,
     max: WINDOW_TRANSLUCENCY_OPACITY_MAX,
   },
-  windowTranslucencyBlur: {
-    min: DESKTOP_WINDOW_BLUR_RADIUS_MIN,
-    max: DESKTOP_WINDOW_BLUR_RADIUS_MAX,
+  windowTranslucencyBlurStrength: {
+    min: WINDOW_TRANSLUCENCY_BLUR_STRENGTH_MIN,
+    max: WINDOW_TRANSLUCENCY_BLUR_STRENGTH_MAX,
   },
   // Only the slider's stops, so a stored value always matches where the slider sits.
   contrast: {
@@ -332,7 +331,6 @@ const OPTION_VALUES: Partial<Record<AppearancePreferenceKey, ReadonlySet<string>
   fontFamilySans: new Set(FONT_FAMILY_SANS_OPTIONS.map((option) => option.value)),
   fontFamilyMono: new Set(FONT_FAMILY_MONO_OPTIONS.map((option) => option.value)),
   fontSizeBase: new Set(FONT_SIZE_OPTIONS.map((option) => option.value)),
-  radius: new Set(RADIUS_OPTIONS.map((option) => option.value)),
   primaryColorMode: new Set(PRIMARY_COLOR_MODE_OPTIONS.map((option) => option.value)),
   primaryColor: new Set(PRIMARY_COLOR_OPTIONS.map((option) => option.value)),
   surfaceTransparency: new Set(SURFACE_TRANSPARENCY_OPTIONS.map((option) => option.value)),
@@ -393,10 +391,29 @@ function parseStoredOverrides(): Partial<AppearancePreferences> {
         if (typeof value === "string") next[key] = value;
       }
     }
+    const legacyBlur = migrateLegacyBlurRadius(candidate);
+    if (legacyBlur !== null && next.windowTranslucencyBlurStrength === undefined) {
+      next.windowTranslucencyBlurStrength = legacyBlur;
+    }
     return next;
   } catch {
     return {};
   }
+}
+
+/**
+ * The blur strength for a blur stored by an older build as a radius in points
+ * (`windowTranslucencyBlur`, 1-64), so a chosen blur survives the move to a
+ * percentage. The next write stores it under the new key and drops the old one.
+ */
+function migrateLegacyBlurRadius(candidate: Record<string, unknown>): string | null {
+  const raw = candidate.windowTranslucencyBlur;
+  if (typeof raw !== "string" || !/^\d+$/.test(raw)) return null;
+  const radius = Number(raw);
+  if (radius < DESKTOP_WINDOW_BLUR_RADIUS_MIN || radius > DESKTOP_WINDOW_BLUR_RADIUS_MAX) {
+    return null;
+  }
+  return String(blurStrengthForDesktopRadius(radius));
 }
 
 /** Persist appearance preference overrides to localStorage, clearing storage if no overrides remain. */
@@ -513,7 +530,7 @@ export function resetAppearancePreference(key: AppearancePreferenceKey): void {
 /** The stylesheet text {@link applyAppearancePreferencesToDocument} writes. */
 export function buildAppearancePreferencesCss(): string {
   const preferences = getEffectiveAppearancePreferences();
-  return `:root { --font-family-sans: ${preferences.fontFamilySans}; --font-family-mono: ${preferences.fontFamilyMono}; --font-size-base: ${preferences.fontSizeBase}; ${buildRadiusCssVariables(preferences.radius)} ${buildSurfaceTransparencyCssVariables(preferences.surfaceTransparency)} ${buildMotionCssVariables(isReducedMotionEffective())} ${buildDockDensityCssVariables(preferences.dockDensity)} ${buildWindowTranslucencyCssVariables(Number(preferences.windowTranslucencyOpacity))} }${buildPrimaryColorCssRule(preferences)}${buildContrastCssRule(Number(preferences.contrast))}`;
+  return `:root { --font-family-sans: ${preferences.fontFamilySans}; --font-family-mono: ${preferences.fontFamilyMono}; --font-size-base: ${preferences.fontSizeBase}; ${buildSurfaceTransparencyCssVariables(preferences.surfaceTransparency)} ${buildMotionCssVariables(isReducedMotionEffective())} ${buildDockDensityCssVariables(preferences.dockDensity)} ${buildWindowTranslucencyCssVariables(Number(preferences.windowTranslucencyOpacity))} }${buildPrimaryColorCssRule(preferences)}${buildContrastCssRule(Number(preferences.contrast))}`;
 }
 
 /**
@@ -546,7 +563,9 @@ export function applyAppearancePreferencesToDocument(): boolean {
   }
   applyWindowTranslucencyToDocument({
     scope: getRequestedWindowTranslucencyScope(),
-    blurRadius: Number(getAppearancePreferences().windowTranslucencyBlur),
+    blurRadius: desktopBlurRadiusForStrength(
+      Number(getAppearancePreferences().windowTranslucencyBlurStrength),
+    ),
   });
   // Subscribers still hear about environment changes that emit no CSS
   // (e.g. prefers-reduced-transparency, which the settings UI reports).
@@ -601,31 +620,6 @@ export function normalizePrimaryColor(value: unknown): string | null {
   const longMatch = /^#?([0-9a-f]{6})$/i.exec(trimmed);
   if (!longMatch?.[1]) return null;
   return `#${longMatch[1].toLowerCase()}`;
-}
-
-/** Generate CSS variable declarations for all border-radius tokens derived from a base radius. */
-function buildRadiusCssVariables(radius: string): string {
-  const tokens = Object.entries(RADIUS_TOKEN_OFFSETS_PX)
-    .map(
-      ([token, offset]) => `--radius-${token}: ${resolveRadiusToken(radius, offset)} !important;`,
-    )
-    .join(" ");
-  return `--radius: ${radius}; ${tokens}`;
-}
-
-/** Apply per-token radius offset to compute variant border-radius values (sm/md/lg/xl/2xl/3xl/4xl). */
-function resolveRadiusToken(radius: string, offsetPx: number): string {
-  if (radius === "0rem") return "0px";
-  const baseRem = Number.parseFloat(radius);
-  if (!Number.isFinite(baseRem)) return radius;
-  const nextPx = Math.max(0, baseRem * 16 + offsetPx);
-  return formatRemLength(nextPx / 16);
-}
-
-/** Format a number as rem, clamped to 4 decimal places and converted to px if zero. */
-function formatRemLength(rem: number): string {
-  if (rem === 0) return "0px";
-  return `${Number(rem.toFixed(4))}rem`;
 }
 
 /**

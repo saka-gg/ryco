@@ -90,7 +90,7 @@ export const RYCO_DARK_THEME_COLORS: ThemeColors = {
   "warning-foreground": "#ffb900",
 };
 
-export const RYCO_DEFAULT_RADIUS = "0.625rem";
+export const RYCO_DEFAULT_RADIUS = "1.125rem";
 
 export function defaultThemeColors(appearance: ThemeAppearance): ThemeColors {
   return appearance === "light" ? RYCO_LIGHT_THEME_COLORS : RYCO_DARK_THEME_COLORS;
