@@ -316,9 +316,9 @@ function ClonePanel(props: AddProjectSourceStepProps) {
       onClone({ source: effectiveSource, ...resolved });
     } catch (error) {
       setLookupError(`Repository lookup failed: ${errorText(error)}`);
-    } finally {
-      setLookingUp(false);
     }
+    // After the try, not in a `finally`: React Compiler does not lower one.
+    setLookingUp(false);
   };
 
   const handleKeyDown = (event: KeyboardEvent<HTMLInputElement>) => {

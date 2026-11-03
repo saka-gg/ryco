@@ -884,16 +884,11 @@ function AddProjectFlow(props: {
         ?.trim()
         .replace(/[\\/]+$/u, "") ?? "";
     setPickingNatively(true);
-    let picked: string | null = null;
-    try {
-      picked = await localApi.dialogs.pickFolder(
-        initialPath.length > 0 ? { initialPath } : undefined,
-      );
-    } catch {
+    const picked = await localApi.dialogs
+      .pickFolder(initialPath.length > 0 ? { initialPath } : undefined)
       // A failed picker leaves the dialog as it was.
-    } finally {
-      setPickingNatively(false);
-    }
+      .catch(() => null);
+    setPickingNatively(false);
     if (!picked) return;
     if (kind === "folder") void addFolder(picked, null);
     else setFolderValue(picked);

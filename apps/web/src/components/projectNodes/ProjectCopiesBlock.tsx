@@ -162,10 +162,10 @@ export function ProjectCopiesBlock(props: ProjectCopiesBlockProps) {
         title: "That didn't work",
         description: error instanceof Error ? error.message : String(error),
       });
-    } finally {
-      setBusy(null);
-      setRefresh((value) => value + 1);
     }
+    // After the try, not in a `finally`: React Compiler does not lower one.
+    setBusy(null);
+    setRefresh((value) => value + 1);
   };
 
   const discard = (row: ProjectCopyRow) =>

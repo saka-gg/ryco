@@ -1,7 +1,12 @@
 import { useEffect } from "react";
 
+import { scheduleIdleTask } from "../lib/idleTask";
+
 /** The publisher is not needed for first paint; it loads once the app is idle. */
 const PUBLISHER_IDLE_TIMEOUT_MS = 5_000;
+
+/** Outside the hook: React Compiler does not lower `import()` expressions. */
+const loadNodeDirectoryPublisher = () => import("./nodeDirectoryPublisher");
 
 /**
  * Keeps Agent Control's node directory current on every node that supports
@@ -14,23 +19,17 @@ export function useNodeDirectoryPublisher(enabled = true): void {
     if (!enabled) return;
     let stop: (() => void) | null = null;
     let disposed = false;
-    const start = () => {
-      void import("./nodeDirectoryPublisher")
+    const cancelStart = scheduleIdleTask(() => {
+      void loadNodeDirectoryPublisher()
         .then((module) => {
           if (!disposed) stop = module.startNodeDirectoryPublisher();
         })
         // A failed chunk load leaves the directory unpublished until the next mount.
         .catch(() => undefined);
-    };
-    const idle =
-      typeof globalThis.requestIdleCallback === "function"
-        ? globalThis.requestIdleCallback(start, { timeout: PUBLISHER_IDLE_TIMEOUT_MS })
-        : null;
-    const timer = idle === null ? globalThis.setTimeout(start, PUBLISHER_IDLE_TIMEOUT_MS) : null;
+    }, PUBLISHER_IDLE_TIMEOUT_MS);
     return () => {
       disposed = true;
-      if (idle !== null) globalThis.cancelIdleCallback(idle);
-      if (timer !== null) globalThis.clearTimeout(timer);
+      cancelStart();
       stop?.();
     };
   }, [enabled]);
