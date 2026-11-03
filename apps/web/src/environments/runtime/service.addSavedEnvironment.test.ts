@@ -1832,7 +1832,8 @@ describe("addSavedEnvironment", () => {
           throw new Error("socket setup failed");
         });
 
-      const { DESKTOP_SSH_OWNER_REPAIR_RETRY_MS } = await import("@ryco/client-runtime/connection");
+      const { DESKTOP_SSH_OWNER_REPAIR_RETRY_MS } =
+        await import("@ryco/client-runtime/connection/desktopSshOwnerPairing");
       const { reconnectSavedEnvironment, resetEnvironmentServiceForTests } =
         await import("./service");
       // An SSH hiccup fails the re-pair: the client bearer stays.
@@ -1921,7 +1922,8 @@ describe("addSavedEnvironment", () => {
       mockClientGetConfig.mockImplementation(async () => configForVersion("0.1.36") as never);
       const node = failFirstOwnerPairings();
 
-      const { DESKTOP_SSH_OWNER_REPAIR_RETRY_MS } = await import("@ryco/client-runtime/connection");
+      const { DESKTOP_SSH_OWNER_REPAIR_RETRY_MS } =
+        await import("@ryco/client-runtime/connection/desktopSshOwnerPairing");
       const { reconnectSavedEnvironment, resetEnvironmentServiceForTests } =
         await import("./service");
       // At app start the re-pair hits an SSH hiccup: the node connects on its
@@ -1955,7 +1957,8 @@ describe("addSavedEnvironment", () => {
       mockClientGetConfig.mockImplementation(async () => configForVersion("0.1.36") as never);
       const node = failFirstOwnerPairings(2);
 
-      const { DESKTOP_SSH_OWNER_REPAIR_RETRY_MS } = await import("@ryco/client-runtime/connection");
+      const { DESKTOP_SSH_OWNER_REPAIR_RETRY_MS } =
+        await import("@ryco/client-runtime/connection/desktopSshOwnerPairing");
       const { reconnectSavedEnvironment, resetEnvironmentServiceForTests } =
         await import("./service");
       await reconnectSavedEnvironment(environmentId);

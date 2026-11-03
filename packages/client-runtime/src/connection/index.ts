@@ -2,7 +2,6 @@ export * from "./connection.ts";
 export * from "./connectivityRecovery.ts";
 export * from "./deviceFrameSource.ts";
 export * from "./catalog.ts";
-export * from "./desktopSshOwnerPairing.ts";
 export * from "./environmentRoutes.ts";
 export * from "./environmentRouteUpgrader.ts";
 export * from "./hostFreeze.ts";
