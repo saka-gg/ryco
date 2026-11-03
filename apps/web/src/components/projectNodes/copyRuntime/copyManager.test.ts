@@ -11,6 +11,7 @@ import {
   AgentControlRpcError,
   EnvironmentId,
   ProjectId,
+  ThreadId,
   type AgentControlClientExecutorId,
   type AgentControlProposalId,
   type AgentControlReportClientExecutionInput,
@@ -534,6 +535,9 @@ describe("copyManager", () => {
           projectId: newProjectId,
           workspaceRoot: "/Users/me/Code/ryco",
           warnings: ["Setup exited with 1."],
+          // The target's import had no setup step and started no thread.
+          setup: null,
+          followUpThreadId: null,
         },
       },
     ]);
@@ -786,6 +790,8 @@ describe("Agent Control reports", () => {
         importId: owed.importId,
         projectId: newProjectId,
         warnings: ["Setup exited with 1."],
+        steps: [{ id: "setup", status: "failed", progressPercent: null, detail: "Exit code 1" }],
+        followUpThreadId: ThreadId.make("thread-on-mini"),
       },
     ];
     setLocalStorageItem(PROJECT_COPY_RECORDS_STORAGE_KEY, [owed], Schema.Unknown);
@@ -805,6 +811,9 @@ describe("Agent Control reports", () => {
           projectId: newProjectId,
           workspaceRoot: "/Users/me/Code/ryco",
           warnings: ["Setup exited with 1."],
+          // How the target's setup went and its setup thread, for the agent that asked.
+          setup: { status: "failed", detail: "Exit code 1" },
+          followUpThreadId: ThreadId.make("thread-on-mini"),
         },
       },
     ]);

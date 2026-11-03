@@ -5,13 +5,17 @@
  * (`beginClientExecution`, `reportClientExecution`, and failing a run whose report deadline
  * passed).
  *
- * Loaded by the executor with `import()` on the first copy request, its recovery or a missed
- * deadline, so the server's boot path carries none of it. The executor passes its stores and
- * its own result helpers in.
+ * Once either settles, the agent that asked is told how it ended (`projectCopyOutcomeWake.ts`:
+ * a note queued in its chat, which wakes it at the chat's next idle moment).
+ *
+ * Loaded by the executor with `import()` on the first copy request, its recovery, a missed
+ * deadline or a settled copy, so the server's boot path carries none of it. The executor passes
+ * its stores and its own result helpers in.
  *
  * @module agentControl/projectCopyRuns
  */
 import {
+  type AgentControlClientExecutionResult,
   type AgentControlClientExecutionState,
   type AgentControlClientExecutorId,
   type AgentControlCopyProjectToNodePlan,
@@ -23,17 +27,27 @@ import {
   type AgentControlProposalId,
   type AgentControlResultEnvelope,
   type AgentControlExecutionReceipt,
+  type AgentControlProjectCopyOutcome,
+  type AgentControlProjectSetupOutcome,
+  type OrchestrationDispatchCommandError,
+  type ThreadId,
 } from "@ryco/contracts";
 import {
   PROJECT_IMPORT_TERMINAL_STATUSES,
   type ProjectImportId,
   type ProjectImportSnapshot,
 } from "@ryco/contracts/project-copy";
+import { projectImportSetupOutcome } from "@ryco/shared/projectImportOutcome";
 import { Cause, Duration, Effect, Option, type Scope, Stream } from "effect";
 
 import type { ProjectImportsShape } from "../projectCopy/Services/ProjectImports.ts";
 import { AgentControlClientExecutionError, AgentControlProposalNotFoundError } from "./Errors.ts";
 import { computeAgentControlPlanDigest } from "./planDigest.ts";
+import {
+  isSettledProjectCopyProposal,
+  wakeProjectCopyOrigin,
+  type ProjectCopyOutcomeWakeDeps,
+} from "./projectCopyOutcomeWake.ts";
 import {
   AGENT_CONTROL_CLIENT_EXECUTION_DEADLINE_MS,
   AGENT_CONTROL_CLIENT_EXECUTION_STARTED_DEADLINE_MS,
@@ -68,6 +82,59 @@ const isProjectImportTerminal = (snapshot: ProjectImportSnapshot): boolean =>
 type ProposalWithPlan<P> = AgentControlProposal & { readonly plan: P };
 
 const unique = <T>(items: ReadonlyArray<T>): Array<T> => [...new Set(items)];
+
+/** Warnings as a result keeps them: credentials redacted, bounded, blank ones dropped. */
+const boundedWarnings = (warnings: ReadonlyArray<string>): Array<string> =>
+  warnings
+    .map((warning) => boundedProjectCopyText(warning, ""))
+    .filter((warning) => warning.length > 0)
+    .slice(0, 20);
+
+/** The folder, setup outcome (its detail redacted like any result text) and setup thread. */
+const projectCopyOutcome = (input: {
+  readonly path: string;
+  readonly setup: AgentControlProjectSetupOutcome | null;
+  readonly followUpThreadId: ThreadId | null;
+  readonly warnings: ReadonlyArray<string>;
+}): AgentControlProjectCopyOutcome => {
+  const detail = input.setup?.detail == null ? "" : boundedProjectCopyText(input.setup.detail, "");
+  return {
+    path: input.path,
+    setup:
+      input.setup === null
+        ? null
+        : { status: input.setup.status, detail: detail.length > 0 ? detail : null },
+    followUpThreadId: input.followUpThreadId,
+    warnings: boundedWarnings(input.warnings),
+  };
+};
+
+/** What an import's terminal snapshot says about the project it set up. */
+const importOutcome = (job: ProjectImportSnapshot): AgentControlProjectCopyOutcome =>
+  projectCopyOutcome({
+    path: job.destinationPath,
+    setup: projectImportSetupOutcome(job),
+    followUpThreadId: job.followUpThreadId,
+    warnings: job.warnings,
+  });
+
+/** What the approving app reported about the project the copy set up on its target. */
+const reportedOutcome = (
+  reported: AgentControlClientExecutionResult,
+): AgentControlProjectCopyOutcome =>
+  projectCopyOutcome({
+    path: reported.workspaceRoot,
+    setup: reported.setup ?? null,
+    followUpThreadId: reported.followUpThreadId ?? null,
+    warnings: reported.warnings,
+  });
+
+/** A completed result with the project's outcome; a failed one stays as it is. */
+const withProjectCopy = (
+  result: AgentControlResultEnvelope,
+  projectCopy: AgentControlProjectCopyOutcome,
+): AgentControlResultEnvelope =>
+  result.outcome === "completed" ? { ...result, projectCopy } : result;
 
 export interface ProjectCopyRunDeps {
   readonly proposals: AgentControlProposalStoreShape;
@@ -106,6 +173,8 @@ export interface ProjectCopyRunDeps {
       readonly code?: AgentControlErrorCode;
     },
   ) => Effect.Effect<unknown, AgentControlOperationStoreError | AgentControlProposalStoreError>;
+  /** Reads the asking chat and queues the outcome note there. */
+  readonly wake: ProjectCopyOutcomeWakeDeps<Error | OrchestrationDispatchCommandError>;
 }
 
 export const makeProjectCopyRuns = (deps: ProjectCopyRunDeps) => {
@@ -121,6 +190,7 @@ export const makeProjectCopyRuns = (deps: ProjectCopyRunDeps) => {
     executionReceipt,
     boundedCauseMessage,
     settleProposalFailure,
+    wake,
   } = deps;
   const isPastDeadline = isPastAgentControlClientExecutionDeadline;
 
@@ -166,6 +236,7 @@ export const makeProjectCopyRuns = (deps: ProjectCopyRunDeps) => {
           [`Set up ${job.title} on this node.`, ...job.warnings].join(" "),
           "Set up the project on this node.",
         );
+        const projectCopy = importOutcome(job);
         const completed = yield* operations.transition({
           operationId: current.operationId,
           expectedStatus: "running",
@@ -173,12 +244,12 @@ export const makeProjectCopyRuns = (deps: ProjectCopyRunDeps) => {
           actor: "executor",
           attempt: current.attempt,
           state,
-          result: completedResult({ ...current, state }, detail),
+          result: withProjectCopy(completedResult({ ...current, state }, detail), projectCopy),
           updatedAt: new Date().toISOString(),
         });
         yield* proposals.settleExecution({
           proposalId,
-          result: completedResult(completed, detail),
+          result: withProjectCopy(completedResult(completed, detail), projectCopy),
           now: new Date().toISOString(),
         });
         return;
@@ -608,6 +679,7 @@ export const makeProjectCopyRuns = (deps: ProjectCopyRunDeps) => {
               environmentId: reported.targetEnvironmentId,
               projectId: reported.projectId,
             },
+            projectCopy: reportedOutcome(reported),
             execution: executionReceipt({ ...operation, state }),
             detail: boundedProjectCopyText(
               [`Copied to ${plan.target.label}.`, ...reported.warnings].join(" "),
@@ -659,7 +731,25 @@ export const makeProjectCopyRuns = (deps: ProjectCopyRunDeps) => {
       });
     }).pipe(Effect.catchTag("AgentControlInvalidTransitionError", () => Effect.void));
 
+  /**
+   * Tells the agent that asked for a settled copy or import how it ended. Safe to repeat: the
+   * note's ids follow from the operation, and the queue takes an id it already has as done.
+   */
+  const wakeOrigin = (proposal: AgentControlProposal) =>
+    isSettledProjectCopyProposal(proposal)
+      ? wakeProjectCopyOrigin(wake, proposal).pipe(
+          Effect.asVoid,
+          Effect.catchCause((cause) =>
+            Effect.logWarning("Agent Control could not tell the agent how its copy ended", {
+              proposalId: proposal.proposalId,
+              cause: Cause.hasInterruptsOnly(cause) ? "interrupted" : Cause.pretty(cause),
+            }),
+          ),
+        )
+      : Effect.void;
+
   return {
+    wakeOrigin,
     startProjectImport,
     followProjectImport,
     beginClientExecution,

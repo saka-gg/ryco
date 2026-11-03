@@ -338,6 +338,10 @@
       "types": "./src/projectKind.ts",
       "import": "./src/projectKind.ts"
     },
+    "./projectImportOutcome": {
+      "types": "./src/projectImportOutcome.ts",
+      "import": "./src/projectImportOutcome.ts"
+    },
     "./directorySlug": {
       "types": "./src/directorySlug.ts",
       "import": "./src/directorySlug.ts"

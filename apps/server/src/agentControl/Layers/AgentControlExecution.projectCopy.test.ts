@@ -17,6 +17,8 @@ import {
   type AgentControlProposal,
   type AgentControlProposalId,
   type AgentControlProposalReceipt,
+  type OrchestrationThreadShell,
+  type ThreadQueueAddCommand,
 } from "@ryco/contracts";
 import {
   ProjectCopyError,
@@ -24,7 +26,7 @@ import {
   type ProjectImportSnapshot,
   type ProjectImportStartInput,
 } from "@ryco/contracts/project-copy";
-import { Deferred, Duration, Effect, Fiber, Layer, Option, PubSub, Stream } from "effect";
+import { Deferred, Duration, Effect, Fiber, Layer, Option, PubSub, Queue, Stream } from "effect";
 
 import { authorizeRpcPrincipal } from "../../auth/wsAuthorization.ts";
 import { ServerConfig } from "../../config.ts";
@@ -160,27 +162,50 @@ const noImports: ProjectImportsShape = {
   recoverOnStartup: () => Effect.void,
 };
 
+/** The asking chat, as the outcome note reads it. */
+const callerShell = {
+  id: principal.threadId,
+  projectId,
+  archivedAt: null,
+  runtimeMode: "full-access",
+  interactionMode: "default",
+  modelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5.6" },
+} as unknown as OrchestrationThreadShell;
+
 const makeExecution = (
   input: {
     readonly revalidate?: () => Effect.Effect<void, AgentControlPlanValidationError>;
     readonly imports?: ProjectImportsShape;
+    /** Runs the executor's background work and records the commands it applies. */
+    readonly background?: { readonly applied: Queue.Queue<ThreadQueueAddCommand> };
   } = {},
 ) =>
-  makeAgentControlExecution({ disableBackground: true }).pipe(
+  makeAgentControlExecution({ disableBackground: input.background === undefined }).pipe(
     Effect.provideService(AgentControlActionValidator, {
       validateOwnerAutomation: () => Effect.die("unused"),
       validateSubmission: () => Effect.die("unused"),
       validateExternalSubmission: () => Effect.die("unused"),
       revalidateExecution: input.revalidate ?? (() => Effect.void),
     }),
-    // Neither kind dispatches orchestration commands or touches git here.
-    Effect.provideService(OrchestrationCommandApplication, {} as never),
+    // Neither kind dispatches orchestration commands or touches git here, except the outcome
+    // note queued in the asking chat.
+    Effect.provideService(
+      OrchestrationCommandApplication,
+      (input.background === undefined
+        ? {}
+        : {
+            applyInternal: (command: ThreadQueueAddCommand) =>
+              Queue.offer(input.background!.applied, command).pipe(Effect.as({ sequence: 1 })),
+          }) as never,
+    ),
     Effect.provideService(OrchestrationEngineService, {} as never),
-    Effect.provideService(ProjectionSnapshotQuery, {} as never),
+    Effect.provideService(ProjectionSnapshotQuery, {
+      getThreadShellById: () => Effect.succeed(Option.some(callerShell)),
+    } as never),
     Effect.provideService(GitWorkflowService, {} as never),
     Effect.provideService(WorkspaceAccessPolicy, {} as never),
     Effect.provideService(DeviceService, { supported: false, manager: {} } as never),
-    Effect.provideService(ServerRuntimeStartup, {} as never),
+    Effect.provideService(ServerRuntimeStartup, { awaitCommandReady: Effect.void } as never),
     Effect.provideService(ProjectImports, input.imports ?? noImports),
     Effect.provideService(PullRequestWatchService, {} as never),
     Effect.provide(
@@ -328,6 +353,8 @@ describe("copyProjectToNode: client-executed lifecycle", () => {
           projectId: ProjectId.make("project-on-mini"),
           workspaceRoot: SECRETS.path,
           warnings: ["Setup failed (exit 1); clone of https://me:hunter2@example.com/x.git"],
+          setup: { status: "succeeded" as const, detail: "Exit code 0" },
+          followUpThreadId: ThreadId.make("thread-on-mini"),
         };
         const wrongTarget = yield* Effect.flip(
           rpc.report({
@@ -354,6 +381,13 @@ describe("copyProjectToNode: client-executed lifecycle", () => {
             projectId: "project-on-mini",
           });
           assert.isUndefined(settled.result.createdProjectIds);
+          assert.deepStrictEqual(settled.result.projectCopy, {
+            path: SECRETS.path,
+            setup: { status: "succeeded", detail: "Exit code 0" },
+            followUpThreadId: ThreadId.make("thread-on-mini"),
+            warnings: [settled.result.detail!.replace(`Copied to ${SECRETS.label}. `, "")],
+          });
+          assert.notInclude(JSON.stringify(settled.result.projectCopy), "hunter2");
           assert.include(settled.result.detail, `Copied to ${SECRETS.label}.`);
           assert.notInclude(settled.result.detail, "hunter2");
         }
@@ -543,7 +577,17 @@ const scriptedImports = Effect.gen(function* () {
     title: input.title,
     destinationPath: input.destinationPath,
     status,
-    steps: [],
+    steps:
+      status === "completed"
+        ? [
+            {
+              id: "setup",
+              status: "failed",
+              progressPercent: null,
+              detail: "The command exited with code 1",
+            },
+          ]
+        : [],
     outputTail: "",
     error:
       status === "failed"
@@ -647,6 +691,13 @@ describe("importProject: executed here through the import job", () => {
             ThreadId.make("thread-follow-up"),
           ]);
           assert.include(settled.result.detail, "Setup failed (exit 1).");
+          // Where it is and how setup went, for the agent that asked.
+          assert.deepStrictEqual(settled.result.projectCopy, {
+            path: SECRETS.path,
+            setup: { status: "failed", detail: "The command exited with code 1" },
+            followUpThreadId: ThreadId.make("thread-follow-up"),
+            warnings: ["Setup failed (exit 1)."],
+          });
         }
       }).pipe(Effect.provide(storesLayer)),
   );
@@ -727,6 +778,95 @@ describe("importProject: executed here through the import job", () => {
       assert.strictEqual(lostResult?.outcome, "failed");
       if (lostResult?.outcome === "failed")
         assert.include(lostResult.error.message, "did not start");
+    }).pipe(Effect.provide(storesLayer)),
+  );
+});
+
+/** The next note the executor's background work queued. */
+const nextQueued = (applied: Queue.Queue<ThreadQueueAddCommand>) =>
+  Queue.take(applied).pipe(Effect.timeout(Duration.seconds(10)), Effect.orDie);
+
+describe("the asking agent learns how its copy or import ended", () => {
+  it.effect(
+    "queues one note in the asking chat when a copy settles, and again after a restart",
+    () =>
+      Effect.gen(function* () {
+        const service = yield* AgentControlProposalService;
+        const applied = yield* Queue.unbounded<ThreadQueueAddCommand>();
+        const execution = yield* makeExecution({ background: { applied } });
+        const rpc = ownerHandlers(service, execution);
+        const proposal = yield* submit(copyPlan, "copy-wake");
+        yield* rpc.accept({
+          proposalId: proposal.proposalId,
+          executeOnClient: { executorId: executorA },
+        });
+        yield* rpc.report({
+          proposalId: proposal.proposalId,
+          executorId: executorA,
+          outcome: "completed",
+          result: {
+            targetEnvironmentId: miniNode,
+            projectId: ProjectId.make("project-on-mini"),
+            workspaceRoot: SECRETS.path,
+            warnings: ["The commits were not copied."],
+            setup: { status: "failed", detail: "The command exited with code 2" },
+            followUpThreadId: ThreadId.make("thread-on-mini"),
+          },
+        });
+        // The first note is the settled one: nothing was queued while it ran.
+        const note = yield* nextQueued(applied);
+        assert.strictEqual(note.type, "thread.queue.add");
+        assert.strictEqual(note.threadId, principal.threadId);
+        assert.strictEqual(note.author, "agent");
+        assert.strictEqual(note.queuedBy, principal.threadId);
+        // Never above the privilege the chat had when it asked.
+        assert.strictEqual(note.entry.runtimeMode, "auto");
+        const text = note.entry.text;
+        assert.include(text, `Copying ${SECRETS.title} to ${SECRETS.label} (${miniNode})`);
+        assert.include(text, "finished.");
+        assert.include(text, `Folder on ${SECRETS.label}: ${SECRETS.path}`);
+        assert.include(text, "Project: project-on-mini");
+        assert.include(text, "failed (The command exited with code 2)");
+        assert.include(text, '"Finish" (thread-on-mini)');
+        assert.include(text, "Warning: The commits were not copied.");
+
+        // A restart queues it again under the same ids, which the queue takes as already done.
+        const afterRestart = yield* Queue.unbounded<ThreadQueueAddCommand>();
+        yield* makeExecution({ background: { applied: afterRestart } });
+        const again = yield* nextQueued(afterRestart);
+        assert.strictEqual(again.commandId, note.commandId);
+        assert.strictEqual(again.entry.messageId, note.entry.messageId);
+      }).pipe(Effect.provide(storesLayer)),
+  );
+
+  it.effect("tells it why an import failed", () =>
+    Effect.gen(function* () {
+      const service = yield* AgentControlProposalService;
+      const applied = yield* Queue.unbounded<ThreadQueueAddCommand>();
+      const imports = yield* scriptedImports;
+      const startedJob = yield* Deferred.make<void>();
+      const execution = yield* makeExecution({
+        imports: {
+          ...imports.service,
+          start: (input) =>
+            imports.service
+              .start(input)
+              .pipe(Effect.tap(() => Deferred.succeed(startedJob, undefined))),
+        },
+        background: { applied },
+      });
+      const proposal = yield* submit(importPlan, "import-wake");
+      yield* service.accept({
+        proposalId: proposal.proposalId,
+        decidedAt: new Date().toISOString(),
+      });
+      // The background executor runs it on approval; this call finds it running or runs it.
+      yield* execution.executeApproved(proposal.proposalId);
+      yield* Deferred.await(startedJob);
+      yield* imports.finish("failed");
+      const note = yield* nextQueued(applied);
+      assert.include(note.entry.text, `Setting up ${SECRETS.title} on this node`);
+      assert.include(note.entry.text, "failed: fatal: could not read from");
     }).pipe(Effect.provide(storesLayer)),
   );
 });

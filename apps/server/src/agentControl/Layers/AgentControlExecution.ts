@@ -95,6 +95,10 @@ const TARGET_WAIT_TIMEOUT_MS = 60_000;
 /** Minimum spacing of woken target checks: the interval of the poll the waits replaced. */
 const TARGET_WAKE_SPACING_MS = 100;
 const RECOVERY_SCAN_LIMIT = 100;
+/** A restart queues the outcome note of copies and imports that settled this recently. */
+const PROJECT_COPY_WAKE_RECOVERY_MS = 24 * 60 * 60 * 1000;
+const isProjectCopyPlanKind = (kind: string): boolean =>
+  kind === "importProject" || kind === "copyProjectToNode";
 /** How often expired client executions are failed while the node runs. */
 const CLIENT_EXECUTION_SWEEP_INTERVAL = Duration.minutes(1);
 type ProposalWithPlan<P> = AgentControlProposal & { readonly plan: P };
@@ -1860,9 +1864,43 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
             executionReceipt,
             boundedCauseMessage,
             settleProposalFailure,
+            wake: {
+              loadThread,
+              queue: (command) => commandApplication.applyInternal(command),
+              commandIdFor,
+              messageIdFor,
+            },
           }),
         ),
       ),
+    );
+
+    /** Tells the asking agent how a copy or import ended (`projectCopyOutcomeWake.ts`). */
+    const wakeProjectCopyOrigin = (proposal: AgentControlProposal) =>
+      Effect.flatMap(projectCopyRuns, (runs) => runs.wakeOrigin(proposal));
+
+    /**
+     * After a restart: queues the outcome note of copies and imports that settled recently, in
+     * case the node stopped between the settle and the queue add. Notes already queued or sent
+     * are left as they are (their ids are known), so this repeats nothing.
+     */
+    const recoverProjectCopyWakes = Effect.suspend(() =>
+      proposals.listRecent({ limit: RECOVERY_SCAN_LIMIT }),
+    ).pipe(
+      Effect.flatMap((recent) => {
+        const since = Date.now() - PROJECT_COPY_WAKE_RECOVERY_MS;
+        return Effect.forEach(
+          recent.filter(
+            (proposal) =>
+              isProjectCopyPlanKind(proposal.plan.kind) &&
+              (proposal.status === "completed" || proposal.status === "failed") &&
+              Date.parse(proposal.updatedAt) >= since,
+          ),
+          wakeProjectCopyOrigin,
+          { discard: true },
+        );
+      }),
+      Effect.catchCause(() => Effect.void),
     );
 
     const beginClientExecution: AgentControlExecutionShape["beginClientExecution"] = (input) =>
@@ -2302,11 +2340,18 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
       yield* Effect.forkScoped(
         startup.awaitCommandReady.pipe(
           Effect.andThen(recoverIncomplete),
+          Effect.andThen(recoverProjectCopyWakes),
           Effect.andThen(scanApproved),
           Effect.andThen(
             Stream.fromSubscription(subscription).pipe(
-              Stream.filter((event) => event.proposal.status === "approved"),
-              Stream.runForEach((event) => executeApproved(event.proposal.proposalId)),
+              Stream.runForEach(({ proposal }) =>
+                proposal.status === "approved"
+                  ? executeApproved(proposal.proposalId)
+                  : isProjectCopyPlanKind(proposal.plan.kind) &&
+                      (proposal.status === "completed" || proposal.status === "failed")
+                    ? wakeProjectCopyOrigin(proposal)
+                    : Effect.void,
+              ),
             ),
           ),
         ),

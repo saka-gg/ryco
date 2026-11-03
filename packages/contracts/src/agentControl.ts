@@ -1372,6 +1372,27 @@ export const AgentControlExecutionReceipt = Schema.Struct({
 });
 export type AgentControlExecutionReceipt = typeof AgentControlExecutionReceipt.Type;
 
+/** How a project's setup command ended, as the import that ran it reported. */
+export const AgentControlProjectSetupOutcome = Schema.Struct({
+  status: Schema.Literals(["succeeded", "failed"]),
+  /** "Exit code 0", "The command exited with code 1", why it could not start. */
+  detail: Schema.NullOr(AgentControlResultMessage),
+});
+export type AgentControlProjectSetupOutcome = typeof AgentControlProjectSetupOutcome.Type;
+
+/** Where an `importProject` or `copyProjectToNode` put the project, and how its setup went. */
+export const AgentControlProjectCopyOutcome = Schema.Struct({
+  /** The project folder on the node that has it (this node for an import). */
+  path: AgentControlWorkspaceRoot,
+  /** Null when no setup command ran. */
+  setup: Schema.NullOr(AgentControlProjectSetupOutcome),
+  /** The setup thread the import started there, when one started. */
+  followUpThreadId: Schema.NullOr(ThreadId),
+  /** What the import warned about (a setup that failed, changes left behind), at most 20. */
+  warnings: Schema.Array(AgentControlResultMessage).check(Schema.isMaxLength(20)),
+});
+export type AgentControlProjectCopyOutcome = typeof AgentControlProjectCopyOutcome.Type;
+
 export const AgentControlCompletedResult = Schema.Struct({
   outcome: Schema.Literal("completed"),
   createdThreadIds: Schema.optional(Schema.Array(ThreadId)),
@@ -1384,6 +1405,8 @@ export const AgentControlCompletedResult = Schema.Struct({
       projectId: ProjectId,
     }),
   ),
+  /** A project import's or cross-node copy's folder, setup outcome and setup thread. */
+  projectCopy: Schema.optional(AgentControlProjectCopyOutcome),
   execution: Schema.optional(AgentControlExecutionReceipt),
   detail: Schema.optional(AgentControlResultMessage),
   completedAt: IsoDateTime,
@@ -1683,6 +1706,10 @@ export const AgentControlClientExecutionResult = Schema.Struct({
   warnings: Schema.Array(AgentControlResultMessage).check(
     Schema.isMaxLength(AGENT_CONTROL_CLIENT_EXECUTION_WARNINGS_MAX),
   ),
+  /** How the target's setup command ended; null when none ran, absent when not known. */
+  setup: Schema.optional(Schema.NullOr(AgentControlProjectSetupOutcome)),
+  /** The setup thread the target's import started, when one started. */
+  followUpThreadId: Schema.optional(Schema.NullOr(ThreadId)),
 }).pipe(rejectExcessProperties);
 export type AgentControlClientExecutionResult = typeof AgentControlClientExecutionResult.Type;
 

@@ -42,6 +42,7 @@ import {
 } from "@ryco/contracts";
 import { scopedProjectKey } from "@ryco/client-runtime/scoped";
 import type { ProjectImportId, ProjectImportSnapshot } from "@ryco/contracts/project-copy";
+import { projectImportSetupOutcome } from "@ryco/shared/projectImportOutcome";
 import * as Schema from "effect/Schema";
 import { create } from "zustand";
 
@@ -542,6 +543,14 @@ function completedResult(facts: FinalReportFacts): AgentControlClientExecutionRe
       .map(boundedMessage)
       .filter((warning): warning is string => warning !== null)
       .slice(0, AGENT_CONTROL_CLIENT_EXECUTION_WARNINGS_MAX),
+    // How the target's setup went and its setup thread, so the agent learns them (absent when
+    // the target's import could not be read).
+    ...(facts.importSnapshot === null
+      ? {}
+      : {
+          setup: projectImportSetupOutcome(facts.importSnapshot),
+          followUpThreadId: facts.importSnapshot.followUpThreadId ?? null,
+        }),
   };
 }
 
