@@ -84,7 +84,7 @@ interface TransferEntry {
   readonly purpose: ProjectTransferPurpose;
   readonly byteLength: number;
   readonly sha256: string;
-  /** Holds opted-in ignored files: never taken over a relay the Hub can read (A33). */
+  /** Holds opted-in ignored files: never taken over an unencrypted connection (A33). */
   readonly carriesIgnoredFiles: boolean;
   readonly createdAt: string;
   state: TransferState;

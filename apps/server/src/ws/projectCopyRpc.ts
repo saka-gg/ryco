@@ -42,7 +42,8 @@ export const projectCopyCallerChannel = (
  * Cross-node project copy RPCs: reads and scratch transfers on either node, the durable import
  * job on the destination. Each one passes the access check, then delegates to its service. The
  * export's `start` and `readChunk` and the transfer's `begin` and `append` learn how the caller's
- * bytes travel, so opted-in ignored files never cross a plaintext relay on either leg (A33).
+ * bytes travel, so opted-in ignored files never cross an unencrypted connection on either leg
+ * (A33).
  */
 export const makeProjectCopyHandlers = (ctx: WsRpcContext) => {
   const { ownerEffect, ownerStreamEffect, projectCopy } = ctx;

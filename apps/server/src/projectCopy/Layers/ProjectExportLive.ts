@@ -475,7 +475,7 @@ export const makeProjectExport = Effect.fn("makeProjectExport")(function* (
         );
       }
       const skipped: ProjectExportSkippedArtifact[] = [];
-      // The Hub or the network could read them on an unencrypted connection (amendment 33).
+      // The Hub or the network could read them over an unencrypted connection (amendment 33).
       const ignoredPaths = mayCarryIgnoredFiles(channel) ? requestedIgnored : [];
       if (ignoredPaths.length < requestedIgnored.length) {
         skipped.push(skippedOf("changes-patch", PROJECT_EXPORT_SKIP_REASON.insecureChannel));

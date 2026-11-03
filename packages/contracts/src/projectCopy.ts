@@ -515,7 +515,7 @@ export const ProjectExportArtifact = Schema.Struct({
   sha256: ProjectCopySha256,
   /**
    * True when it holds opted-in ignored files (a changes patch with `.env`). Declare it at
-   * `transferBegin`: neither node lets these bytes cross a relay the Hub can read (A33).
+   * `transferBegin`: neither node lets these bytes cross an unencrypted connection (A33).
    */
   carriesIgnoredFiles: Schema.optional(Schema.Boolean),
 });
@@ -575,8 +575,8 @@ export const ProjectTransferBeginInput = Schema.Struct({
   sha256: ProjectCopySha256,
   /**
    * The artifact's `carriesIgnoredFiles`. The node then refuses the transfer's begin and appends
-   * over a relay channel the Hub can read (`access-denied`), as the source refuses to read them
-   * out there (A33). Part of the begin's identity.
+   * over an unencrypted connection (`access-denied`), as the source refuses to read them out
+   * there (A33). Part of the begin's identity.
    */
   carriesIgnoredFiles: Schema.optional(Schema.Boolean),
 }).pipe(rejectExcessProperties);

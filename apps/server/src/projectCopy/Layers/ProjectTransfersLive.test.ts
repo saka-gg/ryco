@@ -203,7 +203,7 @@ describe("ProjectTransfersLive", () => {
     }),
   );
 
-  it.effect("never takes opted-in ignored files over a relay the Hub can read (A33)", () =>
+  it.effect("never takes opted-in ignored files over an unencrypted connection (A33)", () =>
     Effect.gen(function* () {
       const stateDir = makeStateDir();
       const bytes = randomBytes(PROJECT_COPY_CHUNK_BYTES + 1234);

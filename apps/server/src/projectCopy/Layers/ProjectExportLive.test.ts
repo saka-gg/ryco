@@ -712,7 +712,7 @@ describe("ProjectExportLive", () => {
   });
 
   it.effect(
-    "carries an opted-in ignored .env only when asked and never over a plaintext relay",
+    "carries an opted-in ignored .env only when asked and never over an unencrypted connection",
     () => {
       const harness = makeHarness();
       return withFixtureRoot((root) =>
@@ -749,7 +749,7 @@ describe("ProjectExportLive", () => {
           });
           const result = yield* exporter.start({ input, channel: "encrypted" });
           const patch = artifactOf(result, "changes-patch");
-          // The client declares it to the destination, which refuses it over a plaintext relay.
+          // The client declares it to the destination, which refuses it over an unencrypted connection.
           expect(patch.carriesIgnoredFiles).toBe(true);
           const patchFile = path.join(root, "changes.patch");
           fs.writeFileSync(patchFile, yield* readArtifact(input.exportId, patch));
@@ -760,7 +760,7 @@ describe("ProjectExportLive", () => {
           expect(fs.readFileSync(path.join(dest, "change.txt"), "utf8")).toBe("untracked\n");
           expect(fs.existsSync(path.join(dest, "apps", "web", ".env.local"))).toBe(false);
 
-          // The same export is not readable, nor joinable, over a plaintext relay.
+          // The same export is not readable, nor joinable, over an unencrypted connection.
           const denied = yield* exporter
             .readChunk(
               { exportId: input.exportId, artifactId: patch.artifactId, offset: 0, length: 1024 },
@@ -771,7 +771,7 @@ describe("ProjectExportLive", () => {
           const joined = yield* exporter.start({ input, channel: "unencrypted" }).pipe(Effect.flip);
           expect(joined.code).toBe("access-denied");
 
-          // Started over a plaintext relay, the ignored file stays home.
+          // Started over an unencrypted connection, the ignored file stays home.
           const plaintextInput = startInput(project.id, {
             include: { workingTreeChanges: true, ignoredPaths: [".env"] },
           });
