@@ -41,12 +41,14 @@ vi.mock("../../environments/runtime", () => ({
   startEnvironmentConnectionService: () => undefined,
   subscribeEnvironmentConnections: () => () => {},
   updateEnvironmentServerSettings: mockUpdateEnvironmentServerSettings,
-  useSavedEnvironmentRegistryStore: (
-    selector: (state: { byId: Record<string, never> }) => unknown,
-  ) => selector({ byId: {} }),
-  useSavedEnvironmentRuntimeStore: (
-    selector: (state: { byId: Record<string, never> }) => unknown,
-  ) => selector({ byId: {} }),
+  useSavedEnvironmentRegistryStore: Object.assign(
+    (selector: (state: { byId: Record<string, never> }) => unknown) => selector({ byId: {} }),
+    { getState: () => ({ byId: {} }), subscribe: () => () => undefined },
+  ),
+  useSavedEnvironmentRuntimeStore: Object.assign(
+    (selector: (state: { byId: Record<string, never> }) => unknown) => selector({ byId: {} }),
+    { getState: () => ({ byId: {} }), subscribe: () => () => undefined },
+  ),
 }));
 
 const PROJECTS = [{ id: "p1", title: "Project One" }];

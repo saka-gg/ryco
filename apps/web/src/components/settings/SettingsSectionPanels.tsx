@@ -61,6 +61,10 @@ import {
   type SettingsStorage,
 } from "./settingsRegistry";
 import { settingsStorageReachable, type SettingsReach } from "./settingsSections.logic";
+import { useSharedSettingsMode } from "./sharedSettings/sharedSettingsMode";
+import { DeviceSettingsCompare } from "./sharedSettings/DeviceSettingsCompare";
+import { DeviceSharingDifferences } from "./sharedSettings/DeviceSharingDifferences";
+import { PER_DEVICE_CHIP } from "./sharedSettings/SharedSettingRow";
 import {
   SettingsChip,
   SettingsPageContainer,
@@ -126,19 +130,22 @@ function DevicePart({
   readonly children: ReactNode;
 }) {
   const { reach, target } = useSettingsParts();
+  const { targetLabel } = useSharedSettingsMode();
   if (!settingsStorageReachable(storage, reach) || !settingsDeviceReady(target)) return null;
+  // While "All devices" shows, a row that is not shared still edits the chosen device.
+  const rowChip = !chip ? null : targetLabel === null ? (
+    PER_DEVICE_CHIP
+  ) : (
+    <SettingsChip icon={<LayersIcon aria-hidden />}>On {targetLabel}</SettingsChip>
+  );
   return (
     <SettingsEditingScopeProvider value="node">
       <SettingsTargetProvider value={target}>
-        <SettingsRowChipProvider value={chip ? PER_DEVICE_CHIP : null}>
-          {children}
-        </SettingsRowChipProvider>
+        <SettingsRowChipProvider value={rowChip}>{children}</SettingsRowChipProvider>
       </SettingsTargetProvider>
     </SettingsEditingScopeProvider>
   );
 }
-
-const PER_DEVICE_CHIP = <SettingsChip icon={<LayersIcon aria-hidden />}>Per device</SettingsChip>;
 
 // Section bodies render synchronously once loaded: a `React.lazy` boundary
 // committed its fallback on every first visit and React then held the section
@@ -446,7 +453,7 @@ function SectionBody({
           <AppPart>
             <AllDevices devices={devices} />
           </AppPart>
-          {/* The redesign's Compare settings block (phase 3) goes here, right after the cards. */}
+          <DeviceSettingsCompare />
           {isHostedHubMode() ? null : (
             // How this app reaches the devices above: its Hub link and saved environments.
             <AppPart>
@@ -587,6 +594,7 @@ export function SettingsDevicePage({
     case "overview":
       body = (
         <>
+          <DeviceSharingDifferences environmentId={target.environmentId} />
           <SettingsDeviceFactTiles environmentId={target.environmentId} />
           {ownerPart(<DeviceIdentitySettings />)}
         </>
@@ -667,7 +675,7 @@ export function SettingsDeviceOfflineBanner({ label }: { readonly label: string 
       className="mb-6 flex items-start gap-2.5 rounded-[min(var(--radius-lg),0.625rem)] bg-muted px-3 py-2.5 text-xs leading-relaxed text-foreground"
     >
       <InfoIcon aria-hidden className="mt-px size-3.5 shrink-0 text-muted-foreground" />
-      <span>{label} is offline. Its settings show again when it reconnects.</span>
+      <span>{label} is offline. Changes wait and apply when it reconnects.</span>
     </div>
   );
 }

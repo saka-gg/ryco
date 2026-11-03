@@ -34,6 +34,7 @@ import {
   useEffect,
   useEffectEvent,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
   type CSSProperties,
@@ -118,6 +119,13 @@ import {
   type SettingsDevicesModel,
 } from "./useSettingsDevices";
 import { useSettingsSubsections } from "./useSettingsSubsections";
+import { sectionHasSharedSettings } from "./sharedSettings/sharedSettingsCatalog";
+import {
+  SharedSettingsModeProvider,
+  setSettingsDeviceView,
+  useSettingsDeviceView,
+  type SharedSettingsModeValue,
+} from "./sharedSettings/sharedSettingsMode";
 
 /** Each section's nav icon. Typed over every section, so a new one fails typecheck until drawn. */
 const SETTINGS_SECTION_ICONS: Readonly<Record<SettingsPageSectionId, LucideIcon>> = {
@@ -558,14 +566,32 @@ function DeviceBarMore({
 }
 
 /**
- * "Values for: [device pills]" at the top of a section with rows stored on a
- * device: the one device those rows read and write. Choosing a pill moves the
- * settings target, as the device menu did; it never opens a second target.
- * Past five devices the rest sit in "More", with a search.
+ * "Values for: [All devices] [device pills]" at the top of a section with rows
+ * stored on a device. A device pill moves the settings target, as the device
+ * menu did, and never opens a second target; its rows show that device's own
+ * values. "All devices" (sections with shared rows, two or more devices) shows
+ * every device's value in each shared row; the other device rows keep showing
+ * the chosen device. Past five devices the rest sit in "More", with a search.
  */
-function DeviceBar({ model }: { readonly model: SettingsDevicesModel }) {
+function DeviceBar({
+  model,
+  allDevices,
+  onShowDevice,
+}: {
+  readonly model: SettingsDevicesModel;
+  /** "All devices" is offered: whether it is chosen, and how to choose it. */
+  readonly allDevices: { readonly selected: boolean; readonly select: () => void } | null;
+  readonly onShowDevice: (environmentId: EnvironmentId) => void;
+}) {
   if (model.choices.length === 0) return null;
   const { pills, more } = splitDeviceBarChoices(model.choices, model.value);
+  const pillClass = (selected: boolean) =>
+    cn(
+      DEVICE_PILL_CLASS,
+      selected
+        ? "border-foreground bg-foreground text-background"
+        : "border-border text-foreground hover:bg-accent/60",
+    );
   return (
     <div
       role="group"
@@ -577,8 +603,18 @@ function DeviceBar({ model }: { readonly model: SettingsDevicesModel }) {
         <LayersIcon aria-hidden className="size-3.5" />
         Values for
       </span>
+      {allDevices ? (
+        <button
+          type="button"
+          aria-pressed={allDevices.selected}
+          onClick={allDevices.select}
+          className={pillClass(allDevices.selected)}
+        >
+          All devices
+        </button>
+      ) : null}
       {pills.map((choice) => {
-        const selected = choice.environmentId === model.value;
+        const selected = choice.environmentId === model.value && !allDevices?.selected;
         return (
           <button
             key={choice.environmentId}
@@ -586,20 +622,15 @@ function DeviceBar({ model }: { readonly model: SettingsDevicesModel }) {
             aria-pressed={selected}
             disabled={choice.disabled}
             title={choice.status ? SETTINGS_NODE_STATUS_LABELS[choice.status] : undefined}
-            onClick={() => model.select(choice.environmentId)}
-            className={cn(
-              DEVICE_PILL_CLASS,
-              selected
-                ? "border-foreground bg-foreground text-background"
-                : "border-border text-foreground hover:bg-accent/60",
-            )}
+            onClick={() => onShowDevice(choice.environmentId)}
+            className={pillClass(selected)}
           >
             <DeviceStatusDot status={choice.status} />
             <span className="truncate">{choice.label}</span>
           </button>
         );
       })}
-      {more.length > 0 ? <DeviceBarMore choices={more} onSelect={model.select} /> : null}
+      {more.length > 0 ? <DeviceBarMore choices={more} onSelect={onShowDevice} /> : null}
     </div>
   );
 }
@@ -816,6 +847,32 @@ export function SettingsPage({
     ? requestedSection
     : (listedSections.find((id) => !settingsSection(id).link) ?? "appearance");
   const usesDevice = effectiveSection === "device" || sectionUsesDevice(effectiveSection);
+  // "All devices" or the chosen device, for sections with shared rows.
+  const deviceView = useSettingsDeviceView((state) => state.view);
+  const allDevicesOffered =
+    devices.choices.length >= 2 && sectionHasSharedSettings(effectiveSection);
+  const showAllDevices = allDevicesOffered && deviceView === "all";
+  const showDevice = useCallback(
+    (environmentId: EnvironmentId) => {
+      setSettingsDeviceView("device");
+      devices.select(environmentId);
+    },
+    [devices],
+  );
+  const sharedSettingsMode = useMemo(
+    (): SharedSettingsModeValue => ({
+      mode:
+        showAllDevices || targetEnvironmentId === null
+          ? { kind: "all" }
+          : { kind: "device", environmentId: targetEnvironmentId },
+      showDevice,
+      targetLabel: showAllDevices ? (target?.nodeLabel ?? null) : null,
+      lastSeenAt: (environmentId) =>
+        devices.choices.find((choice) => choice.environmentId === environmentId)?.lastSeenAt ??
+        null,
+    }),
+    [devices.choices, showAllDevices, showDevice, target?.nodeLabel, targetEnvironmentId],
+  );
   // An old id keeps its tab (`security` opens Security) through the redirect.
   const deviceTab = resolveSettingsDeviceTab(storeSection, storeDeviceTab);
   const normalizedTab = effectiveSection === "device" ? deviceTab : null;
@@ -1001,183 +1058,198 @@ export function SettingsPage({
       <SettingsPartsProvider
         value={{ reach, target, primaryEnvironmentId, onRestored: handleRestored }}
       >
-        <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
-          <header
-            className={cn(
-              "flex shrink-0 items-center gap-3 border-b border-border/70 pr-3 sm:pr-4",
-              APP_SIDEBAR_CHROME_INSET_TRANSITION_CLASS,
-              appSidebarCollapsed ? COLLAPSED_APP_SIDEBAR_CHROME_INSET_CLASS : "pl-4 sm:pl-5",
-              isElectron
-                ? "drag-region h-[52px] wco:h-[env(titlebar-area-height)] wco:pr-[calc(100vw-env(titlebar-area-width)-env(titlebar-area-x)+0.75rem)]"
-                : "h-14",
-            )}
-          >
-            <h1 className="shrink-0 text-sm font-semibold tracking-tight">Settings</h1>
-            <div className="relative ml-auto w-full max-w-72 min-w-0 md:ml-6 md:max-w-80">
-              <SearchIcon
-                aria-hidden
-                className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground/70"
-              />
-              <input
-                ref={searchInputRef}
-                type="search"
-                value={searchQuery}
-                onChange={(event) => {
-                  setSearchTarget(null);
-                  setSearchQuery(event.target.value);
-                }}
-                placeholder="Search settings"
-                aria-label="Search settings"
-                className="h-8 w-full rounded-lg border border-transparent bg-muted/60 pr-9 pl-8 text-[13px] outline-hidden transition-[background-color,border-color,box-shadow] placeholder:text-muted-foreground/70 hover:bg-muted focus-visible:border-ring focus-visible:bg-background focus-visible:ring-[3px] focus-visible:ring-ring/20 [&::-webkit-search-cancel-button]:appearance-none"
-              />
-              {searchQuery ? (
-                <button
-                  type="button"
-                  aria-label="Clear search"
-                  onClick={() => {
-                    setSearchQuery("");
-                    searchInputRef.current?.focus();
-                  }}
-                  className="absolute top-1/2 right-1.5 flex size-5 -translate-y-1/2 items-center justify-center rounded-sm text-muted-foreground hover:text-foreground"
-                >
-                  <XIcon className="size-3.5" />
-                </button>
-              ) : (
-                <Kbd className="pointer-events-none absolute top-1/2 right-2 -translate-y-1/2">
-                  /
-                </Kbd>
+        <SharedSettingsModeProvider value={sharedSettingsMode}>
+          <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+            <header
+              className={cn(
+                "flex shrink-0 items-center gap-3 border-b border-border/70 pr-3 sm:pr-4",
+                APP_SIDEBAR_CHROME_INSET_TRANSITION_CLASS,
+                appSidebarCollapsed ? COLLAPSED_APP_SIDEBAR_CHROME_INSET_CLASS : "pl-4 sm:pl-5",
+                isElectron
+                  ? "drag-region h-[52px] wco:h-[env(titlebar-area-height)] wco:pr-[calc(100vw-env(titlebar-area-width)-env(titlebar-area-x)+0.75rem)]"
+                  : "h-14",
               )}
-            </div>
-            <div className="ml-auto flex shrink-0 items-center gap-1">
-              <Tooltip>
-                <TooltipTrigger
-                  render={
-                    <Button
-                      size="icon-sm"
-                      variant="ghost"
-                      aria-label="Close settings"
-                      className="text-muted-foreground hover:text-foreground"
-                      onClick={leaveSettings}
-                    >
-                      <XIcon />
-                    </Button>
-                  }
-                />
-                <TooltipPopup side="bottom">
-                  Close <Kbd className="ml-1">Esc</Kbd>
-                </TooltipPopup>
-              </Tooltip>
-            </div>
-          </header>
-
-          <div className="flex min-h-0 min-w-0 flex-1">
-            <SettingsNav
-              sections={listedSections}
-              devices={devices.choices}
-              primaryEnvironmentId={primaryEnvironmentId}
-              activeKey={activeKey}
-              subsections={subsections}
-              onSelectSection={selectSection}
-              onSelectDevice={selectDevice}
-            />
-            <div
-              ref={setScrollRef}
-              className="min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto [scrollbar-gutter:stable]"
             >
-              <div className="mx-auto w-full max-w-[52rem] px-5 pt-8 pb-24 sm:px-8 lg:px-10 lg:pt-10">
-                <CompactSectionPicker
-                  sections={listedSections}
-                  devices={devices.choices}
-                  activeKey={activeKey}
-                  activeLabel={activeLabel}
-                  onSelectSection={selectSection}
-                  onSelectDevice={selectDevice}
+              <h1 className="shrink-0 text-sm font-semibold tracking-tight">Settings</h1>
+              <div className="relative ml-auto w-full max-w-72 min-w-0 md:ml-6 md:max-w-80">
+                <SearchIcon
+                  aria-hidden
+                  className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground/70"
                 />
-                {searching ? (
-                  <SearchResults
-                    query={searchQuery.trim()}
-                    results={searchResults}
-                    deviceLabel={targetLabel}
-                    onPick={(entry) => {
-                      const destination = settingsSearchEntryDestination(entry, {
-                        target: targetEnvironmentId,
-                        primary: primaryEnvironmentId,
-                      });
-                      setSearchTarget({ targetId: entry.targetId ?? entry.title });
+                <input
+                  ref={searchInputRef}
+                  type="search"
+                  value={searchQuery}
+                  onChange={(event) => {
+                    setSearchTarget(null);
+                    setSearchQuery(event.target.value);
+                  }}
+                  placeholder="Search settings"
+                  aria-label="Search settings"
+                  className="h-8 w-full rounded-lg border border-transparent bg-muted/60 pr-9 pl-8 text-[13px] outline-hidden transition-[background-color,border-color,box-shadow] placeholder:text-muted-foreground/70 hover:bg-muted focus-visible:border-ring focus-visible:bg-background focus-visible:ring-[3px] focus-visible:ring-ring/20 [&::-webkit-search-cancel-button]:appearance-none"
+                />
+                {searchQuery ? (
+                  <button
+                    type="button"
+                    aria-label="Clear search"
+                    onClick={() => {
                       setSearchQuery("");
-                      setSection(destination.section, destination.deviceTab);
-                      if (
-                        destination.environmentId &&
-                        destination.environmentId !== targetEnvironmentId
-                      )
-                        devices.select(destination.environmentId);
+                      searchInputRef.current?.focus();
                     }}
-                  />
+                    className="absolute top-1/2 right-1.5 flex size-5 -translate-y-1/2 items-center justify-center rounded-sm text-muted-foreground hover:text-foreground"
+                  >
+                    <XIcon className="size-3.5" />
+                  </button>
                 ) : (
-                  <div key={`${panelKey}:${restoreSignal}`} className="settings-panel-enter">
-                    <header className="mb-8 min-w-0">
-                      {devicePage ? (
-                        <DevicePageHeader
-                          device={targetChoice}
-                          environmentId={targetEnvironmentId}
-                          label={targetLabel ?? ""}
-                        />
-                      ) : (
-                        <>
-                          <h2 className="text-xl font-semibold tracking-[-0.015em] text-foreground">
-                            {definition.title}
-                          </h2>
-                          <p
-                            className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-[13px] text-muted-foreground"
-                            data-testid="settings-destination-description"
-                          >
-                            {definition.description}
-                            {settingsSectionAppOnly(effectiveSection) ? (
-                              <SettingsChip icon={<AppWindowIcon aria-hidden />}>
-                                This app
-                              </SettingsChip>
-                            ) : null}
-                          </p>
-                        </>
-                      )}
-                    </header>
-                    {usesDevice && !devicePage ? <DeviceBar model={devices} /> : null}
-                    {devicePage && !settingsDeviceReady(target) && targetStatus === "offline" ? (
-                      <SettingsDeviceOfflineBanner label={targetLabel ?? ""} />
-                    ) : usesDevice && (!devicePage || !settingsDeviceReady(target)) ? (
-                      <DeviceNotice
-                        devicePage={devicePage}
-                        section={effectiveSection}
-                        reach={reach}
-                        label={targetLabel}
-                        environmentId={targetEnvironmentId}
-                        connected={settingsDeviceReady(target)}
-                        status={targetStatus}
-                        machine={desktopWorkspaceMachine}
-                      />
-                    ) : null}
-                    <Suspense fallback={<PanelFallback />}>
-                      {effectiveSection === "device" ? (
-                        <SettingsDevicePage
-                          tab={deviceTab}
-                          onTabChange={(tab: SettingsDevicePartId) => {
-                            setSearchTarget(null);
-                            setDeviceTab(tab);
-                          }}
-                        />
-                      ) : effectiveSection === "account" ? null : (
-                        <SettingsSectionPanel
-                          section={effectiveSection}
-                          devices={{ choices: devices.choices, onOpen: selectDevice }}
-                        />
-                      )}
-                    </Suspense>
-                  </div>
+                  <Kbd className="pointer-events-none absolute top-1/2 right-2 -translate-y-1/2">
+                    /
+                  </Kbd>
                 )}
+              </div>
+              <div className="ml-auto flex shrink-0 items-center gap-1">
+                <Tooltip>
+                  <TooltipTrigger
+                    render={
+                      <Button
+                        size="icon-sm"
+                        variant="ghost"
+                        aria-label="Close settings"
+                        className="text-muted-foreground hover:text-foreground"
+                        onClick={leaveSettings}
+                      >
+                        <XIcon />
+                      </Button>
+                    }
+                  />
+                  <TooltipPopup side="bottom">
+                    Close <Kbd className="ml-1">Esc</Kbd>
+                  </TooltipPopup>
+                </Tooltip>
+              </div>
+            </header>
+
+            <div className="flex min-h-0 min-w-0 flex-1">
+              <SettingsNav
+                sections={listedSections}
+                devices={devices.choices}
+                primaryEnvironmentId={primaryEnvironmentId}
+                activeKey={activeKey}
+                subsections={subsections}
+                onSelectSection={selectSection}
+                onSelectDevice={selectDevice}
+              />
+              <div
+                ref={setScrollRef}
+                className="min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto [scrollbar-gutter:stable]"
+              >
+                <div className="mx-auto w-full max-w-[52rem] px-5 pt-8 pb-24 sm:px-8 lg:px-10 lg:pt-10">
+                  <CompactSectionPicker
+                    sections={listedSections}
+                    devices={devices.choices}
+                    activeKey={activeKey}
+                    activeLabel={activeLabel}
+                    onSelectSection={selectSection}
+                    onSelectDevice={selectDevice}
+                  />
+                  {searching ? (
+                    <SearchResults
+                      query={searchQuery.trim()}
+                      results={searchResults}
+                      deviceLabel={targetLabel}
+                      onPick={(entry) => {
+                        const destination = settingsSearchEntryDestination(entry, {
+                          target: targetEnvironmentId,
+                          primary: primaryEnvironmentId,
+                        });
+                        setSearchTarget({ targetId: entry.targetId ?? entry.title });
+                        setSearchQuery("");
+                        setSection(destination.section, destination.deviceTab);
+                        if (
+                          destination.environmentId &&
+                          destination.environmentId !== targetEnvironmentId
+                        )
+                          devices.select(destination.environmentId);
+                      }}
+                    />
+                  ) : (
+                    <div key={`${panelKey}:${restoreSignal}`} className="settings-panel-enter">
+                      <header className="mb-8 min-w-0">
+                        {devicePage ? (
+                          <DevicePageHeader
+                            device={targetChoice}
+                            environmentId={targetEnvironmentId}
+                            label={targetLabel ?? ""}
+                          />
+                        ) : (
+                          <>
+                            <h2 className="text-xl font-semibold tracking-[-0.015em] text-foreground">
+                              {definition.title}
+                            </h2>
+                            <p
+                              className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-[13px] text-muted-foreground"
+                              data-testid="settings-destination-description"
+                            >
+                              {definition.description}
+                              {settingsSectionAppOnly(effectiveSection) ? (
+                                <SettingsChip icon={<AppWindowIcon aria-hidden />}>
+                                  This app
+                                </SettingsChip>
+                              ) : null}
+                            </p>
+                          </>
+                        )}
+                      </header>
+                      {usesDevice && !devicePage ? (
+                        <DeviceBar
+                          model={devices}
+                          allDevices={
+                            allDevicesOffered
+                              ? {
+                                  selected: showAllDevices,
+                                  select: () => setSettingsDeviceView("all"),
+                                }
+                              : null
+                          }
+                          onShowDevice={showDevice}
+                        />
+                      ) : null}
+                      {devicePage && !settingsDeviceReady(target) && targetStatus === "offline" ? (
+                        <SettingsDeviceOfflineBanner label={targetLabel ?? ""} />
+                      ) : usesDevice && (!devicePage || !settingsDeviceReady(target)) ? (
+                        <DeviceNotice
+                          devicePage={devicePage}
+                          section={effectiveSection}
+                          reach={reach}
+                          label={targetLabel}
+                          environmentId={targetEnvironmentId}
+                          connected={settingsDeviceReady(target)}
+                          status={targetStatus}
+                          machine={desktopWorkspaceMachine}
+                        />
+                      ) : null}
+                      <Suspense fallback={<PanelFallback />}>
+                        {effectiveSection === "device" ? (
+                          <SettingsDevicePage
+                            tab={deviceTab}
+                            onTabChange={(tab: SettingsDevicePartId) => {
+                              setSearchTarget(null);
+                              setDeviceTab(tab);
+                            }}
+                          />
+                        ) : effectiveSection === "account" ? null : (
+                          <SettingsSectionPanel
+                            section={effectiveSection}
+                            devices={{ choices: devices.choices, onOpen: selectDevice }}
+                          />
+                        )}
+                      </Suspense>
+                    </div>
+                  )}
+                </div>
               </div>
             </div>
           </div>
-        </div>
+        </SharedSettingsModeProvider>
       </SettingsPartsProvider>
     </SidebarInset>
   );

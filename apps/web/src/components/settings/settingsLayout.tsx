@@ -129,6 +129,11 @@ const SettingsRowChipContext = createContext<ReactNode>(null);
  */
 export const SettingsRowChipProvider = SettingsRowChipContext.Provider;
 
+/** The chip rows show here (null for none). */
+export function useSettingsRowChip(): ReactNode {
+  return useContext(SettingsRowChipContext);
+}
+
 export function SettingsSection({
   title,
   description,

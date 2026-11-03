@@ -1,9 +1,9 @@
 import { usageSummaryCache } from "@ryco/client-runtime/usage";
+import type { NodeSettingsConfig } from "@ryco/client-runtime/state/settings/nodeSettingsTargets";
 import { WS_METHODS, type UsagePriceOverrides } from "@ryco/contracts";
 import { CircleDollarSignIcon, LoaderIcon, PlusIcon, Trash2Icon, Undo2Icon } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
-import { updateEnvironmentServerSettings } from "../../environments/runtime";
 import { useHostedRpcCapability } from "../../hostedHub/capabilities";
 import { cn } from "../../lib/utils";
 import { useServerConfig } from "../../rpc/serverState";
@@ -13,11 +13,13 @@ import { Input } from "../ui/input";
 import { SettingsSelect, type SettingsSelectOption } from "./SettingsSelect";
 import {
   SETTINGS_INSET_CLASS,
+  SettingsBlock,
   SettingsEmpty,
   SettingsNotice,
   SettingsSection,
 } from "./settingsLayout";
 import { isNodeSettingsTargetReadOnly } from "./settingsSections.logic";
+import { SharedSettingRow, type SharedSettingControl } from "./sharedSettings/SharedSettingRow";
 import {
   listsUsagePriceModel,
   resolveUsagePriceDrafts,
@@ -54,17 +56,50 @@ type SaveStatus =
  */
 export function UsagePriceSettings() {
   const target = useSettingsTarget();
-  // Unsaved edits belong to the node they were made on.
-  return <UsagePriceEditor key={target?.environmentId ?? ""} />;
+  return (
+    <SharedSettingRow
+      settingKey="usagePriceOverrides"
+      layout="editor"
+      title={USAGE_PRICE_SECTION_TITLE}
+      knowsSetting={nodeKeepsUsagePrices}
+      render={(control) => (
+        // Unsaved edits belong to the devices they were made for.
+        <UsagePriceEditor
+          key={`${target?.environmentId ?? ""}:${control.deviceLabel ?? ""}`}
+          control={control}
+        />
+      )}
+    />
+  );
 }
 
-function UsagePriceEditor() {
+const nodeKeepsUsagePrices = (config: NodeSettingsConfig): boolean =>
+  config.environment.capabilities.usagePriceOverrides === true;
+
+/** The overrides after a patch of the editor (`null` removes a model). */
+function applyUsagePricePatch(
+  saved: UsagePriceOverrides,
+  patch: Readonly<Record<string, UsagePriceOverrides[string] | null>>,
+): UsagePriceOverrides {
+  const next: Record<string, UsagePriceOverrides[string]> = { ...saved };
+  for (const [model, entry] of Object.entries(patch)) {
+    if (entry === null) delete next[model];
+    else next[model] = entry;
+  }
+  return next;
+}
+
+function UsagePriceEditor({
+  control,
+}: {
+  readonly control: SharedSettingControl<"usagePriceOverrides">;
+}) {
   const config = useServerConfig();
   const target = useSettingsTarget();
   const scope = useSettingsEditingScope();
   const environmentId = target?.environmentId ?? null;
   const settingsCapability = useHostedRpcCapability(WS_METHODS.serverUpdateSettings, environmentId);
-  const saved = config?.settings.usagePriceOverrides ?? NO_OVERRIDES;
+  const saved = control.value ?? NO_OVERRIDES;
   const unsupported =
     config !== null && config.environment.capabilities.usagePriceOverrides !== true;
   const disabled =
@@ -72,7 +107,8 @@ function UsagePriceEditor() {
     unsupported ||
     target === null ||
     isNodeSettingsTargetReadOnly(scope, target) ||
-    !settingsCapability.allowed;
+    !settingsCapability.allowed ||
+    control.disabled;
 
   const [drafts, setDrafts] = useState<readonly UsagePriceDraft[]>([]);
   const [saving, setSaving] = useState(false);
@@ -130,22 +166,21 @@ function UsagePriceEditor() {
     if (environmentId === null || blocked || changeCount === 0) return;
     setSaving(true);
     setStatus(null);
-    void updateEnvironmentServerSettings(environmentId, { usagePriceOverrides: patch }).then(
-      () => {
-        // Summaries the client kept were priced before: the next view asks the node again.
-        usageSummaryCache.forget(environmentId);
-        setSaving(false);
-        setDrafts([]);
-        setStatus({ kind: "saved" });
-      },
-      (cause: unknown) => {
-        setSaving(false);
+    void control.save(applyUsagePricePatch(saved, patch)).then((result) => {
+      setSaving(false);
+      const failed = result?.notApplied.find((entry) => entry.reason === "failed");
+      if (result === null || failed !== undefined) {
         setStatus({
           kind: "failed",
-          message: cause instanceof Error ? cause.message : "Could not save the prices. Try again.",
+          message: failed?.detail ?? "Could not save the prices. Try again.",
         });
-      },
-    );
+        return;
+      }
+      // Summaries the client kept were priced before: the next view asks each device again.
+      for (const device of result.applied) usageSummaryCache.forget(device.environmentId);
+      setDrafts([]);
+      setStatus({ kind: "saved" });
+    });
   };
 
   return (
@@ -166,6 +201,9 @@ function UsagePriceEditor() {
         </Button>
       }
     >
+      {control.sharing ? (
+        <SettingsBlock className="text-xs text-muted-foreground">{control.sharing}</SettingsBlock>
+      ) : null}
       {unsupported ? (
         <div className={cn("border-b border-border/60 py-3", SETTINGS_INSET_CLASS)}>
           <SettingsNotice tone="warning">

@@ -52,12 +52,14 @@ vi.mock("../../environments/runtime", () => ({
   startEnvironmentConnectionService: () => undefined,
   subscribeEnvironmentConnections: () => () => {},
   updateEnvironmentServerSettings: harness.updateSettings,
-  useSavedEnvironmentRegistryStore: (
-    selector: (state: { byId: Record<string, never> }) => unknown,
-  ) => selector({ byId: {} }),
-  useSavedEnvironmentRuntimeStore: (
-    selector: (state: { byId: Record<string, never> }) => unknown,
-  ) => selector({ byId: {} }),
+  useSavedEnvironmentRegistryStore: Object.assign(
+    (selector: (state: { byId: Record<string, never> }) => unknown) => selector({ byId: {} }),
+    { getState: () => ({ byId: {} }), subscribe: () => () => undefined },
+  ),
+  useSavedEnvironmentRuntimeStore: Object.assign(
+    (selector: (state: { byId: Record<string, never> }) => unknown) => selector({ byId: {} }),
+    { getState: () => ({ byId: {} }), subscribe: () => () => undefined },
+  ),
 }));
 vi.mock("@tanstack/react-router", async (importOriginal) => ({
   ...(await importOriginal<typeof import("@tanstack/react-router")>()),

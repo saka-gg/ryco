@@ -34,6 +34,7 @@ import {
   SettingsRow,
   SettingsSection,
 } from "./settingsLayout";
+import { saveSharedSetting, useSharedSettingWriter } from "./sharedSettings/SharedSettingRow";
 import { SettingsSelect } from "./SettingsSelect";
 
 /** Node storage is separate from client/device cache and never appears in the frozen phone tier. */
@@ -81,6 +82,7 @@ function StorageEditor({
   const [enableApproval, setEnableApproval] = useState<StorageRetentionPolicy | null>(null);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState<string | null>(null);
+  const sharedRetention = useSharedSettingWriter("storageRetention");
   const settings = config?.settings;
   const policy = settings
     ? resolveStorageRetentionPolicy(settings, projectId || null)
@@ -94,11 +96,14 @@ function StorageEditor({
     controller.invalidatePreview();
     setSelected([]);
     setEnableApproval(null);
-    const patch: ServerSettingsPatch = projectId
-      ? { projectStorageRetention: { [projectId]: next } }
-      : { storageRetention: next! };
     try {
-      await updateEnvironmentServerSettings(environmentId, patch);
+      if (projectId) {
+        const patch: ServerSettingsPatch = { projectStorageRetention: { [projectId]: next } };
+        await updateEnvironmentServerSettings(environmentId, patch);
+      } else if (next !== null) {
+        // The device policy is shared across devices; a project's policy stays here.
+        await saveSharedSetting(sharedRetention.save, next);
+      }
     } catch (cause) {
       setSaveError(cause instanceof Error ? cause.message : "Could not save retention policy.");
     } finally {
@@ -158,7 +163,16 @@ function StorageEditor({
           <SettingsRow
             title="Retention policy"
             description="Applies hourly after the device starts. Only archived, stopped, unshared Ryco checkouts with no uncommitted work qualify. Dependency folders such as node_modules go with them; .env and other ignored files keep a checkout. Abandoned checkouts get a 24-hour grace period."
-            status={retentionScopeLabel}
+            status={
+              projectId ? (
+                retentionScopeLabel
+              ) : (
+                <>
+                  <span className="block">{retentionScopeLabel}</span>
+                  {sharedRetention.status}
+                </>
+              )
+            }
             resetAction={
               projectId && settings?.projectStorageRetention[projectId] ? (
                 <SettingResetButton

@@ -7,16 +7,18 @@ can opt out of a setting with an **override** and keep its own value. Design:
 
 ## Where things live
 
-| Piece                             | Module                                                                |
-| --------------------------------- | --------------------------------------------------------------------- |
-| Which keys are shareable          | `@ryco/shared/settingsSharing` (`SERVER_SETTING_SHARING`)             |
-| Stamp and entry schemas           | `@ryco/contracts/settings` (`SettingsSharing*`)                       |
-| Node rules for a sharing patch    | `@ryco/shared/settingsSharing`, applied by `applyServerSettingsPatch` |
-| Capability (sharing version)      | `ExecutionEnvironmentCapabilities.settingsSharingVersion`             |
-| Clock and client id               | `@ryco/client-runtime/state/settings/settingsSharingClock`            |
-| Planner, row view model, commands | `@ryco/client-runtime/state/settings/sharedDeviceSettings`            |
-| Runner and command executor       | `@ryco/client-runtime/state/settings/sharedDeviceSettingsRunner`      |
-| Web runner targets (not started)  | `apps/web/src/environments/settingsSharingTargets.ts`                 |
+| Piece                              | Module                                                                |
+| ---------------------------------- | --------------------------------------------------------------------- |
+| Which keys are shareable           | `@ryco/shared/settingsSharing` (`SERVER_SETTING_SHARING`)             |
+| Stamp and entry schemas            | `@ryco/contracts/settings` (`SettingsSharing*`)                       |
+| Node rules for a sharing patch     | `@ryco/shared/settingsSharing`, applied by `applyServerSettingsPatch` |
+| Capability (sharing version)       | `ExecutionEnvironmentCapabilities.settingsSharingVersion`             |
+| Clock and client id                | `@ryco/client-runtime/state/settings/settingsSharingClock`            |
+| Planner, row view model, commands  | `@ryco/client-runtime/state/settings/sharedDeviceSettings`            |
+| Runner and command executor        | `@ryco/client-runtime/state/settings/sharedDeviceSettingsRunner`      |
+| Web runner targets                 | `apps/web/src/environments/settingsSharingTargets.ts`                 |
+| Web runtime (runner, started idle) | `apps/web/src/settingsSharing/settingsSharingRuntime.ts`              |
+| Settings rows and compare table    | `apps/web/src/components/settings/sharedSettings/`                    |
 
 ## Model
 
@@ -113,3 +115,41 @@ hosted session whose own environment session currently grants `server.updateSett
 runner never keeps that answer: it reads every target again right before each write, so a
 superseded session generation or a lost grant never inherits a planned write. Viewers see values
 read-only.
+
+## Settings UI
+
+Every row of a shareable key on the settings page is one `SharedSettingRow`
+(`apps/web/src/components/settings/sharedSettings/`): it takes the key and a
+`render({ value, onChange, disabled, deviceLabel, ... })` for the row's existing control, and
+sends every edit through the commands above, so a shared key never turns into an override by
+accident:
+
+| Edit                                                                  | Command                                               |
+| --------------------------------------------------------------------- | ----------------------------------------------------- |
+| The one control ("Same on all N devices")                             | `writeSharedSetting`                                  |
+| A device's control in the list, or one device shown by the device bar | `setSettingOverride` (plain edit on an older node)    |
+| The only device                                                       | `writeSharedSetting`, or its override when it has one |
+| "Reset to shared"                                                     | `resetSettingToShared`                                |
+| "Use “X” everywhere"                                                  | `useSettingEverywhere`                                |
+
+Layouts: `inline` (a control beside the title), `block` (a text area under it), `editor` (a whole
+form with its own Save, such as model prices: drawn once, for every device while they agree or for
+the device shown; while they differ the row lists each device's value with an Edit). A row that
+edits one field of a larger value (Agent Control's limits, the two cleanup suggestions) compares
+only that field (`compareBy`). Policy editors inside bigger sections (the storage retention policy)
+use `useSharedSettingWriter`. The display catalog (`sharedSettingsCatalog.ts`) gives each key its
+section, title and value format, for the rows, the compare table and "Where this device differs".
+
+Agreement treats devices on the same shared write as agreeing even when their stored values
+differ: a device stores a path the way it normalized it (`~/` expanded, symlinks resolved), so
+`~/w` reads `/Users/me/w` on a Mac and `/home/me/w` on Linux after one shared write.
+
+The runner starts once the app shell is idle (`settingsSharingStart.ts`, a dynamic import), so an
+offline device catches up when it reconnects with settings closed. In hosted mode its writes go
+through each node session's current grant (see Hosted), and it restarts with its own client id,
+clock and cache when the signed-in account changes.
+
+Writes outside the rows: the settings page's "Restore defaults" (this device's), the desktop quit
+dialog's "Continue after restart" (this computer's backend) and an agent's settings change on a
+node stay plain per-device edits; on a key that already has a shared write they make that device
+keep its own value. The one-time auto-settle hand-over writes only devices that keep no rule yet.

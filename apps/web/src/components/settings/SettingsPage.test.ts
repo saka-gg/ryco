@@ -172,7 +172,7 @@ describe("rows that moved", () => {
     expect(entry("Response streaming")).toMatchObject({
       section: "chat",
       storage: "device",
-      targetId: "response-streaming",
+      targetId: "shared-setting-responseStreamingMode",
     });
     const text = `${entry("Response streaming")?.keywords}`.toLowerCase();
     for (const query of ["paragraph", "token", "streaming", "legacy"]) {
