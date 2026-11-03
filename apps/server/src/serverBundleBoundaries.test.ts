@@ -729,8 +729,12 @@ describe.skipIf(!hasCurrentBuild)("built server bundle", () => {
     // restore's startup check (1.3 KB) and the sidebar rows' fingerprint revalidation
     // (1.7 KB: the repository list cache's change record, the row read path and the
     // status poll's rule) passed 7.1 MB. 7.00 MB once Forgejo's review code, the setup guide
-    // and the turn diff parser loaded through import() (-98 KB).
-    expect(bytes).toBeLessThan(7_105_000);
+    // and the turn diff parser loaded through import() (-98 KB). 7.186 MB with the cross-node
+    // project copy (+125 KB): what every boot needs of it, its RPC schemas and handlers, the
+    // Agent Control node directory and plan checks, its migration and the startup check that
+    // decides whether an earlier process left copy work (about 85 KB), and the chunk boundaries
+    // its import() splits add; its services, runs and tools (about 200 KB) load on first use.
+    expect(bytes).toBeLessThan(7_191_000);
     for (const chunk of serve.chunks) {
       const source = readFileSync(chunk, "utf8");
       // Region markers rolldown leaves in the output name the modules each chunk holds.
