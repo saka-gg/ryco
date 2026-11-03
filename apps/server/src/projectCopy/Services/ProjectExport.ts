@@ -32,6 +32,11 @@ import type { ProjectCopyCallerChannel } from "../callerChannel.ts";
 export interface ProjectExportStartRequest {
   readonly input: ProjectExportStartInput;
   readonly channel: ProjectCopyCallerChannel;
+  /**
+   * The largest chunk the caller's connection carries, announced in the answer as
+   * `maxChunkBytes`; `PROJECT_COPY_DIRECT_CHUNK_BYTES` when absent (a call from inside the node).
+   */
+  readonly maxChunkBytes?: number;
 }
 
 export interface ProjectExportShape {
@@ -54,11 +59,14 @@ export interface ProjectExportShape {
   /**
    * One chunk of an artifact; slides the export's TTL (30 min from the last read). With the
    * caller's `channel`, an artifact that carries opted-in ignored files is refused on
-   * an `unencrypted` channel (`access-denied`), like `start` leaves them out there.
+   * an `unencrypted` channel (`access-denied`), like `start` leaves them out there. A `length`
+   * over `maxChunkBytes` (the caller connection's limit, `PROJECT_COPY_DIRECT_CHUNK_BYTES` when
+   * absent) fails `invalid`.
    */
   readonly readChunk: (
     input: ProjectExportReadChunkInput,
     channel?: ProjectCopyCallerChannel,
+    maxChunkBytes?: number,
   ) => Effect.Effect<ProjectExportReadChunkResult, ProjectCopyError>;
   /** Deletes the export's artifacts; idempotent, and an unknown id is already gone. */
   readonly dispose: (input: ProjectExportDisposeInput) => Effect.Effect<void, ProjectCopyError>;

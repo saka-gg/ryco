@@ -48,20 +48,26 @@ export interface ProjectTransfersShape {
    * Idempotent for the same id, purpose, length, digest and `carriesIgnoredFiles`; a different
    * one fails `conflict`. With the caller's `channel`, a transfer that carries opted-in ignored
    * files is refused on an `unencrypted` channel (`access-denied`), before anything is stored.
+   * `maxChunkBytes` is the largest chunk the caller's connection carries
+   * (`PROJECT_COPY_DIRECT_CHUNK_BYTES` when absent); the answer announces it.
    */
   readonly begin: (
     input: ProjectTransferBeginInput,
     channel?: ProjectCopyCallerChannel,
+    maxChunkBytes?: number,
   ) => Effect.Effect<ProjectTransferProgress, ProjectCopyError>;
   /**
    * Appends at `offset == receivedBytes`. A range already written is a no-op when its bytes
-   * match and `conflict` when they differ; a gap fails with the node's `receivedBytes`. Bytes of
-   * a transfer that carries ignored files are refused on an `unencrypted` channel, whatever
-   * channel began it.
+   * match and `conflict` when they differ. A chunk that starts a little ahead (a client keeps
+   * several appends in flight, and they may arrive out of order) waits, bounded in count, bytes
+   * and time, for the bytes before it; any other gap fails with the node's `receivedBytes`. A
+   * chunk over `maxChunkBytes` fails `invalid` with `receivedBytes`. Bytes of a transfer that
+   * carries ignored files are refused on an `unencrypted` channel, whatever channel began it.
    */
   readonly append: (
     input: ProjectTransferAppendInput,
     channel?: ProjectCopyCallerChannel,
+    maxChunkBytes?: number,
   ) => Effect.Effect<ProjectTransferProgress, ProjectCopyError>;
   /** Verifies length and digest and seals the transfer; later appends fail. Idempotent. */
   readonly commit: (

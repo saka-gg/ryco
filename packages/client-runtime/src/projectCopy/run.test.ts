@@ -1,6 +1,7 @@
 import type { EnvironmentId, ProjectId } from "@ryco/contracts";
 import {
   PROJECT_COPY_CHUNK_BYTES,
+  PROJECT_COPY_DIRECT_CHUNK_BYTES,
   PROJECT_COPY_RELAY_MAX_ARTIFACT_BYTES,
   PROJECT_IMPORT_LIST_MAX,
   type ProjectExportArtifactKind,
@@ -24,10 +25,9 @@ import {
 } from "./io.ts";
 import type { ProjectCopyJobRecord } from "./jobRecord.ts";
 import { projectCopyPlanWithSendFiles, type ProjectCopyRunPlan } from "./plan.ts";
+import { PROJECT_COPY_MAX_CHUNK_RPCS_PER_NODE, projectCopyPipelineLimits } from "./pipeline.ts";
 import {
   PROJECT_COPY_IMPORT_LOOKUP_TIMEOUT_MS,
-  PROJECT_COPY_MAX_CHUNK_RPCS_PER_NODE,
-  PROJECT_COPY_MAX_CHUNKS_IN_MEMORY,
   startProjectCopy,
   type ProjectCopyOutcome,
   type ProjectCopyProgress,
@@ -125,6 +125,10 @@ class FakeNode {
     string,
     { input: ProjectImportStartInput; snapshot: ProjectImportSnapshot }
   >();
+  /** The `maxChunkBytes` its export and transfer begins announce; none, as an older node. */
+  announcedChunkBytes: number | undefined = undefined;
+  /** Refuses reads longer than this (`invalid`), as a node whose caller's connection changed. */
+  refuseReadsOver: number | undefined = undefined;
   private readonly listeners = new Map<string, Set<(snapshot: ProjectImportSnapshot) => void>>();
   private clock = 0;
   chunkCallsInFlight = 0;
@@ -187,8 +191,12 @@ class FakeNode {
     projects: {
       exportStart: (input) =>
         this.handle("exportStart", input, () => {
+          const announced =
+            this.announcedChunkBytes === undefined
+              ? {}
+              : { maxChunkBytes: this.announcedChunkBytes };
           const known = this.exports.get(input.exportId);
-          if (known) return known;
+          if (known) return { ...known, ...announced };
           const kinds: ProjectExportArtifactKind[] = [];
           if (input.include.commits) kinds.push("commits-bundle");
           if (input.include.wholeRepository) kinds.push("repository-bundle");
@@ -247,13 +255,16 @@ class FakeNode {
             expiresAt: "2026-10-22T11:00:00.000Z",
           };
           this.exports.set(input.exportId, result);
-          return result;
+          return { ...result, ...announced };
         }),
       exportReadChunk: (input) =>
         this.handle("exportReadChunk", input, () => {
           const result = this.exports.get(input.exportId);
           if (!result || this.disposed.includes(input.exportId)) {
             throw rpcError("not-found", "No such export.");
+          }
+          if (this.refuseReadsOver !== undefined && input.length > this.refuseReadsOver) {
+            throw rpcError("invalid", "Too large a chunk for this connection.");
           }
           const kind = input.artifactId.replace("artifact-", "") as ProjectExportArtifactKind;
           const artifact = this.artifacts.get(kind)!;
@@ -272,12 +283,16 @@ class FakeNode {
         }),
       transferBegin: (input) =>
         this.handle("transferBegin", input, () => {
+          const announced =
+            this.announcedChunkBytes === undefined
+              ? {}
+              : { maxChunkBytes: this.announcedChunkBytes };
           const existing = this.transfers.get(input.transferId);
           if (existing) {
             if (existing.sha256 !== input.sha256 || existing.byteLength !== input.byteLength) {
               throw rpcError("conflict", "Begun with other bytes.");
             }
-            return { transferId: input.transferId, receivedBytes: existing.received };
+            return { transferId: input.transferId, receivedBytes: existing.received, ...announced };
           }
           this.transfers.set(input.transferId, {
             purpose: input.purpose,
@@ -287,7 +302,7 @@ class FakeNode {
             received: 0,
             committed: false,
           });
-          return { transferId: input.transferId, receivedBytes: 0 };
+          return { transferId: input.transferId, receivedBytes: 0, ...announced };
         }),
       transferAppend: (input) =>
         this.handle("transferAppend", input, () => {
@@ -677,10 +692,21 @@ describe("startProjectCopy", () => {
     expect(seen.progress.at(-1)).toMatchObject({ uploadedBytes: totalBytes, totalBytes });
 
     // A22/A7: bounded memory and calls in flight.
-    expect(io.maxChunksHeld).toBeLessThanOrEqual(PROJECT_COPY_MAX_CHUNKS_IN_MEMORY);
-    expect(io.maxChunksHeld).toBe(2);
+    expect(io.maxChunksHeld).toBeLessThanOrEqual(
+      projectCopyPipelineLimits(PROJECT_COPY_CHUNK_BYTES).maxChunksInMemory,
+    );
     expect(source.maxChunkCallsInFlight).toBeLessThanOrEqual(PROJECT_COPY_MAX_CHUNK_RPCS_PER_NODE);
     expect(target.maxChunkCallsInFlight).toBeLessThanOrEqual(PROJECT_COPY_MAX_CHUNK_RPCS_PER_NODE);
+    // Appends do not wait for the one before to answer.
+    expect(target.maxChunkCallsInFlight).toBeGreaterThan(1);
+    // Neither node announced bigger chunks: 160 KiB, which every node takes.
+    expect(
+      Math.max(
+        ...target
+          .inputs<{ readonly dataBase64: string }>("transferAppend")
+          .map((input) => atob(input.dataBase64).length),
+      ),
+    ).toBe(PROJECT_COPY_CHUNK_BYTES);
 
     // The client may close only once the target accepted the import.
     const firstClosable = seen.progress.findIndex((entry) => entry.canCloseClient);
@@ -711,6 +737,62 @@ describe("startProjectCopy", () => {
     expect(seen.records.at(-1)).toEqual(outcome.record);
   });
 
+  it("sends 1 MiB chunks only while both nodes are direct and announce them", async () => {
+    const bundle = known(spec("commits-bundle", 3 * KIB * KIB + 5, 61));
+    const largest = (node: FakeNode) =>
+      Math.max(
+        ...node
+          .inputs<{ readonly dataBase64: string }>("transferAppend")
+          .map((input) => atob(input.dataBase64).length),
+      );
+
+    const direct = setup({ artifacts: [bundle] });
+    direct.source.announcedChunkBytes = PROJECT_COPY_DIRECT_CHUNK_BYTES;
+    direct.target.announcedChunkBytes = PROJECT_COPY_DIRECT_CHUNK_BYTES;
+    expect((await startProjectCopy({ io: direct.io, plan: plan() }).done).progress.phase).toBe(
+      "done",
+    );
+    expect(largest(direct.target)).toBe(PROJECT_COPY_DIRECT_CHUNK_BYTES);
+    expect(direct.target.count("transferAppend")).toBe(4);
+    expect(direct.io.maxChunksHeld).toBeLessThanOrEqual(
+      projectCopyPipelineLimits(PROJECT_COPY_DIRECT_CHUNK_BYTES).maxChunksInMemory,
+    );
+
+    // Through the relay the chunk stays at what one relay frame holds.
+    const relayed = setup({ artifacts: [bundle] });
+    relayed.source.announcedChunkBytes = PROJECT_COPY_DIRECT_CHUNK_BYTES;
+    relayed.target.announcedChunkBytes = PROJECT_COPY_DIRECT_CHUNK_BYTES;
+    relayed.io.transports.set(TARGET, "relay");
+    expect((await startProjectCopy({ io: relayed.io, plan: plan() }).done).progress.phase).toBe(
+      "done",
+    );
+    expect(largest(relayed.target)).toBe(PROJECT_COPY_CHUNK_BYTES);
+
+    // An older target announces nothing.
+    const older = setup({ artifacts: [bundle] });
+    older.source.announcedChunkBytes = PROJECT_COPY_DIRECT_CHUNK_BYTES;
+    expect((await startProjectCopy({ io: older.io, plan: plan() }).done).progress.phase).toBe(
+      "done",
+    );
+    expect(largest(older.target)).toBe(PROJECT_COPY_CHUNK_BYTES);
+  });
+
+  it("falls back to 160 KiB chunks when the source refuses a larger one", async () => {
+    const bundle = known(spec("commits-bundle", 2 * KIB * KIB, 67));
+    const { source, target, io } = setup({ artifacts: [bundle] });
+    source.announcedChunkBytes = PROJECT_COPY_DIRECT_CHUNK_BYTES;
+    target.announcedChunkBytes = PROJECT_COPY_DIRECT_CHUNK_BYTES;
+    source.refuseReadsOver = PROJECT_COPY_CHUNK_BYTES;
+    const outcome = await startProjectCopy({ io, plan: plan() }).done;
+    expect(outcome.progress.phase).toBe("done");
+    const lengths = source
+      .inputs<{ readonly length: number }>("exportReadChunk")
+      .map((input) => input.length);
+    expect(lengths[0]).toBe(PROJECT_COPY_DIRECT_CHUNK_BYTES);
+    expect(lengths.at(-1)).toBeLessThanOrEqual(PROJECT_COPY_CHUNK_BYTES);
+    expect(target.transfers.size).toBe(1);
+  });
+
   it("publishes a new copy under the id the app claimed for it", async () => {
     const { io } = setup();
     const seen = track();
@@ -723,10 +805,18 @@ describe("startProjectCopy", () => {
 
   it("resumes a half-finished upload from the target's receivedBytes", async () => {
     const { target, io, source } = setup();
-    let appends = 0;
     let gone = false;
-    target.after = (method) => {
-      if (method === "transferAppend" && ++appends === 2) gone = true;
+    // The target goes away as the third chunk reaches it; the first two are written.
+    target.before = (method, input) => {
+      if (
+        method === "transferAppend" &&
+        (input as { offset: number }).offset === 2 * PROJECT_COPY_CHUNK_BYTES
+      ) {
+        gone = true;
+      }
+      if (gone && method === "transferAppend") {
+        throw new Error("SocketCloseError: the connection closed");
+      }
     };
     io.loseLease = (environmentId) => gone && environmentId === TARGET;
     io.failAcquire = (environmentId) => gone && environmentId === TARGET;
@@ -741,7 +831,7 @@ describe("startProjectCopy", () => {
 
     // A reload: the same ids, the target already holds two chunks.
     gone = false;
-    target.after = () => undefined;
+    target.before = () => undefined;
     const appendsBefore = target.count("transferAppend");
     const resumed = await startProjectCopy({ io, plan: plan(), resume: first.record }).done;
     expect(resumed.progress.phase).toBe("done");

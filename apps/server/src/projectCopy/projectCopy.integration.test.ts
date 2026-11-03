@@ -12,7 +12,7 @@
  * remotes have no forge.
  */
 import { execFileSync } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import {
   existsSync,
   mkdirSync,
@@ -27,7 +27,13 @@ import * as NodeServices from "@effect/platform-node/NodeServices";
 import { afterEach, assert, describe, it } from "@effect/vitest";
 import { CommandId, ProjectId, ProviderInstanceId, type ProjectScript } from "@ryco/contracts";
 import {
+  projectCopyChunkBytes,
+  projectCopyPipelineLimits,
+  pumpProjectCopyChunks,
+} from "@ryco/client-runtime/projectCopy";
+import {
   PROJECT_COPY_CHUNK_BYTES,
+  PROJECT_COPY_DIRECT_CHUNK_BYTES,
   ProjectExportId,
   ProjectImportId,
   ProjectTransferId,
@@ -62,6 +68,7 @@ import {
   initRepository,
   tempRoots,
   withProcessEnv,
+  withSimulatedLatency,
   writeFakeSsh,
 } from "./projectCopyGit.fixtures.ts";
 import { ProjectExport } from "./Services/ProjectExport.ts";
@@ -274,65 +281,108 @@ const exportFromA = (
     }),
   );
 
-/** Reads each artifact from A in chunks and uploads it to B; B's transfer ids by kind. */
+/** A's chunk of an artifact, read as the coordinator reads it. */
+const readFromA = (
+  a: TestNode,
+  exportId: ProjectExportId,
+  artifact: ProjectExportArtifact,
+  offset: number,
+  length: number,
+) =>
+  Effect.runPromise(
+    a.run(
+      Effect.gen(function* () {
+        const exporter = yield* ProjectExport;
+        const chunk = yield* exporter.readChunk(
+          { exportId, artifactId: artifact.artifactId, offset, length },
+          "encrypted",
+        );
+        assert.equal(chunk.offset, offset);
+        assert.equal(chunk.length, length);
+        return chunk.dataBase64;
+      }),
+    ),
+  );
+
+/** Appends a chunk to B's transfer; resolves with B's `receivedBytes`. */
+const appendToB = (
+  b: TestNode,
+  transferId: ProjectTransferId,
+  offset: number,
+  dataBase64: string,
+) =>
+  Effect.runPromise(
+    b.run(
+      Effect.gen(function* () {
+        const transfers = yield* ProjectTransfers;
+        return (yield* transfers.append({ transferId, offset, dataBase64 }, "encrypted"))
+          .receivedBytes;
+      }),
+    ),
+  );
+
+const beginOnB = (b: TestNode, transferId: ProjectTransferId, artifact: ProjectExportArtifact) =>
+  b.run(
+    Effect.gen(function* () {
+      const transfers = yield* ProjectTransfers;
+      return yield* transfers.begin(
+        {
+          transferId,
+          purpose: artifact.kind,
+          byteLength: artifact.byteLength,
+          sha256: artifact.sha256,
+        },
+        "encrypted",
+      );
+    }),
+  );
+
+const commitOnB = (b: TestNode, transferId: ProjectTransferId) =>
+  b.run(
+    Effect.gen(function* () {
+      const transfers = yield* ProjectTransfers;
+      return yield* transfers.commit({ transferId });
+    }),
+  );
+
+/**
+ * Reads each artifact from A and uploads it to B through the coordinator's chunk pipeline
+ * (reads ahead, several appends in flight, at the chunk size both nodes announce); B's
+ * transfer ids by kind.
+ */
 const transferArtifacts = (
   a: TestNode,
   b: TestNode,
   exportId: ProjectExportId,
-  artifacts: ReadonlyArray<ProjectExportArtifact>,
+  exported: ProjectExportResult,
 ) =>
   Effect.gen(function* () {
     const transferIds = new Map<ProjectExportArtifact["kind"], ProjectTransferId>();
-    for (const artifact of artifacts) {
+    for (const artifact of exported.artifacts) {
       const transferId = ProjectTransferId.make(randomUUID());
-      const begun = yield* b.run(
-        Effect.gen(function* () {
-          const transfers = yield* ProjectTransfers;
-          return yield* transfers.begin({
-            transferId,
-            purpose: artifact.kind,
-            byteLength: artifact.byteLength,
-            sha256: artifact.sha256,
-          });
-        }),
-      );
+      const begun = yield* beginOnB(b, transferId, artifact);
       assert.equal(begun.receivedBytes, 0);
-      let offset = 0;
+      const chunkBytes = projectCopyChunkBytes({
+        source: { transport: "direct", maxChunkBytes: exported.maxChunkBytes },
+        target: { transport: "direct", maxChunkBytes: begun.maxChunkBytes },
+      });
+      assert.equal(chunkBytes, PROJECT_COPY_DIRECT_CHUNK_BYTES);
       let chunks = 0;
-      for (;;) {
-        const chunk = yield* a.run(
-          Effect.gen(function* () {
-            const exporter = yield* ProjectExport;
-            return yield* exporter.readChunk(
-              {
-                exportId,
-                artifactId: artifact.artifactId,
-                offset,
-                length: PROJECT_COPY_CHUNK_BYTES,
-              },
-              "encrypted",
-            );
-          }),
-        );
-        if (chunk.length > 0) {
-          chunks += 1;
-          const appended = yield* b.run(
-            Effect.gen(function* () {
-              const transfers = yield* ProjectTransfers;
-              return yield* transfers.append({ transferId, offset, dataBase64: chunk.dataBase64 });
-            }),
-          );
-          offset = appended.receivedBytes;
-        }
-        if (chunk.eof) break;
-      }
-      assert.isAtLeast(chunks, 1);
-      const committed = yield* b.run(
-        Effect.gen(function* () {
-          const transfers = yield* ProjectTransfers;
-          return yield* transfers.commit({ transferId });
+      const pumped = yield* Effect.promise(() =>
+        pumpProjectCopyChunks({
+          byteLength: artifact.byteLength,
+          start: 0,
+          limits: projectCopyPipelineLimits(chunkBytes),
+          read: (offset, length) => readFromA(a, exportId, artifact, offset, length),
+          append: (offset, dataBase64) => {
+            chunks += 1;
+            return appendToB(b, transferId, offset, dataBase64);
+          },
         }),
       );
+      assert.equal(pumped, "done");
+      assert.isAtLeast(chunks, 1);
+      const committed = yield* commitOnB(b, transferId);
       assert.equal(committed.sha256, artifact.sha256);
       assert.equal(committed.byteLength, artifact.byteLength);
       transferIds.set(artifact.kind, transferId);
@@ -522,7 +572,7 @@ describe("cross-node project copy", () => {
         assert.deepEqual(exported.settings.overrides, SOURCE_OVERRIDES);
 
         // The client in the middle: A's chunks become B's transfers; then the export goes.
-        const transfers = yield* transferArtifacts(a, b, exportId, exported.artifacts);
+        const transfers = yield* transferArtifacts(a, b, exportId, exported);
         yield* disposeOnA(a, exportId);
         assert.isFalse(existsSync(path.join(a.stateDir, "project-exports", exportId)));
 
@@ -590,12 +640,7 @@ describe("cross-node project copy", () => {
           workingTreeChanges: true,
           ignoredPaths: [".env"],
         });
-        const firstTransfers = yield* transferArtifacts(
-          a,
-          b,
-          first.exportId,
-          first.result.artifacts,
-        );
+        const firstTransfers = yield* transferArtifacts(a, b, first.exportId, first.result);
         yield* disposeOnA(a, first.exportId);
         const unreachable = importInputFrom(first.result, {
           projectId: copyProjectId,
@@ -625,12 +670,7 @@ describe("cross-node project copy", () => {
           "changes-patch",
           "repository-bundle",
         ]);
-        const retryTransfers = yield* transferArtifacts(
-          a,
-          b,
-          retry.exportId,
-          retry.result.artifacts,
-        );
+        const retryTransfers = yield* transferArtifacts(a, b, retry.exportId, retry.result);
         yield* disposeOnA(a, retry.exportId);
         const bundleTransfer = retryTransfers.get("repository-bundle");
         assert.isDefined(bundleTransfer);
@@ -658,5 +698,103 @@ describe("cross-node project copy", () => {
       }).pipe(servedBy(fixture), Effect.scoped);
     },
     { timeout: 180_000 },
+  );
+});
+
+// ── Throughput (opt in: RYCO_PROJECT_COPY_BENCH=1) ────────────────────
+
+const BENCH_ARTIFACT_BYTES = Number(process.env.RYCO_PROJECT_COPY_BENCH_MIB ?? 64) * 1024 * 1024;
+const BENCH_CALL_LATENCY_MS = Number(process.env.RYCO_PROJECT_COPY_BENCH_LATENCY_MS ?? 50);
+
+const withLatency = <T>(call: () => Promise<T>) =>
+  withSimulatedLatency(BENCH_CALL_LATENCY_MS, call);
+
+describe.runIf(process.env.RYCO_PROJECT_COPY_BENCH === "1")("project copy throughput", () => {
+  it.live(
+    "moves a whole-repository bundle from A to B with a fixed latency per call",
+    () =>
+      Effect.gen(function* () {
+        const a = yield* startNode("bench-a");
+        const b = yield* startNode("bench-b");
+        const work = initRepository(
+          path.join(realpathSync(roots.make("ryco-xnode-bench-")), "app"),
+        );
+        commitFiles(work, { "blob.bin": randomBytes(BENCH_ARTIFACT_BYTES) }, "big");
+        const projectId = ProjectId.make(`bench-${randomUUID()}`);
+        yield* a.run(
+          Effect.gen(function* () {
+            const engine = yield* OrchestrationEngineService;
+            yield* engine.dispatch({
+              type: "project.create",
+              commandId: CommandId.make(`create-${projectId}`),
+              projectId,
+              title: "Bench",
+              workspaceRoot: work,
+              projectMetadataDir: ".ryco",
+              createWorkspaceRootIfMissing: false,
+              createdAt: new Date().toISOString(),
+            });
+          }),
+        );
+        const { exportId, result } = yield* exportFromA(a, projectId, { wholeRepository: true });
+        const artifact = result.artifacts.find((entry) => entry.kind === "repository-bundle");
+        assert.isDefined(artifact);
+        const bundle = artifact!;
+
+        const runs = [
+          {
+            // What the coordinator did before: one append at a time, one read ahead.
+            name: "serial, 160 KiB",
+            limits: {
+              ...projectCopyPipelineLimits(PROJECT_COPY_CHUNK_BYTES),
+              maxChunksInMemory: 2,
+              maxAppendsInFlight: 1,
+            },
+          },
+          {
+            name: "pipelined, 160 KiB (relay)",
+            limits: projectCopyPipelineLimits(PROJECT_COPY_CHUNK_BYTES),
+          },
+          {
+            name: "pipelined, 1 MiB (direct)",
+            limits: projectCopyPipelineLimits(PROJECT_COPY_DIRECT_CHUNK_BYTES),
+          },
+        ];
+        const lines: string[] = [];
+        for (const run of runs) {
+          const transferId = ProjectTransferId.make(randomUUID());
+          yield* beginOnB(b, transferId, bundle);
+          const startedAt = performance.now();
+          const pumped = yield* Effect.promise(() =>
+            pumpProjectCopyChunks({
+              byteLength: bundle.byteLength,
+              start: 0,
+              limits: run.limits,
+              read: (offset, length) =>
+                withLatency(() => readFromA(a, exportId, bundle, offset, length)),
+              append: (offset, dataBase64) =>
+                withLatency(() => appendToB(b, transferId, offset, dataBase64)),
+            }),
+          );
+          const seconds = (performance.now() - startedAt) / 1000;
+          assert.equal(pumped, "done");
+          assert.equal((yield* commitOnB(b, transferId)).sha256, bundle.sha256);
+          yield* b.run(
+            Effect.gen(function* () {
+              yield* (yield* ProjectTransfers).abort({ transferId });
+            }),
+          );
+          const megabytes = bundle.byteLength / 1_000_000;
+          lines.push(
+            `${run.name}: ${seconds.toFixed(2)} s, ${(megabytes / seconds).toFixed(1)} MB/s`,
+          );
+        }
+        yield* disposeOnA(a, exportId);
+        console.log(
+          `project copy throughput, ${(bundle.byteLength / 1_048_576).toFixed(1)} MiB bundle, ` +
+            `${BENCH_CALL_LATENCY_MS} ms per call:\n  ${lines.join("\n  ")}`,
+        );
+      }).pipe(Effect.scoped),
+    { timeout: 600_000 },
   );
 });

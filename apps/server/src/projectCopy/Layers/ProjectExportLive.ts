@@ -24,6 +24,7 @@ import {
 } from "@ryco/contracts";
 import {
   PROJECT_COPY_DEFAULT_PATCH_LIMIT_BYTES,
+  PROJECT_COPY_DIRECT_CHUNK_BYTES,
   PROJECT_COPY_MAX_ARTIFACT_BYTES,
   PROJECT_COPY_MAX_AVATAR_BYTES,
   type ProjectCopyError,
@@ -624,13 +625,19 @@ export const makeProjectExport = Effect.fn("makeProjectExport")(function* (
       );
     });
 
-  const answer = (entry: ExportEntry) =>
+  /** The export's result, with its current expiry and what this caller's chunks may hold. */
+  const answer = (entry: ExportEntry, maxChunkBytes: number) =>
     Deferred.await(entry.done).pipe(
-      Effect.map((result) => ({ ...result, expiresAt: isoAt(entry.expiresAtMs) })),
+      Effect.map((result) => ({
+        ...result,
+        expiresAt: isoAt(entry.expiresAtMs),
+        maxChunkBytes,
+      })),
     );
 
   const start: ProjectExportShape["start"] = Effect.fn("ProjectExport.start")(function* (request) {
     const { input, channel } = request;
+    const maxChunkBytes = request.maxChunkBytes ?? PROJECT_COPY_DIRECT_CHUNK_BYTES;
     const directory = yield* exportDirectory(input.exportId);
     const digest = sha256Hex(
       canonicalJson({
@@ -659,7 +666,7 @@ export const makeProjectExport = Effect.fn("makeProjectExport")(function* (
       if (existing.carriesIgnoredFiles && !mayCarryIgnoredFiles(channel)) {
         return yield* ignoredFilesRefused("This export");
       }
-      return yield* answer(existing);
+      return yield* answer(existing, maxChunkBytes);
     }
     const entry: ExportEntry = {
       exportId: input.exportId,
@@ -681,13 +688,23 @@ export const makeProjectExport = Effect.fn("makeProjectExport")(function* (
         Effect.onExit((exit) => settle(entry, input.exportId, exit)),
         Effect.forkIn(layerScope),
       );
-    return yield* answer(entry);
+    return yield* answer(entry, maxChunkBytes);
   });
 
   // ── Read, dispose, sweep ────────────────────────────────────────────
 
   const readChunk: ProjectExportShape["readChunk"] = Effect.fn("ProjectExport.readChunk")(
-    function* (input, channel?: ProjectCopyCallerChannel) {
+    function* (
+      input,
+      channel?: ProjectCopyCallerChannel,
+      maxChunkBytes: number = PROJECT_COPY_DIRECT_CHUNK_BYTES,
+    ) {
+      if (input.length > maxChunkBytes) {
+        return yield* projectCopyError(
+          "invalid",
+          `A chunk may hold at most ${maxChunkBytes} bytes over this connection.`,
+        );
+      }
       const entry = entries.get(input.exportId);
       if (!entry) {
         return yield* projectCopyError("not-found", "This export is unknown or has expired.");

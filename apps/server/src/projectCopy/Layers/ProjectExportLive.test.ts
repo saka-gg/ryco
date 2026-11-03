@@ -16,6 +16,8 @@ import {
   ProviderInstanceId,
 } from "@ryco/contracts";
 import {
+  PROJECT_COPY_CHUNK_BYTES,
+  PROJECT_COPY_DIRECT_CHUNK_BYTES,
   type ProjectExportArtifact,
   ProjectExportId,
   type ProjectExportStartInput,
@@ -368,6 +370,27 @@ describe("ProjectExportLive", () => {
           const input = startInput(project.id, { include: { commits: true } });
           const result = yield* exporter.start({ input, channel: "encrypted" });
           expect(result.skipped).toEqual([]);
+          // A call from inside the node may read direct-sized chunks; a relayed caller may not.
+          expect(result.maxChunkBytes).toBe(PROJECT_COPY_DIRECT_CHUNK_BYTES);
+          const relayed = yield* exporter.start({
+            input,
+            channel: "encrypted",
+            maxChunkBytes: PROJECT_COPY_CHUNK_BYTES,
+          });
+          expect(relayed.maxChunkBytes).toBe(PROJECT_COPY_CHUNK_BYTES);
+          const tooLarge = yield* Effect.flip(
+            exporter.readChunk(
+              {
+                exportId: input.exportId,
+                artifactId: artifactOf(result, "commits-bundle").artifactId,
+                offset: 0,
+                length: PROJECT_COPY_CHUNK_BYTES + 1,
+              },
+              "encrypted",
+              PROJECT_COPY_CHUNK_BYTES,
+            ),
+          );
+          expect(tooLarge.code).toBe("invalid");
           // Small chunks exercise offsets and eof.
           const bytes = yield* readArtifact(
             input.exportId,

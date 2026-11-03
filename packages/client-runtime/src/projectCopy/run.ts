@@ -4,10 +4,11 @@
  *
  * - Every id is minted here and kept in the job record, so each call is idempotent by its id
  *   and a reload resumes with the same ids.
- * - Transfers resume from the target's `receivedBytes`. Appends go in order; one read runs
- *   ahead, so at most {@link PROJECT_COPY_MAX_CHUNKS_IN_MEMORY} chunks are held and at most two
- *   chunk calls per node are in flight (the cap is {@link PROJECT_COPY_MAX_CHUNK_RPCS_PER_NODE}).
- *   Chunks pass through as base64 and are never decoded or stored.
+ * - Transfers resume from the target's `receivedBytes`. Chunks stream through
+ *   `pumpProjectCopyChunks` (`pipeline.ts`): reads run ahead and several appends are in flight,
+ *   in offset order, within its memory bound and four chunk calls per node. Chunks are 1 MiB
+ *   when both nodes are direct and announce it, else 160 KiB. They pass through as base64 and
+ *   are never decoded or stored.
  * - A lost lease or connection pauses the copy (phase `acquire`) until the node is acquired
  *   again; the copy then resumes with the same ids through the node's current API (A22).
  * - `importStart` is a mutation: after a call that may have gone out, the node is asked whether
@@ -58,6 +59,12 @@ import {
   type ProjectCopyJobRecord,
 } from "./jobRecord.ts";
 import {
+  ProjectCopyChunkReadError,
+  projectCopyChunkBytes,
+  projectCopyPipelineLimits,
+  pumpProjectCopyChunks,
+} from "./pipeline.ts";
+import {
   buildProjectImportStartInput,
   formatCopyMegabytes,
   joinNodePath,
@@ -66,11 +73,6 @@ import {
   relayTooLargeMessage,
   type ProjectCopyRunPlan,
 } from "./plan.ts";
-
-/** Chunks held at once: one being appended, one read ahead (A22). */
-export const PROJECT_COPY_MAX_CHUNKS_IN_MEMORY = 2;
-/** Chunk calls in flight per node (A7); the memory bound keeps the copy at two. */
-export const PROJECT_COPY_MAX_CHUNK_RPCS_PER_NODE = 4;
 
 const TRANSIENT_ATTEMPTS = 5;
 const REACQUIRE_ATTEMPTS = 3;
@@ -578,17 +580,14 @@ export function startProjectCopy(input: StartProjectCopyInput): ProjectCopyRun {
     emit({ uploadedBytes: Math.min(total, progress.totalBytes) });
   };
 
-  type ChunkRead =
-    | { readonly ok: true; readonly offset: number; readonly length: number; readonly data: string }
-    | { readonly ok: false; readonly error: unknown };
-
-  const readChunk = (
+  /** One chunk's base64, checked against what was asked for. */
+  const readChunk = async (
     result: ProjectExportResult,
     artifact: ProjectExportArtifact,
     offset: number,
     length: number,
-  ): Promise<ChunkRead> =>
-    callNode(source!.environmentId, "read", (api) =>
+  ): Promise<string> => {
+    const chunk = await callNode(source!.environmentId, "read", (api) =>
       need(
         api.projects.exportReadChunk,
         sourceLabel,
@@ -598,82 +597,85 @@ export function startProjectCopy(input: StartProjectCopyInput): ProjectCopyRun {
         offset,
         length,
       }),
-    ).then(
-      (chunk): ChunkRead =>
-        chunk.offset === offset &&
-        chunk.length === length &&
-        base64ByteLength(chunk.dataBase64) === length
-          ? { ok: true, offset, length, data: chunk.dataBase64 }
-          : {
-              ok: false,
-              error: new CopyFailure(
-                "transfer-failed",
-                `${sourceLabel} sent an unexpected chunk.`,
-                "resume",
-              ),
-            },
-      (error: unknown): ChunkRead => ({ ok: false, error }),
     );
+    if (
+      chunk.offset !== offset ||
+      chunk.length !== length ||
+      base64ByteLength(chunk.dataBase64) !== length
+    ) {
+      throw new CopyFailure(
+        "transfer-failed",
+        `${sourceLabel} sent an unexpected chunk.`,
+        "resume",
+      );
+    }
+    return chunk.dataBase64;
+  };
+
+  /** The source refused a chunk as larger than its connection carries: 160 KiB from then on. */
+  let largeChunksRefused = false;
 
   /**
    * Sends the artifact from `start` on. `rebegin` asks the caller to ask the target where it
-   * stands (a gap, an expired transfer, or an unexpected `receivedBytes`).
+   * stands (a gap, an expired transfer, an unexpected `receivedBytes`, or chunks too large for
+   * a connection that changed). `targetMaxChunkBytes` is what the target's begin announced.
    */
   const pumpChunks = async (
     result: ProjectExportResult,
     artifact: ProjectExportArtifact,
     transferId: ProjectTransferId,
     start: number,
+    targetMaxChunkBytes: number | undefined,
   ): Promise<"done" | "rebegin"> => {
-    const reads: Array<Promise<ChunkRead>> = [];
-    let nextRead = start;
-    let offset = start;
-    // `appending` counts the chunk being appended, so reads + held chunks stay within the cap.
-    const readAhead = (appending: boolean) => {
-      while (
-        reads.length + (appending ? 1 : 0) < PROJECT_COPY_MAX_CHUNKS_IN_MEMORY &&
-        nextRead < artifact.byteLength
-      ) {
-        const length = Math.min(PROJECT_COPY_CHUNK_BYTES, artifact.byteLength - nextRead);
-        spendRelayBudget(source!.environmentId, length);
-        reads.push(readChunk(result, artifact, nextRead, length));
-        nextRead += length;
-      }
-    };
+    const sourceId = source!.environmentId;
+    const chunkBytes = largeChunksRefused
+      ? PROJECT_COPY_CHUNK_BYTES
+      : projectCopyChunkBytes({
+          source: {
+            transport: handles.get(sourceId)?.transport,
+            maxChunkBytes: result.maxChunkBytes,
+          },
+          target: {
+            transport: handles.get(targetEnvironmentId)?.transport,
+            maxChunkBytes: targetMaxChunkBytes,
+          },
+        });
     try {
-      while (offset < artifact.byteLength) {
-        readAhead(false);
-        const read = await reads.shift()!;
-        if (!read.ok) {
-          const { error } = read;
-          if (
-            isProjectCopyRpcError(error) &&
-            (error.code === "not-found" || error.code === "expired")
-          ) {
-            throw new ExportGone();
-          }
-          if (refusesIgnoredFiles(error, artifact)) throw new IgnoredFilesRefused(sourceLabel);
-          throw error;
-        }
-        readAhead(true);
-        spendRelayBudget(targetEnvironmentId, read.length);
-        const appended = await callNode(targetEnvironmentId, "lease", (api) =>
-          need(
-            api.projects.transferAppend,
-            targetLabel,
-          )({
-            transferId,
-            offset: read.offset,
-            dataBase64: read.data,
-          }),
-        );
-        offset = read.offset + read.length;
-        if (appended.receivedBytes !== offset) return "rebegin";
-        setUploaded(artifact.kind, offset);
-      }
-      return "done";
+      return await pumpProjectCopyChunks({
+        byteLength: artifact.byteLength,
+        start,
+        limits: projectCopyPipelineLimits(chunkBytes, sourceId === targetEnvironmentId),
+        read: (offset, length) => readChunk(result, artifact, offset, length),
+        append: async (offset, dataBase64) =>
+          (
+            await callNode(targetEnvironmentId, "lease", (api) =>
+              need(api.projects.transferAppend, targetLabel)({ transferId, offset, dataBase64 }),
+            )
+          ).receivedBytes,
+        beforeRead: (length) => spendRelayBudget(sourceId, length),
+        beforeAppend: (length) => spendRelayBudget(targetEnvironmentId, length),
+        onAcknowledged: (offset) => setUploaded(artifact.kind, offset),
+      });
     } catch (error) {
-      // A refused read became `IgnoredFilesRefused` above: this is the target refusing a chunk.
+      if (error instanceof ProjectCopyChunkReadError) {
+        const cause = error.cause;
+        if (
+          isProjectCopyRpcError(cause) &&
+          (cause.code === "not-found" || cause.code === "expired")
+        ) {
+          throw new ExportGone();
+        }
+        if (refusesIgnoredFiles(cause, artifact)) throw new IgnoredFilesRefused(sourceLabel);
+        if (
+          isProjectCopyRpcError(cause) &&
+          cause.code === "invalid" &&
+          chunkBytes > PROJECT_COPY_CHUNK_BYTES
+        ) {
+          largeChunksRefused = true;
+          return "rebegin";
+        }
+        throw cause;
+      }
       if (refusesIgnoredFiles(error, artifact)) throw new IgnoredFilesRefused(targetLabel);
       if (
         isProjectCopyRpcError(error) &&
@@ -684,9 +686,6 @@ export function startProjectCopy(input: StartProjectCopyInput): ProjectCopyRun {
         return "rebegin";
       }
       throw error;
-    } finally {
-      // Reads never reject; wait for the ones in flight so none outlives this attempt.
-      await Promise.all(reads);
     }
   };
 
@@ -713,9 +712,12 @@ export function startProjectCopy(input: StartProjectCopyInput): ProjectCopyRun {
       }
       const id = transferId ?? assignTransfer();
       let receivedBytes: number;
+      let targetMaxChunkBytes: number | undefined;
       try {
-        receivedBytes = (
-          await callNode(targetEnvironmentId, "lease", (api) =>
+        ({ receivedBytes, maxChunkBytes: targetMaxChunkBytes } = await callNode(
+          targetEnvironmentId,
+          "lease",
+          (api) =>
             need(
               api.projects.transferBegin,
               targetLabel,
@@ -726,8 +728,7 @@ export function startProjectCopy(input: StartProjectCopyInput): ProjectCopyRun {
               sha256: artifact.sha256,
               ...(artifact.carriesIgnoredFiles === true ? { carriesIgnoredFiles: true } : {}),
             }),
-          )
-        ).receivedBytes;
+        ));
       } catch (error) {
         if (refusesIgnoredFiles(error, artifact)) throw new IgnoredFilesRefused(targetLabel);
         // A transfer begun for other bytes (the export was made again): start a new one.
@@ -742,7 +743,8 @@ export function startProjectCopy(input: StartProjectCopyInput): ProjectCopyRun {
       }
       setUploaded(purpose, receivedBytes);
       if (receivedBytes < artifact.byteLength) {
-        if ((await pumpChunks(result, artifact, id, receivedBytes)) === "rebegin") continue;
+        const pumped = await pumpChunks(result, artifact, id, receivedBytes, targetMaxChunkBytes);
+        if (pumped === "rebegin") continue;
       }
       try {
         await callNode(targetEnvironmentId, "lease", (api) =>

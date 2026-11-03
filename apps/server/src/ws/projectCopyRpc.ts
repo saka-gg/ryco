@@ -1,5 +1,9 @@
 import { WS_METHODS } from "@ryco/contracts";
-import { ProjectCopyError } from "@ryco/contracts/project-copy";
+import {
+  PROJECT_COPY_CHUNK_BYTES,
+  PROJECT_COPY_DIRECT_CHUNK_BYTES,
+  ProjectCopyError,
+} from "@ryco/contracts/project-copy";
 import { Effect, Option } from "effect";
 
 import { observeRpcEffect, observeRpcStreamEffect } from "../observability/RpcInstrumentation.ts";
@@ -39,6 +43,14 @@ export const projectCopyCallerChannel = (
   );
 
 /**
+ * The largest raw chunk the caller's connection carries: one relay data frame holds a
+ * `PROJECT_COPY_CHUNK_BYTES` chunk, a direct connection a `PROJECT_COPY_DIRECT_CHUNK_BYTES` one.
+ * A connection without facts counts as relayed.
+ */
+export const projectCopyMaxChunkBytes = (connection: RpcConnectionFacts | undefined): number =>
+  connection?.kind === "direct" ? PROJECT_COPY_DIRECT_CHUNK_BYTES : PROJECT_COPY_CHUNK_BYTES;
+
+/**
  * Cross-node project copy RPCs: reads and scratch transfers on either node, the durable import
  * job on the destination. Each one passes the access check, then delegates to its service. The
  * export's `start` and `readChunk` and the transfer's `begin` and `append` learn how the caller's
@@ -48,6 +60,7 @@ export const projectCopyCallerChannel = (
 export const makeProjectCopyHandlers = (ctx: WsRpcContext) => {
   const { ownerEffect, ownerStreamEffect, projectCopy } = ctx;
   const callerChannel = projectCopyCallerChannel(ctx.connection, ctx.readNodeTailscaleAddresses);
+  const maxChunkBytes = projectCopyMaxChunkBytes(ctx.connection);
 
   // Absent only in route tests that leave the project copy services out.
   const service = <S>(option: Option.Option<S>): Effect.Effect<S, ProjectCopyError> =>
@@ -101,7 +114,9 @@ export const makeProjectCopyHandlers = (ctx: WsRpcContext) => {
         WS_METHODS.projectsExportStart,
         exporter.pipe(
           Effect.flatMap((source) =>
-            callerChannel.pipe(Effect.flatMap((channel) => source.start({ input, channel }))),
+            callerChannel.pipe(
+              Effect.flatMap((channel) => source.start({ input, channel, maxChunkBytes })),
+            ),
           ),
         ),
       ),
@@ -110,7 +125,9 @@ export const makeProjectCopyHandlers = (ctx: WsRpcContext) => {
         WS_METHODS.projectsExportReadChunk,
         exporter.pipe(
           Effect.flatMap((source) =>
-            callerChannel.pipe(Effect.flatMap((channel) => source.readChunk(input, channel))),
+            callerChannel.pipe(
+              Effect.flatMap((channel) => source.readChunk(input, channel, maxChunkBytes)),
+            ),
           ),
         ),
       ),
@@ -127,7 +144,9 @@ export const makeProjectCopyHandlers = (ctx: WsRpcContext) => {
         WS_METHODS.projectsTransferBegin,
         transfers.pipe(
           Effect.flatMap((uploads) =>
-            callerChannel.pipe(Effect.flatMap((channel) => uploads.begin(input, channel))),
+            callerChannel.pipe(
+              Effect.flatMap((channel) => uploads.begin(input, channel, maxChunkBytes)),
+            ),
           ),
         ),
       ),
@@ -136,7 +155,9 @@ export const makeProjectCopyHandlers = (ctx: WsRpcContext) => {
         WS_METHODS.projectsTransferAppend,
         transfers.pipe(
           Effect.flatMap((uploads) =>
-            callerChannel.pipe(Effect.flatMap((channel) => uploads.append(input, channel))),
+            callerChannel.pipe(
+              Effect.flatMap((channel) => uploads.append(input, channel, maxChunkBytes)),
+            ),
           ),
         ),
       ),

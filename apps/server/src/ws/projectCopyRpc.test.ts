@@ -1,5 +1,7 @@
 import { WS_METHODS } from "@ryco/contracts";
 import {
+  PROJECT_COPY_CHUNK_BYTES,
+  PROJECT_COPY_DIRECT_CHUNK_BYTES,
   ProjectExportId,
   type ProjectCopyError,
   type ProjectExportStartInput,
@@ -16,7 +18,11 @@ import type {
 } from "../projectCopy/Services/ProjectExport.ts";
 import type { ProjectTransfersShape } from "../projectCopy/Services/ProjectTransfers.ts";
 import type { WsRpcContext } from "./context.ts";
-import { makeProjectCopyHandlers, projectCopyCallerChannel } from "./projectCopyRpc.ts";
+import {
+  makeProjectCopyHandlers,
+  projectCopyCallerChannel,
+  projectCopyMaxChunkBytes,
+} from "./projectCopyRpc.ts";
 import { rpcAccessFor } from "./RpcAccessPolicy.ts";
 import { relayRpcPrincipal, type RpcConnectionFacts, type RpcPrincipal } from "./RpcPrincipal.ts";
 
@@ -246,5 +252,73 @@ it.effect("withholds ignored files from plain ws:// and connections it knows not
     expect(yield* projectCopyCallerChannel(directOwner.connection)).toBe("encrypted");
     expect(yield* projectCopyCallerChannel(plainDirectOwner.connection)).toBe("unencrypted");
     expect(yield* projectCopyCallerChannel(undefined)).toBe("unencrypted");
+  }),
+);
+
+it.effect("lets only a direct caller move 1 MiB chunks; the relay keeps 160 KiB", () =>
+  Effect.gen(function* () {
+    const limits: Array<[string, number | undefined]> = [];
+    const exporter = {
+      start: (request: ProjectExportStartRequest) => {
+        limits.push(["start", request.maxChunkBytes]);
+        return Effect.die("recorded");
+      },
+      readChunk: (_input: unknown, _channel: unknown, maxChunkBytes?: number) => {
+        limits.push(["readChunk", maxChunkBytes]);
+        return Effect.die("recorded");
+      },
+    } as unknown as ProjectExportShape;
+    const record =
+      (method: string) => (_input: unknown, _channel: unknown, maxChunkBytes?: number) => {
+        limits.push([method, maxChunkBytes]);
+        return Effect.die("recorded");
+      };
+    const transfers = {
+      begin: record("begin"),
+      append: record("append"),
+    } as unknown as ProjectTransfersShape;
+    const services = {
+      ...noServices,
+      projectExport: Option.some(exporter),
+      projectTransfers: Option.some(transfers),
+    };
+    const transferId = "5b6e3f0e-2f5c-4f7e-9c1a-0d7a1c2b3e4f";
+    for (const principal of [
+      directOwner,
+      relayRpcPrincipal("owner", "relay-e2ee", undefined, () => true),
+    ]) {
+      const handlers = makeProjectCopyHandlers(makeContext(principal, services));
+      yield* unary(handlers, WS_METHODS.projectsExportStart)(exportInput).pipe(Effect.exit);
+      yield* unary(
+        handlers,
+        WS_METHODS.projectsExportReadChunk,
+      )({ exportId: exportInput.exportId, artifactId: "artifact", offset: 0, length: 1 }).pipe(
+        Effect.exit,
+      );
+      yield* unary(
+        handlers,
+        WS_METHODS.projectsTransferBegin,
+      )({ transferId, purpose: "changes-patch", byteLength: 1, sha256: "0".repeat(64) }).pipe(
+        Effect.exit,
+      );
+      yield* unary(
+        handlers,
+        WS_METHODS.projectsTransferAppend,
+      )({ transferId, offset: 0, dataBase64: "AA==" }).pipe(Effect.exit);
+    }
+    const direct = PROJECT_COPY_DIRECT_CHUNK_BYTES;
+    const relay = PROJECT_COPY_CHUNK_BYTES;
+    expect(limits).toEqual([
+      ["start", direct],
+      ["readChunk", direct],
+      ["begin", direct],
+      ["append", direct],
+      ["start", relay],
+      ["readChunk", relay],
+      ["begin", relay],
+      ["append", relay],
+    ]);
+    // A connection the node knows nothing about counts as relayed.
+    expect(projectCopyMaxChunkBytes(undefined)).toBe(relay);
   }),
 );

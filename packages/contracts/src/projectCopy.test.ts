@@ -9,8 +9,8 @@ import {
   GitBranchName,
   GitObjectId,
   GitRemoteName,
-  PROJECT_COPY_CHUNK_BASE64_MAX_CHARS,
-  PROJECT_COPY_CHUNK_BYTES,
+  PROJECT_COPY_DIRECT_CHUNK_BASE64_MAX_CHARS,
+  PROJECT_COPY_DIRECT_CHUNK_BYTES,
   ProjectCopyDestinationPath,
   ProjectCopyDirectoryName,
   ProjectCopyError,
@@ -429,10 +429,10 @@ describe("input hygiene", () => {
     expect(() => decodeStart({ ...start, patchLimitBytes: 0 })).toThrow();
     const decodeRead = Schema.decodeUnknownSync(ProjectExportReadChunkInput);
     const read = { exportId: importId, artifactId: "commits-1", offset: 0, length: 1 };
-    expect(decodeRead({ ...read, length: PROJECT_COPY_CHUNK_BYTES }).length).toBe(
-      PROJECT_COPY_CHUNK_BYTES,
+    expect(decodeRead({ ...read, length: PROJECT_COPY_DIRECT_CHUNK_BYTES }).length).toBe(
+      PROJECT_COPY_DIRECT_CHUNK_BYTES,
     );
-    expect(() => decodeRead({ ...read, length: PROJECT_COPY_CHUNK_BYTES + 1 })).toThrow();
+    expect(() => decodeRead({ ...read, length: PROJECT_COPY_DIRECT_CHUNK_BYTES + 1 })).toThrow();
     expect(() => decodeRead({ ...read, artifactId: "../etc/passwd" })).toThrow();
     expect(Schema.decodeUnknownSync(ProjectCopyRelativePath)(".env")).toBe(".env");
   });
@@ -457,7 +457,7 @@ describe("input hygiene", () => {
       decodeAppend({
         transferId,
         offset: 0,
-        dataBase64: "A".repeat(PROJECT_COPY_CHUNK_BASE64_MAX_CHARS + 4),
+        dataBase64: "A".repeat(PROJECT_COPY_DIRECT_CHUNK_BASE64_MAX_CHARS + 4),
       }),
     ).toThrow();
   });

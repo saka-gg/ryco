@@ -19,6 +19,14 @@
  * (begin's capacity admission, claim, release, sweep); a per-transfer lock serializes the calls on
  * one transfer. The order is always the registry first, then transfer locks in id order.
  *
+ * Out of order: a client keeps a few appends of one transfer in flight, and two calls sent in order
+ * may reach the lock in either order (each first learns its caller's channel). An append that
+ * starts at most {@link PROJECT_TRANSFER_MAX_WAITING_APPENDS} chunks ahead of `receivedBytes` waits,
+ * without the lock, until the bytes before it arrived or {@link PROJECT_TRANSFER_AHEAD_WAIT_MS}
+ * passed. At most that many appends wait per transfer, holding at most
+ * {@link PROJECT_TRANSFERS_MAX_WAITING_BYTES} together on the node; past any bound the gap fails
+ * at once with `receivedBytes`, as it always did, and the client resumes from there.
+ *
  * @module ProjectTransfersLive
  */
 import { mkdir, open, readFile, readdir, rename, rm, stat, truncate } from "node:fs/promises";
@@ -26,7 +34,7 @@ import nodePath from "node:path";
 
 import { PositiveInt } from "@ryco/contracts";
 import {
-  PROJECT_COPY_CHUNK_BYTES,
+  PROJECT_COPY_DIRECT_CHUNK_BYTES,
   PROJECT_COPY_MAX_ARTIFACT_BYTES,
   PROJECT_COPY_MAX_AVATAR_BYTES,
   ProjectCopyError,
@@ -34,17 +42,22 @@ import {
   ProjectCopySha256,
   ProjectImportId,
   ProjectTransferId,
+  type ProjectTransferAppendInput,
   type ProjectTransferProgress,
   ProjectTransferPurpose,
 } from "@ryco/contracts/project-copy";
 import { bytesEqual } from "@ryco/shared/bytesEqual";
 import { makeKeyedSerialExecutor } from "@ryco/shared/KeyedSerialExecutor";
-import { Clock, Data, Effect, FileSystem, Layer, Option, Path, Schema } from "effect";
+import { Clock, Data, Deferred, Effect, FileSystem, Layer, Option, Path, Schema } from "effect";
 import * as Semaphore from "effect/Semaphore";
 
 import { writeFileStringAtomically } from "../../atomicWrite.ts";
 import { ServerConfig } from "../../config.ts";
-import { ignoredFilesRefused, mayCarryIgnoredFiles } from "../callerChannel.ts";
+import {
+  ignoredFilesRefused,
+  mayCarryIgnoredFiles,
+  type ProjectCopyCallerChannel,
+} from "../callerChannel.ts";
 import { sha256File } from "../fileSha256.ts";
 import {
   type ClaimedProjectTransfer,
@@ -60,6 +73,16 @@ export const PROJECT_TRANSFERS_CAPACITY_BYTES = 512 * 1024 * 1024;
 const SWEEP_INTERVAL_MS = 5 * 60 * 1000;
 /** How stale an open transfer's sidecar `lastAppendAt` may get while chunks arrive. */
 const SIDECAR_REFRESH_MS = 60 * 1000;
+/** Appends of one transfer that may wait for the bytes before them; also how many chunks ahead. */
+export const PROJECT_TRANSFER_MAX_WAITING_APPENDS = 8;
+/** Raw bytes every waiting append of the node holds together. */
+export const PROJECT_TRANSFERS_MAX_WAITING_BYTES = 16 * 1024 * 1024;
+/**
+ * How long an append ahead waits for the bytes before it; then it fails with the gap. Long enough
+ * for the client to retry the missing chunk a few times, short enough that a client that gave up
+ * on it learns soon.
+ */
+export const PROJECT_TRANSFER_AHEAD_WAIT_MS = 15_000;
 
 const TransferSidecar = Schema.Struct({
   purpose: ProjectTransferPurpose,
@@ -480,7 +503,22 @@ export interface ProjectTransfersOptions {
   readonly ttlMs?: number;
   readonly capacityBytes?: number;
   readonly sweepIntervalMs?: number;
+  readonly aheadWaitMs?: number;
 }
+
+/** An append that waits, outside the transfer's lock, for the bytes before it. */
+interface AheadWaiter {
+  readonly woken: Deferred.Deferred<void>;
+  readonly bytes: number;
+}
+
+type AppendAttempt =
+  | { readonly _tag: "done"; readonly progress: ProjectTransferProgress }
+  | {
+      readonly _tag: "wait";
+      readonly transferId: ProjectTransferId;
+      readonly waiter: AheadWaiter;
+    };
 
 /**
  * Builds the transfer store over `<stateDir>`: recovers it from disk, sweeps it once, then every
@@ -491,12 +529,50 @@ export const makeProjectTransfers = Effect.fn("makeProjectTransfers")(function* 
 ) {
   const ttlMs = options.ttlMs ?? PROJECT_TRANSFER_TTL_MS;
   const capacityBytes = options.capacityBytes ?? PROJECT_TRANSFERS_CAPACITY_BYTES;
+  const aheadWaitMs = options.aheadWaitMs ?? PROJECT_TRANSFER_AHEAD_WAIT_MS;
   const dirs = projectTransferDirectories(options.stateDir);
   const paths = storePaths(dirs);
   const fileServices = yield* Effect.context<FileSystem.FileSystem | Path.Path>();
   const entries = new Map<ProjectTransferId, TransferEntry>();
   const registry = yield* Semaphore.make(1);
   const transferLocks = yield* makeKeyedSerialExecutor<ProjectTransferId>();
+  const waiters = new Map<ProjectTransferId, Set<AheadWaiter>>();
+  let waitingBytes = 0;
+
+  /** Registers an append ahead; null when a bound is reached. Call it holding the transfer's lock. */
+  const addWaiter = (transferId: ProjectTransferId, bytes: number): AheadWaiter | null => {
+    const waiting = waiters.get(transferId) ?? new Set<AheadWaiter>();
+    if (
+      waiting.size >= PROJECT_TRANSFER_MAX_WAITING_APPENDS ||
+      waitingBytes + bytes > PROJECT_TRANSFERS_MAX_WAITING_BYTES
+    ) {
+      return null;
+    }
+    const waiter: AheadWaiter = { woken: Deferred.makeUnsafe<void>(), bytes };
+    waiting.add(waiter);
+    waiters.set(transferId, waiting);
+    waitingBytes += bytes;
+    return waiter;
+  };
+
+  /** Forgets a waiter that timed out or was interrupted; a woken one is gone already. */
+  const dropWaiter = (transferId: ProjectTransferId, waiter: AheadWaiter) => {
+    const waiting = waiters.get(transferId);
+    if (waiting === undefined || !waiting.delete(waiter)) return;
+    waitingBytes -= waiter.bytes;
+    if (waiting.size === 0) waiters.delete(transferId);
+  };
+
+  /** The transfer changed (bytes arrived, or it was committed, reset or removed): look again. */
+  const wakeWaiters = (transferId: ProjectTransferId) => {
+    const waiting = waiters.get(transferId);
+    if (waiting === undefined) return;
+    waiters.delete(transferId);
+    for (const waiter of waiting) {
+      waitingBytes -= waiter.bytes;
+      Deferred.doneUnsafe(waiter.woken, Effect.void);
+    }
+  };
 
   /** Holds the locks of `ids` in id order, so two claims can never wait on each other. */
   const withTransferLocks = <A, E>(
@@ -532,7 +608,10 @@ export const makeProjectTransfers = Effect.fn("makeProjectTransfers")(function* 
 
   /** Deletes an unclaimed transfer's files; its sidecar goes first, so a crash leaves only orphans. */
   const removeTransfer = (entry: TransferEntry) =>
-    Effect.sync(() => entries.delete(entry.transferId)).pipe(
+    Effect.sync(() => {
+      entries.delete(entry.transferId);
+      wakeWaiters(entry.transferId);
+    }).pipe(
       Effect.andThen(
         removeFiles("delete a transfer", [
           paths.sidecar(entry.transferId),
@@ -587,7 +666,11 @@ export const makeProjectTransfers = Effect.fn("makeProjectTransfers")(function* 
         )
       : Effect.fail(transferError("invalid", "A transfer id must be a lowercase version 4 UUID."));
 
-  const begin: ProjectTransfersShape["begin"] = (input, channel) =>
+  const begin: ProjectTransfersShape["begin"] = (
+    input,
+    channel,
+    maxChunkBytes = PROJECT_COPY_DIRECT_CHUNK_BYTES,
+  ) =>
     withTransfer(input.transferId, (transferId) =>
       Effect.gen(function* () {
         if (!isPurpose(input.purpose) || !isSha256(input.sha256)) {
@@ -620,7 +703,7 @@ export const makeProjectTransfers = Effect.fn("makeProjectTransfers")(function* 
               `Transfer ${transferId} was begun with a different purpose, length, sha-256 or content.`,
             );
           }
-          return progressOf(existing);
+          return { ...progressOf(existing), maxChunkBytes };
         }
         // This transfer is not in the index, so the sweep never waits on the lock held here.
         if (reservedBytes() + input.byteLength > capacityBytes) yield* sweepExpired;
@@ -653,11 +736,21 @@ export const makeProjectTransfers = Effect.fn("makeProjectTransfers")(function* 
           Effect.andThen(Effect.sync(() => entries.set(transferId, entry))),
           Effect.uninterruptible,
         );
-        return progressOf(entry);
+        return { ...progressOf(entry), maxChunkBytes };
       }),
     ).pipe(registry.withPermits(1));
 
-  const append: ProjectTransfersShape["append"] = (input, channel) =>
+  /**
+   * One try at an append, holding the transfer's lock. A chunk a little ahead of `receivedBytes`
+   * is registered to wait (when `mayWait` and the bounds allow) instead of failing with the gap.
+   */
+  const appendOnce = (
+    input: ProjectTransferAppendInput,
+    data: Buffer,
+    channel: ProjectCopyCallerChannel | undefined,
+    maxChunkBytes: number,
+    mayWait: boolean,
+  ): Effect.Effect<AppendAttempt, ProjectCopyError> =>
     withTransfer(input.transferId, (transferId) =>
       Effect.gen(function* () {
         const entry = entries.get(transferId);
@@ -669,11 +762,10 @@ export const makeProjectTransfers = Effect.fn("makeProjectTransfers")(function* 
         if (entry.state !== "open") {
           return yield* transferError("conflict", `Transfer ${transferId} is already committed.`);
         }
-        const data = Buffer.from(input.dataBase64, "base64");
-        if (data.byteLength === 0 || data.byteLength > PROJECT_COPY_CHUNK_BYTES) {
+        if (data.byteLength === 0 || data.byteLength > maxChunkBytes) {
           return yield* transferError(
             "invalid",
-            `A chunk must hold 1 to ${PROJECT_COPY_CHUNK_BYTES} bytes.`,
+            `A chunk must hold 1 to ${maxChunkBytes} bytes over this connection.`,
             entry.receivedBytes,
           );
         }
@@ -691,6 +783,13 @@ export const makeProjectTransfers = Effect.fn("makeProjectTransfers")(function* 
           );
         }
         if (input.offset > entry.receivedBytes) {
+          const waiter =
+            mayWait &&
+            input.offset - entry.receivedBytes <=
+              PROJECT_TRANSFER_MAX_WAITING_APPENDS * PROJECT_COPY_DIRECT_CHUNK_BYTES
+              ? addWaiter(transferId, data.byteLength)
+              : null;
+          if (waiter !== null) return { _tag: "wait", transferId, waiter } as const;
           return yield* transferError(
             "invalid",
             `Transfer ${transferId} holds ${entry.receivedBytes} bytes; resume there.`,
@@ -709,6 +808,7 @@ export const makeProjectTransfers = Effect.fn("makeProjectTransfers")(function* 
             written === "appended"
               ? Effect.sync(() => {
                   entry.receivedBytes = input.offset + data.byteLength;
+                  wakeWaiters(transferId);
                 })
               : Effect.void,
           ),
@@ -727,9 +827,30 @@ export const makeProjectTransfers = Effect.fn("makeProjectTransfers")(function* 
           // Only the TTL reads it, and the data file's mtime backs it up: never fail a chunk.
           yield* writeSidecar(entry).pipe(Effect.ignore);
         }
-        return progressOf(entry);
+        return { _tag: "done", progress: progressOf(entry) } as const;
       }),
     );
+
+  const append: ProjectTransfersShape["append"] = (
+    input,
+    channel,
+    maxChunkBytes = PROJECT_COPY_DIRECT_CHUNK_BYTES,
+  ) =>
+    Effect.gen(function* () {
+      const data = Buffer.from(input.dataBase64, "base64");
+      const deadlineMs = (yield* Clock.currentTimeMillis) + aheadWaitMs;
+      for (;;) {
+        const nowMs = yield* Clock.currentTimeMillis;
+        const attempt = yield* appendOnce(input, data, channel, maxChunkBytes, nowMs < deadlineMs);
+        if (attempt._tag === "done") return attempt.progress;
+        const { transferId, waiter } = attempt;
+        // Woken when the transfer changed; after the deadline the next try fails with the gap.
+        yield* Deferred.await(waiter.woken).pipe(
+          Effect.timeoutOption(Math.max(0, deadlineMs - nowMs)),
+          Effect.ensuring(Effect.sync(() => dropWaiter(transferId, waiter))),
+        );
+      }
+    });
 
   const commit: ProjectTransfersShape["commit"] = (input) =>
     withTransfer(input.transferId, (transferId) =>
@@ -754,6 +875,7 @@ export const makeProjectTransfers = Effect.fn("makeProjectTransfers")(function* 
             Effect.andThen(
               Effect.sync(() => {
                 entry.receivedBytes = 0;
+                wakeWaiters(transferId);
               }),
             ),
             Effect.uninterruptible,
@@ -772,6 +894,7 @@ export const makeProjectTransfers = Effect.fn("makeProjectTransfers")(function* 
             Effect.sync(() => {
               entry.state = "committed";
               entry.lastAppendAtMs = committedAtMs;
+              wakeWaiters(transferId);
             }),
           ),
           Effect.uninterruptible,

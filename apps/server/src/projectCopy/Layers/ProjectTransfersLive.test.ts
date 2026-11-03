@@ -6,6 +6,7 @@ import path from "node:path";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import {
   PROJECT_COPY_CHUNK_BYTES,
+  PROJECT_COPY_DIRECT_CHUNK_BYTES,
   PROJECT_COPY_MAX_ARTIFACT_BYTES,
   PROJECT_COPY_MAX_AVATAR_BYTES,
   type ProjectImportId,
@@ -13,13 +14,18 @@ import {
   type ProjectTransferPurpose,
 } from "@ryco/contracts/project-copy";
 import { it } from "@effect/vitest";
-import { Duration, Effect } from "effect";
+import { Duration, Effect, Fiber } from "effect";
 import { TestClock } from "effect/testing";
 import { describe, expect } from "vite-plus/test";
 
 import { PROJECT_IMPORTS_DIRECTORY, PROJECT_TRANSFERS_DIRECTORY } from "../projectCopyStartup.ts";
 import type { ProjectTransfersShape } from "../Services/ProjectTransfers.ts";
-import { type ProjectTransfersOptions, makeProjectTransfers } from "./ProjectTransfersLive.ts";
+import {
+  PROJECT_TRANSFER_AHEAD_WAIT_MS,
+  PROJECT_TRANSFER_MAX_WAITING_APPENDS,
+  type ProjectTransfersOptions,
+  makeProjectTransfers,
+} from "./ProjectTransfersLive.ts";
 
 const sha256 = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 const newTransferId = () => randomUUID() as ProjectTransferId;
@@ -86,6 +92,7 @@ describe("ProjectTransfersLive", () => {
       expect(yield* beginFor(transfers, transferId, bytes)).toEqual({
         transferId,
         receivedBytes: 0,
+        maxChunkBytes: PROJECT_COPY_DIRECT_CHUNK_BYTES,
       });
       expect(yield* appendAll(transfers, transferId, bytes)).toBe(bytes.byteLength);
       expect(yield* transfers.commit({ transferId })).toEqual({
@@ -135,6 +142,7 @@ describe("ProjectTransfersLive", () => {
       expect(yield* beginFor(transfers, transferId, bytes)).toEqual({
         transferId,
         receivedBytes: 2000,
+        maxChunkBytes: PROJECT_COPY_DIRECT_CHUNK_BYTES,
       });
       for (const changed of [
         { purpose: "changes-patch" as const, byteLength: bytes.byteLength, sha256: sha256(bytes) },
@@ -268,7 +276,8 @@ describe("ProjectTransfersLive", () => {
 
   it.effect("appends only at receivedBytes and treats rewritten ranges by their bytes", () =>
     Effect.gen(function* () {
-      const transfers = yield* openStore(makeStateDir());
+      // No waiting for the bytes before a chunk here: a gap fails at once.
+      const transfers = yield* openStore(makeStateDir(), { aheadWaitMs: 0 });
       const bytes = randomBytes(3000);
       const transferId = newTransferId();
       yield* beginFor(transfers, transferId, bytes);
@@ -344,6 +353,134 @@ describe("ProjectTransfersLive", () => {
       });
 
       expect((yield* beginFor(transfers, transferId, bytes)).receivedBytes).toBe(bytes.byteLength);
+      expect((yield* transfers.commit({ transferId })).sha256).toBe(sha256(bytes));
+    }),
+  );
+
+  it.effect("takes chunks that arrive a little early once the bytes before them land", () =>
+    Effect.gen(function* () {
+      const stateDir = makeStateDir();
+      const transfers = yield* openStore(stateDir);
+      const chunkBytes = 1000;
+      const bytes = randomBytes(chunkBytes * 5);
+      const transferId = newTransferId();
+      yield* beginFor(transfers, transferId, bytes);
+      const send = (offset: number) =>
+        transfers.append({ transferId, offset, dataBase64: chunk(bytes, offset, chunkBytes) });
+
+      // Chunks 4, 3, 2 and 1 arrive before chunk 0: each waits instead of failing.
+      const early = yield* Effect.forEach([4, 3, 2, 1], (index) =>
+        send(index * chunkBytes).pipe(Effect.forkChild),
+      );
+      yield* Effect.repeat(Effect.yieldNow, { times: 20 });
+      const held = fs.statSync(path.join(transfersDir(stateDir), `${transferId}.part`)).size;
+      expect(held).toBe(0);
+      expect(early.map((fiber) => fiber.pollUnsafe())).toEqual([
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+      ]);
+      // A duplicate of a waiting chunk waits too, and lands as a no-op.
+      const duplicate = yield* send(2 * chunkBytes).pipe(Effect.forkChild);
+      expect((yield* send(0)).receivedBytes).toBe(chunkBytes);
+      const answers = yield* Fiber.joinAll([...early, duplicate]);
+      // Each answers once the node holds its bytes (a duplicate may have written them first).
+      const ends = [5, 4, 3, 2, 3].map((index) => index * chunkBytes);
+      answers.forEach((answer, index) => {
+        expect(answer.receivedBytes).toBeGreaterThanOrEqual(ends[index]!);
+      });
+      expect((yield* transfers.commit({ transferId })).sha256).toBe(sha256(bytes));
+    }),
+  );
+
+  it.effect("fails a gap past its bounds at once, and one that does not close in time", () =>
+    Effect.gen(function* () {
+      const transfers = yield* openStore(makeStateDir());
+      const bytes = randomBytes(PROJECT_COPY_DIRECT_CHUNK_BYTES * 12);
+      const transferId = newTransferId();
+      yield* beginFor(transfers, transferId, bytes);
+      const send = (offset: number, length = 1000) =>
+        transfers.append({ transferId, offset, dataBase64: chunk(bytes, offset, length) });
+      yield* send(0);
+
+      // Further ahead than the waiting window: refused with where to resume.
+      const far = 1000 + PROJECT_TRANSFER_MAX_WAITING_APPENDS * PROJECT_COPY_DIRECT_CHUNK_BYTES + 1;
+      expect(yield* Effect.flip(send(far))).toMatchObject({ code: "invalid", receivedBytes: 1000 });
+
+      // At most so many wait at once; the next one is refused at once.
+      const waiting = yield* Effect.forEach(
+        Array.from({ length: PROJECT_TRANSFER_MAX_WAITING_APPENDS }, (_, index) => 2000 + index),
+        (offset) => send(offset, 1).pipe(Effect.flip, Effect.forkChild),
+      );
+      yield* Effect.repeat(Effect.yieldNow, { times: 20 });
+      expect(waiting.every((fiber) => fiber.pollUnsafe() === undefined)).toBe(true);
+      expect(yield* Effect.flip(send(5000, 1))).toMatchObject({
+        code: "invalid",
+        receivedBytes: 1000,
+      });
+
+      // The bytes before them never come: after the wait each fails with the gap.
+      yield* TestClock.adjust(Duration.millis(PROJECT_TRANSFER_AHEAD_WAIT_MS));
+      const failures = yield* Fiber.joinAll(waiting);
+      for (const failure of failures) {
+        expect(failure).toMatchObject({ code: "invalid", receivedBytes: 1000 });
+      }
+      // The slots are free again, and the transfer resumes where it stands.
+      expect((yield* send(1000)).receivedBytes).toBe(2000);
+    }),
+  );
+
+  it.effect("wakes a waiting chunk with the transfer's end when it is aborted", () =>
+    Effect.gen(function* () {
+      const transfers = yield* openStore(makeStateDir());
+      const bytes = randomBytes(3000);
+      const transferId = newTransferId();
+      yield* beginFor(transfers, transferId, bytes);
+      const waiting = yield* transfers
+        .append({ transferId, offset: 1000, dataBase64: chunk(bytes, 1000, 1000) })
+        .pipe(Effect.flip, Effect.forkChild);
+      yield* Effect.repeat(Effect.yieldNow, { times: 20 });
+      expect(waiting.pollUnsafe()).toBeUndefined();
+      yield* transfers.abort({ transferId });
+      expect((yield* Fiber.join(waiting)).code).toBe("not-found");
+    }),
+  );
+
+  it.effect("takes 1 MiB chunks only from a caller whose connection carries them", () =>
+    Effect.gen(function* () {
+      const transfers = yield* openStore(makeStateDir());
+      const bytes = randomBytes(PROJECT_COPY_DIRECT_CHUNK_BYTES * 2);
+      const transferId = newTransferId();
+      const relayed = yield* transfers.begin(
+        {
+          transferId,
+          purpose: "commits-bundle",
+          byteLength: bytes.byteLength,
+          sha256: sha256(bytes),
+        },
+        "encrypted",
+        PROJECT_COPY_CHUNK_BYTES,
+      );
+      expect(relayed.maxChunkBytes).toBe(PROJECT_COPY_CHUNK_BYTES);
+      const big = {
+        transferId,
+        offset: 0,
+        dataBase64: chunk(bytes, 0, PROJECT_COPY_DIRECT_CHUNK_BYTES),
+      };
+      expect(
+        yield* Effect.flip(transfers.append(big, "encrypted", PROJECT_COPY_CHUNK_BYTES)),
+      ).toMatchObject({ code: "invalid", receivedBytes: 0 });
+      expect((yield* transfers.append(big, "encrypted")).receivedBytes).toBe(
+        PROJECT_COPY_DIRECT_CHUNK_BYTES,
+      );
+      yield* appendAll(
+        transfers,
+        transferId,
+        bytes,
+        PROJECT_COPY_DIRECT_CHUNK_BYTES,
+        PROJECT_COPY_DIRECT_CHUNK_BYTES,
+      );
       expect((yield* transfers.commit({ transferId })).sha256).toBe(sha256(bytes));
     }),
   );

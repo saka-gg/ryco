@@ -3,6 +3,7 @@
 // model. Used by the copy and add-project dialogs and the Agent Control client executor.
 export * from "./io.ts";
 export * from "./jobRecord.ts";
+export * from "./pipeline.ts";
 export * from "./plan.ts";
 export * from "./run.ts";
 // The remote-URL rules the nodes enforce, so the client plans with the same ones.

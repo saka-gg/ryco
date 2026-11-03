@@ -197,3 +197,18 @@ export const waitFor = (
       yield* Effect.sleep(Duration.millis(50));
     }
   });
+
+/**
+ * Runs `call` with `latencyMs` of wall-clock delay, half before and half after, like a client far
+ * from the node. Only for the opt-in throughput benchmark: the delay is what it measures.
+ */
+export const withSimulatedLatency = async <T>(
+  latencyMs: number,
+  call: () => Promise<T>,
+): Promise<T> => {
+  const delay = () => new Promise<void>((resolve) => setTimeout(resolve, latencyMs / 2));
+  await delay();
+  const result = await call();
+  await delay();
+  return result;
+};

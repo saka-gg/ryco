@@ -56,10 +56,23 @@ export * from "./projectCopyPrimitives.ts";
 
 // ── Limits ────────────────────────────────────────────────────────────
 
-/** Raw bytes per chunk: its base64 (≈213 KiB) fits one 256 KiB relay data chunk. */
+/**
+ * Raw bytes per chunk that every node takes over any connection: its base64 (≈213 KiB) fits one
+ * 256 KiB relay data chunk.
+ */
 export const PROJECT_COPY_CHUNK_BYTES = 160 * 1024;
 /** Base64 characters of one full chunk. */
 export const PROJECT_COPY_CHUNK_BASE64_MAX_CHARS = Math.ceil(PROJECT_COPY_CHUNK_BYTES / 3) * 4;
+/**
+ * The largest raw chunk over a direct connection. A node announces what it takes and serves over
+ * the caller's connection as `maxChunkBytes` in its `projects.exportStart` and
+ * `projects.transferBegin` answers: this over a direct connection, `PROJECT_COPY_CHUNK_BYTES`
+ * over the relay. Older nodes announce nothing and take `PROJECT_COPY_CHUNK_BYTES`.
+ */
+export const PROJECT_COPY_DIRECT_CHUNK_BYTES = 1024 * 1024;
+/** Base64 characters of one full direct chunk. */
+export const PROJECT_COPY_DIRECT_CHUNK_BASE64_MAX_CHARS =
+  Math.ceil(PROJECT_COPY_DIRECT_CHUNK_BYTES / 3) * 4;
 /** Per bundle or patch transfer, on a direct connection. */
 export const PROJECT_COPY_MAX_ARTIFACT_BYTES = 256 * 1024 * 1024;
 /**
@@ -140,8 +153,9 @@ export type ProjectCopyRelativePath = typeof ProjectCopyRelativePath.Type;
 export const ProjectCopyRelativeRoot = Schema.Union([Schema.Literal(""), ProjectCopyRelativePath]);
 export type ProjectCopyRelativeRoot = typeof ProjectCopyRelativeRoot.Type;
 
+// The node checks a chunk against the limit of the caller's connection (`maxChunkBytes`).
 const Base64Chunk = Schema.String.check(
-  Schema.isMaxLength(PROJECT_COPY_CHUNK_BASE64_MAX_CHARS),
+  Schema.isMaxLength(PROJECT_COPY_DIRECT_CHUNK_BASE64_MAX_CHARS),
   Schema.isPattern(/^[A-Za-z0-9+/]*={0,2}$/),
 );
 
@@ -451,6 +465,11 @@ export const ProjectExportResult = Schema.Struct({
   skipped: Schema.Array(ProjectExportSkippedArtifact),
   /** Artifacts are deleted 30 minutes after the last read, or on dispose. */
   expiresAt: IsoDateTime,
+  /**
+   * The largest `length` `projects.exportReadChunk` serves over the caller's connection; absent
+   * on older nodes, which serve `PROJECT_COPY_CHUNK_BYTES`.
+   */
+  maxChunkBytes: Schema.optional(PositiveInt),
 });
 export type ProjectExportResult = typeof ProjectExportResult.Type;
 
@@ -458,7 +477,8 @@ export const ProjectExportReadChunkInput = Schema.Struct({
   exportId: ProjectExportId,
   artifactId: ProjectExportArtifactId,
   offset: NonNegativeInt,
-  length: PositiveInt.check(Schema.isLessThanOrEqualTo(PROJECT_COPY_CHUNK_BYTES)),
+  /** At most the `maxChunkBytes` the export's start announced (`PROJECT_COPY_CHUNK_BYTES` if none). */
+  length: PositiveInt.check(Schema.isLessThanOrEqualTo(PROJECT_COPY_DIRECT_CHUNK_BYTES)),
 }).pipe(rejectExcessProperties);
 export type ProjectExportReadChunkInput = typeof ProjectExportReadChunkInput.Type;
 
@@ -502,12 +522,19 @@ export type ProjectTransferBeginInput = typeof ProjectTransferBeginInput.Type;
 export const ProjectTransferProgress = Schema.Struct({
   transferId: ProjectTransferId,
   receivedBytes: NonNegativeInt,
+  /**
+   * In `projects.transferBegin`'s answer: the largest chunk `projects.transferAppend` takes over
+   * the caller's connection. Absent on older nodes, which take `PROJECT_COPY_CHUNK_BYTES`.
+   */
+  maxChunkBytes: Schema.optional(PositiveInt),
 });
 export type ProjectTransferProgress = typeof ProjectTransferProgress.Type;
 
 /**
  * Appends at `offset == receivedBytes`. A range already written is a no-op when
- * its bytes match and a `conflict` when they differ; a gap fails with the node's
+ * its bytes match and a `conflict` when they differ. A chunk a few chunks ahead
+ * (sent while the ones before it are in flight) waits a while for them; a
+ * bigger gap, or one that does not close in time, fails with the node's
  * `receivedBytes`.
  */
 export const ProjectTransferAppendInput = Schema.Struct({
