@@ -71,6 +71,8 @@ import {
   SettingsRow,
   SettingsRowChipProvider,
   SettingsSection,
+  SHARED_ROWS_ONLY_CHILDREN_CLASS,
+  SharedRowsOnlyProvider,
   useRelativeLabelTick,
 } from "./settingsLayout";
 
@@ -86,6 +88,12 @@ export interface SettingsPartsValue {
   readonly primaryEnvironmentId: EnvironmentId | null;
   /** Called after a restore resets values, so the section remounts. */
   readonly onRestored: () => void;
+  /**
+   * "All devices" while the device bar's device cannot be used and `target` is another device
+   * this client may write now: device parts show only their shared rows (`SharedRowsOnlyProvider`),
+   * and parts stored on one device wait for it.
+   */
+  readonly sharedRowsOnly?: boolean;
 }
 
 const SettingsPartsContext = createContext<SettingsPartsValue | null>(null);
@@ -129,11 +137,13 @@ function DevicePart({
   readonly chip?: boolean;
   readonly children: ReactNode;
 }) {
-  const { reach, target } = useSettingsParts();
+  const { reach, target, sharedRowsOnly = false } = useSettingsParts();
   const { targetLabel } = useSharedSettingsMode();
+  // Archived threads and the like belong to one device: they wait for the device bar's device.
+  if (sharedRowsOnly && storage !== "device") return null;
   if (!settingsStorageReachable(storage, reach) || !settingsDeviceReady(target)) return null;
   // While "All devices" shows, a row that is not shared still edits the chosen device.
-  const rowChip = !chip ? null : targetLabel === null ? (
+  const rowChip = !chip ? null : targetLabel === null || sharedRowsOnly ? (
     PER_DEVICE_CHIP
   ) : (
     <SettingsChip icon={<LayersIcon aria-hidden />}>On {targetLabel}</SettingsChip>
@@ -141,7 +151,15 @@ function DevicePart({
   return (
     <SettingsEditingScopeProvider value="node">
       <SettingsTargetProvider value={target}>
-        <SettingsRowChipProvider value={rowChip}>{children}</SettingsRowChipProvider>
+        <SettingsRowChipProvider value={rowChip}>
+          <SharedRowsOnlyProvider value={sharedRowsOnly}>
+            {sharedRowsOnly ? (
+              <div className={SHARED_ROWS_ONLY_CHILDREN_CLASS}>{children}</div>
+            ) : (
+              children
+            )}
+          </SharedRowsOnlyProvider>
+        </SettingsRowChipProvider>
       </SettingsTargetProvider>
     </SettingsEditingScopeProvider>
   );

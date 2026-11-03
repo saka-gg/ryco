@@ -1,12 +1,4 @@
 import { resolveAutoSettleAfterDays } from "@ryco/shared/threadSettlement";
-import {
-  nodeAutoSettleRulePatch,
-  nodeOwnsAutoSettleRule,
-} from "@ryco/client-runtime/state/settings";
-import {
-  applyNodeSettingsPatch,
-  describeNodeSettingsApplyResult,
-} from "@ryco/client-runtime/state/settings/nodeSettingsFanOut";
 import type { EnvironmentId } from "@ryco/contracts";
 import {
   SIDEBAR_AUTO_SETTLE_DAY_OPTIONS,
@@ -32,6 +24,8 @@ import {
   changeAutoSettleRuleModel,
 } from "./autoSettleRuleModel";
 import { buildNodeSettingsTargets } from "./nodeSettingsTargets";
+import { mobileSettingsSharing } from "./sharing/mobileSettingsSharing";
+import { saveNodeSharedSetting, applySharedSettingToAllNodes } from "./sharing/sharedSettingEdits";
 
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : "An unexpected error occurred.";
@@ -98,6 +92,18 @@ export function SettingsInboxRouteScreen() {
     deviceValue: deviceAutoSettleAfterDays,
   });
   const editingRuleNode = ruleModel.editing;
+  // Every node, as a write target: the rule is a shared setting, stamped against all of them.
+  const ruleTargets = buildNodeSettingsTargets({
+    environmentIds: [...nodeLabels.keys(), ...configs.keys()],
+    configs,
+    labelOf: (environmentId) =>
+      nodeLabels.get(environmentId) ??
+      configs.get(environmentId)?.environment.label ??
+      environmentId,
+    isOwner: isNodeOwner,
+    isConnected: isNodeConnected,
+    write: updateEnvironmentServerSettings,
+  });
 
   const setAutoSettleRule = (value: SidebarAutoSettleAfterDays) => {
     setRuleStatus(null);
@@ -105,7 +111,14 @@ export function SettingsInboxRouteScreen() {
     const writesNode = editingRuleNode !== null;
     if (writesNode) setRuleBusy(true);
     void changeAutoSettleRuleModel(ruleModel, value, {
-      writeNode: updateEnvironmentServerSettings,
+      writeNode: (environmentId, next) =>
+        saveNodeSharedSetting({
+          runtime: mobileSettingsSharing,
+          targets: ruleTargets,
+          environmentId,
+          key: "threadAutoSettleAfterDays",
+          value: next,
+        }),
       writeDevice: (sidebarAutoSettleAfterDays) =>
         updatePreferences({ sidebarAutoSettleAfterDays }),
     })
@@ -117,24 +130,17 @@ export function SettingsInboxRouteScreen() {
       });
   };
 
+  // One shared write: every node this device may change takes it now, the rest on reconnect.
   const applyRuleToAllNodes = () => {
     setRuleBusy(true);
     setRuleStatus(null);
-    const targets = buildNodeSettingsTargets({
-      environmentIds: [...nodeLabels.keys(), ...configs.keys()],
-      configs,
-      labelOf: (environmentId) =>
-        nodeLabels.get(environmentId) ??
-        configs.get(environmentId)?.environment.label ??
-        environmentId,
-      isOwner: isNodeOwner,
-      isConnected: isNodeConnected,
-      write: updateEnvironmentServerSettings,
-    });
-    void applyNodeSettingsPatch(targets, nodeAutoSettleRulePatch(ruleModel.value), {
-      supported: nodeOwnsAutoSettleRule,
+    void applySharedSettingToAllNodes({
+      runtime: mobileSettingsSharing,
+      targets: ruleTargets,
+      key: "threadAutoSettleAfterDays",
+      value: ruleModel.value,
     })
-      .then((result) => setRuleStatus(describeNodeSettingsApplyResult(result)))
+      .then(setRuleStatus, (error: unknown) => setRuleStatus(errorMessage(error)))
       .finally(() => setRuleBusy(false));
   };
 
@@ -191,9 +197,10 @@ export function SettingsInboxRouteScreen() {
         ))}
         {knownNodeCount > 1 || ruleStatus !== null ? (
           <SettingsRow
-            label="Apply to all connected nodes"
+            label="Use on every node"
             detail={
-              ruleStatus ?? "Gives every node this device can change the rule selected above."
+              ruleStatus ??
+              "Shares the rule selected above with every node. Offline nodes take it when they reconnect."
             }
             value={ruleBusy ? "Applying…" : undefined}
             disabled={ruleBusy}

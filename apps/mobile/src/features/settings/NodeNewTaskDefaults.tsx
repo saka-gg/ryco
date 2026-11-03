@@ -1,7 +1,7 @@
 import { type ReactNode, useLayoutEffect, useMemo, useState, useSyncExternalStore } from "react";
 import { Alert, Pressable, ScrollView, View } from "react-native";
 import { useShallow } from "zustand/react/shallow";
-import type { NodeSettingsTarget } from "@ryco/client-runtime/state/settings/nodeSettingsFanOut";
+import type { NodeSettingsTarget } from "@ryco/client-runtime/state/settings/nodeSettingsTargets";
 import type { EnvironmentId, ProjectId, ServerConfig } from "@ryco/contracts";
 
 import { AppText as Text, AppTextInput } from "../../components/AppText";
@@ -32,19 +32,22 @@ import {
   nodeConnected,
   nodeSettingsReadOnlyReason,
 } from "./nodeSettingsTargets";
+import { mobileSettingsSharing } from "./sharing/mobileSettingsSharing";
+import { applySharedSettingToAllNodes, saveNodeSharedSetting } from "./sharing/sharedSettingEdits";
 
 const APPLY_DETAIL =
-  "Writes one of this node's defaults to every connected node you own. Offline nodes keep their value. The model stays per node.";
+  "Shares one of this node's defaults with every node. Offline nodes take it when they reconnect. The model stays per node.";
 
 /**
  * One "New tasks" panel per node: the defaults a new task on it starts with, and each project's
- * overrides. Edits go to that node only, and only from its owner.
+ * overrides. Edits go to that node only (a shared default becomes its own value), and only from
+ * its owner; "Use on every node" shares a default with every node.
  */
 export function NodeNewTaskDefaults() {
   const nodes = useHomeEnvironments();
   const configs = useEnvironmentServerConfigs();
-  // Every known node, for "Apply to all connected nodes": each writes through its own
-  // connection and compares its own values.
+  // Every known node, for the shared defaults: an edit is stamped against all of them, and "Use
+  // on every node" writes each one through its own connection.
   const targets = useMemo(
     () => homeNodeSettingsTargets({ nodes, configs, write: updateEnvironmentServerSettings }),
     [configs, nodes],
@@ -85,6 +88,16 @@ function NodeNewTaskDefaultsPanel(props: {
     () =>
       createNewTaskDefaultsController({
         write: (patch) => updateEnvironmentServerSettings(environmentId, patch),
+        writeShared: (targets, key, value) =>
+          saveNodeSharedSetting({
+            runtime: mobileSettingsSharing,
+            targets,
+            environmentId,
+            key,
+            value,
+          }),
+        applyEverywhere: (targets, key, value) =>
+          applySharedSettingToAllNodes({ runtime: mobileSettingsSharing, targets, key, value }),
       }),
     [environmentId],
   );
@@ -95,8 +108,8 @@ function NodeNewTaskDefaultsPanel(props: {
   const [selected, setSelected] = useState<ProjectId | null>(null);
   const projectId = resolveNewTaskDefaultsScope(selected, scopes);
   useLayoutEffect(() => {
-    controller.setInput({ label, config, api, editable, projectId });
-  }, [api, config, controller, editable, label, projectId]);
+    controller.setInput({ label, config, api, editable, projectId, targets: props.targets });
+  }, [api, config, controller, editable, label, projectId, props.targets]);
   const state = useSyncExternalStore(
     controller.subscribe,
     controller.getSnapshot,
@@ -181,7 +194,7 @@ function NodeNewTaskDefaultsPanel(props: {
       />
       {applyChoices.length > 0 || view.applyStatus !== null ? (
         <SettingsRow
-          label="Apply to all connected nodes"
+          label="Use on every node"
           value={state.applying ? "Applying…" : undefined}
           detail={view.applyStatus ?? APPLY_DETAIL}
           disabled={!view.canApply || applyChoices.length === 0}
@@ -192,12 +205,12 @@ function NodeNewTaskDefaultsPanel(props: {
         ? applyChoices.map((choice) => (
             <SettingsRow
               key={`apply:${choice.key}`}
-              label={`Apply ${choice.title.toLowerCase()}: ${choice.value}`}
+              label={`Use ${choice.title.toLowerCase()}: ${choice.value}`}
               detail={choice.detail}
               disabled={!view.canApply}
               onPress={() => {
                 setApplyOpen(false);
-                void controller.applyToAllNodes(choice.key, props.targets);
+                void controller.applyToAllNodes(choice.key);
               }}
             />
           ))

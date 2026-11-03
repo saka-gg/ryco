@@ -29,6 +29,7 @@ import {
   SettingsSection,
   SettingsRow as LayoutSettingsRow,
   SettingsRowChipProvider,
+  SharedRowScope,
   useSettingsRowChip,
 } from "../settingsLayout";
 import {
@@ -405,6 +406,17 @@ export function useSharedSettingWriter<K extends ShareableServerSettingKey>(
 export function SharedSettingRow<K extends ShareableServerSettingKey>(
   props: SharedSettingRowProps<K>,
 ) {
+  // Shown while only shared rows may (All devices, the device shown unusable).
+  return (
+    <SharedRowScope>
+      <SharedSettingRowBody {...props} />
+    </SharedRowScope>
+  );
+}
+
+function SharedSettingRowBody<K extends ShareableServerSettingKey>(
+  props: SharedSettingRowProps<K>,
+) {
   const { render } = props;
   const { key, model, setOpen, busy, notes, send, format, display, showDevice } =
     useSharedSettingState(props);
@@ -515,7 +527,12 @@ export function SharedSettingRow<K extends ShareableServerSettingKey>(
       sharing: editor ? withStatus(singleStatus) : null,
       known: device.knowsSetting,
     });
-    if (editor) return <div id={sharedSettingRowId(key)}>{control}</div>;
+    if (editor)
+      return (
+        <div id={sharedSettingRowId(key)} data-shared-setting>
+          {control}
+        </div>
+      );
     return (
       <SettingsRow
         id={sharedSettingRowId(key)}
@@ -574,7 +591,12 @@ export function SharedSettingRow<K extends ShareableServerSettingKey>(
       sharing: editor ? sameStatus : null,
       known: true,
     });
-    if (editor) return <div id={sharedSettingRowId(key)}>{control}</div>;
+    if (editor)
+      return (
+        <div id={sharedSettingRowId(key)} data-shared-setting>
+          {control}
+        </div>
+      );
     return (
       <SettingsRow
         id={sharedSettingRowId(key)}

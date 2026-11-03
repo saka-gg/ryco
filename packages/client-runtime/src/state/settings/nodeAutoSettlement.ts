@@ -32,10 +32,7 @@ export function nodeAwaitsAutoSettleRule(config: NodeConfig | null | undefined):
   );
 }
 
-/**
- * The settings patch that sets a node's rule. Applied to every node through
- * `applyNodeSettingsPatch` with {@link nodeOwnsAutoSettleRule} as `supported`.
- */
+/** The settings patch that sets one node's rule as a plain edit of that node. */
 export function nodeAutoSettleRulePatch(value: SidebarAutoSettleAfterDays): ServerSettingsPatch {
   return { threadAutoSettleAfterDays: value };
 }

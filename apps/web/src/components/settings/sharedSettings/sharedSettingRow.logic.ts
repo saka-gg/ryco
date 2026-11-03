@@ -4,8 +4,9 @@ import type {
   NodeSettingsConfig,
 } from "@ryco/client-runtime/state/settings/nodeSettingsTargets";
 import {
+  editDeviceSetting,
   resetSettingToShared,
-  setSettingOverride,
+  sharedDeviceValuesAgree,
   useSettingEverywhere as settingEverywhereCommand,
   writeSharedSetting,
   type SettingsSharingCache,
@@ -16,7 +17,6 @@ import {
 } from "@ryco/client-runtime/state/settings/sharedDeviceSettings";
 import type { SettingsSharingStamp } from "@ryco/contracts/settings";
 import {
-  compareSharingStamps,
   shareableSettingValuesEqual,
   type ShareableServerSettingKey,
   type ShareableSettingValue,
@@ -36,7 +36,10 @@ export interface SharedRowDevice<K extends ShareableServerSettingKey> {
   readonly environmentId: EnvironmentId;
   readonly label: string;
   readonly connected: boolean;
-  /** Its own value from its last known config; undefined while none is known. */
+  /**
+   * Its own value from its last known config, as written (a shared path reads `~/w`, not the
+   * device's `/Users/me/w`); undefined while none is known.
+   */
   readonly value: ShareableSettingValue<K> | undefined;
   readonly state: SharedSettingDeviceState;
   /** This client may change its value now (connected, writable, and it knows the setting). */
@@ -86,31 +89,17 @@ function shownValue<K extends ShareableServerSettingKey>(
 ): ShareableSettingValue<K> | undefined {
   const { kind } = device.state;
   if ((kind === "queued" || kind === "syncing") && view.newest !== null) return view.newest.value;
-  return device.value;
+  return device.written;
 }
 
-/**
- * Whether two devices agree: the same value, or both shared on the same write. A device stores
- * a path the way it normalized it (`~/` expanded, symlinks resolved), so the same shared write
- * can read differently on each device; its stamp says it took the same value.
- */
+/** Whether two devices agree on what they show (`sharedDeviceValuesAgree`). */
 function sameSetting<K extends ShareableServerSettingKey>(
   view: SharedSettingView<K>,
   a: SharedSettingView<K>["devices"][number],
   b: SharedSettingView<K>["devices"][number],
   equal: (left: ShareableSettingValue<K>, right: ShareableSettingValue<K>) => boolean,
 ): boolean {
-  const left = shownValue(view, a);
-  const right = shownValue(view, b);
-  if (left === undefined || right === undefined) return false;
-  if (equal(left, right)) return true;
-  return (
-    a.state.kind === "shared" &&
-    b.state.kind === "shared" &&
-    a.stamp !== undefined &&
-    b.stamp !== undefined &&
-    compareSharingStamps(a.stamp, b.stamp) === 0
-  );
+  return sharedDeviceValuesAgree(a, b, equal, (device) => shownValue(view, device));
 }
 
 export function readSharedRowModel<K extends ShareableServerSettingKey>(input: {
@@ -140,7 +129,7 @@ export function readSharedRowModel<K extends ShareableServerSettingKey>(input: {
       environmentId: entry.environmentId,
       label: entry.label,
       connected: device?.connected === true,
-      value: entry.value,
+      value: entry.written,
       state: entry.state,
       knowsSetting,
       editable:
@@ -262,17 +251,13 @@ export function buildSharedRowCommand<K extends ShareableServerSettingKey>(input
     return writeSharedSetting({ devices, key, value: action.value, stamp });
   if (action.kind === "everywhere")
     return settingEverywhereCommand({ devices, key, value: action.value, stamp });
-  const device = devices.find((entry) => entry.environmentId === action.environmentId);
-  if (device === undefined) return null;
-  const entry = input.view.devices.find((view) => view.environmentId === action.environmentId);
-  const followsShared =
-    devices.length === 1 &&
-    entry !== undefined &&
-    entry.state.kind !== "unsupported" &&
-    entry.state.kind !== "override";
-  return followsShared
-    ? writeSharedSetting({ devices: [device], key, value: action.value, stamp })
-    : setSettingOverride({ device, key, value: action.value, stamp });
+  return editDeviceSetting({
+    devices,
+    environmentId: action.environmentId,
+    key,
+    value: action.value,
+    stamp,
+  });
 }
 
 /** What an edit could not do, in one line each: devices left out and refused writes. */
@@ -302,4 +287,27 @@ export function describeSharedRowOutcome<K extends ShareableServerSettingKey>(in
       notes.push(`${failed.label} went offline; it catches up when it reconnects.`);
   }
   return notes;
+}
+
+/**
+ * The device shared rows use on "All devices" when the device the page shows cannot be used:
+ * any device this client may write now (connected, a config, writable; a hosted grant is
+ * already false while its role snapshot is stale), this app's own first. Its rows only edit
+ * through the shared commands, which write every device they can reach; offline devices catch
+ * up. Null when none can be written now, so the rows wait as before.
+ */
+export function pickSharedRowsDevice(
+  devices: ReadonlyArray<
+    Pick<SharingDevice, "environmentId" | "config" | "connected" | "canWrite">
+  >,
+  preferred: EnvironmentId | null,
+): EnvironmentId | null {
+  const writable = devices.filter(
+    (device) => device.connected && device.canWrite && device.config !== null,
+  );
+  return (
+    writable.find((device) => device.environmentId === preferred)?.environmentId ??
+    writable[0]?.environmentId ??
+    null
+  );
 }

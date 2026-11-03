@@ -1,3 +1,4 @@
+import { SETTINGS_SECTION_TITLES } from "@ryco/client-runtime/state/settings/settingsSections";
 import {
   createPathConfigForStaticNavigation,
   getPathFromState,
@@ -192,7 +193,7 @@ const SettingsSheetStack = createNativeStackNavigator({
     SettingsStatistics: createNativeStackScreen({
       screen: SettingsStatisticsRouteScreen,
       linking: MVP_SETTINGS_SHEET_ROUTES.SettingsStatistics.linking,
-      options: settingsRouteOptions("SettingsStatistics", "Statistics"),
+      options: settingsRouteOptions("SettingsStatistics", SETTINGS_SECTION_TITLES.usage),
     }),
     SettingsProviderAccounts: createNativeStackScreen({
       screen: SettingsProviderAccountsRouteScreen,
@@ -202,7 +203,7 @@ const SettingsSheetStack = createNativeStackNavigator({
     SettingsInbox: createNativeStackScreen({
       screen: SettingsInboxRouteScreen,
       linking: MVP_SETTINGS_SHEET_ROUTES.SettingsInbox.linking,
-      options: settingsRouteOptions("SettingsInbox", "Inbox"),
+      options: settingsRouteOptions("SettingsInbox", SETTINGS_SECTION_TITLES.inbox),
     }),
     SettingsAccount: createNativeStackScreen({
       screen: HostedAccountRouteScreen,

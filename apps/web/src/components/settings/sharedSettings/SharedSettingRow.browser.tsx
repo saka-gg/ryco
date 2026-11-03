@@ -13,7 +13,13 @@ import { render } from "vitest-browser-react";
 
 import { useSettingsDialogStore } from "../../../settingsDialogStore";
 import { Switch } from "../../ui/switch";
-import { SettingsCard } from "../settingsLayout";
+import {
+  SettingsCard,
+  SettingsRow,
+  SettingsSection,
+  SHARED_ROWS_ONLY_CHILDREN_CLASS,
+  SharedRowsOnlyProvider,
+} from "../settingsLayout";
 import { useSettingsSearchRevealStore } from "../settingsSearchReveal";
 import { DeviceSettingsCompare } from "./DeviceSettingsCompare";
 import { DeviceSharingDifferences } from "./DeviceSharingDifferences";
@@ -361,5 +367,56 @@ describe("where this device differs", () => {
     await expect.element(page.getByText(/here: mine/)).toBeVisible();
     await page.getByRole("button", { name: "Open" }).click();
     expect(useSharedRowOpenRequest.getState().key).toBe("worktreeBranchPrefix");
+  });
+});
+
+describe("all devices while the device shown cannot be used", () => {
+  it("shows only shared rows, writes the devices it can reach and queues the offline one", async () => {
+    // The device bar's device ("Studio") is offline; the page lends the rows a writable device.
+    const devices = createTestSharedSettings([
+      { id: "laptop", label: "Laptop" },
+      { id: "studio", label: "Studio", connected: false },
+    ]);
+    await show(
+      devices,
+      <SharedRowsOnlyProvider value={true}>
+        <div className={SHARED_ROWS_ONLY_CHILDREN_CLASS}>
+          <SettingsSection title="Shared and own">
+            <SharedSettingRow
+              settingKey="enableProviderUpdateChecks"
+              render={(control) => (
+                <Switch
+                  checked={control.value}
+                  disabled={control.disabled}
+                  onCheckedChange={(checked) => control.onChange(Boolean(checked))}
+                  aria-label={sharedControlLabel("Check providers for updates", control)}
+                />
+              )}
+            />
+            <SettingsRow title="A device's own row" />
+            <p>A device's own list</p>
+          </SettingsSection>
+          <SettingsSection title="Only own rows">
+            <SettingsRow title="Another own row" />
+          </SettingsSection>
+          <p>A device's own panel</p>
+        </div>
+      </SharedRowsOnlyProvider>,
+    );
+
+    await expect.element(page.getByText("Same on all 2 devices")).toBeVisible();
+    await expect.element(page.getByText("A device's own row")).not.toBeInTheDocument();
+    await expect.element(page.getByText("Another own row")).not.toBeInTheDocument();
+    await expect.element(page.getByText("A device's own list")).not.toBeVisible();
+    await expect.element(page.getByText("Only own rows")).not.toBeVisible();
+    await expect.element(page.getByText("A device's own panel")).not.toBeVisible();
+
+    await page.getByRole("switch", { name: "Check providers for updates" }).click();
+    await expect.poll(() => devices.settings("laptop").enableProviderUpdateChecks).toBe(false);
+    await expect.element(page.getByText("1 queued until online")).toBeVisible();
+    devices.update("studio", (device) => {
+      device.connected = true;
+    });
+    await expect.poll(() => devices.settings("studio").enableProviderUpdateChecks).toBe(false);
   });
 });

@@ -1,3 +1,4 @@
+import { SETTINGS_SECTION_TITLES } from "@ryco/client-runtime/state/settings/settingsSections";
 import {
   buildCommandPaletteRootGroups,
   buildCommandPaletteRows,
@@ -109,15 +110,15 @@ const SETTINGS_ACTIONS: ReadonlyArray<{
   },
   {
     screen: "SettingsInbox",
-    title: "Inbox settings",
+    title: SETTINGS_SECTION_TITLES.inbox,
     icon: "tray",
     searchTerms: ["settle", "snooze", "inbox"],
   },
   {
     screen: "SettingsStatistics",
-    title: "Statistics",
+    title: SETTINGS_SECTION_TITLES.usage,
     icon: "chart.bar.xaxis",
-    searchTerms: ["usage", "limits", "cost"],
+    searchTerms: ["statistics", "usage", "limits", "cost"],
   },
 ];
 

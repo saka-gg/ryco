@@ -1,8 +1,7 @@
 /**
  * The nodes a client may write settings to, and the write itself: each node gets its own
  * patch through its own connection, re-checked just before it is sent, and the result names
- * every node left out and why. Shared by the one-time bulk edit (`nodeSettingsFanOut`) and
- * shared device settings (`settingsSharing*`).
+ * every node left out and why. Used by shared device settings (`sharedDeviceSettings*`).
  *
  * Kept off the `state/settings` index, which the app shell imports.
  */

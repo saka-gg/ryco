@@ -8,13 +8,12 @@ import {
 import { applyServerSettingsPatch } from "@ryco/shared/serverSettings";
 import {
   nodeKeepsProjectPreferences,
-  nodePreferencesPatchFor,
   projectPreferenceCanReset,
   projectPreferenceResetValue,
   projectPreferencesWritePatch,
   projectPreferenceSupported,
 } from "./projectPreferenceEditing.ts";
-import type { NodeSettingsConfig } from "./nodeSettingsFanOut.ts";
+import type { NodeSettingsConfig } from "./nodeSettingsTargets.ts";
 
 const builtinModel = { instanceId: ProviderInstanceId.make("codex"), model: "builtin-model" };
 const nodeModel = {
@@ -257,61 +256,16 @@ describe("project preference resets", () => {
   });
 });
 
-describe("node defaults written to every node", () => {
-  function node(settings: ServerSettings, projectPreferences = true): NodeSettingsConfig {
+describe("nodes that keep project preferences", () => {
+  function node(projectPreferences: boolean): NodeSettingsConfig {
     return {
       environment: { capabilities: projectPreferences ? { projectPreferences: true } : {} },
-      settings,
+      settings: DEFAULT_SERVER_SETTINGS,
     } as NodeSettingsConfig;
   }
 
-  it("compares each node's own current value, so nodes that differ all take the write", () => {
-    const studio = applyServerSettingsPatch(DEFAULT_SERVER_SETTINGS, {
-      defaultThreadEnvMode: "worktree",
-    });
-    const laptop = DEFAULT_SERVER_SETTINGS;
-    const patchFor = nodePreferencesPatchFor({ defaultThreadEnvMode: "worktree" });
-
-    expect(patchFor(node(studio))).toEqual({
-      defaultThreadEnvMode: "worktree",
-      expectedNodePreferences: { defaultThreadEnvMode: "worktree" },
-    });
-    expect(patchFor(node(laptop))).toEqual({
-      defaultThreadEnvMode: "worktree",
-      expectedNodePreferences: { defaultThreadEnvMode: "local" },
-    });
-    expect(applyServerSettingsPatch(laptop, patchFor(node(laptop))).defaultThreadEnvMode).toBe(
-      "worktree",
-    );
-    // The value the editing node showed would refuse the other node's write.
-    expect(() =>
-      applyServerSettingsPatch(
-        laptop,
-        projectPreferencesWritePatch({
-          effective: effectiveFor(studio),
-          patch: { defaultThreadEnvMode: "worktree" },
-        }),
-      ),
-    ).toThrow("Node preferences changed elsewhere");
-  });
-
-  it("refuses a node whose value changed since this client last saw it", () => {
-    const seen = DEFAULT_SERVER_SETTINGS;
-    const current = applyServerSettingsPatch(seen, { runSetupScript: false });
-    const patch = nodePreferencesPatchFor({ runSetupScript: true, worktreeBranchPrefix: "team" })(
-      node(seen),
-    );
-    expect(patch.expectedNodePreferences).toEqual({
-      runSetupScript: true,
-      worktreeBranchPrefix: seen.worktreeBranchPrefix,
-    });
-    expect(() => applyServerSettingsPatch(current, patch)).toThrow(
-      "Node preferences changed elsewhere",
-    );
-  });
-
-  it("writes only to nodes that keep project preferences", () => {
-    expect(nodeKeepsProjectPreferences(node(DEFAULT_SERVER_SETTINGS))).toBe(true);
-    expect(nodeKeepsProjectPreferences(node(DEFAULT_SERVER_SETTINGS, false))).toBe(false);
+  it("reads the node's own capability", () => {
+    expect(nodeKeepsProjectPreferences(node(true))).toBe(true);
+    expect(nodeKeepsProjectPreferences(node(false))).toBe(false);
   });
 });

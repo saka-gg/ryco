@@ -7,13 +7,11 @@ import type {
   ProjectPreferenceKey,
   ProjectPreferencesExpected,
   ProjectPreferencesPatch,
-  ProjectPreferenceValueKey,
-  ServerSettings,
   ServerSettingsPatch,
 } from "@ryco/contracts";
 import { DEFAULT_SERVER_SETTINGS } from "@ryco/contracts/settings";
 
-import type { NodeSettingsConfig } from "./nodeSettingsFanOut.ts";
+import type { NodeSettingsConfig } from "./nodeSettingsTargets.ts";
 
 /**
  * Whether the node reports this preference. An older node's reply omits keys added after it, so
@@ -73,27 +71,6 @@ export function projectPreferencesWritePatch(input: {
 /** Whether a node keeps project preferences, and with them the compare-and-set of node defaults. */
 export function nodeKeepsProjectPreferences(config: NodeSettingsConfig): boolean {
   return config.environment.capabilities.projectPreferences === true;
-}
-
-/**
- * A node-default edit written to every node (`applyNodeSettingsPatch`): each node's patch
- * compares that node's own current values, read from its own config, the way
- * {@link projectPreferencesWritePatch} compares the values the editing node showed. A value
- * copied from another node would refuse a write the node should take, or pass a guard it should
- * fail. Only for keys every node with {@link nodeKeepsProjectPreferences} knows; the initial model
- * is never written across nodes, whose provider instances differ.
- */
-export function nodePreferencesPatchFor(patch: {
-  readonly [K in ProjectPreferenceValueKey]?: ServerSettings[K];
-}): (config: NodeSettingsConfig) => ServerSettingsPatch {
-  const fields = Object.keys(patch) as ReadonlyArray<ProjectPreferenceValueKey>;
-  return (config) =>
-    ({
-      ...patch,
-      expectedNodePreferences: Object.fromEntries(
-        fields.map((field) => [field, config.settings[field] ?? null]),
-      ),
-    }) as ServerSettingsPatch;
 }
 
 function overriddenForProject(

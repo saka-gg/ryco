@@ -2246,6 +2246,30 @@ it.layer(NodeServices.layer)("shared device settings", (it) => {
     }).pipe(Effect.provide(makeServerSettingsLayer())),
   );
 
+  it.effect("keeps a shared path as written next to the path it normalized", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const root = yield* fs.makeTempDirectoryScoped({ prefix: "settings-shared-root-" });
+      const links = yield* fs.makeTempDirectoryScoped({ prefix: "settings-shared-link-" });
+      const written = `${links}/workspaces`;
+      yield* fs.symlink(root, written);
+      const canonical = yield* fs.realPath(root);
+      const settings = yield* ServerSettingsService;
+      const saved = yield* settings.updateSettings({
+        worktreeRoot: written,
+        settingsSharing: {
+          // A written value of the client's own is never kept: the node records what it got.
+          worktreeRoot: { mode: "shared", stamp, written: "/somewhere/else" },
+        },
+      });
+      assert.equal(saved.worktreeRoot, canonical);
+      assert.deepEqual(saved.settingsSharing.worktreeRoot, { mode: "shared", stamp, written });
+      // An unstamped edit of the path: this device's own value, the written form dropped.
+      const edited = yield* settings.updateSettings({ worktreeRoot: links });
+      assert.deepEqual(edited.settingsSharing.worktreeRoot, { mode: "override", stamp });
+    }).pipe(Effect.provide(makeServerSettingsLayer())),
+  );
+
   it.effect("drops a catch-up for an override before validating its value", () =>
     Effect.gen(function* () {
       const settings = yield* ServerSettingsService;

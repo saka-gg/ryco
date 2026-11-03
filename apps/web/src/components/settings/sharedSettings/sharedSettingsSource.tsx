@@ -9,6 +9,7 @@ import type {
   SharingDevice,
 } from "@ryco/client-runtime/state/settings/sharedDeviceSettings";
 import type { SettingsSharingStamp } from "@ryco/contracts/settings";
+import type { EnvironmentId } from "@ryco/contracts";
 import { createContext, useContext, useMemo, useSyncExternalStore } from "react";
 
 import { updateEnvironmentServerSettings } from "../../../environments/runtime";
@@ -26,6 +27,7 @@ import {
   runSettingsSharingCommand,
   subscribeSettingsSharingRuntime,
 } from "../../../settingsSharing/settingsSharingRuntime";
+import { pickSharedRowsDevice } from "./sharedSettingRow.logic";
 
 /**
  * Where shared rows read every device and send a person's edits. The app's own source reads
@@ -150,6 +152,20 @@ export function useSharedSettingsSnapshot(): SharedSettingsSnapshot {
         : { ...snapshot, devices: [...snapshot.devices, extra] },
     [extra, snapshot],
   );
+}
+
+/**
+ * The device shared rows use on "All devices" while the device the page shows cannot be used
+ * (`pickSharedRowsDevice`); null while `enabled` is false or no device can be written now. Only
+ * the id: a config push re-renders nothing unless the choice changes.
+ */
+export function useSharedRowsDevice(
+  enabled: boolean,
+  preferred: EnvironmentId | null,
+): EnvironmentId | null {
+  const source = useSharedSettingsSource();
+  const read = () => (enabled ? pickSharedRowsDevice(source.readDevices(), preferred) : null);
+  return useSyncExternalStore(source.subscribeDevices, read, read);
 }
 
 /**

@@ -239,6 +239,67 @@ export function shareableSettingValuePatch<K extends ShareableServerSettingKey>(
   return { [key]: value } as ServerSettingsPatch;
 }
 
+// ── Values as written ───────────────────────────────────────────
+
+/**
+ * Keys a node stores differently from how they were written: paths, with `~/` expanded and
+ * symlinks resolved on that machine. Their sharing entry keeps the value as written
+ * (`SettingsSharingEntry.written`), and that is what other devices are caught up to and
+ * compared by, so `~/w` stays right on a Mac (`/Users/me/w`) and on Linux (`/home/me/w`).
+ */
+export const WRITTEN_VALUE_SETTING_KEYS = [
+  "worktreeRoot",
+  "chatsRoot",
+] as const satisfies ReadonlyArray<ShareableServerSettingKey>;
+
+export type WrittenValueSettingKey = (typeof WRITTEN_VALUE_SETTING_KEYS)[number];
+
+const WRITTEN_VALUE_KEY_SET: ReadonlySet<string> = new Set(WRITTEN_VALUE_SETTING_KEYS);
+
+export function keepsWrittenSettingValue(key: string): key is WrittenValueSettingKey {
+  return WRITTEN_VALUE_KEY_SET.has(key);
+}
+
+/**
+ * The patch with each sharing entry of a {@link WRITTEN_VALUE_SETTING_KEYS} key carrying the
+ * patch's own value of that key as `written`, and a `written` without its value dropped. A node
+ * calls it on the patch as received, before it normalizes any value, so `written` is always what
+ * the writer sent; clients build the same entries for their optimistic copy.
+ */
+export function recordWrittenSettingValues(patch: ServerSettingsPatch): ServerSettingsPatch {
+  const sharing = patch.settingsSharing;
+  if (sharing === undefined) return patch;
+  let next: Record<string, unknown> | null = null;
+  for (const key of WRITTEN_VALUE_SETTING_KEYS) {
+    const entry = Object.hasOwn(sharing, key) ? sharing[key] : undefined;
+    if (entry === undefined || entry === null) continue;
+    const value = patch[key];
+    if (entry.written === value) continue;
+    const { written: _written, ...rest } = entry;
+    next ??= { ...sharing };
+    next[key] = typeof value === "string" ? { ...rest, written: value } : rest;
+  }
+  return next === null
+    ? patch
+    : { ...patch, settingsSharing: next as NonNullable<ServerSettingsPatch["settingsSharing"]> };
+}
+
+/**
+ * A key's value as the device's sharing entry has it written: for a
+ * {@link WRITTEN_VALUE_SETTING_KEYS} key the value before the device normalized it, when the
+ * entry knows it; otherwise the stored value. This is the value a device shares.
+ */
+export function readWrittenShareableSettingValue<K extends ShareableServerSettingKey>(
+  settings: ServerSettings,
+  key: K,
+): ShareableSettingValue<K> {
+  if (keepsWrittenSettingValue(key)) {
+    const written = readSharingEntry(settings.settingsSharing, key).written;
+    if (written !== undefined) return written as ShareableSettingValue<K>;
+  }
+  return readShareableSettingValue(settings, key);
+}
+
 // ── Applying a sharing patch on a node ──────────────────────────
 
 function patchWritesKey(patch: ServerSettingsPatch, key: ShareableServerSettingKey): boolean {
@@ -291,9 +352,16 @@ export function resolveSettingsSharingPatch(
         continue;
       }
     }
-    if (entry.mode === "shared" && !patchWritesKey(rest, key))
+    const writesValue = patchWritesKey(rest, key);
+    if (entry.mode === "shared" && !writesValue)
       throw new Error(`A shared "${key}" must be written with its value.`);
-    entries.set(key, { mode: entry.mode, stamp: entry.stamp });
+    entries.set(key, {
+      mode: entry.mode,
+      stamp: entry.stamp,
+      ...(writesValue && keepsWrittenSettingValue(key) && entry.written !== undefined
+        ? { written: entry.written }
+        : {}),
+    });
   }
   return { patch: next, entries, skipped };
 }
@@ -327,6 +395,21 @@ export function nextSettingsSharing(
     )
       continue;
     sharing.set(key, { mode: "override" satisfies SettingsSharingMode, stamp: stored.stamp });
+  }
+  // `written` stands for the stored value: kept while the value stays, dropped once it changes
+  // without one (an unstamped edit, or a stamped one that did not carry it).
+  for (const key of WRITTEN_VALUE_SETTING_KEYS) {
+    const entry = sharing.get(key);
+    if (entry === undefined || entries.get(key)?.written !== undefined) continue;
+    const { written: _written, ...rest } = entry;
+    const storedWritten = readSharingEntry(current.settingsSharing, key).written;
+    const keep =
+      storedWritten !== undefined &&
+      shareableSettingValuesEqual(
+        readShareableSettingValue(current, key),
+        readShareableSettingValue(next, key),
+      );
+    sharing.set(key, keep ? { ...rest, written: storedWritten } : rest);
   }
   return Object.fromEntries(sharing);
 }

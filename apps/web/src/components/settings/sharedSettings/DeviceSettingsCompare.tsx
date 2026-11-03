@@ -191,9 +191,9 @@ function CompareRow(props: {
       {props.devices.map((device) => {
         const cellDiffers =
           props.differs &&
-          device.value !== undefined &&
+          device.written !== undefined &&
           props.reference !== null &&
-          !shareableSettingValuesEqual(device.value, props.reference) &&
+          !shareableSettingValuesEqual(device.written, props.reference) &&
           device.state.kind !== "queued" &&
           device.state.kind !== "syncing";
         return (
@@ -207,7 +207,7 @@ function CompareRow(props: {
           >
             <span className="flex flex-wrap items-center gap-1.5">
               <span className="truncate">
-                {device.value === undefined ? "—" : formatSharedSettingValue(key, device.value)}
+                {device.written === undefined ? "—" : formatSharedSettingValue(key, device.written)}
               </span>
               <CellMark state={device.state} />
             </span>

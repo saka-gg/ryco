@@ -97,6 +97,33 @@ describe("settings sharing runner", () => {
     runner.stop();
   });
 
+  it("brings a Linux device that was offline to a Mac's shared path as written", async () => {
+    const net = createDeviceNetwork();
+    const mac = net.add("mac", { home: "/Users/me" });
+    const linux = net.add("linux", { home: "/home/me", connected: false });
+    const { runner, clock } = setup(net);
+    runner.start();
+    const command = writeSharedSetting({
+      devices: net.readTargets(),
+      key: "worktreeRoot",
+      value: "~/w",
+      stamp: nextSettingsSharingStamp(clock, net.readTargets()),
+    });
+    runner.noteCommand(command, await executeSettingsSharingCommand(net.readTargets(), command));
+    expect(mac.settings.worktreeRoot).toBe("/Users/me/w");
+    linux.connected = true;
+    await runner.runNow();
+    expect(linux.settings.worktreeRoot).toBe("/home/me/w");
+    expect(linux.settings.settingsSharing.worktreeRoot?.written).toBe("~/w");
+    await settle();
+    await runner.runNow();
+    expect(linux.writes).toHaveLength(1);
+    expect(
+      readSharedSettingView({ key: "worktreeRoot", devices: net.readTargets() }).agreement,
+    ).toEqual({ kind: "same", value: "~/w" });
+    runner.stop();
+  });
+
   it("converges two clients with skewed clocks on one value, without a write storm", async () => {
     const net = createDeviceNetwork();
     const devices = [net.add("desktop"), net.add("laptop"), net.add("phone-node")];

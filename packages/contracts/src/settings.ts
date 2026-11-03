@@ -878,9 +878,18 @@ export const SettingsSharingStamp = Schema.Struct({
 });
 export type SettingsSharingStamp = typeof SettingsSharingStamp.Type;
 
+/**
+ * For a setting the node normalizes when it stores it (a path: `~/` expanded, symlinks
+ * resolved), the value as the person wrote it. Other devices are caught up to this value and
+ * normalize it themselves, so `~/w` stays right on a Mac and on Linux. Absent for every other
+ * key, and once the value changes without one.
+ */
+const SettingsSharingWrittenValue = WorktreeRoot;
+
 export const SettingsSharingEntry = Schema.Struct({
   mode: SettingsSharingMode,
   stamp: SettingsSharingStamp,
+  written: Schema.optionalKey(SettingsSharingWrittenValue),
 });
 export type SettingsSharingEntry = typeof SettingsSharingEntry.Type;
 
@@ -908,6 +917,8 @@ export const SettingsSharingPatchEntry = Schema.Struct({
   mode: SettingsSharingMode,
   stamp: SettingsSharingStamp,
   onlyIfOlderShared: Schema.optionalKey(Schema.Literal(true)),
+  /** The node records the patch's own value here; see `SettingsSharingEntry.written`. */
+  written: Schema.optionalKey(SettingsSharingWrittenValue),
 });
 export type SettingsSharingPatchEntry = typeof SettingsSharingPatchEntry.Type;
 

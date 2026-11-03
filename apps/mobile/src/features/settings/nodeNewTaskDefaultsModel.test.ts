@@ -1,7 +1,4 @@
-import {
-  applyNodeSettingsPatch,
-  type NodeSettingsTarget,
-} from "@ryco/client-runtime/state/settings/nodeSettingsFanOut";
+import type { NodeSettingsTarget } from "@ryco/client-runtime/state/settings/nodeSettingsTargets";
 import { projectPreferencesWritePatch } from "@ryco/client-runtime/state/settings/projectPreferenceEditing";
 import {
   DEFAULT_SERVER_SETTINGS,
@@ -59,11 +56,39 @@ function input(node: TestNode, patch: Partial<NewTaskDefaultsInput> = {}): NewTa
   };
 }
 
+/**
+ * The controller's writers for one fake node: a shared default goes to the node as its own
+ * value (the sharing commands' edit of one node, `sharedSettingEdits.test.ts`), and "Use on
+ * every node" is recorded with the status it reports.
+ */
+function writers(node: TestNode) {
+  const applied: Array<{
+    readonly key: string;
+    readonly value: unknown;
+    readonly targets: number;
+  }> = [];
+  return {
+    applied,
+    write: node.write,
+    writeShared: (_targets: ReadonlyArray<NodeSettingsTarget>, key: string, value: unknown) =>
+      node.write({ [key]: value }),
+    applyEverywhere: async (
+      targets: ReadonlyArray<NodeSettingsTarget>,
+      key: string,
+      value: unknown,
+    ) => {
+      applied.push({ key, value, targets: targets.length });
+      return `Shared ${key}.`;
+    },
+  };
+}
+
 async function opened(
   node: TestNode,
   patch: Partial<NewTaskDefaultsInput> = {},
+  deps: ReturnType<typeof writers> = writers(node),
 ): Promise<NewTaskDefaultsController> {
-  const controller = createNewTaskDefaultsController({ write: node.write });
+  const controller = createNewTaskDefaultsController(deps);
   controller.setInput(input(node, patch));
   await settle();
   return controller;
@@ -309,16 +334,38 @@ describe("the new-task defaults controller", () => {
   it("shows a refused write as '<node>: <message>' next to the node's current values", async () => {
     const node = fakeNode();
     const controller = await opened(node);
-    // Another device switches the node to worktrees after this panel read it.
-    node.changeElsewhere({ defaultThreadEnvMode: "worktree" });
+    // Another device picks a model on the node after this panel read it.
+    node.changeElsewhere({ initialModelSelection: { instanceId: CODEX, model: "gpt-fast" } });
 
-    await controller.save(null, { defaultThreadEnvMode: "worktree" });
+    await controller.save(null, {
+      initialModelSelection: { instanceId: CODEX, model: "gpt-builtin" },
+    });
 
     const view = rowsOf(controller);
     expect(view.error).toBe("Studio: Node preferences changed elsewhere. Reload before saving.");
     expect(node.reads).toEqual([undefined, undefined]);
-    expect(view.rows.find((row) => row.key === "defaultThreadEnvMode")?.value).toBe("New worktree");
+    expect(view.rows[0]?.value).toBe("GPT Fast · High");
     expect(view.canEdit).toBe(true);
+  });
+
+  it("writes the node's own defaults as shared settings, and a refusal says why", async () => {
+    const node = fakeNode();
+    const deps = writers(node);
+    const writeShared = vi.fn(deps.writeShared);
+    const controller = await opened(node, {}, { ...deps, writeShared });
+
+    await controller.save(null, { defaultThreadEnvMode: "worktree" });
+    expect(writeShared).toHaveBeenCalledWith([], "defaultThreadEnvMode", "worktree");
+    // No compare-and-set: a shared setting orders edits by their stamps.
+    expect(node.writes).toEqual([{ defaultThreadEnvMode: "worktree" }]);
+
+    writeShared.mockRejectedValueOnce(new Error("Connect as the node owner to change this."));
+    await controller.save(null, { runSetupScript: false });
+    expect(rowsOf(controller).error).toBe("Studio: Connect as the node owner to change this.");
+    // A project's override stays a plain write to this node.
+    writeShared.mockClear();
+    await controller.reload();
+    expect(writeShared).not.toHaveBeenCalled();
   });
 
   it("holds a second edit until the first one's values are read back", async () => {
@@ -420,12 +467,7 @@ describe("the new-task defaults controller", () => {
     expect(rowsOf(controller).error).toBe("Project no longer exists.");
     // The node's own rows still take their own edits.
     await controller.save(null, choice.patch);
-    expect(node.writes).toEqual([
-      {
-        defaultThreadEnvMode: "worktree",
-        expectedNodePreferences: { defaultThreadEnvMode: "local" },
-      },
-    ]);
+    expect(node.writes).toEqual([{ defaultThreadEnvMode: "worktree" }]);
   });
 
   it("drops an answer for a scope the panel has left", async () => {
@@ -441,7 +483,7 @@ describe("the new-task defaults controller", () => {
           answerFirst = () => resolve(effectiveFor(node.settings, projectId));
         }),
     );
-    const controller = createNewTaskDefaultsController({ write: node.write });
+    const controller = createNewTaskDefaultsController(writers(node));
     controller.setInput(input(node, { projectId: PROJECT }));
     controller.setInput(input(node, { projectId: OTHER_PROJECT }));
     await settle();
@@ -503,21 +545,14 @@ describe("the new-task defaults controller", () => {
     );
 
     await controller.saveText(null, "worktreeBranchPrefix", "  team/tasks ");
-    expect(node.writes).toEqual([
-      {
-        worktreeBranchPrefix: "team/tasks",
-        expectedNodePreferences: {
-          worktreeBranchPrefix: DEFAULT_SERVER_SETTINGS.worktreeBranchPrefix,
-        },
-      },
-    ]);
+    expect(node.writes).toEqual([{ worktreeBranchPrefix: "team/tasks" }]);
     expect(controller.getSnapshot().error).toBeNull();
     // An unchanged value is no write.
     await controller.saveText(null, "worktreeBranchPrefix", "team/tasks");
     expect(node.writes).toHaveLength(1);
   });
 
-  it("applies one node default to every connected node, each compared with its own value", async () => {
+  it("shares one node default with every node, and says what it did", async () => {
     const studio = fakeNode(
       applyServerSettingsPatch(DEFAULT_SERVER_SETTINGS, { defaultThreadEnvMode: "worktree" }),
     );
@@ -541,8 +576,10 @@ describe("the new-task defaults controller", () => {
       target("laptop", "Laptop", laptop),
       target("away", "Away", away, false),
     ];
-    const controller = await opened(studio);
+    const deps = writers(studio);
+    const controller = await opened(studio, { targets }, deps);
 
+    // Every known node counts, an offline one by its last known value.
     expect(
       newTaskDefaultsApplyChoices(rowsOf(controller).rows, targets).find(
         (choice) => choice.key === "defaultThreadEnvMode",
@@ -551,26 +588,12 @@ describe("the new-task defaults controller", () => {
       key: "defaultThreadEnvMode",
       title: "New threads",
       value: "New worktree",
-      detail: "Differs: Studio: New worktree, Laptop: Local.",
+      detail: "Differs: Studio: New worktree, Laptop: Local, Away: Local.",
     });
-    await controller.applyToAllNodes("defaultThreadEnvMode", targets);
+    await controller.applyToAllNodes("defaultThreadEnvMode");
 
-    expect(studio.writes).toEqual([
-      {
-        defaultThreadEnvMode: "worktree",
-        expectedNodePreferences: { defaultThreadEnvMode: "worktree" },
-      },
-    ]);
-    expect(laptop.writes).toEqual([
-      {
-        defaultThreadEnvMode: "worktree",
-        expectedNodePreferences: { defaultThreadEnvMode: "local" },
-      },
-    ]);
-    expect(away.writes).toEqual([]);
-    expect(controller.getSnapshot().applyStatus).toBe(
-      "Applied to Studio, Laptop. Not changed: Away (not connected).",
-    );
+    expect(deps.applied).toEqual([{ key: "defaultThreadEnvMode", value: "worktree", targets: 3 }]);
+    expect(controller.getSnapshot().applyStatus).toBe("Shared defaultThreadEnvMode.");
     // The model is never offered: provider instances differ per node.
     expect(
       newTaskDefaultsApplyChoices(rowsOf(controller).rows, targets).map((choice) => choice.key),
@@ -590,44 +613,31 @@ describe("the new-task defaults controller", () => {
       canWrite: true,
       write: node.write,
     }));
-    const controller = await opened(studio);
+    const deps = writers(studio);
+    const controller = await opened(studio, { targets }, deps);
     // Another device switches Studio to worktrees; its push reads Studio again, and until that
     // read lands the panel still shows "Local".
     studio.changeElsewhere({ defaultThreadEnvMode: "worktree" });
     studio.answerNextRead(() => new Promise(() => undefined));
-    controller.setInput(input(studio));
+    controller.setInput(input(studio, { targets }));
     expect(controller.getSnapshot().phase).toBe("loading");
     expect(rowsOf(controller)).toMatchObject({ canEdit: true, canApply: false });
 
-    await controller.applyToAllNodes("defaultThreadEnvMode", targets);
+    await controller.applyToAllNodes("defaultThreadEnvMode");
 
-    // Laptop compares its own value, so "Local" copied from the stale read would have landed.
-    expect(laptop.writes).toEqual([]);
-    expect(studio.writes).toEqual([]);
+    // "Local" from the stale read is never shared.
+    expect(deps.applied).toEqual([]);
     expect(laptop.settings.defaultThreadEnvMode).toBe("worktree");
     expect(controller.getSnapshot().applyStatus).toBeNull();
   });
 
   it("never sends a project override to other nodes", async () => {
     const node = fakeNode();
-    const other = vi.fn(async () => undefined);
-    const controller = await opened(node, { projectId: PROJECT });
-    const targets: NodeSettingsTarget[] = [
-      {
-        environmentId: EnvironmentId.make("laptop"),
-        label: "Laptop",
-        config: config(),
-        connected: true,
-        canWrite: true,
-        write: other,
-      },
-    ];
+    const deps = writers(node);
+    const controller = await opened(node, { projectId: PROJECT }, deps);
 
-    await controller.applyToAllNodes("defaultThreadEnvMode", targets);
-    expect(other).not.toHaveBeenCalled();
+    await controller.applyToAllNodes("defaultThreadEnvMode");
+    expect(deps.applied).toEqual([]);
     expect(node.writes).toEqual([]);
-    // Sanity: the same targets do take a node default written directly.
-    await applyNodeSettingsPatch(targets, { defaultThreadEnvMode: "local" });
-    expect(other).toHaveBeenCalledTimes(1);
   });
 });
