@@ -1,3 +1,4 @@
+import * as NodeChildProcess from "node:child_process";
 import * as NodeFs from "node:fs";
 import * as NodePath from "node:path";
 
@@ -42,17 +43,45 @@ const isAlive = (pid: number): boolean => {
   }
 };
 
-/** Polls until `check` holds, failing the test after `timeoutMs`. */
-const waitUntil = (label: string, check: () => boolean, timeoutMs = 5_000) =>
+/**
+ * A FIFO in `root` that the command's background processes hold open for writing (`3>FIFO`), so
+ * the test learns from the kernel, not by polling, when they run and when they are gone: `held`
+ * completes once one holds it, `released` once every holder exited (exit closes descriptors, even
+ * before a zombie is reaped).
+ */
+const makeHolderPipe = (root: string) =>
   Effect.gen(function* () {
-    const deadline = Date.now() + timeoutMs;
-    while (!check()) {
-      if (Date.now() > deadline) return yield* Effect.die(new Error(`Timed out waiting: ${label}`));
-      yield* Effect.sleep("20 millis");
-    }
+    const fifo = NodePath.join(root, "holders.fifo");
+    NodeChildProcess.execFileSync("mkfifo", [fifo]);
+    // Opening for reading blocks (in the thread pool) until a holder opens it for writing.
+    const opening = NodeFs.promises.open(fifo, "r");
+    const draining = opening.then(async (file) => {
+      const buffer = Buffer.alloc(64);
+      while ((await file.read(buffer, 0, buffer.length, null)).bytesRead > 0);
+      await file.close();
+    });
+    // A test that failed before any holder came still has the open pending: unblock it.
+    yield* Effect.addFinalizer(() =>
+      Effect.sync(() => {
+        try {
+          const flags = NodeFs.constants.O_WRONLY | NodeFs.constants.O_NONBLOCK;
+          NodeFs.closeSync(NodeFs.openSync(fifo, flags));
+        } catch {
+          // Nobody is waiting to read.
+        }
+      }),
+    );
+    const within = (label: string) =>
+      Effect.timeoutOrElse({
+        duration: "5 seconds",
+        orElse: () => Effect.die(new Error(`Timed out waiting: ${label}`)),
+      });
+    return {
+      redirect: `3>${JSON.stringify(fifo)}`,
+      held: Effect.promise(() => opening).pipe(Effect.asVoid, within("a holder")),
+      released: Effect.promise(() => draining).pipe(within("every holder to exit")),
+    };
   });
-
-const readPid = (file: string): number => Number(NodeFs.readFileSync(file, "utf8").trim());
 
 it.layer(NodeServices.layer, { excludeTestServices: true })("ProjectSetupCommandLive", (it) => {
   it.effect.skipIf(isWindows)("reports the command's exit code", () =>
@@ -203,27 +232,21 @@ it.layer(NodeServices.layer, { excludeTestServices: true })("ProjectSetupCommand
   it.effect.skipIf(isWindows)("ends the whole process group when it is interrupted", () =>
     Effect.gen(function* () {
       const { root, env } = yield* makeFixture;
-      const pidFile = NodePath.join(root, "grandchild.pid");
+      const grandchild = yield* makeHolderPipe(root);
       const children: Array<ProjectCopyChildProcess | null> = [];
       const fiber = yield* runSetup(
         {
-          command: `sleep 60 & echo $! > ${JSON.stringify(pidFile)}; wait`,
+          command: `sleep 60 ${grandchild.redirect} & wait`,
           projectRoot: root,
           observer: { onChild: (child) => Effect.sync(() => children.push(child)) },
         },
         { env },
       ).pipe(Effect.forkChild);
-      yield* waitUntil(
-        "the grandchild's pid",
-        () => NodeFs.existsSync(pidFile) && readPid(pidFile) > 0,
-      );
-      const grandchild = readPid(pidFile);
+      yield* grandchild.held;
       const shell = children[0]!.pid;
-      assert.isTrue(isAlive(grandchild));
 
       yield* Fiber.interrupt(fiber);
-      // The interrupt returned once the group was gone; the reaper may lag a little.
-      yield* waitUntil("the grandchild to end", () => !isAlive(grandchild), 2_000);
+      yield* grandchild.released;
       assert.isFalse(isAlive(shell));
       assert.deepEqual(children.at(-1), null);
     }),
@@ -232,38 +255,36 @@ it.layer(NodeServices.layer, { excludeTestServices: true })("ProjectSetupCommand
   it.effect.skipIf(isWindows)("kills a group that ignores SIGTERM after the grace", () =>
     Effect.gen(function* () {
       const { root, env } = yield* makeFixture;
-      const pidFile = NodePath.join(root, "stubborn.pid");
+      const stubborn = yield* makeHolderPipe(root);
+      // It holds the pipe only once TERM is ignored, which carries over to `sleep`: only the
+      // kill after the grace ends either.
       const fiber = yield* runSetup(
         {
-          command: `sh -c 'trap "" TERM; echo $$ > ${pidFile}; sleep 60' & wait`,
+          command: `sh -c 'trap "" TERM; exec ${stubborn.redirect}; sleep 60' & wait`,
           projectRoot: root,
         },
         { env, forceKillAfterMs: 300 },
       ).pipe(Effect.forkChild);
-      yield* waitUntil(
-        "the stubborn pid",
-        () => NodeFs.existsSync(pidFile) && readPid(pidFile) > 0,
-      );
-      const stubborn = readPid(pidFile);
+      yield* stubborn.held;
 
       const startedAt = Date.now();
       yield* Fiber.interrupt(fiber);
       assert.isAtLeast(Date.now() - startedAt, 250);
-      yield* waitUntil("the stubborn process to end", () => !isAlive(stubborn), 2_000);
+      yield* stubborn.released;
     }),
   );
 
   it.effect.skipIf(isWindows)("ends background processes the command leaves behind", () =>
     Effect.gen(function* () {
       const { root, env } = yield* makeFixture;
-      const pidFile = NodePath.join(root, "leftover.pid");
+      const leftover = yield* makeHolderPipe(root);
       // The leftover keeps the output pipes open: the run does not wait for it.
       const result = yield* runSetup(
-        { command: `sleep 60 & echo $! > ${pidFile}; echo done`, projectRoot: root },
+        { command: `sleep 60 ${leftover.redirect} & echo done`, projectRoot: root },
         { env },
       );
       assert.deepEqual(result, { outcome: "succeeded", exitCode: 0, outputTail: "done" });
-      yield* waitUntil("the leftover to end", () => !isAlive(readPid(pidFile)), 2_000);
+      yield* leftover.released;
     }),
   );
 

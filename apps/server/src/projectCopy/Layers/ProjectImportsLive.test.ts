@@ -16,6 +16,7 @@ import {
   type ProjectImportStepStatus,
 } from "@ryco/contracts/project-copy";
 import { Deferred, Effect, Fiber, Layer, Option, Schema, Stream } from "effect";
+import { TestClock } from "effect/testing";
 import * as SqlClient from "effect/sql/SqlClient";
 
 import { OrchestrationCommandInvariantError } from "../../orchestration/Errors.ts";
@@ -138,6 +139,8 @@ interface HarnessState {
   readonly avatarsWritten: Array<string>;
   readonly stoppedChildren: Array<ProjectCopyChildProcess>;
   readonly events: Array<string>;
+  /** Called after every recorded event; `untilEvent` waits through these. */
+  readonly eventListeners: Set<() => void>;
   readonly transfersDir: string;
 }
 
@@ -148,8 +151,23 @@ const makeHarness = (options: HarnessOptions = {}) => {
     avatarsWritten: [],
     stoppedChildren: [],
     events: [],
+    eventListeners: new Set(),
     transfersDir: tempDir("transfers"),
   };
+  const record = (event: string) => {
+    state.events.push(event);
+    for (const listener of state.eventListeners) listener();
+  };
+  /**
+   * Records `<name>-waiting` and blocks until `gate` opens, recording `<name>-interrupted` when
+   * interrupted. The record happens inside the interruptible wait, so a test that reacts to it at
+   * once still reaches the wait.
+   */
+  const waitAt = (name: string, gate: Deferred.Deferred<void>) =>
+    Effect.sync(() => record(`${name}-waiting`)).pipe(
+      Effect.andThen(Deferred.await(gate)),
+      Effect.onInterrupt(() => Effect.sync(() => record(`${name}-interrupted`))),
+    );
 
   const nodePaths = Layer.effect(
     NodePaths,
@@ -242,35 +260,32 @@ const makeHarness = (options: HarnessOptions = {}) => {
             input.onProgress?.({ percent: 50, detail: "Receiving objects: 50%" }) ?? Effect.void
           );
           if (options.cloneGate !== undefined) {
-            state.events.push("clone-waiting");
-            yield* Deferred.await(options.cloneGate).pipe(
-              Effect.onInterrupt(() => Effect.sync(() => state.events.push("clone-interrupted"))),
-            );
+            yield* waitAt("clone", options.cloneGate);
           }
           yield* input.observer?.onChild?.(null) ?? Effect.void;
-          state.events.push("cloned");
+          record("cloned");
         }),
       initFromBundle: (input) => Effect.sync(() => writeRepository(input.repositoryRoot)),
       fetchCommitsBundle: () =>
         Effect.sync(() => {
-          state.events.push("commits");
+          record("commits");
           return { headOid: HEAD_OID };
         }),
       checkout: (input) =>
         Effect.sync(() => {
           const root = path.join(input.repositoryRoot, input.relativeRootInRepository);
           fs.mkdirSync(root, { recursive: true });
-          state.events.push(`checkout:${input.checkout?.branch ?? "default"}`);
+          record(`checkout:${input.checkout?.branch ?? "default"}`);
           return { branch: input.checkout?.branch ?? "main", headOid: HEAD_OID, upstream: null };
         }),
       setRemotes: (input) =>
         Effect.sync(() => {
-          state.events.push(`remotes:${input.remotes.map((remote) => remote.name).join(",")}`);
+          record(`remotes:${input.remotes.map((remote) => remote.name).join(",")}`);
           return { warnings: [] };
         }),
       applyChanges: (input) =>
         Effect.sync(() => {
-          state.events.push("changes");
+          record("changes");
           return input.baseOid === HEAD_OID
             ? ({ status: "applied" } as const)
             : ({
@@ -303,10 +318,7 @@ const makeHarness = (options: HarnessOptions = {}) => {
       claimForImport: (input) =>
         Effect.gen(function* () {
           if (options.claimGate !== undefined) {
-            state.events.push("claim-waiting");
-            yield* Deferred.await(options.claimGate).pipe(
-              Effect.onInterrupt(() => Effect.sync(() => state.events.push("claim-interrupted"))),
-            );
+            yield* waitAt("claim", options.claimGate);
           }
           if (options.failClaims) {
             return yield* new ProjectCopyError({ code: "not-found", message: "Transfer expired." });
@@ -328,7 +340,7 @@ const makeHarness = (options: HarnessOptions = {}) => {
       releaseImport: (importId) =>
         Effect.gen(function* () {
           if (options.releaseGate !== undefined) {
-            state.events.push("release-waiting");
+            record("release-waiting");
             yield* Deferred.await(options.releaseGate);
           }
           state.released.push(importId);
@@ -347,13 +359,10 @@ const makeHarness = (options: HarnessOptions = {}) => {
               message: "no shell",
             });
           }
-          state.events.push(`setup:${input.command}@${input.projectRoot}`);
+          record(`setup:${input.command}@${input.projectRoot}`);
           yield* input.observer?.onOutput?.("installing dependencies\n") ?? Effect.void;
           if (options.setupGate !== undefined) {
-            state.events.push("setup-waiting");
-            yield* Deferred.await(options.setupGate).pipe(
-              Effect.onInterrupt(() => Effect.sync(() => state.events.push("setup-interrupted"))),
-            );
+            yield* waitAt("setup", options.setupGate);
           }
           return options.setupResult ?? { outcome: "succeeded", exitCode: 0, outputTail: "done" };
         }),
@@ -407,7 +416,7 @@ const makeHarness = (options: HarnessOptions = {}) => {
     write: (input) =>
       Effect.gen(function* () {
         if (options.avatarGate !== undefined) {
-          state.events.push("avatar-waiting");
+          record("avatar-waiting");
           yield* Deferred.await(options.avatarGate);
         }
         state.avatarsWritten.push(`${input.projectId}:${input.contentType}`);
@@ -514,17 +523,26 @@ const rowOf = (importId: string) =>
     return rows[0];
   });
 
-/** Waits, on real time, until the harness recorded `event` `count` times. */
+/** Waits until the harness recorded `event` `count` times. */
 const untilEvent = (harness: Harness, event: string, count = 1) =>
-  Effect.promise(async () => {
-    while (harness.state.events.filter((seen) => seen === event).length < count) {
-      await new Promise((resolve) => setTimeout(resolve, 5));
-    }
+  Effect.callback<void>((resume) => {
+    const listeners = harness.state.eventListeners;
+    const check = () => {
+      if (harness.state.events.filter((seen) => seen === event).length < count) return;
+      listeners.delete(check);
+      resume(Effect.void);
+    };
+    listeners.add(check);
+    check();
+    return Effect.sync(() => listeners.delete(check));
   });
 
-/** Lets a server stop go ahead and opens `gate` a moment later, on real time. */
+/**
+ * Lets a server stop go ahead and opens `gate` after it: the stop runs synchronously once the
+ * body returns, so a macrotask flush later it is already waiting on the job.
+ */
 const openSoon = (gate: Deferred.Deferred<void>) =>
-  Effect.promise(() => new Promise((resolve) => setTimeout(resolve, 20))).pipe(
+  Effect.promise(() => new Promise((resolve) => setImmediate(resolve))).pipe(
     Effect.andThen(Deferred.succeed(gate, undefined)),
     Effect.forkDetach,
   );
@@ -600,7 +618,7 @@ const memoryDatabase = <A, E, R>(effect: Effect.Effect<A, E, R>) =>
 // ── Tests ─────────────────────────────────────────────────────────────
 
 describe("ProjectImportsLive", () => {
-  it.live("hands subscribers at most one snapshot per interval, always the newest", () =>
+  it.effect("hands subscribers at most one snapshot per interval, always the newest", () =>
     Effect.gen(function* () {
       // A burst of 200 changes, one a millisecond at most, then a last one after a pause.
       const source = Stream.range(1, 200).pipe(
@@ -608,7 +626,11 @@ describe("ProjectImportsLive", () => {
         Stream.tap((value) => (value % 20 === 0 ? Effect.sleep("1 millis") : Effect.void)),
         Stream.concat(Stream.fromEffect(Effect.sleep("150 millis").pipe(Effect.as(201)))),
       );
-      const seen = Array.from(yield* Stream.runCollect(source.pipe(newestAtMostEvery(50))));
+      const collected = yield* Stream.runCollect(source.pipe(newestAtMostEvery(50))).pipe(
+        Effect.forkChild,
+      );
+      yield* TestClock.adjust("1 second");
+      const seen = Array.from(yield* Fiber.join(collected));
       // The newest of the burst, then the last change; never a backlog of the others.
       assert.include(seen, 200);
       assert.equal(seen.at(-1), 201);

@@ -153,8 +153,14 @@ const makeHarness = (options: { readonly realNetwork?: boolean } = {}) => {
   const network: {
     failLsRemote: boolean;
     lsRemoteCalls: number;
-    /** Holds every `ls-remote` until it completes, to pin a build in flight. */
-    hold: Effect.Effect<void> | null;
+    /**
+     * Holds every `ls-remote` until `release` completes, to pin a build in flight; `reached`
+     * completes once a build is held there.
+     */
+    hold: {
+      readonly reached: Deferred.Deferred<void>;
+      readonly release: Effect.Effect<void>;
+    } | null;
   } = { failLsRemote: false, lsRemoteCalls: 0, hold: null };
 
   const projections = {
@@ -199,7 +205,13 @@ const makeHarness = (options: { readonly realNetwork?: boolean } = {}) => {
         network.failLsRemote || input.allowLocalRemote !== true
           ? Effect.fail(failure)
           : Effect.tryPromise({ try: () => runLsRemote(input.remoteUrl), catch: () => failure });
-      return network.hold ? Effect.andThen(network.hold, run) : run;
+      const hold = network.hold;
+      return hold
+        ? Deferred.succeed(hold.reached, undefined).pipe(
+            Effect.andThen(hold.release),
+            Effect.andThen(run),
+          )
+        : run;
     },
     checkRemoteAccess: () => Effect.die("unused"),
     alternateRemoteUrl: () => null,
@@ -299,12 +311,6 @@ const fetchCommitsBundle = (dest: string, bundleFile: string) => {
   git(dest, "fetch", "-q", "--no-tags", bundleFile, "+HEAD:refs/ryco-import/test/head");
   return git(dest, "rev-parse", "refs/ryco-import/test/head");
 };
-
-/** Polls (in real time) until `condition` holds. */
-const waitFor = (condition: () => boolean) =>
-  Effect.gen(function* () {
-    while (!condition()) yield* Effect.sleep("10 millis");
-  }).pipe(Effect.timeout("20 seconds"));
 
 const withFixtureRoot = <A, E, R>(use: (root: string) => Effect.Effect<A, E, R>) =>
   Effect.acquireUseRelease(
@@ -1163,14 +1169,15 @@ describe("ProjectExportLive", () => {
         const exporter = yield* ProjectExport;
         const config = yield* ServerConfig;
         const release = yield* Deferred.make<void>();
-        harness.network.hold = Deferred.await(release);
+        const reached = yield* Deferred.make<void>();
+        harness.network.hold = { reached, release: Deferred.await(release) };
 
         // The caller disconnects mid-build; its retry joins the same build.
         const input = startInput(project.id, { include: { commits: true } });
         const caller = yield* exporter
           .start({ input, channel: "encrypted" })
           .pipe(Effect.forkChild);
-        yield* waitFor(() => harness.network.lsRemoteCalls === 1);
+        yield* Deferred.await(reached);
         yield* Fiber.interrupt(caller);
         const retry = yield* exporter.start({ input, channel: "encrypted" }).pipe(Effect.forkChild);
         yield* Deferred.succeed(release, undefined);
@@ -1180,12 +1187,14 @@ describe("ProjectExportLive", () => {
 
         // Disposed mid-build: waiters fail, nothing stays on disk.
         const held = yield* Deferred.make<void>();
-        harness.network.hold = Deferred.await(held);
+        const heldReached = yield* Deferred.make<void>();
+        harness.network.hold = { reached: heldReached, release: Deferred.await(held) };
         const disposed = startInput(project.id, { include: { commits: true } });
         const waiter = yield* exporter
           .start({ input: disposed, channel: "encrypted" })
           .pipe(Effect.flip, Effect.forkChild);
-        yield* waitFor(() => harness.network.lsRemoteCalls === 2);
+        yield* Deferred.await(heldReached);
+        expect(harness.network.lsRemoteCalls).toBe(2);
         yield* exporter.dispose({ exportId: disposed.exportId });
         const failure = yield* Fiber.join(waiter);
         expect(failure.code).toBe("not-found");

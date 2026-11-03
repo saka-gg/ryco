@@ -24,7 +24,7 @@ import {
   type ProjectImportSnapshot,
   type ProjectImportStartInput,
 } from "@ryco/contracts/project-copy";
-import { Deferred, Duration, Effect, Fiber, Layer, Option, Stream } from "effect";
+import { Deferred, Duration, Effect, Fiber, Layer, Option, PubSub, Stream } from "effect";
 
 import { authorizeRpcPrincipal } from "../../auth/wsAuthorization.ts";
 import { ServerConfig } from "../../config.ts";
@@ -57,6 +57,7 @@ import { agentControlProjectImportId } from "../projectCopyControl.ts";
 import { AgentControlActionValidator } from "../Services/AgentControlActionValidator.ts";
 import type { AgentControlExecutionShape } from "../Services/AgentControlExecution.ts";
 import { AgentControlOperationStore } from "../Services/AgentControlOperationStore.ts";
+import { AgentControlProposalEvents } from "../Services/AgentControlProposalEvents.ts";
 import {
   AgentControlProposalService,
   type AgentControlProposalServiceShape,
@@ -592,13 +593,18 @@ const waitForStatus = (
   status: AgentControlProposal["status"],
 ) =>
   Effect.gen(function* () {
-    for (let attempt = 0; attempt < 500; attempt += 1) {
-      const proposal = yield* readProposal(proposalId);
-      if (proposal.status === status) return proposal;
-      yield* Effect.sleep(Duration.millis(10));
+    const events = yield* AgentControlProposalEvents;
+    // Subscribe before reading, so a transition between the read and the wait is not lost.
+    const subscription = yield* events.subscribe;
+    const current = yield* readProposal(proposalId);
+    if (current.status === status) return current;
+    while (true) {
+      const event = yield* PubSub.take(subscription);
+      if (event.proposal.proposalId === proposalId && event.proposal.status === status) {
+        return event.proposal;
+      }
     }
-    return yield* readProposal(proposalId);
-  });
+  }).pipe(Effect.scoped, Effect.timeout(Duration.seconds(10)), Effect.orDie);
 
 describe("importProject: executed here through the import job", () => {
   it.live(
