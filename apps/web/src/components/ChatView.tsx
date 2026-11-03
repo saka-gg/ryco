@@ -353,7 +353,8 @@ import type { SidebarThreadSummary } from "../types";
 import { markTabSwitchClick, usePerfMark } from "../perf/tabSwitchInstrumentation";
 import { type ExpandedImagePreview } from "./chat/ExpandedImagePreview";
 import { NoActiveThreadState } from "./NoActiveThreadState";
-import { resolveEffectiveEnvMode, resolveEnvironmentOptionLabel } from "./BranchToolbar.logic";
+import { resolveEffectiveEnvMode } from "./BranchToolbar.logic";
+import { resolveEnvironmentOptionLabel } from "../environmentDisplay";
 import {
   dismissProviderStatusNotice,
   isProviderStatusNoticeDismissed,

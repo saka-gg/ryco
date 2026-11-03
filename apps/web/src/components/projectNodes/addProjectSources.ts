@@ -40,7 +40,7 @@ import {
 } from "../../logicalProject";
 import type { Project, Thread } from "../../types";
 import { useUiStateStore } from "../../uiStateStore";
-import { resolveEnvironmentOptionLabel } from "../BranchToolbar.logic";
+import { resolveEnvironmentOptionLabel } from "../../environmentDisplay";
 import { AzureDevOpsIcon, BitbucketIcon, ForgejoIcon, GitHubIcon, GitLabIcon } from "../Icons";
 
 /* ───────── Nodes ───────── */

@@ -33,7 +33,7 @@ import {
 } from "@ryco/contracts/project-copy";
 import { normalizeGitRemoteUrl } from "@ryco/shared/git";
 import { excludeChatProjects } from "@ryco/shared/projectKind";
-import { useNavigate, useRouterState } from "@tanstack/react-router";
+import { useLocation, useNavigate } from "@tanstack/react-router";
 import { CheckIcon, PlusIcon, XIcon } from "lucide-react";
 import {
   Fragment,
@@ -268,10 +268,12 @@ function useNodeConnection(environmentId: EnvironmentId | null): void {
  */
 function useAddProjectContextNodeId(): EnvironmentId | null {
   const threadRef = useActiveThreadRefFromRoute();
-  const projectsPageNode = useRouterState({
-    select: (state) => {
-      if (state.location.pathname !== PROJECTS_ROUTE_PATH) return null;
-      const env = (state.location.search as { readonly env?: unknown }).env;
+  // useLocation, not useRouterState: boot already carries it (the router's barrel would put
+  // useRouterState into the boot vendor chunk for this lazy dialog alone).
+  const projectsPageNode = useLocation({
+    select: (location) => {
+      if (location.pathname !== PROJECTS_ROUTE_PATH) return null;
+      const env = (location.search as { readonly env?: unknown }).env;
       return typeof env === "string" && env.length > 0 ? (env as EnvironmentId) : null;
     },
   });
