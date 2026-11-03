@@ -110,6 +110,54 @@ describe("groupProviderInstancesAcrossDevices", () => {
     expect(workRows[0]!.cells.map((cell) => cell.status)).toEqual(["checking", "missing"]);
   });
 
+  it("groups by id before matching by name, and never overwrites a matched cell", () => {
+    // BUILD's job instance is listed before its copy of MAC's work instance: the id still wins.
+    const rows = groupProviderInstancesAcrossDevices([
+      device(MAC, { claudeAgent_work: work }, []),
+      device(BUILD, { claudeAgent_job: work, claudeAgent_work: work }, []),
+    ]);
+    const workRows = rows.filter((row) => row.customName === "Work");
+    expect(workRows.map((row) => [row.instanceId, row.match])).toEqual([
+      ["claudeAgent_work", "id"],
+      ["claudeAgent_job", "id"],
+    ]);
+    expect(workRows[0]!.cells.map((cell) => cell.instanceId)).toEqual([
+      "claudeAgent_work",
+      "claudeAgent_work",
+    ]);
+    expect(workRows[1]!.cells.map((cell) => cell.instanceId)).toEqual([null, "claudeAgent_job"]);
+  });
+
+  it("matches a lone instance by name into a row several devices share by id", () => {
+    const rows = groupProviderInstancesAcrossDevices([
+      device(MAC, { claudeAgent_job: work }, []),
+      device(BUILD, { claudeAgent_work: work }, []),
+      device(PI, { claudeAgent_work: work }, []),
+    ]);
+    const workRows = rows.filter((row) => row.customName === "Work");
+    expect(workRows).toHaveLength(1);
+    expect(workRows[0]!.match).toBe("name");
+    expect(workRows[0]!.cells.map((cell) => cell.instanceId)).toEqual([
+      "claudeAgent_job",
+      "claudeAgent_work",
+      "claudeAgent_work",
+    ]);
+  });
+
+  it("keeps the same id on two drivers apart", () => {
+    const rows = groupProviderInstancesAcrossDevices([
+      device(MAC, { shared: { driver: codex, enabled: true, displayName: "Shared" } }, []),
+      device(BUILD, { shared: { driver: claude, enabled: true, displayName: "Shared" } }, []),
+    ]);
+    const shared = rows.filter((row) => row.instanceId === "shared");
+    expect(shared.map((row) => row.driver)).toEqual([codex, claude]);
+    expect(new Set(shared.map((row) => row.key)).size).toBe(2);
+    expect(shared.map((row) => row.cells.map((cell) => cell.status))).toEqual([
+      ["checking", "missing"],
+      ["missing", "checking"],
+    ]);
+  });
+
   it("does not match unnamed instances by their driver's label", () => {
     const unnamed: ProviderInstanceConfig = { driver: codex, enabled: true };
     const rows = groupProviderInstancesAcrossDevices([

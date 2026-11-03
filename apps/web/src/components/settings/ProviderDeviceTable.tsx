@@ -200,12 +200,16 @@ export function ProviderDeviceTable({
         <table className="w-full border-collapse text-xs" data-testid="provider-device-table">
           <thead>
             <tr>
-              <th className="px-4 py-2 text-left font-medium whitespace-nowrap text-muted-foreground">
+              <th
+                scope="col"
+                className="px-4 py-2 text-left font-medium whitespace-nowrap text-muted-foreground"
+              >
                 Provider
               </th>
               {columns.map((choice) => (
                 <th
                   key={choice.environmentId}
+                  scope="col"
                   className="px-3 py-2 text-left align-bottom font-medium whitespace-nowrap text-muted-foreground"
                 >
                   <span className="inline-flex items-center gap-1.5">
@@ -229,12 +233,12 @@ export function ProviderDeviceTable({
                 data-testid="provider-device-row"
                 data-provider={row.displayName}
               >
-                <td className="px-4 py-2 align-middle">
+                <th scope="row" className="px-4 py-2 text-left align-middle font-normal">
                   <span className="block text-[13px] font-medium text-foreground">
                     {row.displayName}
                   </span>
                   <span className="block text-muted-foreground">{rowDetail(row)}</span>
-                </td>
+                </th>
                 {row.cells.map((cell, index) => {
                   const choice = columns[index]!;
                   return (

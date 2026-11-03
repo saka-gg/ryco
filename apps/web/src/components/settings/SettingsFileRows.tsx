@@ -1,5 +1,5 @@
 import type { EnvironmentId } from "@ryco/contracts";
-import { useRef, useState } from "react";
+import { useLayoutEffect, useRef, useState } from "react";
 
 import { useTheme } from "../../hooks/useTheme";
 import { getClientSettingsSnapshot } from "../../hooks/clientSettingsStore";
@@ -14,12 +14,16 @@ import {
 import {
   buildDeviceSettingsRestoreCommands,
   buildDeviceSettingsSection,
+  deviceSettingsRestoreHasWork,
   deviceTakesOwnValueNow,
+  pickableRestoreDevices,
   previewDeviceSettingsRestore,
   summarizeDeviceSettingsRestore,
+  type DeviceRestoreChange,
   type DeviceRestoreOutcome,
   type DeviceRestorePreview,
   type DeviceRestoreTargets,
+  type DeviceSettingsFileKey,
 } from "../../settingsFile/deviceSettingsFile";
 import {
   applyAppearancePreferencesToDocument,
@@ -47,6 +51,11 @@ import {
 } from "../ui/dialog";
 import { Radio, RadioGroup } from "../ui/radio-group";
 import { SettingsRow } from "./settingsLayout";
+import {
+  formatSharedSettingValue,
+  SHARED_SETTING_DISPLAY,
+} from "./sharedSettings/sharedSettingsCatalog";
+import { useSharedSettingsMode } from "./sharedSettings/sharedSettingsMode";
 import {
   useSharedSettingsSnapshot,
   useSharedSettingsSource,
@@ -80,13 +89,38 @@ function plural(count: number, one: string, many: string): string {
   return `${count} ${count === 1 ? one : many}`;
 }
 
+/** A shared setting's name, as its row shows it. */
+function settingTitle(key: DeviceSettingsFileKey): string {
+  return SHARED_SETTING_DISPLAY[key].title;
+}
+
+function titles(keys: ReadonlyArray<DeviceSettingsFileKey>): string {
+  return keys.map(settingTitle).join(", ");
+}
+
+/** One change as its row reads values: "Writing style: Conventional -> Repository". */
+function changeLine({ key, from, to }: DeviceRestoreChange): string {
+  const before = formatSharedSettingValue(key, from);
+  const after = formatSharedSettingValue(key, to);
+  return before === after
+    ? `${settingTitle(key)}: ${after} (edited)`
+    : `${settingTitle(key)}: ${before} -> ${after}`;
+}
+
+function waitNote(preview: DeviceRestorePreview): string | null {
+  if (preview.waits === null || preview.changes.length === 0) return null;
+  if (preview.catchesUp) return "takes it when it is back online";
+  return preview.waits === "offline"
+    ? "not changed: offline"
+    : "not changed: only an owner can change it";
+}
+
 function DevicePreview({ preview }: { readonly preview: DeviceRestorePreview }) {
   const notes = [
     preview.changes.length === 0
       ? "nothing changes"
       : plural(preview.changes.length, "change", "changes"),
-    preview.waits === "offline" ? "waits until it is online" : null,
-    preview.waits === "read-only" ? "waits for an owner" : null,
+    waitNote(preview),
   ].filter(Boolean);
   return (
     <li data-device-preview={preview.label} className="space-y-1">
@@ -95,20 +129,20 @@ function DevicePreview({ preview }: { readonly preview: DeviceRestorePreview }) 
         <span className="text-muted-foreground"> · {notes.join(" · ")}</span>
       </p>
       {preview.changes.length > 0 ? (
-        <ul aria-label={`Changes on ${preview.label}`} className="space-y-0.5 font-mono text-xs">
+        <ul aria-label={`Changes on ${preview.label}`} className="space-y-0.5 text-xs">
           {preview.changes.map((change) => (
-            <li key={change}>{change}</li>
+            <li key={change.key}>{changeLine(change)}</li>
           ))}
         </ul>
       ) : null}
       {preview.keepsOwn.length > 0 ? (
         <p className="text-xs text-muted-foreground">
-          Keeps its own value: {preview.keepsOwn.join(", ")}
+          Keeps its own value: {titles(preview.keepsOwn)}
         </p>
       ) : null}
       {preview.becomesOwn.length > 0 ? (
         <p className="text-xs text-muted-foreground">
-          Becomes its own value here: {preview.becomesOwn.join(", ")}
+          Becomes its own value here: {titles(preview.becomesOwn)}
         </p>
       ) : null}
     </li>
@@ -121,13 +155,18 @@ function outcomeLine(outcome: DeviceRestoreOutcome): string {
       ? `${plural(outcome.applied.length, "setting", "settings")} applied`
       : null,
     outcome.queued.length > 0 ? `${outcome.queued.length} queued until online` : null,
+    ...(["offline", "read-only"] as const).map((reason) => {
+      const count = outcome.notApplied.filter((entry) => entry.reason === reason).length;
+      if (count === 0) return null;
+      return `${count} not applied (${reason === "offline" ? "offline" : "only an owner can change it"})`;
+    }),
     outcome.kept.some((entry) => entry.reason === "override")
       ? `${outcome.kept.filter((entry) => entry.reason === "override").length} kept its own value`
       : null,
     outcome.kept.some((entry) => entry.reason === "unsupported")
       ? "needs a Ryco update to share settings"
       : null,
-    ...outcome.failed.map((entry) => `Couldn't apply ${entry.key}: ${entry.detail}`),
+    ...outcome.failed.map((entry) => `Couldn't apply ${settingTitle(entry.key)}: ${entry.detail}`),
   ].filter(Boolean);
   return `${outcome.label}: ${parts.length === 0 ? "nothing to change" : parts.join(" · ")}`;
 }
@@ -147,10 +186,23 @@ function extraDevices(
  * or nothing, the device part to every device or to the devices picked). Nothing changes until
  * Apply.
  */
-export function SettingsFileRows() {
+export function SettingsFileRows({
+  shownEnvironmentId,
+}: {
+  /** The device the settings show: a backup takes its value where the devices disagree. */
+  readonly shownEnvironmentId?: EnvironmentId | null;
+} = {}) {
   const { theme, setTheme, activeThemeId, setActiveTheme } = useTheme();
   const snapshot = useSharedSettingsSnapshot();
+  // Apply reads the devices as they are once the app part is saved, not as they were rendered.
+  const latestSnapshot = useRef(snapshot);
+  useLayoutEffect(() => {
+    latestSnapshot.current = snapshot;
+  }, [snapshot]);
   const source = useSharedSettingsSource();
+  const { mode } = useSharedSettingsMode();
+  const preferred =
+    shownEnvironmentId ?? (mode.kind === "device" ? mode.environmentId : null) ?? null;
   const inputRef = useRef<HTMLInputElement>(null);
   const knownDevices = snapshot.devices.filter((device) => device.config !== null);
 
@@ -161,6 +213,8 @@ export function SettingsFileRows() {
   const [plan, setPlan] = useState<ClientSettingsImportPlan | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [applying, setApplying] = useState(false);
+  // This app's part is restored (all or nothing) once; Apply again only retries the devices.
+  const [appRestored, setAppRestored] = useState(false);
   const [restoreApp, setRestoreApp] = useState(true);
   const [restoreDevices, setRestoreDevices] = useState(true);
   const [targetsKind, setTargetsKind] = useState<"every" | "chosen">("every");
@@ -178,7 +232,11 @@ export function SettingsFileRows() {
   const exportFile = () => {
     const deviceSettings =
       backupDevices && knownDevices.length > 0
-        ? buildDeviceSettingsSection({ devices: snapshot.devices, cache: snapshot.cache })
+        ? buildDeviceSettingsSection({
+            devices: snapshot.devices,
+            cache: snapshot.cache,
+            preferred,
+          })
         : undefined;
     const file = buildClientSettingsFile(
       backupApp ? currentState() : null,
@@ -196,11 +254,13 @@ export function SettingsFileRows() {
     setPlan(null);
     setOutcomes(null);
     setError(null);
+    setAppRestored(false);
   };
 
   const readFile = (file: File) => {
     setError(null);
     setOutcomes(null);
+    setAppRestored(false);
     void readClientSettingsImportFile(file, currentState(), {
       newThemeId: (imported) => generateCustomThemeId(imported.id),
       themeExists: (id) => getAllThemes().some((entry) => entry.id === id),
@@ -222,15 +282,21 @@ export function SettingsFileRows() {
   };
 
   const deviceValues = plan?.deviceSettings?.values ?? null;
-  const targets: DeviceRestoreTargets =
-    targetsKind === "every" ? { kind: "every" } : { kind: "chosen", environmentIds: chosen };
+  // Picked devices count while they can be written: one that went offline or lost write access
+  // since the file was read drops out of the plan (and comes back checked when it returns).
+  const pickable = snapshot.devices.filter(deviceTakesOwnValueNow);
+  const restoreTargets = (devices: SharedSettingsSnapshot["devices"]): DeviceRestoreTargets =>
+    targetsKind === "every"
+      ? { kind: "every" }
+      : { kind: "chosen", environmentIds: pickableRestoreDevices(devices, chosen) };
+  const targets = restoreTargets(snapshot.devices);
   const previews =
     deviceValues === null
       ? []
       : previewDeviceSettingsRestore({ values: deviceValues, devices: snapshot.devices, targets });
-  const appWork = plan !== null && restoreApp && plan.changes.length > 0;
-  const deviceWork = restoreDevices && previews.some((preview) => preview.changes.length > 0);
-  const pickable = snapshot.devices.filter(deviceTakesOwnValueNow);
+  const appWork = plan !== null && restoreApp && plan.changes.length > 0 && !appRestored;
+  // Only targets that can be written now, or that take the shared values by themselves later.
+  const deviceWork = restoreDevices && deviceSettingsRestoreHasWork(previews);
 
   const apply = async () => {
     if (!plan) return;
@@ -249,6 +315,7 @@ export function SettingsFileRows() {
           setActiveTheme,
           saveClientSettings: persistClientSettingsUpdate,
         });
+        setAppRestored(true);
       } catch (cause) {
         setError(
           `Nothing was restored: ${cause instanceof Error ? cause.message : "saving failed."}`,
@@ -262,11 +329,12 @@ export function SettingsFileRows() {
       closeRestore();
       return;
     }
+    const now = latestSnapshot.current;
     const commands = buildDeviceSettingsRestoreCommands({
       values: deviceValues,
-      devices: snapshot.devices,
-      targets,
-      nextStamp: () => source.nextStamp(snapshot.devices),
+      devices: now.devices,
+      targets: restoreTargets(now.devices),
+      nextStamp: () => source.nextStamp(now.devices),
     });
     if (commands === null) {
       setError(
@@ -277,7 +345,7 @@ export function SettingsFileRows() {
       setApplying(false);
       return;
     }
-    const extra = extraDevices(snapshot, source);
+    const extra = extraDevices(now, source);
     const runs = [];
     for (const command of commands) {
       try {
@@ -291,8 +359,8 @@ export function SettingsFileRows() {
             notApplied: command.writes.map((write) => ({
               environmentId: write.environmentId,
               label:
-                snapshot.devices.find((device) => device.environmentId === write.environmentId)
-                  ?.label ?? write.environmentId,
+                now.devices.find((device) => device.environmentId === write.environmentId)?.label ??
+                write.environmentId,
               reason: "failed" as const,
               detail,
             })),
@@ -300,7 +368,7 @@ export function SettingsFileRows() {
         });
       }
     }
-    setOutcomes(summarizeDeviceSettingsRestore(snapshot.devices, runs));
+    setOutcomes(summarizeDeviceSettingsRestore(now.devices, runs));
     setApplying(false);
   };
 
@@ -403,7 +471,10 @@ export function SettingsFileRows() {
               </ul>
             ) : (
               <>
-                {plan?.hasAppSettings ? (
+                {plan?.hasAppSettings && appRestored ? (
+                  <p className="text-xs text-muted-foreground">This app's settings are restored.</p>
+                ) : null}
+                {plan?.hasAppSettings && !appRestored ? (
                   <section className="grid gap-2">
                     <Choice
                       label="This app's settings"
@@ -458,7 +529,8 @@ export function SettingsFileRows() {
                             <span>
                               Only these devices
                               <span className="block text-xs text-muted-foreground">
-                                Each keeps it as its own value. Only online devices you can change.
+                                As if you changed each one on its own: it keeps the value as its
+                                own. Only online devices you can change.
                               </span>
                             </span>
                           </label>
@@ -471,7 +543,10 @@ export function SettingsFileRows() {
                                 className="flex cursor-pointer items-center gap-2.5 text-[13px] text-foreground"
                               >
                                 <Checkbox
-                                  checked={chosen.has(device.environmentId)}
+                                  checked={
+                                    targets.kind === "chosen" &&
+                                    targets.environmentIds.has(device.environmentId)
+                                  }
                                   onCheckedChange={(checked) =>
                                     setChosen((current) => {
                                       const next = new Set(current);

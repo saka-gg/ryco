@@ -2030,6 +2030,9 @@ function OpenCommandPaletteDialog() {
               primary: primaryEnvironmentId,
             });
             openSettings(destination.section, destination.environmentId, destination.deviceTab);
+            // The device only pins where the results were checked: a section keeps showing
+            // every device, as a search on the page does.
+            useSettingsDialogStore.getState().setDeviceView("all");
             requestSettingsReveal(entry.targetId ?? entry.title);
           },
         });

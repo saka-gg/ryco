@@ -9,7 +9,7 @@ import type {
   SharingDevice,
 } from "@ryco/client-runtime/state/settings/sharedDeviceSettings";
 import type { SettingsSharingStamp } from "@ryco/contracts/settings";
-import type { EnvironmentId } from "@ryco/contracts";
+import type { EnvironmentId, ServerConfig } from "@ryco/contracts";
 import { createContext, useContext, useMemo, useSyncExternalStore } from "react";
 
 import { updateEnvironmentServerSettings } from "../../../environments/runtime";
@@ -18,7 +18,7 @@ import {
   subscribeSettingsSharingTargets,
 } from "../../../environments/settingsSharingTargets";
 import { ensureLocalApi } from "../../../localApi";
-import { applySettingsUpdated, useServerConfig } from "../../../rpc/serverState";
+import { applySettingsUpdated, usePrimaryServerConfigSelector } from "../../../rpc/serverState";
 import { useSettingsTarget, type SettingsTarget } from "../../../settingsTarget";
 import {
   nextSettingsSharingEditStamp,
@@ -138,10 +138,22 @@ function createSnapshotStore(source: SharedSettingsSource) {
   return { subscribe, read };
 }
 
+/** One snapshot store per source, shared by every row reading it. */
+const snapshotStores = new WeakMap<SharedSettingsSource, ReturnType<typeof createSnapshotStore>>();
+
+function snapshotStoreOf(source: SharedSettingsSource): ReturnType<typeof createSnapshotStore> {
+  let store = snapshotStores.get(source);
+  if (store === undefined) {
+    store = createSnapshotStore(source);
+    snapshotStores.set(source, store);
+  }
+  return store;
+}
+
 /** Every known device and the runner's attempts and cache, kept equal while nothing moved. */
 export function useSharedSettingsSnapshot(): SharedSettingsSnapshot {
   const source = useSharedSettingsSource();
-  const store = useMemo(() => createSnapshotStore(source), [source]);
+  const store = snapshotStoreOf(source);
   const snapshot = useSyncExternalStore(store.subscribe, store.read, store.read);
   const extra = useSettingsTargetDevice();
   return useMemo(
@@ -190,13 +202,22 @@ export function settingsTargetDevice(target: SettingsTarget): NodeSettingsTarget
   };
 }
 
+const selectConfig = (config: ServerConfig | null) => config;
+const sameSharingConfig = (left: ServerConfig | null, right: ServerConfig | null) =>
+  left === right ||
+  (left !== null &&
+    right !== null &&
+    left.settings === right.settings &&
+    left.environment === right.environment);
+
 /**
  * The settings target, else this app's own device from its server config (rows rendered
  * outside the settings page's target, as `useSettings` reads them).
  */
 function useSettingsTargetDevice(): NodeSettingsTarget | null {
   const target = useSettingsTarget();
-  const primaryConfig = useServerConfig();
+  // Only what a device carries for shared rows: a provider-status push re-renders no row.
+  const primaryConfig = usePrimaryServerConfigSelector(selectConfig, sameSharingConfig);
   return useMemo(() => {
     if (target !== null) return settingsTargetDevice(target);
     if (primaryConfig === null) return null;

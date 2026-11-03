@@ -41,6 +41,7 @@ import {
   runState,
   THIS_MAC_DEVICE,
 } from "../updates/updateEverythingTestFixtures";
+import { SettingsEditingScopeProvider, SettingsTargetProvider } from "../../settingsTarget";
 import { UpdatesSettings } from "./UpdatesSettings";
 import { SharedSettingsSourceProvider } from "./sharedSettings/sharedSettingsSource";
 import { createTestSharedSettings } from "./sharedSettings/sharedSettingsTestSource";
@@ -118,9 +119,14 @@ describe("Settings → Updates", () => {
         capabilities: { automaticUpdates: true },
       },
     ]);
+    // As the Updates page renders it: inside its app part, whose scope hides device rows.
     mounted = await render(
       <SharedSettingsSourceProvider value={network.source}>
-        <UpdatesSettings />
+        <SettingsEditingScopeProvider value="client">
+          <SettingsTargetProvider value={null}>
+            <UpdatesSettings />
+          </SettingsTargetProvider>
+        </SettingsEditingScopeProvider>
       </SharedSettingsSourceProvider>,
     );
 

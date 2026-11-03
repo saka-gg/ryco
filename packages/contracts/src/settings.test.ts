@@ -19,6 +19,7 @@ import {
   SidebarAutoSettleAfterDays,
   ServerSettings,
   ServerSettingsPatch,
+  SETTINGS_SHARING_STAMP_MAX_AT,
   USAGE_PRICE_OVERRIDE_LIMIT,
 } from "./settings.ts";
 
@@ -890,5 +891,18 @@ describe("ServerSettings.usagePriceOverrides", () => {
     expect(
       decodePatch({ usagePriceOverrides: { model: { price: { inputUsdPerMillion: 1 } } } })._tag,
     ).toBe("Failure");
+  });
+});
+
+describe("settings sharing stamps", () => {
+  const patch = (at: number) => ({
+    settingsSharing: { worktreeBranchPrefix: { mode: "shared", stamp: { at, by: "client" } } },
+  });
+
+  it("accepts a stamp up to the maximum and refuses one beyond it", () => {
+    expect(() => decodeServerSettingsPatch(patch(SETTINGS_SHARING_STAMP_MAX_AT))).not.toThrow();
+    expect(() => decodeServerSettingsPatch(patch(SETTINGS_SHARING_STAMP_MAX_AT + 1))).toThrow();
+    expect(() => decodeServerSettingsPatch(patch(Number.MAX_SAFE_INTEGER))).toThrow();
+    expect(SETTINGS_SHARING_STAMP_MAX_AT).toBeLessThan(Number.MAX_SAFE_INTEGER);
   });
 });

@@ -251,3 +251,115 @@ describe("the device shared rows use when the shown one cannot be", () => {
     ).toBeNull();
   });
 });
+
+describe("review fixes: shared row model and commands", () => {
+  const sharedRoot = (root: string, at: number, mode: "shared" | "override" = "shared") => ({
+    worktreeRoot: root,
+    settingsSharing: { worktreeRoot: { mode, stamp: stamp(at) } },
+  });
+
+  it("lists a device keeping its own value, even an equal one, instead of one control", () => {
+    const devices = [
+      device("a", sharedRoot("/w", 5)),
+      device("b", sharedRoot("/w", 5, "override")),
+    ];
+    expect(model(devices).kind).toBe("list");
+  });
+
+  it("lists a device holding a value from before sharing", () => {
+    const devices = [device("a", sharedRoot("/w", 5)), device("later", { worktreeRoot: "/mine" })];
+    const result = model(devices);
+    expect(result.kind).toBe("list");
+    if (result.kind === "list") expect(result.devices[1]?.state).toEqual({ kind: "differs" });
+  });
+
+  it("counts offline, owner-only, older and unloaded devices apart on one control", () => {
+    const unloaded: SharingDevice = {
+      environmentId: EnvironmentId.make("unloaded"),
+      label: "unloaded",
+      config: null,
+      connected: false,
+      canWrite: false,
+    };
+    const devices = [
+      device("a", sharedRoot("/w", 5)),
+      device("away", sharedRoot("/old", 1), { connected: false }),
+      device("viewer", sharedRoot("/old", 1), { canWrite: false }),
+      device("old", { worktreeRoot: "/w" }, { sharing: false }),
+      unloaded,
+    ];
+    expect(model(devices)).toMatchObject({
+      kind: "same",
+      deviceCount: 4,
+      queued: 1,
+      waitingForOwner: 1,
+      needUpdate: ["old"],
+      notLoaded: 1,
+    });
+  });
+
+  it("writes one field into each device's own value from the one control", () => {
+    const agentControl = (maxDepth: number | null) => ({
+      agentControl: { enabled: false, delegation: { maxDepth, maxTasksPerTree: null } },
+    });
+    const devices = [device("a", agentControl(3)), device("b", agentControl(null))];
+    const view = readSharedSettingView({ key: "agentControl", devices });
+    const command = buildSharedRowCommand({
+      key: "agentControl",
+      action: {
+        kind: "all",
+        value: { enabled: true, delegation: { maxDepth: 3, maxTasksPerTree: null } },
+      },
+      view,
+      devices,
+      nextStamp: () => stamp(10),
+      applyField: (current, edited) => ({ ...current, enabled: edited.enabled }),
+    });
+    expect(command?.writes.map((write) => write.patch.agentControl)).toEqual([
+      { enabled: true, delegation: { maxDepth: 3, maxTasksPerTree: null } },
+      { enabled: true, delegation: { maxDepth: null, maxTasksPerTree: null } },
+    ]);
+  });
+
+  it("promises a catch-up only to devices that follow the shared value, and names refusals", () => {
+    const devices = [
+      device("a", sharedRoot("/w", 5)),
+      device("own", sharedRoot("/x", 5, "override")),
+    ];
+    const view = readSharedSettingView({ key: "worktreeRoot", devices });
+    const command = buildSharedRowCommand({
+      key: "worktreeRoot",
+      action: { kind: "everywhere", value: "/w" },
+      view,
+      devices,
+      nextStamp: () => stamp(10),
+    });
+    if (command === null) throw new Error("expected a command");
+    const notes = describeSharedRowOutcome({
+      action: { kind: "everywhere", value: "/w" },
+      command,
+      view,
+      result: {
+        applied: [],
+        notApplied: [
+          { environmentId: EnvironmentId.make("a"), label: "a", reason: "disconnected" },
+          { environmentId: EnvironmentId.make("own"), label: "own", reason: "disconnected" },
+        ],
+      },
+    });
+    expect(notes).toEqual([
+      "a went offline; it catches up when it reconnects.",
+      "own went offline before the change was saved there.",
+    ]);
+    const readOnly = describeSharedRowOutcome({
+      action: { kind: "device", environmentId: EnvironmentId.make("a"), value: "/v" },
+      command,
+      view,
+      result: {
+        applied: [],
+        notApplied: [{ environmentId: EnvironmentId.make("a"), label: "a", reason: "read-only" }],
+      },
+    });
+    expect(readOnly).toEqual(["Not saved on a: only its owner can change it."]);
+  });
+});

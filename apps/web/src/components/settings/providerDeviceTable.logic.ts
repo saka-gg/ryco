@@ -101,25 +101,38 @@ interface DeviceInstance {
 
 interface Group {
   readonly key: string;
+  readonly nameKey: string | null;
   readonly first: DeviceInstance;
   readonly byDevice: Map<EnvironmentId, DeviceInstance>;
   match: "id" | "name";
+  /** Only one device holds this driver and id: it may still join a row by name. */
+  readonly leftover: boolean;
+}
+
+function idKey(driver: ProviderDriverKind, instanceId: ProviderInstanceId): string {
+  return `${driver}\u0000${instanceId}`;
+}
+
+/** The name an instance may match by: a given name on an instance someone added. */
+function entryNameKey(entry: DeviceInstance): string | null {
+  const name = entry.isDefault ? null : customName(entry.instance);
+  return name === null ? null : nameKey(entry.driver, name);
 }
 
 /**
  * Groups every device's provider instances into one row per provider. Instances with the same
- * id on several devices are one row. An instance whose id no other device holds joins a row of
- * the same driver and the same given name when that row has no instance on its device yet
- * ("matched by name"), so a provider added under another id on each device still reads as one.
- * An instance without a given name only ever matches by id. Rows keep the order of the first
- * device that lists them (each device's own provider order), then later devices' new rows.
+ * driver and id on several devices are one row, always. An instance whose driver and id no
+ * other device holds joins a row of the same driver and the same given name when that row has
+ * no instance on its device ("matched by name"), so a provider added under another id on each
+ * device still reads as one. A cell is never overwritten: a device holds at most one instance
+ * of a row. An instance without a given name only ever matches by id. Rows keep the order of
+ * the first device that lists them (each device's own provider order), then later devices' new
+ * rows.
  */
 export function groupProviderInstancesAcrossDevices(
   devices: ReadonlyArray<ProviderTableDevice>,
 ): ReadonlyArray<ProviderTableRow> {
-  // Every device's instances first: an id another device also holds always groups by id.
   const entries: DeviceInstance[] = [];
-  const idDevices = new Map<ProviderInstanceId, number>();
   for (const device of devices) {
     if (device.config === null) continue;
     const live = new Map(
@@ -137,41 +150,62 @@ export function groupProviderInstancesAcrossDevices(
         isDefault: row.isDefault,
         live: live.get(row.instanceId),
       });
-      idDevices.set(row.instanceId, (idDevices.get(row.instanceId) ?? 0) + 1);
     }
   }
 
-  const groups: Group[] = [];
-  const byId = new Map<ProviderInstanceId, Group>();
-  const byName = new Map<string, Group[]>();
+  // The devices holding each driver and id: two or more always share one row.
+  const idDevices = new Map<string, Set<EnvironmentId>>();
   for (const entry of entries) {
-    const sameId = byId.get(entry.instanceId);
-    if (sameId !== undefined) {
-      sameId.byDevice.set(entry.environmentId, entry);
+    const key = idKey(entry.driver, entry.instanceId);
+    const holders = idDevices.get(key) ?? new Set<EnvironmentId>();
+    holders.add(entry.environmentId);
+    idDevices.set(key, holders);
+  }
+
+  // First by driver and id, each in the place its first instance is listed.
+  const ordered: Group[] = [];
+  const byId = new Map<string, Group>();
+  for (const entry of entries) {
+    const key = idKey(entry.driver, entry.instanceId);
+    const existing = byId.get(key);
+    if (existing !== undefined) {
+      if (!existing.byDevice.has(entry.environmentId)) {
+        existing.byDevice.set(entry.environmentId, entry);
+      }
       continue;
     }
-    const name = entry.isDefault ? null : customName(entry.instance);
-    const key = name === null ? null : nameKey(entry.driver, name);
-    if (key !== null && (idDevices.get(entry.instanceId) ?? 0) < 2) {
-      const free = (byName.get(key) ?? []).find(
-        (group) => !group.byDevice.has(entry.environmentId),
-      );
-      if (free !== undefined) {
-        free.byDevice.set(entry.environmentId, entry);
-        free.match = "name";
-        continue;
-      }
-    }
     const group: Group = {
-      key: `id:${entry.instanceId}`,
+      key: `id:${key}`,
+      nameKey: entryNameKey(entry),
       first: entry,
       byDevice: new Map([[entry.environmentId, entry]]),
       match: "id",
+      leftover: (idDevices.get(key)?.size ?? 0) < 2,
     };
-    groups.push(group);
-    byId.set(entry.instanceId, group);
-    if (key !== null) byName.set(key, [...(byName.get(key) ?? []), group]);
+    ordered.push(group);
+    byId.set(key, group);
   }
+
+  // Then each leftover joins a row of its driver and name with no instance on its device yet:
+  // a row several devices share first, else an earlier leftover's.
+  const merged = new Set<Group>();
+  for (const group of ordered) {
+    if (!group.leftover || group.nameKey === null) continue;
+    const { environmentId } = group.first;
+    const fits = (other: Group) =>
+      other !== group &&
+      !merged.has(other) &&
+      other.nameKey === group.nameKey &&
+      !other.byDevice.has(environmentId);
+    const target =
+      ordered.find((other) => !other.leftover && fits(other)) ??
+      ordered.slice(0, ordered.indexOf(group)).find((other) => other.leftover && fits(other));
+    if (target === undefined) continue;
+    target.byDevice.set(environmentId, group.first);
+    target.match = "name";
+    merged.add(group);
+  }
+  const groups = ordered.filter((group) => !merged.has(group));
 
   return groups.map((group): ProviderTableRow => {
     const { first } = group;

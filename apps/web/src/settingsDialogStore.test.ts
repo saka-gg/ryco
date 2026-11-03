@@ -9,7 +9,25 @@ describe("settingsDialogStore", () => {
       open: false,
       section: "general",
       targetEnvironmentId: null,
+      deviceView: "all",
     });
+  });
+
+  it("opens a named device's own values, and every device's otherwise", () => {
+    const store = useSettingsDialogStore.getState();
+    store.openSettings("usage", EnvironmentId.make("remote"));
+    expect(useSettingsDialogStore.getState()).toMatchObject({
+      section: "usage",
+      targetEnvironmentId: "remote",
+      deviceView: "device",
+    });
+
+    store.openSettings("usage");
+    expect(useSettingsDialogStore.getState().deviceView).toBe("all");
+
+    store.setDeviceView("device");
+    store.closeSettings();
+    expect(useSettingsDialogStore.getState().deviceView).toBe("all");
   });
 
   it("keeps an explicit device until settings close", () => {
@@ -28,6 +46,7 @@ describe("settingsDialogStore", () => {
     expect(useSettingsDialogStore.getState()).toMatchObject({
       open: false,
       targetEnvironmentId: null,
+      deviceView: "all",
     });
   });
 

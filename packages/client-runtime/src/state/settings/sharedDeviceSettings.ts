@@ -8,7 +8,10 @@
  * Rules every function here keeps:
  * - Ordering is `(at, by)`, ties broken by the lowest environment id, so every client picks the
  *   same winner.
- * - A zero stamp is never written: devices that never had a sharing write keep their value.
+ * - A zero stamp is never written, and a device that never took a shared write (its key at the
+ *   zero stamp) is never caught up to a value unlike its own: it shows `differs` until a person
+ *   chooses (`resolveDeviceDifferences`). Only a person's edit that meant it (`covers` in this
+ *   client's cache: it was offline when the edit went out) or an equal value carries it along.
  * - A device in `override` mode is never caught up; only a person's own command changes it.
  * - A device without the `settingsSharingVersion` capability, or not sharing the key, is
  *   `unsupported`: never caught up, never queued, never sent `settingsSharing`.
@@ -42,7 +45,11 @@ import {
 } from "@ryco/shared/settingsSharing";
 
 import type { SettingsSharingClock } from "./settingsSharingClock.ts";
-import type { NodeSettingsConfig, NodeSettingsTarget } from "./nodeSettingsTargets.ts";
+import type {
+  NodeSettingsApplyResult,
+  NodeSettingsConfig,
+  NodeSettingsTarget,
+} from "./nodeSettingsTargets.ts";
 
 /** A device as the sharing functions read it: the write itself is not needed. */
 export type SharingDevice = Pick<
@@ -88,7 +95,14 @@ export interface SharedSettingNewest<K extends ShareableServerSettingKey> {
 export interface SettingsSharingCacheEntry<K extends ShareableServerSettingKey> {
   readonly stamp: SettingsSharingStamp;
   readonly value: ShareableSettingValue<K>;
+  /** A device of this namespace: the entry applies only while it is among the known devices. */
   readonly source: EnvironmentId;
+  /**
+   * Devices this client's own edit was meant for that could not take it then (offline, or gone
+   * mid-write) while following the shared value: they take it when they reconnect, even one
+   * that never had a shared write. Kept only with this stamp.
+   */
+  readonly covers?: ReadonlyArray<EnvironmentId>;
 }
 
 /**
@@ -162,14 +176,25 @@ export function mergeSettingsSharingCache(
   return (next as SettingsSharingCache | null) ?? cache;
 }
 
-/** Records a value this client wrote, when newer than the cache's. */
+/**
+ * Records a value this client wrote, when newer than the cache's. For the same stamp (a pass
+ * already learned it from a device that took the write) it adds the devices the edit covers.
+ */
 export function recordSettingsSharingCache<K extends ShareableServerSettingKey>(
   cache: SettingsSharingCache,
   key: K,
   entry: SettingsSharingCacheEntry<K>,
 ): SettingsSharingCache {
   const cached = cache[key];
-  if (cached !== undefined && compareSharingStamps(cached.stamp, entry.stamp) >= 0) return cache;
+  if (cached !== undefined) {
+    const order = compareSharingStamps(cached.stamp, entry.stamp);
+    if (order > 0) return cache;
+    if (order === 0) {
+      const covers = [...new Set([...(cached.covers ?? []), ...(entry.covers ?? [])])];
+      if (covers.length === (cached.covers?.length ?? 0)) return cache;
+      return { ...cache, [key]: { ...cached, covers } };
+    }
+  }
   return { ...cache, [key]: entry };
 }
 
@@ -188,9 +213,12 @@ export function decodeSettingsSharingCache(raw: unknown): SettingsSharingCache {
   const cache: Record<string, unknown> = {};
   for (const [key, entry] of Object.entries(raw)) {
     if (!isShareableServerSettingKey(key) || typeof entry !== "object" || entry === null) continue;
-    const { stamp, value, source } = entry as Record<string, unknown>;
+    const { stamp, value, source, covers } = entry as Record<string, unknown>;
     if (!isStamp(stamp) || typeof source !== "string" || value === undefined) continue;
-    cache[key] = { stamp, value, source };
+    const covered = Array.isArray(covers)
+      ? covers.filter((id): id is string => typeof id === "string")
+      : [];
+    cache[key] = { stamp, value, source, ...(covered.length > 0 ? { covers: covered } : {}) };
   }
   return cache as SettingsSharingCache;
 }
@@ -250,6 +278,39 @@ function readAttempt(
     : undefined;
 }
 
+// ── Devices that never shared ───────────────────────────────────
+
+/**
+ * Whether a device keeps a value from before sharing that the newest shared value would
+ * replace: it shares the key in `shared` mode at the zero stamp (no shared write ever reached
+ * it: a device added later, or a node updated to share settings), and its value differs from
+ * the newest. Such a device is never caught up on its own; it shows `differs` until a person
+ * picks the shared value or keeps its own. Not when this client's own edit covered it (it was
+ * offline when the person's edit went out).
+ */
+function keepsValueFromBeforeSharing(
+  device: SharingDevice,
+  key: ShareableServerSettingKey,
+  entry: SettingsSharingEntry | null,
+  newest: SharedSettingNewest<ShareableServerSettingKey> | null,
+  cache: SettingsSharingCache | undefined,
+): boolean {
+  if (device.config === null || entry === null || newest === null) return false;
+  if (entry.mode !== "shared" || !isZeroSharingStamp(entry.stamp)) return false;
+  if (!nodeSharesSetting(device.config, key)) return false;
+  const cached = cache?.[key];
+  if (
+    cached !== undefined &&
+    compareSharingStamps(cached.stamp, newest.stamp) === 0 &&
+    cached.covers?.includes(device.environmentId) === true
+  )
+    return false;
+  return !shareableSettingValuesEqual(
+    readWrittenShareableSettingValue(device.config.settings, key),
+    newest.value,
+  );
+}
+
 // ── Planner ─────────────────────────────────────────────────────
 
 /** One key of a catch-up write: its own patch, so a refused batch can be split per key. */
@@ -299,7 +360,9 @@ export function mergeSettingsSharingPatches(
 
 /**
  * The catch-up writes that bring every connected, writable device in `shared` mode holding an
- * older stamp to the newest shared value, one patch per device, sorted by environment id. Each
+ * older stamp to the newest shared value, one patch per device, sorted by environment id. A
+ * device that never took a shared write and holds another value is left alone
+ * (`keepsValueFromBeforeSharing`). Each
  * key is a guarded catch-up (`onlyIfOlderShared`), so a device that turned to an override or got
  * a newer value meanwhile drops it, and two clients sending the same catch-up change nothing
  * twice. A key with an attempt for the same stamp is left out until `attempt.retryAt`.
@@ -321,6 +384,8 @@ export function planSettingsSharingCatchUp(input: {
       if (!nodeSharesSetting(config, key)) continue;
       const entry = readSharingEntry(config.settings.settingsSharing, key);
       if (entry.mode !== "shared" || compareSharingStamps(entry.stamp, newest.stamp) >= 0) continue;
+      // A value from before sharing waits for a person; an equal one just takes the stamp.
+      if (keepsValueFromBeforeSharing(device, key, entry, newest, input.cache)) continue;
       const attempt = readAttempt(input.attempts, device.environmentId, key, newest.stamp);
       if (attempt !== undefined && input.now < attempt.retryAt) continue;
       const list = parts.get(device.environmentId) ?? [];
@@ -362,9 +427,16 @@ export type SharedSettingDeviceState =
   /** No config known yet. */
   | { readonly kind: "unknown" }
   /** The device refused the newest shared value. */
-  | { readonly kind: "couldNotApply"; readonly reason: string };
+  | { readonly kind: "couldNotApply"; readonly reason: string }
+  /**
+   * Never took a shared write and keeps a value unlike the shared one (a device added later, a
+   * node updated to share settings): left alone until a person uses the shared value or keeps
+   * its own (`resolveDeviceDifferences`).
+   */
+  | { readonly kind: "differs" };
 
 export interface SharedSettingDeviceView<K extends ShareableServerSettingKey> {
+  readonly key: K;
   readonly environmentId: EnvironmentId;
   readonly label: string;
   /** The device's value from its last known config; undefined when none is known. */
@@ -403,11 +475,22 @@ function deviceState(
   entry: SettingsSharingEntry | null,
   newest: SharedSettingNewest<ShareableServerSettingKey> | null,
   attempts: SettingsSharingAttempts | undefined,
+  cache: SettingsSharingCache | undefined,
 ): SharedSettingDeviceState {
   if (device.config === null || entry === null) return { kind: "unknown" };
   if (!nodeSharesSetting(device.config, key)) return { kind: "unsupported" };
   if (entry.mode === "override") return { kind: "override" };
   if (newest === null || compareSharingStamps(entry.stamp, newest.stamp) >= 0)
+    return { kind: "shared" };
+  if (keepsValueFromBeforeSharing(device, key, entry, newest, cache)) return { kind: "differs" };
+  // Same value at the zero stamp: only the stamp is still to come, nothing a person would see.
+  if (
+    isZeroSharingStamp(entry.stamp) &&
+    shareableSettingValuesEqual(
+      readWrittenShareableSettingValue(device.config.settings, key),
+      newest.value,
+    )
+  )
     return { kind: "shared" };
   const attempt = readAttempt(attempts, device.environmentId, key, newest.stamp);
   if (attempt?.state === "failed")
@@ -436,6 +519,7 @@ export function readSharedSettingView<K extends ShareableServerSettingKey>(input
     const written =
       recorded && entry?.written !== undefined ? (entry.written as typeof value) : value;
     return {
+      key,
       environmentId: device.environmentId,
       label: device.label,
       value,
@@ -447,7 +531,7 @@ export function readSharedSettingView<K extends ShareableServerSettingKey>(input
         newest !== null &&
         written !== undefined &&
         shareableSettingValuesEqual(written, newest.value),
-      state: deviceState(device, key, entry, newest, input.attempts),
+      state: deviceState(device, key, entry, newest, input.attempts, input.cache),
     };
   });
   const known = devices.filter((device) => device.written !== undefined);
@@ -463,9 +547,11 @@ export function readSharedSettingView<K extends ShareableServerSettingKey>(input
 
 /**
  * Whether two devices hold the same value of a shared setting: equal values as written, or, for
- * two devices shared on the same write, the stamp's word for it. Each device stores a path the
- * way it normalized it; when both entries record the value as written that is compared, and
- * entries from before that record (no `written`) agree by their equal stamp alone.
+ * two devices shared on the same write of a path, the stamp's word for it. Each device stores a
+ * path the way it normalized it; when both entries record the value as written that is
+ * compared, and entries from before that record (no `written`) agree by their equal stamp
+ * alone. Every other key is stored as written, so its values decide: equal stamps holding
+ * different values (a hand-edited settings file) differ.
  */
 export function sharedDeviceValuesAgree<K extends ShareableServerSettingKey>(
   a: SharedSettingDeviceView<K>,
@@ -481,7 +567,7 @@ export function sharedDeviceValuesAgree<K extends ShareableServerSettingKey>(
   const right = shown(b);
   if (left === undefined || right === undefined) return false;
   if (equal(left, right)) return true;
-  if (a.writtenRecorded && b.writtenRecorded) return false;
+  if (!keepsWrittenSettingValue(a.key) || (a.writtenRecorded && b.writtenRecorded)) return false;
   return (
     a.mode === "shared" &&
     b.mode === "shared" &&
@@ -500,25 +586,66 @@ export function readSharedSettingViews(input: {
   return SHAREABLE_SERVER_SETTING_KEYS.map((key) => readSharedSettingView({ ...input, key }));
 }
 
-/** The keys where one device differs: its overrides and the keys it has not caught up on. */
+/**
+ * The keys where one device differs from the others, for its "Where this device differs": its
+ * own values, the values it has not taken yet (queued, syncing, refused), a value from before
+ * sharing (`differs`), and, while no shared write happened yet, a value unlike another
+ * device's (also `differs`). A key an older node does not share is listed when its value
+ * differs too. `value` is what the device holds, as written.
+ */
 export function readDeviceSharingDifferences(
   views: ReadonlyArray<SharedSettingView<ShareableServerSettingKey>>,
   environmentId: EnvironmentId,
 ): ReadonlyArray<{
   readonly key: ShareableServerSettingKey;
   readonly state: SharedSettingDeviceState;
+  readonly value: ShareableSettingValue<ShareableServerSettingKey> | undefined;
 }> {
   return views.flatMap((view) => {
     const device = view.devices.find((entry) => entry.environmentId === environmentId);
     if (device === undefined) return [];
     const { kind } = device.state;
-    return kind === "override" ||
+    const differsFromOthers =
+      view.agreement.kind === "differs" &&
+      view.devices.some(
+        (other) =>
+          other.environmentId !== environmentId &&
+          other.written !== undefined &&
+          !sharedDeviceValuesAgree(device, other),
+      );
+    const listed =
+      kind === "override" ||
       kind === "queued" ||
       kind === "couldNotApply" ||
-      kind === "syncing"
-      ? [{ key: view.key, state: device.state }]
-      : [];
+      kind === "syncing" ||
+      kind === "differs" ||
+      // Before any shared write every device is on its own value; after one, a device on the
+      // shared value does not differ, the others say why.
+      (kind === "shared" && view.newest === null && differsFromOthers) ||
+      (kind === "unsupported" && differsFromOthers);
+    if (!listed) return [];
+    const state: SharedSettingDeviceState = kind === "shared" ? { kind: "differs" } : device.state;
+    return [{ key: view.key, state, value: device.written }];
   });
+}
+
+/**
+ * The keys where a device that never took a shared write keeps a value unlike the shared one
+ * (state `differs` against a newest shared value): what "<device> has N settings that differ
+ * from your shared ones" counts.
+ */
+export function readDeviceValuesFromBeforeSharing(
+  views: ReadonlyArray<SharedSettingView<ShareableServerSettingKey>>,
+  environmentId: EnvironmentId,
+): ReadonlyArray<ShareableServerSettingKey> {
+  return views.flatMap((view) =>
+    view.newest !== null &&
+    view.devices.some(
+      (device) => device.environmentId === environmentId && device.state.kind === "differs",
+    )
+      ? [view.key]
+      : [],
+  );
 }
 
 // ── Commands ────────────────────────────────────────────────────
@@ -532,6 +659,7 @@ export type SettingsSharingSkipReason =
 
 /** A person's edit as per-device patches; skipped devices say why. */
 export interface SettingsSharingCommand {
+  /** The key it changes (the first one, for `resolveDeviceDifferences` over several). */
   readonly key: ShareableServerSettingKey;
   readonly writes: ReadonlyArray<{
     readonly environmentId: EnvironmentId;
@@ -544,14 +672,42 @@ export interface SettingsSharingCommand {
   }>;
   /** The shared value and stamp the edit sets, for the client's cache; null for none. */
   readonly shared: { readonly stamp: SettingsSharingStamp; readonly value: unknown } | null;
+  /**
+   * With `shared`: the devices following the shared value (in `shared` mode now), written now or
+   * skipped offline. One this edit misses (offline, or gone mid-write) takes it when it
+   * reconnects; any other device it misses keeps what it has.
+   */
+  readonly followers: ReadonlyArray<EnvironmentId>;
+}
+
+/** The devices a shared command missed that take it when they reconnect. */
+export function settingsSharingCommandCatchUps(
+  command: SettingsSharingCommand,
+  result: NodeSettingsApplyResult,
+): ReadonlyArray<EnvironmentId> {
+  if (command.shared === null) return [];
+  const missed = new Set<EnvironmentId>([
+    ...command.skipped
+      .filter((device) => device.reason === "offline")
+      .map((device) => device.environmentId),
+    ...result.notApplied
+      .filter((device) => device.reason === "disconnected")
+      .map((device) => device.environmentId),
+  ]);
+  return command.followers.filter((environmentId) => missed.has(environmentId));
 }
 
 function writeBlocker(device: SharingDevice): SettingsSharingSkipReason | null {
-  if (device.config === null) return "unknown";
   if (!device.connected) return "offline";
   return device.canWrite ? null : "read-only";
 }
 
+/**
+ * Per-device patches of one edit. What the edit means for a device (`patchFor`: it keeps its
+ * own value, it does not share the key) is decided first, from its last known config, so an
+ * offline device that would not take the edit anyway is not promised it; then whether it can
+ * be written now.
+ */
 function buildCommand(
   key: ShareableServerSettingKey,
   devices: ReadonlyArray<SharingDevice>,
@@ -563,15 +719,63 @@ function buildCommand(
 ): SettingsSharingCommand {
   const writes: Array<SettingsSharingCommand["writes"][number]> = [];
   const skipped: Array<SettingsSharingCommand["skipped"][number]> = [];
+  const followers: EnvironmentId[] = [];
   for (const device of devices) {
-    const blocker = writeBlocker(device);
-    const result =
-      blocker ?? (device.config === null ? "unknown" : patchFor(device, device.config.settings));
-    if (typeof result === "string")
-      skipped.push({ environmentId: device.environmentId, label: device.label, reason: result });
-    else writes.push({ environmentId: device.environmentId, patch: result });
+    const result = device.config === null ? "unknown" : patchFor(device, device.config.settings);
+    const reason = typeof result === "string" ? result : writeBlocker(device);
+    if (reason !== null)
+      skipped.push({ environmentId: device.environmentId, label: device.label, reason });
+    else if (typeof result !== "string")
+      writes.push({ environmentId: device.environmentId, patch: result });
+    if (
+      shared !== null &&
+      typeof result !== "string" &&
+      (reason === null || reason === "offline") &&
+      deviceEntry(device, key)?.mode === "shared"
+    )
+      followers.push(device.environmentId);
   }
-  return { key, writes, skipped, shared };
+  return { key, writes, skipped, shared, followers };
+}
+
+/**
+ * For an edit of one field of a larger value: each device's own value with the edited field
+ * put in (`valueFor`), so a device keeps the fields the edit did not touch. One value for every
+ * device without it.
+ */
+type DeviceValue<K extends ShareableServerSettingKey> = (
+  current: ShareableSettingValue<K>,
+) => ShareableSettingValue<K>;
+
+function valueForDevice<K extends ShareableServerSettingKey>(
+  key: K,
+  value: ShareableSettingValue<K>,
+  valueFor: DeviceValue<K> | undefined,
+  settings: ServerSettings,
+): ShareableSettingValue<K> {
+  return valueFor === undefined ? value : valueFor(readWrittenShareableSettingValue(settings, key));
+}
+
+/**
+ * The shared value of a command whose devices may each get their own value (`valueFor`): the
+ * one value when every device it reaches gets the same, else null, so no device that missed it
+ * is later given another device's other fields.
+ */
+function commonSharedValue<K extends ShareableServerSettingKey>(
+  key: K,
+  devices: ReadonlyArray<SharingDevice>,
+  value: ShareableSettingValue<K>,
+  valueFor: DeviceValue<K> | undefined,
+): { readonly value: ShareableSettingValue<K> } | null {
+  if (valueFor === undefined) return { value };
+  let common: { readonly value: ShareableSettingValue<K> } | null = null;
+  for (const device of devices) {
+    if (device.config === null || !nodeSharesSetting(device.config, key)) continue;
+    const own = valueForDevice(key, value, valueFor, device.config.settings);
+    if (common === null) common = { value: own };
+    else if (!shareableSettingValuesEqual(common.value, own)) return null;
+  }
+  return common ?? { value };
 }
 
 /**
@@ -586,13 +790,30 @@ export function writeSharedSetting<K extends ShareableServerSettingKey>(input: {
   readonly value: ShareableSettingValue<K>;
   /** From {@link nextSettingsSharingStamp}. */
   readonly stamp: SettingsSharingStamp;
+  /** For a row that edits one field: each device's own value with that field put in. */
+  readonly valueFor?: DeviceValue<K>;
 }): SettingsSharingCommand {
-  const { key, value, stamp } = input;
-  return buildCommand(key, input.devices, { stamp, value }, (device, settings) => {
-    if (!nodeSharesSetting(device.config, key)) return "unsupported";
-    if (readSharingEntry(settings.settingsSharing, key).mode === "override") return "override";
-    return sharingPatch(key, value, settings, { mode: "shared", stamp, onlyIfOlderShared: true });
-  });
+  const { key, value, stamp, valueFor } = input;
+  const followers = input.devices.filter(
+    (device) =>
+      device.config !== null &&
+      readSharingEntry(device.config.settings.settingsSharing, key).mode !== "override",
+  );
+  const common = commonSharedValue(key, followers, value, valueFor);
+  return buildCommand(
+    key,
+    input.devices,
+    common === null ? null : { stamp, value: common.value },
+    (device, settings) => {
+      if (!nodeSharesSetting(device.config, key)) return "unsupported";
+      if (readSharingEntry(settings.settingsSharing, key).mode === "override") return "override";
+      return sharingPatch(key, valueForDevice(key, value, valueFor, settings), settings, {
+        mode: "shared",
+        stamp,
+        onlyIfOlderShared: true,
+      });
+    },
+  );
 }
 
 /**
@@ -647,14 +868,7 @@ export function editDeviceSetting<K extends ShareableServerSettingKey>(input: {
  */
 export function describeSettingsSharingResult(
   command: SettingsSharingCommand,
-  result: {
-    readonly applied: ReadonlyArray<{ readonly label: string }>;
-    readonly notApplied: ReadonlyArray<{
-      readonly label: string;
-      readonly reason: string;
-      readonly detail?: string;
-    }>;
-  },
+  result: NodeSettingsApplyResult,
 ): string {
   const names = (labels: ReadonlyArray<string>) => labels.join(", ");
   const parts: string[] = [];
@@ -665,15 +879,22 @@ export function describeSettingsSharingResult(
   );
   const skipped = (reason: SettingsSharingSkipReason) =>
     command.skipped.filter((device) => device.reason === reason).map((device) => device.label);
-  const later = [
-    ...(command.shared === null ? [] : skipped("offline")),
-    ...result.notApplied
-      .filter((device) => device.reason === "disconnected")
-      .map((device) => device.label),
-  ];
+  // Only devices that follow the shared value take it later; the rest keep what they have.
+  const catchUps = new Set<EnvironmentId>(settingsSharingCommandCatchUps(command, result));
+  const labelOf = (environmentId: EnvironmentId) =>
+    command.skipped.find((device) => device.environmentId === environmentId)?.label ??
+    result.notApplied.find((device) => device.environmentId === environmentId)?.label ??
+    environmentId;
+  const later = [...catchUps].map(labelOf);
   if (later.length > 0) parts.push(`Applies when they reconnect: ${names(later)}.`);
-  if (command.shared === null && skipped("offline").length > 0)
-    parts.push(`Offline: ${names(skipped("offline"))}.`);
+  const offline = command.skipped
+    .filter((device) => device.reason === "offline" && !catchUps.has(device.environmentId))
+    .map((device) => device.label);
+  if (offline.length > 0) parts.push(`Offline: ${names(offline)}.`);
+  const gone = result.notApplied
+    .filter((device) => device.reason === "disconnected" && !catchUps.has(device.environmentId))
+    .map((device) => device.label);
+  if (gone.length > 0) parts.push(`Went offline before it was saved: ${names(gone)}.`);
   if (skipped("override").length > 0)
     parts.push(`Keep their own value: ${names(skipped("override"))}.`);
   if (skipped("read-only").length > 0)
@@ -721,11 +942,58 @@ export function useSettingEverywhere<K extends ShareableServerSettingKey>(input:
   readonly key: K;
   readonly value: ShareableSettingValue<K>;
   readonly stamp: SettingsSharingStamp;
+  /** For a row that edits one field: each device's own value with that field put in. */
+  readonly valueFor?: DeviceValue<K>;
 }): SettingsSharingCommand {
-  const { key, value, stamp } = input;
-  return buildCommand(key, input.devices, { stamp, value }, (device, settings) =>
-    nodeSharesSetting(device.config, key)
-      ? sharingPatch(key, value, settings, { mode: "shared", stamp })
-      : "unsupported",
+  const { key, value, stamp, valueFor } = input;
+  const common = commonSharedValue(key, input.devices, value, valueFor);
+  return buildCommand(
+    key,
+    input.devices,
+    common === null ? null : { stamp, value: common.value },
+    (device, settings) =>
+      nodeSharesSetting(device.config, key)
+        ? sharingPatch(key, valueForDevice(key, value, valueFor, settings), settings, {
+            mode: "shared",
+            stamp,
+          })
+        : "unsupported",
   );
+}
+
+/**
+ * Settles a device's values from before sharing (`readDeviceValuesFromBeforeSharing`) in one
+ * write: `shared` gives it the newest shared value and stamp of each key (as "Reset to
+ * shared"), `own` keeps each of its values as its own (an override, stamped). Keys without a
+ * shared value (any more) are left out. One patch, so the device takes all of them or none.
+ */
+export function resolveDeviceDifferences(input: {
+  readonly device: SharingDevice;
+  readonly devices: ReadonlyArray<SharingDevice>;
+  readonly keys: ReadonlyArray<ShareableServerSettingKey>;
+  readonly choice: "shared" | "own";
+  /** For `own`, from {@link nextSettingsSharingStamp}. */
+  readonly stamp: SettingsSharingStamp;
+  readonly cache?: SettingsSharingCache;
+}): SettingsSharingCommand | null {
+  const [first] = input.keys;
+  if (first === undefined) return null;
+  return buildCommand(first, [input.device], null, (device, settings) => {
+    const patches: ServerSettingsPatch[] = [];
+    for (const key of input.keys) {
+      if (!nodeSharesSetting(device.config, key)) continue;
+      if (input.choice === "own") {
+        patches.push(
+          sharingPatch(key, undefined, settings, { mode: "override", stamp: input.stamp }),
+        );
+        continue;
+      }
+      const newest = readNewestSharedSetting(input.devices, key, input.cache);
+      if (newest !== null)
+        patches.push(
+          sharingPatch(key, newest.value, settings, { mode: "shared", stamp: newest.stamp }),
+        );
+    }
+    return patches.length === 0 ? "unsupported" : mergeSettingsSharingPatches(patches);
+  });
 }

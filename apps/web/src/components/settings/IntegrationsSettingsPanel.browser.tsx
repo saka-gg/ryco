@@ -259,6 +259,17 @@ describe("AgentControlSettingsPanel", () => {
     harness.delegation = { maxDepth: null, maxTasksPerTree: 50 };
     const network = renderAgentControl();
 
+    // Three rows of one setting, each with its own element id; "Open" reveals the first.
+    await expect.element(page.getByLabelText("How deep tasks can go")).toBeVisible();
+    const ids = Array.from(document.querySelectorAll('[id^="shared-setting-agentControl"]')).map(
+      (element) => element.id,
+    );
+    expect(ids).toEqual([
+      "shared-setting-agentControl",
+      "shared-setting-agentControl-maxDepth",
+      "shared-setting-agentControl-maxTasksPerTree",
+    ]);
+
     await page.getByLabelText("How deep tasks can go").click();
     await page.getByRole("option", { name: "1 level: tasks can't delegate" }).click();
     // The other limit and `enabled` stay as the device holds them.

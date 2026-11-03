@@ -5,6 +5,7 @@ import type { NodeSettingsConfig } from "@ryco/client-runtime/state/settings/nod
 import { useCallback, useSyncExternalStore } from "react";
 
 import { readNodeServerConfig } from "../../environments/nodeServerConfig";
+import { SettingsEditingScopeProvider } from "../../settingsTarget";
 import {
   mayCallNodeOwnerMethod,
   subscribeNodeMethodPermissions,
@@ -92,6 +93,22 @@ export function AutomaticUpdatesSettings({
   const desktopNotes = useDesktopNotes(entries);
   const checksOff = views.some((view) => view.endsWith("-checks-off"));
   if (!views.some((view) => view !== "hidden")) return null;
+  // A setting of every device, inside the Updates page's app part: shown whatever that part's
+  // editing scope (an app-only scope hides rows stored on devices).
+  return (
+    <SettingsEditingScopeProvider value="all">
+      <AutomaticUpdatesSection desktopNotes={desktopNotes} checksOff={checksOff} />
+    </SettingsEditingScopeProvider>
+  );
+}
+
+function AutomaticUpdatesSection({
+  desktopNotes,
+  checksOff,
+}: {
+  readonly desktopNotes: string | null;
+  readonly checksOff: boolean;
+}) {
   return (
     <SettingsSection title="Update automatically">
       <SharedSettingRow

@@ -27,7 +27,18 @@ import {
  */
 
 export const CLIENT_SETTINGS_FILE_FORMAT = "ryco-client-settings";
-export const CLIENT_SETTINGS_FILE_VERSION = 1;
+/**
+ * A file with shared device settings. A Ryco that reads only version 1 ignores keys it does not
+ * know, so it would drop `deviceSettings` without a word (and read a file with device settings
+ * only as "nothing to change"); version 2 makes it ask for an update instead.
+ */
+export const CLIENT_SETTINGS_FILE_VERSION = 2;
+/** A file with this app's settings only stays version 1, which every Ryco reads. */
+export const CLIENT_SETTINGS_FILE_APP_ONLY_VERSION = 1;
+const READABLE_VERSIONS: ReadonlySet<unknown> = new Set([
+  CLIENT_SETTINGS_FILE_APP_ONLY_VERSION,
+  CLIENT_SETTINGS_FILE_VERSION,
+]);
 /** Checked before a file is read. */
 export const MAX_CLIENT_SETTINGS_FILE_BYTES = 1024 * 1024;
 /** At most this many custom themes are read from one file; each is saved with the whole list. */
@@ -99,7 +110,9 @@ export interface ClientSettingsFileAppPart {
 
 interface ClientSettingsFileHeader {
   readonly format: typeof CLIENT_SETTINGS_FILE_FORMAT;
-  readonly version: typeof CLIENT_SETTINGS_FILE_VERSION;
+  readonly version:
+    | typeof CLIENT_SETTINGS_FILE_VERSION
+    | typeof CLIENT_SETTINGS_FILE_APP_ONLY_VERSION;
   readonly exportedAt: string;
   /** The shared device settings, when the backup holds them. */
   readonly deviceSettings?: DeviceSettingsFileSection;
@@ -131,7 +144,10 @@ export function buildClientSettingsFile(
 ): ClientSettingsFile {
   const header: ClientSettingsFileHeader = {
     format: CLIENT_SETTINGS_FILE_FORMAT,
-    version: CLIENT_SETTINGS_FILE_VERSION,
+    version:
+      deviceSettings === undefined
+        ? CLIENT_SETTINGS_FILE_APP_ONLY_VERSION
+        : CLIENT_SETTINGS_FILE_VERSION,
     exportedAt: now.toISOString(),
     ...(deviceSettings === undefined ? {} : { deviceSettings }),
   };
@@ -189,7 +205,7 @@ export function planClientSettingsImport(
   if (!isRecord(value) || value.format !== CLIENT_SETTINGS_FILE_FORMAT) {
     throw new Error("This is not a Ryco settings file.");
   }
-  if (value.version !== CLIENT_SETTINGS_FILE_VERSION) {
+  if (!READABLE_VERSIONS.has(value.version)) {
     throw new Error("This settings file comes from a newer Ryco. Update Ryco, then import it.");
   }
   const warnings: string[] = [];

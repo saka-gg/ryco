@@ -27,12 +27,18 @@ interface SettingsDialogStore {
    * (`security`), else Overview (`resolveSettingsDeviceTab`).
    */
   deviceTab: SettingsDevicePartId | null;
+  /**
+   * The device bar's view where it offers "All devices": every device's value, or
+   * the target's own. Opening with a device shows that device's; settings
+   * otherwise open and close on "All devices".
+   */
+  deviceView: "all" | "device";
   /** Show another device's values without leaving the section. */
   setTargetEnvironmentId: (environmentId: EnvironmentId) => void;
   /**
    * Open settings on a section. With a device and no section, open that
    * device's page; with both, the section shows that device's values. A device
-   * page opens on `deviceTab`.
+   * page opens on `deviceTab`. Named a device, sections show its own values.
    */
   openSettings: (
     section?: SettingsSectionId,
@@ -43,6 +49,7 @@ interface SettingsDialogStore {
   /** Show a section; a device page on `deviceTab`. */
   setSection: (section: SettingsSectionId, deviceTab?: SettingsDevicePartId | null) => void;
   setDeviceTab: (deviceTab: SettingsDevicePartId) => void;
+  setDeviceView: (deviceView: "all" | "device") => void;
   /**
    * Mark settings open without changing where they point. The desktop settings
    * page calls this when it is reached by URL, Back, or Forward rather than by
@@ -56,6 +63,7 @@ export const useSettingsDialogStore = create<SettingsDialogStore>((set) => ({
   section: "general",
   targetEnvironmentId: null,
   deviceTab: null,
+  deviceView: "all",
   setTargetEnvironmentId: (targetEnvironmentId) => set({ targetEnvironmentId }),
   openSettings: (section, environmentId, deviceTab) =>
     set((state) => ({
@@ -63,9 +71,11 @@ export const useSettingsDialogStore = create<SettingsDialogStore>((set) => ({
       section: section ?? (environmentId ? "device" : state.section),
       targetEnvironmentId: environmentId ?? null,
       deviceTab: section || environmentId ? (deviceTab ?? null) : state.deviceTab,
+      deviceView: environmentId ? "device" : "all",
     })),
-  closeSettings: () => set({ open: false, targetEnvironmentId: null }),
+  closeSettings: () => set({ open: false, targetEnvironmentId: null, deviceView: "all" }),
   setSection: (section, deviceTab = null) => set({ section, deviceTab }),
   setDeviceTab: (deviceTab) => set({ deviceTab }),
+  setDeviceView: (deviceView) => set({ deviceView }),
   markOpen: () => set({ open: true }),
 }));

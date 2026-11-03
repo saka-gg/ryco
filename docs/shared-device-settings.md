@@ -41,8 +41,11 @@ stamp. Devices are the source of truth; there is no Hub copy and no client-side 
 ## Stamps
 
 A stamp is a hybrid logical clock: `at` is the writer's clock in ms, never behind the wall clock,
-any stamp it issued, or any stamp it has seen on a device; `by` is the writer's stable client id
-(one per app install). Stamps order by `(at, by)`, ties of equal stamps by the lowest environment
+any stamp it issued, or any stamp it has seen on a device; `by` is the writer's client id: the
+install's stored id plus a part of the running instance's own (`settingsSharingInstanceId`), so
+two browser tabs or windows sharing one storage never issue the same stamp. The last `at` is kept
+in that storage and read again before each fresh stamp, so a tab's edit orders after another
+tab's. Stamps order by `(at, by)`, ties of equal stamps by the lowest environment
 id, so every client picks the same winner. Because a client observes every device's stamps before
 it stamps an edit, a person's edit orders after everything their client showed, even when another
 client's clock runs ahead. Concurrent edits from clients that had not seen each other resolve to
@@ -50,6 +53,13 @@ the higher stamp (last writer wins).
 
 A value and its stamp travel in **one** `ServerSettingsPatch` and land in one atomic
 `settings.json` write.
+
+Bounds: a node accepts `at` up to `SETTINGS_SHARING_STAMP_MAX_AT` (2^50 ms, far past any wall
+clock and well below `Number.MAX_SAFE_INTEGER`), and a client's clock ignores a stamp (or its own
+persisted last stamp) more than `SETTINGS_SHARING_MAX_CLOCK_LEAD_MS` (366 days) ahead of its wall
+clock. One hostile or broken stamp therefore cannot pin every client's clock at the maximum, where
+all later stamps would tie; the key it sits on keeps that writer's value until a person uses
+another value everywhere.
 
 ## Paths
 
@@ -94,6 +104,14 @@ Linux. Copying one device's stored path to another would be wrong on another OS,
   across all known devices (and the cache) and writes it, guarded as a catch-up, to every
   connected, writable device in `shared` mode holding an older stamp: one patch per device. It
   never writes an override, an unsupported device, or a zero-stamp value.
+- A device that **never took a shared write** of a key (its entry at the zero stamp: added after
+  sharing started, or a node updated to share settings) is not caught up to a value unlike its
+  own: it shows `differs`, and its device page and All devices say "<device> has N settings that
+  differ from your shared ones" with **Use shared values** and **Keep its own**
+  (`resolveDeviceDifferences`, one write either way). One already holding the shared value just
+  takes the stamp. A device a person's own edit was meant for (in `shared` mode and offline, or
+  gone mid-write, when the edit went out) is the exception: the client's cache entry lists it
+  (`covers`), and it takes the edit when it reconnects.
 - **Commands** build per-device patches for a person's edit, each with a fresh stamp from
   `nextSettingsSharingStamp`: `writeSharedSetting` (shared devices only, guarded),
   `setSettingOverride`, `resetSettingToShared` (adopts the newest shared value and stamp),
@@ -102,7 +120,8 @@ Linux. Copying one device's stored path to another would be wrong on another OS,
 - The **runner** subscribes to device config pushes, debounces, runs one pass at a time, reads each
   device again right before writing it, and retries a refused key with exponential backoff
   (2 s doubling to 10 min). A sent catch-up waits up to 30 s for the device's push before it is sent
-  again.
+  again. It wakes itself only for an attempt still to come on a device it could write now; a due
+  attempt whose device went offline or lost write access waits for that device's next change.
 - The **cache** of the newest shared value per key is persisted by the client and is a hint only:
   an entry is used only while the device it was learned from is still among the known devices,
   and any device holding a newer stamp wins. It lets an offline device catch up when every newer
@@ -110,6 +129,12 @@ Linux. Copying one device's stored path to another would be wrong on another OS,
 - **Per namespace**: the client id, the clock's last stamp and the cache are stored per namespace
   (`createScopedSettingsSharingPersistence`): `local` for this app's own connections, or one per
   Hub origin and account. Another account in the same browser never sees this one's id or values.
+  The web forgets an account's cache and clock when the account signs out or another takes over
+  (`forgetHostedSettingsSharing`, in the hosted account-scoped reset with the hosted read cache).
+  An edit's value is recorded only in the namespace it was made in.
+- A shared edit is recorded in the cache even when no device took it now (all offline): the
+  devices it missed take it when they reconnect. The result line promises that only for devices
+  that follow the shared value; an offline device keeping its own value is named as offline.
 - The **runtime** (`createSettingsSharingRuntime`) is what each app makes once: it keeps one
   runner for the current namespace (made again when the account changes), counts starts (the
   last stop stops and forgets the runner), stamps a person's edit (`nextEditStamp`) and sends it
@@ -117,13 +142,16 @@ Linux. Copying one device's stored path to another would be wrong on another OS,
   and the mobile app give it their own storage, namespace and device list.
 
 Row states (`readSharedSettingView`): `shared`, `override`, `syncing`, `queued` (offline or not
-writable, holding an older stamp), `unsupported`, `unknown` (no config yet), `couldNotApply`.
+writable, holding an older stamp), `unsupported`, `unknown` (no config yet), `couldNotApply`,
+`differs` (a value from before sharing, left alone until a person chooses).
 
 ## Migration
 
 No writes happen at rollout. Without stamps, keys where all devices agree read as shared
 (`agreement: same`); keys that differ show **Differs** and stay untouched until a person picks a
-value. Nothing is unified on its own.
+value. Nothing is unified on its own, and neither is a device added later (see "never took a
+shared write" above). For every key but the paths, devices agree only when their values are
+equal: equal stamps holding different values (a hand-edited `settings.json`) read as Differs.
 
 ## Older nodes
 
@@ -163,8 +191,14 @@ accident:
 Layouts: `inline` (a control beside the title), `block` (a text area under it), `editor` (a whole
 form with its own Save, such as model prices: drawn once, for every device while they agree or for
 the device shown; while they differ the row lists each device's value with an Edit). A row that
-edits one field of a larger value (Agent Control's limits, the two cleanup suggestions) compares
-only that field (`compareBy`). Policy editors inside bigger sections (the storage retention policy)
+edits one field of a larger value (Agent Control's on/off and limits, the two cleanup suggestions)
+compares only that field (`compareBy`) and writes only that field (`applyField`): its one control
+and "Use … everywhere" give each device its own value with the field put in, so a device keeps
+the fields the row does not show. When that leaves devices with different values, the edit is
+not cached as one shared value, so no device that missed it is later given another's fields.
+The one control writes every device it counts: a device keeping its own value (even an equal one),
+one with a value from before sharing, or one that refused the value shows the device list
+instead; older nodes and devices not loaded yet are named beside it. Policy editors inside bigger sections (the storage retention policy)
 use `useSharedSettingWriter`. The display catalog (`sharedSettingsCatalog.ts`) gives each key its
 section, title and value format, for the rows, the compare table and "Where this device differs".
 
@@ -175,8 +209,10 @@ write, though each stores its own expansion.
 shared rows still show and write, through any device this client may write now
 (`pickSharedRowsDevice`: connected, a config, writable; this app's own first), and an offline
 device catches up later. Rows stored on one device wait for it: in this mode (`SharedRowsOnly`
-in `settingsLayout.tsx`) a row outside a shared row renders nothing, and sections and panels
-without a shared row hide; one line under the device bar says why. With no writable device the
+in `settingsLayout.tsx`) a row outside a shared row renders nothing, sections and panels
+without a shared row hide, and content that is no settings row (session import, the storage scan,
+MCP servers, hosting accounts) is not mounted at all (`DeviceBound`), so it never reads the device
+lending the rows; one line under the device bar says why. With no writable device the
 section waits as before. Stale hosted roles stay fail-closed: such a device is not writable, so it
 neither shows the rows nor lends them.
 
@@ -187,8 +223,8 @@ clock and cache when the signed-in account changes.
 
 A settings restore (Data & backup → Restore settings, `docs/device-settings.md`) writes the file's
 shared settings through the same commands: to every device with `writeSharedSetting` (offline
-devices queue, overrides stay), or to the devices a person picks with `setSettingOverride`, which
-the dialog names as their own values.
+devices that follow the shared value queue, overrides stay), or to the devices a person picks
+with `editDeviceSetting`, a one-device edit each, which the dialog names as their own values.
 
 ## Mobile
 

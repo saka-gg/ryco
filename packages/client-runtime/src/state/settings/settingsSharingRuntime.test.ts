@@ -60,9 +60,11 @@ describe("settings sharing runtime", () => {
   it("stamps edits with its namespace's own client id, a fresh one per account", () => {
     const { runtime, net, setNamespace, store } = setup();
     net.add("a");
-    expect(runtime.nextEditStamp(net.readTargets())?.by).toBe("client-1");
+    // The stored id of the namespace, then this instance's own part.
+    const stored = () => runtime.nextEditStamp(net.readTargets())?.by.split("~")[0];
+    expect(stored()).toBe("client-1");
     setNamespace({ kind: "hosted", hubOrigin: "https://hub.example", accountId: "acct-1" });
-    expect(runtime.nextEditStamp(net.readTargets())?.by).toBe("client-2");
+    expect(stored()).toBe("client-3");
     expect(
       store.get(
         settingsSharingStorageKeys({
@@ -71,9 +73,9 @@ describe("settings sharing runtime", () => {
           accountId: "acct-1",
         }).clientId,
       ),
-    ).toBe(JSON.stringify("client-2"));
+    ).toBe(JSON.stringify("client-3"));
     setNamespace({ kind: "local" });
-    expect(runtime.nextEditStamp(net.readTargets())?.by).toBe("client-1");
+    expect(stored()).toBe("client-1");
     setNamespace(null);
     expect(runtime.nextEditStamp(net.readTargets())).toBeNull();
   });
@@ -99,5 +101,24 @@ describe("settings sharing runtime", () => {
     expect(online.settings.worktreeBranchPrefix).toBe("team");
     expect(runtime.readState().cache.worktreeBranchPrefix?.value).toBe("team");
     expect(notified).toBeGreaterThan(0);
+  });
+
+  it("records a command's value only in the namespace it was made in", async () => {
+    const { runtime, net, setNamespace } = setup();
+    const slow = net.add("slow");
+    const stamp = runtime.nextEditStamp(net.readTargets());
+    if (stamp === null) throw new Error("expected a stamp");
+    const command = writeSharedSetting({
+      devices: net.readTargets(),
+      key: "worktreeBranchPrefix",
+      value: "team",
+      stamp,
+    });
+    // The account changes while the write is on its way.
+    const running = runtime.runCommand(command);
+    setNamespace({ kind: "hosted", hubOrigin: "https://hub.example", accountId: "other" });
+    await running;
+    expect(slow.settings.worktreeBranchPrefix).toBe("team");
+    expect(runtime.readState().cache.worktreeBranchPrefix).toBeUndefined();
   });
 });

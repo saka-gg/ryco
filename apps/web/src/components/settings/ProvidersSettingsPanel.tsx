@@ -58,7 +58,11 @@ import {
   AddProviderInstanceDialog,
   type AddProviderInstancePreset,
 } from "./AddProviderInstanceDialog";
-import { takeProviderEditorRequest, useProviderEditorRequest } from "./providerEditorRequest";
+import {
+  clearProviderEditorRequest,
+  takeProviderEditorRequest,
+  useProviderEditorRequest,
+} from "./providerEditorRequest";
 import { CliProxyHubSettings } from "./CliProxyHubSettings";
 import { ProviderInstanceCard } from "./ProviderInstanceCard";
 import { ProviderInstanceListItem } from "./ProviderInstanceListItem";
@@ -157,10 +161,22 @@ export function ProvidersSettingsPanel() {
   // The providers table's Edit and Add, once this editor shows their device.
   const editorRequest = useProviderEditorRequest((state) => state.request);
   const targetEnvironmentId = settingsTarget?.environmentId ?? null;
+  const editorRequestExpiresAt = useProviderEditorRequest((state) => state.expiresAt);
   useEffect(() => {
     if (editorRequest === null) return;
-    const request = takeProviderEditorRequest(targetEnvironmentId);
-    if (request === null) return;
+    // Never opens the add dialog while this client may not change the device's settings.
+    const request = takeProviderEditorRequest(targetEnvironmentId, { canAdd: !settingsBlocked });
+    if (request === null) {
+      // Waiting (another device, or blocked): dropped once it can no longer be honored.
+      const remaining = editorRequestExpiresAt - Date.now();
+      if (remaining <= 0) return;
+      const timer = window.setTimeout(() => {
+        if (useProviderEditorRequest.getState().request === editorRequest) {
+          clearProviderEditorRequest();
+        }
+      }, remaining);
+      return () => window.clearTimeout(timer);
+    }
     if (request.kind === "add") {
       setAddPreset(request.preset);
       setIsAddInstanceDialogOpen(true);
@@ -173,7 +189,7 @@ export function ProvidersSettingsPanel() {
         .getElementById("provider-instance-editor")
         ?.scrollIntoView({ block: "start", behavior: "smooth" }),
     );
-  }, [editorRequest, targetEnvironmentId]);
+  }, [editorRequest, editorRequestExpiresAt, settingsBlocked, targetEnvironmentId]);
   const [pendingDestructiveAction, setPendingDestructiveAction] =
     useState<PendingProviderDestructiveAction | null>(null);
   const [updatingProviderInstanceIds, setUpdatingProviderInstanceIds] = useState<

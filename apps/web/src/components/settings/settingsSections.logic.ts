@@ -107,12 +107,25 @@ export function settingsStorageReachable(storage: SettingsStorage, reach: Settin
   }
 }
 
-/** Whether the nav lists a section: any of its parts is reachable. */
+/**
+ * Whether the nav lists a section: any of its parts is reachable. Outside hosted
+ * mode the device bar switches devices within a section, so a part stored on a
+ * device counts while any device is shown, whatever this reader's role on it or
+ * its connection: an offline, connecting or not-owned device keeps its sections,
+ * and the page says under the device bar why its rows do not show. Hosted, the
+ * role decides, as it does for every part.
+ */
 export function settingsSectionListed(
   section: SettingsPageSectionId,
   reach: SettingsReach,
 ): boolean {
-  return settingsSection(section).parts.some((storage) => settingsStorageReachable(storage, reach));
+  return settingsSection(section).parts.some(
+    (storage) =>
+      settingsStorageReachable(storage, reach) ||
+      (!reach.hosted &&
+        reach.device !== null &&
+        (storage === "device" || storage === "device-read")),
+  );
 }
 
 /** Whether a section shows the device bar: it has a reachable part stored on a device. */

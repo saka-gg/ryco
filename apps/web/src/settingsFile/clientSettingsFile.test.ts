@@ -282,8 +282,53 @@ describe("the client settings file", () => {
       "This is not a Ryco settings file.",
     );
     expect(() =>
-      planClientSettingsImport({ format: "ryco-client-settings", version: 2 }, defaults, options),
+      planClientSettingsImport({ format: "ryco-client-settings", version: 3 }, defaults, options),
     ).toThrow(/newer Ryco/u);
+  });
+
+  it("marks a file with device settings version 2, so an older Ryco refuses it", () => {
+    const appOnly = buildClientSettingsFile(defaults, new Date(0));
+    expect(appOnly.version).toBe(1);
+    const withDevices = buildClientSettingsFile(defaults, new Date(0), {
+      worktreeBranchPrefix: "team",
+    });
+    expect(withDevices.version).toBe(2);
+    expect(buildClientSettingsFile(null, new Date(0), { worktreeBranchPrefix: "x" }).version).toBe(
+      2,
+    );
+    // A Ryco that reads version 1 only, as released before the device part.
+    const olderRyco = (file: { readonly version: number }) => {
+      if (file.version !== 1) throw new Error("This settings file comes from a newer Ryco.");
+    };
+    expect(() => olderRyco(withDevices)).toThrow(/newer Ryco/u);
+    expect(() => olderRyco(appOnly)).not.toThrow();
+    // This Ryco reads both, and version 1 files with a device part too.
+    const plan = planClientSettingsImport(
+      JSON.parse(JSON.stringify(withDevices)),
+      defaults,
+      options,
+    );
+    expect(plan.deviceSettings?.values).toEqual({ worktreeBranchPrefix: "team" });
+    const legacy = planClientSettingsImport(
+      { format: "ryco-client-settings", version: 1, deviceSettings: { worktreeBranchPrefix: "a" } },
+      defaults,
+      options,
+    );
+    expect(legacy.deviceSettings?.values).toEqual({ worktreeBranchPrefix: "a" });
+  });
+
+  it("adds each theme once when the same plan is applied twice", async () => {
+    const plan = planClientSettingsImport(
+      { format: "ryco-client-settings", version: 1, customThemes: [sunset] },
+      defaults,
+      options,
+    );
+    const state = { current: defaults };
+    const { calls, writers } = fakeWriters(state);
+    await applyClientSettingsImport(plan, state.current, writers);
+    await applyClientSettingsImport(plan, state.current, writers);
+    expect(calls.filter((call) => call.startsWith("add "))).toEqual(["add custom-sunset"]);
+    expect(state.current.customThemes.map((theme) => theme.id)).toEqual(["custom-sunset"]);
   });
 });
 

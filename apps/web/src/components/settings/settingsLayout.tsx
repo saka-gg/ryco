@@ -150,9 +150,19 @@ export function useSharedRowsOnly(): { readonly only: boolean; readonly inShared
 }
 
 /**
+ * Content of a device part that is no settings row of a shared setting (an import, a storage
+ * scan, a list read from the device): not mounted at all while only shared rows show, so it
+ * never reads or acts on the device lending those rows, which the reader did not pick.
+ */
+export function DeviceBound({ children }: { readonly children: ReactNode }) {
+  return useContext(SharedRowsOnlyContext) ? null : children;
+}
+
+/**
  * While only shared rows show, hides what holds no shared row and is not a settings row (rows
  * hide themselves): content outside any section, and panels inside a section's card, such as
- * a device's own lists. Mounted all the same, against the device the shared rows use.
+ * a device's own lists. Mounted all the same, against the device the shared rows use; content
+ * that reads or acts on the device is wrapped in `DeviceBound` instead.
  */
 export const SHARED_ROWS_ONLY_CHILDREN_CLASS =
   "contents [&>*:not(:has([data-shared-setting]))]:hidden [&_[data-slot=settings-card]>*:not([data-shared-setting]):not(:has([data-shared-setting]))]:hidden";

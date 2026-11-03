@@ -543,10 +543,11 @@ describe("the device bar and This app", () => {
     clearHubNodeDetailRequest();
     window.history.replaceState(null, "", "/");
 
-    await tab("Computer use").click();
-    await expect
-      .element(page.getByText("Computer use needs the Ryco desktop app on Studio node."))
-      .toBeVisible();
+    // Computer use is the desktop app's: no tab for it in a browser, and asking for it opens
+    // Overview.
+    expect(tab("Computer use").elements()).toHaveLength(0);
+    useSettingsDialogStore.getState().setDeviceTab("computer-use");
+    await expect.element(tab("Overview")).toHaveAttribute("aria-selected", "true");
   });
 
   it("follows its address and writes its place back, without naming the hosted node", async () => {

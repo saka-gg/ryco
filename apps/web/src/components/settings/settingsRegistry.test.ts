@@ -37,6 +37,22 @@ describe("the settings address", () => {
     });
   });
 
+  it("keeps the All devices view only with a device", () => {
+    expect(parseSettingsLocationSearch({ section: "usage", device: "env-1", view: "all" })).toEqual(
+      { section: "usage", device: "env-1", view: "all" },
+    );
+    // A named device opens on its own values; no other view is spelled out.
+    expect(
+      parseSettingsLocationSearch({ section: "usage", device: "env-1", view: "device" }),
+    ).toEqual({ section: "usage", device: "env-1" });
+    expect(parseSettingsLocationSearch({ section: "usage", view: "all" })).toEqual({
+      section: "usage",
+    });
+    expect(settingsLocationKey({ section: "usage", device: "env-1", view: "all" })).not.toBe(
+      settingsLocationKey({ section: "usage", device: "env-1" }),
+    );
+  });
+
   it("drops what it does not know", () => {
     expect(
       parseSettingsLocationSearch({ section: "nope", tab: "identity", device: 3, extra: "x" }),

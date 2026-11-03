@@ -76,7 +76,8 @@ app's preferences, the shared device settings, or both:
   appearance setting, the color mode and theme, and custom themes.
 - **Shared device settings** (`deviceSettings`, `apps/web/src/settingsFile/deviceSettingsFile.ts`):
   the shareable device settings (`docs/shared-device-settings.md`) as the devices hold them: per
-  setting the newest shared value, else the value they agree on. `DEVICE_SETTINGS_FILE_SCOPE`
+  setting the newest shared value, else the value they agree on, else the value of the device the
+  settings show. `DEVICE_SETTINGS_FILE_SCOPE`
   places every shareable key (a new one fails typecheck until placed); paths stay out. Device-only
   settings (provider instances, CLIProxyAPI hubs, the default and text-generation models, ...)
   never travel.
@@ -84,23 +85,35 @@ app's preferences, the shared device settings, or both:
 The file never carries anything that names a node, an account, a connection or a credential, nor
 machine-local state (onboarding, dismissed notices, model favorites and provider model order keyed
 by node-local instance ids, per-project grouping, the preferred editor). Keybindings keep their
-own file in Settings → Keyboard. A file from before the device part reads as before.
+own file in Settings → Keyboard. A file with this app's settings only is version 1; a file with
+device settings is version 2, because a Ryco that reads version 1 only would drop the device part
+without a word (and read a file with device settings only as "nothing to change"): it asks for an
+update instead. This Ryco reads both, and files from before the device part read as before.
 
 A restore is checked before anything is written: every value against its setting's schema, every
 custom theme against the theme file rules. Unknown keys and refused values are listed and keep
 the current value. The dialog lists each change as `key: old -> new` (for device settings, per
-device); nothing changes until Apply. Each part can be left out.
+device, with each setting's name and its values as its row shows them); nothing changes until
+Apply. Each part can be left out.
 
 - This app's part is all or nothing: a custom theme whose id is taken arrives as a copy (the
   theme choice follows it), client settings are saved last, and if they cannot be saved every
-  other value the restore wrote goes back and no device is written.
+  other value the restore wrote goes back and no device is written. Once it is restored, Apply
+  again (after the device part could not be written) retries only the device part.
 - The device part goes to **Every device** (default): one shared write per setting
-  (`writeSharedSetting`); an offline or read-only device takes it when it is back (queued), a
-  device that keeps its own value for a setting keeps it (listed), and a device on an older Ryco
-  gets a plain edit. Or to **Only these devices** (online devices this client may change): each
-  gets the value as its own (`setSettingOverride`), and the dialog says so. Results are reported
-  per device: applied, queued until online, kept its own value, or couldn't apply with the
-  device's reason.
+  (`writeSharedSetting`); an offline device that follows the shared value takes it when it is
+  back (queued), a device that keeps its own value for a setting keeps it (listed), and a device
+  on an older Ryco gets a plain edit while it is online. Or to **Only these devices** (online
+  devices this client may change): each gets the change as a one-device edit
+  (`editDeviceSetting`), its own value, except that the only known device keeps following the
+  shared value, as when it is edited alone; the dialog says which become their own. A picked
+  device that goes offline or loses write access drops out of the plan.
+- Only a device that will really take the value later is called queued. A device this client
+  may not change, an offline override, an offline device on an older Ryco, and a picked device
+  that disconnects during the write are reported as not applied, with why. Apply stays off while
+  no target changes now or later.
+- Results are reported per device: applied, queued until online, kept its own value (or needs
+  an update), not applied, or couldn't apply with the device's reason.
 
 ## Hosted devices
 

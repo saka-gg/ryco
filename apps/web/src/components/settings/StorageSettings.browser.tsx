@@ -15,12 +15,17 @@ const fixtures = vi.hoisted(() => ({
 vi.mock("../../lib/utils", () => ({
   cn: (...values: unknown[]) => values.filter(Boolean).join(" "),
 }));
-vi.mock("../../rpc/serverState", () => ({
-  useServerConfig: () => ({
+vi.mock("../../rpc/serverState", () => {
+  const config = () => ({
     settings: fixtures.settings,
     environment: { environmentId: "fixture-node", capabilities: { storageManagement: true } },
-  }),
-}));
+  });
+  return {
+    useServerConfig: config,
+    usePrimaryServerConfigSelector: (selector: (value: unknown) => unknown) => selector(config()),
+    applySettingsUpdated: vi.fn(),
+  };
+});
 vi.mock("../../settingsTarget", () => ({
   useSettingsEditingScope: () => "node",
   useSettingsTarget: () => ({

@@ -12,7 +12,7 @@ import { useMemo } from "react";
 
 import { isHostedHubMode } from "../env";
 import { readNodeServerConfig } from "./nodeServerConfig";
-import { readNodeRole } from "./nodeRole";
+import { readNodeRole, subscribeNodeRoles } from "./nodeRole";
 import { getPrimaryKnownEnvironment, usePrimaryEnvironmentDescriptor } from "./primary";
 import {
   readEnvironmentConnection,
@@ -78,7 +78,8 @@ export function readNodeSettingsTarget(node: KnownSettingsNode): NodeSettingsTar
 
 /**
  * Calls `listener` whenever what {@link readNodeSettingsTarget} reads for
- * these nodes may have changed: a config, a connection, or its socket.
+ * these nodes may have changed: a config, a connection, its socket, or this
+ * client's role there.
  */
 export function subscribeNodeSettingsTargets(
   environmentIds: ReadonlyArray<EnvironmentId>,
@@ -89,6 +90,9 @@ export function subscribeNodeSettingsTargets(
     subscribeEnvironmentConnections(listener),
     useSavedEnvironmentRuntimeStore.subscribe(listener),
     appAtomRegistry.subscribe(serverConfigAtom, listener),
+    // Write access follows the role, which arrives after the config (the primary counts as
+    // writable until its role is known): a role that turns out not the owner's disables rows.
+    subscribeNodeRoles(listener),
     ...environmentIds.map((environmentId) =>
       appAtomRegistry.subscribe(wsConnectionStatusForEnvironmentAtom(environmentId), listener),
     ),

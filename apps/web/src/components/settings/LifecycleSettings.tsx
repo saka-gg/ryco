@@ -35,7 +35,7 @@ export function LifecycleSuggestionSettings(props: { readonly disabled: boolean 
       owner="node"
       description="Suggestions appear on each project's page under Workspaces, where a project can also change these. They always need your approval: running work, background tasks, open terminals, pinned threads and unfinished goals are never suggested, and nothing is removed because a pull request merged."
     >
-      {FIELDS.map((field) => {
+      {FIELDS.map((field, index) => {
         const copy = LIFECYCLE_SUGGESTION_COPY[field];
         return (
           <SharedSettingRow
@@ -44,6 +44,9 @@ export function LifecycleSuggestionSettings(props: { readonly disabled: boolean 
             title={copy.title}
             description={copy.description}
             compareBy={SELECT_FIELD[field]}
+            applyField={(current, edited) => ({ ...current, [field]: edited[field] })}
+            // The first row is the setting's own ("Open" reveals it); the other names its field.
+            {...(index === 0 ? {} : { field })}
             formatValue={(policy) => formatSuggestionDays(policy[field])}
             render={(control) => (
               <SettingsSelect

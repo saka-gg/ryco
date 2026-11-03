@@ -15,7 +15,9 @@ import {
   resetMobileHubProfileCacheForTests,
   saveMobileHubProfile,
   serializeHubProfile,
+  subscribeMobileHubProfile,
 } from "./hubProfile";
+import { mobileSettingsSharingNamespace } from "../features/settings/sharing/settingsSharingNamespace";
 
 function memoryKv() {
   const values = new Map<string, string>();
@@ -174,6 +176,34 @@ describe("Hub profile persistence", () => {
         }),
       ),
     ).toBeNull();
+  });
+});
+
+describe("Hub profile changes", () => {
+  it("tells listeners once the profile is read, saved or cleared, so the sharing namespace follows", async () => {
+    const { service } = memoryKv();
+    const profile = createHubProfile({ origin: "https://hub.ryco.dev" })!;
+    await service.setItem(HUB_PROFILE_STORAGE_KEY, serializeHubProfile(profile));
+    const signedIn = { accountStatus: "authenticated", account: { id: "acct" } };
+    // Signed in before the profile is read: the phone's own namespace until it arrives.
+    expect(mobileSettingsSharingNamespace(signedIn, readCachedMobileHubProfile()?.origin)).toEqual({
+      kind: "local",
+    });
+    const listener = vi.fn();
+    const stop = subscribeMobileHubProfile(listener);
+    await hydrateMobileHubProfile(service);
+    expect(listener).toHaveBeenCalledTimes(1);
+    expect(mobileSettingsSharingNamespace(signedIn, readCachedMobileHubProfile()?.origin)).toEqual({
+      kind: "hosted",
+      hubOrigin: "https://hub.ryco.dev",
+      accountId: "acct",
+    });
+    // The same profile saved again changes nothing.
+    await saveMobileHubProfile(service, profile);
+    expect(listener).toHaveBeenCalledTimes(1);
+    await clearMobileHubProfile(service);
+    expect(listener).toHaveBeenCalledTimes(2);
+    stop();
   });
 });
 

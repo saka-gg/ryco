@@ -7,9 +7,10 @@ import type * as AppearanceSettingsModule from "./AppearanceSettings";
 import type * as ConnectionsModule from "./ConnectionsSettings";
 import type * as NotificationsTestModule from "./NotificationsTestSection";
 import type * as ProviderDeviceTableModule from "./ProviderDeviceTable";
+import type * as SettingsFileRowsModule from "./SettingsFileRows";
 import type * as SourceControlModule from "./SourceControlSettings";
 import { useAppPreferencesLabel } from "../../deviceName";
-import { isHostedHubMode } from "../../env";
+import { isElectron, isHostedHubMode } from "../../env";
 import { openHubNodeDetail } from "../../hostedHub/hubNodeDetailRequest";
 import { useHostedHubStore } from "../../hostedHub/state";
 import { preloadableLazy, type PreloadableModule } from "../../lib/preloadableLazy";
@@ -63,9 +64,14 @@ import {
   type SettingsPageSectionId,
   type SettingsStorage,
 } from "./settingsRegistry";
-import { settingsStorageReachable, type SettingsReach } from "./settingsSections.logic";
+import {
+  settingsSectionListed,
+  settingsStorageReachable,
+  type SettingsReach,
+} from "./settingsSections.logic";
 import { useSharedSettingsMode } from "./sharedSettings/sharedSettingsMode";
 import { DeviceSettingsCompare } from "./sharedSettings/DeviceSettingsCompare";
+import { DeviceSharingPrompts } from "./sharedSettings/DeviceSharingPrompt";
 import { DeviceSharingDifferences } from "./sharedSettings/DeviceSharingDifferences";
 import { PER_DEVICE_CHIP } from "./sharedSettings/SharedSettingRow";
 import {
@@ -76,6 +82,7 @@ import {
   SettingsSection,
   SHARED_ROWS_ONLY_CHILDREN_CLASS,
   SharedRowsOnlyProvider,
+  DeviceBound,
   useRelativeLabelTick,
 } from "./settingsLayout";
 
@@ -228,9 +235,9 @@ const LazyDiagnosticsSettings = preloadableLazy(() =>
 const LazyTierPreviewSection = preloadableLazy(() =>
   import("./DiagnosticsSettings").then((module) => module.TierPreviewSection),
 );
-const LazySettingsFileRows = preloadableLazy(() =>
-  import("./SettingsFileRows").then((module) => module.SettingsFileRows),
-);
+const LazySettingsFileRows = preloadableLazy<
+  NonNullable<ComponentProps<typeof SettingsFileRowsModule.SettingsFileRows>>
+>(() => import("./SettingsFileRows").then((module) => module.SettingsFileRows));
 
 /** The code-split pieces each section renders, for its preload. */
 const SECTION_CHUNKS: Readonly<Record<SettingsPageSectionId, ReadonlyArray<PreloadableModule>>> = {
@@ -356,7 +363,11 @@ function AllDevices({ devices }: { readonly devices: SettingsAllDevices }) {
  */
 function ProvidersTable({ devices }: { readonly devices: SettingsAllDevices }) {
   const { reach, target } = useSettingsParts();
-  if (!settingsStorageReachable("device", reach)) return null;
+  // The table reads every device itself and each cell edits only a device this client may
+  // change now, so a bar's device that is offline or still connecting (its role unknown) does
+  // not hide it. Hosted, and for a device this reader does not own, the role decides.
+  const barDeviceUnknown = !reach.hosted && !settingsDeviceReady(target);
+  if (!settingsStorageReachable("device", reach) && !barDeviceUnknown) return null;
   return (
     <LazyProviderDeviceTable choices={devices.choices} target={target} select={devices.select} />
   );
@@ -371,6 +382,7 @@ function SectionBody({
 }) {
   const desktopBridge = window.desktopBridge;
   const appLabel = useAppPreferencesLabel();
+  const { reach, target } = useSettingsParts();
   switch (section) {
     case "appearance":
       return (
@@ -455,7 +467,9 @@ function SectionBody({
             <DiffDisplaySettings />
           </AppPart>
           <DevicePart>
-            <LazyNodeSourceControlSettingsPanel includeWriting={false} />
+            <DeviceBound>
+              <LazyNodeSourceControlSettingsPanel includeWriting={false} />
+            </DeviceBound>
           </DevicePart>
         </>
       );
@@ -473,14 +487,18 @@ function SectionBody({
         <DevicePart>
           <UsageLimitSettings />
           <UsagePriceSettings />
-          <StatisticsLinkSection />
+          <DeviceBound>
+            <StatisticsLinkSection />
+          </DeviceBound>
         </DevicePart>
       );
     case "plugins":
       return (
         <DevicePart>
           <LazyOpinionatedPluginsSettingsPanel />
-          <LazyMcpServersSettings />
+          <DeviceBound>
+            <LazyMcpServersSettings />
+          </DeviceBound>
         </DevicePart>
       );
     case "agent-control":
@@ -492,10 +510,11 @@ function SectionBody({
     case "devices":
       return (
         <>
+          <DeviceSharingPrompts />
           <AppPart>
             <AllDevices devices={devices} />
           </AppPart>
-          <DeviceSettingsCompare />
+          <DeviceSettingsCompare canOpen={(id) => settingsSectionListed(id, reach)} />
           {isHostedHubMode() ? null : (
             // How this app reaches the devices above: its Hub link and saved environments.
             <AppPart>
@@ -520,11 +539,15 @@ function SectionBody({
       return (
         <>
           <DevicePart>
-            <SessionImportSettings />
+            <DeviceBound>
+              <SessionImportSettings />
+            </DeviceBound>
             <SettingsSection title="Chats">
               <ChatsFolderSettings />
             </SettingsSection>
-            <StorageSettings />
+            <DeviceBound>
+              <StorageSettings />
+            </DeviceBound>
             <DeviceLifecycleSuggestionSettings />
             <SettingsSection title="This device's defaults">
               <RestoreDefaultsRow
@@ -535,7 +558,8 @@ function SectionBody({
           </DevicePart>
           <AppPart>
             <SettingsSection title="Settings file">
-              <LazySettingsFileRows />
+              {/* A backup takes the shown device's value where the devices disagree. */}
+              <LazySettingsFileRows shownEnvironmentId={target?.environmentId ?? null} />
               <RestoreDefaultsRow
                 title="Restore this app's defaults"
                 description="Reset this app's settings to their defaults. Devices keep theirs. Back up first to keep a copy."
@@ -629,7 +653,10 @@ const DEVICE_TAB_CHUNKS: Readonly<Record<SettingsDevicePartId, ReadonlyArray<Pre
     power: [],
   };
 
-const DEVICE_TABS = SETTINGS_DEVICE_PARTS.map((part) => ({ id: part.id, label: part.title }));
+/** Computer use is the desktop app's: its permissions are granted there (spec: desktop only). */
+const DEVICE_TABS = SETTINGS_DEVICE_PARTS.filter(
+  (part) => part.id !== "computer-use" || isElectron,
+).map((part) => ({ id: part.id, label: part.title }));
 
 /**
  * One device's own settings, a tab at a time: Overview (facts and identity),
@@ -646,6 +673,10 @@ export function SettingsDevicePage({
 }) {
   const { reach, target } = useSettingsParts();
   if (!target) return null;
+  // A tab this app does not offer (Computer use outside the desktop app) opens Overview.
+  const shownTab: SettingsDevicePartId = DEVICE_TABS.some((entry) => entry.id === tab)
+    ? tab
+    : "overview";
   const label = target.nodeLabel;
   const ready = settingsDeviceReady(target);
   const owner = settingsStorageReachable("device", reach);
@@ -661,7 +692,7 @@ export function SettingsDevicePage({
       <DevicePartNote>Only an owner of {label} can see and change this.</DevicePartNote>
     );
   let body: ReactNode;
-  switch (tab) {
+  switch (shownTab) {
     case "overview":
       body = (
         <>
@@ -719,7 +750,7 @@ export function SettingsDevicePage({
     <div className="flex w-full min-w-0 flex-col gap-7">
       <SlidingTabs
         tabs={DEVICE_TABS}
-        activeId={tab}
+        activeId={shownTab}
         onSelect={(id) => onTabChange(id as SettingsDevicePartId)}
         onTabIntent={(id) => {
           for (const chunk of DEVICE_TAB_CHUNKS[id as SettingsDevicePartId]) void chunk.preload();
@@ -731,10 +762,10 @@ export function SettingsDevicePage({
         tabClassName="text-[13px]"
       />
       <div
-        key={tab}
+        key={shownTab}
         role="tabpanel"
-        id={slidingTabPanelId(DEVICE_TABS_ID, tab)}
-        aria-labelledby={slidingTabId(DEVICE_TABS_ID, tab)}
+        id={slidingTabPanelId(DEVICE_TABS_ID, shownTab)}
+        aria-labelledby={slidingTabId(DEVICE_TABS_ID, shownTab)}
         className="settings-panel-enter flex min-w-0 flex-col gap-9"
       >
         {body}
@@ -751,7 +782,10 @@ export function SettingsDeviceOfflineBanner({ label }: { readonly label: string 
       className="mb-6 flex items-start gap-2.5 rounded-[min(var(--radius-lg),0.625rem)] bg-muted px-3 py-2.5 text-xs leading-relaxed text-foreground"
     >
       <InfoIcon aria-hidden className="mt-px size-3.5 shrink-0 text-muted-foreground" />
-      <span>{label} is offline. Changes wait and apply when it reconnects.</span>
+      <span>
+        {label} is offline. Its own settings show again when it reconnects; shared settings you
+        change meanwhile reach it then.
+      </span>
     </div>
   );
 }

@@ -45,6 +45,7 @@ import {
 } from "../workspaceMetadataProjection";
 import { getHostedEnvironmentSessions, hostedHubController, hostedHubStore } from "./state";
 import { clearWebHostedAccountScopedState } from "./environment";
+import { forgetHostedSettingsSharing } from "../settingsSharing/forgetHostedSettingsSharing";
 import { startBrowserHostedThreadReadCache } from "./threadReadCache";
 import {
   canShowHostedReadPreview,
@@ -1350,7 +1351,12 @@ export function startHostedWorkspaceCoordinator(input?: {
       // Mounted route leases express intent, not authority. Preserve them
       // across same-account credential/Space changes so fresh admission can
       // reconnect unchanged routes; an account switch discards that intent.
-      if (accountId !== previousAccountId) hostedWebConnectionScopes.reset();
+      if (accountId !== previousAccountId) {
+        hostedWebConnectionScopes.reset();
+        // The previous account's shared-settings cache and clock leave this browser with it.
+        if (previousAccountId)
+          forgetHostedSettingsSharing({ hubOrigin, accountId: previousAccountId });
+      }
       clearWebHostedAccountScopedState();
       publish(NO_MACHINES);
       const cleanup = Promise.all([
