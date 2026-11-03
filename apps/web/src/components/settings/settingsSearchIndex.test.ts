@@ -103,19 +103,22 @@ describe("where a result opens", () => {
   const target = EnvironmentId.make("remote");
   const primary = EnvironmentId.make("local");
 
-  it("opens device rows on the device searched, and this computer's rows on its own page", () => {
+  it("opens device rows on the device searched, this computer's rows on its own page, on their tab", () => {
     const entry = (title: string) => SETTINGS_SEARCH_INDEX.find((item) => item.title === title)!;
     expect(settingsSearchEntryDestination(entry("Worktree root"), { target, primary })).toEqual({
       section: "projects",
       environmentId: target,
+      deviceTab: null,
     });
     expect(settingsSearchEntryDestination(entry("Network access"), { target, primary })).toEqual({
       section: "device",
       environmentId: primary,
+      deviceTab: "access",
     });
     expect(settingsSearchEntryDestination(entry("Session code"), { target, primary })).toEqual({
       section: "device",
       environmentId: target,
+      deviceTab: "security",
     });
   });
 

@@ -87,6 +87,7 @@ import {
 } from "./ConnectionsSettings.logic";
 import type { AddDeviceCode, AddDeviceOperations } from "./AddDeviceDialog.logic";
 import { AddDeviceButton, AddDeviceDialogHost } from "./AddDeviceEntry";
+import { useLocalSessionAccess } from "./localSessionAccess";
 import {
   Menu,
   MenuGroup,
@@ -101,7 +102,6 @@ import { getPairingTokenFromUrl, setPairingTokenOnUrl } from "../../pairingUrl";
 import { readHostedPairingRequest } from "../../hostedPairing";
 import {
   createServerPairingCredential,
-  fetchSessionState,
   revokeOtherServerClientSessions,
   revokeServerClientSession,
   revokeServerPairingLink,
@@ -1555,64 +1555,14 @@ const DesktopSshHostRow = memo(function DesktopSshHostRow({
 });
 
 /**
- * Which part of the connection settings to show. The settings page shows this
- * computer's reach, pairing and clients on its own device page (`access`) and
- * the devices this app connects to under All devices (`devices`); the frozen
- * phone tier shows both (`all`).
+ * This computer's own reach: who may manage it, whether the network can reach it,
+ * its pairing links and client sessions (one access subscription while mounted),
+ * and the network-access and Tailscale changes. Access and the "Add a device"
+ * flow on All devices each mount it only while they show.
  */
-export type ConnectionsSettingsPart = "all" | "access" | "devices";
-
-export function ConnectionsSettings({
-  part = "all",
-}: { readonly part?: ConnectionsSettingsPart } = {}) {
-  const showAccess = part !== "devices";
-  const showDevices = part !== "access";
+function useLocalBackendAccess() {
   const desktopBridge = window.desktopBridge;
-  const [currentSessionRole, setCurrentSessionRole] = useState<"owner" | "client" | null>(
-    desktopBridge ? "owner" : null,
-  );
-  const [currentAuthPolicy, setCurrentAuthPolicy] = useState<
-    "desktop-managed-local" | "loopback-browser" | "remote-reachable" | "unsafe-no-auth" | null
-  >(desktopBridge ? null : null);
-  const savedEnvironmentsById = useSavedEnvironmentRegistryStore((state) => state.byId);
-  const savedEnvironmentIds = useMemo(
-    () =>
-      Object.values(savedEnvironmentsById)
-        .toSorted((left, right) => left.label.localeCompare(right.label))
-        .map((record) => record.environmentId),
-    [savedEnvironmentsById],
-  );
-  const savedDesktopSshEnvironmentsByAlias = useMemo(
-    () =>
-      Object.values(savedEnvironmentsById).reduce<Record<string, SavedEnvironmentRecord>>(
-        (accumulator, record) => {
-          if (record.desktopSsh?.alias) {
-            accumulator[record.desktopSsh.alias] = record;
-          }
-          return accumulator;
-        },
-        {},
-      ),
-    [savedEnvironmentsById],
-  );
-  const savedDesktopSshEnvironmentKeys = useMemo(() => {
-    const keys = new Set<string>();
-    for (const record of Object.values(savedEnvironmentsById)) {
-      const target = record.desktopSsh;
-      if (!target) continue;
-      keys.add(target.alias);
-      keys.add(formatDesktopSshTarget(target));
-    }
-    return keys;
-  }, [savedEnvironmentsById]);
-  const [discoveredSshHosts, setDiscoveredSshHosts] = useState<
-    ReadonlyArray<DesktopDiscoveredSshHost>
-  >([]);
-  const [hasLoadedDiscoveredSshHosts, setHasLoadedDiscoveredSshHosts] = useState(false);
-  const [isLoadingDiscoveredSshHosts, setIsLoadingDiscoveredSshHosts] = useState(false);
-  const [discoveredSshHostsError, setDiscoveredSshHostsError] = useState<string | null>(null);
-  const [connectingSshHostAlias, setConnectingSshHostAlias] = useState<string | null>(null);
-
+  const { role: currentSessionRole, authPolicy: currentAuthPolicy } = useLocalSessionAccess();
   const [desktopServerExposureState, setDesktopServerExposureState] =
     useState<DesktopServerExposureState | null>(null);
   const [desktopAdvertisedEndpoints, setDesktopAdvertisedEndpoints] = useState<
@@ -1638,34 +1588,6 @@ export function ConnectionsSettings({
   const [isRevokingOtherDesktopClients, setIsRevokingOtherDesktopClients] = useState(false);
   const [addDeviceOpening, setAddDeviceOpening] = useState(0);
   const [isAddDeviceOpen, setIsAddDeviceOpen] = useState(false);
-  const [addBackendDialogOpen, setAddBackendDialogOpen] = useState(false);
-  const [savedBackendMode, setSavedBackendMode] = useState<"remote" | "ssh">("remote");
-  const [savedBackendHost, setSavedBackendHost] = useState("");
-  const [savedBackendPairingCode, setSavedBackendPairingCode] = useState("");
-  const [savedBackendSshHost, setSavedBackendSshHost] = useState("");
-  const [savedBackendSshUsername, setSavedBackendSshUsername] = useState("");
-  const [savedBackendSshPort, setSavedBackendSshPort] = useState("");
-  const [savedBackendError, setSavedBackendError] = useState<string | null>(null);
-  const [isAddingSavedBackend, setIsAddingSavedBackend] = useState(false);
-  const unsavedDiscoveredSshHosts = useMemo(
-    () =>
-      discoveredSshHosts.filter((target) => {
-        const address = formatDesktopSshTarget(target);
-        return (
-          !savedDesktopSshEnvironmentKeys.has(target.alias) &&
-          !savedDesktopSshEnvironmentKeys.has(address)
-        );
-      }),
-    [discoveredSshHosts, savedDesktopSshEnvironmentKeys],
-  );
-  const [reconnectingSavedEnvironmentId, setReconnectingSavedEnvironmentId] =
-    useState<EnvironmentId | null>(null);
-  const [disconnectingSavedEnvironmentId, setDisconnectingSavedEnvironmentId] =
-    useState<EnvironmentId | null>(null);
-  const [removingSavedEnvironmentId, setRemovingSavedEnvironmentId] =
-    useState<EnvironmentId | null>(null);
-  const [switchingSavedEnvironmentId, setSwitchingSavedEnvironmentId] =
-    useState<EnvironmentId | null>(null);
   const [isUpdatingDesktopServerExposure, setIsUpdatingDesktopServerExposure] = useState(false);
   const [isDesktopServerExposureDialogOpen, setIsDesktopServerExposureDialogOpen] = useState(false);
   const [isUpdatingTailscaleServe, setIsUpdatingTailscaleServe] = useState(false);
@@ -1983,6 +1905,838 @@ export function ConnectionsSettings({
       setIsRevokingOtherDesktopClients(false);
     }
   }, []);
+  useEffect(() => {
+    if (!canManageLocalBackend) return;
+
+    let cancelled = false;
+    setIsLoadingDesktopAccessManagement(true);
+    type AuthAccessEvent = Parameters<
+      Parameters<WsRpcClient["server"]["subscribeAuthAccess"]>[0]
+    >[0];
+    const unsubscribeAuthAccess =
+      getPrimaryEnvironmentConnection().client.server.subscribeAuthAccess(
+        (event: AuthAccessEvent) => {
+          if (cancelled) {
+            return;
+          }
+
+          switch (event.type) {
+            case "snapshot":
+              setDesktopPairingLinks(
+                sortDesktopPairingLinks(
+                  event.payload.pairingLinks.map((pairingLink: AuthPairingLink) =>
+                    toDesktopPairingLinkRecord(pairingLink),
+                  ),
+                ),
+              );
+              setDesktopClientSessions(
+                sortDesktopClientSessions(
+                  event.payload.clientSessions.map((clientSession: AuthClientSession) =>
+                    toDesktopClientSessionRecord(clientSession),
+                  ),
+                ),
+              );
+              break;
+            case "pairingLinkUpserted":
+              setDesktopPairingLinks((current) =>
+                upsertDesktopPairingLink(current, toDesktopPairingLinkRecord(event.payload)),
+              );
+              break;
+            case "pairingLinkRemoved":
+              setDesktopPairingLinks((current) =>
+                removeDesktopPairingLink(current, event.payload.id),
+              );
+              break;
+            case "clientUpserted":
+              setDesktopClientSessions((current) =>
+                upsertDesktopClientSession(current, toDesktopClientSessionRecord(event.payload)),
+              );
+              break;
+            case "clientRemoved":
+              setDesktopClientSessions((current) =>
+                removeDesktopClientSession(current, event.payload.sessionId),
+              );
+              break;
+          }
+
+          setDesktopAccessManagementError(null);
+          setIsLoadingDesktopAccessManagement(false);
+        },
+        {
+          onResubscribe: () => {
+            if (!cancelled) {
+              setIsLoadingDesktopAccessManagement(true);
+            }
+          },
+        },
+      );
+    if (desktopBridge) {
+      void desktopBridge
+        .getServerExposureState()
+        .then((state) => {
+          if (cancelled) return;
+          setDesktopServerExposureState(state);
+        })
+        .catch((error: unknown) => {
+          if (cancelled) return;
+          const message =
+            error instanceof Error ? error.message : "Failed to load network exposure state.";
+          setDesktopServerExposureError(message);
+        });
+      void desktopBridge
+        .getAdvertisedEndpoints()
+        .then((endpoints) => {
+          if (cancelled) return;
+          setDesktopAdvertisedEndpoints(endpoints);
+        })
+        .catch((error: unknown) => {
+          if (cancelled) return;
+          const message =
+            error instanceof Error ? error.message : "Failed to load reachable endpoints.";
+          setDesktopServerExposureError(message);
+        });
+    } else {
+      setDesktopServerExposureState(null);
+      void getPrimaryEnvironmentConnection()
+        .client.server.getAdvertisedEndpoints()
+        .then((endpoints) => {
+          if (cancelled) return;
+          setDesktopAdvertisedEndpoints(endpoints);
+        })
+        .catch((error: unknown) => {
+          if (cancelled) return;
+          const message =
+            error instanceof Error ? error.message : "Failed to load reachable endpoints.";
+          setDesktopServerExposureError(message);
+        });
+    }
+
+    return () => {
+      cancelled = true;
+      unsubscribeAuthAccess();
+    };
+  }, [canManageLocalBackend, desktopBridge]);
+
+  useEffect(() => {
+    if (canManageLocalBackend) return;
+    setIsLoadingDesktopAccessManagement(false);
+    setDesktopPairingLinks([]);
+    setDesktopClientSessions([]);
+    setDesktopAccessManagementError(null);
+    setDesktopServerExposureState(null);
+    setDesktopAdvertisedEndpoints([]);
+    setDesktopServerExposureError(null);
+  }, [canManageLocalBackend]);
+  const visibleDesktopPairingLinks = useMemo(
+    () => desktopPairingLinks.filter((pairingLink) => pairingLink.role === "client"),
+    [desktopPairingLinks],
+  );
+  const tailscaleHttpsEndpoint = useMemo(
+    () => desktopAdvertisedEndpoints.find(isTailscaleHttpsEndpoint) ?? null,
+    [desktopAdvertisedEndpoints],
+  );
+  const visibleDesktopNetworkAdvertisedEndpoints = useMemo(
+    () =>
+      isLocalBackendNetworkAccessible
+        ? desktopAdvertisedEndpoints.filter((endpoint) => !isTailscaleHttpsEndpoint(endpoint))
+        : [],
+    [desktopAdvertisedEndpoints, isLocalBackendNetworkAccessible],
+  );
+  const visibleDesktopAdvertisedEndpoints = useMemo(
+    () =>
+      tailscaleHttpsEndpoint
+        ? [...visibleDesktopNetworkAdvertisedEndpoints, tailscaleHttpsEndpoint]
+        : visibleDesktopNetworkAdvertisedEndpoints,
+    [tailscaleHttpsEndpoint, visibleDesktopNetworkAdvertisedEndpoints],
+  );
+  const isLocalBackendRemotelyReachable =
+    isLocalBackendNetworkAccessible || tailscaleHttpsEndpoint?.status === "available";
+  const defaultDesktopNetworkAdvertisedEndpoint = useMemo(
+    () =>
+      selectPairingEndpoint(visibleDesktopNetworkAdvertisedEndpoints, defaultAdvertisedEndpointKey),
+    [defaultAdvertisedEndpointKey, visibleDesktopNetworkAdvertisedEndpoints],
+  );
+  const defaultDesktopAdvertisedEndpoint = useMemo(
+    () =>
+      defaultDesktopNetworkAdvertisedEndpoint ??
+      selectPairingEndpoint(
+        tailscaleHttpsEndpoint ? [tailscaleHttpsEndpoint] : [],
+        defaultAdvertisedEndpointKey,
+      ),
+    [defaultAdvertisedEndpointKey, defaultDesktopNetworkAdvertisedEndpoint, tailscaleHttpsEndpoint],
+  );
+  const defaultDesktopAdvertisedEndpointKey = defaultDesktopAdvertisedEndpoint
+    ? endpointDefaultPreferenceKey(defaultDesktopAdvertisedEndpoint)
+    : null;
+  const handleSetDefaultAdvertisedEndpoint = useCallback(
+    (endpoint: AdvertisedEndpoint) => {
+      setDefaultAdvertisedEndpointKey(endpointDefaultPreferenceKey(endpoint));
+    },
+    [setDefaultAdvertisedEndpointKey],
+  );
+  return {
+    desktopBridge,
+    currentAuthPolicy,
+    desktopServerExposureState,
+    desktopServerExposureError,
+    desktopPairingLinks,
+    desktopClientSessions,
+    desktopAccessManagementError,
+    isLoadingDesktopAccessManagement,
+    revokingDesktopPairingLinkId,
+    revokingDesktopClientSessionId,
+    isRevokingOtherDesktopClients,
+    addDeviceOpening,
+    isAddDeviceOpen,
+    setIsAddDeviceOpen,
+    isUpdatingDesktopServerExposure,
+    isDesktopServerExposureDialogOpen,
+    setIsDesktopServerExposureDialogOpen,
+    isUpdatingTailscaleServe,
+    pendingTailscaleServeEndpoint,
+    setPendingTailscaleServeEndpoint,
+    disableTailscaleServeDialogOpen,
+    setDisableTailscaleServeDialogOpen,
+    tailscaleServePortInput,
+    setTailscaleServePortInput,
+    pendingDesktopServerExposureMode,
+    setPendingDesktopServerExposureMode,
+    primaryVersionMismatch,
+    relaunchGuardDialog,
+    isAdvertisedEndpointListExpanded,
+    setIsAdvertisedEndpointListExpanded,
+    canManageLocalBackend,
+    isLocalBackendNetworkAccessible,
+    isTailscaleServePortValid,
+    pendingTailscaleServeBaseUrl,
+    handleConfirmDesktopServerExposureChange,
+    handleConfirmTailscaleServeSetup,
+    handleStartTailscaleServeSetup,
+    handleConfirmTailscaleServeDisable,
+    handleStartTailscaleServeDisable,
+    restartForSavedChanges,
+    handleWithdrawSavedNetworkAccess,
+    handleWithdrawSavedTailscaleServe,
+    handleOpenAddDevice,
+    handleTurnOnNetworkAccess,
+    handleRevokeDesktopPairingLink,
+    handleRevokeDesktopClientSession,
+    handleRevokeOtherDesktopClients,
+    visibleDesktopPairingLinks,
+    tailscaleHttpsEndpoint,
+    visibleDesktopNetworkAdvertisedEndpoints,
+    visibleDesktopAdvertisedEndpoints,
+    isLocalBackendRemotelyReachable,
+    defaultDesktopNetworkAdvertisedEndpoint,
+    defaultDesktopAdvertisedEndpointKey,
+    handleSetDefaultAdvertisedEndpoint,
+  };
+}
+
+type LocalBackendAccess = ReturnType<typeof useLocalBackendAccess>;
+
+/**
+ * This computer's reach, pairing and clients: a device page's Access, and the
+ * frozen phone tier's Connections (`includeDesktopRows`, which also keeps the
+ * "Add a device" button the settings page shows on All devices).
+ */
+function LocalBackendAccessSettings({
+  includeDesktopRows,
+}: {
+  readonly includeDesktopRows: boolean;
+}) {
+  const access = useLocalBackendAccess();
+  const {
+    desktopBridge,
+    currentAuthPolicy,
+    desktopServerExposureState,
+    desktopServerExposureError,
+    desktopClientSessions,
+    desktopAccessManagementError,
+    isLoadingDesktopAccessManagement,
+    revokingDesktopPairingLinkId,
+    revokingDesktopClientSessionId,
+    isRevokingOtherDesktopClients,
+    isUpdatingDesktopServerExposure,
+    setIsDesktopServerExposureDialogOpen,
+    isUpdatingTailscaleServe,
+    pendingTailscaleServeEndpoint,
+    setPendingTailscaleServeEndpoint,
+    disableTailscaleServeDialogOpen,
+    setDisableTailscaleServeDialogOpen,
+    tailscaleServePortInput,
+    setTailscaleServePortInput,
+    setPendingDesktopServerExposureMode,
+    primaryVersionMismatch,
+    relaunchGuardDialog,
+    isAdvertisedEndpointListExpanded,
+    setIsAdvertisedEndpointListExpanded,
+    canManageLocalBackend,
+    isLocalBackendNetworkAccessible,
+    isTailscaleServePortValid,
+    pendingTailscaleServeBaseUrl,
+    handleConfirmTailscaleServeSetup,
+    handleStartTailscaleServeSetup,
+    handleConfirmTailscaleServeDisable,
+    handleStartTailscaleServeDisable,
+    restartForSavedChanges,
+    handleWithdrawSavedNetworkAccess,
+    handleWithdrawSavedTailscaleServe,
+    handleOpenAddDevice,
+    handleRevokeDesktopPairingLink,
+    handleRevokeDesktopClientSession,
+    handleRevokeOtherDesktopClients,
+    visibleDesktopPairingLinks,
+    tailscaleHttpsEndpoint,
+    visibleDesktopNetworkAdvertisedEndpoints,
+    visibleDesktopAdvertisedEndpoints,
+    isLocalBackendRemotelyReachable,
+    defaultDesktopNetworkAdvertisedEndpoint,
+    defaultDesktopAdvertisedEndpointKey,
+    handleSetDefaultAdvertisedEndpoint,
+  } = access;
+  const renderNetworkAccessToggle = () => (
+    <Switch
+      checked={desktopServerExposureState?.mode === "network-accessible"}
+      disabled={!desktopServerExposureState || isUpdatingDesktopServerExposure}
+      onCheckedChange={(checked) => {
+        setPendingDesktopServerExposureMode(checked ? "network-accessible" : "local-only");
+        setIsDesktopServerExposureDialogOpen(true);
+      }}
+      aria-label="Enable network access"
+    />
+  );
+  const renderEndpointRows = (presentation: AccessSectionPresentation) =>
+    isAdvertisedEndpointListExpanded
+      ? visibleDesktopNetworkAdvertisedEndpoints.map((endpoint) => {
+          const endpointKey = endpointDefaultPreferenceKey(endpoint);
+          return (
+            <AdvertisedEndpointListRow
+              key={endpoint.id}
+              endpoint={endpoint}
+              isDefault={endpointKey === defaultDesktopAdvertisedEndpointKey}
+              presentation={presentation}
+              onSetDefault={handleSetDefaultAdvertisedEndpoint}
+              onSetupTailscaleServe={handleStartTailscaleServeSetup}
+              onDisableTailscaleServe={handleStartTailscaleServeDisable}
+              isUpdatingTailscaleServe={isUpdatingTailscaleServe}
+            />
+          );
+        })
+      : null;
+  const pendingTailscaleServe = desktopServerExposureState?.pendingTailscaleServe;
+  const renderTailscaleRow = () => (
+    <SettingsRow
+      title="Tailscale HTTPS"
+      description={
+        tailscaleHttpsEndpoint
+          ? tailscaleHttpsEndpoint.status === "available"
+            ? tailscaleHttpsEndpoint.httpBaseUrl
+            : "Use Tailscale Serve to expose this backend through a MagicDNS HTTPS URL."
+          : "Start Tailscale to set up HTTPS access through MagicDNS."
+      }
+      status={
+        pendingTailscaleServe ? (
+          <SavedForRelaunchNotice
+            message={
+              !pendingTailscaleServe.enabled
+                ? "Saved to turn off when Ryco restarts."
+                : desktopServerExposureState?.tailscaleServeEnabled
+                  ? `Saved to serve on port ${pendingTailscaleServe.port} when Ryco restarts.`
+                  : "Saved to turn on when Ryco restarts."
+            }
+            busy={isUpdatingTailscaleServe}
+            onRestart={restartForSavedChanges}
+            onUndo={() => void handleWithdrawSavedTailscaleServe()}
+          />
+        ) : null
+      }
+      control={
+        tailscaleHttpsEndpoint ? (
+          <Switch
+            checked={tailscaleHttpsEndpoint.status === "available"}
+            disabled={isUpdatingTailscaleServe}
+            onCheckedChange={(checked) => {
+              if (checked) {
+                handleStartTailscaleServeSetup(tailscaleHttpsEndpoint);
+                return;
+              }
+              handleStartTailscaleServeDisable(tailscaleHttpsEndpoint);
+            }}
+            aria-label="Enable Tailscale HTTPS"
+          />
+        ) : null
+      }
+    />
+  );
+  const renderAuthorizedClients = (presentation: AccessSectionPresentation) => (
+    <>
+      {desktopAccessManagementError ? (
+        <div className={accessRowClassName(presentation)}>
+          <p className="text-xs text-destructive">{desktopAccessManagementError}</p>
+        </div>
+      ) : null}
+      <PairingClientsList
+        endpointUrl={desktopServerExposureState?.endpointUrl}
+        endpoints={visibleDesktopAdvertisedEndpoints}
+        defaultEndpointKey={defaultDesktopAdvertisedEndpointKey}
+        presentation={presentation}
+        isLoading={isLoadingDesktopAccessManagement}
+        pairingLinks={visibleDesktopPairingLinks}
+        clientSessions={desktopClientSessions}
+        revokingPairingLinkId={revokingDesktopPairingLinkId}
+        revokingClientSessionId={revokingDesktopClientSessionId}
+        onRevokePairingLink={handleRevokeDesktopPairingLink}
+        onRevokeClientSession={handleRevokeDesktopClientSession}
+      />
+    </>
+  );
+  const renderNetworkAccessRow = () => (
+    <SettingsRow
+      id={PAIRING_LINK_TARGET_ID}
+      title="Network access"
+      description={
+        isLocalBackendNetworkAccessible ? (
+          <NetworkAccessDescription
+            endpoint={defaultDesktopNetworkAdvertisedEndpoint}
+            hiddenEndpointCount={Math.max(visibleDesktopNetworkAdvertisedEndpoints.length - 1, 0)}
+            expanded={isAdvertisedEndpointListExpanded}
+            onToggleExpanded={() => setIsAdvertisedEndpointListExpanded((expanded) => !expanded)}
+            fallback={
+              desktopServerExposureState?.endpointUrl
+                ? `Reachable at ${desktopServerExposureState.endpointUrl}`
+                : desktopServerExposureState?.advertisedHost
+                  ? `Exposed on all interfaces. Pairing links use ${desktopServerExposureState.advertisedHost}.`
+                  : "Exposed on all interfaces."
+            }
+          />
+        ) : desktopServerExposureState ? (
+          "Limited to this machine."
+        ) : (
+          "Loading…"
+        )
+      }
+      status={
+        desktopServerExposureState?.pendingMode || desktopServerExposureError ? (
+          <>
+            {desktopServerExposureState?.pendingMode ? (
+              <SavedForRelaunchNotice
+                message={
+                  desktopServerExposureState.pendingMode === "network-accessible"
+                    ? "Saved to turn on when Ryco restarts."
+                    : "Saved to turn off when Ryco restarts."
+                }
+                busy={isUpdatingDesktopServerExposure}
+                onRestart={restartForSavedChanges}
+                onUndo={() => void handleWithdrawSavedNetworkAccess()}
+              />
+            ) : null}
+            {desktopServerExposureError ? (
+              <span className="block text-destructive">{desktopServerExposureError}</span>
+            ) : null}
+          </>
+        ) : null
+      }
+      control={renderNetworkAccessToggle()}
+    />
+  );
+  const renderDisabledNetworkAccessRow = () => (
+    <SettingsRow
+      id={PAIRING_LINK_TARGET_ID}
+      title="Network access"
+      description={
+        currentAuthPolicy === "remote-reachable"
+          ? "This backend is already configured for remote access. Network exposure changes must be made where the server is launched."
+          : "This backend is only reachable on this machine. Restart it with a non-loopback host to enable remote pairing."
+      }
+      control={
+        <Tooltip>
+          <TooltipTrigger
+            render={
+              <span className="inline-flex">
+                <Switch
+                  checked={isLocalBackendNetworkAccessible}
+                  disabled
+                  aria-label="Enable network access"
+                />
+              </span>
+            }
+          />
+          <TooltipPopup side="top">
+            Network exposure changes restart the backend and must be controlled where the server
+            process is launched.
+          </TooltipPopup>
+        </Tooltip>
+      }
+    />
+  );
+
+  return (
+    <>
+      {canManageLocalBackend ? (
+        <>
+          <SettingsSection
+            title="Manage local backend"
+            headerAction={
+              includeDesktopRows ? <AddDeviceButton onClick={handleOpenAddDevice} /> : undefined
+            }
+          >
+            {primaryVersionMismatch ? (
+              <SettingsRow
+                title="Version drift"
+                description={
+                  <span className="flex items-center gap-1 text-warning">
+                    <TriangleAlertIcon className="size-3.5 shrink-0" />
+                    Client {primaryVersionMismatch.clientVersion}, server{" "}
+                    {primaryVersionMismatch.serverVersion}. Sync them if RPC calls or reconnects
+                    fail.
+                  </span>
+                }
+              />
+            ) : null}
+            {desktopBridge ? (
+              <>
+                {renderNetworkAccessRow()}
+                {renderEndpointRows("endpoint-rail")}
+                {renderTailscaleRow()}
+                {/* The settings page shows these under Power and Data & backup. */}
+                {includeDesktopRows ? (
+                  <>
+                    <DesktopKeepAwakeRow desktopBridge={desktopBridge} />
+                    <DesktopConversationCacheRow desktopBridge={desktopBridge} />
+                  </>
+                ) : null}
+              </>
+            ) : (
+              renderDisabledNetworkAccessRow()
+            )}
+          </SettingsSection>
+
+          {isLocalBackendRemotelyReachable ? (
+            <SettingsSection
+              title="Authorized clients"
+              headerAction={
+                <AuthorizedClientsHeaderAction
+                  clientSessions={desktopClientSessions}
+                  isRevokingOtherClients={isRevokingOtherDesktopClients}
+                  onRevokeOtherClients={handleRevokeOtherDesktopClients}
+                  onAddDevice={handleOpenAddDevice}
+                />
+              }
+            >
+              {renderAuthorizedClients("current")}
+            </SettingsSection>
+          ) : null}
+          <LocalBackendAddDeviceDialogs access={access} />
+          <AlertDialog
+            open={disableTailscaleServeDialogOpen}
+            onOpenChange={(open) => {
+              if (isUpdatingTailscaleServe) return;
+              setDisableTailscaleServeDialogOpen(open);
+            }}
+          >
+            <AlertDialogPopup>
+              <AlertDialogHeader>
+                <AlertDialogTitle>Disable Tailscale HTTPS?</AlertDialogTitle>
+                <AlertDialogDescription>
+                  Ryco will restart the local backend without Tailscale Serve.
+                </AlertDialogDescription>
+              </AlertDialogHeader>
+              <AlertDialogFooter>
+                <AlertDialogClose
+                  disabled={isUpdatingTailscaleServe}
+                  render={<Button variant="outline" disabled={isUpdatingTailscaleServe} />}
+                >
+                  Cancel
+                </AlertDialogClose>
+                <Button
+                  variant="destructive"
+                  onClick={() => void handleConfirmTailscaleServeDisable()}
+                  disabled={isUpdatingTailscaleServe}
+                >
+                  {isUpdatingTailscaleServe ? (
+                    <>
+                      <Spinner className="size-3.5" />
+                      Restarting…
+                    </>
+                  ) : (
+                    "Restart and disable"
+                  )}
+                </Button>
+              </AlertDialogFooter>
+            </AlertDialogPopup>
+          </AlertDialog>
+          <Dialog
+            open={pendingTailscaleServeEndpoint !== null}
+            onOpenChange={(open) => {
+              if (isUpdatingTailscaleServe) return;
+              if (!open) setPendingTailscaleServeEndpoint(null);
+            }}
+          >
+            <DialogPopup className="max-w-md">
+              <DialogHeader>
+                <DialogTitle>Set up Tailscale HTTPS?</DialogTitle>
+                <DialogDescription>
+                  Ryco will restart the local backend with Tailscale Serve enabled and ask Tailscale
+                  to proxy HTTPS traffic to this backend.
+                </DialogDescription>
+              </DialogHeader>
+              <DialogPanel className="space-y-4">
+                <label className="block">
+                  <span className="text-sm font-medium text-foreground">HTTPS port</span>
+                  <Input
+                    className="mt-2"
+                    type="number"
+                    inputMode="numeric"
+                    min={1}
+                    max={65_535}
+                    step={1}
+                    value={tailscaleServePortInput}
+                    onChange={(event) => setTailscaleServePortInput(event.target.value)}
+                    disabled={isUpdatingTailscaleServe}
+                  />
+                </label>
+                {!isTailscaleServePortValid ? (
+                  <p className="mt-2 text-xs text-destructive">Enter a port from 1 to 65535.</p>
+                ) : null}
+                <div className="rounded-md border border-border/70 bg-muted/20 px-3 py-2">
+                  <p className="text-xs font-medium text-muted-foreground">HTTPS endpoint</p>
+                  <p
+                    className="mt-1 truncate text-sm text-foreground"
+                    title={pendingTailscaleServeBaseUrl ?? undefined}
+                  >
+                    {pendingTailscaleServeBaseUrl ?? "Pending MagicDNS endpoint"}
+                  </p>
+                </div>
+              </DialogPanel>
+              <DialogFooter>
+                <DialogClose
+                  disabled={isUpdatingTailscaleServe}
+                  render={<Button variant="outline" disabled={isUpdatingTailscaleServe} />}
+                >
+                  Cancel
+                </DialogClose>
+                <Button
+                  onClick={() => void handleConfirmTailscaleServeSetup()}
+                  disabled={isUpdatingTailscaleServe || !isTailscaleServePortValid}
+                >
+                  {isUpdatingTailscaleServe ? (
+                    <>
+                      <Spinner className="size-3.5" />
+                      Restarting…
+                    </>
+                  ) : (
+                    "Enable"
+                  )}
+                </Button>
+              </DialogFooter>
+            </DialogPopup>
+          </Dialog>
+        </>
+      ) : (
+        <SettingsSection title="Local backend access">
+          <SettingsRow
+            title="Owner tools"
+            description="Pairing links and client-session management are only available to owner sessions for this backend."
+          />
+        </SettingsSection>
+      )}
+
+      {relaunchGuardDialog}
+    </>
+  );
+}
+
+/**
+ * "Add a device" and the network-access confirmation its "Turn on network
+ * access" opens, over one {@link useLocalBackendAccess}: Access renders them
+ * with its rows, All devices on their own ({@link AddDeviceFlow}).
+ */
+function LocalBackendAddDeviceDialogs({ access }: { readonly access: LocalBackendAccess }) {
+  const {
+    isAddDeviceOpen,
+    setIsAddDeviceOpen,
+    addDeviceOpening,
+    desktopPairingLinks,
+    desktopClientSessions,
+    visibleDesktopAdvertisedEndpoints,
+    defaultDesktopAdvertisedEndpointKey,
+    handleTurnOnNetworkAccess,
+    isDesktopServerExposureDialogOpen,
+    isUpdatingDesktopServerExposure,
+    setIsDesktopServerExposureDialogOpen,
+    setPendingDesktopServerExposureMode,
+    pendingDesktopServerExposureMode,
+    handleConfirmDesktopServerExposureChange,
+  } = access;
+  return (
+    <>
+      <AddDeviceDialogHost
+        open={isAddDeviceOpen}
+        onOpenChange={setIsAddDeviceOpen}
+        opening={addDeviceOpening}
+        operations={ADD_DEVICE_OPERATIONS}
+        pairingLinks={desktopPairingLinks}
+        clientSessions={desktopClientSessions}
+        endpoints={visibleDesktopAdvertisedEndpoints}
+        defaultEndpointKey={defaultDesktopAdvertisedEndpointKey}
+        onTurnOnNetworkAccess={handleTurnOnNetworkAccess}
+      />
+      <AlertDialog
+        open={isDesktopServerExposureDialogOpen}
+        onOpenChange={(open) => {
+          if (isUpdatingDesktopServerExposure) return;
+          setIsDesktopServerExposureDialogOpen(open);
+        }}
+        onOpenChangeComplete={(open) => {
+          if (!open) setPendingDesktopServerExposureMode(null);
+        }}
+      >
+        <AlertDialogPopup>
+          <AlertDialogHeader>
+            <AlertDialogTitle>
+              {pendingDesktopServerExposureMode === "network-accessible"
+                ? "Enable network access?"
+                : "Disable network access?"}
+            </AlertDialogTitle>
+            <AlertDialogDescription>
+              {pendingDesktopServerExposureMode === "network-accessible"
+                ? "Ryco will restart to expose this environment over the network."
+                : "Ryco will restart and limit this environment back to this machine."}
+            </AlertDialogDescription>
+          </AlertDialogHeader>
+          <AlertDialogFooter>
+            <AlertDialogClose
+              disabled={isUpdatingDesktopServerExposure}
+              render={<Button variant="outline" disabled={isUpdatingDesktopServerExposure} />}
+            >
+              Cancel
+            </AlertDialogClose>
+            <Button
+              variant={
+                pendingDesktopServerExposureMode === "local-only" ? "destructive" : "default"
+              }
+              onClick={handleConfirmDesktopServerExposureChange}
+              disabled={
+                pendingDesktopServerExposureMode === null || isUpdatingDesktopServerExposure
+              }
+            >
+              {isUpdatingDesktopServerExposure ? (
+                <>
+                  <Spinner className="size-3.5" />
+                  Restarting…
+                </>
+              ) : pendingDesktopServerExposureMode === "network-accessible" ? (
+                "Restart and enable"
+              ) : (
+                "Restart and disable"
+              )}
+            </Button>
+          </AlertDialogFooter>
+        </AlertDialogPopup>
+      </AlertDialog>
+    </>
+  );
+}
+
+/**
+ * "Add a device" from All devices: this computer's access state, the dialog
+ * and its network-access confirmation, mounted on the first click so the page
+ * holds no access subscription until then. `opening` counts clicks; each one
+ * mints its own code, as the Access button does.
+ */
+export function AddDeviceFlow({ opening }: { readonly opening: number }) {
+  const access = useLocalBackendAccess();
+  const { canManageLocalBackend, handleOpenAddDevice, relaunchGuardDialog } = access;
+  // A click counts once this computer's role is known (a browser asks the
+  // backend first); a reader who may not manage it never sees the dialog.
+  const [seenOpening, setSeenOpening] = useState(0);
+  if (canManageLocalBackend && opening !== seenOpening) {
+    setSeenOpening(opening);
+    handleOpenAddDevice();
+  }
+  if (!canManageLocalBackend) return null;
+  return (
+    <>
+      <LocalBackendAddDeviceDialogs access={access} />
+      {relaunchGuardDialog}
+    </>
+  );
+}
+
+/**
+ * The devices this app connects to besides its own: the Hub connection and
+ * saved remote environments. All devices shows it below the device cards.
+ */
+export function ConnectedDevicesSettings() {
+  const desktopBridge = window.desktopBridge;
+  const savedEnvironmentsById = useSavedEnvironmentRegistryStore((state) => state.byId);
+  const savedEnvironmentIds = useMemo(
+    () =>
+      Object.values(savedEnvironmentsById)
+        .toSorted((left, right) => left.label.localeCompare(right.label))
+        .map((record) => record.environmentId),
+    [savedEnvironmentsById],
+  );
+  const savedDesktopSshEnvironmentsByAlias = useMemo(
+    () =>
+      Object.values(savedEnvironmentsById).reduce<Record<string, SavedEnvironmentRecord>>(
+        (accumulator, record) => {
+          if (record.desktopSsh?.alias) {
+            accumulator[record.desktopSsh.alias] = record;
+          }
+          return accumulator;
+        },
+        {},
+      ),
+    [savedEnvironmentsById],
+  );
+  const savedDesktopSshEnvironmentKeys = useMemo(() => {
+    const keys = new Set<string>();
+    for (const record of Object.values(savedEnvironmentsById)) {
+      const target = record.desktopSsh;
+      if (!target) continue;
+      keys.add(target.alias);
+      keys.add(formatDesktopSshTarget(target));
+    }
+    return keys;
+  }, [savedEnvironmentsById]);
+  const [discoveredSshHosts, setDiscoveredSshHosts] = useState<
+    ReadonlyArray<DesktopDiscoveredSshHost>
+  >([]);
+  const [hasLoadedDiscoveredSshHosts, setHasLoadedDiscoveredSshHosts] = useState(false);
+  const [isLoadingDiscoveredSshHosts, setIsLoadingDiscoveredSshHosts] = useState(false);
+  const [discoveredSshHostsError, setDiscoveredSshHostsError] = useState<string | null>(null);
+  const [connectingSshHostAlias, setConnectingSshHostAlias] = useState<string | null>(null);
+
+  const [addBackendDialogOpen, setAddBackendDialogOpen] = useState(false);
+  const [savedBackendMode, setSavedBackendMode] = useState<"remote" | "ssh">("remote");
+  const [savedBackendHost, setSavedBackendHost] = useState("");
+  const [savedBackendPairingCode, setSavedBackendPairingCode] = useState("");
+  const [savedBackendSshHost, setSavedBackendSshHost] = useState("");
+  const [savedBackendSshUsername, setSavedBackendSshUsername] = useState("");
+  const [savedBackendSshPort, setSavedBackendSshPort] = useState("");
+  const [savedBackendError, setSavedBackendError] = useState<string | null>(null);
+  const [isAddingSavedBackend, setIsAddingSavedBackend] = useState(false);
+  const unsavedDiscoveredSshHosts = useMemo(
+    () =>
+      discoveredSshHosts.filter((target) => {
+        const address = formatDesktopSshTarget(target);
+        return (
+          !savedDesktopSshEnvironmentKeys.has(target.alias) &&
+          !savedDesktopSshEnvironmentKeys.has(address)
+        );
+      }),
+    [discoveredSshHosts, savedDesktopSshEnvironmentKeys],
+  );
+  const [reconnectingSavedEnvironmentId, setReconnectingSavedEnvironmentId] =
+    useState<EnvironmentId | null>(null);
+  const [disconnectingSavedEnvironmentId, setDisconnectingSavedEnvironmentId] =
+    useState<EnvironmentId | null>(null);
+  const [removingSavedEnvironmentId, setRemovingSavedEnvironmentId] =
+    useState<EnvironmentId | null>(null);
+  const [switchingSavedEnvironmentId, setSwitchingSavedEnvironmentId] =
+    useState<EnvironmentId | null>(null);
 
   const handleAddSavedBackend = useCallback(async () => {
     if (savedBackendMode === "ssh") {
@@ -2238,199 +2992,6 @@ export function ConnectionsSettings({
     savedBackendMode,
   ]);
 
-  useEffect(() => {
-    if (desktopBridge) {
-      setCurrentSessionRole("owner");
-      return;
-    }
-
-    let cancelled = false;
-    void fetchSessionState()
-      .then((session) => {
-        if (cancelled) return;
-        setCurrentSessionRole(session.authenticated ? (session.role ?? null) : null);
-        setCurrentAuthPolicy(session.auth.policy);
-      })
-      .catch(() => {
-        if (cancelled) return;
-        setCurrentSessionRole(null);
-        setCurrentAuthPolicy(null);
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [desktopBridge]);
-
-  useEffect(() => {
-    if (!canManageLocalBackend) return;
-
-    let cancelled = false;
-    setIsLoadingDesktopAccessManagement(true);
-    type AuthAccessEvent = Parameters<
-      Parameters<WsRpcClient["server"]["subscribeAuthAccess"]>[0]
-    >[0];
-    const unsubscribeAuthAccess =
-      getPrimaryEnvironmentConnection().client.server.subscribeAuthAccess(
-        (event: AuthAccessEvent) => {
-          if (cancelled) {
-            return;
-          }
-
-          switch (event.type) {
-            case "snapshot":
-              setDesktopPairingLinks(
-                sortDesktopPairingLinks(
-                  event.payload.pairingLinks.map((pairingLink: AuthPairingLink) =>
-                    toDesktopPairingLinkRecord(pairingLink),
-                  ),
-                ),
-              );
-              setDesktopClientSessions(
-                sortDesktopClientSessions(
-                  event.payload.clientSessions.map((clientSession: AuthClientSession) =>
-                    toDesktopClientSessionRecord(clientSession),
-                  ),
-                ),
-              );
-              break;
-            case "pairingLinkUpserted":
-              setDesktopPairingLinks((current) =>
-                upsertDesktopPairingLink(current, toDesktopPairingLinkRecord(event.payload)),
-              );
-              break;
-            case "pairingLinkRemoved":
-              setDesktopPairingLinks((current) =>
-                removeDesktopPairingLink(current, event.payload.id),
-              );
-              break;
-            case "clientUpserted":
-              setDesktopClientSessions((current) =>
-                upsertDesktopClientSession(current, toDesktopClientSessionRecord(event.payload)),
-              );
-              break;
-            case "clientRemoved":
-              setDesktopClientSessions((current) =>
-                removeDesktopClientSession(current, event.payload.sessionId),
-              );
-              break;
-          }
-
-          setDesktopAccessManagementError(null);
-          setIsLoadingDesktopAccessManagement(false);
-        },
-        {
-          onResubscribe: () => {
-            if (!cancelled) {
-              setIsLoadingDesktopAccessManagement(true);
-            }
-          },
-        },
-      );
-    if (desktopBridge) {
-      void desktopBridge
-        .getServerExposureState()
-        .then((state) => {
-          if (cancelled) return;
-          setDesktopServerExposureState(state);
-        })
-        .catch((error: unknown) => {
-          if (cancelled) return;
-          const message =
-            error instanceof Error ? error.message : "Failed to load network exposure state.";
-          setDesktopServerExposureError(message);
-        });
-      void desktopBridge
-        .getAdvertisedEndpoints()
-        .then((endpoints) => {
-          if (cancelled) return;
-          setDesktopAdvertisedEndpoints(endpoints);
-        })
-        .catch((error: unknown) => {
-          if (cancelled) return;
-          const message =
-            error instanceof Error ? error.message : "Failed to load reachable endpoints.";
-          setDesktopServerExposureError(message);
-        });
-    } else {
-      setDesktopServerExposureState(null);
-      void getPrimaryEnvironmentConnection()
-        .client.server.getAdvertisedEndpoints()
-        .then((endpoints) => {
-          if (cancelled) return;
-          setDesktopAdvertisedEndpoints(endpoints);
-        })
-        .catch((error: unknown) => {
-          if (cancelled) return;
-          const message =
-            error instanceof Error ? error.message : "Failed to load reachable endpoints.";
-          setDesktopServerExposureError(message);
-        });
-    }
-
-    return () => {
-      cancelled = true;
-      unsubscribeAuthAccess();
-    };
-  }, [canManageLocalBackend, desktopBridge]);
-
-  useEffect(() => {
-    if (canManageLocalBackend) return;
-    setIsLoadingDesktopAccessManagement(false);
-    setDesktopPairingLinks([]);
-    setDesktopClientSessions([]);
-    setDesktopAccessManagementError(null);
-    setDesktopServerExposureState(null);
-    setDesktopAdvertisedEndpoints([]);
-    setDesktopServerExposureError(null);
-  }, [canManageLocalBackend]);
-  const visibleDesktopPairingLinks = useMemo(
-    () => desktopPairingLinks.filter((pairingLink) => pairingLink.role === "client"),
-    [desktopPairingLinks],
-  );
-  const tailscaleHttpsEndpoint = useMemo(
-    () => desktopAdvertisedEndpoints.find(isTailscaleHttpsEndpoint) ?? null,
-    [desktopAdvertisedEndpoints],
-  );
-  const visibleDesktopNetworkAdvertisedEndpoints = useMemo(
-    () =>
-      isLocalBackendNetworkAccessible
-        ? desktopAdvertisedEndpoints.filter((endpoint) => !isTailscaleHttpsEndpoint(endpoint))
-        : [],
-    [desktopAdvertisedEndpoints, isLocalBackendNetworkAccessible],
-  );
-  const visibleDesktopAdvertisedEndpoints = useMemo(
-    () =>
-      tailscaleHttpsEndpoint
-        ? [...visibleDesktopNetworkAdvertisedEndpoints, tailscaleHttpsEndpoint]
-        : visibleDesktopNetworkAdvertisedEndpoints,
-    [tailscaleHttpsEndpoint, visibleDesktopNetworkAdvertisedEndpoints],
-  );
-  const isLocalBackendRemotelyReachable =
-    isLocalBackendNetworkAccessible || tailscaleHttpsEndpoint?.status === "available";
-  const defaultDesktopNetworkAdvertisedEndpoint = useMemo(
-    () =>
-      selectPairingEndpoint(visibleDesktopNetworkAdvertisedEndpoints, defaultAdvertisedEndpointKey),
-    [defaultAdvertisedEndpointKey, visibleDesktopNetworkAdvertisedEndpoints],
-  );
-  const defaultDesktopAdvertisedEndpoint = useMemo(
-    () =>
-      defaultDesktopNetworkAdvertisedEndpoint ??
-      selectPairingEndpoint(
-        tailscaleHttpsEndpoint ? [tailscaleHttpsEndpoint] : [],
-        defaultAdvertisedEndpointKey,
-      ),
-    [defaultAdvertisedEndpointKey, defaultDesktopNetworkAdvertisedEndpoint, tailscaleHttpsEndpoint],
-  );
-  const defaultDesktopAdvertisedEndpointKey = defaultDesktopAdvertisedEndpoint
-    ? endpointDefaultPreferenceKey(defaultDesktopAdvertisedEndpoint)
-    : null;
-  const handleSetDefaultAdvertisedEndpoint = useCallback(
-    (endpoint: AdvertisedEndpoint) => {
-      setDefaultAdvertisedEndpointKey(endpointDefaultPreferenceKey(endpoint));
-    },
-    [setDefaultAdvertisedEndpointKey],
-  );
   const handleSavedBackendHostChange = useCallback((value: string) => {
     const parsedPairingUrl = parsePairingUrlFields(value);
     if (parsedPairingUrl) {
@@ -2625,498 +3186,109 @@ export function ConnectionsSettings({
       </div>
     </div>
   );
-  const renderNetworkAccessToggle = () => (
-    <Switch
-      checked={desktopServerExposureState?.mode === "network-accessible"}
-      disabled={!desktopServerExposureState || isUpdatingDesktopServerExposure}
-      onCheckedChange={(checked) => {
-        setPendingDesktopServerExposureMode(checked ? "network-accessible" : "local-only");
-        setIsDesktopServerExposureDialogOpen(true);
-      }}
-      aria-label="Enable network access"
-    />
-  );
-  const renderEndpointRows = (presentation: AccessSectionPresentation) =>
-    isAdvertisedEndpointListExpanded
-      ? visibleDesktopNetworkAdvertisedEndpoints.map((endpoint) => {
-          const endpointKey = endpointDefaultPreferenceKey(endpoint);
-          return (
-            <AdvertisedEndpointListRow
-              key={endpoint.id}
-              endpoint={endpoint}
-              isDefault={endpointKey === defaultDesktopAdvertisedEndpointKey}
-              presentation={presentation}
-              onSetDefault={handleSetDefaultAdvertisedEndpoint}
-              onSetupTailscaleServe={handleStartTailscaleServeSetup}
-              onDisableTailscaleServe={handleStartTailscaleServeDisable}
-              isUpdatingTailscaleServe={isUpdatingTailscaleServe}
-            />
-          );
-        })
-      : null;
-  const pendingTailscaleServe = desktopServerExposureState?.pendingTailscaleServe;
-  const renderTailscaleRow = () => (
-    <SettingsRow
-      title="Tailscale HTTPS"
-      description={
-        tailscaleHttpsEndpoint
-          ? tailscaleHttpsEndpoint.status === "available"
-            ? tailscaleHttpsEndpoint.httpBaseUrl
-            : "Use Tailscale Serve to expose this backend through a MagicDNS HTTPS URL."
-          : "Start Tailscale to set up HTTPS access through MagicDNS."
-      }
-      status={
-        pendingTailscaleServe ? (
-          <SavedForRelaunchNotice
-            message={
-              !pendingTailscaleServe.enabled
-                ? "Saved to turn off when Ryco restarts."
-                : desktopServerExposureState?.tailscaleServeEnabled
-                  ? `Saved to serve on port ${pendingTailscaleServe.port} when Ryco restarts.`
-                  : "Saved to turn on when Ryco restarts."
-            }
-            busy={isUpdatingTailscaleServe}
-            onRestart={restartForSavedChanges}
-            onUndo={() => void handleWithdrawSavedTailscaleServe()}
-          />
-        ) : null
-      }
-      control={
-        tailscaleHttpsEndpoint ? (
-          <Switch
-            checked={tailscaleHttpsEndpoint.status === "available"}
-            disabled={isUpdatingTailscaleServe}
-            onCheckedChange={(checked) => {
-              if (checked) {
-                handleStartTailscaleServeSetup(tailscaleHttpsEndpoint);
-                return;
-              }
-              handleStartTailscaleServeDisable(tailscaleHttpsEndpoint);
-            }}
-            aria-label="Enable Tailscale HTTPS"
-          />
-        ) : null
-      }
-    />
-  );
-  const renderAuthorizedClients = (presentation: AccessSectionPresentation) => (
-    <>
-      {desktopAccessManagementError ? (
-        <div className={accessRowClassName(presentation)}>
-          <p className="text-xs text-destructive">{desktopAccessManagementError}</p>
-        </div>
-      ) : null}
-      <PairingClientsList
-        endpointUrl={desktopServerExposureState?.endpointUrl}
-        endpoints={visibleDesktopAdvertisedEndpoints}
-        defaultEndpointKey={defaultDesktopAdvertisedEndpointKey}
-        presentation={presentation}
-        isLoading={isLoadingDesktopAccessManagement}
-        pairingLinks={visibleDesktopPairingLinks}
-        clientSessions={desktopClientSessions}
-        revokingPairingLinkId={revokingDesktopPairingLinkId}
-        revokingClientSessionId={revokingDesktopClientSessionId}
-        onRevokePairingLink={handleRevokeDesktopPairingLink}
-        onRevokeClientSession={handleRevokeDesktopClientSession}
-      />
-    </>
-  );
-  const renderNetworkAccessRow = () => (
-    <SettingsRow
-      id={PAIRING_LINK_TARGET_ID}
-      title="Network access"
-      description={
-        isLocalBackendNetworkAccessible ? (
-          <NetworkAccessDescription
-            endpoint={defaultDesktopNetworkAdvertisedEndpoint}
-            hiddenEndpointCount={Math.max(visibleDesktopNetworkAdvertisedEndpoints.length - 1, 0)}
-            expanded={isAdvertisedEndpointListExpanded}
-            onToggleExpanded={() => setIsAdvertisedEndpointListExpanded((expanded) => !expanded)}
-            fallback={
-              desktopServerExposureState?.endpointUrl
-                ? `Reachable at ${desktopServerExposureState.endpointUrl}`
-                : desktopServerExposureState?.advertisedHost
-                  ? `Exposed on all interfaces. Pairing links use ${desktopServerExposureState.advertisedHost}.`
-                  : "Exposed on all interfaces."
-            }
-          />
-        ) : desktopServerExposureState ? (
-          "Limited to this machine."
-        ) : (
-          "Loading…"
-        )
-      }
-      status={
-        desktopServerExposureState?.pendingMode || desktopServerExposureError ? (
-          <>
-            {desktopServerExposureState?.pendingMode ? (
-              <SavedForRelaunchNotice
-                message={
-                  desktopServerExposureState.pendingMode === "network-accessible"
-                    ? "Saved to turn on when Ryco restarts."
-                    : "Saved to turn off when Ryco restarts."
-                }
-                busy={isUpdatingDesktopServerExposure}
-                onRestart={restartForSavedChanges}
-                onUndo={() => void handleWithdrawSavedNetworkAccess()}
-              />
-            ) : null}
-            {desktopServerExposureError ? (
-              <span className="block text-destructive">{desktopServerExposureError}</span>
-            ) : null}
-          </>
-        ) : null
-      }
-      control={renderNetworkAccessToggle()}
-    />
-  );
-  const renderDisabledNetworkAccessRow = () => (
-    <SettingsRow
-      id={PAIRING_LINK_TARGET_ID}
-      title="Network access"
-      description={
-        currentAuthPolicy === "remote-reachable"
-          ? "This backend is already configured for remote access. Network exposure changes must be made where the server is launched."
-          : "This backend is only reachable on this machine. Restart it with a non-loopback host to enable remote pairing."
-      }
-      control={
-        <Tooltip>
-          <TooltipTrigger
-            render={
-              <span className="inline-flex">
-                <Switch
-                  checked={isLocalBackendNetworkAccessible}
-                  disabled
-                  aria-label="Enable network access"
-                />
-              </span>
-            }
-          />
-          <TooltipPopup side="top">
-            Network exposure changes restart the backend and must be controlled where the server
-            process is launched.
-          </TooltipPopup>
-        </Tooltip>
-      }
-    />
-  );
 
   return (
-    <SettingsPageContainer>
-      {!showAccess ? null : canManageLocalBackend ? (
-        <>
-          <SettingsSection
-            title="Manage local backend"
-            headerAction={<AddDeviceButton onClick={handleOpenAddDevice} />}
-          >
-            {primaryVersionMismatch ? (
-              <SettingsRow
-                title="Version drift"
-                description={
-                  <span className="flex items-center gap-1 text-warning">
-                    <TriangleAlertIcon className="size-3.5 shrink-0" />
-                    Client {primaryVersionMismatch.clientVersion}, server{" "}
-                    {primaryVersionMismatch.serverVersion}. Sync them if RPC calls or reconnects
-                    fail.
-                  </span>
-                }
-              />
-            ) : null}
-            {desktopBridge ? (
-              <>
-                {renderNetworkAccessRow()}
-                {renderEndpointRows("endpoint-rail")}
-                {renderTailscaleRow()}
-                {/* The settings page shows these under Power and Data & backup. */}
-                {part === "all" ? (
-                  <>
-                    <DesktopKeepAwakeRow desktopBridge={desktopBridge} />
-                    <DesktopConversationCacheRow desktopBridge={desktopBridge} />
-                  </>
-                ) : null}
-              </>
-            ) : (
-              renderDisabledNetworkAccessRow()
-            )}
-          </SettingsSection>
+    <>
+      {desktopBridge ? <HubSection desktopBridge={desktopBridge} /> : null}
 
-          {isLocalBackendRemotelyReachable ? (
-            <SettingsSection
-              title="Authorized clients"
-              headerAction={
-                <AuthorizedClientsHeaderAction
-                  clientSessions={desktopClientSessions}
-                  isRevokingOtherClients={isRevokingOtherDesktopClients}
-                  onRevokeOtherClients={handleRevokeOtherDesktopClients}
-                  onAddDevice={handleOpenAddDevice}
-                />
-              }
-            >
-              {renderAuthorizedClients("current")}
-            </SettingsSection>
-          ) : null}
-          <AddDeviceDialogHost
-            open={isAddDeviceOpen}
-            onOpenChange={setIsAddDeviceOpen}
-            opening={addDeviceOpening}
-            operations={ADD_DEVICE_OPERATIONS}
-            pairingLinks={desktopPairingLinks}
-            clientSessions={desktopClientSessions}
-            endpoints={visibleDesktopAdvertisedEndpoints}
-            defaultEndpointKey={defaultDesktopAdvertisedEndpointKey}
-            onTurnOnNetworkAccess={handleTurnOnNetworkAccess}
-          />
-          <AlertDialog
-            open={isDesktopServerExposureDialogOpen}
-            onOpenChange={(open) => {
-              if (isUpdatingDesktopServerExposure) return;
-              setIsDesktopServerExposureDialogOpen(open);
-            }}
-            onOpenChangeComplete={(open) => {
-              if (!open) setPendingDesktopServerExposureMode(null);
-            }}
-          >
-            <AlertDialogPopup>
-              <AlertDialogHeader>
-                <AlertDialogTitle>
-                  {pendingDesktopServerExposureMode === "network-accessible"
-                    ? "Enable network access?"
-                    : "Disable network access?"}
-                </AlertDialogTitle>
-                <AlertDialogDescription>
-                  {pendingDesktopServerExposureMode === "network-accessible"
-                    ? "Ryco will restart to expose this environment over the network."
-                    : "Ryco will restart and limit this environment back to this machine."}
-                </AlertDialogDescription>
-              </AlertDialogHeader>
-              <AlertDialogFooter>
-                <AlertDialogClose
-                  disabled={isUpdatingDesktopServerExposure}
-                  render={<Button variant="outline" disabled={isUpdatingDesktopServerExposure} />}
-                >
-                  Cancel
-                </AlertDialogClose>
-                <Button
-                  variant={
-                    pendingDesktopServerExposureMode === "local-only" ? "destructive" : "default"
-                  }
-                  onClick={handleConfirmDesktopServerExposureChange}
-                  disabled={
-                    pendingDesktopServerExposureMode === null || isUpdatingDesktopServerExposure
-                  }
-                >
-                  {isUpdatingDesktopServerExposure ? (
-                    <>
-                      <Spinner className="size-3.5" />
-                      Restarting…
-                    </>
-                  ) : pendingDesktopServerExposureMode === "network-accessible" ? (
-                    "Restart and enable"
-                  ) : (
-                    "Restart and disable"
-                  )}
-                </Button>
-              </AlertDialogFooter>
-            </AlertDialogPopup>
-          </AlertDialog>
-          <AlertDialog
-            open={disableTailscaleServeDialogOpen}
-            onOpenChange={(open) => {
-              if (isUpdatingTailscaleServe) return;
-              setDisableTailscaleServeDialogOpen(open);
-            }}
-          >
-            <AlertDialogPopup>
-              <AlertDialogHeader>
-                <AlertDialogTitle>Disable Tailscale HTTPS?</AlertDialogTitle>
-                <AlertDialogDescription>
-                  Ryco will restart the local backend without Tailscale Serve.
-                </AlertDialogDescription>
-              </AlertDialogHeader>
-              <AlertDialogFooter>
-                <AlertDialogClose
-                  disabled={isUpdatingTailscaleServe}
-                  render={<Button variant="outline" disabled={isUpdatingTailscaleServe} />}
-                >
-                  Cancel
-                </AlertDialogClose>
-                <Button
-                  variant="destructive"
-                  onClick={() => void handleConfirmTailscaleServeDisable()}
-                  disabled={isUpdatingTailscaleServe}
-                >
-                  {isUpdatingTailscaleServe ? (
-                    <>
-                      <Spinner className="size-3.5" />
-                      Restarting…
-                    </>
-                  ) : (
-                    "Restart and disable"
-                  )}
-                </Button>
-              </AlertDialogFooter>
-            </AlertDialogPopup>
-          </AlertDialog>
+      <SettingsSection
+        title="Remote environments"
+        headerAction={
           <Dialog
-            open={pendingTailscaleServeEndpoint !== null}
+            open={addBackendDialogOpen}
             onOpenChange={(open) => {
-              if (isUpdatingTailscaleServe) return;
-              if (!open) setPendingTailscaleServeEndpoint(null);
+              setAddBackendDialogOpen(open);
+              if (!open) {
+                setSavedBackendError(null);
+              }
             }}
           >
-            <DialogPopup className="max-w-md">
+            <DialogTrigger
+              render={
+                <Button size="xs" variant="outline">
+                  <PlusIcon className="size-3" />
+                  Add environment
+                </Button>
+              }
+            />
+            <DialogPopup className="max-h-[80dvh] sm:max-w-3xl">
               <DialogHeader>
-                <DialogTitle>Set up Tailscale HTTPS?</DialogTitle>
-                <DialogDescription>
-                  Ryco will restart the local backend with Tailscale Serve enabled and ask Tailscale
-                  to proxy HTTPS traffic to this backend.
-                </DialogDescription>
+                <DialogTitle>Add Environment</DialogTitle>
+                <DialogDescription>Pair another environment to this client.</DialogDescription>
               </DialogHeader>
-              <DialogPanel className="space-y-4">
-                <label className="block">
-                  <span className="text-sm font-medium text-foreground">HTTPS port</span>
-                  <Input
-                    className="mt-2"
-                    type="number"
-                    inputMode="numeric"
-                    min={1}
-                    max={65_535}
-                    step={1}
-                    value={tailscaleServePortInput}
-                    onChange={(event) => setTailscaleServePortInput(event.target.value)}
-                    disabled={isUpdatingTailscaleServe}
-                  />
-                </label>
-                {!isTailscaleServePortValid ? (
-                  <p className="mt-2 text-xs text-destructive">Enter a port from 1 to 65535.</p>
-                ) : null}
-                <div className="rounded-md border border-border/70 bg-muted/20 px-3 py-2">
-                  <p className="text-xs font-medium text-muted-foreground">HTTPS endpoint</p>
-                  <p
-                    className="mt-1 truncate text-sm text-foreground"
-                    title={pendingTailscaleServeBaseUrl ?? undefined}
-                  >
-                    {pendingTailscaleServeBaseUrl ?? "Pending MagicDNS endpoint"}
-                  </p>
+              <DialogPanel>
+                <div className="space-y-4">
+                  <div className="grid gap-3 sm:grid-cols-2">
+                    {renderConnectionModeCard({
+                      mode: "remote",
+                      title: "Remote link",
+                      description: "Enter a backend host and pairing code.",
+                      icon: <ChevronsLeftRightEllipsisIcon aria-hidden className="size-4" />,
+                    })}
+                    {desktopBridge
+                      ? renderConnectionModeCard({
+                          mode: "ssh",
+                          title: "SSH",
+                          description: "Use local SSH config, agent, and tunnels for the backend.",
+                          icon: <TerminalIcon aria-hidden className="size-4" />,
+                        })
+                      : null}
+                  </div>
+                  <AnimatedHeight>
+                    {savedBackendMode === "ssh" ? renderSshFields() : renderRemoteModeBody()}
+                  </AnimatedHeight>
                 </div>
               </DialogPanel>
-              <DialogFooter>
-                <DialogClose
-                  disabled={isUpdatingTailscaleServe}
-                  render={<Button variant="outline" disabled={isUpdatingTailscaleServe} />}
-                >
-                  Cancel
-                </DialogClose>
-                <Button
-                  onClick={() => void handleConfirmTailscaleServeSetup()}
-                  disabled={isUpdatingTailscaleServe || !isTailscaleServePortValid}
-                >
-                  {isUpdatingTailscaleServe ? (
-                    <>
-                      <Spinner className="size-3.5" />
-                      Restarting…
-                    </>
-                  ) : (
-                    "Enable"
-                  )}
-                </Button>
-              </DialogFooter>
             </DialogPopup>
           </Dialog>
-        </>
-      ) : (
-        <SettingsSection title="Local backend access">
-          <SettingsRow
-            title="Owner tools"
-            description="Pairing links and client-session management are only available to owner sessions for this backend."
+        }
+      >
+        {savedEnvironmentIds.map((environmentId) => (
+          <SavedBackendListRow
+            key={environmentId}
+            environmentId={environmentId}
+            reconnectingEnvironmentId={reconnectingSavedEnvironmentId}
+            disconnectingEnvironmentId={disconnectingSavedEnvironmentId}
+            removingEnvironmentId={removingSavedEnvironmentId}
+            switchingEnvironmentId={switchingSavedEnvironmentId}
+            onConnect={handleConnectSavedBackend}
+            onDisconnect={handleDisconnectSavedBackend}
+            onRepair={handleRepairSavedBackend}
+            onRemove={handleRemoveSavedBackend}
+            onSetEnabled={handleSetSavedBackendEnabled}
           />
-        </SettingsSection>
+        ))}
+
+        {savedEnvironmentIds.length === 0 ? (
+          <div className={ITEM_ROW_CLASSNAME}>
+            <p className="text-xs text-muted-foreground">
+              No remote environments yet. Click &ldquo;Add environment&rdquo; to pair another
+              environment.
+            </p>
+          </div>
+        ) : null}
+      </SettingsSection>
+    </>
+  );
+}
+
+/**
+ * Which part of the connection settings to show. The settings page shows this
+ * computer's reach, pairing and clients on its own device page (`access`) and
+ * the devices this app connects to under All devices (`devices`); the frozen
+ * phone tier shows both (`all`).
+ */
+export type ConnectionsSettingsPart = "all" | "access" | "devices";
+
+export function ConnectionsSettings({
+  part = "all",
+}: { readonly part?: ConnectionsSettingsPart } = {}) {
+  return (
+    <SettingsPageContainer>
+      {part === "devices" ? null : (
+        <LocalBackendAccessSettings includeDesktopRows={part === "all"} />
       )}
-
-      {relaunchGuardDialog}
-
-      {showDevices && desktopBridge ? <HubSection desktopBridge={desktopBridge} /> : null}
-
-      {showDevices ? (
-        <SettingsSection
-          title="Remote environments"
-          headerAction={
-            <Dialog
-              open={addBackendDialogOpen}
-              onOpenChange={(open) => {
-                setAddBackendDialogOpen(open);
-                if (!open) {
-                  setSavedBackendError(null);
-                }
-              }}
-            >
-              <DialogTrigger
-                render={
-                  <Button size="xs" variant="outline">
-                    <PlusIcon className="size-3" />
-                    Add environment
-                  </Button>
-                }
-              />
-              <DialogPopup className="max-h-[80dvh] sm:max-w-3xl">
-                <DialogHeader>
-                  <DialogTitle>Add Environment</DialogTitle>
-                  <DialogDescription>Pair another environment to this client.</DialogDescription>
-                </DialogHeader>
-                <DialogPanel>
-                  <div className="space-y-4">
-                    <div className="grid gap-3 sm:grid-cols-2">
-                      {renderConnectionModeCard({
-                        mode: "remote",
-                        title: "Remote link",
-                        description: "Enter a backend host and pairing code.",
-                        icon: <ChevronsLeftRightEllipsisIcon aria-hidden className="size-4" />,
-                      })}
-                      {desktopBridge
-                        ? renderConnectionModeCard({
-                            mode: "ssh",
-                            title: "SSH",
-                            description:
-                              "Use local SSH config, agent, and tunnels for the backend.",
-                            icon: <TerminalIcon aria-hidden className="size-4" />,
-                          })
-                        : null}
-                    </div>
-                    <AnimatedHeight>
-                      {savedBackendMode === "ssh" ? renderSshFields() : renderRemoteModeBody()}
-                    </AnimatedHeight>
-                  </div>
-                </DialogPanel>
-              </DialogPopup>
-            </Dialog>
-          }
-        >
-          {savedEnvironmentIds.map((environmentId) => (
-            <SavedBackendListRow
-              key={environmentId}
-              environmentId={environmentId}
-              reconnectingEnvironmentId={reconnectingSavedEnvironmentId}
-              disconnectingEnvironmentId={disconnectingSavedEnvironmentId}
-              removingEnvironmentId={removingSavedEnvironmentId}
-              switchingEnvironmentId={switchingSavedEnvironmentId}
-              onConnect={handleConnectSavedBackend}
-              onDisconnect={handleDisconnectSavedBackend}
-              onRepair={handleRepairSavedBackend}
-              onRemove={handleRemoveSavedBackend}
-              onSetEnabled={handleSetSavedBackendEnabled}
-            />
-          ))}
-
-          {savedEnvironmentIds.length === 0 ? (
-            <div className={ITEM_ROW_CLASSNAME}>
-              <p className="text-xs text-muted-foreground">
-                No remote environments yet. Click &ldquo;Add environment&rdquo; to pair another
-                environment.
-              </p>
-            </div>
-          ) : null}
-        </SettingsSection>
-      ) : null}
+      {part === "access" ? null : <ConnectedDevicesSettings />}
     </SettingsPageContainer>
   );
 }

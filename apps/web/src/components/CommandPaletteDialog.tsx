@@ -2029,7 +2029,7 @@ function OpenCommandPaletteDialog() {
               target: settingsPageTarget.environmentId,
               primary: primaryEnvironmentId,
             });
-            openSettings(destination.section, destination.environmentId);
+            openSettings(destination.section, destination.environmentId, destination.deviceTab);
             requestSettingsReveal(entry.targetId ?? entry.title);
           },
         });

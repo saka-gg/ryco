@@ -31,6 +31,7 @@ import { syncDocumentPresentationTier } from "../../lib/presentationTier";
 import { useTierOverrideStore } from "../../tierOverrideStore";
 import { SettingsEditingScopeProvider, SettingsTargetProvider } from "../../settingsTarget";
 import { DEFAULT_CLIENT_SETTINGS } from "@ryco/contracts/settings";
+import { AddDeviceCard } from "./AddDeviceEntry";
 import { ConnectionsSettings } from "./ConnectionsSettings";
 import { KeybindingsSettingsPanel } from "./KeybindingsSettings";
 import { ProvidersSettingsPanel } from "./ProvidersSettingsPanel";
@@ -92,6 +93,7 @@ const authAccessHarness = vi.hoisted(() => {
       revision += 1;
     },
     emitEvent,
+    listenerCount: () => listeners.size,
     emitPairingLinkUpserted(pairingLink: Snapshot["pairingLinks"][number]) {
       emitEvent({
         version: 1,
@@ -1981,6 +1983,58 @@ describe("GeneralSettingsPanel observability", () => {
     await expect.element(page.getByText("Revoke others")).toBeInTheDocument();
     // Naming the device replaced only the dialog's own unused code.
     expect(revokedPairingLinkIds).toEqual(["pairing-link-0"]);
+  });
+
+  it("opens Add a device from All devices, with no access subscription until then", async () => {
+    await page.viewport(1280, 800);
+    window.desktopBridge = createDesktopBridgeStub({
+      serverExposureState: {
+        mode: "local-only",
+        endpointUrl: null,
+        advertisedHost: null,
+        tailscaleServeEnabled: false,
+        tailscaleServePort: 443,
+      },
+    });
+    setServerConfigSnapshot(createBaseServerConfig());
+
+    mounted = await render(
+      <AppAtomRegistryProvider>
+        <AddDeviceCard />
+      </AppAtomRegistryProvider>,
+    );
+    const card = page.getByRole("button", { name: /Add a device/ });
+    await expect.element(card).toBeVisible();
+    expect(authAccessHarness.listenerCount()).toBe(0);
+
+    await card.click();
+    await expect.element(page.getByRole("dialog")).toBeVisible();
+    expect(authAccessHarness.listenerCount()).toBe(1);
+  });
+
+  it("keeps Access free of the header Add a device button; All devices has it", async () => {
+    window.desktopBridge = createDesktopBridgeStub({
+      serverExposureState: {
+        mode: "local-only",
+        endpointUrl: null,
+        advertisedHost: null,
+        tailscaleServeEnabled: false,
+        tailscaleServePort: 443,
+      },
+    });
+    setServerConfigSnapshot(createBaseServerConfig());
+
+    mounted = await render(
+      <AppAtomRegistryProvider>
+        <ConnectionsSettings part="access" />
+      </AppAtomRegistryProvider>,
+    );
+    await expect.element(page.getByText("Manage local backend")).toBeVisible();
+    await expect
+      .element(page.getByRole("button", { name: "Add a device" }))
+      .not.toBeInTheDocument();
+    // Saved environments and the Hub live on All devices, not here.
+    await expect.element(page.getByText("Remote environments")).not.toBeInTheDocument();
   });
 
   it("revokes all other paired clients from settings", async () => {

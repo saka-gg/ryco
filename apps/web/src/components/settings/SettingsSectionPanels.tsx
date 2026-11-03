@@ -1,6 +1,6 @@
 import { useRouter } from "@tanstack/react-router";
 import type { EnvironmentId } from "@ryco/contracts";
-import { ArrowUpRightIcon, LayersIcon, RotateCcwIcon } from "lucide-react";
+import { ArrowUpRightIcon, InfoIcon, LayersIcon, RotateCcwIcon } from "lucide-react";
 import { createContext, useContext, type ComponentProps, type ReactNode } from "react";
 
 import type * as AppearanceSettingsModule from "./AppearanceSettings";
@@ -19,6 +19,7 @@ import {
 import { OnboardingReplaySetting } from "../onboarding/OnboardingReplaySetting";
 import { parseStatisticsSearch } from "../statistics/statisticsSearch";
 import { Button } from "../ui/button";
+import { SlidingTabs, slidingTabId, slidingTabPanelId } from "../ui/sliding-tabs";
 import { CliCommandSettings } from "./CliCommandSettings";
 import { ComposerSettings, SendShortcutSetting } from "./ComposerSettings";
 import { ChatsFolderSettings } from "./ChatsFolderSettings";
@@ -49,9 +50,11 @@ import { ThreadNotificationSettings } from "./ThreadNotificationSettings";
 import { UsageLimitSettings } from "./UsageLimitSettings";
 import { UsagePriceSettings } from "./UsagePriceSettings";
 import { WindowCaptureSettings, preloadWindowCaptureSettings } from "./WindowCaptureSettings";
+import { SettingsDeviceCards, SettingsDeviceFactTiles } from "./SettingsDeviceCards";
+import type { SettingsDeviceChoice } from "./useSettingsDevices";
 import {
   resolveSettingsPageSection,
-  SETTINGS_DEVICE_PART_TITLES,
+  SETTINGS_DEVICE_PARTS,
   type SettingsSectionId,
   type SettingsDevicePartId,
   type SettingsPageSectionId,
@@ -64,6 +67,7 @@ import {
   SettingsRow,
   SettingsRowChipProvider,
   SettingsSection,
+  useRelativeLabelTick,
 } from "./settingsLayout";
 
 /**
@@ -289,20 +293,35 @@ function StatisticsLinkSection() {
   );
 }
 
-function DeviceListSection({ children }: { readonly children: ReactNode }) {
+/** What All devices lists: the nav's device items, and how to open one. */
+export interface SettingsAllDevices {
+  readonly choices: ReadonlyArray<SettingsDeviceChoice>;
+  readonly onOpen: (environmentId: EnvironmentId) => void;
+}
+
+function AllDevices({ devices }: { readonly devices: SettingsAllDevices }) {
+  const { primaryEnvironmentId } = useSettingsParts();
+  const nowMs = useRelativeLabelTick(
+    devices.choices.map((device) => device.lastSeenAt ?? undefined),
+  );
   return (
-    <SettingsSection title="Devices" description="Open a device for its own settings." bare>
-      {children}
+    <SettingsSection title="Devices" bare>
+      <SettingsDeviceCards
+        devices={devices.choices}
+        primaryEnvironmentId={primaryEnvironmentId}
+        nowMs={nowMs}
+        onOpen={devices.onOpen}
+      />
     </SettingsSection>
   );
 }
 
 function SectionBody({
   section,
-  deviceList,
+  devices,
 }: {
   readonly section: Exclude<SettingsPageSectionId, "device" | "account">;
-  readonly deviceList: ReactNode;
+  readonly devices: SettingsAllDevices;
 }) {
   const desktopBridge = window.desktopBridge;
   const appLabel = useAppPreferencesLabel();
@@ -425,9 +444,11 @@ function SectionBody({
       return (
         <>
           <AppPart>
-            <DeviceListSection>{deviceList}</DeviceListSection>
+            <AllDevices devices={devices} />
           </AppPart>
+          {/* The redesign's Compare settings block (phase 3) goes here, right after the cards. */}
           {isHostedHubMode() ? null : (
+            // How this app reaches the devices above: its Hub link and saved environments.
             <AppPart>
               <LazyConnectionsSettings part="devices" />
             </AppPart>
@@ -504,8 +525,8 @@ function SectionBody({
 /** The body of a section that is not a device's page. */
 export function SettingsSectionPanel(props: {
   readonly section: Exclude<SettingsPageSectionId, "device" | "account">;
-  /** All devices lists the nav's device items again, as rows. */
-  readonly deviceList: ReactNode;
+  /** All devices lists the nav's device items again, as cards. */
+  readonly devices: SettingsAllDevices;
 }) {
   return (
     <SettingsPageContainer>
@@ -514,99 +535,139 @@ export function SettingsSectionPanel(props: {
   );
 }
 
-function DevicePagePart({
-  part,
-  children,
-}: {
-  readonly part: SettingsDevicePartId;
-  readonly children: ReactNode;
-}) {
-  const title = SETTINGS_DEVICE_PART_TITLES[part];
-  return (
-    <section
-      data-settings-part={title}
-      className="flex min-w-0 scroll-mt-6 flex-col gap-4 border-t border-border/70 pt-6 first:border-t-0 first:pt-0"
-    >
-      <h3 className="text-[15px] font-semibold tracking-[-0.01em] text-foreground">{title}</h3>
-      <div className="flex min-w-0 flex-col gap-9">{children}</div>
-    </section>
-  );
-}
-
 function DevicePartNote({ children }: { readonly children: ReactNode }) {
   return <p className="px-0.5 text-xs leading-relaxed text-muted-foreground">{children}</p>;
 }
 
+const DEVICE_TABS_ID = "settings-device";
+
+/** Each tab's code-split pieces, warmed when its tab is hovered or focused. */
+const DEVICE_TAB_CHUNKS: Readonly<Record<SettingsDevicePartId, ReadonlyArray<PreloadableModule>>> =
+  {
+    overview: [],
+    access: [LazyConnectionsSettings],
+    security: [LazyNodeSecuritySettings],
+    "computer-use": [LazyDeviceComputerUseSettings],
+    power: [],
+  };
+
+const DEVICE_TABS = SETTINGS_DEVICE_PARTS.map((part) => ({ id: part.id, label: part.title }));
+
 /**
- * One device's own settings, stacked: identity, access, security, computer
- * use and power. Phase 2 of the settings redesign turns the parts into tabs.
+ * One device's own settings, a tab at a time: Overview (facts and identity),
+ * Access, Security, Computer use and Power. The tab is part of where settings
+ * are (`deviceTab` in the settings store, `tab` in the address), so a search
+ * result, the command palette and Back open the same one.
  */
-export function SettingsDevicePage() {
+export function SettingsDevicePage({
+  tab,
+  onTabChange,
+}: {
+  readonly tab: SettingsDevicePartId;
+  readonly onTabChange: (tab: SettingsDevicePartId) => void;
+}) {
   const { reach, target } = useSettingsParts();
   if (!target) return null;
   const label = target.nodeLabel;
+  const ready = settingsDeviceReady(target);
   const owner = settingsStorageReachable("device", reach);
   const desktopBridge = window.desktopBridge;
   const thisComputer = target.primary && settingsStorageReachable("this-computer", reach);
-  // While the device is not connected the page says so once; its parts wait quietly.
-  const ownerOnly = settingsDeviceReady(target) ? (
-    <DevicePartNote>Only an owner of {label} can see and change this.</DevicePartNote>
-  ) : null;
-  return (
-    <div className="flex w-full min-w-0 flex-col gap-10">
-      <DevicePagePart part="identity">
-        {owner ? (
-          <DevicePart chip={false}>
-            <DeviceIdentitySettings />
-          </DevicePart>
-        ) : (
-          ownerOnly
-        )}
-      </DevicePagePart>
-      <DevicePagePart part="access">
-        {thisComputer ? (
-          <AppPart>
-            <LazyConnectionsSettings part="access" />
-          </AppPart>
-        ) : (
-          <DevicePartNote>
-            Network access, pairing links and authorized clients are set on {label} itself. Its
-            Security below shows who can reach it.
-          </DevicePartNote>
-        )}
-      </DevicePagePart>
-      <DevicePagePart part="security">
-        {owner ? (
-          <DevicePart chip={false}>
-            <LazyNodeSecuritySettings />
-          </DevicePart>
-        ) : (
-          ownerOnly
-        )}
-      </DevicePagePart>
-      <DevicePagePart part="computer-use">
+  // Stored on the device: shown while it is connected, to its owners.
+  const ownerPart = (children: ReactNode) =>
+    !ready ? (
+      <DevicePartNote>Shown when {label} is connected.</DevicePartNote>
+    ) : owner ? (
+      <DevicePart chip={false}>{children}</DevicePart>
+    ) : (
+      <DevicePartNote>Only an owner of {label} can see and change this.</DevicePartNote>
+    );
+  let body: ReactNode;
+  switch (tab) {
+    case "overview":
+      body = (
+        <>
+          <SettingsDeviceFactTiles environmentId={target.environmentId} />
+          {ownerPart(<DeviceIdentitySettings />)}
+        </>
+      );
+      break;
+    case "access":
+      body = thisComputer ? (
+        <AppPart>
+          <LazyConnectionsSettings part="access" />
+        </AppPart>
+      ) : (
+        <DevicePartNote>
+          Network access, pairing links and authorized clients are set on {label} itself. Its
+          Security tab shows who can reach it.
+        </DevicePartNote>
+      );
+      break;
+    case "security":
+      body = ownerPart(<LazyNodeSecuritySettings />);
+      break;
+    case "computer-use":
+      body = (
         <SettingsEditingScopeProvider value="node">
           <SettingsTargetProvider value={target}>
             <LazyDeviceComputerUseSettings />
           </SettingsTargetProvider>
         </SettingsEditingScopeProvider>
-      </DevicePagePart>
-      <DevicePagePart part="power">
-        {thisComputer && desktopBridge?.setKeepAwakeMode ? (
-          <AppPart>
-            <SettingsSection title="Sleep">
-              <DesktopKeepAwakeRow desktopBridge={desktopBridge} />
-            </SettingsSection>
-          </AppPart>
-        ) : null}
-        {owner ? (
-          <DevicePart chip={false}>
-            <AgentProcessPrioritySettings />
-          </DevicePart>
-        ) : (
-          ownerOnly
-        )}
-      </DevicePagePart>
+      );
+      break;
+    case "power":
+      body = (
+        <>
+          {thisComputer && desktopBridge?.setKeepAwakeMode ? (
+            <AppPart>
+              <SettingsSection title="Sleep">
+                <DesktopKeepAwakeRow desktopBridge={desktopBridge} />
+              </SettingsSection>
+            </AppPart>
+          ) : null}
+          {ownerPart(<AgentProcessPrioritySettings />)}
+        </>
+      );
+      break;
+  }
+  return (
+    <div className="flex w-full min-w-0 flex-col gap-7">
+      <SlidingTabs
+        tabs={DEVICE_TABS}
+        activeId={tab}
+        onSelect={(id) => onTabChange(id as SettingsDevicePartId)}
+        onTabIntent={(id) => {
+          for (const chunk of DEVICE_TAB_CHUNKS[id as SettingsDevicePartId]) void chunk.preload();
+        }}
+        variant="underline"
+        idPrefix={DEVICE_TABS_ID}
+        aria-label={`${label} settings`}
+        className="h-9 gap-2 border-b border-border/70"
+        tabClassName="text-[13px]"
+      />
+      <div
+        key={tab}
+        role="tabpanel"
+        id={slidingTabPanelId(DEVICE_TABS_ID, tab)}
+        aria-labelledby={slidingTabId(DEVICE_TABS_ID, tab)}
+        className="settings-panel-enter flex min-w-0 flex-col gap-9"
+      >
+        {body}
+      </div>
+    </div>
+  );
+}
+
+/** The offline banner a device page shows above its tabs. */
+export function SettingsDeviceOfflineBanner({ label }: { readonly label: string }) {
+  return (
+    <div
+      role="status"
+      className="mb-6 flex items-start gap-2.5 rounded-[min(var(--radius-lg),0.625rem)] bg-muted px-3 py-2.5 text-xs leading-relaxed text-foreground"
+    >
+      <InfoIcon aria-hidden className="mt-px size-3.5 shrink-0 text-muted-foreground" />
+      <span>{label} is offline. Its settings show again when it reconnects.</span>
     </div>
   );
 }

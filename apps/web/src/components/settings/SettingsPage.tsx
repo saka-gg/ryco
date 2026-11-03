@@ -32,6 +32,7 @@ import {
   Suspense,
   useCallback,
   useEffect,
+  useEffectEvent,
   useLayoutEffect,
   useRef,
   useState,
@@ -55,7 +56,9 @@ import { useSettingsDialogStore } from "../../settingsDialogStore";
 import { DeviceIcon } from "../DeviceIcon";
 import { Button } from "../ui/button";
 import { Kbd } from "../ui/kbd";
+import { Input } from "../ui/input";
 import { Menu, MenuPopup, MenuRadioGroup, MenuRadioItem, MenuTrigger } from "../ui/menu";
+import { Popover, PopoverPopup, PopoverTrigger } from "../ui/popover";
 import { SidebarInset } from "../ui/sidebar";
 import { Skeleton } from "../ui/skeleton";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
@@ -65,14 +68,25 @@ import {
   preloadSettingsSection,
   SettingsDevicePage,
   settingsDeviceReady,
+  SettingsDeviceOfflineBanner,
   SettingsPartsProvider,
   SettingsSectionPanel,
 } from "./SettingsSectionPanels";
 import {
+  DeviceStatusDot,
+  settingsDeviceRoleLine,
+  settingsDeviceStatusText,
+  useSettingsDeviceFacts,
+} from "./SettingsDeviceCards";
+import {
   SETTINGS_GROUPS,
   SETTINGS_SECTIONS,
+  resolveSettingsDeviceTab,
   resolveSettingsPageSection,
+  settingsLocationKey,
   settingsSection,
+  type SettingsDevicePartId,
+  type SettingsLocationSearch,
   type SettingsPageSectionId,
 } from "./settingsRegistry";
 import {
@@ -95,8 +109,8 @@ import {
   settingsStorageReachable,
   type SettingsReach,
 } from "./settingsSections.logic";
-import { SettingsCard, SettingsChip, SettingsEmpty } from "./settingsLayout";
-import type { SettingsNodeStatus } from "./settingsDevices.logic";
+import { SettingsCard, SettingsChip, SettingsEmpty, useRelativeLabelTick } from "./settingsLayout";
+import { splitDeviceBarChoices, type SettingsNodeStatus } from "./settingsDevices.logic";
 import {
   SETTINGS_NODE_STATUS_LABELS,
   useSettingsDevices,
@@ -205,21 +219,6 @@ type NavKey = SettingsPageSectionId | `device:${string}`;
 
 function deviceNavKey(environmentId: EnvironmentId): NavKey {
   return `device:${environmentId}`;
-}
-
-const STATUS_DOT_CLASS: Record<"online" | SettingsNodeStatus, string> = {
-  online: "bg-success",
-  connecting: "bg-warning",
-  offline: "bg-muted-foreground/50",
-};
-
-function DeviceStatusDot({ status }: { readonly status: SettingsNodeStatus | null }) {
-  return (
-    <span
-      aria-hidden
-      className={cn("size-1.5 shrink-0 rounded-full", STATUS_DOT_CLASS[status ?? "online"])}
-    />
-  );
 }
 
 const NAV_ITEM_CLASS =
@@ -475,13 +474,98 @@ function CompactSectionPicker({
   );
 }
 
+const DEVICE_PILL_CLASS =
+  "inline-flex h-6 max-w-56 items-center gap-1.5 rounded-full border px-2.5 text-xs outline-hidden transition-colors focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50";
+
+/** The device bar's other devices, past its pills: searchable, with their status. */
+function DeviceBarMore({
+  choices,
+  onSelect,
+}: {
+  readonly choices: ReadonlyArray<SettingsDeviceChoice>;
+  readonly onSelect: (environmentId: EnvironmentId) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const normalized = query.trim().toLowerCase();
+  const matches = normalized
+    ? choices.filter((choice) => choice.label.toLowerCase().includes(normalized))
+    : choices;
+  return (
+    <Popover
+      open={open}
+      onOpenChange={(next) => {
+        setOpen(next);
+        if (!next) setQuery("");
+      }}
+    >
+      <PopoverTrigger
+        render={
+          <button
+            type="button"
+            className={cn(DEVICE_PILL_CLASS, "border-border text-foreground hover:bg-accent/60")}
+          >
+            More
+            <span className="text-muted-foreground tabular-nums">{choices.length}</span>
+          </button>
+        }
+      />
+      <PopoverPopup align="start" className="w-64 p-0">
+        <div className="flex flex-col gap-1 p-1.5">
+          <Input
+            size="sm"
+            type="search"
+            autoFocus
+            value={query}
+            onChange={(event) => setQuery(event.target.value)}
+            placeholder="Search devices"
+            aria-label="Search devices"
+          />
+          <div
+            role="list"
+            aria-label="Other devices"
+            className="flex max-h-64 flex-col overflow-y-auto"
+          >
+            {matches.length === 0 ? (
+              <p className="px-2 py-3 text-center text-xs text-muted-foreground">
+                No devices match.
+              </p>
+            ) : (
+              matches.map((choice) => (
+                <button
+                  key={choice.environmentId}
+                  type="button"
+                  role="listitem"
+                  disabled={choice.disabled}
+                  title={choice.status ? SETTINGS_NODE_STATUS_LABELS[choice.status] : undefined}
+                  onClick={() => {
+                    setOpen(false);
+                    setQuery("");
+                    onSelect(choice.environmentId);
+                  }}
+                  className="flex h-8 min-w-0 items-center gap-2 rounded-md px-2 text-left text-[13px] outline-hidden hover:bg-accent focus-visible:bg-accent disabled:opacity-50"
+                >
+                  <DeviceStatusDot status={choice.status} />
+                  <span className="truncate">{choice.label}</span>
+                </button>
+              ))
+            )}
+          </div>
+        </div>
+      </PopoverPopup>
+    </Popover>
+  );
+}
+
 /**
  * "Values for: [device pills]" at the top of a section with rows stored on a
  * device: the one device those rows read and write. Choosing a pill moves the
  * settings target, as the device menu did; it never opens a second target.
+ * Past five devices the rest sit in "More", with a search.
  */
 function DeviceBar({ model }: { readonly model: SettingsDevicesModel }) {
   if (model.choices.length === 0) return null;
+  const { pills, more } = splitDeviceBarChoices(model.choices, model.value);
   return (
     <div
       role="group"
@@ -493,7 +577,7 @@ function DeviceBar({ model }: { readonly model: SettingsDevicesModel }) {
         <LayersIcon aria-hidden className="size-3.5" />
         Values for
       </span>
-      {model.choices.map((choice) => {
+      {pills.map((choice) => {
         const selected = choice.environmentId === model.value;
         return (
           <button
@@ -504,7 +588,7 @@ function DeviceBar({ model }: { readonly model: SettingsDevicesModel }) {
             title={choice.status ? SETTINGS_NODE_STATUS_LABELS[choice.status] : undefined}
             onClick={() => model.select(choice.environmentId)}
             className={cn(
-              "inline-flex h-6 max-w-56 items-center gap-1.5 rounded-full border px-2.5 text-xs outline-hidden transition-colors focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50",
+              DEVICE_PILL_CLASS,
               selected
                 ? "border-foreground bg-foreground text-background"
                 : "border-border text-foreground hover:bg-accent/60",
@@ -515,62 +599,45 @@ function DeviceBar({ model }: { readonly model: SettingsDevicesModel }) {
           </button>
         );
       })}
+      {more.length > 0 ? <DeviceBarMore choices={more} onSelect={model.select} /> : null}
     </div>
   );
 }
 
-/** The device list All devices shows: the nav's device items, as rows that open each page. */
-function DeviceList({
-  devices,
-  primaryEnvironmentId,
-  onOpen,
+/** A device page's header: icon, name, how this app reaches it, and its status. */
+function DevicePageHeader({
+  device,
+  environmentId,
+  label,
 }: {
-  readonly devices: ReadonlyArray<SettingsDeviceChoice>;
-  readonly primaryEnvironmentId: EnvironmentId | null;
-  readonly onOpen: (environmentId: EnvironmentId) => void;
+  readonly device: SettingsDeviceChoice | null;
+  readonly environmentId: EnvironmentId | null;
+  readonly label: string;
 }) {
-  if (devices.length === 0) {
-    return (
-      <SettingsCard>
-        <SettingsEmpty
-          icon={<MonitorIcon />}
-          title="No devices yet"
-          description="Devices this app connects to show up here."
-        />
-      </SettingsCard>
-    );
-  }
+  const facts = useSettingsDeviceFacts(environmentId);
+  const nowMs = useRelativeLabelTick([device?.lastSeenAt ?? undefined]);
   return (
-    <SettingsCard>
-      {devices.map((device) => (
-        <button
-          key={device.environmentId}
-          type="button"
-          disabled={device.disabled}
-          onClick={() => onOpen(device.environmentId)}
-          className="flex w-full min-w-0 items-center gap-3 border-t border-border/60 px-4 py-3 text-left outline-hidden transition-colors first:border-t-0 hover:bg-accent/40 focus-visible:bg-accent/40 disabled:opacity-50 sm:px-5"
+    <div className="flex items-center gap-3">
+      <span className="flex size-10 shrink-0 items-center justify-center rounded-[min(var(--radius-lg),0.625rem)] bg-muted text-muted-foreground">
+        <DeviceIcon environmentId={environmentId} label={label} className="size-5" />
+      </span>
+      <div className="min-w-0">
+        <h2 className="truncate text-xl font-semibold tracking-[-0.015em] text-foreground">
+          {label}
+        </h2>
+        <p
+          className="mt-0.5 flex flex-wrap items-center gap-x-1.5 text-[13px] text-muted-foreground"
+          data-testid="settings-destination-description"
         >
-          <DeviceIcon
-            environmentId={device.environmentId}
-            label={device.label}
-            className="size-4 shrink-0 text-muted-foreground"
-          />
-          <span className="min-w-0 flex-1">
-            <span className="block truncate text-[13px] font-medium text-foreground">
-              {device.label}
-            </span>
-            <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
-              <DeviceStatusDot status={device.status} />
-              {device.status ? SETTINGS_NODE_STATUS_LABELS[device.status] : "Online"}
-              {device.environmentId === primaryEnvironmentId && !isHostedHubMode()
-                ? " · This computer"
-                : null}
-            </span>
+          {device ? <span>{settingsDeviceRoleLine(device, facts.installationLabel)}</span> : null}
+          {device ? <span aria-hidden>·</span> : null}
+          <span className="inline-flex items-center gap-1.5">
+            <DeviceStatusDot status={device?.status ?? null} />
+            {settingsDeviceStatusText(device, nowMs)}
           </span>
-          <ArrowUpRightIcon aria-hidden className="size-3.5 shrink-0 text-muted-foreground" />
-        </button>
-      ))}
-    </SettingsCard>
+        </p>
+      </div>
+    </div>
   );
 }
 
@@ -697,11 +764,25 @@ function DeviceNotice({
   return null;
 }
 
-export function SettingsPage() {
+/**
+ * Where the page is, as its route's address says, and how to move it. The
+ * `/settings` route passes it; a page rendered on its own keeps its place in
+ * the settings store only.
+ */
+export interface SettingsPageLocation {
+  readonly search: SettingsLocationSearch;
+  readonly replace: (search: SettingsLocationSearch) => void;
+}
+
+export function SettingsPage({
+  location,
+}: { readonly location?: SettingsPageLocation | undefined } = {}) {
   const leaveSettings = useLeaveSettings();
   const appSidebarCollapsed = useAppSidebarCollapsed();
   const storeSection = useSettingsDialogStore((s) => s.section);
+  const storeDeviceTab = useSettingsDialogStore((s) => s.deviceTab);
   const setSection = useSettingsDialogStore((s) => s.setSection);
+  const setDeviceTab = useSettingsDialogStore((s) => s.setDeviceTab);
   const closeSettings = useSettingsDialogStore((s) => s.closeSettings);
   const hosted = isHostedHubMode();
   const primaryEnvironmentId = usePrimaryEnvironmentId();
@@ -735,6 +816,9 @@ export function SettingsPage() {
     ? requestedSection
     : (listedSections.find((id) => !settingsSection(id).link) ?? "appearance");
   const usesDevice = effectiveSection === "device" || sectionUsesDevice(effectiveSection);
+  // An old id keeps its tab (`security` opens Security) through the redirect.
+  const deviceTab = resolveSettingsDeviceTab(storeSection, storeDeviceTab);
+  const normalizedTab = effectiveSection === "device" ? deviceTab : null;
 
   useEffect(() => {
     if (!usesDevice || !isElectron || !targetEnvironmentId || targetIsPrimary) return;
@@ -746,8 +830,63 @@ export function SettingsPage() {
 
   useEffect(() => {
     if (hosted && !roleFresh) return;
-    if (storeSection !== effectiveSection) setSection(effectiveSection);
-  }, [effectiveSection, hosted, roleFresh, setSection, storeSection]);
+    // Only the section this render saw: the address may have moved it since.
+    if (useSettingsDialogStore.getState().section !== storeSection) return;
+    if (storeSection !== effectiveSection) setSection(effectiveSection, normalizedTab);
+  }, [effectiveSection, hosted, normalizedTab, roleFresh, setSection, storeSection]);
+
+  // The address and the store say the same place. An address that changed
+  // without this page (a link, Back, Forward) moves the store; otherwise the
+  // store's place, once settled, is written back by replacing the entry. The
+  // device rides along outside hosted mode, whose address names no node.
+  const locationKey = location ? settingsLocationKey(location.search) : null;
+  const syncedLocationKey = useRef<string | null>(null);
+  // Only a listed device moves the target; an unknown one is written over.
+  const moveToLocationDevice = useEffectEvent((environmentId: EnvironmentId): boolean => {
+    if (
+      !devices.choices.some((choice) => choice.environmentId === environmentId && !choice.disabled)
+    )
+      return false;
+    devices.select(environmentId);
+    return true;
+  });
+  useEffect(() => {
+    if (!location || locationKey === null) return;
+    if (locationKey !== syncedLocationKey.current) {
+      syncedLocationKey.current = locationKey;
+      const { section, tab, device } = location.search;
+      const state = useSettingsDialogStore.getState();
+      const moveSection =
+        section !== undefined && (section !== state.section || (tab ?? null) !== state.deviceTab);
+      if (moveSection && section) state.setSection(section, tab ?? null);
+      const moveDevice =
+        !hosted &&
+        device !== undefined &&
+        device !== targetEnvironmentId &&
+        moveToLocationDevice(device as EnvironmentId);
+      if (moveSection || moveDevice) return;
+    }
+    if ((hosted && !roleFresh) || storeSection !== effectiveSection) return;
+    const next: SettingsLocationSearch = {
+      section: effectiveSection,
+      ...(!hosted && usesDevice && targetEnvironmentId ? { device: targetEnvironmentId } : {}),
+      ...(normalizedTab ? { tab: normalizedTab } : {}),
+    };
+    const nextKey = settingsLocationKey(next);
+    if (nextKey === locationKey) return;
+    syncedLocationKey.current = nextKey;
+    location.replace(next);
+  }, [
+    effectiveSection,
+    hosted,
+    location,
+    locationKey,
+    normalizedTab,
+    roleFresh,
+    storeSection,
+    targetEnvironmentId,
+    usesDevice,
+  ]);
 
   // The command palette can ask for a row before this page mounts; a request
   // that arrives while it shows replaces any search in progress.
@@ -776,7 +915,9 @@ export function SettingsPage() {
       ? deviceNavKey(targetEnvironmentId)
       : effectiveSection;
   const panelKey = `${effectiveSection}:${usesDevice ? (targetEnvironmentId ?? "") : ""}`;
-  const subsections = useSettingsSubsections(panelKey, normalizedQuery.length > 0, searchTarget);
+  // A device page's tab is a place of its own: its sections, its scroll, its reveal.
+  const placeKey = normalizedTab ? `${panelKey}:${normalizedTab}` : panelKey;
+  const subsections = useSettingsSubsections(placeKey, normalizedQuery.length > 0, searchTarget);
   const { contentRef: setSubsectionRoot } = subsections;
   const scrollRef = useRef<HTMLDivElement | null>(null);
   const setScrollRef = useCallback(
@@ -787,12 +928,12 @@ export function SettingsPage() {
     [setSubsectionRoot],
   );
   // A new section starts at its top; a search jump scrolls itself into place.
-  const scrolledPanelKey = useRef(panelKey);
+  const scrolledPlaceKey = useRef(placeKey);
   useLayoutEffect(() => {
-    if (scrolledPanelKey.current === panelKey) return;
-    scrolledPanelKey.current = panelKey;
+    if (scrolledPlaceKey.current === placeKey) return;
+    scrolledPlaceKey.current = placeKey;
     if (!searchTarget) scrollRef.current?.scrollTo({ top: 0 });
-  }, [panelKey, searchTarget]);
+  }, [placeKey, searchTarget]);
 
   const selectSection = (section: SettingsPageSectionId) => {
     if (section === "account") {
@@ -846,8 +987,9 @@ export function SettingsPage() {
   const searching = normalizedQuery.length > 0;
   const definition = settingsSection(effectiveSection);
   const targetLabel = target?.nodeLabel ?? null;
-  const targetStatus =
-    devices.choices.find((choice) => choice.environmentId === targetEnvironmentId)?.status ?? null;
+  const targetChoice =
+    devices.choices.find((choice) => choice.environmentId === targetEnvironmentId) ?? null;
+  const targetStatus = targetChoice?.status ?? null;
   const devicePage = effectiveSection === "device" && target !== null;
   const activeLabel = devicePage ? (targetLabel ?? definition.title) : definition.title;
 
@@ -963,7 +1105,7 @@ export function SettingsPage() {
                       });
                       setSearchTarget({ targetId: entry.targetId ?? entry.title });
                       setSearchQuery("");
-                      setSection(destination.section);
+                      setSection(destination.section, destination.deviceTab);
                       if (
                         destination.environmentId &&
                         destination.environmentId !== targetEnvironmentId
@@ -975,28 +1117,11 @@ export function SettingsPage() {
                   <div key={`${panelKey}:${restoreSignal}`} className="settings-panel-enter">
                     <header className="mb-8 min-w-0">
                       {devicePage ? (
-                        <div className="flex items-center gap-3">
-                          <span className="flex size-9 shrink-0 items-center justify-center rounded-[min(var(--radius-lg),0.625rem)] bg-muted text-muted-foreground">
-                            <DeviceIcon
-                              environmentId={targetEnvironmentId}
-                              label={targetLabel ?? ""}
-                              className="size-4.5"
-                            />
-                          </span>
-                          <div className="min-w-0">
-                            <h2 className="truncate text-xl font-semibold tracking-[-0.015em] text-foreground">
-                              {targetLabel}
-                            </h2>
-                            <p
-                              className="mt-0.5 flex items-center gap-1.5 text-[13px] text-muted-foreground"
-                              data-testid="settings-destination-description"
-                            >
-                              <DeviceStatusDot status={targetStatus} />
-                              {targetStatus ? SETTINGS_NODE_STATUS_LABELS[targetStatus] : "Online"}
-                              {target?.primary && !hosted ? " · This computer" : null}
-                            </p>
-                          </div>
-                        </div>
+                        <DevicePageHeader
+                          device={targetChoice}
+                          environmentId={targetEnvironmentId}
+                          label={targetLabel ?? ""}
+                        />
                       ) : (
                         <>
                           <h2 className="text-xl font-semibold tracking-[-0.015em] text-foreground">
@@ -1017,7 +1142,9 @@ export function SettingsPage() {
                       )}
                     </header>
                     {usesDevice && !devicePage ? <DeviceBar model={devices} /> : null}
-                    {usesDevice && (!devicePage || !settingsDeviceReady(target)) ? (
+                    {devicePage && !settingsDeviceReady(target) && targetStatus === "offline" ? (
+                      <SettingsDeviceOfflineBanner label={targetLabel ?? ""} />
+                    ) : usesDevice && (!devicePage || !settingsDeviceReady(target)) ? (
                       <DeviceNotice
                         devicePage={devicePage}
                         section={effectiveSection}
@@ -1031,17 +1158,17 @@ export function SettingsPage() {
                     ) : null}
                     <Suspense fallback={<PanelFallback />}>
                       {effectiveSection === "device" ? (
-                        <SettingsDevicePage />
+                        <SettingsDevicePage
+                          tab={deviceTab}
+                          onTabChange={(tab: SettingsDevicePartId) => {
+                            setSearchTarget(null);
+                            setDeviceTab(tab);
+                          }}
+                        />
                       ) : effectiveSection === "account" ? null : (
                         <SettingsSectionPanel
                           section={effectiveSection}
-                          deviceList={
-                            <DeviceList
-                              devices={devices.choices}
-                              primaryEnvironmentId={primaryEnvironmentId}
-                              onOpen={selectDevice}
-                            />
-                          }
+                          devices={{ choices: devices.choices, onOpen: selectDevice }}
                         />
                       )}
                     </Suspense>

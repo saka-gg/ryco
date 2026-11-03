@@ -23,6 +23,7 @@ const mock = vi.hoisted(() => ({
 
 vi.mock("../../updates/useUpdateEverything", () => ({
   useUpdateEverything: () => mock.controller!,
+  useUpdateEverythingPlan: () => mock.controller!.plan,
   useNodeUpdateState: (environmentId: EnvironmentId) =>
     (mock.nodeUpdates.get(environmentId) as NodeUpdateState | undefined) ?? null,
 }));

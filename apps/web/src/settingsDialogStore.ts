@@ -1,7 +1,10 @@
 import type { EnvironmentId } from "@ryco/contracts";
 import { create } from "zustand";
 
-import type { SettingsSectionId } from "./components/settings/settingsRegistry";
+import type {
+  SettingsDevicePartId,
+  SettingsSectionId,
+} from "./components/settings/settingsRegistry";
 
 export type { SettingsSectionId } from "./components/settings/settingsRegistry";
 
@@ -19,15 +22,27 @@ interface SettingsDialogStore {
    * active device, else this app's own (`useSettingsPageTarget`).
    */
   targetEnvironmentId: EnvironmentId | null;
+  /**
+   * The device page's tab asked for. Null opens the tab an old section id names
+   * (`security`), else Overview (`resolveSettingsDeviceTab`).
+   */
+  deviceTab: SettingsDevicePartId | null;
   /** Show another device's values without leaving the section. */
   setTargetEnvironmentId: (environmentId: EnvironmentId) => void;
   /**
    * Open settings on a section. With a device and no section, open that
-   * device's page; with both, the section shows that device's values.
+   * device's page; with both, the section shows that device's values. A device
+   * page opens on `deviceTab`.
    */
-  openSettings: (section?: SettingsSectionId, environmentId?: EnvironmentId | null) => void;
+  openSettings: (
+    section?: SettingsSectionId,
+    environmentId?: EnvironmentId | null,
+    deviceTab?: SettingsDevicePartId | null,
+  ) => void;
   closeSettings: () => void;
-  setSection: (section: SettingsSectionId) => void;
+  /** Show a section; a device page on `deviceTab`. */
+  setSection: (section: SettingsSectionId, deviceTab?: SettingsDevicePartId | null) => void;
+  setDeviceTab: (deviceTab: SettingsDevicePartId) => void;
   /**
    * Mark settings open without changing where they point. The desktop settings
    * page calls this when it is reached by URL, Back, or Forward rather than by
@@ -40,14 +55,17 @@ export const useSettingsDialogStore = create<SettingsDialogStore>((set) => ({
   open: false,
   section: "general",
   targetEnvironmentId: null,
+  deviceTab: null,
   setTargetEnvironmentId: (targetEnvironmentId) => set({ targetEnvironmentId }),
-  openSettings: (section, environmentId) =>
+  openSettings: (section, environmentId, deviceTab) =>
     set((state) => ({
       open: true,
       section: section ?? (environmentId ? "device" : state.section),
       targetEnvironmentId: environmentId ?? null,
+      deviceTab: section || environmentId ? (deviceTab ?? null) : state.deviceTab,
     })),
   closeSettings: () => set({ open: false, targetEnvironmentId: null }),
-  setSection: (section) => set({ section }),
+  setSection: (section, deviceTab = null) => set({ section, deviceTab }),
+  setDeviceTab: (deviceTab) => set({ deviceTab }),
   markOpen: () => set({ open: true }),
 }));

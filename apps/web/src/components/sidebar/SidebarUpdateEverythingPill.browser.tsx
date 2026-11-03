@@ -18,6 +18,7 @@ vi.mock("../../env", async (importOriginal) => ({
 
 vi.mock("../../updates/useUpdateEverything", () => ({
   useUpdateEverything: () => mock.controller!,
+  useUpdateEverythingPlan: () => mock.controller!.plan,
   useNodeUpdateState: () => null,
 }));
 
