@@ -194,7 +194,7 @@ import { AgentControlSessionRegistryLive } from "./agentControl/Layers/AgentCont
 import { AgentControlActionValidatorLive } from "./agentControl/Layers/AgentControlActionValidator.ts";
 import { AgentControlDelegationSlotsLive } from "./agentControl/Layers/AgentControlDelegationSlots.ts";
 import { AgentControlExecutionLive } from "./agentControl/Layers/AgentControlExecution.ts";
-import { AgentControlNodeDirectoryLive } from "./agentControl/Layers/AgentControlNodeDirectoryLive.ts";
+import { AgentControlNodeDirectoryDeferredLive } from "./agentControl/Layers/AgentControlNodeDirectoryDeferred.ts";
 import { ProjectCopyServicesDeferredLive } from "./projectCopy/Layers/ProjectCopyServicesDeferred.ts";
 import { ProjectImportsStartupRecoveryLive } from "./projectCopy/Layers/ProjectImportsStartupRecovery.ts";
 import { AgentControlProjectPlansLive } from "./agentControl/Layers/AgentControlProjectPlans.ts";
@@ -765,7 +765,7 @@ const RuntimeServicesLive = Layer.mergeAll(
   // Agent Control (its tools, validator and execution) share one instance of each. Topmost, so
   // their layers can use everything provided below.
   Layer.provideMerge(
-    Layer.mergeAll(ProjectCopyServicesDeferredLive, AgentControlNodeDirectoryLive),
+    Layer.mergeAll(ProjectCopyServicesDeferredLive, AgentControlNodeDirectoryDeferredLive),
   ),
   // Pull request watches, beneath the services: the source-control RPC and Agent Control's
   // execution share one instance (its read cache and per-chat lock). Right below the project

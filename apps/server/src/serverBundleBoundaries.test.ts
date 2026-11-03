@@ -684,17 +684,22 @@ describe.skipIf(!hasCurrentBuild)("built server bundle", () => {
 
   it("loads the cross-node project copy services, tools and runs after the server serves", () => {
     // The services are stand-ins that load `ProjectCopyServices.ts` on first use (or at a start
-    // that has copy work left over); the executor and the MCP server hold only an import().
+    // that has copy work left over), the node directory loads its store with the first
+    // publication or listing; the executor and the MCP server hold only an import().
     const lazy =
-      /apps\/server\/src\/(?:projectCopy\/(?:Layers\/(?:ProjectCopyServices|ProjectImportsLive|ProjectExportLive|ProjectTransfersLive|ProjectImportGitLive|ProjectSetupCommandLive|NodePathsLive|GitNetworkLive)|exportGit|gitProcess|directorySearch|privacyGuardedFolders|projectImportFollowUp|projectImportProcesses)|agentControl\/(?:projectCopyRuns|Mcp\/projectCopyTools)|project\/codeRoots|sourceControl\/gitCloneCommon)\.ts$/u;
+      /apps\/server\/src\/(?:projectCopy\/(?:Layers\/(?:ProjectCopyServices|ProjectImportsLive|ProjectExportLive|ProjectTransfersLive|ProjectImportGitLive|ProjectSetupCommandLive|NodePathsLive|GitNetworkLive)|exportGit|gitProcess|directorySearch|privacyGuardedFolders|projectImportFollowUp|projectImportProcesses)|agentControl\/(?:projectCopyRuns|Mcp\/projectCopyTools|Layers\/AgentControlNodeDirectoryLive)|project\/codeRoots|sourceControl\/gitCloneCommon)\.ts$/u;
     const boot = staticGraph("src/cliMain.ts").files;
     expect(boot.filter((file) => lazy.test(file))).toEqual([]);
     expect(boot).toContain("apps/server/src/projectCopy/Layers/ProjectCopyServicesDeferred.ts");
+    expect(boot).toContain(
+      "apps/server/src/agentControl/Layers/AgentControlNodeDirectoryDeferred.ts",
+    );
     expect(
       staticGraph("src/cliMain.ts", { dynamic: true })
         .files.filter((file) => lazy.test(file))
         .toSorted(),
     ).toEqual([
+      "apps/server/src/agentControl/Layers/AgentControlNodeDirectoryLive.ts",
       "apps/server/src/agentControl/Mcp/projectCopyTools.ts",
       "apps/server/src/agentControl/projectCopyRuns.ts",
       "apps/server/src/project/codeRoots.ts",
@@ -731,9 +736,10 @@ describe.skipIf(!hasCurrentBuild)("built server bundle", () => {
     // status poll's rule) passed 7.1 MB. 7.00 MB once Forgejo's review code, the setup guide
     // and the turn diff parser loaded through import() (-98 KB). 7.186 MB with the cross-node
     // project copy (+125 KB): what every boot needs of it, its RPC schemas and handlers, the
-    // Agent Control node directory and plan checks, its migration and the startup check that
-    // decides whether an earlier process left copy work (about 85 KB), and the chunk boundaries
-    // its import() splits add; its services, runs and tools (about 200 KB) load on first use.
+    // Agent Control plan checks, its migration and the startup check that decides whether an
+    // earlier process left copy work (about 85 KB), and the chunk boundaries its import() splits
+    // add; its services, runs, tools and the node directory's store (about 200 KB) load on first
+    // use. 7.185 MB once the node directory's store moved behind import() (-6 KB).
     expect(bytes).toBeLessThan(7_191_000);
     for (const chunk of serve.chunks) {
       const source = readFileSync(chunk, "utf8");

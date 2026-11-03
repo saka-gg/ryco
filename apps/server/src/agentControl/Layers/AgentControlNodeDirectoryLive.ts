@@ -16,8 +16,9 @@
  * Hub enrollment, the Hub environment id hosted clients key it by (read per `list`, since a Hub
  * leave or re-enrollment changes it).
  *
- * Loaded once at startup. An unreadable file, or records in it that no longer decode, are
- * dropped with a warning: clients publish again on connect.
+ * Its file is read once, when the directory is built: on the server, with the first publication
+ * or listing (`AgentControlNodeDirectoryDeferredLive`). An unreadable file, or records in it
+ * that no longer decode, are dropped with a warning: clients publish again on connect.
  *
  * @module AgentControlNodeDirectoryLive
  */
@@ -343,16 +344,23 @@ export const makeAgentControlNodeDirectory = Effect.fn("makeAgentControlNodeDire
   return AgentControlNodeDirectory.of({ publish, list });
 });
 
+/** The server's directory: in its state directory, this node known by its Hub id as well. */
+export const makeServerAgentControlNodeDirectory = Effect.gen(function* () {
+  const config = yield* ServerConfig;
+  const environment = yield* ServerEnvironment;
+  const path = yield* Path.Path;
+  return yield* makeAgentControlNodeDirectory({
+    filePath: path.join(config.stateDir, AGENT_CONTROL_NODE_DIRECTORY_FILE_NAME),
+    thisNodeEnvironmentId: yield* environment.getEnvironmentId,
+    thisNodeAliases: readHubEnvironmentAliases(config.hubIdentityStatePath),
+  });
+});
+
+/**
+ * Builds the directory with the layer, reading its file at once. The server uses
+ * `AgentControlNodeDirectoryDeferredLive`, which loads this module on first use.
+ */
 export const AgentControlNodeDirectoryLive = Layer.effect(
   AgentControlNodeDirectory,
-  Effect.gen(function* () {
-    const config = yield* ServerConfig;
-    const environment = yield* ServerEnvironment;
-    const path = yield* Path.Path;
-    return yield* makeAgentControlNodeDirectory({
-      filePath: path.join(config.stateDir, AGENT_CONTROL_NODE_DIRECTORY_FILE_NAME),
-      thisNodeEnvironmentId: yield* environment.getEnvironmentId,
-      thisNodeAliases: readHubEnvironmentAliases(config.hubIdentityStatePath),
-    });
-  }),
+  makeServerAgentControlNodeDirectory,
 );
