@@ -1,5 +1,6 @@
 import "../../index.css";
 
+import { describeOfflineSince } from "@ryco/client-runtime/connection";
 import type { NodeCatalogEntry } from "@ryco/client-runtime/state/nodes";
 import { EnvironmentId } from "@ryco/contracts";
 import { useState } from "react";
@@ -12,6 +13,8 @@ import type { NodePickerExtrasMap } from "./nodePicker.logic";
 import { fakeNodeEntry, FAKE_PATH_HINTS } from "./projectNodesTestFixtures";
 
 const NOW = Date.parse("2026-10-22T12:00:00Z");
+/** The Gaming PC's status line: last seen two hours before NOW, in local time. */
+const GAMING_STATUS = `Windows · offline ${describeOfflineSince(NOW - 2 * 3_600_000, { nowMs: NOW })}`;
 const LAPTOP = EnvironmentId.make("environment-laptop");
 const MINI = EnvironmentId.make("environment-mini");
 const BUILD = EnvironmentId.make("environment-build");
@@ -94,14 +97,10 @@ describe("NodePicker cards", () => {
 
       // Unavailable nodes stay visible, disabled with their reason.
       await expect.element(radio(/^Gaming PC/)).toBeDisabled();
-      await expect
-        .element(radio(/^Gaming PC/).getByText("Windows · offline · seen 2h ago"))
-        .toBeVisible();
+      await expect.element(radio(/^Gaming PC/).getByText(GAMING_STATUS)).toBeVisible();
       // Its presence line says why, so it keeps its summary.
       await expect.element(radio(/^Gaming PC/).getByText("1 project")).toBeVisible();
-      await expect
-        .element(radio(/^Gaming PC/))
-        .toHaveAccessibleDescription("Windows · offline · seen 2h ago");
+      await expect.element(radio(/^Gaming PC/)).toHaveAccessibleDescription(GAMING_STATUS);
       await expect.element(radio(/^hetzner-build/)).toBeDisabled();
       await expect
         .element(radio(/^hetzner-build/))
@@ -172,9 +171,7 @@ describe("NodePicker chips", () => {
       await expect.element(radio(/^All 4$/)).toHaveAttribute("aria-checked", "true");
       await expect.element(radio(/^MacBook Pro 3$/)).toBeVisible();
       await expect.element(radio(/^Gaming PC/)).toBeEnabled();
-      await expect
-        .element(radio(/^Gaming PC/))
-        .toHaveAttribute("title", "Windows · offline · seen 2h ago");
+      await expect.element(radio(/^Gaming PC/)).toHaveAttribute("title", GAMING_STATUS);
 
       await radio(/^Gaming PC/).click();
       await expect.element(page.getByTestId("value")).toHaveTextContent(GAMING);

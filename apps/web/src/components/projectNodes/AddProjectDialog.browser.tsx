@@ -259,7 +259,7 @@ describe("AddProjectDialog", () => {
         .toMatchTextContent(/0 projects · ~\/Code, ~\/Dropbox\/Code\/Web/);
       await expect
         .element(dialog().getByRole("radio", { name: /Gaming PC/ }), ELEMENT_WAIT)
-        .toMatchTextContent(/offline · seen/);
+        .toMatchTextContent(/offline (since|for) /);
       await expect
         .element(dialog().getByRole("radio", { name: /Gaming PC/ }), ELEMENT_WAIT)
         .toBeDisabled();

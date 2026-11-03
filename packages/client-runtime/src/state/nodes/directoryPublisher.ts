@@ -3,10 +3,9 @@ import type {
   AgentControlNodeDirectoryEntry,
   AgentControlPublishNodeDirectoryInput,
   EnvironmentId,
-  ExecutionEnvironmentPlatformOs,
 } from "@ryco/contracts";
 
-import type { NodeCatalogSnapshot } from "../workspace/nodeCatalog.js";
+import { catalogPlatformOs, type NodeCatalogSnapshot } from "../workspace/nodeCatalog.js";
 
 /**
  * Agent Control's node directory, fed by owner clients: every node that
@@ -23,18 +22,6 @@ const NODE_DIRECTORY_RETRY_BASE_MS = 30_000;
 const NODE_DIRECTORY_RETRY_MAX_MS = 15 * 60_000;
 const NODE_DIRECTORY_ENVIRONMENT_ID_MAX_CHARS = 128;
 const NODE_DIRECTORY_LABEL_MAX_CHARS = 120;
-
-const KNOWN_PLATFORM_OS: ReadonlySet<string> = new Set([
-  "darwin",
-  "linux",
-  "windows",
-] satisfies ReadonlyArray<ExecutionEnvironmentPlatformOs>);
-
-function directoryPlatformOs(os: string | null): ExecutionEnvironmentPlatformOs {
-  return os !== null && KNOWN_PLATFORM_OS.has(os)
-    ? (os as ExecutionEnvironmentPlatformOs)
-    : "unknown";
-}
 
 /**
  * The entries this client publishes: the catalog's owner-held nodes, in the
@@ -53,7 +40,7 @@ export function nodeDirectoryEntries(
     entries.push({
       environmentId: node.environmentId,
       label,
-      platformOs: directoryPlatformOs(node.platformOs),
+      platformOs: catalogPlatformOs(node.platformOs) ?? "unknown",
       online: node.presence === "online",
       projectCopySupport: node.projectCopySupport,
     });

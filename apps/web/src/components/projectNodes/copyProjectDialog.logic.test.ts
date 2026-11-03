@@ -4,6 +4,7 @@ import {
   type CopyDestinationSuggestion,
   type ProjectCopyProgress,
 } from "@ryco/client-runtime/projectCopy";
+import { describeOfflineSince } from "@ryco/client-runtime/connection";
 import type { NodeCatalogEntry } from "@ryco/client-runtime/state/nodes";
 import { EnvironmentId, ProjectId } from "@ryco/contracts";
 import { ProjectImportId, type ProjectImportSnapshot } from "@ryco/contracts/project-copy";
@@ -15,7 +16,6 @@ import {
   copyFolderTag,
   copyFooterSummary,
   copyOverallPercent,
-  copyPlatformOs,
   copyProgressFooter,
   copyProgressSteps,
   copySegmentsText,
@@ -98,7 +98,12 @@ describe("From and To", () => {
       ["MacBook Pro", "has-it", false, "has it · ~/Code/ryco"],
       ["Mac mini", "has-it", false, "has it · ~/dev/ryco"],
       ["hetzner-build", "ready", true, "Linux"],
-      ["Gaming PC", "offline", false, "offline · seen 2h ago"],
+      [
+        "Gaming PC",
+        "offline",
+        false,
+        `offline ${describeOfflineSince(NOW - 2 * 3_600_000, { nowMs: NOW })}`,
+      ],
       ["Old box", "outdated", false, "Update Ryco on Old box to copy here"],
     ]);
     expect(initialCopyTarget(cards, MINI)).toBe(HETZNER);
@@ -257,13 +262,6 @@ describe("the destination folder", () => {
     expect(parentOfNodePath("/ryco")).toBe("/");
     expect(parentOfNodePath("C:\\Code\\ryco")).toBe("C:\\Code");
     expect(parentOfNodePath("C:\\ryco")).toBe("C:\\");
-  });
-
-  it("maps a node's OS for the setup note", () => {
-    expect(copyPlatformOs("darwin")).toBe("darwin");
-    expect(copyPlatformOs("win32")).toBe("windows");
-    expect(copyPlatformOs("freebsd")).toBe("unknown");
-    expect(copyPlatformOs(null)).toBeNull();
   });
 });
 

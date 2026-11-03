@@ -36,7 +36,7 @@ import {
   type ProjectCopyRow,
 } from "./copyProjectDialog.logic";
 import { CopyBar, CopyProgressStepList } from "./copyProjectDialogParts";
-import { displayNodePath } from "./folderPicker.logic";
+import { displayProjectPath } from "../../lib/projectPaths";
 import { useNodeRead } from "./nodePathQueries";
 import { NodeBadge } from "./NodePicker";
 
@@ -186,7 +186,7 @@ export function ProjectCopiesBlock(props: ProjectCopiesBlockProps) {
         toastManager.add({
           type: "success",
           title: "Leftover removed",
-          description: displayNodePath(leftover.path),
+          description: displayProjectPath(leftover.path),
         });
       } else {
         toastManager.add({

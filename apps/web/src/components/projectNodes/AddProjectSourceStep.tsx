@@ -56,7 +56,7 @@ import {
   type AddProjectRemoteSource,
   type ResolvedRemoteRepository,
 } from "./addProjectSources";
-import { displayNodePath } from "./folderPicker.logic";
+import { displayProjectPath } from "../../lib/projectPaths";
 import { NodeBadge } from "./NodePicker";
 import { closeAddProject } from "./projectNodesDialogStore";
 
@@ -481,7 +481,7 @@ function CopyPanel(props: AddProjectSourceStepProps) {
         {props.copySources.length > 0 ? (
           props.copySources.map((entry) => {
             const sourceNode = nodeById.get(entry.source.environmentId);
-            const where = `${sourceNode?.label ?? "Another node"} · ${displayNodePath(entry.source.cwd)}`;
+            const where = `${sourceNode?.label ?? "Another node"} · ${displayProjectPath(entry.source.cwd)}`;
             return (
               <button
                 key={entry.key}

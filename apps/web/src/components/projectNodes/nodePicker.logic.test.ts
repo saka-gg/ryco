@@ -1,3 +1,4 @@
+import { describeOfflineSince } from "@ryco/client-runtime/connection";
 import type { NodeCatalogEntry } from "@ryco/client-runtime/state/nodes";
 import { EnvironmentId } from "@ryco/contracts";
 import { describe, expect, it } from "vite-plus/test";
@@ -119,7 +120,10 @@ describe("node presentation", () => {
     expect(describeNodePresence(node(), now)).toEqual({ tone: "online", text: "online" });
     expect(
       describeNodePresence(node({ presence: "offline", lastSeenAt: now - 2 * 3_600_000 }), now),
-    ).toEqual({ tone: "offline", text: "offline · seen 2h ago" });
+    ).toEqual({
+      tone: "offline",
+      text: `offline ${describeOfflineSince(now - 2 * 3_600_000, { nowMs: now })}`,
+    });
     expect(describeNodePresence(node({ presence: "offline" }), now).text).toBe("offline");
   });
 

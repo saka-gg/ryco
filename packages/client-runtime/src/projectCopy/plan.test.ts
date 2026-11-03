@@ -182,6 +182,16 @@ const planning = (
 ): ProjectCopyPlanningInput => ({ source, target: targetFacts });
 
 describe("node paths", () => {
+  it("joins with the parent's own separator when the node's is unknown", () => {
+    expect(joinNodePath("/Users/me/Code", ["ryco"])).toBe("/Users/me/Code/ryco");
+    expect(joinNodePath("/Users/me/Code/", ["ryco"])).toBe("/Users/me/Code/ryco");
+    expect(joinNodePath("/", ["srv"])).toBe("/srv");
+    expect(joinNodePath("~", ["Code"])).toBe("~/Code");
+    expect(joinNodePath("C:\\Code", ["homelab"])).toBe("C:\\Code\\homelab");
+    expect(joinNodePath("C:\\", ["Code"])).toBe("C:\\Code");
+    expect(joinNodePath("\\\\nas\\share", ["app"])).toBe("\\\\nas\\share\\app");
+  });
+
   it("joins with each node's separator and folds Windows case", () => {
     expect(joinNodePath("/Users/ada/", ["Code", "app"], "/")).toBe("/Users/ada/Code/app");
     expect(joinNodePath("C:/Users/Ada", ["Code"], "\\")).toBe("C:\\Users\\Ada\\Code");

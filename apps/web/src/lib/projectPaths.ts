@@ -351,6 +351,16 @@ export function formatProjectPath(cwd: string, homeDir: string | null | undefine
 }
 
 /**
+ * A path as people read it when its node may not have reported a home directory:
+ * home-relative under `homeDirectory` when given, else under the home its layout
+ * implies (see `inferHomeDirectory`). A trailing separator is dropped.
+ */
+export function displayProjectPath(path: string, homeDirectory?: string | null): string {
+  const normalized = normalizeProjectPathForDispatch(path);
+  return formatProjectPath(normalized, homeDirectory ?? inferHomeDirectory(normalized));
+}
+
+/**
  * The home directory a path sits under, inferred from the usual layouts
  * (`/Users/<name>`, `/home/<name>`, `C:\\Users\\<name>`); servers do not report it.
  */

@@ -4,6 +4,7 @@ import { describe, expect, it } from "vite-plus/test";
 import { reconcileWorkspaceMachine, type WorkspaceMachineCatalogInput } from "./machineCatalog.js";
 import {
   buildNodeCatalog,
+  catalogPlatformOs,
   nodeMutateBlockedReason,
   sameNodeCatalog,
   type NodeCatalogInput,
@@ -373,6 +374,15 @@ describe("node catalog", () => {
     expect(sameNodeCatalog(first, same)).toBe(true);
     expect(sameNodeCatalog(first, changed)).toBe(false);
     expect(sameNodeCatalog(first, first.slice(1))).toBe(false);
+  });
+});
+
+describe("catalogPlatformOs", () => {
+  it("names a node's OS as the contracts do", () => {
+    expect(catalogPlatformOs("darwin")).toBe("darwin");
+    expect(catalogPlatformOs("win32")).toBe("windows");
+    expect(catalogPlatformOs("freebsd")).toBe("unknown");
+    expect(catalogPlatformOs(null)).toBeNull();
   });
 });
 

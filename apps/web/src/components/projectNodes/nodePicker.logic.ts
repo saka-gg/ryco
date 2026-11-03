@@ -4,13 +4,13 @@
 //          it is disabled.
 // Layer: Web UI logic, pure. The catalog entries come from `@ryco/client-runtime/state/nodes`.
 
+import { describeOfflineSince } from "@ryco/client-runtime/connection";
 import type { EnvironmentId, EnvironmentMachineKind } from "@ryco/contracts";
 import type { NodePathHints } from "@ryco/contracts/project-copy";
 import type { NodeCatalogEntry } from "@ryco/client-runtime/state/nodes";
 import { inferEnvironmentMachineKind } from "@ryco/shared/environmentIcon";
 
 import { formatProjectPath } from "../../lib/projectPaths";
-import { formatRelativeTimeLabel } from "../../timestampFormat";
 
 /** What a picker knows about a node beyond the catalog, keyed by environment id. */
 export interface NodePickerNodeExtras {
@@ -105,7 +105,7 @@ export function nodeOsLabel(platformOs: string | null | undefined): string | nul
 
 export type NodePresenceTone = "online" | "connecting" | "offline";
 
-/** "online", "connecting…", or "offline · seen 2h ago". */
+/** "online", "connecting…", or "offline since 09:05" (`describeOfflineSince`). */
 export function describeNodePresence(
   entry: Pick<NodeCatalogEntry, "presence" | "lastSeenAt">,
   nowMs: number,
@@ -115,14 +115,10 @@ export function describeNodePresence(
       return { tone: "online", text: "online" };
     case "connecting":
       return { tone: "connecting", text: "connecting…" };
-    case "offline":
-      return {
-        tone: "offline",
-        text:
-          entry.lastSeenAt === null
-            ? "offline"
-            : `offline · seen ${formatRelativeTimeLabel(new Date(entry.lastSeenAt).toISOString(), nowMs)}`,
-      };
+    case "offline": {
+      const since = describeOfflineSince(entry.lastSeenAt, { nowMs });
+      return { tone: "offline", text: since === null ? "offline" : `offline ${since}` };
+    }
   }
 }
 

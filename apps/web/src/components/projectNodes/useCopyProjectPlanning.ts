@@ -25,7 +25,7 @@ import {
   type ProjectCopyTargetFacts,
   type ProjectCopyTransport,
 } from "@ryco/client-runtime/projectCopy";
-import type { NodeCatalogEntry } from "@ryco/client-runtime/state/nodes";
+import { catalogPlatformOs, type NodeCatalogEntry } from "@ryco/client-runtime/state/nodes";
 import {
   DEFAULT_PROJECT_METADATA_DIR,
   type EnvironmentId,
@@ -38,7 +38,6 @@ import { useEffect, useMemo, useState } from "react";
 import { acquireNode } from "../../environments/acquireNode";
 import type { Project } from "../../types";
 import { inferHomeDirectory } from "../projects/projectsModel.logic";
-import { copyPlatformOs } from "./copyProjectDialog.logic";
 import { startManagedProjectCopy } from "./copyRuntime/copyManager";
 import { createWebProjectCopyIo } from "./copyRuntime/webProjectCopyIo";
 import {
@@ -225,7 +224,7 @@ export function useCopySource(input: {
           kind: "legacy",
           environmentId,
           label: node.label,
-          platformOs: copyPlatformOs(node.platformOs),
+          platformOs: catalogPlatformOs(node.platformOs),
           projectId: project.id,
           project: legacyCopyProject(project),
         },
@@ -255,7 +254,7 @@ export function useCopySource(input: {
         kind: "inspected",
         environmentId,
         label: node.label,
-        platformOs: copyPlatformOs(node.platformOs),
+        platformOs: catalogPlatformOs(node.platformOs),
         transport: node.transport ?? hold.transport,
         checkoutPath: null,
         inspection: inspection.data,

@@ -167,6 +167,27 @@ function knownOs(os: string | null | undefined): string | null {
   return os && os !== "unknown" ? os : null;
 }
 
+/**
+ * A catalog entry's `platformOs` as the contracts name it (`win32` is `windows`); null when the
+ * node reported none, `unknown` for an OS outside the list.
+ */
+export function catalogPlatformOs(os: string | null): ExecutionEnvironmentPlatformOs | null {
+  switch (os?.trim().toLowerCase()) {
+    case "darwin":
+      return "darwin";
+    case "linux":
+      return "linux";
+    case "windows":
+    case "win32":
+      return "windows";
+    case undefined:
+    case "":
+      return null;
+    default:
+      return "unknown";
+  }
+}
+
 function toEntry(
   facts: NodeFacts,
   input: NodeCatalogInput,

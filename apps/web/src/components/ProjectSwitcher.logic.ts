@@ -10,7 +10,7 @@ import type { NodeCatalogEntry } from "@ryco/client-runtime/state/nodes";
 import type { EnvironmentId, ProjectId } from "@ryco/contracts";
 
 import type { ProjectCheckoutOption } from "../projectCheckouts.logic";
-import { formatProjectPath, inferHomeDirectory } from "./projects/projectsModel.logic";
+import { displayProjectPath } from "./projects/projectsModel.logic";
 
 /** What a selector row shows of a node: its badge, its name and whether it is reachable. */
 export type ProjectSelectorNode = Pick<
@@ -66,7 +66,7 @@ export function projectSelectorCheckoutItem(
 
 /** A checkout path as the selector shows it: `~/Code/ryco` for `/Users/me/Code/ryco`. */
 export function projectSelectorPath(cwd: string): string {
-  return formatProjectPath(cwd, inferHomeDirectory(cwd));
+  return displayProjectPath(cwd);
 }
 
 /**

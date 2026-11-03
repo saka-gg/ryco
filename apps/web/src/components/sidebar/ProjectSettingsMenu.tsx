@@ -10,7 +10,7 @@ import {
 import { DeviceIcon } from "../DeviceIcon";
 import { AtlassianJiraIcon } from "../Icons";
 import type { CrossNodeProjectActions } from "../projectNodes/projectNodesDialogStore";
-import { formatProjectPath, inferHomeDirectory } from "../../lib/projectPaths";
+import { displayProjectPath } from "../../lib/projectPaths";
 import { scopedProjectKey, scopeProjectRef } from "@ryco/client-runtime/scoped";
 import { MenuGroup, MenuItem, MenuSeparator } from "../ui/menu";
 import type {
@@ -200,7 +200,7 @@ function CrossNodeMenuSection(props: {
                 className="ms-auto max-w-[120px] truncate font-mono text-[11px]"
                 title={member.cwd}
               >
-                {formatProjectPath(member.cwd, inferHomeDirectory(member.cwd))}
+                {displayProjectPath(member.cwd)}
               </span>
             </div>
           );

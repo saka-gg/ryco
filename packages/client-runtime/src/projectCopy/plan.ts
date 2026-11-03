@@ -117,11 +117,22 @@ function formatNodePath(parts: NodePathParts, separator: NodePathSeparator): str
   return `${parts.root}${parts.segments.join(separator)}` || ".";
 }
 
-/** `parent` joined with relative `segments`, in the node's own separator. */
+/**
+ * The separator a node path is written with, for when the node's hints are unknown: `\` for a
+ * drive or UNC path, `/` for a POSIX one, else whichever the path uses.
+ */
+export function inferNodePathSeparator(path: string): NodePathSeparator {
+  const value = path.trim();
+  if (/^[A-Za-z]:(?:[\\/]|$)/u.test(value) || value.startsWith("\\\\")) return "\\";
+  if (value.startsWith("/")) return "/";
+  return value.includes("\\") ? "\\" : "/";
+}
+
+/** `parent` joined with relative `segments`, in the node's own separator (or the parent's). */
 export function joinNodePath(
   parent: string,
   segments: ReadonlyArray<string>,
-  separator: NodePathSeparator,
+  separator: NodePathSeparator = inferNodePathSeparator(parent),
 ): string {
   const base = splitNodePath(parent, separator);
   return formatNodePath({ root: base.root, segments: [...base.segments, ...segments] }, separator);

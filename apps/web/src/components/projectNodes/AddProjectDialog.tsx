@@ -14,7 +14,7 @@
 //        import the user leaves before the node answered `importStart` (Cancel,
 //        Back) is cancelled by its id, since the node may have started it.
 
-import { isProjectCopyRpcError } from "@ryco/client-runtime/projectCopy";
+import { isProjectCopyRpcError, joinNodePath } from "@ryco/client-runtime/projectCopy";
 import type { AcquiredNode, NodeCatalogEntry } from "@ryco/client-runtime/state/nodes";
 import { scopeProjectRef } from "@ryco/client-runtime/scoped";
 import {
@@ -104,7 +104,7 @@ import {
   validateAddProjectPath,
 } from "./addProjectSources";
 import { FolderPicker } from "./FolderPicker";
-import { joinNodePath, nodePathLeaf, type FolderSelectionStatus } from "./folderPicker.logic";
+import { nodePathLeaf, type FolderSelectionStatus } from "./folderPicker.logic";
 import { useNodeEnvironmentApi, useNodePathHints } from "./nodePathQueries";
 import { NodePicker } from "./NodePicker";
 import type { NodePickerExtrasMap } from "./nodePicker.logic";
@@ -230,10 +230,7 @@ async function cancelImportOnNode(
 
 /** `<root>/<relative>` with the root's own separator; the root itself for "". */
 function projectRootIn(repositoryRoot: string, relativeRoot: string): string {
-  return relativeRoot
-    .split("/")
-    .filter(Boolean)
-    .reduce((path, segment) => joinNodePath(path, segment), repositoryRoot);
+  return joinNodePath(repositoryRoot, relativeRoot.split("/").filter(Boolean));
 }
 
 /**

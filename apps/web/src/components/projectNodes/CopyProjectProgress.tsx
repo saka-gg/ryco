@@ -29,7 +29,7 @@ import {
   CopyRingSpinner,
 } from "./copyProjectDialogParts";
 import type { StartedProjectCopy } from "./CopyProjectForm";
-import { displayNodePath } from "./folderPicker.logic";
+import { displayProjectPath } from "../../lib/projectPaths";
 import { NodeBadge } from "./NodePicker";
 
 const FOOTER_CLASS = "flex items-center gap-2 border-border border-t px-4 py-[11px]";
@@ -223,7 +223,7 @@ function DoneView(props: CopyProjectProgressProps & { readonly entry: ProjectCop
               {row.node ? <NodeBadge node={row.node} size="sm" /> : null}
               <span className="w-26 shrink-0 truncate">{row.label}</span>
               <span className="min-w-0 flex-1 truncate font-mono text-[11.5px] text-muted-foreground">
-                {displayNodePath(row.path)}
+                {displayProjectPath(row.path)}
               </span>
               <CopyCheckoutMetaLine
                 isNew={row.isNew}

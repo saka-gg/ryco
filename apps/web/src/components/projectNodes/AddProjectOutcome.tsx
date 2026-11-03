@@ -12,7 +12,7 @@ import { useMemo } from "react";
 import { importProgressSteps, type AddedProjectNodeRow } from "./addProjectDialog.logic";
 import type { CopyProgressStep } from "./copyProjectDialog.logic";
 import { CopyProgressStepList } from "./copyProjectDialogParts";
-import { displayNodePath } from "./folderPicker.logic";
+import { displayProjectPath } from "../../lib/projectPaths";
 import { NodeBadge } from "./NodePicker";
 
 /**
@@ -87,7 +87,7 @@ export function AddedProjectSummary(props: {
               <NodeBadge node={node} size="sm" />
               <span className="w-[104px] shrink-0 truncate">{node.label}</span>
               <span className="min-w-0 flex-1 truncate font-mono text-[11.5px] text-muted-foreground">
-                {displayNodePath(row.cwd)}
+                {displayProjectPath(row.cwd)}
               </span>
               {row.isNew ? (
                 <span className="inline-flex items-center whitespace-nowrap rounded-full bg-primary/10 px-1.5 py-px text-[10.5px] text-foreground dark:bg-primary/18">

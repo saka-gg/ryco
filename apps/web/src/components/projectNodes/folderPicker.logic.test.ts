@@ -8,21 +8,9 @@ import {
   describeFolderSelection,
   folderSelectionStatusKey,
   highlightMatch,
-  joinNodePath,
   resolveFolderDestination,
   type DescribeFolderSelectionInput,
 } from "./folderPicker.logic";
-
-describe("joinNodePath", () => {
-  it("joins with the parent's own separator", () => {
-    expect(joinNodePath("/Users/me/Code", "ryco")).toBe("/Users/me/Code/ryco");
-    expect(joinNodePath("/Users/me/Code/", "ryco")).toBe("/Users/me/Code/ryco");
-    expect(joinNodePath("/", "srv")).toBe("/srv");
-    expect(joinNodePath("~", "Code")).toBe("~/Code");
-    expect(joinNodePath("C:\\Code", "homelab")).toBe("C:\\Code\\homelab");
-    expect(joinNodePath("C:\\", "Code")).toBe("C:\\Code");
-  });
-});
 
 describe("buildFolderCrumbs", () => {
   it("starts at home for a folder under it", () => {

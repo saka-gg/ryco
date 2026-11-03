@@ -34,8 +34,7 @@ import {
 } from "../../sidebar/sidebarProjectGroupingLabels";
 import {
   devicesWithoutProject,
-  formatProjectPath,
-  inferHomeDirectory,
+  displayProjectPath,
   threadActivityTimestamp,
 } from "../projectsModel.logic";
 import { useProjectsPage, useProjectsSelection } from "../ProjectsPageContext";
@@ -121,7 +120,7 @@ function CheckoutRow(props: {
         </span>
         <span className="flex min-w-0 items-center gap-1.5 text-[11px] text-muted-foreground">
           <span className="truncate font-mono" title={props.member.cwd}>
-            {formatProjectPath(props.member.cwd, inferHomeDirectory(props.member.cwd))}
+            {displayProjectPath(props.member.cwd)}
           </span>
           <span aria-hidden>·</span>
           {presence.status === "online" ? null : (

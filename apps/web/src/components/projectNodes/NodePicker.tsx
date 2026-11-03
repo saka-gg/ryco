@@ -102,7 +102,7 @@ export interface NodePickerProps {
     | null
     | undefined;
   readonly "aria-label"?: string | undefined;
-  /** The clock "seen 2h ago" is measured against; defaults to now. */
+  /** The clock "offline since 09:05" is measured against; defaults to now. */
   readonly nowMs?: number | undefined;
   readonly className?: string | undefined;
 }
@@ -118,7 +118,7 @@ export function NodePicker(props: NodePickerProps) {
   const allowOffline = props.requirements?.allowOffline;
   const requireProjectCopy = props.requirements?.requireProjectCopy;
   const reasonIdPrefix = useId();
-  // "seen 2h ago" is measured once per mount; a picker is open for moments.
+  // "offline since 09:05" is measured once per mount; a picker is open for moments.
   const [mountedAtMs] = useState(() => Date.now());
   const nowMs = props.nowMs ?? mountedAtMs;
   const rows = useMemo(

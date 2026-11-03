@@ -39,7 +39,7 @@ import {
 import { useEvent } from "../../../../hooks/useEvent";
 import { cn, isMacPlatform, randomUUID } from "../../../../lib/utils";
 import { selectSidebarWorktreesForProjectRef, useStore } from "../../../../store";
-import { formatProjectPath, inferHomeDirectory } from "../../../projects/projectsModel.logic";
+import { displayProjectPath } from "../../../projects/projectsModel.logic";
 import { Switch } from "../../../ui/switch";
 import { Textarea } from "../../../ui/textarea";
 import { toastManager } from "../../../ui/toast";
@@ -245,7 +245,7 @@ export function ScheduleEditor(props: ScheduleEditorSlotProps) {
       key: candidate.key,
       label: candidate.deviceLabel,
       environmentId: candidate.environmentId,
-      path: formatProjectPath(candidate.member.cwd, inferHomeDirectory(candidate.member.cwd)),
+      path: displayProjectPath(candidate.member.cwd),
     }));
   const device = devices.find((candidate) => candidate.key === checkoutKey) ?? null;
 

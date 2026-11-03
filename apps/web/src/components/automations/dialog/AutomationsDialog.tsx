@@ -31,7 +31,7 @@ import { useEvent } from "../../../hooks/useEvent";
 import { useLogicalProjectSnapshots } from "../../../hooks/useLogicalProjectSnapshots";
 import type { SidebarProjectSnapshot } from "../../../sidebarProjectGrouping";
 import { buildThreadRouteParams } from "../../../threadRoutes";
-import { formatProjectPath, inferHomeDirectory } from "../../projects/projectsModel.logic";
+import { displayProjectPath } from "../../projects/projectsModel.logic";
 import { Dialog, DialogPopup, DialogTitle } from "../../ui/dialog";
 import { toastManager } from "../../ui/toast";
 import {
@@ -920,7 +920,7 @@ function AutomationsDialogBody(
         ) : (
           <EmptyProjectState
             projectName={snapshot.displayName}
-            path={formatProjectPath(primary.cwd, inferHomeDirectory(primary.cwd))}
+            path={displayProjectPath(primary.cwd)}
             newOff={limit.allFull}
             newOffReason={newOffReason}
             onNew={(origin) => openNew(origin)}

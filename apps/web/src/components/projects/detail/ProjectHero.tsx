@@ -43,11 +43,7 @@ import { Button } from "../../ui/button";
 import { Menu, MenuItem, MenuPopup, MenuSeparator, MenuTrigger } from "../../ui/menu";
 import { Spinner } from "../../ui/spinner";
 import { stackedThreadToast, toastManager } from "../../ui/toast";
-import {
-  formatProjectPath,
-  inferHomeDirectory,
-  projectRepositoryLabel,
-} from "../projectsModel.logic";
+import { displayProjectPath, projectRepositoryLabel } from "../projectsModel.logic";
 import { useProjectsSelection } from "../ProjectsPageContext";
 import { SavedTick, useSavedFlash } from "../sections/ProjectSection";
 import { useHeroSentinel } from "./ProjectDetailContext";
@@ -298,7 +294,7 @@ function ProjectMetaLine(props: {
   );
   const status = gitStatus.data;
   const branch = status?.isRepo ? status.refName : null;
-  const path = formatProjectPath(member.cwd, inferHomeDirectory(member.cwd));
+  const path = displayProjectPath(member.cwd);
   return (
     <div className="mt-1 flex min-w-0 flex-wrap items-center gap-x-2 gap-y-1 text-xs text-muted-foreground">
       <span className="inline-flex min-w-0 items-center gap-0.5">

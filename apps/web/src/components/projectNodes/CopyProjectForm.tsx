@@ -15,7 +15,7 @@ import {
   type ProjectCopyOptionsPlan,
   type ProjectCopyTargetFacts,
 } from "@ryco/client-runtime/projectCopy";
-import type { NodeCatalogEntry } from "@ryco/client-runtime/state/nodes";
+import { catalogPlatformOs, type NodeCatalogEntry } from "@ryco/client-runtime/state/nodes";
 import { UNIFIED_WORKSPACE_MAX_CONNECTIONS } from "@ryco/client-runtime/state/workspace";
 import {
   DEFAULT_UNIFIED_SETTINGS,
@@ -61,7 +61,6 @@ import {
   copyFolderTag,
   copyFooterSummary,
   copyNoTargetMessage,
-  copyPlatformOs,
   copySourceRows,
   copyTargetCards,
   initialCopySource,
@@ -81,7 +80,7 @@ import {
   CopySegments,
 } from "./copyProjectDialogParts";
 import { FolderPicker } from "./FolderPicker";
-import { displayNodePath } from "./folderPicker.logic";
+import { displayProjectPath } from "../../lib/projectPaths";
 import { NodeBadge } from "./NodePicker";
 import type { CopyProjectDialogRequest } from "./projectNodesDialogStore";
 import {
@@ -414,7 +413,7 @@ export function CopyProjectForm(props: CopyProjectFormProps) {
   const [choices, setChoices] = useState<CopyUserChoices>(DEFAULT_COPY_USER_CHOICES);
   const targetFactsBase: ProjectCopyTargetFacts = {
     label: targetLabel,
-    platformOs: copyPlatformOs(targetNode?.platformOs ?? null),
+    platformOs: catalogPlatformOs(targetNode?.platformOs ?? null),
     projectCopySupport: targetHold.status === "failed" ? "unknown" : targetSupport,
     transport: targetNode?.transport ?? targetHold.transport,
     remoteAccess: null,
@@ -641,7 +640,9 @@ export function CopyProjectForm(props: CopyProjectFormProps) {
 
   const tag = copyFolderTag(suggestion);
   const shownPath =
-    suggestion !== null ? displayNodePath(suggestion.path, destination.hints?.homeDirectory) : null;
+    suggestion !== null
+      ? displayProjectPath(suggestion.path, destination.hints?.homeDirectory)
+      : null;
   const note = copyFolderNote({
     suggestion: checking ? null : suggestion,
     manual: manualPath !== null,

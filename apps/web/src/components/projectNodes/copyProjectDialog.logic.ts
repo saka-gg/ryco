@@ -15,13 +15,7 @@ import type {
   ProjectCopyProgress,
 } from "@ryco/client-runtime/projectCopy";
 import type { NodeCatalogEntry } from "@ryco/client-runtime/state/nodes";
-import type {
-  EnvironmentId,
-  ExecutionEnvironmentPlatformOs,
-  ProjectId,
-  ScopedProjectRef,
-  VcsStatusResult,
-} from "@ryco/contracts";
+import type { EnvironmentId, ProjectId, ScopedProjectRef, VcsStatusResult } from "@ryco/contracts";
 import type {
   ProjectImportSnapshot,
   ProjectImportStep,
@@ -34,7 +28,7 @@ import {
   lastOutputLine,
   projectCopyView,
 } from "./copyRuntime/projectCopyProgress.logic";
-import { displayNodePath } from "./folderPicker.logic";
+import { displayProjectPath } from "../../lib/projectPaths";
 import { describeNodePresence, nodeOsLabel } from "./nodePicker.logic";
 
 /** Text with its paths and commands marked, so the view sets them in mono. */
@@ -48,24 +42,6 @@ const plain = (text: string): CopyTextSegment => ({ text });
 
 export function copySegmentsText(segments: ReadonlyArray<CopyTextSegment>): string {
   return segments.map((segment) => segment.text).join("");
-}
-
-/** A catalog node's OS as the coordinator plans with it (setup notes compare it). */
-export function copyPlatformOs(os: string | null): ExecutionEnvironmentPlatformOs | null {
-  switch (os?.trim().toLowerCase()) {
-    case "darwin":
-      return "darwin";
-    case "linux":
-      return "linux";
-    case "windows":
-    case "win32":
-      return "windows";
-    case undefined:
-    case "":
-      return null;
-    default:
-      return "unknown";
-  }
 }
 
 /* ───────── From: the project's checkouts ───────── */
@@ -137,7 +113,7 @@ export function copySourceRows(input: {
       label,
       node,
       path: member.cwd,
-      displayPath: displayNodePath(member.cwd),
+      displayPath: displayProjectPath(member.cwd),
       selectable: !offline,
       reason: offline ? `${label} is offline` : null,
       offline,
@@ -173,7 +149,7 @@ export interface CopyTargetCard {
   readonly node: NodeCatalogEntry;
   readonly state: CopyTargetState;
   readonly selectable: boolean;
-  /** The card's second line, e.g. "has it · ~/dev/ryco", "offline · seen 2h ago", "macOS". */
+  /** The card's second line, e.g. "has it · ~/dev/ryco", "offline since 09:05", "macOS". */
   readonly sub: string;
   /** The full reason for a disabled card (its tooltip). */
   readonly reason: string | null;
@@ -192,7 +168,7 @@ export function copyTargetCards(input: {
   return input.nodes.map((node) => {
     const checkout = input.members.find((member) => member.environmentId === node.environmentId);
     if (checkout) {
-      const sub = `has it · ${displayNodePath(checkout.cwd)}`;
+      const sub = `has it · ${displayProjectPath(checkout.cwd)}`;
       return { node, state: "has-it", selectable: false, sub, reason: sub };
     }
     if (node.presence === "offline") {
@@ -318,11 +294,11 @@ export function copyFolderNote(input: {
     return { segments: [plain(`Same place as on ${input.sourceLabel}.`)], tone: "muted" };
   }
   const parent = parentOfNodePath(suggestion.takenPath ?? suggestion.path);
-  const shownParent = displayNodePath(parent, input.targetHome);
+  const shownParent = displayProjectPath(parent, input.targetHome);
   if (suggestion.missingMirroredParent !== null) {
     return {
       segments: [
-        mono(displayNodePath(suggestion.missingMirroredParent, input.targetHome)),
+        mono(displayProjectPath(suggestion.missingMirroredParent, input.targetHome)),
         plain(` doesn’t exist on ${targetLabel}, so this uses `),
         mono(shownParent),
         plain(" instead."),
@@ -456,8 +432,8 @@ export function copyImportStepLabel(
   switch (id) {
     case "preflight":
       return context.mode === "link"
-        ? [plain("Check "), mono(displayNodePath(context.destinationPath, context.targetHome))]
-        : [plain("Create "), mono(displayNodePath(context.destinationPath, context.targetHome))];
+        ? [plain("Check "), mono(displayProjectPath(context.destinationPath, context.targetHome))]
+        : [plain("Create "), mono(displayProjectPath(context.destinationPath, context.targetHome))];
     case "clone":
       return context.mode === "send-files"
         ? [plain("Unpack the files")]
