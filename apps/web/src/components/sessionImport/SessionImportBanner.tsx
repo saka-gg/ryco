@@ -4,18 +4,19 @@ import { XIcon } from "lucide-react";
 import { useLocalStorage } from "../../hooks/useLocalStorage";
 import { cn } from "../../lib/utils";
 import { Button } from "../ui/button";
-import { openProjectImportDialog, preloadProjectImportDialog } from "./projectImportDialogStore";
+import { openSessionImportDialog, preloadSessionImportDialog } from "./sessionImportDialogStore";
 
-export const PROJECT_IMPORT_BANNER_DISMISSED_KEY = "ryco:project-import-banner-dismissed:v1";
+// The stored key keeps its original name so a dismissal survives the rename.
+export const SESSION_IMPORT_BANNER_DISMISSED_KEY = "ryco:project-import-banner-dismissed:v1";
 
 /**
  * Offers project import where there are no projects yet. Dismissing it hides
  * it for good on this device; the command palette and Settings still offer
  * the import.
  */
-export function ProjectImportBanner(props: { readonly className?: string }) {
+export function SessionImportBanner(props: { readonly className?: string }) {
   const [dismissed, setDismissed] = useLocalStorage(
-    PROJECT_IMPORT_BANNER_DISMISSED_KEY,
+    SESSION_IMPORT_BANNER_DISMISSED_KEY,
     false,
     Schema.Boolean,
   );
@@ -46,9 +47,9 @@ export function ProjectImportBanner(props: { readonly className?: string }) {
         size="xs"
         variant="outline"
         className="mt-2"
-        onPointerEnter={preloadProjectImportDialog}
-        onFocus={preloadProjectImportDialog}
-        onClick={() => openProjectImportDialog()}
+        onPointerEnter={preloadSessionImportDialog}
+        onFocus={preloadSessionImportDialog}
+        onClick={() => openSessionImportDialog()}
       >
         Import projects…
       </Button>

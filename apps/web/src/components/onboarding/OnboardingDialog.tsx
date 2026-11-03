@@ -28,9 +28,9 @@ import { useCommandPaletteStore } from "../../commandPaletteStore";
 import { cn } from "../../lib/utils";
 import { useSettingsDialogStore } from "../../settingsDialogStore";
 import {
-  openProjectImportDialog,
-  preloadProjectImportDialog,
-} from "../projectImport/projectImportDialogStore";
+  openSessionImportDialog,
+  preloadSessionImportDialog,
+} from "../sessionImport/sessionImportDialogStore";
 import { getProviderSummary } from "../settings/providerStatus";
 import { PROVIDER_CLIENT_DEFINITIONS } from "../settings/providerDriverMeta";
 import { PAIRING_LINK_TARGET_ID, requestSettingsReveal } from "../settings/settingsSearchReveal";
@@ -459,9 +459,9 @@ export function OnboardingDialog({
               <Button
                 variant="outline"
                 disabled={!ready}
-                onPointerEnter={preloadProjectImportDialog}
-                onFocus={preloadProjectImportDialog}
-                onClick={() => openProjectImportDialog({ environmentId })}
+                onPointerEnter={preloadSessionImportDialog}
+                onFocus={preloadSessionImportDialog}
+                onClick={() => openSessionImportDialog({ environmentId })}
               >
                 Import from Codex or Claude Code
               </Button>

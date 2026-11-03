@@ -12,7 +12,7 @@ import {
   type SessionImportInput,
 } from "@ryco/contracts";
 
-import { ProjectImportPanel } from "./ProjectImportPanel";
+import { SessionImportDialogPanel } from "./SessionImportDialogPanel";
 
 const CODEX_STORE = "c".repeat(64);
 const CLAUDE_STORE = "d".repeat(64);
@@ -74,7 +74,7 @@ const gone = item("3", {
 
 function FixturePanel() {
   return (
-    <ProjectImportPanel
+    <SessionImportDialogPanel
       nodeLabel="Fixture node"
       allowed={harness.allowed}
       canCreateProjects

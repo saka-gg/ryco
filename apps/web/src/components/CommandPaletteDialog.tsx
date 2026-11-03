@@ -217,7 +217,7 @@ import { useComposerHandleContext } from "../composerHandleContext";
 import { useHostedRpcCapability, type HostedRpcCapability } from "../hostedHub/capabilities";
 import { hostedCapabilityCopy, hostedSwitchTargetLabel } from "../hostedHub/switchTarget";
 import { openAutomationsDialog } from "./automations/automationsDialogStore";
-import { openProjectImportDialog } from "./projectImport/projectImportDialogStore";
+import { openSessionImportDialog } from "./sessionImport/sessionImportDialogStore";
 import { openPromoteChatDialog, useCanPromoteChat } from "./chat/promoteChatDialogStore";
 import { getPresentationTier } from "../lib/presentationTier";
 import { buildProjectsPageLocation } from "../projectsRoute";
@@ -1540,7 +1540,7 @@ function OpenCommandPaletteDialog() {
       icon: <FolderInputIcon className={ITEM_ICON_CLASS} />,
       run: async () => {
         setOpen(false);
-        openProjectImportDialog({ environmentId: settingsPageTarget.environmentId });
+        openSessionImportDialog({ environmentId: settingsPageTarget.environmentId });
       },
     });
     actionItems.push({

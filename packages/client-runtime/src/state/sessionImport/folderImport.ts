@@ -18,13 +18,13 @@ import type {
 import { absolutePathKey, workspacePathWithinRepository } from "../files/paths.ts";
 
 /** A discovered conversation and the source row (a source's store) it was read from. */
-export interface ProjectImportCandidate extends SessionImportCandidate {
+export interface SessionImportOriginCandidate extends SessionImportCandidate {
   /** The caller's id for the store the conversation was read from and who continues it. */
   readonly origin: string;
 }
 
 /** A project on the node that can receive imported conversations. */
-export interface ProjectImportProject {
+export interface SessionImportProject {
   readonly id: ProjectId;
   readonly name: string;
   readonly workspaceRoot: string;
@@ -35,29 +35,29 @@ export interface ProjectImportProject {
  * from a node too old to resolve it). `missing`: the recorded folder is gone.
  * `unknown`: the conversation recorded no folder.
  */
-export type ProjectImportFolderState = "found" | "missing" | "unknown";
+export type SessionImportFolderState = "found" | "missing" | "unknown";
 
 /** Where a group's conversations are imported to. */
-export type ProjectImportTarget =
+export type SessionImportTarget =
   | { readonly kind: "project"; readonly projectId: ProjectId }
   /** A new project in the group's own folder, created just before its first conversation. */
   | { readonly kind: "new"; readonly workspaceRoot: string };
 
-export type ProjectImportDestination = ProjectImportTarget | { readonly kind: "none" };
+export type SessionImportDestination = SessionImportTarget | { readonly kind: "none" };
 
-export interface ProjectImportGroup {
+export interface SessionImportGroup {
   readonly key: string;
   /** The real path for `found`, the recorded path for `missing`, null for `unknown`. */
   readonly folder: string | null;
-  readonly folderState: ProjectImportFolderState;
+  readonly folderState: SessionImportFolderState;
   readonly sources: readonly SessionImportSource[];
-  readonly candidates: readonly ProjectImportCandidate[];
+  readonly candidates: readonly SessionImportOriginCandidate[];
   /** The destination proposed until the user picks another. */
-  readonly suggested: ProjectImportDestination;
+  readonly suggested: SessionImportDestination;
 }
 
 /** One store of one source to read, and the label its notices carry. */
-export interface ProjectImportSourceRow {
+export interface SessionImportSourceRow {
   /** Becomes each candidate's `origin`. */
   readonly id: string;
   readonly source: SessionImportSource;
@@ -65,8 +65,8 @@ export interface ProjectImportSourceRow {
   readonly label: string;
 }
 
-export interface ProjectImportDiscovery {
-  readonly candidates: readonly ProjectImportCandidate[];
+export interface SessionImportDiscovery {
+  readonly candidates: readonly SessionImportOriginCandidate[];
   /** The node's notices (skipped files, safety limits) and per-store failures, once each. */
   readonly notices: readonly string[];
   /** False when `shouldContinue` ended the reading early. */
@@ -79,16 +79,16 @@ export interface ProjectImportDiscovery {
  * page that does not move forward ends that store, so a misbehaving node
  * cannot loop it.
  */
-export async function discoverProjectImportCandidates(input: {
-  readonly rows: readonly ProjectImportSourceRow[];
+export async function discoverSessionImportCandidates(input: {
+  readonly rows: readonly SessionImportSourceRow[];
   readonly includeArchived: boolean;
   readonly discover: (request: SessionImportDiscoverInput) => Promise<SessionImportPage>;
   /** Read before each page; false ends the reading. */
   readonly shouldContinue: () => boolean;
   /** How many conversations were found so far. */
   readonly onProgress?: (found: number) => void;
-}): Promise<ProjectImportDiscovery> {
-  const candidates: ProjectImportCandidate[] = [];
+}): Promise<SessionImportDiscovery> {
+  const candidates: SessionImportOriginCandidate[] = [];
   const notices = new Set<string>();
   for (const row of input.rows) {
     let offset: number | null = 0;
@@ -116,7 +116,7 @@ export async function discoverProjectImportCandidates(input: {
   return { candidates, notices: [...notices], complete: true };
 }
 
-const FOLDER_STATE_ORDER: Record<ProjectImportFolderState, number> = {
+const FOLDER_STATE_ORDER: Record<SessionImportFolderState, number> = {
   found: 0,
   missing: 1,
   unknown: 2,
@@ -124,7 +124,7 @@ const FOLDER_STATE_ORDER: Record<ProjectImportFolderState, number> = {
 
 function candidateFolder(candidate: SessionImportCandidate): {
   readonly folder: string | null;
-  readonly state: ProjectImportFolderState;
+  readonly state: SessionImportFolderState;
 } {
   if (candidate.canonicalCwd) return { folder: candidate.canonicalCwd, state: "found" };
   if (!candidate.cwd) return { folder: null, state: "unknown" };
@@ -140,7 +140,7 @@ function sameFolder(left: string, right: string): boolean {
  * The project whose folder holds `folder`, the closest one when projects
  * nest; null when none does.
  */
-export function findContainingImportProject<P extends ProjectImportProject>(
+export function findContainingImportProject<P extends SessionImportProject>(
   folder: string,
   projects: readonly P[],
 ): P | null {
@@ -156,9 +156,9 @@ export function findContainingImportProject<P extends ProjectImportProject>(
 
 function suggestDestination(
   folder: string | null,
-  state: ProjectImportFolderState,
-  projects: readonly ProjectImportProject[],
-): ProjectImportDestination {
+  state: SessionImportFolderState,
+  projects: readonly SessionImportProject[],
+): SessionImportDestination {
   if (folder === null) return { kind: "none" };
   const existing = findContainingImportProject(folder, projects);
   if (existing) return { kind: "project", projectId: existing.id };
@@ -172,16 +172,16 @@ function suggestDestination(
  * Existing folders come first, then gone ones, then conversations without a
  * folder; each part is ordered by path, and conversations keep their order.
  */
-export function groupProjectImportCandidates(
-  candidates: readonly ProjectImportCandidate[],
-  projects: readonly ProjectImportProject[],
-): ProjectImportGroup[] {
+export function groupSessionImportCandidates(
+  candidates: readonly SessionImportOriginCandidate[],
+  projects: readonly SessionImportProject[],
+): SessionImportGroup[] {
   const groups = new Map<
     string,
     {
       folder: string | null;
-      state: ProjectImportFolderState;
-      candidates: ProjectImportCandidate[];
+      state: SessionImportFolderState;
+      candidates: SessionImportOriginCandidate[];
     }
   >();
   const seen = new Set<string>();
@@ -195,7 +195,7 @@ export function groupProjectImportCandidates(
     else groups.set(key, { folder, state, candidates: [candidate] });
   }
   return [...groups.entries()]
-    .map(([key, group]): ProjectImportGroup => ({
+    .map(([key, group]): SessionImportGroup => ({
       key,
       folder: group.folder,
       folderState: group.state,
@@ -218,10 +218,10 @@ export function groupProjectImportCandidates(
  * (only when the folder exists and no project already uses it), then every
  * project.
  */
-export function projectImportDestinationOptions(
-  group: ProjectImportGroup,
-  projects: readonly ProjectImportProject[],
-): ProjectImportTarget[] {
+export function sessionImportDestinationOptions(
+  group: SessionImportGroup,
+  projects: readonly SessionImportProject[],
+): SessionImportTarget[] {
   const folder = group.folder;
   const offersNew =
     group.folderState === "found" &&
@@ -234,60 +234,60 @@ export function projectImportDestinationOptions(
 }
 
 /** Not imported before, not paused by an uncertain earlier import, and not done in this session. */
-export function isProjectImportCandidatePending(
-  candidate: ProjectImportCandidate,
+export function isSessionImportCandidatePending(
+  candidate: SessionImportOriginCandidate,
   done: ReadonlySet<string>,
 ): boolean {
   return candidate.importedThreadId === null && !candidate.quarantined && !done.has(candidate.key);
 }
 
 /** Every conversation that can still be imported, across groups. */
-export function pendingProjectImportKeys(
-  groups: readonly ProjectImportGroup[],
+export function pendingSessionImportKeys(
+  groups: readonly SessionImportGroup[],
   done: ReadonlySet<string>,
 ): string[] {
   return groups.flatMap((group) =>
     group.candidates
-      .filter((candidate) => isProjectImportCandidatePending(candidate, done))
+      .filter((candidate) => isSessionImportCandidatePending(candidate, done))
       .map((candidate) => candidate.key),
   );
 }
 
 /** How much of a group's pending conversations is selected. */
-export function projectImportGroupSelection(
-  group: ProjectImportGroup,
+export function sessionImportGroupSelection(
+  group: SessionImportGroup,
   selected: ReadonlySet<string>,
   done: ReadonlySet<string>,
 ): "all" | "some" | "none" {
-  const pending = pendingProjectImportKeys([group], done);
+  const pending = pendingSessionImportKeys([group], done);
   const count = pending.filter((key) => selected.has(key)).length;
   if (count === 0) return "none";
   return count === pending.length ? "all" : "some";
 }
 
 /** `selected` with every pending conversation of `group` added or removed. */
-export function setProjectImportGroupSelected(
-  group: ProjectImportGroup,
+export function setSessionImportGroupSelected(
+  group: SessionImportGroup,
   selected: ReadonlySet<string>,
   done: ReadonlySet<string>,
   checked: boolean,
 ): Set<string> {
   const next = new Set(selected);
-  for (const key of pendingProjectImportKeys([group], done)) {
+  for (const key of pendingSessionImportKeys([group], done)) {
     if (checked) next.add(key);
     else next.delete(key);
   }
   return next;
 }
 
-export interface ProjectImportPlanItem {
-  readonly candidate: ProjectImportCandidate;
-  readonly target: ProjectImportTarget;
+export interface SessionImportPlanItem {
+  readonly candidate: SessionImportOriginCandidate;
+  readonly target: SessionImportTarget;
 }
 
-export interface ProjectImportPlan {
+export interface SessionImportPlan {
   /** Selected pending conversations with a destination, group by group. */
-  readonly items: readonly ProjectImportPlanItem[];
+  readonly items: readonly SessionImportPlanItem[];
   /** Selected pending conversations whose group has no destination yet. */
   readonly unassigned: number;
   /** Folders a project is created in. */
@@ -300,23 +300,23 @@ export interface ProjectImportPlan {
  * leaves the group unassigned, and a new project in a folder a project now
  * uses imports into that project instead of adding another.
  */
-export function planProjectImport(input: {
-  readonly groups: readonly ProjectImportGroup[];
+export function planSessionImport(input: {
+  readonly groups: readonly SessionImportGroup[];
   readonly selected: ReadonlySet<string>;
   readonly done: ReadonlySet<string>;
-  readonly destinations: Readonly<Record<string, ProjectImportDestination>>;
-  readonly projects: readonly ProjectImportProject[];
-}): ProjectImportPlan {
-  const items: ProjectImportPlanItem[] = [];
+  readonly destinations: Readonly<Record<string, SessionImportDestination>>;
+  readonly projects: readonly SessionImportProject[];
+}): SessionImportPlan {
+  const items: SessionImportPlanItem[] = [];
   const newProjects = new Set<string>();
   let unassigned = 0;
   for (const group of input.groups) {
     const chosen = group.candidates.filter(
       (candidate) =>
-        input.selected.has(candidate.key) && isProjectImportCandidatePending(candidate, input.done),
+        input.selected.has(candidate.key) && isSessionImportCandidatePending(candidate, input.done),
     );
     if (chosen.length === 0) continue;
-    const target = resolveProjectImportDestination(
+    const target = resolveSessionImportDestination(
       input.destinations[group.key] ?? group.suggested,
       input.projects,
     );
@@ -335,10 +335,10 @@ export function planProjectImport(input: {
  * project that is gone leads nowhere, and a new project in a folder that a
  * project now uses is that project.
  */
-export function resolveProjectImportDestination(
-  destination: ProjectImportDestination,
-  projects: readonly ProjectImportProject[],
-): ProjectImportDestination {
+export function resolveSessionImportDestination(
+  destination: SessionImportDestination,
+  projects: readonly SessionImportProject[],
+): SessionImportDestination {
   if (destination.kind === "none") return destination;
   if (destination.kind === "project")
     return projects.some((project) => project.id === destination.projectId)
@@ -350,26 +350,26 @@ export function resolveProjectImportDestination(
   return existing ? { kind: "project", projectId: existing.id } : destination;
 }
 
-export type ProjectImportItemStatus =
+export type SessionImportItemStatus =
   | { readonly state: "importing" }
   | { readonly state: "imported"; readonly threadId: ThreadId }
   | { readonly state: "failed"; readonly message: string };
 
-export interface ProjectImportRunHandlers {
+export interface SessionImportRunHandlers {
   /** Creates a project in `workspaceRoot` through the normal project creation path. */
   readonly createProject: (workspaceRoot: string) => Promise<ProjectId>;
   /** The existing single-conversation import into `projectId`. */
   readonly importCandidate: (
-    candidate: ProjectImportCandidate,
+    candidate: SessionImportOriginCandidate,
     projectId: ProjectId,
   ) => Promise<SessionImportResult>;
   /** Read before each conversation; false ends the run after the one in progress. */
   readonly shouldContinue: () => boolean;
   readonly onProjectCreated: (workspaceRoot: string, projectId: ProjectId) => void;
-  readonly onItem: (key: string, status: ProjectImportItemStatus) => void;
+  readonly onItem: (key: string, status: SessionImportItemStatus) => void;
 }
 
-export interface ProjectImportRunSummary {
+export interface SessionImportRunSummary {
   readonly imported: number;
   readonly failed: number;
   /** The run ended before its last conversation. */
@@ -387,13 +387,13 @@ function failureMessage(error: unknown, fallback: string): string {
  * reason and creation is not tried again in this run. One failure never stops
  * the others.
  */
-export async function runProjectImport(
-  plan: ProjectImportPlan,
-  handlers: ProjectImportRunHandlers,
-): Promise<ProjectImportRunSummary> {
+export async function runSessionImport(
+  plan: SessionImportPlan,
+  handlers: SessionImportRunHandlers,
+): Promise<SessionImportRunSummary> {
   const created = new Map<string, ProjectId>();
   const creationFailures = new Map<string, string>();
-  const projectFor = async (target: ProjectImportTarget): Promise<ProjectId> => {
+  const projectFor = async (target: SessionImportTarget): Promise<ProjectId> => {
     if (target.kind === "project") return target.projectId;
     const root = target.workspaceRoot;
     const existing = created.get(root);

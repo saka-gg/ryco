@@ -1,34 +1,34 @@
-// FILE: ProjectImportPanel.tsx
+// FILE: SessionImportDialogPanel.tsx
 // Purpose: Import whole Codex and Claude Code projects: read every store,
 //          show conversations grouped by the folder they ran in, let the user
 //          pick projects or single conversations and review each group's
 //          destination, then import one conversation at a time with progress,
 //          Stop and Retry failed.
 // Layer: Web UI over `@ryco/client-runtime/state/sessionImport`, which owns
-//        grouping, planning and the run. Hosted by `ProjectImportDialog`.
+//        grouping, planning and the run. Hosted by `SessionImportDialog`.
 
 import { useEffect, useMemo, useRef, useState } from "react";
 import { ProjectId, type SessionImportSource, type SessionImportStore } from "@ryco/contracts";
 import type { WsRpcClient } from "@ryco/client-runtime/rpc";
 import {
-  discoverProjectImportCandidates,
-  groupProjectImportCandidates,
-  isProjectImportCandidatePending,
-  pendingProjectImportKeys,
-  planProjectImport,
-  projectImportDestinationOptions,
-  projectImportGroupSelection,
-  resolveProjectImportDestination,
+  discoverSessionImportCandidates,
+  groupSessionImportCandidates,
+  isSessionImportCandidatePending,
+  pendingSessionImportKeys,
+  planSessionImport,
+  sessionImportDestinationOptions,
+  sessionImportGroupSelection,
+  resolveSessionImportDestination,
   resolveSessionImportContinuation,
-  runProjectImport,
+  runSessionImport,
   sessionImportContinuationProviders,
-  setProjectImportGroupSelected,
-  type ProjectImportCandidate,
-  type ProjectImportDestination,
-  type ProjectImportGroup,
-  type ProjectImportItemStatus,
-  type ProjectImportProject,
-  type ProjectImportRunSummary,
+  setSessionImportGroupSelected,
+  type SessionImportOriginCandidate,
+  type SessionImportDestination,
+  type SessionImportGroup,
+  type SessionImportItemStatus,
+  type SessionImportProject,
+  type SessionImportRunSummary,
   type SessionImportContinuationProvider,
 } from "@ryco/client-runtime/state/sessionImport";
 import { ChevronRightIcon, SearchIcon } from "lucide-react";
@@ -42,21 +42,21 @@ import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
 import { Checkbox } from "../ui/checkbox";
 
-export type ProjectImportClient = Pick<
+export type SessionImportDialogClient = Pick<
   WsRpcClient["sessionImport"],
   "sources" | "discover" | "run"
 >;
 
-export interface ProjectImportPanelProps {
+export interface SessionImportDialogPanelProps {
   readonly nodeLabel: string;
   /** Reading and importing the node's history is allowed now. */
   readonly allowed: boolean;
   /** New projects can be created on the node now. */
   readonly canCreateProjects: boolean;
   /** The node's projects that can receive conversations (no chats). */
-  readonly projects: readonly ProjectImportProject[];
+  readonly projects: readonly SessionImportProject[];
   readonly providerOptions: readonly SessionImportContinuationProvider[];
-  readonly client: () => ProjectImportClient;
+  readonly client: () => SessionImportDialogClient;
   /** Creates a project in the folder through the normal project creation path. */
   readonly createProject: (workspaceRoot: string) => Promise<ProjectId>;
   readonly onRunningChange?: (running: boolean) => void;
@@ -86,7 +86,7 @@ type Phase = "loading" | "idle" | "finding" | "running";
 
 /** Each source's stores; a source that cannot be read adds a notice instead. */
 async function loadSourceRows(
-  client: () => ProjectImportClient,
+  client: () => SessionImportDialogClient,
 ): Promise<{ readonly rows: SourceRow[]; readonly notices: string[] }> {
   const results = await Promise.allSettled(
     SOURCES.map((source) => Promise.resolve().then(() => client().sources({ source }))),
@@ -116,11 +116,11 @@ async function loadSourceRows(
   return { rows, notices };
 }
 
-function groupTitle(group: ProjectImportGroup): string {
+function groupTitle(group: SessionImportGroup): string {
   return group.folder === null ? "Folder unknown" : inferProjectTitleFromPath(group.folder);
 }
 
-function destinationValue(destination: ProjectImportDestination): string {
+function destinationValue(destination: SessionImportDestination): string {
   if (destination.kind === "project") return `project:${destination.projectId}`;
   return destination.kind === "new" ? "new" : "";
 }
@@ -130,8 +130,8 @@ function conversationCount(count: number): string {
 }
 
 function statusText(
-  candidate: ProjectImportCandidate,
-  status: ProjectImportItemStatus | undefined,
+  candidate: SessionImportOriginCandidate,
+  status: SessionImportItemStatus | undefined,
 ) {
   if (status?.state === "importing") return "Importing…";
   if (status?.state === "imported") return "Imported";
@@ -142,7 +142,7 @@ function statusText(
   return null;
 }
 
-export function ProjectImportPanel({
+export function SessionImportDialogPanel({
   nodeLabel,
   allowed,
   canCreateProjects,
@@ -151,7 +151,7 @@ export function ProjectImportPanel({
   client,
   createProject,
   onRunningChange,
-}: ProjectImportPanelProps) {
+}: SessionImportDialogPanelProps) {
   // Bumps when access changes or the panel goes away: work started before
   // then stops at its next step and publishes nothing.
   const generation = useRef(0);
@@ -162,16 +162,18 @@ export function ProjectImportPanel({
   const [choices, setChoices] = useState<Record<string, ContinuationChoice>>({});
   const [archived, setArchived] = useState(false);
   const [found, setFound] = useState(0);
-  const [candidates, setCandidates] = useState<readonly ProjectImportCandidate[] | null>(null);
+  const [candidates, setCandidates] = useState<readonly SessionImportOriginCandidate[] | null>(
+    null,
+  );
   const [notices, setNotices] = useState<readonly string[]>([]);
   const [selected, setSelected] = useState<ReadonlySet<string>>(new Set());
-  const [destinations, setDestinations] = useState<Record<string, ProjectImportDestination>>({});
+  const [destinations, setDestinations] = useState<Record<string, SessionImportDestination>>({});
   const [expanded, setExpanded] = useState<ReadonlySet<string>>(new Set());
-  const [statuses, setStatuses] = useState<Record<string, ProjectImportItemStatus>>({});
-  const [created, setCreated] = useState<readonly ProjectImportProject[]>([]);
+  const [statuses, setStatuses] = useState<Record<string, SessionImportItemStatus>>({});
+  const [created, setCreated] = useState<readonly SessionImportProject[]>([]);
   const [stopping, setStopping] = useState(false);
   const [progress, setProgress] = useState({ settled: 0, total: 0 });
-  const [summary, setSummary] = useState<ProjectImportRunSummary | null>(null);
+  const [summary, setSummary] = useState<SessionImportRunSummary | null>(null);
 
   // Gaining or losing access starts over from reading the sources; losing it
   // also ends a run, so the dialog can close again.
@@ -217,7 +219,7 @@ export function ProjectImportPanel({
     [created, projects],
   );
   const groups = useMemo(
-    () => groupProjectImportCandidates(candidates ?? [], knownProjects),
+    () => groupSessionImportCandidates(candidates ?? [], knownProjects),
     [candidates, knownProjects],
   );
   const done = useMemo(
@@ -232,7 +234,7 @@ export function ProjectImportPanel({
   const failedKeys = Object.entries(statuses)
     .filter(([, status]) => status.state === "failed")
     .map(([key]) => key);
-  const plan = planProjectImport({
+  const plan = planSessionImport({
     groups,
     selected,
     done,
@@ -251,7 +253,7 @@ export function ProjectImportPanel({
   const usableRows = rows.filter((row) => continuations.get(row.id)?.model !== undefined);
   const readRows = usableRows.filter((row) => rowEnabled[row.id] !== false);
   const busy = phase !== "idle" || !allowed;
-  const pendingKeys = pendingProjectImportKeys(groups, done);
+  const pendingKeys = pendingSessionImportKeys(groups, done);
   const createsProjects = plan.newProjects.length > 0;
 
   const find = () => {
@@ -259,7 +261,7 @@ export function ProjectImportPanel({
     setPhase("finding");
     setFound(0);
     setSummary(null);
-    void discoverProjectImportCandidates({
+    void discoverSessionImportCandidates({
       rows: readRows.map((row) => ({
         id: row.id,
         source: row.source,
@@ -286,7 +288,7 @@ export function ProjectImportPanel({
 
   const run = (keys: ReadonlySet<string>) => {
     const attempt = generation.current;
-    const runPlan = planProjectImport({
+    const runPlan = planSessionImport({
       groups,
       selected: keys,
       done,
@@ -299,7 +301,7 @@ export function ProjectImportPanel({
     setProgress({ settled: 0, total: runPlan.items.length });
     setPhase("running");
     const rowById = new Map(rows.map((row) => [row.id, row]));
-    void runProjectImport(runPlan, {
+    void runSessionImport(runPlan, {
       createProject,
       importCandidate: (candidate, projectId) => {
         const row = rowById.get(candidate.origin);
@@ -486,7 +488,7 @@ export function ProjectImportPanel({
           </div>
           <ul className="max-h-96 divide-y divide-border/60 overflow-y-auto rounded-lg border border-border/60">
             {groups.map((group) => (
-              <ProjectImportGroupRow
+              <SessionImportGroupRow
                 key={group.key}
                 group={group}
                 projects={knownProjects}
@@ -495,7 +497,7 @@ export function ProjectImportPanel({
                 selected={selected}
                 done={done}
                 statuses={statuses}
-                destination={resolveProjectImportDestination(
+                destination={resolveSessionImportDestination(
                   destinations[group.key] ?? group.suggested,
                   knownProjects,
                 )}
@@ -567,7 +569,7 @@ export function ProjectImportPanel({
   );
 }
 
-function ProjectImportGroupRow({
+function SessionImportGroupRow({
   group,
   projects,
   canCreateProjects,
@@ -581,30 +583,30 @@ function ProjectImportGroupRow({
   onSelectedChange,
   onDestinationChange,
 }: {
-  readonly group: ProjectImportGroup;
-  readonly projects: readonly ProjectImportProject[];
+  readonly group: SessionImportGroup;
+  readonly projects: readonly SessionImportProject[];
   readonly canCreateProjects: boolean;
   readonly busy: boolean;
   readonly selected: ReadonlySet<string>;
   readonly done: ReadonlySet<string>;
-  readonly statuses: Readonly<Record<string, ProjectImportItemStatus>>;
-  readonly destination: ProjectImportDestination;
+  readonly statuses: Readonly<Record<string, SessionImportItemStatus>>;
+  readonly destination: SessionImportDestination;
   readonly expanded: boolean;
   readonly onExpandedChange: (expanded: boolean) => void;
   readonly onSelectedChange: (
     update: (previous: ReadonlySet<string>) => ReadonlySet<string>,
   ) => void;
-  readonly onDestinationChange: (destination: ProjectImportDestination) => void;
+  readonly onDestinationChange: (destination: SessionImportDestination) => void;
 }) {
   const title = groupTitle(group);
-  const selection = projectImportGroupSelection(group, selected, done);
+  const selection = sessionImportGroupSelection(group, selected, done);
   const hasPending = group.candidates.some((candidate) =>
-    isProjectImportCandidatePending(candidate, done),
+    isSessionImportCandidatePending(candidate, done),
   );
   const failed = group.candidates.filter(
     (candidate) => statuses[candidate.key]?.state === "failed",
   ).length;
-  const options = projectImportDestinationOptions(group, projects).map((option) =>
+  const options = sessionImportDestinationOptions(group, projects).map((option) =>
     option.kind === "new"
       ? {
           value: "new",
@@ -628,7 +630,7 @@ function ProjectImportGroupRow({
             disabled={busy || !hasPending}
             onCheckedChange={(checked) =>
               onSelectedChange((previous) =>
-                setProjectImportGroupSelected(group, previous, done, checked === true),
+                setSessionImportGroupSelected(group, previous, done, checked === true),
               )
             }
           />
@@ -685,7 +687,7 @@ function ProjectImportGroupRow({
         <ul aria-label={`Conversations in ${title}`} className="ml-7 flex flex-col gap-1.5">
           {group.candidates.map((candidate) => {
             const status = statusText(candidate, statuses[candidate.key]);
-            const pending = isProjectImportCandidatePending(candidate, done);
+            const pending = isSessionImportCandidatePending(candidate, done);
             const itemFailed = statuses[candidate.key]?.state === "failed";
             return (
               <li key={candidate.key} className="flex gap-2">

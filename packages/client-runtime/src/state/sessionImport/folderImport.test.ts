@@ -2,21 +2,23 @@ import { ProjectId, ThreadId } from "@ryco/contracts";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
-  discoverProjectImportCandidates,
+  discoverSessionImportCandidates,
   findContainingImportProject,
-  groupProjectImportCandidates,
-  planProjectImport,
-  projectImportDestinationOptions,
-  projectImportGroupSelection,
-  runProjectImport,
-  setProjectImportGroupSelected,
-  type ProjectImportCandidate,
-  type ProjectImportItemStatus,
-  type ProjectImportProject,
-} from "./projectImport.ts";
+  groupSessionImportCandidates,
+  planSessionImport,
+  sessionImportDestinationOptions,
+  sessionImportGroupSelection,
+  runSessionImport,
+  setSessionImportGroupSelected,
+  type SessionImportOriginCandidate,
+  type SessionImportItemStatus,
+  type SessionImportProject,
+} from "./folderImport.ts";
 
 let sequence = 0;
-function candidate(overrides: Partial<ProjectImportCandidate> = {}): ProjectImportCandidate {
+function candidate(
+  overrides: Partial<SessionImportOriginCandidate> = {},
+): SessionImportOriginCandidate {
   sequence += 1;
   return {
     key: `key-${sequence}`,
@@ -33,13 +35,13 @@ function candidate(overrides: Partial<ProjectImportCandidate> = {}): ProjectImpo
   };
 }
 
-const project = (id: string, workspaceRoot: string): ProjectImportProject => ({
+const project = (id: string, workspaceRoot: string): SessionImportProject => ({
   id: ProjectId.make(id),
   name: id,
   workspaceRoot,
 });
 
-describe("groupProjectImportCandidates", () => {
+describe("groupSessionImportCandidates", () => {
   it("groups by the folder the node resolved, not by the recorded spelling, name or source", () => {
     const viaLink = candidate({ cwd: "/home/me/link/app", canonicalCwd: "/srv/app" });
     const direct = candidate({
@@ -50,7 +52,7 @@ describe("groupProjectImportCandidates", () => {
     });
     const sameName = candidate({ cwd: "/other/app", canonicalCwd: "/other/app" });
 
-    const groups = groupProjectImportCandidates([viaLink, direct, sameName], []);
+    const groups = groupSessionImportCandidates([viaLink, direct, sameName], []);
 
     expect(groups.map((group) => [group.folder, group.candidates.map((item) => item.key)])).toEqual(
       [
@@ -71,7 +73,7 @@ describe("groupProjectImportCandidates", () => {
     // `/srv/repository` only shares a prefix with `/srv/repo`; it is not inside it.
     const sibling = candidate({ cwd: "/srv/repository", canonicalCwd: "/srv/repository" });
 
-    const groups = groupProjectImportCandidates([inPackage, atRoot, sibling], projects);
+    const groups = groupSessionImportCandidates([inPackage, atRoot, sibling], projects);
 
     expect(groups.map((group) => [group.folder, group.suggested])).toEqual([
       ["/srv/repo", { kind: "project", projectId: "repo" }],
@@ -87,7 +89,7 @@ describe("groupProjectImportCandidates", () => {
     const noFolder = candidate({ cwd: "", canonicalCwd: null });
     const present = candidate({ cwd: "/zzz", canonicalCwd: "/zzz" });
 
-    const groups = groupProjectImportCandidates(
+    const groups = groupSessionImportCandidates(
       [noFolder, deletedElsewhere, deletedWorktree, present],
       projects,
     );
@@ -104,7 +106,7 @@ describe("groupProjectImportCandidates", () => {
     const first = candidate({ cwd: "/srv/app", canonicalCwd: undefined });
     const second = candidate({ cwd: "/srv/app/", canonicalCwd: undefined });
 
-    const [group] = groupProjectImportCandidates([first, second], []);
+    const [group] = groupSessionImportCandidates([first, second], []);
 
     expect(group).toMatchObject({
       folderState: "found",
@@ -119,7 +121,7 @@ describe("groupProjectImportCandidates", () => {
     const nested = candidate({ cwd: "c:\\work\\app\\src", canonicalCwd: "c:\\work\\app\\src" });
 
     expect(findContainingImportProject("c:\\work\\app\\src", projects)?.id).toBe("win");
-    expect(groupProjectImportCandidates([nested], projects)[0]!.suggested).toEqual({
+    expect(groupSessionImportCandidates([nested], projects)[0]!.suggested).toEqual({
       kind: "project",
       projectId: "win",
     });
@@ -129,17 +131,17 @@ describe("groupProjectImportCandidates", () => {
 describe("destinations and selection", () => {
   it("offers a new project only in the group's own existing folder that no project uses", () => {
     const projects = [project("repo", "/srv/repo")];
-    const [atRepo, elsewhere] = groupProjectImportCandidates(
+    const [atRepo, elsewhere] = groupSessionImportCandidates(
       [
         candidate({ cwd: "/srv/repo", canonicalCwd: "/srv/repo" }),
         candidate({ cwd: "/srv/web", canonicalCwd: "/srv/web" }),
       ],
       projects,
     );
-    expect(projectImportDestinationOptions(atRepo!, projects)).toEqual([
+    expect(sessionImportDestinationOptions(atRepo!, projects)).toEqual([
       { kind: "project", projectId: "repo" },
     ]);
-    expect(projectImportDestinationOptions(elsewhere!, projects)).toEqual([
+    expect(sessionImportDestinationOptions(elsewhere!, projects)).toEqual([
       { kind: "new", workspaceRoot: "/srv/web" },
       { kind: "project", projectId: "repo" },
     ]);
@@ -154,28 +156,28 @@ describe("destinations and selection", () => {
     });
     const paused = candidate({ cwd: "/srv/app", canonicalCwd: "/srv/app", quarantined: true });
     const doneHere = candidate({ cwd: "/srv/app", canonicalCwd: "/srv/app" });
-    const [group] = groupProjectImportCandidates([pending, imported, paused, doneHere], []);
+    const [group] = groupSessionImportCandidates([pending, imported, paused, doneHere], []);
     const done = new Set([doneHere.key]);
 
-    const selected = setProjectImportGroupSelected(group!, new Set(), done, true);
+    const selected = setSessionImportGroupSelected(group!, new Set(), done, true);
 
     expect([...selected]).toEqual([pending.key]);
-    expect(projectImportGroupSelection(group!, selected, done)).toBe("all");
-    expect(projectImportGroupSelection(group!, new Set(), done)).toBe("none");
-    expect([...setProjectImportGroupSelected(group!, selected, done, false)]).toEqual([]);
+    expect(sessionImportGroupSelection(group!, selected, done)).toBe("all");
+    expect(sessionImportGroupSelection(group!, new Set(), done)).toBe("none");
+    expect([...setSessionImportGroupSelected(group!, selected, done, false)]).toEqual([]);
   });
 });
 
-describe("planProjectImport", () => {
+describe("planSessionImport", () => {
   it("plans selected conversations by destination and counts groups still without one", () => {
     const projects = [project("repo", "/srv/repo")];
     const toRepo = candidate({ cwd: "/srv/repo/src", canonicalCwd: "/srv/repo/src" });
     const toNew = candidate({ cwd: "/srv/web", canonicalCwd: "/srv/web" });
     const unassigned = candidate({ cwd: "/gone", canonicalCwd: null });
     const notSelected = candidate({ cwd: "/srv/api", canonicalCwd: "/srv/api" });
-    const groups = groupProjectImportCandidates([toRepo, toNew, unassigned, notSelected], projects);
+    const groups = groupSessionImportCandidates([toRepo, toNew, unassigned, notSelected], projects);
 
-    const plan = planProjectImport({
+    const plan = planSessionImport({
       groups,
       selected: new Set([toRepo.key, toNew.key, unassigned.key]),
       done: new Set(),
@@ -190,7 +192,7 @@ describe("planProjectImport", () => {
     expect(plan.newProjects).toEqual(["/srv/web"]);
     expect(plan.unassigned).toBe(1);
 
-    const assigned = planProjectImport({
+    const assigned = planSessionImport({
       groups,
       selected: new Set([unassigned.key]),
       done: new Set(),
@@ -208,10 +210,10 @@ describe("planProjectImport", () => {
 
   it("imports into a project that now uses the folder instead of creating another, and unassigns a deleted one", () => {
     const toNew = candidate({ cwd: "/srv/web", canonicalCwd: "/srv/web" });
-    const groups = groupProjectImportCandidates([toNew], []);
+    const groups = groupSessionImportCandidates([toNew], []);
     const selected = new Set([toNew.key]);
 
-    const reused = planProjectImport({
+    const reused = planSessionImport({
       groups,
       selected,
       done: new Set(),
@@ -221,7 +223,7 @@ describe("planProjectImport", () => {
     expect(reused.items[0]!.target).toEqual({ kind: "project", projectId: "created" });
     expect(reused.newProjects).toEqual([]);
 
-    const deleted = planProjectImport({
+    const deleted = planSessionImport({
       groups,
       selected,
       done: new Set(),
@@ -233,10 +235,10 @@ describe("planProjectImport", () => {
   });
 });
 
-describe("runProjectImport", () => {
+describe("runSessionImport", () => {
   function harness(options: { failCreate?: boolean; failKeys?: ReadonlySet<string> } = {}) {
     const calls: string[] = [];
-    const statuses: [string, ProjectImportItemStatus][] = [];
+    const statuses: [string, SessionImportItemStatus][] = [];
     let created = 0;
     let stop = false;
     return {
@@ -252,7 +254,7 @@ describe("runProjectImport", () => {
           created += 1;
           return ProjectId.make(`created-${created}`);
         },
-        importCandidate: async (item: ProjectImportCandidate, projectId: ProjectId) => {
+        importCandidate: async (item: SessionImportOriginCandidate, projectId: ProjectId) => {
           calls.push(`import ${item.key} -> ${projectId}`);
           if (options.failKeys?.has(item.key)) throw new Error("Provider unavailable");
           return { threadId: ThreadId.make(`thread-${item.key}`), alreadyImported: false };
@@ -261,7 +263,7 @@ describe("runProjectImport", () => {
         onProjectCreated: (root: string, projectId: ProjectId) => {
           calls.push(`created ${root} = ${projectId}`);
         },
-        onItem: (key: string, status: ProjectImportItemStatus) => {
+        onItem: (key: string, status: SessionImportItemStatus) => {
           statuses.push([key, status]);
         },
       },
@@ -273,8 +275,8 @@ describe("runProjectImport", () => {
     const first = candidate({ cwd: "/srv/web", canonicalCwd: "/srv/web" });
     const second = candidate({ cwd: "/srv/web", canonicalCwd: "/srv/web" });
     const third = candidate({ cwd: "/srv/repo", canonicalCwd: "/srv/repo" });
-    const groups = groupProjectImportCandidates([first, second, third], projects);
-    const plan = planProjectImport({
+    const groups = groupSessionImportCandidates([first, second, third], projects);
+    const plan = planSessionImport({
       groups,
       selected: new Set([first.key, second.key, third.key]),
       done: new Set(),
@@ -288,7 +290,7 @@ describe("runProjectImport", () => {
     const { first, second, third, plan } = twoNewOneExisting();
     const run = harness();
 
-    const summary = await runProjectImport(plan, run.handlers);
+    const summary = await runSessionImport(plan, run.handlers);
 
     expect(summary).toEqual({ imported: 3, failed: 0, stopped: false });
     expect(run.calls).toEqual([
@@ -304,7 +306,7 @@ describe("runProjectImport", () => {
     const { first, second, third, plan } = twoNewOneExisting();
     const run = harness({ failCreate: true, failKeys: new Set([third.key]) });
 
-    const summary = await runProjectImport(plan, run.handlers);
+    const summary = await runSessionImport(plan, run.handlers);
 
     expect(summary).toEqual({ imported: 0, failed: 3, stopped: false });
     expect(run.calls.filter((call) => call.startsWith("create"))).toEqual(["create /srv/web"]);
@@ -327,20 +329,20 @@ describe("runProjectImport", () => {
     const run = harness();
     const handlers = {
       ...run.handlers,
-      importCandidate: async (item: ProjectImportCandidate, projectId: ProjectId) => {
+      importCandidate: async (item: SessionImportOriginCandidate, projectId: ProjectId) => {
         run.requestStop();
         return run.handlers.importCandidate(item, projectId);
       },
     };
 
-    const summary = await runProjectImport(plan, handlers);
+    const summary = await runSessionImport(plan, handlers);
 
     expect(summary).toEqual({ imported: 1, failed: 0, stopped: true });
     expect(run.calls).toEqual([`import ${third.key} -> repo`]);
   });
 });
 
-describe("discoverProjectImportCandidates", () => {
+describe("discoverSessionImportCandidates", () => {
   const rows = [
     { id: "codex:default", source: "codex", storeKey: "c".repeat(64), label: "Codex" },
     { id: "claude:default", source: "claudeAgent", storeKey: "d".repeat(64), label: "Claude Code" },
@@ -350,7 +352,7 @@ describe("discoverProjectImportCandidates", () => {
     const requests: string[] = [];
     const first = candidate();
     const second = candidate();
-    const discovery = await discoverProjectImportCandidates({
+    const discovery = await discoverSessionImportCandidates({
       rows,
       includeArchived: true,
       shouldContinue: () => true,
@@ -374,7 +376,7 @@ describe("discoverProjectImportCandidates", () => {
 
   it("ends a store whose page does not move forward, and stops when told to", async () => {
     let calls = 0;
-    const stuck = await discoverProjectImportCandidates({
+    const stuck = await discoverSessionImportCandidates({
       rows: [rows[0]],
       includeArchived: false,
       shouldContinue: () => true,
@@ -386,7 +388,7 @@ describe("discoverProjectImportCandidates", () => {
     expect(calls).toBe(1);
     expect(stuck.complete).toBe(true);
 
-    const stopped = await discoverProjectImportCandidates({
+    const stopped = await discoverSessionImportCandidates({
       rows,
       includeArchived: false,
       shouldContinue: () => false,

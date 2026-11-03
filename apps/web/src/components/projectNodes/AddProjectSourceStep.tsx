@@ -31,9 +31,9 @@ import { useSourceControlRepositorySearch } from "../../rpc/useSourceControl";
 import type { Project } from "../../types";
 import { ProjectFavicon } from "../ProjectFavicon";
 import {
-  openProjectImportDialog,
-  preloadProjectImportDialog,
-} from "../projectImport/projectImportDialogStore";
+  openSessionImportDialog,
+  preloadSessionImportDialog,
+} from "../sessionImport/sessionImportDialogStore";
 import { Menu, MenuItem, MenuPopup, MenuTrigger } from "../ui/menu";
 import { Spinner } from "../ui/spinner";
 import {
@@ -214,10 +214,10 @@ export function AddProjectSourceStep(props: AddProjectSourceStepProps) {
           `Your conversations on ${node.label}, grouped into projects by folder`
         }
         disabled={!sessionImportCapability.allowed}
-        onIntent={preloadProjectImportDialog}
+        onIntent={preloadSessionImportDialog}
         onClick={() => {
           closeAddProject();
-          openProjectImportDialog({ environmentId: node.environmentId });
+          openSessionImportDialog({ environmentId: node.environmentId });
         }}
       />
     </>

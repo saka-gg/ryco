@@ -1,10 +1,10 @@
-// FILE: ProjectImportDialog.tsx
+// FILE: SessionImportDialog.tsx
 // Purpose: The app's one "Import from Codex or Claude Code" dialog: resolves
 //          the node to import on, who may import there, its projects and
 //          providers, and creates missing projects the way the project picker
-//          does. The import itself is `ProjectImportPanel`.
+//          does. The import itself is `SessionImportDialogPanel`.
 // Layer: Web UI. Mounted lazily by `RootAppShell`, opened through
-//        `projectImportDialogStore.ts`.
+//        `sessionImportDialogStore.ts`.
 
 import { type EnvironmentId, type ProjectId, WS_METHODS } from "@ryco/contracts";
 import { excludeChatProjects } from "@ryco/shared/projectKind";
@@ -27,8 +27,8 @@ import {
   DialogPopup,
   DialogTitle,
 } from "../ui/dialog";
-import { ProjectImportPanel } from "./ProjectImportPanel";
-import { closeProjectImportDialog, useProjectImportDialogStore } from "./projectImportDialogStore";
+import { SessionImportDialogPanel } from "./SessionImportDialogPanel";
+import { closeSessionImportDialog, useSessionImportDialogStore } from "./sessionImportDialogStore";
 
 /**
  * Creates a project in an existing folder on the node through the same
@@ -49,26 +49,26 @@ async function createImportProject(
   return projectId;
 }
 
-/** Mount once; open with `openProjectImportDialog`. */
-export function ProjectImportDialog() {
-  const open = useProjectImportDialogStore((state) => state.open);
-  const token = useProjectImportDialogStore((state) => state.token);
-  const requestedEnvironmentId = useProjectImportDialogStore((state) => state.environmentId);
+/** Mount once; open with `openSessionImportDialog`. */
+export function SessionImportDialog() {
+  const open = useSessionImportDialogStore((state) => state.open);
+  const token = useSessionImportDialogStore((state) => state.token);
+  const requestedEnvironmentId = useSessionImportDialogStore((state) => state.environmentId);
   // While an import runs the dialog stays: Stop ends it after the current conversation.
   const [running, setRunning] = useState(false);
   return (
     <Dialog
       open={open}
       onOpenChange={(next) => {
-        if (!next && !running) closeProjectImportDialog();
+        if (!next && !running) closeSessionImportDialog();
       }}
     >
       <DialogPopup
         className="max-w-2xl"
-        data-testid="project-import-dialog"
+        data-testid="session-import-dialog"
         bottomStickOnMobile={false}
       >
-        <ProjectImportDialogBody
+        <SessionImportDialogBody
           key={token}
           requestedEnvironmentId={requestedEnvironmentId}
           onRunningChange={setRunning}
@@ -78,7 +78,7 @@ export function ProjectImportDialog() {
   );
 }
 
-function ProjectImportDialogBody(props: {
+function SessionImportDialogBody(props: {
   readonly requestedEnvironmentId: EnvironmentId | null;
   readonly onRunningChange: (running: boolean) => void;
 }) {
@@ -107,7 +107,7 @@ function ProjectImportDialogBody(props: {
         </DialogDescription>
       </DialogHeader>
       <DialogPanel>
-        <ProjectImportPanel
+        <SessionImportDialogPanel
           key={environmentId ?? "none"}
           nodeLabel={nodeLabel}
           allowed={allowed}

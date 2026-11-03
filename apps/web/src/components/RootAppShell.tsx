@@ -17,7 +17,7 @@ import { ContextMenuActionSheetHost } from "./shell/phone/ContextMenuActionSheet
 import { SshPasswordPromptDialog } from "./desktop/SshPasswordPromptDialog";
 import { WorkspaceReviewDialog } from "./worktrees/WorkspaceReviewDialog";
 import { useAutomationsDialogStore } from "./automations/automationsDialogStore";
-import { useProjectImportDialogStore } from "./projectImport/projectImportDialogStore";
+import { useSessionImportDialogStore } from "./sessionImport/sessionImportDialogStore";
 import { usePromoteChatDialogStore } from "./chat/promoteChatDialogStore";
 import { useForkThreadDialogStore } from "./chat/forkThreadDialogStore";
 import {
@@ -170,7 +170,7 @@ export function RootAppShell({ authGateState }: RootAppShellProps) {
         {chatAvailable ? <PromoteChatDialogMount /> : null}
         {chatAvailable ? <ForkThreadDialogMount /> : null}
         {chatAvailable ? <ProjectNodesDialogsMount /> : null}
-        {chatAvailable ? <ProjectImportDialogMount /> : null}
+        {chatAvailable ? <SessionImportDialogMount /> : null}
         {chatAvailable ? <MissedAutomationRunsNotice /> : null}
         {ownsThreadAlerts ? <ThreadAlertsBootstrap /> : null}
         {authGateState.status === "hosted-static" ? <HostedStaticEnvironmentBootstrap /> : null}
@@ -281,15 +281,15 @@ function useResumeProjectCopies(enabled: boolean): void {
 
 const PROJECT_COPY_RESUME_IDLE_TIMEOUT_MS = 5_000;
 
-const ProjectImportDialog = preloadableLazy(() =>
-  import("./projectImport/ProjectImportDialog").then((module) => module.ProjectImportDialog),
+const SessionImportDialog = preloadableLazy(() =>
+  import("./sessionImport/SessionImportDialog").then((module) => module.SessionImportDialog),
 );
 
 /** "Import from Codex or Claude Code" loads the first time something opens it, then stays mounted. */
-function ProjectImportDialogMount() {
-  const open = useProjectImportDialogStore((state) => state.open);
-  if (!useMountedOnceWanted(ProjectImportDialog, open)) return null;
-  return <ProjectImportDialog />;
+function SessionImportDialogMount() {
+  const open = useSessionImportDialogStore((state) => state.open);
+  if (!useMountedOnceWanted(SessionImportDialog, open)) return null;
+  return <SessionImportDialog />;
 }
 
 const THREAD_ROUTE_ID = "/_chat/$environmentId/$threadId";

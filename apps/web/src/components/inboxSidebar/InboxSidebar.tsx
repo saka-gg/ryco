@@ -23,7 +23,7 @@ import { SIDEBAR_AUTO_ANIMATE_VISIBLE_THREAD_LIMIT } from "../Sidebar.logic";
 import { handleSidebarListScroll } from "../sidebar/sidebarFold";
 import { omnifieldListQuery } from "../sidebar/sidebarOmnifield.logic";
 import { Button } from "../ui/button";
-import { ProjectImportBanner } from "../projectImport/ProjectImportBanner";
+import { SessionImportBanner } from "../sessionImport/SessionImportBanner";
 import { SidebarContent } from "../ui/sidebar";
 import { TooltipCreateHandle } from "../ui/tooltip";
 import { InboxDelegatedGroup } from "./InboxDelegatedGroup";
@@ -356,7 +356,7 @@ export function InboxSidebar(props: InboxSidebarProps) {
                 </Button>
               ) : null}
               {!hasFilters && hasNoProjects && !isPhone ? (
-                <ProjectImportBanner className="mt-2 w-full" />
+                <SessionImportBanner className="mt-2 w-full" />
               ) : null}
             </div>
           ) : (

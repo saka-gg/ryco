@@ -3,18 +3,18 @@ import { page } from "vite-plus/test/browser";
 import { beforeEach, expect, it } from "vite-plus/test";
 import { render } from "vitest-browser-react";
 
-import { PROJECT_IMPORT_BANNER_DISMISSED_KEY, ProjectImportBanner } from "./ProjectImportBanner";
-import { useProjectImportDialogStore } from "./projectImportDialogStore";
+import { SESSION_IMPORT_BANNER_DISMISSED_KEY, SessionImportBanner } from "./SessionImportBanner";
+import { useSessionImportDialogStore } from "./sessionImportDialogStore";
 
 beforeEach(() => {
-  window.localStorage.removeItem(PROJECT_IMPORT_BANNER_DISMISSED_KEY);
-  useProjectImportDialogStore.setState({ open: false, token: 0, environmentId: null });
+  window.localStorage.removeItem(SESSION_IMPORT_BANNER_DISMISSED_KEY);
+  useSessionImportDialogStore.setState({ open: false, token: 0, environmentId: null });
 });
 
 it("opens the import dialog, and once dismissed stays hidden on this device", async () => {
-  const first = await render(<ProjectImportBanner />);
+  const first = await render(<SessionImportBanner />);
   await page.getByRole("button", { name: "Import projects…" }).click();
-  expect(useProjectImportDialogStore.getState()).toMatchObject({ open: true, token: 1 });
+  expect(useSessionImportDialogStore.getState()).toMatchObject({ open: true, token: 1 });
 
   await page.getByRole("button", { name: "Dismiss import suggestion" }).click();
   await expect
@@ -22,7 +22,7 @@ it("opens the import dialog, and once dismissed stays hidden on this device", as
     .not.toBeInTheDocument();
   await first.unmount();
 
-  await render(<ProjectImportBanner />);
+  await render(<SessionImportBanner />);
   await expect
     .element(page.getByRole("button", { name: "Import projects…" }))
     .not.toBeInTheDocument();
