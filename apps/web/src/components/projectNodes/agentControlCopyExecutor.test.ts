@@ -114,6 +114,7 @@ const inspection = {
     preferredRemoteName: "origin",
     projectMetadataDir: ".ryco",
     hasCustomAvatar: false,
+    overrides: {},
     relativeRootInRepository: "",
   },
   estimates: [],

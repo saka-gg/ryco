@@ -224,6 +224,7 @@ class FakeNode {
               preferredRemoteName: null,
               projectMetadataDir: ".ryco",
               hasCustomAvatar: true,
+              overrides: { worktreeBranchPrefix: "ada", runSetupScript: false },
               relativeRootInRepository: "",
             },
             artifacts: kinds.flatMap((kind) => {
@@ -691,6 +692,8 @@ describe("startProjectCopy", () => {
       checkout: { branch: "feature", headOid: HEAD },
       changes: { transferId: transferOf("changes-patch"), baseOid: HEAD },
       avatarTransferId: transferOf("avatar"),
+      // The project's overrides as the source exported them.
+      settings: { overrides: { worktreeBranchPrefix: "ada", runSetupScript: false } },
     });
     expect(source.disposed).toEqual([outcome.record.exportId]);
     expect(io.acquired).toEqual([

@@ -98,6 +98,7 @@ function inspection(
       preferredRemoteName: "origin",
       projectMetadataDir: ".ryco",
       hasCustomAvatar: true,
+      overrides: {},
       relativeRootInRepository: "",
     },
     estimates: Object.entries(estimates).map(([kind, estimatedBytes]) => ({

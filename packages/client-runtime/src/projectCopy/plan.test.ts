@@ -136,6 +136,7 @@ function inspection(overrides: {
       preferredRemoteName: "origin",
       projectMetadataDir: ".ryco",
       hasCustomAvatar: true,
+      overrides: { defaultThreadEnvMode: "worktree", pullRequestTemplates: false },
       relativeRootInRepository: "",
     },
     estimates: Object.entries(estimates).map(([kind, value]) => ({
@@ -503,6 +504,8 @@ describe("planProjectCopyOptions", () => {
         customSystemPrompt: "Be brief.",
         preferredRemoteName: "upstream",
         projectMetadataDir: ".ryco",
+        // A legacy source cannot export its overrides: the copy keeps the destination's.
+        overrides: {},
       },
     });
     expect(projectCopyExportInclude(built.plan)).toBeNull();
@@ -780,8 +783,34 @@ describe("buildProjectImportStartInput", () => {
       changes: { transferId: transfer(2), baseOid: OID, ignoredPaths: [".env"] },
       avatarTransferId: transfer(3),
       setup: { command: "bun install", saveAsScript: false },
-      settings: { preferredRemoteName: "origin", projectMetadataDir: ".ryco" },
+      settings: {
+        preferredRemoteName: "origin",
+        projectMetadataDir: ".ryco",
+        overrides: { defaultThreadEnvMode: "worktree", pullRequestTemplates: false },
+      },
     });
+  });
+
+  it("carries the source's overrides only with the project settings", () => {
+    const withSettings = buildProjectImportStartInput({
+      plan: runPlan({}),
+      importId,
+      projectId: "new-project" as ProjectId,
+      exportResult: exportResult(),
+      transfers: {},
+    });
+    expect(withSettings.input.settings?.overrides).toEqual({
+      defaultThreadEnvMode: "worktree",
+      pullRequestTemplates: false,
+    });
+    const withoutSettings = buildProjectImportStartInput({
+      plan: runPlan({ copySettings: false }),
+      importId,
+      projectId: "new-project" as ProjectId,
+      exportResult: exportResult(),
+      transfers: {},
+    });
+    expect(withoutSettings.input.settings).toBeNull();
   });
 
   it("checks out the remote branch when HEAD stays behind, and drops changes then", () => {

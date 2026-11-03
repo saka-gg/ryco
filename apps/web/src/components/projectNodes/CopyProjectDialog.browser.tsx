@@ -209,6 +209,7 @@ function inspection(
       preferredRemoteName: null,
       projectMetadataDir: ".ryco",
       hasCustomAvatar: false,
+      overrides: {},
       relativeRootInRepository: "",
     },
     estimates: [

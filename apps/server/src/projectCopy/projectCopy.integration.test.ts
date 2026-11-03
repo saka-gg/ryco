@@ -25,7 +25,7 @@ import path from "node:path";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { afterEach, assert, describe, it } from "@effect/vitest";
-import { CommandId, ProjectId, type ProjectScript } from "@ryco/contracts";
+import { CommandId, ProjectId, ProviderInstanceId, type ProjectScript } from "@ryco/contracts";
 import {
   PROJECT_COPY_CHUNK_BYTES,
   ProjectExportId,
@@ -207,7 +207,10 @@ const codeFolderOnB = () => {
 
 // ── The client in the middle ──────────────────────────────────────────
 
-/** Registers the source project on A, with the settings a copy carries. */
+/** The overrides the source project sets for itself on A that a copy carries. */
+const SOURCE_OVERRIDES = { defaultThreadEnvMode: "worktree", pullRequestTemplates: false } as const;
+
+/** Registers the source project on A, with the settings a copy carries (and one it leaves). */
 const registerSource = (fixture: Fixture) =>
   Effect.gen(function* () {
     const engine = yield* OrchestrationEngineService;
@@ -229,6 +232,16 @@ const registerSource = (fixture: Fixture) =>
       projectId,
       scripts: [SETUP_SCRIPT],
       preferredRemoteName: "origin",
+    });
+    const settings = yield* ServerSettingsService;
+    yield* settings.updateSettings({
+      projectPreferences: {
+        [projectId]: {
+          ...SOURCE_OVERRIDES,
+          // Names one of A's provider instances: it stays on A.
+          initialModelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5" },
+        },
+      },
     });
     return projectId;
   });
@@ -376,6 +389,7 @@ const importInputFrom = (
       customSystemPrompt: exported.settings.customSystemPrompt,
       preferredRemoteName: exported.settings.preferredRemoteName,
       projectMetadataDir: exported.settings.projectMetadataDir,
+      overrides: exported.settings.overrides,
     },
     avatarTransferId: null,
     setup: { command: SETUP_SCRIPT.command, saveAsScript: false },
@@ -436,7 +450,10 @@ const canonicalKeyOf = (node: TestNode, checkout: string) =>
     }),
   );
 
-/** B registered the project with A's title, root, prompt, preferred remote and scripts. */
+/**
+ * B registered the project with A's title, root, prompt, preferred remote, scripts and
+ * overrides, without A's initial model.
+ */
 const assertRegistered = (b: TestNode, input: ProjectImportStartInput, destination: string) =>
   b.run(
     Effect.gen(function* () {
@@ -449,6 +466,8 @@ const assertRegistered = (b: TestNode, input: ProjectImportStartInput, destinati
       assert.equal(project.value.customSystemPrompt, "Be careful with the database.");
       assert.equal(project.value.preferredRemoteName, "origin");
       assert.deepEqual(project.value.scripts, [SETUP_SCRIPT]);
+      const settings = yield* (yield* ServerSettingsService).getSettings;
+      assert.deepEqual(settings.projectPreferences[input.projectId], SOURCE_OVERRIDES);
     }),
   );
 
@@ -500,6 +519,7 @@ describe("cross-node project copy", () => {
         ]);
         assert.equal(exported.repository.cloneRemoteName, "origin");
         assert.deepEqual(exported.settings.scripts, [SETUP_SCRIPT]);
+        assert.deepEqual(exported.settings.overrides, SOURCE_OVERRIDES);
 
         // The client in the middle: A's chunks become B's transfers; then the export goes.
         const transfers = yield* transferArtifacts(a, b, exportId, exported.artifacts);

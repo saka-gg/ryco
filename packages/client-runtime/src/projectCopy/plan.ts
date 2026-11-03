@@ -1004,6 +1004,8 @@ function legacySettings(project: ProjectCopyLegacyProject): ProjectImportSetting
         ? project.preferredRemoteName
         : null,
     projectMetadataDir: project.projectMetadataDir,
+    // A source without project copy cannot export its overrides: the copy keeps node settings.
+    overrides: {},
   };
 }
 
@@ -1271,6 +1273,7 @@ export function buildProjectImportStartInput(input: {
                 ? settings.preferredRemoteName
                 : null,
             projectMetadataDir: settings.projectMetadataDir,
+            overrides: settings.overrides,
           }
         : null,
       avatarTransferId: transfers.avatar ?? null,

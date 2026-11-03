@@ -1144,7 +1144,7 @@ function CopyOptions(props: {
         options.choices.copySettings && options.copyAvatar.reason ? options.copyAvatar.reason : null
       }
     >
-      Copy project settings: scripts, avatar, system prompt
+      Copy project settings: scripts, avatar, system prompt, overrides
     </CheckRow>,
   );
   return <>{rows}</>;

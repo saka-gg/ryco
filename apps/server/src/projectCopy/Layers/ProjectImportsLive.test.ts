@@ -6,7 +6,14 @@ import path from "node:path";
 
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { assert, describe, it } from "@effect/vitest";
-import { ProjectId, type OrchestrationCommand, type ServerProvider } from "@ryco/contracts";
+import {
+  DEFAULT_SERVER_SETTINGS,
+  ProjectId,
+  type OrchestrationCommand,
+  type ServerProvider,
+  ServerSettingsError,
+  type ServerSettingsPatch,
+} from "@ryco/contracts";
 import {
   ProjectCopyError,
   ProjectImportSnapshot,
@@ -15,6 +22,7 @@ import {
   type ProjectImportStepId,
   type ProjectImportStepStatus,
 } from "@ryco/contracts/project-copy";
+import { applyServerSettingsPatch } from "@ryco/shared/serverSettings";
 import { Deferred, Effect, Fiber, Layer, Option, Schema, Stream } from "effect";
 import { TestClock } from "effect/testing";
 import * as SqlClient from "effect/sql/SqlClient";
@@ -32,6 +40,7 @@ import {
   ProviderRegistry,
   type ProviderRegistryShape,
 } from "../../provider/Services/ProviderRegistry.ts";
+import { ServerSettingsService } from "../../serverSettings.ts";
 import { WorkspaceAccessPolicyLayer } from "../../workspace/Layers/WorkspaceAccessPolicy.ts";
 import { withProjectDestinationReservation } from "../destinationReservation.ts";
 import { ProjectImportStepError, ProjectSetupCommandError } from "../Errors.ts";
@@ -135,6 +144,8 @@ interface HarnessOptions {
   /** The cloned repository has a `.gitmodules`, so the (failing) submodule step runs. */
   readonly withSubmodules?: boolean;
   readonly processes?: ProjectImportProcessControl;
+  /** Every node settings write fails, as a full disk would. */
+  readonly failSettingsWrites?: boolean;
 }
 
 interface HarnessState {
@@ -146,6 +157,9 @@ interface HarnessState {
   /** Called after every recorded event; `untilEvent` waits through these. */
   readonly eventListeners: Set<() => void>;
   readonly transfersDir: string;
+  /** Every node settings patch, in order. */
+  readonly settingsPatches: Array<ServerSettingsPatch>;
+  settings: typeof DEFAULT_SERVER_SETTINGS;
 }
 
 const makeHarness = (options: HarnessOptions = {}) => {
@@ -157,6 +171,8 @@ const makeHarness = (options: HarnessOptions = {}) => {
     events: [],
     eventListeners: new Set(),
     transfersDir: tempDir("transfers"),
+    settingsPatches: [],
+    settings: DEFAULT_SERVER_SETTINGS,
   };
   const record = (event: string) => {
     state.events.push(event);
@@ -443,6 +459,18 @@ const makeHarness = (options: HarnessOptions = {}) => {
     ]),
   } as unknown as ProviderRegistryShape);
 
+  const serverSettings = Layer.mock(ServerSettingsService)({
+    getSettings: Effect.sync(() => state.settings),
+    updateSettings: (patch) =>
+      options.failSettingsWrites
+        ? Effect.fail(new ServerSettingsError({ settingsPath: "<test>", detail: "disk full" }))
+        : Effect.sync(() => {
+            state.settingsPatches.push(patch);
+            state.settings = applyServerSettingsPatch(state.settings, patch);
+            return state.settings;
+          }),
+  });
+
   const processes: ProjectImportProcessControl = options.processes ?? {
     stopRecordedChild: (child) =>
       Effect.sync(() => {
@@ -460,6 +488,7 @@ const makeHarness = (options: HarnessOptions = {}) => {
     engine,
     avatars,
     providers,
+    serverSettings,
     WorkspaceAccessPolicyLayer(undefined),
   ).pipe(
     Layer.provideMerge(ProjectionProjectRepositoryLive),
@@ -678,6 +707,7 @@ describe("ProjectImportsLive", () => {
             customSystemPrompt: "Be careful.",
             preferredRemoteName: "upstream",
             projectMetadataDir: ".ryco",
+            overrides: { defaultThreadEnvMode: "worktree", worktreeBranchPrefix: "team" },
           },
           avatarTransferId: transferId(),
           setup: { command: "bun install", saveAsScript: true },
@@ -753,6 +783,11 @@ describe("ProjectImportsLive", () => {
               );
               assert.equal(meta.preferredRemoteName, "upstream");
             }
+            // The source's overrides, saved for the new project as the settings page saves them.
+            assert.deepEqual(harness.state.settings.projectPreferences[input.projectId], {
+              defaultThreadEnvMode: "worktree",
+              worktreeBranchPrefix: "team",
+            });
             assert.equal(avatar?.type, "project.avatar.set");
             assert.deepEqual(harness.state.avatarsWritten, [`${input.projectId}:image/png`]);
             if (turn?.type === "thread.turn.start") {
@@ -894,6 +929,38 @@ describe("ProjectImportsLive", () => {
             const discarded = yield* imports.discard({ importId: input.importId });
             assert.isFalse(discarded.deleted);
             assert.isTrue(fs.existsSync(destination));
+          }),
+        );
+      }),
+    ),
+  );
+
+  it.effect("an override that cannot be saved leaves a warning, not a failed import", () =>
+    memoryDatabase(
+      Effect.gen(function* () {
+        const harness = makeHarness({ failSettingsWrites: true });
+        const input = makeInput({
+          destinationPath: path.join(tempDir("overrides-fail"), "app"),
+          settings: {
+            scripts: [],
+            customSystemPrompt: null,
+            preferredRemoteName: "origin",
+            projectMetadataDir: ".ryco",
+            overrides: { pullRequestTemplates: false },
+          },
+        });
+        yield* withImports(harness, (imports) =>
+          Effect.gen(function* () {
+            yield* imports.start(input);
+            const done = yield* settled(imports, input.importId);
+            assert.equal(done.status, "completed");
+            assert.equal(stepStatus(done, "settings"), "failed");
+            assert.deepEqual(done.warnings, ["The project's overrides were not copied: disk full"]);
+            // The scripts and preferred remote still arrived.
+            assert.deepEqual(
+              harness.state.commands.map((command) => command.type),
+              ["project.create", "project.meta.update"],
+            );
           }),
         );
       }),
@@ -1178,6 +1245,7 @@ describe("ProjectImportsLive", () => {
               customSystemPrompt: null,
               preferredRemoteName: "origin",
               projectMetadataDir: ".ryco",
+              overrides: {},
             },
             setup: { command: "make", saveAsScript: false },
           });
@@ -1428,6 +1496,7 @@ describe("ProjectImportsLive", () => {
           customSystemPrompt: null,
           preferredRemoteName: "origin",
           projectMetadataDir: ".ryco",
+          overrides: { runSetupScript: false },
         };
         // One crashed while saving its settings, the other while copying its avatar.
         const duringSettings = makeInput({
@@ -1459,6 +1528,10 @@ describe("ProjectImportsLive", () => {
             assert.equal(stepStatus(settingsAfter, "avatar"), "done");
             const avatarAfter = Option.getOrThrow(yield* imports.get(duringAvatar.importId));
             assert.equal(stepStatus(avatarAfter, "avatar"), "done");
+            // The replayed settings step saved the overrides too.
+            assert.deepEqual(harness.state.settings.projectPreferences[duringSettings.projectId], {
+              runSetupScript: false,
+            });
             assert.sameMembers(
               harness.state.commands.map((command) => command.commandId),
               [

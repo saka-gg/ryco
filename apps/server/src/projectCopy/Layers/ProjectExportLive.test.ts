@@ -8,9 +8,12 @@ import { promisify } from "node:util";
 import * as NodeServices from "@effect/platform-node/NodeServices";
 import { describe, expect, it } from "@effect/vitest";
 import {
+  DEFAULT_SERVER_SETTINGS,
   type OrchestrationProjectShell,
   type OrchestrationWorktreeShell,
   ProjectId,
+  type ProjectPreferences,
+  ProviderInstanceId,
 } from "@ryco/contracts";
 import {
   type ProjectExportArtifact,
@@ -30,6 +33,7 @@ import {
   ProjectAvatarStore,
   type ProjectAvatarStoreShape,
 } from "../../project/Services/ProjectAvatarStore.ts";
+import { ServerSettingsService } from "../../serverSettings.ts";
 import { SourceControlProviderRegistry } from "../../sourceControl/SourceControlProviderRegistry.ts";
 import * as GitVcsDriver from "../../vcs/GitVcsDriver.ts";
 import { GitNetworkError } from "../Errors.ts";
@@ -143,11 +147,12 @@ const runLsRemote = async (url: string): Promise<ReadonlyArray<GitRemoteRef>> =>
 };
 
 /**
- * Fakes for everything but git: projects, worktrees, avatars and (unless `realNetwork`) the
- * network service.
+ * Fakes for everything but git: projects, worktrees, avatars, the node's project preferences
+ * and (unless `realNetwork`) the network service.
  */
 const makeHarness = (options: { readonly realNetwork?: boolean } = {}) => {
   const projects = new Map<string, OrchestrationProjectShell>();
+  const projectPreferences: Record<string, ProjectPreferences> = {};
   const worktrees: OrchestrationWorktreeShell[] = [];
   const avatarBytes = new Map<string, Buffer>();
   const network: {
@@ -230,6 +235,11 @@ const makeHarness = (options: { readonly realNetwork?: boolean } = {}) => {
   const layer = makeProjectExportLive({ disablePeriodicSweep: true }).pipe(
     Layer.provide(Layer.succeed(ProjectionSnapshotQuery, projections)),
     Layer.provide(Layer.succeed(ProjectAvatarStore, avatars)),
+    Layer.provide(
+      Layer.mock(ServerSettingsService)({
+        getSettings: Effect.sync(() => ({ ...DEFAULT_SERVER_SETTINGS, projectPreferences })),
+      }),
+    ),
     Layer.provide(networkLayer),
     Layer.provide(GitVcsDriver.layer),
     Layer.provideMerge(ServerConfig.layerTest(process.cwd(), { prefix: "ryco-export-test-" })),
@@ -245,7 +255,7 @@ const makeHarness = (options: { readonly realNetwork?: boolean } = {}) => {
     return project;
   };
 
-  return { layer, addProject, worktrees, avatarBytes, network };
+  return { layer, addProject, worktrees, avatarBytes, network, projectPreferences };
 };
 
 const include = (overrides: Partial<ProjectExportStartInput["include"]> = {}) => ({
@@ -1067,6 +1077,7 @@ describe("ProjectExportLive", () => {
           preferredRemoteName: "origin",
           projectMetadataDir: ".ryco",
           hasCustomAvatar: true,
+          overrides: {},
           relativeRootInRepository: "",
         });
         expect(result.skipped).toEqual([
@@ -1075,6 +1086,45 @@ describe("ProjectExportLive", () => {
         ]);
         const bytes = yield* readArtifact(input.exportId, artifactOf(result, "avatar"));
         expect(bytes.equals(avatar)).toBe(true);
+      }),
+    ).pipe(Effect.provide(harness.layer));
+  });
+
+  it.effect("exports the project's own overrides and leaves node-local ones behind", () => {
+    const harness = makeHarness();
+    return withFixtureRoot((root) =>
+      Effect.gen(function* () {
+        const folder = path.join(root, "plain");
+        write(path.join(folder, "notes.md"), "notes\n");
+        const project = harness.addProject(folder);
+        write(path.join(root, "other", "notes.md"), "notes\n");
+        const other = harness.addProject(path.join(root, "other"));
+        harness.projectPreferences[project.id] = {
+          // Names a provider instance of this node: it stays behind.
+          initialModelSelection: { instanceId: ProviderInstanceId.make("codex"), model: "gpt-5" },
+          defaultThreadEnvMode: "worktree",
+          worktreeBranchPrefix: "",
+          runSetupScript: false,
+          pullRequestTemplates: false,
+        };
+        harness.projectPreferences[other.id] = { worktreeBranchChangeTypes: false };
+        const exporter = yield* ProjectExport;
+
+        const inspection = yield* exporter.inspect({ projectId: project.id });
+        const expected = {
+          defaultThreadEnvMode: "worktree",
+          worktreeBranchPrefix: "",
+          runSetupScript: false,
+          pullRequestTemplates: false,
+        };
+        expect(inspection.settings.overrides).toEqual(expected);
+        const result = yield* exporter.start({
+          input: startInput(project.id),
+          channel: "encrypted",
+        });
+        expect(result.settings.overrides).toEqual(expected);
+        const plain = yield* exporter.inspect({ projectId: other.id });
+        expect(plain.settings.overrides).toEqual({ worktreeBranchChangeTypes: false });
       }),
     ).pipe(Effect.provide(harness.layer));
   });

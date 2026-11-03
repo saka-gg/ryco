@@ -61,7 +61,9 @@ import {
   ProjectionSnapshotQuery,
   readWorkspacePlacement,
 } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
+import { projectRegistryOverrides } from "../../project/projectPreferences.ts";
 import { ProjectAvatarStore } from "../../project/Services/ProjectAvatarStore.ts";
+import { ServerSettingsService } from "../../serverSettings.ts";
 import { RestartSensitiveWork } from "../../updates/restartSensitiveWork.ts";
 import { GitVcsDriver } from "../../vcs/GitVcsDriver.ts";
 import {
@@ -187,6 +189,7 @@ export const makeProjectExport = Effect.fn("makeProjectExport")(function* (
   const network = yield* GitNetwork;
   const projections = yield* ProjectionSnapshotQuery;
   const avatars = yield* ProjectAvatarStore;
+  const serverSettings = yield* ServerSettingsService;
   const layerScope = yield* Effect.scope;
   const buildPermits = yield* Semaphore.make(EXPORT_BUILD_CONCURRENCY);
   const restartWork = yield* RestartSensitiveWork;
@@ -292,6 +295,14 @@ export const makeProjectExport = Effect.fn("makeProjectExport")(function* (
         : [null, null];
       const ignoredCandidates: ReadonlyArray<ProjectExportIgnoredCandidate> =
         facts && scan ? yield* readIgnoredCandidates(facts, scan) : [];
+      // The project's own overrides of node settings. What stays behind, and why, is on
+      // `ProjectCopyOverrides`: the initial model and the worktree root only hold on this node.
+      const overrides = yield* serverSettings.getSettings.pipe(
+        Effect.map((settings) => projectRegistryOverrides(settings, project.id)),
+        Effect.mapError(() =>
+          projectCopyError("internal", "Could not read the project's settings."),
+        ),
+      );
       const repository: ProjectExportRepository = facts
         ? {
             rootPath: facts.displayRoot,
@@ -350,6 +361,7 @@ export const makeProjectExport = Effect.fn("makeProjectExport")(function* (
           preferredRemoteName: project.preferredRemoteName ?? null,
           projectMetadataDir: project.projectMetadataDir ?? DEFAULT_PROJECT_METADATA_DIR,
           hasCustomAvatar: (project.customAvatarContentHash ?? null) !== null,
+          overrides,
           relativeRootInRepository: facts?.relativeRoot ?? "",
         },
       };
@@ -772,7 +784,8 @@ export const makeProjectExport = Effect.fn("makeProjectExport")(function* (
 
 /**
  * The live export service. Needs `ServerConfig` (its state directory), `GitVcsDriver`,
- * `GitNetwork`, `ProjectionSnapshotQuery` and `ProjectAvatarStore`; schedules its own sweep.
+ * `GitNetwork`, `ProjectionSnapshotQuery`, `ProjectAvatarStore` and `ServerSettingsService` (the
+ * project's overrides); schedules its own sweep.
  */
 export const makeProjectExportLive = (options?: ProjectExportLiveOptions) =>
   Layer.effect(ProjectExport, makeProjectExport(options));

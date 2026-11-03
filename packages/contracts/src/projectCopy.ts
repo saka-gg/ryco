@@ -18,6 +18,7 @@
  * @module projectCopy
  */
 import * as Schema from "effect/Schema";
+import * as Struct from "effect/Struct";
 
 import {
   IsoDateTime,
@@ -37,7 +38,7 @@ import {
   ProjectScript,
   RuntimeMode,
 } from "./orchestration.ts";
-import { ThreadEnvMode } from "./settings.ts";
+import { PROJECT_PREFERENCE_VALUES, ThreadEnvMode } from "./settings.ts";
 
 // ── Limits ────────────────────────────────────────────────────────────
 
@@ -439,6 +440,21 @@ export const ProjectExportWorkingTree = Schema.Struct({
 });
 export type ProjectExportWorkingTree = typeof ProjectExportWorkingTree.Type;
 
+/**
+ * The project's own overrides of node settings that a copy carries: the keys of the project
+ * preference registry (`PROJECT_PREFERENCE_VALUES`) the project sets for itself. An absent key
+ * inherits the destination node's setting. Each value is bounded by the registry's own schema and
+ * an unknown key is refused, so a key added to the registry is carried without a change here.
+ *
+ * Two project preferences stay behind because they only hold on the source node:
+ * - the initial model (`initialModelSelection`) names a provider instance configured there;
+ * - the worktree root (`projectWorktreeRoots`) is an absolute path on its disk.
+ */
+export const ProjectCopyOverrides = Schema.Struct(
+  Struct.map(PROJECT_PREFERENCE_VALUES.fields, Schema.optionalKey),
+).pipe(rejectExcessProperties);
+export type ProjectCopyOverrides = typeof ProjectCopyOverrides.Type;
+
 export const ProjectExportSettings = Schema.Struct({
   title: TrimmedNonEmptyString,
   scripts: Schema.Array(ProjectScript),
@@ -446,6 +462,7 @@ export const ProjectExportSettings = Schema.Struct({
   preferredRemoteName: Schema.NullOr(Schema.String),
   projectMetadataDir: ProjectMetadataDir,
   hasCustomAvatar: Schema.Boolean,
+  overrides: ProjectCopyOverrides,
   /** `""` or the monorepo subfolder of the project root. */
   relativeRootInRepository: Schema.String,
 });
@@ -687,6 +704,8 @@ export const ProjectImportSettings = Schema.Struct({
   customSystemPrompt: Schema.NullOr(ProjectCustomSystemPrompt),
   preferredRemoteName: Schema.NullOr(GitRemoteName),
   projectMetadataDir: ProjectMetadataDir,
+  /** Written as the new project's overrides; `{}` keeps every node setting. */
+  overrides: ProjectCopyOverrides,
 }).pipe(rejectExcessProperties);
 export type ProjectImportSettings = typeof ProjectImportSettings.Type;
 

@@ -280,7 +280,7 @@ const descriptors = {
   proposeCopy: {
     name: TOOLS.proposeCopy,
     description:
-      "Ask the user to copy a project of this node (or a repository) to ANOTHER node, e.g. \"set up project X on my Mac mini in the normal code directory\": source {projectId} from ryco_list_projects (defaults to this chat's project) or {remoteUrl}, target = the node's environmentId or label from ryco_list_nodes, destination {kind:\"default\"} for the target's normal code directory. The target clones from the project's remote; bringCommits and bringChanges also send unpushed commits and uncommitted changes, copySettings (default true for a project) its scripts, system prompt and avatar. setup runs a command on the target after the copy: give command, or {} to use the project's setup script. followUpThread starts an agent there to finish setup. The Ryco app the user approves it in runs the copy and reports back; nothing happens before that, and never approve it yourself. Returns a receipt; follow it with ryco_wait_for_control_request.",
+      "Ask the user to copy a project of this node (or a repository) to ANOTHER node, e.g. \"set up project X on my Mac mini in the normal code directory\": source {projectId} from ryco_list_projects (defaults to this chat's project) or {remoteUrl}, target = the node's environmentId or label from ryco_list_nodes, destination {kind:\"default\"} for the target's normal code directory. The target clones from the project's remote; bringCommits and bringChanges also send unpushed commits and uncommitted changes, copySettings (default true for a project) its scripts, system prompt, avatar and overrides. setup runs a command on the target after the copy: give command, or {} to use the project's setup script. followUpThread starts an agent there to finish setup. The Ryco app the user approves it in runs the copy and reports back; nothing happens before that, and never approve it yourself. Returns a receipt; follow it with ryco_wait_for_control_request.",
     inputSchema: {
       type: "object",
       properties: {
@@ -320,7 +320,7 @@ const descriptors = {
         copySettings: {
           type: "boolean",
           description:
-            "Copy the project's scripts, system prompt and avatar. Default true for a project.",
+            "Copy the project's scripts, system prompt, avatar and overrides. Default true for a project.",
         },
         setup: {
           description:

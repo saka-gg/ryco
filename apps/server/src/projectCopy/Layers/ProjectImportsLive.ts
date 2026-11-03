@@ -1251,7 +1251,26 @@ export const makeProjectImports = (options: ProjectImportsLiveOptions = {}) =>
         (projectRoot) => projectRoot,
       );
 
-    /** project.meta.update with the source's scripts and preferred remote; idempotent by id. */
+    /**
+     * The source's overrides of node settings, written for the new project the way the settings
+     * page writes them. The same patch again changes nothing, so a replay is idempotent.
+     */
+    const writeOverrides = (record: JobRecord) =>
+      Effect.gen(function* () {
+        const overrides = record.input.settings?.overrides ?? {};
+        if (Object.keys(overrides).length === 0) return;
+        if (Option.isNone(serverSettings)) {
+          return yield* Effect.fail("this node keeps no settings");
+        }
+        yield* serverSettings.value
+          .updateSettings({ projectPreferences: { [record.input.projectId]: overrides } })
+          .pipe(Effect.mapError((error) => error.detail));
+      });
+
+    /**
+     * project.meta.update with the source's scripts and preferred remote (idempotent by id), and
+     * the source's overrides. Either failing leaves its own warning; neither fails the import.
+     */
     const settingsStep = (record: JobRecord) =>
       Effect.gen(function* () {
         const input = record.input;
@@ -1260,7 +1279,7 @@ export const makeProjectImports = (options: ProjectImportsLiveOptions = {}) =>
           return yield* skipStep(record, "settings", null);
         }
         yield* setStep(record, "settings", { status: "running" });
-        const result = yield* engine
+        const meta = yield* engine
           .dispatch({
             type: "project.meta.update",
             commandId: projectImportCommandId(record.importId, "project-settings"),
@@ -1270,12 +1289,20 @@ export const makeProjectImports = (options: ProjectImportsLiveOptions = {}) =>
               ? {}
               : { preferredRemoteName: input.settings.preferredRemoteName }),
           })
-          .pipe(Effect.result);
-        if (result._tag === "Success")
-          return yield* setStep(record, "settings", { status: "done" });
-        const message = messageOf(result.failure, "orchestration error");
-        yield* setStep(record, "settings", { status: "failed", detail: message });
-        yield* warn(record, replayedImportStepWarning("settings", message));
+          .pipe(
+            Effect.mapError((error) => messageOf(error, "orchestration error")),
+            Effect.result,
+          );
+        const overrides = yield* writeOverrides(record).pipe(Effect.result);
+        const warnings = [
+          ...(meta._tag === "Failure" ? [replayedImportStepWarning("settings", meta.failure)] : []),
+          ...(overrides._tag === "Failure"
+            ? [`The project's overrides were not copied: ${overrides.failure}`]
+            : []),
+        ];
+        if (warnings.length === 0) return yield* setStep(record, "settings", { status: "done" });
+        yield* setStep(record, "settings", { status: "failed", detail: warnings.join(" ") });
+        yield* Effect.forEach(warnings, (warning) => warn(record, warning), { discard: true });
       });
 
     /** The avatar through the upload pipeline, then project.avatar.set; idempotent by id. */

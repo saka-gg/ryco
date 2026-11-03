@@ -63,6 +63,11 @@ const importStartInput = {
     customSystemPrompt: null,
     preferredRemoteName: "origin",
     projectMetadataDir: ".ryco",
+    overrides: {
+      defaultThreadEnvMode: "worktree",
+      worktreeBranchPrefix: "me",
+      runSetupScript: false,
+    },
   },
   avatarTransferId: null,
   setup: { command: "bun install", saveAsScript: false },
@@ -242,6 +247,27 @@ describe("ProjectImportStartInput", () => {
     expect(() =>
       decodeImportStart({ ...importStartInput, changes: withoutIgnoredPaths }),
     ).toThrow();
+  });
+
+  it("carries only registry overrides, each bounded by its setting's schema", () => {
+    const settings = importStartInput.settings;
+    expect(
+      decodeImportStart({ ...importStartInput, settings: { ...settings, overrides: {} } }),
+    ).toBeTruthy();
+    for (const overrides of [
+      // Node-local preferences a copy leaves behind.
+      { initialModelSelection: { instanceId: "codex", model: "gpt-5.6" } },
+      { worktreeRoot: "/Users/me/worktrees" },
+      { defaultThreadEnvMode: "elsewhere" },
+      { runSetupScript: "yes" },
+      { worktreeBranchPrefix: "x".repeat(129) },
+    ]) {
+      expect(() =>
+        decodeImportStart({ ...importStartInput, settings: { ...settings, overrides } }),
+      ).toThrow();
+    }
+    const { overrides: _omitted, ...withoutOverrides } = settings;
+    expect(() => decodeImportStart({ ...importStartInput, settings: withoutOverrides })).toThrow();
   });
 
   it("bounds the setup command", () => {

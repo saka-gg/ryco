@@ -97,8 +97,11 @@ becomes **Link existing checkout**: Ryco registers that checkout as is and copie
   to `.git/info/exclude` if its ignore rules don't already cover them. Changes need the commit they
   are based on: when that commit isn't on the remote, the unpushed commits come along with the
   changes. A checkout with merge conflicts can't send its changes.
-- **Copy project settings**: title, scripts, system prompt, preferred remote, metadata folder and
-  avatar.
+- **Copy project settings**: title, scripts, system prompt, preferred remote, metadata folder,
+  avatar, and the settings the project overrides for itself (new threads, worktree branch prefix,
+  worktree setup, generated branch names, pull request template). Settings the project leaves at
+  the defaults follow the destination's defaults. A source on an older Ryco can't share its
+  overrides, so its copy keeps the destination's defaults.
 - **Run setup afterwards**: one command, prefilled from the project's worktree setup script and
   editable. It runs in the project folder on the destination, in your login shell there, with no
   input, for at most 30 minutes. When the two nodes run different systems, the dialog says the
@@ -140,14 +143,14 @@ dialog: it gets the same toasts and shows up in the Copies block.
 
 ### What is copied
 
-| Copied                                                           | Not copied                                      |
-| ---------------------------------------------------------------- | ----------------------------------------------- |
-| The repository: cloned, or sent as files                         | Threads and their history                       |
-| Every remote, credentials stripped (ssh user names kept)         | Worktrees                                       |
-| Unpushed commits and the exact branch and commit (opt-in)        | Per-node project preferences and worktree roots |
-| Uncommitted changes and the ignored files you pick (opt-in)      | Atlassian links                                 |
-| Title, scripts, system prompt, preferred remote, metadata folder | Anything outside the repository                 |
-| The project avatar (with the settings)                           |                                                 |
+| Copied                                                           | Not copied                                                    |
+| ---------------------------------------------------------------- | ------------------------------------------------------------- |
+| The repository: cloned, or sent as files                         | Threads and their history                                     |
+| Every remote, credentials stripped (ssh user names kept)         | Worktrees                                                     |
+| Unpushed commits and the exact branch and commit (opt-in)        | The project's initial model (it names the source's providers) |
+| Uncommitted changes and the ignored files you pick (opt-in)      | The project's worktree root (a path on the source)            |
+| Title, scripts, system prompt, preferred remote, metadata folder | Atlassian links                                               |
+| The project avatar and overrides (with the settings)             | Anything outside the repository                               |
 
 Remote URLs are cleaned before they leave the source. A password in a URL is always removed, and
 so is the user name of an http(s) URL. The user name of an ssh URL is kept, because ssh needs it

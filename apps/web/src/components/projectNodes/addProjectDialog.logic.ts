@@ -550,6 +550,8 @@ export function buildLinkImportInput(input: {
       customSystemPrompt: source.customSystemPrompt ?? null,
       preferredRemoteName: source.preferredRemoteName ?? null,
       projectMetadataDir: source.projectMetadataDir ?? ".ryco",
+      // The project record carries no overrides: the linked project keeps this node's settings.
+      overrides: {},
     },
   };
   if (isValidImportStartInput(withSettings)) return withSettings;

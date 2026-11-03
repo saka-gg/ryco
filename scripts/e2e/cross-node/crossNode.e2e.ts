@@ -427,6 +427,7 @@ const importSettingsOf = (settings: ProjectExportResult["settings"]) => ({
   customSystemPrompt: settings.customSystemPrompt,
   preferredRemoteName: settings.preferredRemoteName,
   projectMetadataDir: settings.projectMetadataDir,
+  overrides: settings.overrides,
 });
 
 /**
