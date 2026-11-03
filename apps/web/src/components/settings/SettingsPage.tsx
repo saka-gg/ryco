@@ -875,7 +875,8 @@ export function SettingsPage({
   // "All devices" or the chosen device, for sections with shared rows.
   const deviceView = useSettingsDeviceView((state) => state.view);
   const allDevicesOffered =
-    devices.choices.length >= 2 && sectionHasSharedSettings(effectiveSection);
+    devices.choices.length >= 2 &&
+    (sectionHasSharedSettings(effectiveSection) || effectiveSection === "providers");
   const showAllDevices = allDevicesOffered && deviceView === "all";
   const showDevice = useCallback(
     (environmentId: EnvironmentId) => {
@@ -887,11 +888,12 @@ export function SettingsPage({
   // "All devices" while the device bar's device cannot be used (offline, or not this reader's to
   // change): shared rows still show, through another device this client may write now, and
   // write every device they can reach (offline ones catch up). Rows stored on one device wait
-  // for it. A hosted grant is already unwritable while its role snapshot is stale.
+  // for it. A hosted grant is already unwritable while its role snapshot is stale. Providers has
+  // no shared rows: its table reads every device itself, and the editor waits for the bar's device.
   const chosenDeviceUsable =
     settingsDeviceReady(target) && settingsStorageReachable("device", reach);
   const sharedRowsEnvironmentId = useSharedRowsDevice(
-    showAllDevices && !chosenDeviceUsable && effectiveSection !== "device",
+    showAllDevices && !chosenDeviceUsable && sectionHasSharedSettings(effectiveSection),
     primaryEnvironmentId,
   );
   const sharedRowsTarget = useEnvironmentSettingsTarget(sharedRowsEnvironmentId);
@@ -1295,7 +1297,11 @@ export function SettingsPage({
                         ) : effectiveSection === "account" ? null : (
                           <SettingsSectionPanel
                             section={effectiveSection}
-                            devices={{ choices: devices.choices, onOpen: selectDevice }}
+                            devices={{
+                              choices: devices.choices,
+                              onOpen: selectDevice,
+                              select: devices.select,
+                            }}
                           />
                         )}
                       </Suspense>

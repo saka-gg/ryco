@@ -443,6 +443,13 @@ export const SETTINGS_SEARCH_INDEX: ReadonlyArray<SettingsSearchEntry> = [
     keywords: "api model driver accent",
   },
   {
+    section: "providers",
+    storage: "device",
+    title: "Where each provider runs",
+    description: "Every provider on every device. Add one to a device from its column.",
+    keywords: "providers devices table add edit ready sign in",
+  },
+  {
     section: "agent-control",
     storage: "device",
     title: "Private Agent Control",
@@ -624,10 +631,24 @@ export const SETTINGS_SEARCH_INDEX: ReadonlyArray<SettingsSearchEntry> = [
   },
   {
     section: "data",
+    storage: "device",
+    title: "Restore this device's defaults",
+    description: "Reset the settings this device keeps to their defaults.",
+    keywords: "reset factory clear device",
+  },
+  {
+    section: "data",
     storage: "app",
     title: "Settings file",
-    description: "Export this app's settings to a file, or import one.",
-    keywords: "backup restore export import json preferences",
+    description: "Back up this app's and your devices' shared settings, or restore them.",
+    keywords: "backup restore export import json preferences devices",
+  },
+  {
+    section: "data",
+    storage: "app",
+    title: "Restore this app's defaults",
+    description: "Reset this app's settings to their defaults.",
+    keywords: "reset factory clear app preferences",
   },
   {
     section: "usage",

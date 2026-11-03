@@ -101,16 +101,26 @@ function validateInstanceId(id: string, existing: ReadonlySet<string>): string |
   return null;
 }
 
+/** A provider another device has, to add here under the same id and name (no config, no secrets). */
+export interface AddProviderInstancePreset {
+  readonly driver: ProviderDriverKind;
+  readonly displayName: string | null;
+  readonly instanceId: ProviderInstanceId;
+}
+
 interface AddProviderInstanceDialogProps {
   open: boolean;
   onOpenChange: (open: boolean) => void;
   onCreated?: (instanceId: ProviderInstanceId) => void;
+  /** Starts at Identity with the driver, name and id filled in. */
+  preset?: AddProviderInstancePreset | null;
 }
 
 export function AddProviderInstanceDialog({
   open,
   onOpenChange,
   onCreated,
+  preset = null,
 }: AddProviderInstanceDialogProps) {
   // Uncompiled on purpose: Babel's React Compiler never compiled this function
   // (it bails on value blocks inside try/catch). Oxc can, but its render reads
@@ -146,15 +156,15 @@ export function AddProviderInstanceDialog({
   // from a clean slate.
   useEffect(() => {
     if (!open) return;
-    setDriver(DEFAULT_DRIVER_KIND);
-    setLabel("");
+    setDriver(preset?.driver ?? DEFAULT_DRIVER_KIND);
+    setLabel(preset?.displayName ?? "");
     setAccentColor("");
-    setInstanceId("");
-    setWizardStep(0);
-    setInstanceIdDirty(false);
+    setInstanceId(preset?.instanceId ?? "");
+    setWizardStep(preset ? 1 : 0);
+    setInstanceIdDirty(preset !== null);
     setConfigByDriver({});
     setHasAttemptedSubmit(false);
-  }, [open]);
+  }, [open, preset]);
 
   // Auto-derive the instance id from driver + label until the user types
   // in the Instance ID field directly (after which they own its value).

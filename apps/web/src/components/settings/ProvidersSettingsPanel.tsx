@@ -1,7 +1,7 @@
 import { CodexResetCredits } from "../usage/CodexResetCredits";
 import { updateInstanceModelFavorites } from "@ryco/client-runtime/state/composer";
 import { LoaderIcon, PlusIcon, RefreshCwIcon } from "lucide-react";
-import { useCallback, useRef, useState, type KeyboardEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type KeyboardEvent } from "react";
 import {
   defaultInstanceIdForDriver,
   ProviderDriverKind,
@@ -54,7 +54,11 @@ import {
   isProviderUpdateOffered,
   type ProviderUpdateCandidate,
 } from "../ProviderUpdateLaunchNotification.logic";
-import { AddProviderInstanceDialog } from "./AddProviderInstanceDialog";
+import {
+  AddProviderInstanceDialog,
+  type AddProviderInstancePreset,
+} from "./AddProviderInstanceDialog";
+import { takeProviderEditorRequest, useProviderEditorRequest } from "./providerEditorRequest";
 import { CliProxyHubSettings } from "./CliProxyHubSettings";
 import { ProviderInstanceCard } from "./ProviderInstanceCard";
 import { ProviderInstanceListItem } from "./ProviderInstanceListItem";
@@ -148,7 +152,28 @@ export function ProvidersSettingsPanel() {
   const serverProviders = useServerProviders();
   const [isRefreshingProviders, setIsRefreshingProviders] = useState(false);
   const [isAddInstanceDialogOpen, setIsAddInstanceDialogOpen] = useState(false);
+  const [addPreset, setAddPreset] = useState<AddProviderInstancePreset | null>(null);
   const [selectedInstanceId, setSelectedInstanceId] = useState<ProviderInstanceId | null>(null);
+  // The providers table's Edit and Add, once this editor shows their device.
+  const editorRequest = useProviderEditorRequest((state) => state.request);
+  const targetEnvironmentId = settingsTarget?.environmentId ?? null;
+  useEffect(() => {
+    if (editorRequest === null) return;
+    const request = takeProviderEditorRequest(targetEnvironmentId);
+    if (request === null) return;
+    if (request.kind === "add") {
+      setAddPreset(request.preset);
+      setIsAddInstanceDialogOpen(true);
+      return;
+    }
+    setSelectedInstanceId(request.instanceId);
+    // Not cancelled: taking the request re-runs this effect before the frame.
+    requestAnimationFrame(() =>
+      document
+        .getElementById("provider-instance-editor")
+        ?.scrollIntoView({ block: "start", behavior: "smooth" }),
+    );
+  }, [editorRequest, targetEnvironmentId]);
   const [pendingDestructiveAction, setPendingDestructiveAction] =
     useState<PendingProviderDestructiveAction | null>(null);
   const [updatingProviderInstanceIds, setUpdatingProviderInstanceIds] = useState<
@@ -565,7 +590,10 @@ export function ProvidersSettingsPanel() {
               size="xs"
               variant="outline"
               className="ml-1"
-              onClick={() => setIsAddInstanceDialogOpen(true)}
+              onClick={() => {
+                setAddPreset(null);
+                setIsAddInstanceDialogOpen(true);
+              }}
               aria-label="Add provider instance"
             >
               <PlusIcon />
@@ -744,6 +772,7 @@ export function ProvidersSettingsPanel() {
         open={isAddInstanceDialogOpen}
         onOpenChange={setIsAddInstanceDialogOpen}
         onCreated={setSelectedInstanceId}
+        preset={addPreset}
       />
 
       <AlertDialog

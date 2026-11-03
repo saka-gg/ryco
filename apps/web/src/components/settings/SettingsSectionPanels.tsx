@@ -6,9 +6,12 @@ import { createContext, useContext, type ComponentProps, type ReactNode } from "
 import type * as AppearanceSettingsModule from "./AppearanceSettings";
 import type * as ConnectionsModule from "./ConnectionsSettings";
 import type * as NotificationsTestModule from "./NotificationsTestSection";
+import type * as ProviderDeviceTableModule from "./ProviderDeviceTable";
 import type * as SourceControlModule from "./SourceControlSettings";
 import { useAppPreferencesLabel } from "../../deviceName";
 import { isHostedHubMode } from "../../env";
+import { openHubNodeDetail } from "../../hostedHub/hubNodeDetailRequest";
+import { useHostedHubStore } from "../../hostedHub/state";
 import { preloadableLazy, type PreloadableModule } from "../../lib/preloadableLazy";
 import { useSettingsDialogStore } from "../../settingsDialogStore";
 import {
@@ -193,6 +196,9 @@ const LazyNodeSourceControlSettingsPanel = preloadableLazy<
 const LazyProvidersSettingsPanel = preloadableLazy(() =>
   import("./ProvidersSettingsPanel").then((module) => module.ProvidersSettingsPanel),
 );
+const LazyProviderDeviceTable = preloadableLazy<
+  NonNullable<ComponentProps<typeof ProviderDeviceTableModule.ProviderDeviceTable>>
+>(() => import("./ProviderDeviceTable").then((module) => module.ProviderDeviceTable));
 const LazyOpinionatedPluginsSettingsPanel = preloadableLazy(() =>
   import("./OpinionatedPluginsSettings").then((module) => module.OpinionatedPluginsSettingsPanel),
 );
@@ -222,8 +228,8 @@ const LazyDiagnosticsSettings = preloadableLazy(() =>
 const LazyTierPreviewSection = preloadableLazy(() =>
   import("./DiagnosticsSettings").then((module) => module.TierPreviewSection),
 );
-const LazyClientSettingsFileActions = preloadableLazy(() =>
-  import("./ClientSettingsFileActions").then((module) => module.ClientSettingsFileActions),
+const LazySettingsFileRows = preloadableLazy(() =>
+  import("./SettingsFileRows").then((module) => module.SettingsFileRows),
 );
 
 /** The code-split pieces each section renders, for its preload. */
@@ -240,14 +246,14 @@ const SECTION_CHUNKS: Readonly<Record<SettingsPageSectionId, ReadonlyArray<Prelo
     LazyDiffAppearanceSettings,
     LazyNodeSourceControlSettingsPanel,
   ],
-  providers: [LazyProvidersSettingsPanel],
+  providers: [LazyProviderDeviceTable, LazyProvidersSettingsPanel],
   usage: [],
   plugins: [LazyOpinionatedPluginsSettingsPanel, LazyMcpServersSettings],
   "agent-control": [LazyAgentControlSettingsPanel],
   devices: [LazyConnectionsSettings],
   device: [LazyConnectionsSettings, LazyNodeSecuritySettings, LazyDeviceComputerUseSettings],
   updates: [LazyUpdatesSettings],
-  data: [LazyClientSettingsFileActions],
+  data: [LazySettingsFileRows],
   diagnostics: [LazyDiagnosticsSettings],
   about: [],
 };
@@ -275,6 +281,7 @@ function RestoreDefaultsRow({ title, description }: { title: string; description
         <Button
           size="xs"
           variant="outline"
+          aria-label={title}
           disabled={changedSettingLabels.length === 0}
           onClick={() => void restoreDefaults()}
         >
@@ -322,6 +329,8 @@ function StatisticsLinkSection() {
 export interface SettingsAllDevices {
   readonly choices: ReadonlyArray<SettingsDeviceChoice>;
   readonly onOpen: (environmentId: EnvironmentId) => void;
+  /** Shows a device's values in the section (the bar's device), keeping the bar's view. */
+  readonly select: (environmentId: EnvironmentId) => void;
 }
 
 function AllDevices({ devices }: { readonly devices: SettingsAllDevices }) {
@@ -338,6 +347,18 @@ function AllDevices({ devices }: { readonly devices: SettingsAllDevices }) {
         onOpen={devices.onOpen}
       />
     </SettingsSection>
+  );
+}
+
+/**
+ * Every device's providers, offline devices too, for the owner of the shown device (as the
+ * section's other rows); a cell edits only where this client may change that device.
+ */
+function ProvidersTable({ devices }: { readonly devices: SettingsAllDevices }) {
+  const { reach, target } = useSettingsParts();
+  if (!settingsStorageReachable("device", reach)) return null;
+  return (
+    <LazyProviderDeviceTable choices={devices.choices} target={target} select={devices.select} />
   );
 }
 
@@ -440,9 +461,12 @@ function SectionBody({
       );
     case "providers":
       return (
-        <DevicePart>
-          <LazyProvidersSettingsPanel />
-        </DevicePart>
+        <>
+          <ProvidersTable devices={devices} />
+          <DevicePart>
+            <LazyProvidersSettingsPanel />
+          </DevicePart>
+        </>
       );
     case "usage":
       return (
@@ -504,16 +528,17 @@ function SectionBody({
             <DeviceLifecycleSuggestionSettings />
             <SettingsSection title="This device's defaults">
               <RestoreDefaultsRow
-                title="Restore defaults"
-                description="Reset this device's settings on this page's sections to their defaults."
+                title="Restore this device's defaults"
+                description="Reset the settings this device keeps on this page's sections to their defaults. This app's settings stay."
               />
             </SettingsSection>
           </DevicePart>
           <AppPart>
-            <SettingsSection title="Settings file" headerAction={<LazyClientSettingsFileActions />}>
+            <SettingsSection title="Settings file">
+              <LazySettingsFileRows />
               <RestoreDefaultsRow
-                title="Restore defaults"
-                description="Reset this app's settings to their defaults. Export a file first to keep a copy."
+                title="Restore this app's defaults"
+                description="Reset this app's settings to their defaults. Devices keep theirs. Back up first to keep a copy."
               />
               {desktopBridge ? <DesktopConversationCacheRow desktopBridge={desktopBridge} /> : null}
             </SettingsSection>
@@ -557,6 +582,34 @@ export function SettingsSectionPanel(props: {
     <SettingsPageContainer>
       <SectionBody {...props} />
     </SettingsPageContainer>
+  );
+}
+
+/** A hosted device's page on the Hub: its details, name, version and access. */
+function HubDeviceLink({
+  environmentId,
+  label,
+}: {
+  readonly environmentId: EnvironmentId;
+  readonly label: string;
+}) {
+  const node = useHostedHubStore((state) =>
+    state.nodes.find((candidate) => candidate.environmentId === environmentId),
+  );
+  if (!node) return null;
+  return (
+    <SettingsSection title="On the Hub">
+      <SettingsRow
+        title="Device details"
+        description={`See ${label}'s version and when it was last seen, rename it or remove its access.`}
+        control={
+          <Button size="sm" variant="outline" onClick={() => openHubNodeDetail(node.id)}>
+            Open on Hub
+            <ArrowUpRightIcon />
+          </Button>
+        }
+      />
+    </SettingsSection>
   );
 }
 
@@ -624,10 +677,15 @@ export function SettingsDevicePage({
           <LazyConnectionsSettings part="access" />
         </AppPart>
       ) : (
-        <DevicePartNote>
-          Network access, pairing links and authorized clients are set on {label} itself. Its
-          Security tab shows who can reach it.
-        </DevicePartNote>
+        <>
+          <DevicePartNote>
+            Network access, pairing links and authorized clients are set on {label} itself. Its
+            Security tab shows who can reach it.
+          </DevicePartNote>
+          {isHostedHubMode() ? (
+            <HubDeviceLink environmentId={target.environmentId} label={label} />
+          ) : null}
+        </>
       );
       break;
     case "security":

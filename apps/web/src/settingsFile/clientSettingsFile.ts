@@ -11,12 +11,19 @@ import {
 } from "../themes/appearancePreferences";
 import { isValidTheme } from "../themes/registry";
 import type { ThemeDefinition } from "../themes/types";
+import {
+  readDeviceSettingsSection,
+  type DeviceSettingsFileSection,
+  type DeviceSettingsFileValues,
+} from "./deviceSettingsFile";
 
 /**
- * One file with this app's own preferences (port of T3 Code's device settings file, #23045):
- * client settings, appearance, the color mode and theme, and custom themes. Nothing a node owns,
- * and nothing that names a machine, an account or a credential, is ever in it. Keybindings keep
- * their own file (Settings > Keybindings).
+ * One settings file (port of T3 Code's device settings file, #23045): this app's own preferences
+ * (client settings, appearance, the color mode and theme, custom themes) and, optionally, the
+ * settings every device shares (`deviceSettings`, `./deviceSettingsFile`). Either part may be
+ * left out; a file from before the device part reads as before. Nothing that names a machine, an
+ * account, a connection or a credential is ever in it. Keybindings keep their own file
+ * (Settings > Keyboard).
  */
 
 export const CLIENT_SETTINGS_FILE_FORMAT = "ryco-client-settings";
@@ -82,27 +89,58 @@ export interface ClientSettingsFileState {
   readonly customThemes: ReadonlyArray<ThemeDefinition>;
 }
 
-export interface ClientSettingsFile {
-  readonly format: typeof CLIENT_SETTINGS_FILE_FORMAT;
-  readonly version: typeof CLIENT_SETTINGS_FILE_VERSION;
-  readonly exportedAt: string;
+/** This app's part of a settings file. */
+export interface ClientSettingsFileAppPart {
   readonly client: Partial<Pick<ClientSettings, FileClientKey>>;
   readonly appearance: Partial<AppearancePreferences>;
   readonly theme: { readonly mode: ColorMode; readonly active: string };
   readonly customThemes: ReadonlyArray<ThemeDefinition>;
 }
 
+interface ClientSettingsFileHeader {
+  readonly format: typeof CLIENT_SETTINGS_FILE_FORMAT;
+  readonly version: typeof CLIENT_SETTINGS_FILE_VERSION;
+  readonly exportedAt: string;
+  /** The shared device settings, when the backup holds them. */
+  readonly deviceSettings?: DeviceSettingsFileSection;
+}
+
+/** A settings file: this app's part, the device part, or both. */
+export type ClientSettingsFile =
+  | (ClientSettingsFileHeader & ClientSettingsFileAppPart)
+  | ClientSettingsFileHeader;
+
+/**
+ * A backup: this app's preferences (`state`; null leaves them out) and the shared device
+ * settings (`deviceSettings`, from `buildDeviceSettingsSection`), at least one of them.
+ */
 export function buildClientSettingsFile(
   state: ClientSettingsFileState,
   now: Date,
+  deviceSettings?: DeviceSettingsFileSection,
+): ClientSettingsFileHeader & ClientSettingsFileAppPart;
+export function buildClientSettingsFile(
+  state: ClientSettingsFileState | null,
+  now: Date,
+  deviceSettings?: DeviceSettingsFileSection,
+): ClientSettingsFile;
+export function buildClientSettingsFile(
+  state: ClientSettingsFileState | null,
+  now: Date,
+  deviceSettings?: DeviceSettingsFileSection,
 ): ClientSettingsFile {
-  const client: Record<string, unknown> = {};
-  for (const key of CLIENT_SETTINGS_FILE_KEYS) client[key] = state.client[key];
-  return {
+  const header: ClientSettingsFileHeader = {
     format: CLIENT_SETTINGS_FILE_FORMAT,
     version: CLIENT_SETTINGS_FILE_VERSION,
     exportedAt: now.toISOString(),
-    client: client as ClientSettingsFile["client"],
+    ...(deviceSettings === undefined ? {} : { deviceSettings }),
+  };
+  if (state === null) return header;
+  const client: Record<string, unknown> = {};
+  for (const key of CLIENT_SETTINGS_FILE_KEYS) client[key] = state.client[key];
+  return {
+    ...header,
+    client: client as ClientSettingsFileAppPart["client"],
     appearance: { ...state.appearance },
     theme: { mode: state.colorMode, active: state.activeThemeId },
     customThemes: state.customThemes.filter((theme) => !theme.builtIn),
@@ -121,6 +159,10 @@ export interface ClientSettingsImportPlan {
   readonly changes: ReadonlyArray<string>;
   /** Keys it did not know and values it refused; the current ones stay. */
   readonly warnings: ReadonlyArray<string>;
+  /** The file holds this app's preferences (a file with device settings only does not). */
+  readonly hasAppSettings: boolean;
+  /** The file's shared device settings, checked; null when it holds none (older files). */
+  readonly deviceSettings: DeviceSettingsFileValues | null;
 }
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -145,10 +187,10 @@ export function planClientSettingsImport(
   },
 ): ClientSettingsImportPlan {
   if (!isRecord(value) || value.format !== CLIENT_SETTINGS_FILE_FORMAT) {
-    throw new Error("This is not a Ryco preferences file.");
+    throw new Error("This is not a Ryco settings file.");
   }
   if (value.version !== CLIENT_SETTINGS_FILE_VERSION) {
-    throw new Error("This preferences file comes from a newer Ryco. Update Ryco, then import it.");
+    throw new Error("This settings file comes from a newer Ryco. Update Ryco, then import it.");
   }
   const warnings: string[] = [];
   const changes: string[] = [];
@@ -265,6 +307,10 @@ export function planClientSettingsImport(
     addThemes,
     changes,
     warnings,
+    hasAppSettings: (["client", "appearance", "theme", "customThemes"] as const).some(
+      (part) => value[part] !== undefined,
+    ),
+    deviceSettings: readDeviceSettingsSection(value.deviceSettings),
   };
 }
 
@@ -331,7 +377,7 @@ export async function readClientSettingsImportFile(
   options: Parameters<typeof planClientSettingsImport>[2],
 ): Promise<ClientSettingsImportPlan> {
   if (file.size > MAX_CLIENT_SETTINGS_FILE_BYTES) {
-    throw new Error("A preferences file is never larger than 1 MiB.");
+    throw new Error("A settings file is never larger than 1 MiB.");
   }
   let value: unknown;
   try {

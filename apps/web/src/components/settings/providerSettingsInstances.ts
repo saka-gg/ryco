@@ -22,8 +22,11 @@ function hasDefaultProviderSlot(driver: ProviderDriverKind): boolean {
   return Object.hasOwn(DEFAULT_UNIFIED_SETTINGS.providers, driver);
 }
 
+/** The settings the rows read; a device's server settings carry them too. */
+type ProviderInstanceSettings = Pick<UnifiedSettings, "providers" | "providerInstances">;
+
 function defaultInstanceForDriver(
-  settings: UnifiedSettings,
+  settings: ProviderInstanceSettings,
   driver: ProviderDriverKind,
 ): { readonly instance: ProviderInstanceConfig; readonly isDirty: boolean } | null {
   // Registry and future instance-only drivers require explicit installation/configuration.
@@ -52,7 +55,7 @@ function defaultInstanceForDriver(
 }
 
 export function deriveProviderSettingsInstanceRows(
-  settings: UnifiedSettings,
+  settings: ProviderInstanceSettings,
   serverProviders: ReadonlyArray<ServerProvider>,
 ): ReadonlyArray<ProviderSettingsInstanceRow> {
   const visibleDrivers = DRIVER_OPTIONS.map((definition) => definition.value).filter(

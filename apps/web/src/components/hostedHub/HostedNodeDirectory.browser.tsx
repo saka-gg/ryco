@@ -61,6 +61,7 @@ import { navigateHub, resetHubRoutesForTests } from "../../hostedHub/hubRoutes";
 import { useSettingsDialogStore } from "../../settingsDialogStore";
 import { useUiStateStore } from "../../uiStateStore";
 import type { HostedHubNode } from "../../hostedHub/types";
+import { openHubNodeDetail, peekHubNodeDetailRequest } from "../../hostedHub/hubNodeDetailRequest";
 import { HostedHubRoot } from "./HostedHubRoot";
 import { getBrowserWorkspaceMetadataCache } from "../../persistence/workspaceMetadataCache";
 
@@ -416,6 +417,15 @@ describe("hosted node directory", () => {
     await page.getByRole("button", { name: "Node details: Studio" }).click();
     await expect.element(page.getByText("0.9.7")).toBeVisible();
     await expect.element(page.getByText("node_aaaaaaaaaaaaaaaaaaaaaa")).toBeVisible();
+  });
+
+  it("opens the details a device's settings linked to, once", async () => {
+    seedDirectory([node()]);
+    openHubNodeDetail("node_aaaaaaaaaaaaaaaaaaaaaa");
+    mounted = await render(<HostedHubRoot />);
+
+    await expect.element(page.getByText("0.9.7")).toBeVisible();
+    expect(peekHubNodeDetailRequest()).toBeNull();
   });
 
   it("re-reads the open detail sheet from the store rather than pinning it to open-time values", async () => {

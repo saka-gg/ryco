@@ -50,20 +50,60 @@ Under **Projects & worktrees**, **Worktree branch prefix** sets the selected ser
 
 The setting applies to every client connected to that server, including native mobile and agent-created worktrees. Explicit branch names and source-specific issue naming keep their existing behavior. First-turn generated names retain the temporary branch's namespace. Changing the setting does not rename existing branches; reconciliation continues recognizing legacy `ryco/` branches. Internal checkpoint refs remain stable so existing checkpoints stay readable. There is no project override.
 
-## Export and import app preferences
+## Providers & models
 
-**Settings → Data & backup → Settings file → Export / Import** (this app's own preferences, beside Restore defaults)
-saves or reads one `ryco-client-settings.json` (`apps/web/src/settingsFile/clientSettingsFile.ts`):
-the client settings that travel between machines (`CLIENT_SETTINGS_FILE_SCOPE`; a new client
-setting fails typecheck until it is placed), every appearance setting, the color mode and theme,
-and custom themes. It never carries anything that names a node, an account, a connection or a
-credential, nor machine-local state (onboarding, dismissed notices, model favorites and provider
-model order keyed by node-local instance ids, per-project grouping, the preferred editor).
-Keybindings keep their own file in Settings → Keyboard.
+**Where each provider runs** opens the section: one row per provider, one column per device (all
+of them with **All devices** in the device bar, else the device chosen). Rows group each device's
+provider instances by instance id; an instance whose id no other device holds joins a row of the
+same driver and the same given name, and the row says "matched by name". A cell is that device's
+state from its last known config: Ready, Needs sign-in, Needs attention, Not installed, Off,
+Checking, or empty when it has no such instance. An offline device shows its last known state,
+read only. **Add** (an empty cell of a provider someone added) opens the add-provider dialog for
+that device with the driver, name and id filled in, so the new instance joins the row; **Edit**
+opens the device's instance editor below. Both are offered only where this client may change
+the device's settings. Below the table, the instance list and editor, CLIProxyAPI hubs and the
+text-generation model are the device's own (the one the bar shows). Nothing here polls or asks a
+device for anything new.
 
-An import is checked before anything is written: every value against its setting's schema, every
+## Back up and restore settings
+
+**Settings → Data & backup → Settings file** has **Back up settings** and **Restore settings**
+(beside Restore this app's defaults). One file (`apps/web/src/settingsFile/clientSettingsFile.ts`) holds this
+app's preferences, the shared device settings, or both:
+
+- **This app's settings**: the client settings that travel between machines
+  (`CLIENT_SETTINGS_FILE_SCOPE`; a new client setting fails typecheck until it is placed), every
+  appearance setting, the color mode and theme, and custom themes.
+- **Shared device settings** (`deviceSettings`, `apps/web/src/settingsFile/deviceSettingsFile.ts`):
+  the shareable device settings (`docs/shared-device-settings.md`) as the devices hold them: per
+  setting the newest shared value, else the value they agree on. `DEVICE_SETTINGS_FILE_SCOPE`
+  places every shareable key (a new one fails typecheck until placed); paths stay out. Device-only
+  settings (provider instances, CLIProxyAPI hubs, the default and text-generation models, ...)
+  never travel.
+
+The file never carries anything that names a node, an account, a connection or a credential, nor
+machine-local state (onboarding, dismissed notices, model favorites and provider model order keyed
+by node-local instance ids, per-project grouping, the preferred editor). Keybindings keep their
+own file in Settings → Keyboard. A file from before the device part reads as before.
+
+A restore is checked before anything is written: every value against its setting's schema, every
 custom theme against the theme file rules. Unknown keys and refused values are listed and keep
-the current value. The dialog lists each change as `key: old -> new`; nothing changes until
-Apply. A custom theme whose id is taken by another theme arrives as a copy, and the theme choice
-follows it. Client settings are saved last; if they cannot be saved, every other value the import
-wrote goes back.
+the current value. The dialog lists each change as `key: old -> new` (for device settings, per
+device); nothing changes until Apply. Each part can be left out.
+
+- This app's part is all or nothing: a custom theme whose id is taken arrives as a copy (the
+  theme choice follows it), client settings are saved last, and if they cannot be saved every
+  other value the restore wrote goes back and no device is written.
+- The device part goes to **Every device** (default): one shared write per setting
+  (`writeSharedSetting`); an offline or read-only device takes it when it is back (queued), a
+  device that keeps its own value for a setting keeps it (listed), and a device on an older Ryco
+  gets a plain edit. Or to **Only these devices** (online devices this client may change): each
+  gets the value as its own (`setSettingOverride`), and the dialog says so. Results are reported
+  per device: applied, queued until online, kept its own value, or couldn't apply with the
+  device's reason.
+
+## Hosted devices
+
+A hosted device's **Access** tab says where network access and pairing are set (on the device
+itself) and links to the device on the Hub (**Open on Hub**), which opens the Hub's node list with
+that device's details. The address names no node; the request is kept in memory.

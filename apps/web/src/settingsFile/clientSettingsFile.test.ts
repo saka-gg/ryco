@@ -279,7 +279,7 @@ describe("the client settings file", () => {
 
   it("refuses a file that is not one, or comes from a newer Ryco", () => {
     expect(() => planClientSettingsImport({ hello: 1 }, defaults, options)).toThrow(
-      "This is not a Ryco preferences file.",
+      "This is not a Ryco settings file.",
     );
     expect(() =>
       planClientSettingsImport({ format: "ryco-client-settings", version: 2 }, defaults, options),

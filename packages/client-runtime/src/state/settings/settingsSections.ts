@@ -149,7 +149,7 @@ export const SETTINGS_SECTIONS = [
     id: "providers",
     group: "agents",
     title: "Providers & models",
-    description: "Coding agents and the models they offer.",
+    description: "Coding agents, the models they offer, and where they run.",
     parts: ["device"],
   },
   {

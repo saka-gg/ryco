@@ -102,6 +102,10 @@ import {
   useHostedConnectionActions,
 } from "./HostedConnectionControls";
 import { HostedNodeDetail } from "./HostedNodeDetail";
+import {
+  clearHubNodeDetailRequest,
+  peekHubNodeDetailRequest,
+} from "../../hostedHub/hubNodeDetailRequest";
 import { HubAccountPage } from "./HubAccountPage";
 import { HubGateway } from "./shell/HubGateway";
 import { HubPage } from "./shell/HubPage";
@@ -1471,7 +1475,9 @@ function HostedNodeDirectory() {
   // against a `revokedAt` the poll had already set, and the sheet would keep
   // printing an "Online" status, a superseded client version, and a heartbeat
   // age that grows for a node that is heartbeating the whole time.
-  const [detailNodeId, setDetailNodeId] = useState<string | null>(null);
+  const [detailNodeId, setDetailNodeId] = useState<string | null>(peekHubNodeDetailRequest);
+  // A device's Access tab in settings opened this list for its node: shown once.
+  useEffect(() => clearHubNodeDetailRequest(), []);
   // Set when `revokeNode` RESOLVES, not when a row stops being rendered.
   //
   // A revocation is the one action here that cannot be taken back, and the only
