@@ -48,6 +48,7 @@ import {
 import { isElectron, isHostedHubMode } from "../../env";
 import { usePrimaryEnvironmentId } from "../../environments/primary/context";
 import { useAppSidebarCollapsed } from "../../hooks/useAppSidebarCollapsed";
+import { useEnvironmentSettingsTarget } from "../../hooks/useEnvironmentSettingsTarget";
 import { useSettingsPageTarget } from "../../hooks/useSettingsPageTarget";
 import { navigateHub } from "../../hostedHub/hubRoutes";
 import { useHostedNodePageDemand } from "../../hostedHub/useHostedNodePageDemand";
@@ -120,6 +121,7 @@ import {
 } from "./useSettingsDevices";
 import { useSettingsSubsections } from "./useSettingsSubsections";
 import { sectionHasSharedSettings } from "./sharedSettings/sharedSettingsCatalog";
+import { useSharedRowsDevice } from "./sharedSettings/sharedSettingsSource";
 import {
   SharedSettingsModeProvider,
   setSettingsDeviceView,
@@ -726,6 +728,29 @@ function SearchResults({
   );
 }
 
+/**
+ * "All devices" with the device bar's device unusable: why only shared rows show, said once
+ * under the device bar.
+ */
+function SharedRowsOnlyNotice({
+  label,
+  connected,
+}: {
+  readonly label: string;
+  readonly connected: boolean;
+}) {
+  return (
+    <p
+      className="-mt-3 mb-6 px-0.5 text-xs leading-relaxed text-muted-foreground"
+      data-testid="settings-shared-rows-only"
+    >
+      {connected
+        ? `Your access to ${label} does not allow changing its settings. Shared settings below change every device you can.`
+        : `${label} is offline. Shared settings below change every device you can reach, and ${label} when it reconnects. Its own settings show then.`}
+    </p>
+  );
+}
+
 /** Why the shown device's rows are not on screen, said once under the device bar. */
 function DeviceNotice({
   devicePage,
@@ -859,6 +884,22 @@ export function SettingsPage({
     },
     [devices],
   );
+  // "All devices" while the device bar's device cannot be used (offline, or not this reader's to
+  // change): shared rows still show, through another device this client may write now, and
+  // write every device they can reach (offline ones catch up). Rows stored on one device wait
+  // for it. A hosted grant is already unwritable while its role snapshot is stale.
+  const chosenDeviceUsable =
+    settingsDeviceReady(target) && settingsStorageReachable("device", reach);
+  const sharedRowsEnvironmentId = useSharedRowsDevice(
+    showAllDevices && !chosenDeviceUsable && effectiveSection !== "device",
+    primaryEnvironmentId,
+  );
+  const sharedRowsTarget = useEnvironmentSettingsTarget(sharedRowsEnvironmentId);
+  const sharedRowsReach = readSettingsReach(sharedRowsTarget);
+  const sharedRowsOnly =
+    sharedRowsEnvironmentId !== null &&
+    settingsDeviceReady(sharedRowsTarget.target) &&
+    settingsStorageReachable("device", sharedRowsReach);
   const sharedSettingsMode = useMemo(
     (): SharedSettingsModeValue => ({
       mode:
@@ -1056,7 +1097,17 @@ export function SettingsPage({
       className="h-dvh min-h-0 overflow-hidden overscroll-y-none bg-background text-foreground"
     >
       <SettingsPartsProvider
-        value={{ reach, target, primaryEnvironmentId, onRestored: handleRestored }}
+        value={
+          sharedRowsOnly
+            ? {
+                reach: sharedRowsReach,
+                target: sharedRowsTarget.target,
+                primaryEnvironmentId,
+                onRestored: handleRestored,
+                sharedRowsOnly,
+              }
+            : { reach, target, primaryEnvironmentId, onRestored: handleRestored }
+        }
       >
         <SharedSettingsModeProvider value={sharedSettingsMode}>
           <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
@@ -1215,6 +1266,11 @@ export function SettingsPage({
                       ) : null}
                       {devicePage && !settingsDeviceReady(target) && targetStatus === "offline" ? (
                         <SettingsDeviceOfflineBanner label={targetLabel ?? ""} />
+                      ) : sharedRowsOnly ? (
+                        <SharedRowsOnlyNotice
+                          label={targetLabel ?? ""}
+                          connected={settingsDeviceReady(target)}
+                        />
                       ) : usesDevice && (!devicePage || !settingsDeviceReady(target)) ? (
                         <DeviceNotice
                           devicePage={devicePage}

@@ -20,6 +20,7 @@ import {
   readSharedSettingViews,
   resetSettingToShared,
   setSettingOverride,
+  sharedDeviceValuesAgree,
   useSettingEverywhere,
   writeSharedSetting,
   type SettingsSharingAttempts,
@@ -333,6 +334,92 @@ describe("row view", () => {
     expect(
       readSharedSettingView({ key: "worktreeBranchPrefix", devices: net.readTargets() }).agreement,
     ).toEqual({ kind: "same", value: "ryco" });
+  });
+});
+
+describe("shared paths across operating systems", () => {
+  const sharedPath = (stored: string, at: number, written?: string) => ({
+    worktreeRoot: stored,
+    settingsSharing: {
+      worktreeRoot: {
+        mode: "shared" as const,
+        stamp: stamp(at),
+        ...(written === undefined ? {} : { written }),
+      },
+    },
+  });
+
+  it("catches another OS up to the path as written, never the newest device's own path", () => {
+    const net = createDeviceNetwork();
+    net.add("mac", { home: "/Users/me", settings: sharedPath("/Users/me/w", 5, "~/w") });
+    const linux = net.add("linux", { home: "/home/me", settings: sharedPath("", 1) });
+    const [write] = planSettingsSharingCatchUp({ devices: net.readTargets(), now: 0 });
+    expect(write?.environmentId).toBe("linux");
+    expect(write?.patch.worktreeRoot).toBe("~/w");
+    expect(write?.patch.settingsSharing?.worktreeRoot).toEqual({
+      mode: "shared",
+      stamp: stamp(5),
+      onlyIfOlderShared: true,
+      written: "~/w",
+    });
+  });
+
+  it("reads devices on one shared path write as agreeing, by the path as written", async () => {
+    const net = createDeviceNetwork();
+    const mac = net.add("mac", { home: "/Users/me" });
+    const linux = net.add("linux", { home: "/home/me" });
+    const command = writeSharedSetting({
+      devices: net.readTargets(),
+      key: "worktreeRoot",
+      value: "~/w",
+      stamp: stamp(9),
+    });
+    for (const write of command.writes)
+      await net
+        .readTargets()
+        .find((t) => t.environmentId === write.environmentId)
+        ?.write(write.patch);
+    expect([mac.settings.worktreeRoot, linux.settings.worktreeRoot]).toEqual([
+      "/Users/me/w",
+      "/home/me/w",
+    ]);
+    const view = readSharedSettingView({ key: "worktreeRoot", devices: net.readTargets() });
+    expect(view.agreement).toEqual({ kind: "same", value: "~/w" });
+    expect(view.newest?.value).toBe("~/w");
+    expect(
+      view.devices.map((device) => [device.value, device.written, device.holdsNewest]),
+    ).toEqual([
+      ["/Users/me/w", "~/w", true],
+      ["/home/me/w", "~/w", true],
+    ]);
+    expect(planSettingsSharingCatchUp({ devices: net.readTargets(), now: 0 })).toEqual([]);
+  });
+
+  it("falls back to the stored path and the equal stamp for entries without a written path", () => {
+    const net = createDeviceNetwork();
+    net.add("mac", { settings: sharedPath("/Users/me/w", 5) });
+    net.add("linux", { settings: sharedPath("/home/me/w", 5) });
+    net.add("behind", { settings: sharedPath("", 1) });
+    const view = readSharedSettingView({ key: "worktreeRoot", devices: net.readTargets() });
+    // The first two took one write; only the device behind differs.
+    expect(view.agreement).toEqual({ kind: "differs" });
+    const [macView, linuxView] = view.devices;
+    expect(macView && linuxView && sharedDeviceValuesAgree(macView, linuxView)).toBe(true);
+    // Old data has nothing better than the newest device's stored path (tie: lowest id).
+    expect(
+      planSettingsSharingCatchUp({ devices: net.readTargets(), now: 0 })[0]?.patch.worktreeRoot,
+    ).toBe("/home/me/w");
+  });
+
+  it("compares written paths, not stamps, when both entries record one", () => {
+    const net = createDeviceNetwork();
+    net.add("a", { settings: sharedPath("/Users/me/a", 5, "~/a") });
+    net.add("b", { settings: sharedPath("/home/me/b", 5, "~/b") });
+    const [a, b] = readSharedSettingView({
+      key: "worktreeRoot",
+      devices: net.readTargets(),
+    }).devices;
+    expect(a && b && sharedDeviceValuesAgree(a, b)).toBe(false);
   });
 });
 

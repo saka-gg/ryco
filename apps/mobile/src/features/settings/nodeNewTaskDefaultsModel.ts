@@ -5,19 +5,15 @@
  *
  * Every rule is the shared one the web settings use: the registry decides the rows, the node's
  * own reply decides which of them it supports, and each write carries the compare-and-set values
- * `projectPreferencesWritePatch` builds, so a node whose values changed elsewhere refuses it.
+ * `projectPreferencesWritePatch` builds, so a node whose values changed elsewhere refuses it. The
+ * node's own defaults other than the model are shared device settings: they are written through
+ * the sharing commands (`writeShared`, `applyEverywhere`), stamped, as the web's rows write them.
  */
 import { readEffectiveProjectPreferences } from "@ryco/client-runtime/state/settings";
-import {
-  applyNodeSettingsPatch,
-  describeNodeSettingsApplyResult,
-  readNodeSettingsAgreement,
-  type NodeSettingsAgreement,
-  type NodeSettingsTarget,
-} from "@ryco/client-runtime/state/settings/nodeSettingsFanOut";
+import type { NodeSettingsTarget } from "@ryco/client-runtime/state/settings/nodeSettingsTargets";
+import { readSharedSettingView } from "@ryco/client-runtime/state/settings/sharedDeviceSettings";
 import {
   nodeKeepsProjectPreferences,
-  nodePreferencesPatchFor,
   projectPreferenceCanReset,
   projectPreferenceResetValue,
   projectPreferencesWritePatch,
@@ -34,11 +30,13 @@ import type {
   ProjectPreferenceValueKey,
   ProviderOptionSelectionValue,
   ServerConfig,
+  ServerSettings,
   ServerSettingsPatch,
 } from "@ryco/contracts";
 import { INITIAL_MODEL_OPTION_IDS, PROJECT_PREFERENCE_VALUE_KEYS } from "@ryco/contracts/settings";
 import { createModelSelection } from "@ryco/shared/model";
 import { excludeChatProjects } from "@ryco/shared/projectKind";
+import { isShareableServerSettingKey } from "@ryco/shared/settingsSharing";
 import {
   PROJECT_PREFERENCE_FIELDS,
   PROJECT_PREFERENCE_PROJECT_GONE,
@@ -340,21 +338,36 @@ export interface NewTaskDefaultsApplyChoice {
   readonly detail: string;
 }
 
+/**
+ * Whether the nodes hold the same value now, from each node's last known config (offline ones
+ * too), compared as shared settings compare (a path as written). Nodes too old for project
+ * defaults are left out.
+ */
 function describeAgreement(
   key: ProjectPreferenceValueKey,
-  agreement: NodeSettingsAgreement<unknown>,
+  targets: ReadonlyArray<NodeSettingsTarget>,
 ): string {
-  if (agreement.kind !== "mixed") return "Same on every connected node.";
-  const values = agreement.values
-    .map((entry) => `${entry.label}: ${projectPreferenceValueLabel(key, entry.value)}`)
+  const view = readSharedSettingView({
+    key,
+    devices: targets.filter(
+      (target) => target.config !== null && nodeKeepsProjectPreferences(target.config),
+    ),
+  });
+  if (view.agreement.kind !== "differs") return "Same on every node.";
+  const values = view.devices
+    .flatMap((device) =>
+      device.written === undefined
+        ? []
+        : [`${device.label}: ${projectPreferenceValueLabel(key, device.written)}`],
+    )
     .join(", ");
   return `Differs: ${values}.`;
 }
 
 /**
- * The node defaults "Apply to all connected nodes" offers, one at a time so one tap never
- * overwrites a setting the user did not pick. Never the initial model, whose provider instances
- * differ per node, and never a project override, whose project ids do.
+ * The node defaults "Use on every node" offers, one at a time so one tap never overwrites a
+ * setting the user did not pick. Never the initial model, whose provider instances differ per
+ * node, and never a project override, whose project ids do.
  */
 export function newTaskDefaultsApplyChoices(
   rows: ReadonlyArray<NewTaskDefaultRow>,
@@ -368,12 +381,7 @@ export function newTaskDefaultsApplyChoices(
             key: row.key,
             title: row.title,
             value: row.value,
-            detail: describeAgreement(
-              row.key,
-              readNodeSettingsAgreement(targets, (settings) => settings[row.key], {
-                supported: nodeKeepsProjectPreferences,
-              }),
-            ),
+            detail: describeAgreement(row.key, targets),
           },
         ],
   );
@@ -391,6 +399,11 @@ export interface NewTaskDefaultsInput {
   /** This device may change the node's settings now (`canChangeNodeSettings`). */
   readonly editable: boolean;
   readonly projectId: ProjectId | null;
+  /**
+   * Every node the phone knows, as write targets: a shared default is stamped against all of
+   * them, and "Use on every node" writes each one it may change now.
+   */
+  readonly targets?: ReadonlyArray<NodeSettingsTarget>;
 }
 
 export type NewTaskDefaultsPhase = "offline" | "loading" | "ready" | "unsupported" | "failed";
@@ -405,7 +418,7 @@ export interface NewTaskDefaultsState {
   /** A refused write ("<node>: <message>") or a value that cannot be saved. */
   readonly error: string | null;
   readonly applying: boolean;
-  /** What "Apply to all connected nodes" did last. */
+  /** What "Use on every node" did last. */
   readonly applyStatus: string | null;
 }
 
@@ -425,10 +438,7 @@ export interface NewTaskDefaultsController {
     key: ProjectPreferenceValueKey,
     text: string,
   ) => Promise<void>;
-  readonly applyToAllNodes: (
-    key: ProjectPreferenceValueKey,
-    targets: ReadonlyArray<NodeSettingsTarget>,
-  ) => Promise<void>;
+  readonly applyToAllNodes: (key: ProjectPreferenceValueKey) => Promise<void>;
 }
 
 const INITIAL_STATE: NewTaskDefaultsState = {
@@ -451,9 +461,8 @@ function editableState(state: NewTaskDefaultsState): boolean {
 }
 
 /**
- * Whether "Apply to all connected nodes" may copy a value now: only once the node's newest read
- * landed, as on the web, which disables it while it reads again. Every other node compares its
- * own value, so no compare-and-set would catch a stale value copied from here.
+ * Whether "Use on every node" may copy a value now: only once the node's newest read landed, as
+ * on the web, which disables it while it reads again, so it never shares a stale value.
  */
 function applicableState(state: NewTaskDefaultsState): boolean {
   return editableState(state) && state.phase === "ready";
@@ -471,7 +480,20 @@ function errorMessage(cause: unknown): string {
  * refusal ("changed elsewhere") shows its current values next to the message.
  */
 export function createNewTaskDefaultsController(deps: {
+  /** A plain write to this node: project overrides and the model, with compare-and-set. */
   readonly write: (patch: ServerSettingsPatch) => Promise<unknown>;
+  /** This node's own value of a shared default (`saveNodeSharedSetting`); throws when refused. */
+  readonly writeShared: (
+    targets: ReadonlyArray<NodeSettingsTarget>,
+    key: ProjectPreferenceValueKey,
+    value: ServerSettings[ProjectPreferenceValueKey],
+  ) => Promise<unknown>;
+  /** One shared write of a default to every node (`applySharedSettingToAllNodes`); its outcome. */
+  readonly applyEverywhere: (
+    targets: ReadonlyArray<NodeSettingsTarget>,
+    key: ProjectPreferenceValueKey,
+    value: ServerSettings[ProjectPreferenceValueKey],
+  ) => Promise<string>;
 }): NewTaskDefaultsController {
   let input: NewTaskDefaultsInput | null = null;
   let state = INITIAL_STATE;
@@ -558,7 +580,27 @@ export function createNewTaskDefaultsController(deps: {
     update({ saving: true, error: null, applyStatus: null });
     let error: string | null = null;
     try {
-      await deps.write(projectPreferencesWritePatch({ effective, projectId, patch }));
+      // The node's own defaults besides the model are shared settings: each is this node's
+      // stamped edit. The model and project overrides stay plain writes with compare-and-set.
+      const shared =
+        projectId === null
+          ? (Object.keys(patch) as ReadonlyArray<ProjectPreferenceKey>).filter(
+              (field): field is ProjectPreferenceValueKey => isShareableServerSettingKey(field),
+            )
+          : [];
+      const rest = Object.fromEntries(
+        Object.entries(patch).filter(
+          ([field]) => !(shared as ReadonlyArray<string>).includes(field),
+        ),
+      ) as ProjectPreferencesPatch;
+      for (const field of shared)
+        await deps.writeShared(
+          input?.targets ?? [],
+          field,
+          patch[field] as ServerSettings[ProjectPreferenceValueKey],
+        );
+      if (Object.keys(rest).length > 0)
+        await deps.write(projectPreferencesWritePatch({ effective, projectId, patch: rest }));
     } catch (cause) {
       error = `${label}: ${errorMessage(cause)}`;
     }
@@ -607,7 +649,7 @@ export function createNewTaskDefaultsController(deps: {
       if (next === current.value) return;
       await save(projectId, { [key]: next } as ProjectPreferencesPatch);
     },
-    applyToAllNodes: async (key, targets) => {
+    applyToAllNodes: async (key) => {
       const current = state.effective?.[key];
       // A project override never goes to other nodes: their project ids differ.
       if (
@@ -619,17 +661,17 @@ export function createNewTaskDefaultsController(deps: {
         return;
       const request = scope;
       update({ applying: true, applyStatus: null, error: null });
-      const result = await applyNodeSettingsPatch(
-        targets,
-        nodePreferencesPatchFor({ [key]: current.value } as Parameters<
-          typeof nodePreferencesPatchFor
-        >[0]),
-        { supported: nodeKeepsProjectPreferences },
-      );
-      update({
-        applying: false,
-        applyStatus: scope === request ? describeNodeSettingsApplyResult(result) : null,
-      });
+      let status: string;
+      try {
+        status = await deps.applyEverywhere(
+          input?.targets ?? [],
+          key,
+          current.value as ServerSettings[ProjectPreferenceValueKey],
+        );
+      } catch (cause) {
+        status = errorMessage(cause);
+      }
+      update({ applying: false, applyStatus: scope === request ? status : null });
     },
   };
 }
@@ -641,7 +683,7 @@ export interface NewTaskDefaultsView {
   readonly rows: ReadonlyArray<NewTaskDefaultRow>;
   /** The rows take an edit now. */
   readonly canEdit: boolean;
-  /** "Apply to all connected nodes" may copy a value now: the node's newest read landed. */
+  /** "Use on every node" may copy a value now: the node's newest read landed. */
   readonly canApply: boolean;
   /** One line about the panel as a whole: a failed read, an older node, read-only, loading. */
   readonly notice: string | null;

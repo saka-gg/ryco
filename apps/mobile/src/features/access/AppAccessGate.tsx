@@ -23,6 +23,7 @@ import {
 } from "../../liveActivity/LiveActivityBridge";
 import { ThreadAlertsBridge } from "../../notifications/ThreadAlertsBridge";
 import { LockedWidgetsBridge, WidgetsBridge } from "../../widgets/WidgetsBridge";
+import { SettingsSharingBridge } from "../settings/sharing/SettingsSharingBridge";
 
 const logo = require("../../../../../assets/logo_letter_only.svg");
 
@@ -153,6 +154,7 @@ export function AppAccessGate(props: {
       <ServerStateBootstrap />
       <ThreadAlertsBridge />
       <WidgetsBridge />
+      <SettingsSharingBridge />
       <LiveActivityBridge />
       <WorkspaceNavigation linking={props.linking} theme={props.theme} />
     </>

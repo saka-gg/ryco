@@ -4,10 +4,9 @@ import {
   nodeOwnsAutoSettleRule,
 } from "@ryco/client-runtime/state/settings";
 import {
-  applyNodeSettingsPatch,
-  describeNodeSettingsApplyResult,
   nodeSettingsBlocker,
-} from "@ryco/client-runtime/state/settings/nodeSettingsFanOut";
+  writeNodeSettingsPatches,
+} from "@ryco/client-runtime/state/settings/nodeSettingsTargets";
 import { beforeEach, describe, expect, it, vi } from "vite-plus/test";
 
 const state = vi.hoisted(() => ({
@@ -152,17 +151,18 @@ describe("applying a setting to every known node", () => {
     state.saved.studio = { role: "owner" };
     state.saved.laptop = { role: "owner" };
 
-    const result = await applyNodeSettingsPatch(
+    const result = await writeNodeSettingsPatches(
       [
         { environmentId: studio, label: "Studio" },
         { environmentId: EnvironmentId.make("laptop"), label: "Laptop" },
       ].map(readNodeSettingsTarget),
-      nodeAutoSettleRulePatch(14),
+      () => nodeAutoSettleRulePatch(14),
       { supported: nodeOwnsAutoSettleRule },
     );
-    expect(describeNodeSettingsApplyResult(result)).toBe(
-      "Applied to Studio. Not changed: Laptop (not connected).",
-    );
+    expect(result).toEqual({
+      applied: [{ environmentId: studio, label: "Studio" }],
+      notApplied: [{ environmentId: "laptop", label: "Laptop", reason: "disconnected" }],
+    });
     expect(state.updateEnvironmentServerSettings).toHaveBeenCalledTimes(1);
     expect(state.updateEnvironmentServerSettings).toHaveBeenCalledWith(studio, {
       threadAutoSettleAfterDays: 14,
@@ -175,16 +175,17 @@ describe("applying a setting to every known node", () => {
     const refused = connectNode("hosted-refused");
     state.hostedWritable.add("hosted-writable");
 
-    const result = await applyNodeSettingsPatch(
+    const result = await writeNodeSettingsPatches(
       [
         { environmentId: writable, label: "Studio" },
         { environmentId: refused, label: "Laptop" },
       ].map(readNodeSettingsTarget),
-      { pullRequestTemplates: false },
+      () => ({ pullRequestTemplates: false }),
     );
-    expect(describeNodeSettingsApplyResult(result)).toBe(
-      "Applied to Studio. Not changed: Laptop (only its owner can change it).",
-    );
+    expect(result).toEqual({
+      applied: [{ environmentId: writable, label: "Studio" }],
+      notApplied: [{ environmentId: refused, label: "Laptop", reason: "read-only" }],
+    });
     expect(state.updateEnvironmentServerSettings).toHaveBeenCalledTimes(1);
     expect(state.updateEnvironmentServerSettings).toHaveBeenCalledWith(writable, {
       pullRequestTemplates: false,

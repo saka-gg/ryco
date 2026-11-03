@@ -62,7 +62,10 @@ import { ServerConfig } from "./config.ts";
 import { type DeepPartial } from "@ryco/shared/Struct";
 import { formatSchemaError, fromLenientJson } from "@ryco/shared/schemaJson";
 import { applyServerSettingsPatch, migrateLegacyServerSettings } from "@ryco/shared/serverSettings";
-import { resolveSettingsSharingPatch } from "@ryco/shared/settingsSharing";
+import {
+  recordWrittenSettingValues,
+  resolveSettingsSharingPatch,
+} from "@ryco/shared/settingsSharing";
 import {
   listEnabledProviderInstances,
   resolveProviderInstanceEnabled,
@@ -1190,10 +1193,13 @@ export const makeServerSettings = Effect.gen(function* () {
       Effect.flatMap(materializeSecrets),
       Effect.map(resolveModelSelections),
     ),
-    updateSettings: (patch) =>
+    updateSettings: (receivedPatch) =>
       writeSemaphore.withPermits(1)(
         Effect.gen(function* () {
           const current = yield* getSettingsFromCache;
+          // A shared path keeps the value as written, before it is normalized for this machine:
+          // other devices are caught up to that value and normalize it themselves.
+          const patch = recordWrittenSettingValues(receivedPatch);
           // A catch-up this node no longer needs (an override here, or a newer stamp) is dropped
           // with its value before anything is validated; a non-shareable key fails the write.
           const sharing = yield* Effect.try({

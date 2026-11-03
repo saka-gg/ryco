@@ -10,7 +10,7 @@ import {
   type ServerSettingsPatch,
 } from "@ryco/contracts/settings";
 import { applyServerSettingsPatch } from "@ryco/shared/serverSettings";
-import { SETTINGS_SHARING_VERSION } from "@ryco/shared/settingsSharing";
+import { SETTINGS_SHARING_VERSION, recordWrittenSettingValues } from "@ryco/shared/settingsSharing";
 
 import type { NodeSettingsConfig, NodeSettingsTarget } from "./nodeSettingsTargets.ts";
 
@@ -21,6 +21,11 @@ export interface SimulatedDevice {
   canWrite: boolean;
   /** Its sharing version; null: an older Ryco without the capability. */
   sharingVersion: number | null;
+  /**
+   * Its home folder: like a node, it records a shared path as written, then stores `~/…` paths
+   * (worktree root, chats folder) expanded against it. Undefined stores paths as written.
+   */
+  home: string | undefined;
   /** Throws with this message for a patch it refuses. */
   reject: ((patch: ServerSettingsPatch) => string | null) | null;
   readonly writes: ServerSettingsPatch[];
@@ -40,6 +45,7 @@ export function createDeviceNetwork() {
       readonly connected?: boolean;
       readonly canWrite?: boolean;
       readonly sharingVersion?: number | null;
+      readonly home?: string;
     } = {},
   ): SimulatedDevice => {
     const device: SimulatedDevice = {
@@ -49,6 +55,7 @@ export function createDeviceNetwork() {
       canWrite: input.canWrite ?? true,
       sharingVersion:
         input.sharingVersion === undefined ? SETTINGS_SHARING_VERSION : input.sharingVersion,
+      home: input.home,
       reject: null,
       writes: [],
       target: () => ({
@@ -70,7 +77,10 @@ export function createDeviceNetwork() {
           const refused = device.reject?.(patch) ?? null;
           if (refused !== null) throw new Error(refused);
           device.writes.push(patch);
-          device.settings = applyServerSettingsPatch(device.settings, patch);
+          device.settings = applyServerSettingsPatch(
+            device.settings,
+            normalizePaths(recordWrittenSettingValues(patch), device.home),
+          );
           void Promise.resolve().then(notify);
           return device.settings;
         },
@@ -89,6 +99,19 @@ export function createDeviceNetwork() {
       return () => listeners.delete(listener);
     },
   };
+}
+
+/** Expands `~/` in the path settings a node normalizes, as `serverSettings.ts` does. */
+function normalizePaths(patch: ServerSettingsPatch, home: string | undefined): ServerSettingsPatch {
+  if (home === undefined) return patch;
+  const expand = (path: string | undefined) =>
+    path !== undefined && path.startsWith("~/") ? `${home}/${path.slice(2)}` : path;
+  const next: Record<string, unknown> = { ...patch };
+  for (const key of ["worktreeRoot", "chatsRoot"] as const) {
+    const value = expand(patch[key]);
+    if (value !== undefined) next[key] = value;
+  }
+  return next as ServerSettingsPatch;
 }
 
 /** Timers run only when the test advances them. */

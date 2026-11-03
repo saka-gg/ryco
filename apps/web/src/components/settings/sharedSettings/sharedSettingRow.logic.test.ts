@@ -9,6 +9,7 @@ import { describe, expect, it } from "vite-plus/test";
 
 import {
   buildSharedRowCommand,
+  pickSharedRowsDevice,
   describeSharedRowOutcome,
   readSharedRowModel,
   type SharedSettingsMode,
@@ -105,6 +106,19 @@ describe("shared row model", () => {
     expect(model(devices)).toMatchObject({ kind: "same", value: "/Users/me/w" });
   });
 
+  it("shows a shared path as written, the same on a Mac and on Linux", () => {
+    const entry = { worktreeRoot: { mode: "shared" as const, stamp: stamp(7), written: "~/w" } };
+    const devices = [
+      device("mac", { worktreeRoot: "/Users/me/w", settingsSharing: entry }),
+      device("linux", { worktreeRoot: "/home/me/w", settingsSharing: entry }),
+    ];
+    expect(model(devices)).toMatchObject({ kind: "same", value: "~/w" });
+    const linux = model(devices, {
+      mode: { kind: "device", environmentId: EnvironmentId.make("linux") },
+    });
+    expect(linux).toMatchObject({ kind: "single", device: { value: "~/w" }, others: [] });
+  });
+
   it("never offers one control when no device can share", () => {
     const devices = [device("a", {}, { sharing: false }), device("b", {}, { sharing: false })];
     expect(model(devices).kind).toBe("list");
@@ -155,7 +169,9 @@ describe("shared row commands", () => {
         environmentId: "b",
         patch: expect.objectContaining({
           worktreeRoot: "/x",
-          settingsSharing: { worktreeRoot: { mode: "override", stamp: stamp(10, "me") } },
+          settingsSharing: {
+            worktreeRoot: { mode: "override", stamp: stamp(10, "me"), written: "/x" },
+          },
         }),
       }),
     ]);
@@ -210,5 +226,28 @@ describe("shared row commands", () => {
       view: readSharedSettingView({ key: "worktreeRoot", devices }),
     });
     expect(notes).toEqual(["box keeps its own value until it is online."]);
+  });
+});
+
+describe("the device shared rows use when the shown one cannot be", () => {
+  it("takes a connected device this client may write, this app's own first", () => {
+    const devices = [
+      device("offline", {}, { connected: false }),
+      device("viewer", {}, { canWrite: false }),
+      device("remote"),
+      device("own"),
+    ];
+    expect(pickSharedRowsDevice(devices, EnvironmentId.make("own"))).toBe("own");
+    expect(pickSharedRowsDevice(devices, EnvironmentId.make("offline"))).toBe("remote");
+    expect(pickSharedRowsDevice(devices, null)).toBe("remote");
+  });
+
+  it("is none while no device can be written now, so the rows wait", () => {
+    expect(
+      pickSharedRowsDevice(
+        [device("offline", {}, { connected: false }), device("viewer", {}, { canWrite: false })],
+        null,
+      ),
+    ).toBeNull();
   });
 });

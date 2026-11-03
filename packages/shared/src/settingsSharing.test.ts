@@ -19,6 +19,8 @@ import {
   compareSharingStamps,
   readShareableSettingValue,
   readSharingEntry,
+  readWrittenShareableSettingValue,
+  recordWrittenSettingValues,
   shareableSettingValuePatch,
   settingSharedAtVersion,
   shareableSettingValuesEqual,
@@ -285,5 +287,111 @@ describe("applying a sharing patch", () => {
       settingsSharing: { worktreeBranchPrefix: null },
     });
     expect(next.settingsSharing).toEqual({});
+  });
+});
+
+describe("shared paths as written", () => {
+  /** A node's write: the path recorded as written, then normalized for this machine. */
+  const nodeApply = (current: ServerSettings, patch: ServerSettingsPatch, home: string) => {
+    const recorded = recordWrittenSettingValues(patch);
+    const normalized =
+      typeof recorded.worktreeRoot === "string" && recorded.worktreeRoot.startsWith("~/")
+        ? { ...recorded, worktreeRoot: `${home}/${recorded.worktreeRoot.slice(2)}` }
+        : recorded;
+    return applyServerSettingsPatch(current, normalized);
+  };
+
+  it("keeps the path as written next to the value the node normalized", () => {
+    const next = nodeApply(
+      DEFAULT_SERVER_SETTINGS,
+      {
+        worktreeRoot: "~/w",
+        settingsSharing: { worktreeRoot: { mode: "shared", stamp: stamp(5) } },
+      },
+      "/Users/me",
+    );
+    expect(next.worktreeRoot).toBe("/Users/me/w");
+    expect(next.settingsSharing.worktreeRoot).toEqual({
+      mode: "shared",
+      stamp: stamp(5),
+      written: "~/w",
+    });
+    expect(readWrittenShareableSettingValue(next, "worktreeRoot")).toBe("~/w");
+    expect(readShareableSettingValue(next, "worktreeRoot")).toBe("/Users/me/w");
+  });
+
+  it("records what the patch carries, never a written value of the writer's own", () => {
+    expect(
+      recordWrittenSettingValues({
+        worktreeRoot: "~/w",
+        settingsSharing: {
+          worktreeRoot: { mode: "shared", stamp: stamp(5), written: "/elsewhere" },
+        },
+      }).settingsSharing?.worktreeRoot,
+    ).toEqual({ mode: "shared", stamp: stamp(5), written: "~/w" });
+    // Without the value, a written value means nothing.
+    expect(
+      recordWrittenSettingValues({
+        settingsSharing: { chatsRoot: { mode: "override", stamp: stamp(5), written: "~/c" } },
+      }).settingsSharing?.chatsRoot,
+    ).toEqual({ mode: "override", stamp: stamp(5) });
+    // Other keys keep no written value.
+    const prefix = applyServerSettingsPatch(DEFAULT_SERVER_SETTINGS, {
+      worktreeBranchPrefix: "me",
+      settingsSharing: {
+        worktreeBranchPrefix: { mode: "shared", stamp: stamp(5), written: "me" },
+      },
+    });
+    expect(prefix.settingsSharing.worktreeBranchPrefix).toEqual({
+      mode: "shared",
+      stamp: stamp(5),
+    });
+  });
+
+  it("keeps the written path while the value stays, and drops it once the value changes", () => {
+    const sharedRoot = nodeApply(
+      DEFAULT_SERVER_SETTINGS,
+      {
+        worktreeRoot: "~/w",
+        settingsSharing: { worktreeRoot: { mode: "shared", stamp: stamp(5) } },
+      },
+      "/home/me",
+    );
+    // "Keep its own value" without a value: the path and its written form stay.
+    const kept = applyServerSettingsPatch(sharedRoot, {
+      settingsSharing: { worktreeRoot: { mode: "override", stamp: stamp(6) } },
+    });
+    expect(kept.settingsSharing.worktreeRoot).toEqual({
+      mode: "override",
+      stamp: stamp(6),
+      written: "~/w",
+    });
+    // An unrelated edit changes nothing about it.
+    expect(
+      applyServerSettingsPatch(sharedRoot, { worktreeBranchPrefix: "x" }).settingsSharing
+        .worktreeRoot,
+    ).toEqual(sharedRoot.settingsSharing.worktreeRoot);
+    // An unstamped edit of the path: an override, and the old written form is gone.
+    const edited = applyServerSettingsPatch(sharedRoot, { worktreeRoot: "/srv/w" });
+    expect(edited.settingsSharing.worktreeRoot).toEqual({ mode: "override", stamp: stamp(5) });
+    expect(readWrittenShareableSettingValue(edited, "worktreeRoot")).toBe("/srv/w");
+    // The same on an override.
+    const overrideEdit = applyServerSettingsPatch(kept, { worktreeRoot: "/srv/w" });
+    expect(overrideEdit.settingsSharing.worktreeRoot).toEqual({
+      mode: "override",
+      stamp: stamp(6),
+    });
+  });
+
+  it("reads entries from before written values by their stored value", () => {
+    const old = withSharing(
+      { worktreeRoot: { mode: "shared", stamp: stamp(5) } },
+      { worktreeRoot: "/Users/me/w" },
+    );
+    expect(readWrittenShareableSettingValue(old, "worktreeRoot")).toBe("/Users/me/w");
+    expect(Schema.decodeUnknownSync(ServerSettings)(old).settingsSharing.worktreeRoot).toEqual({
+      mode: "shared",
+      stamp: stamp(5),
+    });
   });
 });

@@ -26,11 +26,10 @@ import { useHostedHubStore } from "../hostedHub/state";
 import { useDesktopWorkspaceState } from "../platform/desktopWorkspace";
 
 /**
- * The web side of writing settings to every node (`nodeSettingsFanOut`, and
- * shared device settings): which nodes this client knows, and each one as a
- * write target. Outside the settings route so the shared-settings runner can
- * use it without loading the settings page; nothing in the app shell imports
- * it yet.
+ * The web side of writing settings to every node (shared device settings):
+ * which nodes this client knows, and each one as a write target. Outside the
+ * settings route so the shared-settings runner can use it without loading the
+ * settings page; nothing in the app shell imports it yet.
  */
 
 export interface KnownSettingsNode {

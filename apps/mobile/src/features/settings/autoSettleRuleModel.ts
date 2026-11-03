@@ -4,7 +4,7 @@ import {
   readNodeAutoSettleRule,
 } from "@ryco/client-runtime/state/settings";
 import type { EnvironmentId, ServerConfig } from "@ryco/contracts";
-import type { ServerSettingsPatch, SidebarAutoSettleAfterDays } from "@ryco/contracts/settings";
+import type { SidebarAutoSettleAfterDays } from "@ryco/contracts/settings";
 
 export interface AutoSettleRuleNodeRow {
   readonly environmentId: EnvironmentId;
@@ -72,8 +72,9 @@ export function autoSettleRuleModelNote(model: AutoSettleRuleModel): string | nu
 }
 
 /**
- * Sets the rule the options show: on the node being edited, or, without one,
- * as this device's own rule. Null when the node may not be changed here.
+ * Sets the rule the options show: on the node being edited (`writeNode`, a shared setting's
+ * edit of that node), or, without one, as this device's own rule. Null when the node may not
+ * be changed here.
  */
 export function changeAutoSettleRuleModel(
   model: AutoSettleRuleModel,
@@ -81,7 +82,7 @@ export function changeAutoSettleRuleModel(
   writers: {
     readonly writeNode: (
       environmentId: EnvironmentId,
-      patch: ServerSettingsPatch,
+      value: SidebarAutoSettleAfterDays,
     ) => Promise<unknown>;
     readonly writeDevice: (value: SidebarAutoSettleAfterDays) => void;
   },
@@ -89,6 +90,7 @@ export function changeAutoSettleRuleModel(
   return changeAutoSettleRule({
     node: model.editing === null ? null : { ...model.editing, ownsRule: true },
     value,
-    ...writers,
+    writeNode: (environmentId) => writers.writeNode(environmentId, value),
+    writeDevice: writers.writeDevice,
   });
 }

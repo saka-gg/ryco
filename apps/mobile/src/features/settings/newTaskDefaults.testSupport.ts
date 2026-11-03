@@ -44,7 +44,7 @@ const CAPABILITIES = {
 /** A node's config with two models; capabilities default to a current node. */
 export function testNodeConfig(
   settings: ServerSettings = DEFAULT_SERVER_SETTINGS,
-  capabilities: Record<string, boolean> = {
+  capabilities: Record<string, boolean | number> = {
     projectPreferences: true,
     worktreeSubmoduleSettings: true,
   },
