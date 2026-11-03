@@ -1193,6 +1193,11 @@ export const AgentControlCopyProjectToNodePlan = Schema.Struct({
   bringCommits: Schema.Boolean,
   bringChanges: Schema.Boolean,
   copySettings: Schema.Boolean,
+  /**
+   * The branch the target checks out, from the remote. Absent or null: the source's current
+   * branch (a project) or the remote's default branch (a repository).
+   */
+  branch: Schema.optionalKey(Schema.NullOr(GitBranchName)),
   /** The exact command; the client executor refuses to send a different one. */
   setup: Schema.NullOr(ProjectImportSetup),
   followUpThread: Schema.NullOr(

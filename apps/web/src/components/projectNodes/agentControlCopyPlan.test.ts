@@ -372,6 +372,33 @@ describe("planAgentControlCopy", () => {
     );
   });
 
+  it("checks out the plan's branch, and refuses changes that belong to another one", () => {
+    const onBranch = planAgentControlCopy(facts({ plan: copyPlan({ branch: "release/1.2" }) }));
+    expect(onBranch.ok && onBranch.runPlan.checkoutBranch).toBe("release/1.2");
+    // The source's changes are on main: they can't come along to release/1.2.
+    const withChanges = planAgentControlCopy(
+      facts({
+        plan: copyPlan({ branch: "release/1.2", bringChanges: true }),
+        inspection: inspection({ changes: 2 }),
+      }),
+    );
+    expect(withChanges.ok).toBe(false);
+    expect(withChanges.preview.problem).toBe(
+      "The uncommitted changes are on main, not release/1.2; they can't come along to another branch.",
+    );
+    // Naming the source's own branch is no change.
+    const sameBranch = planAgentControlCopy(
+      facts({
+        plan: copyPlan({ branch: "main", bringChanges: true }),
+        inspection: inspection({ changes: 2 }),
+      }),
+    );
+    expect(sameBranch.ok).toBe(true);
+    expect(
+      planAgentControlCopy(facts()).ok && "checkoutBranch" in planAgentControlCopy(facts()),
+    ).toBe(false);
+  });
+
   it("never falls back to sending the files", () => {
     const unreachable = planAgentControlCopy(
       facts({

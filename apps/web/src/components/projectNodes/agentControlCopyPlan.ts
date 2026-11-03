@@ -248,6 +248,18 @@ export function agentControlCopyOptionsProblem(input: {
   if (plan.bringChanges && !choices.bringChanges && changeCount > 0) {
     return cantBring("the uncommitted changes", options.bringChanges.reason);
   }
+  // Another branch is checked out from the remote; the changes belong to the source's own.
+  const sourceBranch = inspection?.repository.branch ?? null;
+  if (
+    plan.branch != null &&
+    choices.mode !== "link" &&
+    plan.bringChanges &&
+    changeCount > 0 &&
+    plan.source.kind === "project" &&
+    plan.branch !== sourceBranch
+  ) {
+    return `The uncommitted changes are on ${sourceBranch ?? "a detached HEAD"}, not ${plan.branch}; they can't come along to another branch.`;
+  }
   if (plan.copySettings && !choices.copySettings) {
     return cantBring("the project settings", options.copySettings.reason);
   }
@@ -414,6 +426,7 @@ export function planAgentControlCopy(facts: AgentControlCopyFacts): AgentControl
     title: plan.source.title,
     setup: plan.setup,
     followUpThread,
+    checkoutBranch: plan.branch ?? null,
     origin: {
       kind: "agent-control",
       sourceLabel: facts.source.label,

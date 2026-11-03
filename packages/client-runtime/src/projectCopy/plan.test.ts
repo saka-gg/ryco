@@ -844,6 +844,54 @@ describe("buildProjectImportStartInput", () => {
     expect(withPatch.warnings).toHaveLength(1);
   });
 
+  it("checks out another branch from the remote when asked, leaving the source's changes", () => {
+    const plan = { ...runPlan({ bringChanges: true }), checkoutBranch: "release/1.2" };
+    const { input, warnings } = buildProjectImportStartInput({
+      plan,
+      importId,
+      projectId: "new-project" as ProjectId,
+      exportResult: exportResult(),
+      transfers: { "commits-bundle": transfer(1), "changes-patch": transfer(2) },
+    });
+    expect(input.checkout).toEqual({ branch: "release/1.2", headOid: null });
+    expect(input.changes).toBeNull();
+    expect(warnings).toEqual([
+      "Uncommitted changes were not copied: they are on feature, not release/1.2.",
+    ]);
+    // The source's own branch named again changes nothing.
+    const same = buildProjectImportStartInput({
+      plan: { ...runPlan({}), checkoutBranch: "feature" },
+      importId,
+      projectId: "new-project" as ProjectId,
+      exportResult: exportResult(),
+      transfers: { "commits-bundle": transfer(1) },
+    });
+    expect(same.input.checkout).toEqual({ branch: "feature", headOid: OID });
+  });
+
+  it("passes an agent's branch through the run plan", () => {
+    const facts = planning(inspectedSource());
+    const built = buildProjectCopyRunPlan({
+      planning: facts,
+      options: planProjectCopyOptions(facts, {}),
+      target: { environmentId: TARGET, pathSeparator: "/" },
+      setup: null,
+      followUpThread: null,
+      origin: { kind: "user", sourceLabel: "MacBook", proposalId: null },
+      checkoutBranch: "release/1.2",
+    });
+    expect(built.ok && built.plan.checkoutBranch).toBe("release/1.2");
+    const without = buildProjectCopyRunPlan({
+      planning: facts,
+      options: planProjectCopyOptions(facts, {}),
+      target: { environmentId: TARGET, pathSeparator: "/" },
+      setup: null,
+      followUpThread: null,
+      origin: { kind: "user", sourceLabel: "MacBook", proposalId: null },
+    });
+    expect(without.ok && "checkoutBranch" in without.plan).toBe(false);
+  });
+
   it("sends a repository bundle on the Send files retry", () => {
     const plan = projectCopyPlanWithSendFiles(runPlan({}));
     expect(plan?.choices).toMatchObject({ mode: "send-files", bringCommits: false });

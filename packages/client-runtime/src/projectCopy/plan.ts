@@ -957,6 +957,11 @@ export interface ProjectCopyRunPlan {
   readonly origin: ProjectImportOrigin;
   /** A clone the target can't reach may be retried by sending the files (A12). */
   readonly sendFilesFallback: boolean;
+  /**
+   * The branch to check out from the remote instead of the source's own (an agent's request);
+   * absent or null keeps the source's branch, or the remote's default for a repository.
+   */
+  readonly checkoutBranch?: string | null;
 }
 
 export type ProjectCopyRunPlanResult =
@@ -1032,6 +1037,7 @@ export function buildProjectCopyRunPlan(input: {
   readonly setup: ProjectImportSetup | null;
   readonly followUpThread: ProjectImportFollowUpThread | null;
   readonly origin: ProjectImportOrigin;
+  readonly checkoutBranch?: string | null;
 }): ProjectCopyRunPlanResult {
   const { planning, options } = input;
   if (options.blockedReason !== null) return { ok: false, reason: options.blockedReason };
@@ -1094,6 +1100,7 @@ export function buildProjectCopyRunPlan(input: {
         source.kind === "inspected" &&
         choices.mode === "clone" &&
         options.modes.sendFiles.available,
+      ...(input.checkoutBranch == null ? {} : { checkoutBranch: input.checkoutBranch }),
     },
   };
 }
@@ -1163,6 +1170,8 @@ export function buildProjectImportStartInput(input: {
   const { plan, exportResult, transfers } = input;
   const warnings: string[] = [];
   const mode = plan.choices.mode;
+  const requestedBranch =
+    plan.checkoutBranch != null && isValidBranch(plan.checkoutBranch) ? plan.checkoutBranch : null;
   const common = {
     importId: input.importId,
     projectId: input.projectId,
@@ -1183,7 +1192,10 @@ export function buildProjectImportStartInput(input: {
       source,
       remotes: mode === "link" ? [] : plan.source.remotes,
       commits: null,
-      checkout: null,
+      checkout:
+        mode === "link" || requestedBranch === null
+          ? null
+          : { branch: requestedBranch, headOid: null },
       changes: null,
       relativeRootInRepository: plan.source.relativeRootInRepository,
       // Nobody inspected the repository: a clone asks for both steps, a link touches nothing.
@@ -1238,18 +1250,26 @@ export function buildProjectImportStartInput(input: {
     if (!repository.isDetached && repository.branch !== null && branch === null) {
       warnings.push(`The branch ${repository.branch} can't be recreated; the copy is detached.`);
     }
+    // Another branch than the source's comes from the remote as it is there.
+    const otherBranch = requestedBranch !== null && requestedBranch !== repository.branch;
     const checkout =
       mode === "link"
         ? null
-        : headOid !== null && headArrives
-          ? { branch, headOid }
-          : branch !== null && pushedState.upstreamBranch !== null
-            ? { branch, headOid: null }
-            : null;
+        : otherBranch
+          ? { branch: requestedBranch, headOid: null }
+          : headOid !== null && headArrives
+            ? { branch, headOid }
+            : branch !== null && pushedState.upstreamBranch !== null
+              ? { branch, headOid: null }
+              : null;
     const changesTransferId = mode === "link" ? undefined : transfers["changes-patch"];
     let changes: ProjectImportStartInput["changes"] = null;
     if (changesTransferId !== undefined) {
-      if (headOid !== null && checkout?.headOid === headOid) {
+      if (otherBranch) {
+        warnings.push(
+          `Uncommitted changes were not copied: they are on ${repository.branch ?? "a detached HEAD"}, not ${requestedBranch}.`,
+        );
+      } else if (headOid !== null && checkout?.headOid === headOid) {
         changes = {
           transferId: changesTransferId,
           baseOid: headOid,
