@@ -98,6 +98,7 @@ import {
 import { FolderPicker } from "./FolderPicker";
 import { displayProjectPath } from "../../lib/projectPaths";
 import { NodeBadge } from "./NodePicker";
+import { NODE_LABEL_CELL, NodePathText, useNodeLabelColumn } from "./NodePathText";
 import type { CopyProjectDialogRequest } from "./projectNodesDialogStore";
 import {
   DEFAULT_COPY_USER_CHOICES,
@@ -157,6 +158,8 @@ function SourceList(props: {
   readonly onChange: (key: string) => void;
   readonly labelledBy: string;
 }) {
+  const listRef = useRef<HTMLDivElement | null>(null);
+  useNodeLabelColumn(listRef, props.rows);
   const only = props.rows.length === 1 ? props.rows[0] : undefined;
   if (only) {
     // One checkout: nothing to choose, so a line instead of a one-option radio.
@@ -168,9 +171,11 @@ function SourceList(props: {
       >
         {only.node ? <NodeBadge node={only.node} size="sm" /> : null}
         <span className="max-w-[45%] shrink-0 truncate">{only.label}</span>
-        <span className="min-w-0 flex-1 truncate font-mono text-[11.5px] opacity-75">
-          {only.displayPath}
-        </span>
+        <NodePathText
+          path={only.displayPath}
+          title={only.reason ?? only.path}
+          className="flex-1 font-mono text-[11.5px] opacity-75"
+        />
         <CopyCheckoutMetaLine
           meta={props.metaByKey.get(only.key) ?? { branch: null, changed: 0, behind: 0 }}
           offline={only.offline}
@@ -185,6 +190,7 @@ function SourceList(props: {
   });
   return (
     <div
+      ref={listRef}
       role="radiogroup"
       aria-labelledby={props.labelledBy}
       onKeyDown={group.onKeyDown}
@@ -205,10 +211,14 @@ function SourceList(props: {
         >
           <CopyRadioDot />
           {row.node ? <NodeBadge node={row.node} size="sm" /> : null}
-          <span className="w-24 shrink-0 truncate">{row.label}</span>
-          <span className="min-w-0 flex-1 truncate font-mono text-[11.5px] opacity-75">
-            {row.displayPath}
+          <span className="w-(--node-label-column,96px) shrink-0 truncate" {...NODE_LABEL_CELL}>
+            {row.label}
           </span>
+          <NodePathText
+            path={row.displayPath}
+            title={row.reason ?? row.path}
+            className="flex-1 font-mono text-[11.5px] opacity-75"
+          />
           <CopyCheckoutMetaLine
             meta={props.metaByKey.get(row.key) ?? { branch: null, changed: 0, behind: 0 }}
             offline={row.offline}

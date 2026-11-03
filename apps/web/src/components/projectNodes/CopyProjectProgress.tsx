@@ -9,6 +9,7 @@
 
 import type { NodeCatalogEntry } from "@ryco/client-runtime/state/nodes";
 import { CheckIcon, CopyIcon, TriangleAlertIcon } from "lucide-react";
+import { useRef } from "react";
 
 import { getGitStatusSnapshot } from "../../lib/gitStatusState";
 import type { Project } from "../../types";
@@ -31,6 +32,7 @@ import {
 import type { StartedProjectCopy } from "./CopyProjectForm";
 import { displayProjectPath } from "../../lib/projectPaths";
 import { NodeBadge } from "./NodePicker";
+import { NODE_LABEL_CELL, NodePathText, useNodeLabelColumn } from "./NodePathText";
 
 const FOOTER_CLASS = "flex items-center gap-2 border-border border-t px-4 py-[11px]";
 const SUMMARY_CLASS = "min-w-0 flex-1 truncate text-[12px] text-muted-foreground";
@@ -193,6 +195,8 @@ function DoneView(props: CopyProjectProgressProps & { readonly entry: ProjectCop
   }
   const nodeCount = new Set(rows.map((row) => row.node?.environmentId ?? row.label).filter(Boolean))
     .size;
+  const listRef = useRef<HTMLDivElement | null>(null);
+  useNodeLabelColumn(listRef, rows.map((row) => row.label).join("\u0000"));
   const warnings = project?.warnings ?? entry.progress.importSnapshot?.warnings ?? [];
   return (
     <>
@@ -214,17 +218,24 @@ function DoneView(props: CopyProjectProgressProps & { readonly entry: ProjectCop
               : "Ready for threads."}
           </p>
         </div>
-        <div className="overflow-hidden rounded-[10px] border border-border">
+        <div ref={listRef} className="overflow-hidden rounded-[10px] border border-border">
           {rows.map((row) => (
             <div
               key={row.key}
               className="flex items-center gap-2 border-border px-2.5 py-2 text-[12.5px] not-first:border-t"
             >
               {row.node ? <NodeBadge node={row.node} size="sm" /> : null}
-              <span className="w-26 shrink-0 truncate">{row.label}</span>
-              <span className="min-w-0 flex-1 truncate font-mono text-[11.5px] text-muted-foreground">
-                {displayProjectPath(row.path)}
+              <span
+                className="w-(--node-label-column,104px) shrink-0 truncate"
+                {...NODE_LABEL_CELL}
+              >
+                {row.label}
               </span>
+              <NodePathText
+                path={displayProjectPath(row.path)}
+                title={row.path}
+                className="flex-1 font-mono text-[11.5px] text-muted-foreground"
+              />
               <CopyCheckoutMetaLine
                 isNew={row.isNew}
                 meta={
