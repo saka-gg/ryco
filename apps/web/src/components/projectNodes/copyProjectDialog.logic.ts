@@ -24,9 +24,12 @@ import type {
 import { displayRemoteUrl } from "@ryco/shared/gitRemoteUrl";
 
 import {
+  formatCopyTimeLeft,
   formatCopyTransfer,
+  formatCopyUpload,
   lastOutputLine,
   projectCopyView,
+  type ProjectCopyThroughput,
 } from "./copyRuntime/projectCopyProgress.logic";
 import { displayProjectPath } from "../../lib/projectPaths";
 import { describeNodePresence, nodeOsLabel } from "./nodePicker.logic";
@@ -215,18 +218,38 @@ export function copyNoTargetMessage(title: string, cards: ReadonlyArray<CopyTarg
   return [`No node can take a copy of ${title} right now.`, ...reasons].join(" ");
 }
 
-/** The destination the dialog starts with: the one asked for, else the first node ready for it. */
+/**
+ * The destination the dialog starts with: the one asked for, else the one this
+ * project was last copied to from this source, else the first node ready for it.
+ */
 export function initialCopyTarget(
   cards: ReadonlyArray<CopyTargetCard>,
   requested: EnvironmentId | null,
+  remembered: EnvironmentId | null = null,
 ): EnvironmentId | null {
-  const asked = requested ? cards.find((card) => card.node.environmentId === requested) : null;
-  if (asked?.selectable) return asked.node.environmentId;
+  for (const preferred of [requested, remembered]) {
+    if (preferred === null) continue;
+    const card = cards.find((candidate) => candidate.node.environmentId === preferred);
+    if (card?.selectable) return card.node.environmentId;
+  }
   return (
     cards.find((card) => card.state === "ready")?.node.environmentId ??
     cards.find((card) => card.selectable)?.node.environmentId ??
     null
   );
+}
+
+/**
+ * The To cards worth a card: nodes that already have the project only get a
+ * name in the "Already on" line (`copyAlreadyOn`).
+ */
+export function copyDestinationCards(cards: ReadonlyArray<CopyTargetCard>): CopyTargetCard[] {
+  return cards.filter((card) => card.state !== "has-it");
+}
+
+/** The nodes that already have the project, for the To field's "Already on" line. */
+export function copyAlreadyOn(cards: ReadonlyArray<CopyTargetCard>): CopyTargetCard[] {
+  return cards.filter((card) => card.state === "has-it");
 }
 
 /* ───────── Folder on the destination ───────── */
@@ -259,6 +282,8 @@ export function copyFolderTag(
 export function copyFolderNote(input: {
   readonly suggestion: CopyDestinationSuggestion | null;
   readonly manual: boolean;
+  /** The manual folder is the one used the last time this checkout was copied there. */
+  readonly remembered?: boolean | undefined;
   readonly sourceLabel: string;
   readonly targetLabel: string;
   readonly targetHome: string | null;
@@ -289,7 +314,14 @@ export function copyFolderNote(input: {
       tone: "muted",
     };
   }
-  if (input.manual) return { segments: [plain("You picked this folder.")], tone: "muted" };
+  if (input.manual) {
+    return {
+      segments: [
+        plain(input.remembered ? "The folder you used last time." : "You picked this folder."),
+      ],
+      tone: "muted",
+    };
+  }
   if (suggestion.basis === "same-place") {
     return { segments: [plain(`Same place as on ${input.sourceLabel}.`)], tone: "muted" };
   }
@@ -322,15 +354,60 @@ export function parentOfNodePath(path: string): string {
   return /^[A-Za-z]:$/u.test(parent) ? `${parent}\\` : parent;
 }
 
-/** The footer's summary: "Clones to ~/Code/ryco on Mac mini". */
-export function copyFooterSummary(input: {
+/** What the copy brings beyond the repository, as the collapsed Options and the footer say it. */
+export interface CopyOptionsSummaryInput {
   readonly mode: ProjectCopyMode;
-  readonly path: string;
-  readonly targetLabel: string;
-}): ReadonlyArray<CopyTextSegment> {
-  const verb = input.mode === "clone" ? "Clones" : input.mode === "send-files" ? "Sends" : "Links";
-  const joiner = input.mode === "link" ? " " : " to ";
-  return [plain(`${verb}${joiner}`), mono(input.path), plain(` on ${input.targetLabel}`)];
+  /** Uncommitted changes that come along (0 when they stay). */
+  readonly changes: number;
+  /** Unpushed commits that come along (0 when they stay). */
+  readonly commits: number;
+  /** Ignored files picked to come along. */
+  readonly ignoredFiles: number;
+  readonly copySettings: boolean;
+  /** The setup command that runs afterwards; null when none does. */
+  readonly setupCommand: string | null;
+  readonly followUp: boolean;
+}
+
+const plural = (count: number, one: string, many = `${one}s`): string =>
+  `${count} ${count === 1 ? one : many}`;
+
+/** A setup command short enough for one line: its first words, "bun install …". */
+export function shortSetupCommand(command: string): string {
+  const line = command.trim().split("\n")[0]?.trim() ?? "";
+  if (line.length <= 24) return line;
+  const words = line.split(/\s+/u);
+  let short = words[0] ?? "";
+  for (const word of words.slice(1)) {
+    if (`${short} ${word}`.length > 20) break;
+    short = `${short} ${word}`;
+  }
+  return short.length > 24 ? `${short.slice(0, 23)}…` : `${short} …`;
+}
+
+/**
+ * The one-line Options summary: "+ 2 uncommitted changes · 1 unpushed commit ·
+ * settings · runs `bun install …`" ("Nothing extra" when it brings nothing).
+ */
+export function copyOptionsSummary(input: CopyOptionsSummaryInput): ReadonlyArray<CopyTextSegment> {
+  const parts: CopyTextSegment[][] = [];
+  if (input.mode !== "link") {
+    if (input.changes > 0) parts.push([plain(plural(input.changes, "uncommitted change"))]);
+    if (input.commits > 0) parts.push([plain(plural(input.commits, "unpushed commit"))]);
+    if (input.ignoredFiles > 0) parts.push([plain(plural(input.ignoredFiles, "ignored file"))]);
+  }
+  if (input.copySettings) parts.push([plain("settings")]);
+  if (input.setupCommand !== null && input.setupCommand.trim().length > 0) {
+    parts.push([plain("runs "), mono(shortSetupCommand(input.setupCommand))]);
+  }
+  if (input.followUp) parts.push([plain("an agent finishes setup")]);
+  if (parts.length === 0) return [plain("Nothing extra")];
+  const segments: CopyTextSegment[] = [plain("+ ")];
+  parts.forEach((part, index) => {
+    if (index > 0) segments.push(plain(" · "));
+    segments.push(...part);
+  });
+  return segments;
 }
 
 /* ───────── Connection cap (A22) ───────── */
@@ -570,6 +647,7 @@ function clientPosition(progress: ProjectCopyProgress, uploads: boolean): number
 export function copyProgressSteps(
   progress: ProjectCopyProgress,
   context: CopyProgressContext,
+  throughput: ProjectCopyThroughput | null = null,
 ): CopyProgressStep[] {
   const snapshot = progress.importSnapshot;
   const uploads = context.uploads && context.sourceLabel !== null;
@@ -628,7 +706,9 @@ export function copyProgressSteps(
           percent: measuring
             ? Math.round((progress.uploadedBytes / progress.totalBytes) * 100)
             : null,
-          log: measuring ? formatCopyTransfer(progress.uploadedBytes, progress.totalBytes) : null,
+          log: measuring
+            ? formatCopyUpload(progress.uploadedBytes, progress.totalBytes, throughput)
+            : null,
         },
       ),
     );
@@ -677,10 +757,19 @@ export function copyOverallPercent(
  * The progress footer (A22): before the target accepted the import the copy
  * still needs this client; after, it runs there on its own.
  */
-export function copyProgressFooter(progress: ProjectCopyProgress, targetLabel: string): string {
+export function copyProgressFooter(
+  progress: ProjectCopyProgress,
+  targetLabel: string,
+  throughput: ProjectCopyThroughput | null = null,
+): string {
   if (progress.canCloseClient) return `Runs on ${targetLabel}; you can close Ryco.`;
   if (progress.totalBytes > 0) {
-    return `Keep Ryco open until the upload finishes (${formatCopyTransfer(progress.uploadedBytes, progress.totalBytes)}).`;
+    // Once the speed is known, the time left says more than the sizes (the step shows both).
+    const status =
+      throughput?.secondsLeft != null
+        ? formatCopyTimeLeft(throughput.secondsLeft)
+        : formatCopyTransfer(progress.uploadedBytes, progress.totalBytes);
+    return `Keep Ryco open until the upload finishes (${status}).`;
   }
   return `Keep Ryco open until ${targetLabel} starts the copy.`;
 }
@@ -724,6 +813,13 @@ export interface ProjectCopyRow {
   readonly retryLabel: string | null;
   /** An unfinished stored copy that can be followed or continued from its record. */
   readonly canResume: boolean;
+  /**
+   * The copy can only go on through the copy dialog: a copy the user started
+   * whose upload stopped when Ryco closed, and whose plan (folder, setup
+   * command, options) never reaches storage. Resume reopens the dialog for it;
+   * dismissing it cleans up what it sent.
+   */
+  readonly resumeInDialog: boolean;
   /** A folder the failed import left behind on the target, which "Discard leftover" deletes. */
   readonly leftover: {
     readonly environmentId: EnvironmentId;
@@ -757,6 +853,8 @@ export function projectCopyRows(input: {
   readonly projectNames: ReadonlySet<string>;
   readonly labelOf: (environmentId: EnvironmentId) => string;
   readonly isResumable: (record: ProjectCopyJobRecord) => boolean;
+  /** Whether a resumable record goes on through the copy dialog (see `resumeInDialog`). */
+  readonly resumesInDialog?: ((record: ProjectCopyJobRecord) => boolean) | undefined;
 }): ProjectCopyRow[] {
   const belongs = (record: ProjectCopyJobRecord) =>
     input.memberProjectIds.has(record.projectId) ||
@@ -800,6 +898,7 @@ export function projectCopyRows(input: {
       copyId: entry.copyId,
       retryLabel: failed && entry.hasPlan ? view.retryLabel : null,
       canResume: !entry.running && !failed && input.isResumable(entry.record),
+      resumeInDialog: false,
       leftover: entry.running ? null : leftoverOf(report),
       canDismiss: !entry.running,
     });
@@ -811,6 +910,7 @@ export function projectCopyRows(input: {
     const report = importById.get(record.importId);
     if (report) usedImports.add(report.snapshot.importId);
     const resumable = input.isResumable(record);
+    const inDialog = resumable && input.resumesInDialog?.(record) === true;
     const status: ProjectCopyRowStatus =
       report && IMPORT_STATUS_ROW[report.snapshot.status]
         ? IMPORT_STATUS_ROW[report.snapshot.status]!
@@ -833,8 +933,9 @@ export function projectCopyRows(input: {
       copyId: record.copyId,
       retryLabel: null,
       canResume: resumable,
+      resumeInDialog: inDialog,
       leftover: leftoverOf(report),
-      canDismiss: !resumable,
+      canDismiss: !resumable || inDialog,
     });
   }
 
@@ -863,6 +964,7 @@ export function projectCopyRows(input: {
       copyId: null,
       retryLabel: null,
       canResume: false,
+      resumeInDialog: false,
       leftover: leftoverOf(report),
       canDismiss: false,
     });

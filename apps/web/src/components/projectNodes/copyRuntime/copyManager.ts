@@ -7,7 +7,12 @@
 //          their proposal lives on (until that node answers, after a reload
 //          too), follows the clones and links the add-project dialog hands over
 //          when it closes, and publishes the sidebar's badge of the checkouts
-//          being copied. Every run holds its copy's claim
+//          being copied. Upload progress reaches the store at most four times a
+//          second, with its speed and time left; while an upload still needs
+//          this window, closing it asks first (browsers). A copy the user
+//          started whose upload stopped when Ryco closed is offered again
+//          (toast, Copies block) through the copy dialog, which goes on with
+//          its ids: its plan never reaches storage. Every run holds its copy's claim
 //          (`projectCopyClaims`), so with the records shared between windows a
 //          copy is run, resumed, cleaned up or reported by one window only.
 // Layer: Web copy runtime, a module-level singleton loaded on demand. The
@@ -54,6 +59,8 @@ import {
   PROJECT_COPY_RECORDS_STORAGE_KEY,
   PROJECT_COPY_STARTS_STORAGE_KEY,
 } from "../projectCopyStorage";
+import { isElectron } from "../../../env";
+import { openCopyProject } from "../projectNodesDialogStore";
 import { markProjectCopiesActive, publishProjectCopyBadges } from "../projectNodesShellActions";
 import {
   agentControlReportRetryDelayMs,
@@ -62,13 +69,18 @@ import {
   type AgentControlReportDelivery,
 } from "./agentControlReports";
 import {
+  copyThroughput,
+  nextCopyByteSamples,
   projectCopyPercent,
   projectCopyView,
   type ProjectCopyAction,
+  type ProjectCopyByteSample,
   type ProjectCopyLabels,
+  type ProjectCopyThroughput,
 } from "./projectCopyProgress.logic";
 import {
   dismissProjectCopyToast,
+  showProjectCopyInterruptedToast,
   showProjectCopyProgressToast,
   showProjectCopyResultToast,
 } from "./projectCopyToasts";
@@ -100,6 +112,8 @@ export interface ProjectCopyEntry {
   readonly targetLabel: string | null;
   readonly targetEnvironmentId: EnvironmentId;
   readonly progress: ProjectCopyProgress;
+  /** The upload's speed and time left while it runs and moved long enough to tell. */
+  readonly throughput: ProjectCopyThroughput | null;
   readonly record: ProjectCopyJobRecord;
   /** The new project once the copy completed. */
   readonly project: ProjectCopyCompletedProject | null;
@@ -140,6 +154,11 @@ export interface StartProjectCopyOptions {
   readonly toast?: boolean;
   /** The checkout the copy starts from, when the plan does not name it (an old source). */
   readonly sourceRef?: ScopedProjectRef | null;
+  /**
+   * A stored copy whose upload stopped when Ryco closed: the copy goes on with
+   * its ids and this plan (the copy dialog started it again).
+   */
+  readonly resume?: ProjectCopyJobRecord | null;
 }
 
 export interface RetryProjectCopyOptions {
@@ -356,10 +375,14 @@ function loadRuntime(): Promise<ProjectCopyRuntime> {
 function refreshToast(copyId: string): void {
   const entry = useProjectCopyStore.getState().entries[copyId];
   if (!entry || entry.background || !entry.running) return;
-  showProjectCopyProgressToast(copyId, projectCopyView(entry.progress, labelsOf(entry)), {
-    onBackground: () => runProjectCopyInBackground(copyId),
-    onCancel: () => cancelProjectCopy(copyId),
-  });
+  showProjectCopyProgressToast(
+    copyId,
+    projectCopyView(entry.progress, labelsOf(entry), entry.throughput),
+    {
+      onBackground: () => runProjectCopyInBackground(copyId),
+      onCancel: () => cancelProjectCopy(copyId),
+    },
+  );
 }
 
 function showResultToast(entry: ProjectCopyEntry): void {
@@ -613,6 +636,78 @@ async function rebuiltFinalReport(
   return finalReportBody(record, facts);
 }
 
+// ── Progress ──
+
+/** Upload ticks reach the store (the dialog, the toast, the badge) at most this often. */
+export const PROJECT_COPY_PROGRESS_INTERVAL_MS = 250;
+
+interface ProgressFeed {
+  samples: ReadonlyArray<ProjectCopyByteSample>;
+  lastAppliedAt: number;
+  pending: ProjectCopyProgress | null;
+  timer: ReturnType<typeof globalThis.setTimeout> | null;
+}
+
+const progressFeeds = new Map<string, ProgressFeed>();
+
+function applyProgress(copyId: string, progress: ProjectCopyProgress, feed: ProgressFeed): void {
+  feed.lastAppliedAt = Date.now();
+  feed.pending = null;
+  const entry = useProjectCopyStore.getState().entries[copyId];
+  // A resumed copy learns its project's name from the target's import.
+  const learnsTitle = entry !== undefined && entry.title === null && progress.importSnapshot;
+  patchEntry(copyId, {
+    progress,
+    throughput:
+      progress.phase === "upload" ? copyThroughput(feed.samples, progress.totalBytes) : null,
+    ...(learnsTitle && progress.importSnapshot ? { title: progress.importSnapshot.title } : {}),
+  });
+  refreshToast(copyId);
+}
+
+/**
+ * Takes one progress report: an upload tick after another is held back until
+ * the interval passed (the latest one wins); anything else applies at once.
+ */
+function feedProgress(copyId: string, progress: ProjectCopyProgress): void {
+  let feed = progressFeeds.get(copyId);
+  if (!feed) {
+    feed = { samples: [], lastAppliedAt: 0, pending: null, timer: null };
+    progressFeeds.set(copyId, feed);
+  }
+  const now = Date.now();
+  if (progress.phase === "upload" && progress.totalBytes > 0) {
+    feed.samples = nextCopyByteSamples(feed.samples, { at: now, bytes: progress.uploadedBytes });
+  } else {
+    feed.samples = [];
+  }
+  const current = useProjectCopyStore.getState().entries[copyId]?.progress;
+  const tick = progress.phase === "upload" && current?.phase === "upload";
+  const wait = feed.lastAppliedAt + PROJECT_COPY_PROGRESS_INTERVAL_MS - now;
+  if (!tick || wait <= 0) {
+    if (feed.timer !== null) globalThis.clearTimeout(feed.timer);
+    feed.timer = null;
+    applyProgress(copyId, progress, feed);
+    return;
+  }
+  feed.pending = progress;
+  if (feed.timer !== null) return;
+  const held = feed;
+  held.timer = globalThis.setTimeout(() => {
+    held.timer = null;
+    if (held.pending !== null && progressFeeds.get(copyId) === held) {
+      applyProgress(copyId, held.pending, held);
+    }
+  }, wait);
+}
+
+/** The copy ended: a held tick must not land after its outcome. */
+function stopProgressFeed(copyId: string): void {
+  const feed = progressFeeds.get(copyId);
+  if (feed?.timer != null) globalThis.clearTimeout(feed.timer);
+  progressFeeds.delete(copyId);
+}
+
 // ── Running ──
 
 interface LaunchInput {
@@ -693,14 +788,7 @@ function launchClaimed(
   };
   const onProgress = (progress: ProjectCopyProgress) => {
     if (!pending.entryReady) return;
-    const entry = useProjectCopyStore.getState().entries[progress.copyId];
-    // A resumed copy learns its project's name from the target's import.
-    const learnsTitle = entry !== undefined && entry.title === null && progress.importSnapshot;
-    patchEntry(progress.copyId, {
-      progress,
-      ...(learnsTitle && progress.importSnapshot ? { title: progress.importSnapshot.title } : {}),
-    });
-    refreshToast(progress.copyId);
+    feedProgress(progress.copyId, progress);
   };
 
   const run = runtime.startProjectCopy({
@@ -726,6 +814,7 @@ function launchClaimed(
     targetLabel: plan?.target.label ?? nodeLabel(record.targetEnvironmentId),
     targetEnvironmentId: record.targetEnvironmentId,
     progress,
+    throughput: null,
     record,
     project: null,
     running: true,
@@ -758,7 +847,10 @@ async function finish(
   reports: CopyReports | null,
 ): Promise<ProjectCopyOutcome> {
   io.dispose();
-  if (live.get(copyId)?.io === io) live.delete(copyId);
+  if (live.get(copyId)?.io === io) {
+    live.delete(copyId);
+    stopProgressFeed(copyId);
+  }
   let record = outcome.record;
   // An Agent Control copy ends with its report: a failure is final there, so
   // the record is too and a reload does not run it again.
@@ -778,6 +870,7 @@ async function finish(
   persistRecord(record);
   patchEntry(copyId, {
     progress: outcome.progress,
+    throughput: null,
     record,
     project: outcome.project,
     running: false,
@@ -808,6 +901,7 @@ export function startManagedProjectCopy(
 ): Promise<ManagedProjectCopy> {
   return launch({
     plan: options.plan,
+    resume: options.resume ?? null,
     agentControl: options.agentControl ?? null,
     background: options.toast === false,
     inDialog: options.toast === false,
@@ -1213,9 +1307,11 @@ let resumedAtStart = false;
  * unfinished copy no other window runs. An import that already started is
  * followed to its end (and an Agent Control copy reports how it ended). An
  * upload the app closed during goes on when an Agent Control copy's plan can be
- * rebuilt from its proposal (still `executing`); otherwise it cleans up and
- * fails. A final report a previous session could not deliver is sent, and an
- * approval it left between accept and copy ends its proposal. Runs once.
+ * rebuilt from its proposal (still `executing`), and otherwise cleans up and
+ * fails; a user's copy keeps what it sent and is offered again instead
+ * (`projectCopyResumesInDialog`). A final report a previous session could not
+ * deliver is sent, and an approval it left between accept and copy ends its
+ * proposal. Runs once.
  */
 export async function resumeProjectCopies(): Promise<void> {
   if (resumedAtStart) return;
@@ -1239,6 +1335,12 @@ export async function resumeProjectCopies(): Promise<void> {
 }
 
 async function resumeAtStart(stale: ProjectCopyJobRecord): Promise<void> {
+  if (projectCopyResumesInDialog(stale)) {
+    // Its destination's name, once the catalog knows it (it offers either way).
+    await waitForNodes([stale.targetEnvironmentId]);
+    await offerInterruptedCopy(stale);
+    return;
+  }
   try {
     const agentControl = agentControlOf(stale);
     const nodes = [stale.targetEnvironmentId];
@@ -1254,6 +1356,130 @@ async function resumeAtStart(stale: ProjectCopyJobRecord): Promise<void> {
   } catch (error) {
     console.warn("Resuming a project copy failed.", error);
   }
+}
+
+// ── Copies the user started that stopped during the upload ──
+
+/**
+ * A copy the user started whose upload (or export) stopped when Ryco closed,
+ * with no plan in memory: its folder, setup command and options never reach
+ * storage, so it goes on through the copy dialog (`openInterruptedProjectCopy`),
+ * which starts it again with its ids. An Agent Control copy rebuilds its plan
+ * from its proposal instead.
+ */
+export function projectCopyResumesInDialog(record: ProjectCopyJobRecord): boolean {
+  return (
+    record.agentControl === null &&
+    projectCopyResumeKind(record) === "continue" &&
+    record.sourceEnvironmentId !== null &&
+    record.sourceProjectId !== null &&
+    !plans.has(record.copyId) &&
+    !live.has(record.copyId)
+  );
+}
+
+/** The stored record of a copy, as storage has it now. */
+export function readProjectCopyRecord(copyId: string): ProjectCopyJobRecord | null {
+  return readRecord(copyId);
+}
+
+/** The project a record copies, by its source checkout, when this client knows it. */
+function recordTitle(record: ProjectCopyJobRecord): string | null {
+  const ref = sourceRefOf(record);
+  return ref ? (selectProjectByRef(useStore.getState(), ref)?.name ?? null) : null;
+}
+
+/** Opens the copy dialog on a stopped copy, prefilled with its checkout and destination. */
+export function openInterruptedProjectCopy(copyId: string): void {
+  const record = readRecord(copyId);
+  const source = record ? sourceRefOf(record) : null;
+  if (record === null || source === null) return;
+  dismissProjectCopyToast(copyId);
+  openCopyProject({
+    source,
+    targetEnvironmentId: record.targetEnvironmentId,
+    origin: "projects-page",
+    resumeCopyId: copyId,
+  });
+}
+
+/** Says, once per app start, that a copy stopped and can go on (no other window runs it). */
+async function offerInterruptedCopy(record: ProjectCopyJobRecord): Promise<void> {
+  try {
+    const claimed = await claim(copyClaimKey(record.copyId));
+    if (claimed === null) return;
+    claimed.release();
+    const title = recordTitle(record);
+    const target = nodeLabel(record.targetEnvironmentId) ?? "the destination";
+    // The dialogs' surface hosts the dialog the toast's Resume opens.
+    markProjectCopiesActive();
+    showProjectCopyInterruptedToast(
+      record.copyId,
+      {
+        title: title ? `Copying ${title} to ${target} stopped` : `A copy to ${target} stopped`,
+        description: "Ryco closed during the upload. Resume sends the rest.",
+      },
+      {
+        onResume: () => openInterruptedProjectCopy(record.copyId),
+        onDiscard: () => discardProjectCopy(record.copyId),
+      },
+    );
+  } catch (error) {
+    console.warn("Offering a stopped project copy failed.", error);
+  }
+}
+
+/**
+ * Gives up a stopped copy: removes what it sent to the destination and left
+ * on the source (the run without a plan cleans up), then forgets it.
+ */
+export function discardProjectCopy(copyId: string): void {
+  dismissProjectCopyToast(copyId);
+  const record = readRecord(copyId);
+  if (record === null || live.has(copyId) || projectCopyResumeKind(record) === "none") {
+    forgetProjectCopy(copyId);
+    return;
+  }
+  void launch({
+    plan: null,
+    resume: record,
+    agentControl: null,
+    background: true,
+    // Its end is no news: nothing toasts, and the sidebar shows no badge for it.
+    inDialog: true,
+  })
+    .then((managed) => managed.done)
+    .then(
+      () => forgetProjectCopy(copyId),
+      (error: unknown) => console.warn("Discarding a stopped project copy failed.", error),
+    );
+}
+
+// ── Closing the window during an upload ──
+
+/** Whether a copy running here still needs this window (its upload, A22). */
+function needsThisWindow(entries: Readonly<Record<string, ProjectCopyEntry>>): boolean {
+  return Object.values(entries).some((entry) => entry.running && !entry.progress.canCloseClient);
+}
+
+const confirmLeavingDuringUpload = (event: BeforeUnloadEvent) => {
+  event.preventDefault();
+  event.returnValue = "";
+};
+let leaveGuardInstalled = false;
+
+/**
+ * Asks before the browser closes or reloads the tab while an upload needs it.
+ * Desktop windows are left alone: Electron would cancel the close without
+ * asking, and the copy is offered again on the next start anyway.
+ */
+function syncLeaveGuard(entries: Readonly<Record<string, ProjectCopyEntry>>): void {
+  if (typeof window === "undefined" || isElectron) return;
+  const wanted = needsThisWindow(entries);
+  if (wanted === leaveGuardInstalled) return;
+  leaveGuardInstalled = wanted;
+  if (wanted) window.addEventListener("beforeunload", confirmLeavingDuringUpload);
+  else window.removeEventListener("beforeunload", confirmLeavingDuringUpload);
 }
 
 // ── View ──
@@ -1309,7 +1535,9 @@ function copyBadgesOf(
 }
 
 useProjectCopyStore.subscribe((state, previous) => {
-  if (state.entries !== previous.entries) publishProjectCopyBadges(copyBadgesOf(state.entries));
+  if (state.entries === previous.entries) return;
+  publishProjectCopyBadges(copyBadgesOf(state.entries));
+  syncLeaveGuard(state.entries);
 });
 
 // ── Reading ──
@@ -1344,6 +1572,7 @@ export function setProjectCopyClaimsForTests(next: ProjectCopyClaims | null): vo
 export function resetProjectCopyManagerForTests(): void {
   for (const copy of live.values()) copy.io.dispose();
   live.clear();
+  for (const copyId of Array.from(progressFeeds.keys())) stopProgressFeed(copyId);
   for (const held of Array.from(heldClaims.values())) held.release();
   plans.clear();
   viewer = null;

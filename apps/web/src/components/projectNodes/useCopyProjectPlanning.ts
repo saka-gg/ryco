@@ -18,6 +18,7 @@ import {
   type CopyDestinationRequest,
   type CopyDestinationSuggestion,
   type ProjectCopyChoices,
+  type ProjectCopyJobRecord,
   type ProjectCopyLegacyProject,
   type ProjectCopyOptionsPlan,
   type ProjectCopyRunPlan,
@@ -42,8 +43,11 @@ import { startManagedProjectCopy } from "./copyRuntime/copyManager";
 import { createWebProjectCopyIo } from "./copyRuntime/webProjectCopyIo";
 import {
   connectionKey,
+  EXPORT_INSPECT_STALE_TIME_MS,
   useNodeEnvironmentApi,
+  useNodeExportInspection,
   useNodePathHints,
+  refetchExportInspection,
   useNodeRead,
   type NodeReadState,
 } from "./nodePathQueries";
@@ -69,11 +73,13 @@ export interface CopyDialogServices {
   readonly readServerConfig: (environmentId: EnvironmentId) => Promise<ServerConfig | null>;
   /**
    * Starts the copy of the checkout `sourceRef`; the dialog shows its progress
-   * (no toast until it hands it over).
+   * (no toast until it hands it over). With `resume`, a copy whose upload
+   * stopped when Ryco closed goes on with its ids instead of starting afresh.
    */
   readonly startCopy: (
     plan: ProjectCopyRunPlan,
     sourceRef: ScopedProjectRef | null,
+    resume?: ProjectCopyJobRecord | null,
   ) => Promise<{ readonly copyId: string }>;
 }
 
@@ -90,7 +96,8 @@ export const DEFAULT_COPY_DIALOG_SERVICES: CopyDialogServices = {
       io.dispose();
     }
   },
-  startCopy: (plan, sourceRef) => startManagedProjectCopy({ plan, toast: false, sourceRef }),
+  startCopy: (plan, sourceRef, resume) =>
+    startManagedProjectCopy({ plan, toast: false, sourceRef, resume: resume ?? null }),
 };
 
 /* ───────── Holding a node ───────── */
@@ -200,12 +207,31 @@ export function useCopySource(input: {
   const api = useNodeEnvironmentApi(environmentId);
   const support = node?.projectCopySupport ?? "unknown";
   const inspect = api?.projects.exportInspect;
-  const inspection = useNodeRead(
-    project && environmentId && support === "yes" && inspect
-      ? `${connectionKey(environmentId, api)}\u0000inspect\u0000${project.id}`
-      : null,
-    project && support === "yes" && inspect ? () => inspect({ projectId: project.id }) : null,
-    { keepPrevious: false },
+  // Cached for a few seconds, so a dialog the entry point's hover warmed opens on it.
+  const query = useNodeExportInspection({
+    environmentId,
+    projectId: project?.id ?? null,
+    enabled: project !== null && support === "yes" && inspect !== undefined,
+  });
+  // Only an answer from shortly before the form opened, or since: the plan needs the
+  // tree as it is, so an older cached one waits for the read it starts.
+  const [openedAt] = useState(() => Date.now());
+  const fresh =
+    query.data !== undefined && query.dataUpdatedAt >= openedAt - EXPORT_INSPECT_STALE_TIME_MS;
+  const inspectionData = fresh ? (query.data ?? null) : null;
+  const inspectionError = query.isFetching ? null : query.error;
+  const projectId = project?.id ?? null;
+  const inspection = useMemo(
+    () => ({
+      data: inspectionData,
+      error: inspectionError,
+      retry: () => {
+        if (environmentId !== null && projectId !== null) {
+          void refetchExportInspection(environmentId, projectId);
+        }
+      },
+    }),
+    [environmentId, inspectionData, inspectionError, projectId],
   );
   const pathHints = useNodePathHints({ environmentId, supported: support === "yes" });
   return useMemo<CopySourceState>(() => {

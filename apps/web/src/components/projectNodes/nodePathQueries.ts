@@ -1,17 +1,19 @@
 // FILE: nodePathQueries.ts
 // Purpose: Reads a node's folders for the project pickers: its path hints (cached and shared by
-//          every picker and dialog), directory search, shallow annotations of one listing, and
-//          the destination preview. All of them are project-copy RPCs, called only when the node
-//          advertises `capabilities.projectCopy`.
+//          every picker and dialog), a project's export inspection (cached briefly, so the copy
+//          dialog's entry points can warm it), directory search, shallow annotations of one
+//          listing, and the destination preview. All of them are project-copy RPCs, called only
+//          when the node advertises `capabilities.projectCopy`.
 // Layer: Web data hooks. Every read follows the node's current connection and fences answers
 //        that arrive after their input changed.
 
-import type { EnvironmentApi, EnvironmentId } from "@ryco/contracts";
+import type { EnvironmentApi, EnvironmentId, ProjectId } from "@ryco/contracts";
 import type {
   FilesystemDirectoryMatch,
   FilesystemSearchDirectoriesResult,
   NodePathHints,
   ProjectDestinationPreview,
+  ProjectExportInspection,
 } from "@ryco/contracts/project-copy";
 import { useEffect, useEffectEvent, useMemo, useState, useSyncExternalStore } from "react";
 
@@ -83,12 +85,86 @@ export function useNodePathHints(input: {
   });
 }
 
-/** Warms a node's path hints, e.g. when a node card is hovered. */
+/** Warms a node's path hints, e.g. when "Copy to another node…" is hovered. */
 export function prefetchNodePathHints(environmentId: EnvironmentId): Promise<void> {
   return defaultQueryClient.prefetchQuery({
     queryKey: nodePathHintsQueryKey(environmentId),
     queryFn: () => readNodePathHints(environmentId),
     staleTime: PATH_HINTS_STALE_TIME_MS,
+  });
+}
+
+/* ───────── Export inspection ───────── */
+
+/**
+ * How long a project's inspection (branch, changes, sizes) is reused: long
+ * enough that hovering "Copy to another node…" warms the dialog, short enough
+ * that it still shows what the working tree has now.
+ */
+export const EXPORT_INSPECT_STALE_TIME_MS = 20_000;
+
+export function exportInspectQueryKey(
+  environmentId: EnvironmentId,
+  projectId: ProjectId,
+): QueryKey {
+  return ["project-nodes", "export-inspect", environmentId, projectId];
+}
+
+async function readExportInspection(
+  environmentId: EnvironmentId,
+  projectId: ProjectId,
+): Promise<ProjectExportInspection> {
+  const inspect = readEnvironmentApi(environmentId)?.projects.exportInspect;
+  if (!inspect) {
+    throw new Error("This node is not connected.");
+  }
+  return inspect({ projectId });
+}
+
+/** `projects.exportInspect` of one project on its node, cached for a few seconds. */
+export function useNodeExportInspection(input: {
+  readonly environmentId: EnvironmentId | null;
+  readonly projectId: ProjectId | null;
+  /** The node advertises project copy and its API has the read. */
+  readonly enabled: boolean;
+}) {
+  const { environmentId, projectId } = input;
+  return useQuery({
+    queryKey:
+      environmentId === null || projectId === null
+        ? ["project-nodes", "export-inspect", null]
+        : exportInspectQueryKey(environmentId, projectId),
+    queryFn: () => readExportInspection(environmentId!, projectId!),
+    environmentId,
+    enabled: input.enabled && environmentId !== null && projectId !== null,
+    staleTime: EXPORT_INSPECT_STALE_TIME_MS,
+    retry: false,
+  });
+}
+
+/** Reads a project's inspection again (a retry after it failed). */
+export function refetchExportInspection(
+  environmentId: EnvironmentId,
+  projectId: ProjectId,
+): Promise<void> {
+  return defaultQueryClient.prefetchQuery({
+    queryKey: exportInspectQueryKey(environmentId, projectId),
+    queryFn: () => readExportInspection(environmentId, projectId),
+    staleTime: 0,
+    retry: false,
+  });
+}
+
+/** Warms a project's inspection on a connected node; a fresh one is kept. */
+export function prefetchExportInspection(
+  environmentId: EnvironmentId,
+  projectId: ProjectId,
+): Promise<void> {
+  return defaultQueryClient.prefetchQuery({
+    queryKey: exportInspectQueryKey(environmentId, projectId),
+    queryFn: () => readExportInspection(environmentId, projectId),
+    staleTime: EXPORT_INSPECT_STALE_TIME_MS,
+    retry: false,
   });
 }
 

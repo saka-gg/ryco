@@ -163,7 +163,12 @@ function CrossNodeMenuSection(props: {
   return (
     <>
       <MenuSeparator />
-      <MenuItem onClick={props.actions.onCopy} className="min-h-7 py-1 sm:text-xs">
+      <MenuItem
+        onClick={props.actions.onCopy}
+        onPointerEnter={props.actions.onCopyIntent}
+        onFocus={props.actions.onCopyIntent}
+        className="min-h-7 py-1 sm:text-xs"
+      >
         <CopyIcon className="size-3.5" />
         Copy to another node…
         <span className="ms-auto rounded-full bg-primary px-1.5 py-px font-medium text-[10px] text-primary-foreground">

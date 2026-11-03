@@ -3,7 +3,12 @@ import type { ProjectImportSnapshot } from "@ryco/contracts/project-copy";
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  copyThroughput,
+  formatCopySpeed,
+  formatCopyThroughput,
+  formatCopyTimeLeft,
   formatCopyTransfer,
+  nextCopyByteSamples,
   projectCopyPercent,
   projectCopyView,
   type ProjectCopyLabels,
@@ -150,6 +155,60 @@ describe("project copy progress", () => {
     ).toMatchObject({ title: "Stopped linking ryco", description: "Mac mini cancelled the link." });
     expect(projectCopyView(progress({ phase: "acquire" }), link).title).toBe(
       "Linking ryco on Mac mini",
+    );
+  });
+
+  it("measures the upload's speed over its last few seconds", () => {
+    let samples = nextCopyByteSamples([], { at: 0, bytes: 0 });
+    // Under a second says nothing yet.
+    samples = nextCopyByteSamples(samples, { at: 500, bytes: MB });
+    expect(copyThroughput(samples, 10 * MB)).toBeNull();
+    samples = nextCopyByteSamples(samples, { at: 2_000, bytes: 4 * MB });
+    expect(copyThroughput(samples, 10 * MB)).toEqual({ bytesPerSecond: 2 * MB, secondsLeft: 3 });
+    // Old readings drop out of the window, keeping one from just before it.
+    samples = nextCopyByteSamples(samples, { at: 6_000, bytes: 6 * MB });
+    samples = nextCopyByteSamples(samples, { at: 8_000, bytes: 10 * MB });
+    expect(samples.map((sample) => sample.at)).toEqual([2_000, 6_000, 8_000]);
+    expect(copyThroughput(samples, 12 * MB)).toEqual({ bytesPerSecond: MB, secondsLeft: 2 });
+    // An upload that started over starts the readings afresh.
+    expect(nextCopyByteSamples(samples, { at: 9_000, bytes: MB })).toEqual([
+      { at: 9_000, bytes: MB },
+    ]);
+    // Nothing moved: a speed of zero and no time left to tell.
+    expect(
+      copyThroughput(
+        [
+          { at: 0, bytes: MB },
+          { at: 2_000, bytes: MB },
+        ],
+        10 * MB,
+      ),
+    ).toEqual({ bytesPerSecond: 0, secondsLeft: null });
+  });
+
+  it("formats the speed and the time left", () => {
+    expect(formatCopySpeed(640 * 1024)).toBe("640 KB/s");
+    expect(formatCopySpeed(3.24 * MB)).toBe("3.2 MB/s");
+    expect(formatCopySpeed(42.6 * MB)).toBe("43 MB/s");
+    expect(formatCopyTimeLeft(0.2)).toBe("1 s left");
+    expect(formatCopyTimeLeft(8)).toBe("8 s left");
+    expect(formatCopyTimeLeft(61)).toBe("2 min left");
+    expect(formatCopyTimeLeft(3_600)).toBe("1 h left");
+    expect(formatCopyTimeLeft(3_900)).toBe("1 h 5 min left");
+    expect(formatCopyThroughput({ bytesPerSecond: 3.2 * MB, secondsLeft: 8 })).toBe(
+      "3.2 MB/s · 8 s left",
+    );
+    expect(formatCopyThroughput({ bytesPerSecond: 0, secondsLeft: null })).toBe("0 KB/s");
+  });
+
+  it("says the upload's speed and time left once they are known", () => {
+    const view = projectCopyView(
+      progress({ phase: "upload", uploadedBytes: 12 * MB, totalBytes: 38 * MB }),
+      labels,
+      { bytesPerSecond: 3.2 * MB, secondsLeft: 9 },
+    );
+    expect(view.description).toBe(
+      "Sending 12 of 38 MB · 3.2 MB/s · 9 s left. Keep Ryco open until the upload finishes.",
     );
   });
 });

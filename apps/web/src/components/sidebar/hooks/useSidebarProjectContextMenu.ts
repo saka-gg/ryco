@@ -55,6 +55,8 @@ export function useSidebarProjectContextMenu(params: {
           onOpenOverview();
         });
         crossNodeActions?.onIntent?.();
+        // A native menu has no hover to listen to: its opening is the copy's intent too.
+        crossNodeActions?.onCopyIntent?.();
         if (crossNodeActions) {
           actionHandlers.set("copy-to-node", crossNodeActions.onCopy);
           actionHandlers.set("link-node-copy", crossNodeActions.onLink);

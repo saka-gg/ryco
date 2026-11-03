@@ -74,7 +74,7 @@ export function CopyProjectProgress(props: CopyProjectProgressProps) {
     sourceLabel: entry.sourceLabel,
     targetLabel: entry.targetLabel ?? copy.targetLabel,
   });
-  const steps = copyProgressSteps(entry.progress, copy.context);
+  const steps = copyProgressSteps(entry.progress, copy.context, entry.throughput);
   switch (view.kind) {
     case "done":
       return <DoneView {...props} entry={entry} />;
@@ -138,7 +138,7 @@ export function CopyProjectProgress(props: CopyProjectProgressProps) {
           </div>
           <div className={FOOTER_CLASS}>
             <span className={SUMMARY_CLASS} data-testid="copy-progress-footer">
-              {copyProgressFooter(entry.progress, copy.targetLabel)}
+              {copyProgressFooter(entry.progress, copy.targetLabel, entry.throughput)}
             </span>
             <Button size="sm" variant="outline" onClick={props.onCancel}>
               Cancel

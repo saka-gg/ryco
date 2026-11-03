@@ -57,11 +57,18 @@ Open **Copy to another node…** from:
 
 The dialog has five parts.
 
-**From.** The checkout to copy, if the project is on more than one node. An offline node can't be
-the source.
+Hovering or focusing one of these starts the dialog's first reads (the source's branch, changes
+and sizes, and the folders of the likely destinations) on nodes that are already connected, so the
+dialog opens on them. They are reused for about 20 seconds.
 
-**To.** The destination node. A node that already has the project shows "has it · <path>". An
-offline node shows when it was last seen. A node that can't take the copy shows why.
+**From.** The checkout to copy. When the project is on more than one node, you pick one; on one
+node it is a single line. An offline node can't be the source.
+
+**To.** The destination node. Nodes that already have the project are listed on one line,
+"Already on <nodes>", with their path on hover. An offline node shows when it was last seen. A node
+that can't take the copy shows why. The dialog preselects the node you last copied this checkout
+to, and the folder you picked there, when you picked one yourself. In the hosted web app this is
+kept only until the tab closes.
 
 **How.**
 
@@ -86,7 +93,8 @@ exists, Ryco suggests the next free name and tags it "renamed, folder exists". *
 the folder picker. When the folder is already a checkout of the same repository, the button
 becomes **Link existing checkout**: Ryco registers that checkout as is and copies nothing into it.
 
-**Options.**
+**Options.** They start folded into one line in the footer, such as "+ 2 uncommitted changes · 1
+unpushed commit · settings · runs `bun install …`". **Edit** unfolds them.
 
 - **Bring unpushed commits**: commits on your branch that aren't on the remote the copy clones
   from. The copy ends on the same branch and commit as the source, even when the remote has moved
@@ -112,7 +120,7 @@ becomes **Link existing checkout**: Ryco registers that checkout as is and copie
   command can't do, like installing tools or following the README. The repository's own provider
   hooks and settings apply to that thread.
 
-The footer sums up what will happen ("Clones to ~/Code/ryco on Mac mini").
+The footer sums up what the copy brings, as above.
 
 ### Progress
 
@@ -121,9 +129,15 @@ destination's own steps (create the folder, clone, add the commits, check out, a
 add the project, copy the settings, run setup, start the setup thread).
 
 - Until the destination has everything, the footer says "Keep Ryco open until the upload finishes
-  (x of y MB)". If you close Ryco during the upload, the copy stops. The next time Ryco opens, it
-  cleans up what the copy left on both nodes and tells you to start it again. (A copy an agent
-  asked for picks up where it stopped instead, as long as its request is still running.)
+  (x of y MB, n s left)", and the upload step shows its speed. In a browser, closing or reloading
+  the tab during the upload asks first.
+- If you close Ryco during the upload anyway, the copy stops. The next time Ryco opens, a toast
+  and the Copies block offer **Resume**, which reopens the dialog with the same checkout and
+  destination. Check the options and start it again: the copy goes on where it stopped, and what
+  already reached the destination is not sent again. The folder, the setup command and the other
+  options are never stored, which is why the dialog asks again. **Discard** removes what the copy
+  left on both nodes. (A copy an agent asked for picks up where it stopped by itself, as long as
+  its request is still running.) The hosted web app keeps no copies across a reload.
 - Once the destination runs the import, the footer says "Runs on <node>; you can close Ryco". The
   import goes on there by itself, and Ryco follows it again when it opens. If that node's server
   restarts during the import, the import stops as interrupted and removes the folder it was

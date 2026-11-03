@@ -55,6 +55,7 @@ import { NodeBadge, NodePicker } from "./projectNodes/NodePicker";
 import { NODE_LABEL_CELL, NodePathText, useNodeLabelColumn } from "./projectNodes/NodePathText";
 import {
   openCopyProject,
+  preloadCopyProject,
   preloadProjectNodesDialogs,
 } from "./projectNodes/projectNodesDialogStore";
 import { ComboboxEmpty, ComboboxItem, ComboboxList, moveComboboxHighlight } from "./ui/combobox";
@@ -410,6 +411,9 @@ export function ProjectSelectorBody(props: ProjectSelectorBodyProps) {
               icon={CopyIcon}
               label={`Copy ${props.copyName} to another node…`}
               onClick={copyActiveProject}
+              onIntent={() =>
+                preloadCopyProject(scopeProjectRef(activeProjectEnvironmentId, activeProjectId))
+              }
             />
           ) : null}
         </div>
@@ -448,14 +452,17 @@ function FooterAction(props: {
   readonly icon: typeof PlusIcon;
   readonly label: string;
   readonly onClick: () => void;
+  /** Hovered or focused; loads the dialogs unless given. */
+  readonly onIntent?: () => void;
 }) {
+  const onIntent = props.onIntent ?? preloadProjectNodesDialogs;
   const Icon = props.icon;
   return (
     <button
       type="button"
       className="flex min-w-0 flex-1 items-center gap-[7px] rounded-[7px] px-2 py-[7px] text-[12.5px] text-muted-foreground transition-colors hover:bg-accent hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-      onPointerEnter={preloadProjectNodesDialogs}
-      onFocus={preloadProjectNodesDialogs}
+      onPointerEnter={onIntent}
+      onFocus={onIntent}
       onClick={props.onClick}
     >
       <Icon aria-hidden className="size-[13px] shrink-0" />

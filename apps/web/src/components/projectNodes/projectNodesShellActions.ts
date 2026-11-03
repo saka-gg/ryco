@@ -10,6 +10,7 @@ import type { ScopedProjectRef } from "@ryco/contracts";
 import {
   NO_COPY_BADGES,
   openCopyProject,
+  preloadCopyProject,
   preloadProjectNodesDialogs,
   useProjectNodesDialogStore,
   type CopyProjectDialogOrigin,
@@ -22,7 +23,7 @@ import {
  * starts from it) and link a copy already on a node (the palette store's `openAddProject` in
  * link mode, passed in by the caller: the add-project dialog where it is
  * available, else the palette's add-project views). Both preload the dialogs
- * on menu intent.
+ * on menu intent; the copy also warms its first reads on its own item's intent.
  */
 export function crossNodeProjectActions(input: {
   readonly projectRef: ScopedProjectRef;
@@ -35,6 +36,7 @@ export function crossNodeProjectActions(input: {
     onCopy: () => openCopyProject({ source: projectRef, origin }),
     onLink: () => input.openAddProject({ mode: "link", projectRef }),
     onIntent: preloadProjectNodesDialogs,
+    onCopyIntent: () => preloadCopyProject(projectRef),
   };
 }
 

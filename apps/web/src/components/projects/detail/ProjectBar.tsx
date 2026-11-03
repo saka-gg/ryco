@@ -25,6 +25,7 @@ import { ProjectFavicon } from "../../ProjectFavicon";
 import { resolveProjectRemoteLink } from "../../sidebar/sidebarProjectRemoteLink";
 import {
   openCopyProject,
+  preloadCopyProject,
   preloadProjectNodesDialogs,
 } from "../../projectNodes/projectNodesDialogStore";
 import { parseStatisticsSearch } from "../../statistics/statisticsSearch";
@@ -182,6 +183,12 @@ function ProjectOverflowMenu() {
         </MenuItem>
         {crossNode ? (
           <MenuItem
+            onPointerEnter={() =>
+              preloadCopyProject({ environmentId: member.environmentId, projectId: member.id })
+            }
+            onFocus={() =>
+              preloadCopyProject({ environmentId: member.environmentId, projectId: member.id })
+            }
             onClick={() =>
               openCopyProject({
                 source: { environmentId: member.environmentId, projectId: member.id },

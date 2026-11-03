@@ -59,6 +59,11 @@ export interface CopyProjectDialogRequest {
   /** Preselected destination node; null lets the user pick. */
   readonly targetEnvironmentId: EnvironmentId | null;
   readonly origin: CopyProjectDialogOrigin;
+  /**
+   * A copy whose upload stopped when Ryco closed: starting it again goes on
+   * with that copy's ids, so what was sent already is not sent again.
+   */
+  readonly resumeCopyId?: string | null | undefined;
 }
 
 /**
@@ -72,12 +77,15 @@ export interface CrossNodeProjectActions {
   readonly onLink: () => void;
   /** The menu is about to open: start loading the dialogs. */
   readonly onIntent?: (() => void) | undefined;
+  /** "Copy to another node…" is hovered or focused: also warm the dialog's first reads. */
+  readonly onCopyIntent?: (() => void) | undefined;
 }
 
 export interface OpenCopyProjectInput {
   readonly source: ScopedProjectRef;
   readonly targetEnvironmentId?: EnvironmentId | null;
   readonly origin: CopyProjectDialogOrigin;
+  readonly resumeCopyId?: string | null;
 }
 
 export interface ProjectNodesDialogSlot<Request> {
@@ -133,6 +141,22 @@ export function preloadProjectNodesDialogs(): void {
   void import("./ProjectNodesDialogs");
 }
 
+/**
+ * A "Copy to another node…" entry point is hovered or focused: loads the
+ * dialogs and warms the copy dialog's first reads of `source` (and of
+ * `targetEnvironmentId` when the entry point names one) in the query client.
+ */
+export function preloadCopyProject(
+  source: ScopedProjectRef,
+  targetEnvironmentId: EnvironmentId | null = null,
+): void {
+  preloadProjectNodesDialogs();
+  void import("./copyProjectPrefetch").then(
+    (module) => module.prefetchCopyProject(source, targetEnvironmentId),
+    () => undefined,
+  );
+}
+
 /** Whether `openAddProject()` entry points open the dialog on `tier` (else the palette's views). */
 export function addProjectDialogAvailable(tier: PresentationTier = getPresentationTier()): boolean {
   // The frozen phone tier keeps the palette's add-project views (A26).
@@ -168,6 +192,7 @@ export function openCopyProject(input: OpenCopyProjectInput): void {
     source: input.source,
     targetEnvironmentId: input.targetEnvironmentId ?? null,
     origin: input.origin,
+    ...(input.resumeCopyId ? { resumeCopyId: input.resumeCopyId } : {}),
   };
   useProjectNodesDialogStore.setState((state) => ({
     copyProject: { open: true, token: state.copyProject.token + 1, request },

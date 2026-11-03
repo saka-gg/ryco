@@ -4,7 +4,8 @@
 //          and stored records plus the imports the already connected nodes
 //          report (`projects.listImports`; a node is never woken for it). Each
 //          row offers View log, Retry, Resume and Discard leftover
-//          (`projects.discardImport`).
+//          (`projects.discardImport`). A copy the user started whose upload
+//          stopped when Ryco closed resumes through the copy dialog.
 // Layer: Web UI, loaded on demand by the devices section of the Projects page
 //        (a settings block of its own; nothing when there is no row).
 
@@ -21,7 +22,10 @@ import { SettingsBlock } from "../settings/settingsLayout";
 import { Button } from "../ui/button";
 import { toastManager } from "../ui/toast";
 import {
+  discardProjectCopy,
   forgetProjectCopy,
+  openInterruptedProjectCopy,
+  projectCopyResumesInDialog,
   resumeProjectCopy,
   retryProjectCopy,
   useProjectCopyEntries,
@@ -135,6 +139,7 @@ export function ProjectCopiesBlock(props: ProjectCopiesBlockProps) {
         labelOf: (environmentId) =>
           nodes.find((node) => node.environmentId === environmentId)?.label ?? "Device",
         isResumable: (record) => projectCopyResumeKind(record) !== "none",
+        resumesInDialog: projectCopyResumesInDialog,
       }),
     [entries, imports, nodes, props.members, records],
   );
@@ -253,8 +258,16 @@ export function ProjectCopiesBlock(props: ProjectCopiesBlockProps) {
                 <Button
                   size="icon-xs"
                   variant="ghost"
-                  aria-label={`Dismiss the copy to ${row.targetLabel}`}
-                  onClick={() => forgetProjectCopy(row.copyId!)}
+                  aria-label={
+                    row.resumeInDialog
+                      ? `Discard the copy to ${row.targetLabel}`
+                      : `Dismiss the copy to ${row.targetLabel}`
+                  }
+                  onClick={() =>
+                    row.resumeInDialog
+                      ? discardProjectCopy(row.copyId!)
+                      : forgetProjectCopy(row.copyId!)
+                  }
                 >
                   <XIcon />
                 </Button>
@@ -292,7 +305,11 @@ export function ProjectCopiesBlock(props: ProjectCopiesBlockProps) {
                   size="xs"
                   variant="outline"
                   disabled={busy === row.key}
-                  onClick={() => void act(row, () => resumeProjectCopy(row.copyId!))}
+                  onClick={() =>
+                    row.resumeInDialog
+                      ? openInterruptedProjectCopy(row.copyId!)
+                      : void act(row, () => resumeProjectCopy(row.copyId!))
+                  }
                 >
                   Resume
                 </Button>

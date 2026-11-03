@@ -21,7 +21,7 @@ import { DeviceIcon } from "../../DeviceIcon";
 import { hasStoredProjectCopyRecords } from "../../projectNodes/projectCopyStorage";
 import {
   openCopyProject,
-  preloadProjectNodesDialogs,
+  preloadCopyProject,
   useProjectNodesDialogStore,
 } from "../../projectNodes/projectNodesDialogStore";
 import { Button } from "../../ui/button";
@@ -213,8 +213,18 @@ export function ProjectNotOnBlock(props: {
             size="xs"
             variant="outline"
             aria-label={`Copy here: ${device.label}`}
-            onPointerEnter={preloadProjectNodesDialogs}
-            onFocus={preloadProjectNodesDialogs}
+            onPointerEnter={() =>
+              preloadCopyProject(
+                { environmentId: props.member.environmentId, projectId: props.member.id },
+                device.environmentId,
+              )
+            }
+            onFocus={() =>
+              preloadCopyProject(
+                { environmentId: props.member.environmentId, projectId: props.member.id },
+                device.environmentId,
+              )
+            }
             onClick={() =>
               openCopyProject({
                 source: { environmentId: props.member.environmentId, projectId: props.member.id },

@@ -15,6 +15,7 @@ import {
   EnvironmentId,
   ProjectId,
   type EnvironmentApi,
+  type ScopedProjectRef,
   type ServerConfig,
 } from "@ryco/contracts";
 import {
@@ -24,6 +25,7 @@ import {
   type ProjectExportInspection,
   type ProjectImportSnapshot,
 } from "@ryco/contracts/project-copy";
+import * as Schema from "effect/Schema";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test";
 import { page } from "vite-plus/test/browser";
 import { render } from "vitest-browser-react";
@@ -32,6 +34,7 @@ import {
   __resetEnvironmentApiOverridesForTests,
   __setEnvironmentApiOverrideForTests,
 } from "../../environmentApi";
+import { removeLocalStorageItem, setLocalStorageItem } from "../../hooks/useLocalStorage";
 import { AppAtomRegistryProvider } from "../../rpc/atomRegistry";
 import { resetProjectAtomsForTests } from "../../rpc/projectAtoms";
 import { defaultQueryClient } from "../../rpc/queryClient";
@@ -44,7 +47,14 @@ import {
   type ProjectCopyRuntime,
 } from "./copyRuntime/copyManager";
 import type { WebProjectCopyIo } from "./copyRuntime/webProjectCopyIo";
+import {
+  COPY_DESTINATIONS_STORAGE_KEY,
+  readRememberedCopyDestination,
+  rememberCopyDestination,
+} from "./copyDestinationMemory";
 import { CopyProjectDialogView } from "./CopyProjectDialog";
+import { prefetchExportInspection } from "./nodePathQueries";
+import { PROJECT_COPY_RECORDS_STORAGE_KEY } from "./projectCopyStorage";
 import type { CopyProjectDialogRequest } from "./projectNodesDialogStore";
 import type { CopyDialogServices } from "./useCopyProjectPlanning";
 
@@ -411,6 +421,9 @@ interface MountOptions {
   readonly hetznerFolders?: FakeFolders;
   readonly reachable?: boolean;
   readonly targetConfig?: ServerConfig | null;
+  readonly members?: ReadonlyArray<Project>;
+  /** Runs once the node APIs are in place, before the dialog renders (a hover's prefetch). */
+  readonly beforeRender?: () => Promise<void>;
 }
 
 async function mount(options: MountOptions = {}) {
@@ -426,8 +439,12 @@ async function mount(options: MountOptions = {}) {
   __setEnvironmentApiOverrideForTests(HETZNER, hetzner.api);
   const fake = fakeRuntime();
   setProjectCopyRuntimeForTests(fake.runtime);
-  const startCopy = vi.fn((plan: ProjectCopyRunPlan) =>
-    startManagedProjectCopy({ plan, toast: false }),
+  const startCopy = vi.fn(
+    (
+      plan: ProjectCopyRunPlan,
+      _sourceRef?: ScopedProjectRef | null,
+      resume?: ProjectCopyJobRecord | null,
+    ) => startManagedProjectCopy({ plan, toast: false, resume: resume ?? null }),
   );
   const services: CopyDialogServices = {
     holdNode:
@@ -449,6 +466,7 @@ async function mount(options: MountOptions = {}) {
     ...options.request,
   };
   const onClose = vi.fn();
+  await options.beforeRender?.();
   function Harness() {
     const entries = useProjectCopyStore((state) => state.entries);
     return (
@@ -457,7 +475,7 @@ async function mount(options: MountOptions = {}) {
         token={1}
         request={request}
         nodes={options.nodes ?? nodes()}
-        members={MEMBERS}
+        members={options.members ?? MEMBERS}
         copies={Object.values(entries)}
         services={services}
         onClose={onClose}
@@ -473,6 +491,8 @@ async function mount(options: MountOptions = {}) {
 }
 
 const dialog = () => page.getByTestId("copy-project-dialog");
+/** Unfolds the Options from the footer's summary. */
+const editOptions = () => dialog().getByRole("button", { name: "Edit the options" }).click();
 const radio = (name: string | RegExp) => dialog().getByRole("radio", { name });
 const primary = () => dialog().getByRole("button", { name: /^(Copy to |Link existing checkout)/u });
 
@@ -486,6 +506,8 @@ afterEach(() => {
   resetProjectCopyManagerForTests();
   setProjectCopyRuntimeForTests(null);
   defaultQueryClient.clear();
+  removeLocalStorageItem(COPY_DESTINATIONS_STORAGE_KEY);
+  removeLocalStorageItem(PROJECT_COPY_RECORDS_STORAGE_KEY);
   document.body.innerHTML = "";
 });
 
@@ -499,9 +521,13 @@ describe("CopyProjectDialog", () => {
         .element(radio(/^MacBook Pro ~\/Code\/ryco/u))
         .toHaveAttribute("aria-checked", "true");
       await expect.element(radio(/^Mac mini ~\/dev\/ryco/u)).toBeVisible();
-      // To: nodes that have it, the offline one, and the first free one picked.
-      await expect.element(radio(/^MacBook Pro has it/u)).toBeDisabled();
-      await expect.element(radio(/^Mac mini has it · ~\/dev\/ryco/u)).toBeDisabled();
+      // To: the nodes that have it are named, not given a card; the offline one, and the
+      // first free one picked.
+      await expect
+        .element(page.getByTestId("copy-already-on"))
+        .toMatchTextContent(/Already on\s*MacBook Pro.*Mac mini/u);
+      await expect.element(radio(/^MacBook Pro has it/u)).not.toBeInTheDocument();
+      await expect.element(radio(/^Mac mini has it/u)).not.toBeInTheDocument();
       await expect.element(radio(/^Gaming PC offline/u)).toBeDisabled();
       await expect.element(radio(/^hetzner-build Linux/u)).toHaveAttribute("aria-checked", "true");
       // How: clone is recommended and the destination can reach the remote.
@@ -526,7 +552,16 @@ describe("CopyProjectDialog", () => {
       await expect
         .element(page.getByTestId("copy-folder-note"))
         .toMatchTextContent("Same place as on MacBook Pro.");
-      // Options and the footer.
+      // Options fold into the footer's summary until Edit.
+      await expect
+        .element(page.getByTestId("copy-footer-summary"))
+        .toHaveTextContent("+ 2 uncommitted changes · settings · runs bun install …");
+      await expect.element(page.getByTestId("copy-option-changes")).not.toBeInTheDocument();
+      // The setup's warning stays in sight while the options are folded.
+      await expect
+        .element(page.getByTestId("copy-setup-os-note"))
+        .toMatchTextContent("This setup was written on macOS");
+      await editOptions();
       await expect
         .element(page.getByTestId("copy-option-changes"))
         .toMatchTextContent("Bring the 2 uncommitted changes along");
@@ -536,9 +571,13 @@ describe("CopyProjectDialog", () => {
       await expect
         .element(dialog().getByRole("textbox", { name: "Setup command" }))
         .toHaveValue("bun install --frozen-lockfile");
+      // Turning setup off says so in the summary.
+      await page.getByTestId("copy-option-setup").getByRole("checkbox").click();
       await expect
         .element(page.getByTestId("copy-footer-summary"))
-        .toMatchTextContent("Clones to ~/Code/ryco on hetzner-build");
+        .toHaveTextContent("+ 2 uncommitted changes · settings");
+      await dialog().getByRole("button", { name: "Hide the options" }).click();
+      await expect.element(page.getByTestId("copy-option-changes")).not.toBeInTheDocument();
       await expect.element(primary()).toMatchTextContent("Copy to hetzner-build");
       await expect.element(primary()).toBeEnabled();
     } finally {
@@ -557,12 +596,13 @@ describe("CopyProjectDialog", () => {
         .toHaveAttribute("aria-checked", "true");
       await expect.element(radio(/^Clone from origin/u)).toBeEnabled();
       // The changes come with the files.
+      await editOptions();
       await expect
         .element(page.getByTestId("copy-option-changes"))
         .toMatchTextContent("2 uncommitted changes come with the files");
       await expect
         .element(page.getByTestId("copy-footer-summary"))
-        .toMatchTextContent("Sends to ~/Code/ryco on hetzner-build");
+        .toHaveTextContent("+ 2 uncommitted changes · settings · runs bun install …");
     } finally {
       await screen.unmount();
     }
@@ -594,6 +634,7 @@ describe("CopyProjectDialog", () => {
     });
     try {
       // Uncommitted changes come along by default, and with them the ignored files to pick.
+      await editOptions();
       await expect
         .element(page.getByTestId("copy-option-changes").getByRole("checkbox"))
         .toHaveAttribute("aria-checked", "true");
@@ -611,6 +652,7 @@ describe("CopyProjectDialog", () => {
   it("says ignored files only travel over an encrypted connection on a direct copy (A33)", async () => {
     const { screen } = await mount({ sourceInspection: inspection({ ignored: [".env"] }) });
     try {
+      await editOptions();
       await expect.element(page.getByTestId("copy-ignored-files")).toMatchTextContent(".env");
       await expect
         .element(page.getByTestId("copy-encryption-note"))
@@ -631,6 +673,7 @@ describe("CopyProjectDialog", () => {
       await expect
         .element(radio(/^Send files from MacBook Pro/u))
         .toMatchTextContent("Update Ryco on MacBook Pro to send files.");
+      await editOptions();
       await expect
         .element(dialog().getByText("Update Ryco on MacBook Pro to bring unpushed commits."))
         .toBeVisible();
@@ -650,10 +693,10 @@ describe("CopyProjectDialog", () => {
   it("skips a destination that already has the project and says why", async () => {
     const { screen } = await mount({ request: { targetEnvironmentId: MINI } });
     try {
-      await expect.element(radio(/^Mac mini has it/u)).toBeDisabled();
+      // The node asked for already has it: named in the "Already on" line, its path on hover.
       await expect
-        .element(radio(/^Mac mini has it/u))
-        .toHaveAttribute("title", "has it · ~/dev/ryco");
+        .element(page.getByTestId("copy-already-on").getByTitle("has it · ~/dev/ryco"))
+        .toMatchTextContent("Mac mini");
       await expect.element(radio(/^hetzner-build/u)).toHaveAttribute("aria-checked", "true");
     } finally {
       await screen.unmount();
@@ -709,9 +752,7 @@ describe("CopyProjectDialog", () => {
       await expect
         .element(page.getByTestId("copy-destination-tag"))
         .toMatchTextContent("renamed, folder exists");
-      await expect
-        .element(page.getByTestId("copy-footer-summary"))
-        .toMatchTextContent("Clones to ~/Code/ryco-2 on hetzner-build");
+      await expect.element(primary()).toBeEnabled();
     } finally {
       await screen.unmount();
     }
@@ -727,9 +768,10 @@ describe("CopyProjectDialog", () => {
         .element(page.getByTestId("copy-destination-tag"))
         .toMatchTextContent("existing checkout");
       await expect.element(page.getByTestId("copy-method-link")).toBeVisible();
+      // A link carries no work: only the settings and the setup command.
       await expect
         .element(page.getByTestId("copy-footer-summary"))
-        .toMatchTextContent("Links ~/Code/ryco on hetzner-build");
+        .toHaveTextContent("+ settings · runs bun install …");
       await primary().click();
       await vi.waitFor(() => expect(fake.runs).toHaveLength(1));
       expect(fake.runs[0]!.input.plan?.choices.mode).toBe("link");
@@ -791,6 +833,12 @@ describe("CopyProjectDialog", () => {
     });
     try {
       await expect.element(primary()).toBeEnabled();
+      await expect
+        .element(page.getByTestId("copy-footer-summary"))
+        .toHaveTextContent(
+          "+ 2 uncommitted changes · 1 unpushed commit · settings · runs bun install …",
+        );
+      await editOptions();
       await expect
         .element(page.getByTestId("copy-option-commits"))
         .toMatchTextContent("The uncommitted changes need them");
@@ -945,6 +993,7 @@ describe("CopyProjectDialog", () => {
     } as unknown as ServerConfig;
     const { screen, fake } = await mount({ targetConfig });
     try {
+      await editOptions();
       const agent = page.getByTestId("copy-option-agent");
       await expect.element(agent.getByRole("checkbox")).toBeEnabled();
       await agent.getByRole("checkbox").click();
@@ -952,6 +1001,9 @@ describe("CopyProjectDialog", () => {
       await expect.element(prompt).toBeVisible();
       await expect.element(agent).toMatchTextContent("Model on hetzner-build");
       await prompt.fill("Install the tools and run the tests.");
+      await expect
+        .element(page.getByTestId("copy-footer-summary"))
+        .toMatchTextContent("an agent finishes setup");
       await primary().click();
       await vi.waitFor(() => expect(fake.runs).toHaveLength(1));
       expect(fake.runs[0]!.input.plan?.followUpThread).toMatchObject({
@@ -967,11 +1019,168 @@ describe("CopyProjectDialog", () => {
   it("can't ask an agent when no provider is ready on the destination", async () => {
     const { screen } = await mount({ targetConfig: null });
     try {
+      await editOptions();
       const agent = page.getByTestId("copy-option-agent");
       await expect.element(agent.getByRole("checkbox")).toBeDisabled();
       await expect
         .element(agent)
         .toMatchTextContent("No agent provider is ready on hetzner-build.");
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it("shows a project on one node as a line, not a one-option radio", async () => {
+    const { screen } = await mount({ members: [MEMBERS[0]!] });
+    try {
+      await expect.element(page.getByTestId("copy-source-line")).toMatchTextContent("MacBook Pro");
+      await expect.element(page.getByTestId("copy-source-line")).toMatchTextContent("~/Code/ryco");
+      await expect.element(radio(/^MacBook Pro ~\/Code\/ryco/u)).not.toBeInTheDocument();
+      await expect
+        .element(page.getByTestId("copy-already-on"))
+        .toMatchTextContent(/^Already on\s*MacBook Pro/u);
+      await expect.element(radio(/^Mac mini/u)).toHaveAttribute("aria-checked", "true");
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it("preselects the destination and folder last used from this checkout, and remembers a new one", async () => {
+    const BOX = EnvironmentId.make("env-box");
+    const all = nodes();
+    rememberCopyDestination(
+      { environmentId: LAPTOP, projectId: SOURCE_ID },
+      { targetEnvironmentId: HETZNER, parentPath: "/home/me/Code/scratch" },
+    );
+    const { screen } = await mount({
+      // Without the memory, the first ready node (box) would be picked.
+      nodes: [...all.slice(0, 2), node({ environmentId: BOX, label: "box" }), ...all.slice(2)],
+    });
+    try {
+      await expect.element(radio(/^hetzner-build/u)).toHaveAttribute("aria-checked", "true");
+      await expect
+        .element(page.getByTestId("copy-destination-path"))
+        .toMatchTextContent("~/Code/scratch/ryco");
+      await expect
+        .element(page.getByTestId("copy-folder-note"))
+        .toMatchTextContent("The folder you used last time.");
+      await expect.element(primary()).toBeEnabled();
+      await primary().click();
+      await expect.element(page.getByTestId("copy-project-progress")).toBeVisible();
+      expect(
+        readRememberedCopyDestination({ environmentId: LAPTOP, projectId: SOURCE_ID }),
+      ).toEqual({ targetEnvironmentId: HETZNER, parentPath: "/home/me/Code/scratch" });
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it("remembers a suggested folder as no folder, so the suggestion follows the source", async () => {
+    const { screen, fake } = await mount();
+    try {
+      await expect.element(primary()).toBeEnabled();
+      await primary().click();
+      await vi.waitFor(() => expect(fake.runs).toHaveLength(1));
+      expect(
+        readRememberedCopyDestination({ environmentId: LAPTOP, projectId: SOURCE_ID }),
+      ).toEqual({ targetEnvironmentId: HETZNER, parentPath: null });
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it("opens on the inspection a hover warmed, and reopens on it too", async () => {
+    // The hover's prefetch, before the dialog opens.
+    const first = await mount({ beforeRender: () => prefetchExportInspection(LAPTOP, SOURCE_ID) });
+    try {
+      await expect.element(primary()).toBeEnabled();
+      // The dialog read the warmed answer instead of asking the source again.
+      expect(first.laptop.exportInspect).toHaveBeenCalledTimes(1);
+    } finally {
+      await first.screen.unmount();
+    }
+    // Opening it again right away reads the same answer.
+    const second = await mount();
+    try {
+      await expect.element(primary()).toBeEnabled();
+      expect(second.laptop.exportInspect).not.toHaveBeenCalled();
+    } finally {
+      await second.screen.unmount();
+    }
+  });
+
+  it("asks before the tab closes while the upload still needs it", async () => {
+    const { screen, fake } = await mount();
+    const closing = () => {
+      const event = new Event("beforeunload", { cancelable: true });
+      window.dispatchEvent(event);
+      return event.defaultPrevented;
+    };
+    try {
+      await primary().click();
+      await vi.waitFor(() => expect(fake.runs).toHaveLength(1));
+      const run = fake.runs[0]!;
+      run.emit({ phase: "upload", uploadedBytes: 1024 * 1024, totalBytes: 8 * 1024 * 1024 });
+      await expect.element(page.getByTestId("copy-progress-footer")).toBeVisible();
+      await vi.waitFor(() => expect(closing()).toBe(true));
+      // Once the destination runs it, closing is fine.
+      run.emit({ phase: "import", canCloseClient: true, importSnapshot: snapshot({}) });
+      await vi.waitFor(() => expect(closing()).toBe(false));
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it("shows the upload's speed and time left", async () => {
+    const { screen, fake } = await mount();
+    try {
+      await primary().click();
+      await vi.waitFor(() => expect(fake.runs).toHaveLength(1));
+      const run = fake.runs[0]!;
+      run.emit({ phase: "upload", uploadedBytes: 1024 * 1024, totalBytes: 8 * 1024 * 1024 });
+      await expect
+        .element(page.getByTestId("copy-progress-footer"))
+        .toHaveTextContent("Keep Ryco open until the upload finishes (1.0 of 8.0 MB).");
+      await new Promise((resolve) => setTimeout(resolve, 1_100));
+      run.emit({ uploadedBytes: 2 * 1024 * 1024 });
+      await expect
+        .element(page.getByTestId("copy-progress-footer"))
+        .toMatchTextContent(/^Keep Ryco open until the upload finishes \(\d+ s left\)\.$/u);
+      await expect
+        .element(dialog().getByText(/^2\.0 of 8\.0 MB · [\d.]+ (MB|KB)\/s · \d+ s left$/u))
+        .toBeVisible();
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it("picks up a copy that stopped when Ryco closed, with its ids", async () => {
+    const stopped = createProjectCopyJobRecord({
+      copyId: "copy-stopped",
+      at: Date.now(),
+      sourceEnvironmentId: LAPTOP,
+      sourceProjectId: SOURCE_ID,
+      targetEnvironmentId: HETZNER,
+      projectId: ProjectId.make("project-new"),
+      importId: ProjectImportId.make(crypto.randomUUID()),
+    });
+    setLocalStorageItem(
+      PROJECT_COPY_RECORDS_STORAGE_KEY,
+      [{ ...stopped, stage: "upload" }],
+      Schema.Unknown,
+    );
+    const { screen, fake, startCopy } = await mount({
+      request: { targetEnvironmentId: HETZNER, resumeCopyId: "copy-stopped" },
+    });
+    try {
+      await expect
+        .element(page.getByTestId("copy-resume-notice"))
+        .toMatchTextContent("This copy stopped when Ryco closed during the upload.");
+      await expect.element(primary()).toBeEnabled();
+      await primary().click();
+      await vi.waitFor(() => expect(fake.runs).toHaveLength(1));
+      expect(startCopy.mock.calls[0]![2]).toMatchObject({ copyId: "copy-stopped" });
+      expect(fake.runs[0]!.input.resume?.copyId).toBe("copy-stopped");
     } finally {
       await screen.unmount();
     }

@@ -1,10 +1,13 @@
 // FILE: CopyProjectForm.tsx
 // Purpose: The form of "Copy <project> to another node": From (the project's
-//          checkouts), To (node cards), How (clone from origin or send the
-//          files), the folder on the destination with its picker, the options
-//          (unpushed commits, uncommitted changes and ignored files, settings,
-//          the setup command, a setup agent) and the footer that starts the
-//          copy. What is possible comes from the coordinator's plan.
+//          checkouts; one line when there is one), To (node cards, and an
+//          "Already on" line for the nodes that have it), How (clone from origin
+//          or send the files), the folder on the destination with its picker,
+//          the options (unpushed commits, uncommitted changes and ignored files,
+//          settings, the setup command, a setup agent; folded into the footer's
+//          one-line summary until Edit) and the footer that starts the copy.
+//          What is possible comes from the coordinator's plan; the destination
+//          last used from this checkout is preselected.
 // Layer: Web UI inside `CopyProjectDialog`; its reads live in
 //        `useCopyProjectPlanning.ts`, its wording in `copyProjectDialog.logic.ts`.
 
@@ -21,6 +24,7 @@ import {
   DEFAULT_UNIFIED_SETTINGS,
   type EnvironmentId,
   type ModelSelection,
+  type ProjectId,
   type ServerConfig,
 } from "@ryco/contracts";
 import { PROJECT_COPY_SETUP_COMMAND_MAX_CHARS } from "@ryco/contracts/project-copy";
@@ -34,7 +38,7 @@ import {
   LinkIcon,
   TriangleAlertIcon,
 } from "lucide-react";
-import { useId, useMemo, useState, type ReactNode } from "react";
+import { useId, useMemo, useRef, useState, type ReactNode } from "react";
 
 import { cn } from "~/lib/utils";
 
@@ -53,14 +57,26 @@ import { Checkbox } from "../ui/checkbox";
 import { DialogTitle } from "../ui/dialog";
 import { rovingRadioGroup } from "../ui/roving-radio-group";
 import { Textarea } from "../ui/textarea";
-import type { ProjectCopyEntry } from "./copyRuntime/copyManager";
 import {
+  discardProjectCopy,
+  readProjectCopyRecord,
+  type ProjectCopyEntry,
+} from "./copyRuntime/copyManager";
+import {
+  readRememberedCopyDestination,
+  rememberCopyDestination,
+  type RememberedCopyDestination,
+} from "./copyDestinationMemory";
+import {
+  copyAlreadyOn,
   copyCheckoutMeta,
   copyConnectionCapReason,
+  copyDestinationCards,
   copyFolderNote,
   copyFolderTag,
-  copyFooterSummary,
   copyNoTargetMessage,
+  copyOptionsSummary,
+  copySegmentsText,
   copySourceRows,
   copyTargetCards,
   initialCopySource,
@@ -141,6 +157,27 @@ function SourceList(props: {
   readonly onChange: (key: string) => void;
   readonly labelledBy: string;
 }) {
+  const only = props.rows.length === 1 ? props.rows[0] : undefined;
+  if (only) {
+    // One checkout: nothing to choose, so a line instead of a one-option radio.
+    return (
+      <div
+        data-testid="copy-source-line"
+        title={only.reason ?? only.path}
+        className="flex min-w-0 items-center gap-2 rounded-[10px] border border-border px-2.5 py-2 text-[12.5px]"
+      >
+        {only.node ? <NodeBadge node={only.node} size="sm" /> : null}
+        <span className="max-w-[45%] shrink-0 truncate">{only.label}</span>
+        <span className="min-w-0 flex-1 truncate font-mono text-[11.5px] opacity-75">
+          {only.displayPath}
+        </span>
+        <CopyCheckoutMetaLine
+          meta={props.metaByKey.get(only.key) ?? { branch: null, changed: 0, behind: 0 }}
+          offline={only.offline}
+        />
+      </div>
+    );
+  }
   const group = rovingRadioGroup<string>({
     options: props.rows.map((row) => ({ value: row.key, disabled: !row.selectable })),
     value: props.value,
@@ -228,6 +265,31 @@ function TargetCards(props: {
         );
       })}
     </div>
+  );
+}
+
+/** The nodes that already have the project: named, with their path on hover, instead of a card each. */
+function AlreadyOnLine(props: { readonly cards: ReadonlyArray<CopyTargetCard> }) {
+  if (props.cards.length === 0) return null;
+  return (
+    <span
+      className="flex min-w-0 flex-wrap items-center gap-x-1.5 gap-y-0.5 text-[11.5px] text-muted-foreground"
+      data-testid="copy-already-on"
+    >
+      <span>Already on</span>
+      {props.cards.map((card, index) => (
+        <span
+          key={card.node.environmentId}
+          className="inline-flex min-w-0 items-center gap-1"
+          title={card.sub}
+        >
+          <NodeBadge node={card.node} size="sm" />
+          <span className="truncate text-foreground/80">{card.node.label}</span>
+          <span className="sr-only">({card.sub})</span>
+          {index < props.cards.length - 1 ? <span aria-hidden>·</span> : null}
+        </span>
+      ))}
+    </span>
   );
 }
 
@@ -336,11 +398,32 @@ function formatFileSize(bytes: number): string {
   return formatCopyMegabytes(bytes);
 }
 
+/** Where this checkout was copied to last time, read once per source. */
+function useRememberedDestination(
+  environmentId: EnvironmentId | null,
+  projectId: ProjectId | null,
+): RememberedCopyDestination | null {
+  return useMemo(
+    () =>
+      environmentId !== null && projectId !== null
+        ? readRememberedCopyDestination({ environmentId, projectId })
+        : null,
+    [environmentId, projectId],
+  );
+}
+
 /* ───────── The form ───────── */
 
 export function CopyProjectForm(props: CopyProjectFormProps) {
   const { request, nodes, members, services } = props;
-  const ids = { from: useId(), to: useId(), how: useId(), folder: useId(), options: useId() };
+  const ids = {
+    from: useId(),
+    to: useId(),
+    how: useId(),
+    folder: useId(),
+    options: useId(),
+    optionsPanel: useId(),
+  };
 
   /* ── From ── */
   const sourceRows = useMemo(
@@ -380,6 +463,15 @@ export function CopyProjectForm(props: CopyProjectFormProps) {
   });
   const title = sourceProject?.name ?? members[0]?.name ?? "Project";
   const sourceLabel = sourceRow?.label ?? "the source";
+  // Where this checkout was copied to last time; read once per source.
+  const remembered = useRememberedDestination(
+    sourceRow?.ref.environmentId ?? null,
+    sourceRow?.ref.projectId ?? null,
+  );
+  // A copy whose upload stopped when Ryco closed, picked up again from here.
+  const [resumeRecord] = useState(() =>
+    request.resumeCopyId ? readProjectCopyRecord(request.resumeCopyId) : null,
+  );
 
   /* ── To ── */
   const [nowMs] = useState(() => Date.now());
@@ -388,7 +480,11 @@ export function CopyProjectForm(props: CopyProjectFormProps) {
   const pickedCard = cards.find((card) => card.node.environmentId === pickedTargetId);
   const targetId = pickedCard?.selectable
     ? pickedCard.node.environmentId
-    : initialCopyTarget(cards, request.targetEnvironmentId);
+    : initialCopyTarget(
+        cards,
+        request.targetEnvironmentId,
+        remembered?.targetEnvironmentId ?? null,
+      );
   const targetCard = cards.find((card) => card.node.environmentId === targetId) ?? null;
   const targetNode = targetCard?.node ?? null;
   const targetLabel = targetNode?.label ?? "the destination";
@@ -401,7 +497,11 @@ export function CopyProjectForm(props: CopyProjectFormProps) {
     readonly path: string;
   } | null>(null);
   const [pickerOpen, setPickerOpen] = useState(false);
-  const manualPath = manualParent && manualParent.targetId === targetId ? manualParent.path : null;
+  // The parent picked last time on this destination, until the user picks one now.
+  const rememberedParent =
+    remembered?.targetEnvironmentId === targetId ? remembered.parentPath : null;
+  const manualPath =
+    manualParent && manualParent.targetId === targetId ? manualParent.path : rememberedParent;
   const destination = useCopyDestination({
     environmentId: targetId,
     supported: targetSupport === "yes",
@@ -411,6 +511,9 @@ export function CopyProjectForm(props: CopyProjectFormProps) {
 
   /* ── Options ── */
   const [choices, setChoices] = useState<CopyUserChoices>(DEFAULT_COPY_USER_CHOICES);
+  // Folded into the footer's summary until Edit, so the form fits a short window.
+  const [optionsOpen, setOptionsOpen] = useState(false);
+  const optionsRef = useRef<HTMLDivElement | null>(null);
   const targetFactsBase: ProjectCopyTargetFacts = {
     label: targetLabel,
     platformOs: catalogPlatformOs(targetNode?.platformOs ?? null),
@@ -549,8 +652,25 @@ export function CopyProjectForm(props: CopyProjectFormProps) {
     }
     setStarting(true);
     setStartError(null);
+    // The stopped copy goes on only with what it was: the same checkout to the same node.
+    const resume =
+      resumeRecord !== null &&
+      sourceRow !== null &&
+      resumeRecord.targetEnvironmentId === targetId &&
+      resumeRecord.sourceEnvironmentId === sourceRow.ref.environmentId &&
+      resumeRecord.sourceProjectId === sourceRow.ref.projectId
+        ? resumeRecord
+        : null;
     try {
-      const started = await services.startCopy(built.plan, sourceRow?.ref ?? null);
+      const started = await services.startCopy(built.plan, sourceRow?.ref ?? null, resume);
+      // A stopped copy this one replaces cleans up what it sent.
+      if (resumeRecord !== null && resume === null) discardProjectCopy(resumeRecord.copyId);
+      if (sourceRow) {
+        rememberCopyDestination(sourceRow.ref, {
+          targetEnvironmentId: targetId,
+          parentPath: manualPath,
+        });
+      }
       const plan = built.plan;
       props.onStarted({
         copyId: started.copyId,
@@ -638,6 +758,39 @@ export function CopyProjectForm(props: CopyProjectFormProps) {
     );
   }
 
+  const destinationCards = copyDestinationCards(cards);
+  const alreadyOn = copyAlreadyOn(cards);
+  const unpushedCount = options?.bringCommits.unpushedCommitCount ?? 0;
+  const changeCount = inspection
+    ? inspection.workingTree.trackedChangeCount + inspection.workingTree.untrackedCount
+    : 0;
+  const optionsSummary =
+    options === null
+      ? null
+      : copyOptionsSummary({
+          mode,
+          changes: mode !== "link" && options.choices.bringChanges ? changeCount : 0,
+          commits:
+            mode === "send-files"
+              ? unpushedCount
+              : mode === "clone" && options.choices.bringCommits
+                ? unpushedCount
+                : 0,
+          ignoredFiles: options.choices.bringChanges ? options.choices.ignoredPaths.length : 0,
+          copySettings: options.choices.copySettings,
+          setupCommand: runSetup ? command : null,
+          followUp: followUpEnabled,
+        });
+  const toggleOptions = () => {
+    const next = !optionsOpen;
+    setOptionsOpen(next);
+    if (next) {
+      // Brings the unfolded options into view once they rendered.
+      globalThis.requestAnimationFrame(() =>
+        optionsRef.current?.scrollIntoView({ block: "nearest", behavior: "smooth" }),
+      );
+    }
+  };
   const tag = copyFolderTag(suggestion);
   const shownPath =
     suggestion !== null
@@ -646,6 +799,7 @@ export function CopyProjectForm(props: CopyProjectFormProps) {
   const note = copyFolderNote({
     suggestion: checking ? null : suggestion,
     manual: manualPath !== null,
+    remembered: manualPath !== null && manualPath === rememberedParent,
     sourceLabel,
     targetLabel,
     targetHome: destination.hints?.homeDirectory ?? null,
@@ -663,6 +817,16 @@ export function CopyProjectForm(props: CopyProjectFormProps) {
             {props.notice}
           </p>
         ) : null}
+        {resumeRecord !== null && !props.notice ? (
+          <p
+            className="m-0 rounded-lg bg-muted px-2.5 py-2 text-[12px] text-muted-foreground"
+            data-testid="copy-resume-notice"
+          >
+            This copy stopped when Ryco closed during the upload. Start it again to send the rest;
+            what already reached {nodeLabelOf(nodes)(resumeRecord.targetEnvironmentId)} is not sent
+            again.
+          </p>
+        ) : null}
         <CopyField label="From" labelId={ids.from}>
           <SourceList
             rows={sourceRows}
@@ -677,7 +841,7 @@ export function CopyProjectForm(props: CopyProjectFormProps) {
         </CopyField>
         <CopyField label="To" labelId={ids.to}>
           <TargetCards
-            cards={cards}
+            cards={destinationCards}
             value={targetId}
             checkingLabel={checking ? `Checking ${targetLabel}…` : null}
             onChange={(next) => {
@@ -686,6 +850,7 @@ export function CopyProjectForm(props: CopyProjectFormProps) {
             }}
             labelledBy={ids.to}
           />
+          <AlreadyOnLine cards={alreadyOn} />
           {updateOffers}
         </CopyField>
         <CopyField label="How" labelId={ids.how}>
@@ -781,104 +946,142 @@ export function CopyProjectForm(props: CopyProjectFormProps) {
             </span>
           )}
         </CopyField>
-        <CopyField label="Options" labelId={ids.options}>
-          <div className="flex flex-col" role="group" aria-labelledby={ids.options}>
-            <CopyOptions
-              options={options}
-              mode={mode}
-              inspection={inspection}
-              relayedLabels={[
-                ...(source.facts?.kind === "inspected" && source.facts.transport === "relay"
-                  ? [sourceLabel]
-                  : []),
-                ...(targetFacts.transport === "relay" ? [targetLabel] : []),
-              ]}
-              choices={choices}
-              onChoices={setChoices}
-            />
-            <CheckRow
-              testId="copy-option-setup"
-              checked={runSetup}
-              onChange={setSetupEnabled}
-              hint={
-                runSetup ? (
-                  <span className="flex flex-col gap-1 pt-1">
-                    <Textarea
-                      aria-label="Setup command"
-                      size="sm"
-                      spellCheck={false}
-                      maxLength={PROJECT_COPY_SETUP_COMMAND_MAX_CHARS}
-                      value={command}
-                      placeholder="e.g. bun install --frozen-lockfile"
-                      onChange={(event) => setSetupCommand(event.target.value)}
-                      className="font-mono text-[12px] sm:text-[12px]"
+        {optionsOpen ? (
+          <CopyField label="Options" labelId={ids.options}>
+            <div
+              ref={optionsRef}
+              id={ids.optionsPanel}
+              className="flex flex-col"
+              role="group"
+              aria-labelledby={ids.options}
+            >
+              <CopyOptions
+                options={options}
+                mode={mode}
+                inspection={inspection}
+                relayedLabels={[
+                  ...(source.facts?.kind === "inspected" && source.facts.transport === "relay"
+                    ? [sourceLabel]
+                    : []),
+                  ...(targetFacts.transport === "relay" ? [targetLabel] : []),
+                ]}
+                choices={choices}
+                onChoices={setChoices}
+              />
+              <CheckRow
+                testId="copy-option-setup"
+                checked={runSetup}
+                onChange={setSetupEnabled}
+                hint={
+                  runSetup ? (
+                    <span className="flex flex-col gap-1 pt-1">
+                      <Textarea
+                        aria-label="Setup command"
+                        size="sm"
+                        spellCheck={false}
+                        maxLength={PROJECT_COPY_SETUP_COMMAND_MAX_CHARS}
+                        value={command}
+                        placeholder="e.g. bun install --frozen-lockfile"
+                        onChange={(event) => setSetupCommand(event.target.value)}
+                        className="font-mono text-[12px] sm:text-[12px]"
+                      />
+                      {options?.setup.osNote ? (
+                        <span className="flex items-center gap-1.5 text-warning">
+                          <TriangleAlertIcon aria-hidden className="size-3 shrink-0" />
+                          {options.setup.osNote}
+                        </span>
+                      ) : null}
+                    </span>
+                  ) : null
+                }
+              >
+                Run setup afterwards
+                {!runSetup && prefill ? (
+                  <>
+                    :{" "}
+                    <code className="rounded bg-muted px-1 font-mono text-[11.5px]">{prefill}</code>
+                  </>
+                ) : null}
+              </CheckRow>
+              <CheckRow
+                testId="copy-option-agent"
+                checked={followUpEnabled}
+                onChange={setFollowUpEnabled}
+                disabled={followUpDefaults.modelSelection === null && !followUpEnabled}
+                hint={
+                  followUpEnabled ? (
+                    <FollowUpFields
+                      config={targetConfig}
+                      targetLabel={targetLabel}
+                      prompt={prompt}
+                      modelSelection={modelSelection}
+                      unavailableReason={followUpDefaults.unavailableReason}
+                      onPrompt={setFollowUpPrompt}
+                      onModel={(selection) => setFollowUpModel({ targetId, selection })}
                     />
-                    {options?.setup.osNote ? (
-                      <span className="flex items-center gap-1.5 text-warning">
-                        <TriangleAlertIcon aria-hidden className="size-3 shrink-0" />
-                        {options.setup.osNote}
-                      </span>
-                    ) : null}
-                  </span>
-                ) : null
-              }
-            >
-              Run setup afterwards
-              {!runSetup && prefill ? (
-                <>
-                  : <code className="rounded bg-muted px-1 font-mono text-[11.5px]">{prefill}</code>
-                </>
-              ) : null}
-            </CheckRow>
-            <CheckRow
-              testId="copy-option-agent"
-              checked={followUpEnabled}
-              onChange={setFollowUpEnabled}
-              disabled={followUpDefaults.modelSelection === null && !followUpEnabled}
-              hint={
-                followUpEnabled ? (
-                  <FollowUpFields
-                    config={targetConfig}
-                    targetLabel={targetLabel}
-                    prompt={prompt}
-                    modelSelection={modelSelection}
-                    unavailableReason={followUpDefaults.unavailableReason}
-                    onPrompt={setFollowUpPrompt}
-                    onModel={(selection) => setFollowUpModel({ targetId, selection })}
-                  />
-                ) : followUpDefaults.modelSelection === null ? (
-                  target.loading ? (
-                    `Checking the agents on ${targetLabel}…`
-                  ) : (
-                    followUpDefaults.unavailableReason
-                  )
-                ) : null
-              }
-            >
-              Ask an agent to finish setup
-            </CheckRow>
-          </div>
-          {options?.notes.map((line) => (
-            <span key={line} className="text-[11.5px] text-muted-foreground">
-              {line}
-            </span>
-          ))}
-        </CopyField>
+                  ) : followUpDefaults.modelSelection === null ? (
+                    target.loading ? (
+                      `Checking the agents on ${targetLabel}…`
+                    ) : (
+                      followUpDefaults.unavailableReason
+                    )
+                  ) : null
+                }
+              >
+                Ask an agent to finish setup
+              </CheckRow>
+            </div>
+          </CopyField>
+        ) : null}
+        {!optionsOpen && runSetup && options?.setup.osNote ? (
+          // The setup runs code on the destination: its warning stays in sight while folded.
+          <span
+            className="flex items-center gap-1.5 text-[11.5px] text-warning"
+            data-testid="copy-setup-os-note"
+          >
+            <TriangleAlertIcon aria-hidden className="size-3 shrink-0" />
+            {options.setup.osNote}
+          </span>
+        ) : null}
+        {options?.notes.map((line) => (
+          <span key={line} className="text-[11.5px] text-muted-foreground">
+            {line}
+          </span>
+        ))}
       </div>
       <div className="flex items-center gap-2 border-border border-t px-4 py-[11px]">
-        <span
-          className={cn(
-            "min-w-0 flex-1 truncate text-[12px] text-muted-foreground",
-            (startError ?? blockedReason) && !checking && "text-warning",
-          )}
-          data-testid="copy-footer-summary"
-          title={startError ?? blockedReason ?? undefined}
-        >
-          {startError ??
-            blockedReason ??
-            (suggestion && shownPath ? (
-              <CopySegments segments={copyFooterSummary({ mode, path: shownPath, targetLabel })} />
-            ) : null)}
+        <span className="flex min-w-0 flex-1 items-center gap-1">
+          <span
+            className={cn(
+              // Two lines before it cuts: the summary is what the copy brings.
+              "line-clamp-2 min-w-0 text-[12px] text-muted-foreground leading-[1.35]",
+              (startError ?? blockedReason) && !checking && "text-warning",
+            )}
+            data-testid="copy-footer-summary"
+            title={
+              startError ??
+              blockedReason ??
+              (optionsSummary ? copySegmentsText(optionsSummary) : undefined)
+            }
+          >
+            {startError ??
+              blockedReason ??
+              (optionsSummary ? <CopySegments segments={optionsSummary} /> : null)}
+          </span>
+          {options !== null ? (
+            <Button
+              size="xs"
+              variant="ghost"
+              className="shrink-0 px-1.5 text-[12px]"
+              aria-expanded={optionsOpen}
+              aria-controls={optionsOpen ? ids.optionsPanel : undefined}
+              aria-label={optionsOpen ? "Hide the options" : "Edit the options"}
+              data-testid="copy-options-toggle"
+              onClick={toggleOptions}
+            >
+              {optionsOpen ? "Hide" : "Edit"}
+            </Button>
+          ) : null}
         </span>
         <Button size="sm" variant="outline" onClick={props.onClose}>
           Cancel

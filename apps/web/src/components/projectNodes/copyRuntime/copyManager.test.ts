@@ -24,6 +24,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vite-plus/test"
 const toasts = vi.hoisted(() => ({
   showProjectCopyProgressToast: vi.fn(),
   showProjectCopyResultToast: vi.fn(),
+  showProjectCopyInterruptedToast: vi.fn(),
   dismissProjectCopyToast: vi.fn(),
 }));
 vi.mock("./projectCopyToasts", () => toasts);
@@ -52,7 +53,10 @@ import {
 } from "../projectNodesDialogStore";
 import {
   cancelProjectCopy,
+  discardProjectCopy,
   holdAgentControlCopyStart,
+  PROJECT_COPY_PROGRESS_INTERVAL_MS,
+  projectCopyResumesInDialog,
   registerProjectCopyViewer,
   resetProjectCopyManagerForTests,
   resumeProjectCopies,
@@ -607,6 +611,124 @@ describe("copyManager", () => {
       title: "ryco (rebuilt)",
       hasPlan: true,
     });
+  });
+});
+
+describe("copyManager upload progress", () => {
+  const MB = 1024 * 1024;
+
+  it("lets upload ticks reach the store at most four times a second, the latest winning", async () => {
+    vi.useFakeTimers();
+    await startManagedProjectCopy({ plan });
+    const run = fake.runs[0]!;
+    const uploaded = () => useProjectCopyStore.getState().entries["copy-1"]?.progress.uploadedBytes;
+
+    // The phase change applies at once.
+    run.emitProgress({ phase: "upload", uploadedBytes: MB, totalBytes: 10 * MB });
+    expect(uploaded()).toBe(MB);
+    const toastCalls = toasts.showProjectCopyProgressToast.mock.calls.length;
+    // Ticks within the interval are held back.
+    run.emitProgress({ uploadedBytes: 2 * MB });
+    run.emitProgress({ uploadedBytes: 3 * MB });
+    expect(uploaded()).toBe(MB);
+    expect(toasts.showProjectCopyProgressToast.mock.calls.length).toBe(toastCalls);
+    await vi.advanceTimersByTimeAsync(PROJECT_COPY_PROGRESS_INTERVAL_MS);
+    expect(uploaded()).toBe(3 * MB);
+    expect(toasts.showProjectCopyProgressToast.mock.calls.length).toBe(toastCalls + 1);
+
+    // About a second in, the speed and the time left are known.
+    await vi.advanceTimersByTimeAsync(1_000);
+    run.emitProgress({ uploadedBytes: 4 * MB });
+    const entry = useProjectCopyStore.getState().entries["copy-1"]!;
+    expect(entry.progress.uploadedBytes).toBe(4 * MB);
+    expect(entry.throughput?.bytesPerSecond).toBeGreaterThan(2 * MB);
+    expect(entry.throughput?.secondsLeft).toBe(3);
+
+    // Leaving the upload applies at once and drops the speed; a held tick never lands after it.
+    run.emitProgress({ uploadedBytes: 5 * MB });
+    run.emitProgress({ phase: "import", canCloseClient: true });
+    await vi.advanceTimersByTimeAsync(PROJECT_COPY_PROGRESS_INTERVAL_MS * 2);
+    expect(useProjectCopyStore.getState().entries["copy-1"]).toMatchObject({
+      progress: { phase: "import" },
+      throughput: null,
+    });
+  });
+
+  it("drops a held tick when the copy ends", async () => {
+    vi.useFakeTimers();
+    const copy = await startManagedProjectCopy({ plan });
+    const run = fake.runs[0]!;
+    run.emitProgress({ phase: "upload", uploadedBytes: MB, totalBytes: 10 * MB });
+    run.emitProgress({ uploadedBytes: 2 * MB });
+    run.emitProgress({ phase: "upload", uploadedBytes: 3 * MB });
+    run.settle({ progress: { ...run.progress, phase: "cancelled" } });
+    await copy.done;
+    await vi.advanceTimersByTimeAsync(PROJECT_COPY_PROGRESS_INTERVAL_MS * 2);
+    expect(useProjectCopyStore.getState().entries["copy-1"]?.progress.phase).toBe("cancelled");
+  });
+});
+
+describe("copyManager after Ryco closed during an upload", () => {
+  it("offers a user's stopped upload again instead of cleaning it up", async () => {
+    const now = Date.now();
+    const upload = record({ copyId: "copy-upload", stage: "upload", updatedAt: now });
+    setLocalStorageItem(PROJECT_COPY_RECORDS_STORAGE_KEY, [upload], Schema.Unknown);
+    expect(projectCopyResumesInDialog(upload)).toBe(true);
+
+    await resumeProjectCopies();
+
+    // Nothing ran: its plan never reached storage, so nothing cleaned up what it sent.
+    expect(fake.runs).toHaveLength(0);
+    expect(toasts.showProjectCopyInterruptedToast).toHaveBeenCalledWith(
+      "copy-upload",
+      expect.objectContaining({ title: "A copy to Mac mini stopped" }),
+      expect.anything(),
+    );
+    const actions = toasts.showProjectCopyInterruptedToast.mock.calls[0]![2] as {
+      onResume: () => void;
+      onDiscard: () => void;
+    };
+    // Resume opens the copy dialog on it, prefilled.
+    actions.onResume();
+    expect(useProjectNodesDialogStore.getState().copyProject).toMatchObject({
+      open: true,
+      request: {
+        source: { environmentId: source, projectId: ProjectId.make("project-source") },
+        targetEnvironmentId: target,
+        resumeCopyId: "copy-upload",
+      },
+    });
+  });
+
+  it("goes on with the stopped copy's ids when the dialog starts it again", async () => {
+    const upload = record({ copyId: "copy-upload", stage: "upload", updatedAt: Date.now() });
+    setLocalStorageItem(PROJECT_COPY_RECORDS_STORAGE_KEY, [upload], Schema.Unknown);
+    const copy = await startManagedProjectCopy({ plan, toast: false, resume: upload });
+    expect(copy.copyId).toBe("copy-upload");
+    expect(fake.runs[0]?.input).toMatchObject({ plan, resume: upload });
+    expect(useProjectCopyStore.getState().entries["copy-upload"]?.hasPlan).toBe(true);
+  });
+
+  it("discards a stopped copy: cleans up what it sent, then forgets it", async () => {
+    const upload = record({ copyId: "copy-upload", stage: "upload", updatedAt: Date.now() });
+    setLocalStorageItem(PROJECT_COPY_RECORDS_STORAGE_KEY, [upload], Schema.Unknown);
+    discardProjectCopy("copy-upload");
+    await vi.waitFor(() => expect(fake.runs).toHaveLength(1));
+    expect(fake.runs[0]?.input).toMatchObject({ plan: null, resume: upload });
+    fake.runs[0]!.settle({
+      progress: { ...fake.runs[0]!.progress, phase: "failed" },
+      record: { ...upload, stage: "finished", outcome: "failed" },
+    });
+    await vi.waitFor(() => expect(storedRecords()).toEqual([]));
+    // Its end is no news.
+    expect(toasts.showProjectCopyResultToast).not.toHaveBeenCalled();
+  });
+
+  it("resumes an Agent Control upload itself, not through the dialog", () => {
+    expect(
+      projectCopyResumesInDialog(record({ stage: "upload", agentControl, updatedAt: Date.now() })),
+    ).toBe(false);
+    expect(projectCopyResumesInDialog(record({ stage: "importing" }))).toBe(false);
   });
 });
 

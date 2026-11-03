@@ -93,6 +93,99 @@ export function formatCopyTransfer(uploadedBytes: number, totalBytes: number): s
   return `${format(uploadedBytes)} of ${format(totalBytes)} MB`;
 }
 
+/* ───────── Upload speed ───────── */
+
+/** How fast the upload goes and how long the rest takes at that speed. */
+export interface ProjectCopyThroughput {
+  readonly bytesPerSecond: number;
+  /** Null while the speed says nothing useful (nothing moved yet). */
+  readonly secondsLeft: number | null;
+}
+
+/** One reading of the uploaded bytes, for the speed over the last few seconds. */
+export interface ProjectCopyByteSample {
+  readonly at: number;
+  readonly bytes: number;
+}
+
+/** The speed is measured over this much of the latest upload. */
+export const COPY_THROUGHPUT_WINDOW_MS = 5_000;
+/** A speed from less than this is too noisy to show. */
+const COPY_THROUGHPUT_MIN_SPAN_MS = 1_000;
+
+/**
+ * Adds a reading and drops those older than the window (keeping one just
+ * before it, so the span stays about the window). A count that went back (the
+ * upload started over) starts the readings afresh.
+ */
+export function nextCopyByteSamples(
+  samples: ReadonlyArray<ProjectCopyByteSample>,
+  sample: ProjectCopyByteSample,
+  windowMs: number = COPY_THROUGHPUT_WINDOW_MS,
+): ReadonlyArray<ProjectCopyByteSample> {
+  const last = samples.at(-1);
+  if (last !== undefined && (sample.bytes < last.bytes || sample.at < last.at)) return [sample];
+  const next = [...samples, sample];
+  const cutoff = sample.at - windowMs;
+  let first = 0;
+  while (first + 1 < next.length - 1 && next[first + 1]!.at <= cutoff) first += 1;
+  return first === 0 ? next : next.slice(first);
+}
+
+/** The upload's speed and time left from its readings; null until about a second was measured. */
+export function copyThroughput(
+  samples: ReadonlyArray<ProjectCopyByteSample>,
+  totalBytes: number,
+): ProjectCopyThroughput | null {
+  const first = samples[0];
+  const last = samples.at(-1);
+  if (first === undefined || last === undefined) return null;
+  const spanMs = last.at - first.at;
+  if (spanMs < COPY_THROUGHPUT_MIN_SPAN_MS) return null;
+  const bytesPerSecond = ((last.bytes - first.bytes) * 1000) / spanMs;
+  const remaining = Math.max(0, totalBytes - last.bytes);
+  return {
+    bytesPerSecond,
+    secondsLeft: bytesPerSecond > 0 ? Math.ceil(remaining / bytesPerSecond) : null,
+  };
+}
+
+/** "3.2 MB/s", "640 KB/s"; one decimal under 10 MB/s. */
+export function formatCopySpeed(bytesPerSecond: number): string {
+  if (bytesPerSecond < MEGABYTE) return `${Math.max(0, Math.round(bytesPerSecond / 1024))} KB/s`;
+  const megabytes = bytesPerSecond / MEGABYTE;
+  return `${megabytes < 10 ? megabytes.toFixed(1) : Math.round(megabytes)} MB/s`;
+}
+
+/** "8 s left", "3 min left", "1 h 5 min left". */
+export function formatCopyTimeLeft(seconds: number): string {
+  const whole = Math.max(1, Math.ceil(seconds));
+  if (whole < 60) return `${whole} s left`;
+  const minutes = Math.ceil(whole / 60);
+  if (minutes < 60) return `${minutes} min left`;
+  const hours = Math.floor(minutes / 60);
+  const rest = minutes % 60;
+  return rest === 0 ? `${hours} h left` : `${hours} h ${rest} min left`;
+}
+
+/** "3.2 MB/s · 8 s left", or only the speed while the time left is unknown. */
+export function formatCopyThroughput(throughput: ProjectCopyThroughput): string {
+  const speed = formatCopySpeed(throughput.bytesPerSecond);
+  return throughput.secondsLeft === null
+    ? speed
+    : `${speed} · ${formatCopyTimeLeft(throughput.secondsLeft)}`;
+}
+
+/** "12 of 38 MB · 3.2 MB/s · 8 s left" while the speed is known, else "12 of 38 MB". */
+export function formatCopyUpload(
+  uploadedBytes: number,
+  totalBytes: number,
+  throughput: ProjectCopyThroughput | null | undefined,
+): string {
+  const transfer = formatCopyTransfer(uploadedBytes, totalBytes);
+  return throughput ? `${transfer} · ${formatCopyThroughput(throughput)}` : transfer;
+}
+
 const clampPercent = (value: number): number => Math.max(0, Math.min(100, Math.round(value)));
 
 /** The step that runs now on the target, else the last one that finished. */
@@ -130,7 +223,11 @@ export function projectCopyPercent(progress: ProjectCopyProgress): number | null
   }
 }
 
-function progressLine(progress: ProjectCopyProgress, labels: ProjectCopyLabels): string {
+function progressLine(
+  progress: ProjectCopyProgress,
+  labels: ProjectCopyLabels,
+  throughput: ProjectCopyThroughput | null,
+): string {
   const target = labels.targetLabel ?? "the destination";
   switch (progress.phase) {
     case "acquire":
@@ -141,7 +238,7 @@ function progressLine(progress: ProjectCopyProgress, labels: ProjectCopyLabels):
       return `Preparing the files on ${labels.sourceLabel ?? "the source"}…`;
     case "upload":
       return progress.totalBytes > 0
-        ? `Sending ${formatCopyTransfer(progress.uploadedBytes, progress.totalBytes)}. Keep Ryco open until the upload finishes.`
+        ? `Sending ${formatCopyUpload(progress.uploadedBytes, progress.totalBytes, throughput)}. Keep Ryco open until the upload finishes.`
         : "Keep Ryco open until the upload finishes.";
     case "import": {
       const step = progress.importSnapshot ? currentImportStep(progress.importSnapshot) : null;
@@ -157,10 +254,14 @@ function progressLine(progress: ProjectCopyProgress, labels: ProjectCopyLabels):
   }
 }
 
-/** The whole view of one copy, for its toast, the dialog and the Copies block. */
+/**
+ * The whole view of one copy, for its toast, the dialog and the Copies block;
+ * a running upload also says its speed and time left when `throughput` knows them.
+ */
 export function projectCopyView(
   progress: ProjectCopyProgress,
   labels: ProjectCopyLabels,
+  throughput: ProjectCopyThroughput | null = null,
 ): ProjectCopyView {
   const title = labels.title ?? progress.importSnapshot?.title ?? null;
   const target = labels.targetLabel ?? "the destination";
@@ -213,7 +314,7 @@ export function projectCopyView(
       return {
         kind: "progress",
         title: title ? `${words.doing} ${title} ${onTarget}` : `${words.doing} ${onTarget}`,
-        description: progressLine(progress, labels),
+        description: progressLine(progress, labels, throughput),
         percent: projectCopyPercent(progress),
         keepOpen: !progress.canCloseClient,
         retryLabel: null,

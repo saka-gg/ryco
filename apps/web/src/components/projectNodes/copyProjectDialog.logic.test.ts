@@ -11,10 +11,12 @@ import { ProjectImportId, type ProjectImportSnapshot } from "@ryco/contracts/pro
 import { describe, expect, it } from "vite-plus/test";
 
 import {
+  copyAlreadyOn,
   copyConnectionCapReason,
+  copyDestinationCards,
   copyFolderNote,
   copyFolderTag,
-  copyFooterSummary,
+  copyOptionsSummary,
   copyOverallPercent,
   copyProgressFooter,
   copyProgressSteps,
@@ -27,6 +29,7 @@ import {
   nodesHeldByCopy,
   parentOfNodePath,
   projectCopyRows,
+  shortSetupCommand,
   type CopyProgressContext,
   type ProjectCopyEntryLike,
 } from "./copyProjectDialog.logic";
@@ -108,6 +111,30 @@ describe("From and To", () => {
     ]);
     expect(initialCopyTarget(cards, MINI)).toBe(HETZNER);
     expect(initialCopyTarget(cards, null)).toBe(HETZNER);
+    // Nodes that have it are named in the "Already on" line, not given a card.
+    expect(copyDestinationCards(cards).map((card) => card.node.label)).toEqual([
+      "hetzner-build",
+      "Gaming PC",
+      "Old box",
+    ]);
+    expect(copyAlreadyOn(cards).map((card) => card.node.label)).toEqual([
+      "MacBook Pro",
+      "Mac mini",
+    ]);
+  });
+
+  it("preselects the destination last copied to when it can take the copy", () => {
+    const cards = copyTargetCards({
+      nodes: [...NODES, node(EnvironmentId.make("env-box"), "box", { platformOs: "linux" })],
+      members: MEMBERS,
+      nowMs: NOW,
+    });
+    const box = EnvironmentId.make("env-box");
+    expect(initialCopyTarget(cards, null, box)).toBe(box);
+    // The one asked for wins; one that can't take it falls back to the usual rule.
+    expect(initialCopyTarget(cards, HETZNER, box)).toBe(HETZNER);
+    expect(initialCopyTarget(cards, null, GAMING)).toBe(HETZNER);
+    expect(initialCopyTarget(cards, null, MINI)).toBe(HETZNER);
   });
 
   it("says why no destination can take the copy", () => {
@@ -216,6 +243,9 @@ describe("the destination folder", () => {
     expect(noteText({ ...NOTE, manual: true, suggestion: suggestion({}) })).toBe(
       "You picked this folder.",
     );
+    expect(noteText({ ...NOTE, manual: true, remembered: true, suggestion: suggestion({}) })).toBe(
+      "The folder you used last time.",
+    );
     expect(noteText({ ...NOTE, suggestion: null })).toBe("Checking hetzner-build…");
   });
 
@@ -243,18 +273,57 @@ describe("the destination folder", () => {
     expect(copyFolderTag(suggestion({ status: "blocked" }))).toBeNull();
   });
 
-  it("summarises the copy in the footer", () => {
-    expect(
-      copySegmentsText(copyFooterSummary({ mode: "clone", path: "~/Code/ryco", targetLabel: "D" })),
-    ).toBe("Clones to ~/Code/ryco on D");
+  it("sums the options up in one line", () => {
+    const base = {
+      mode: "clone" as const,
+      changes: 2,
+      commits: 1,
+      ignoredFiles: 0,
+      copySettings: true,
+      setupCommand: "bun install --frozen-lockfile",
+      followUp: false,
+    };
+    expect(copySegmentsText(copyOptionsSummary(base))).toBe(
+      "+ 2 uncommitted changes · 1 unpushed commit · settings · runs bun install …",
+    );
+    // The command is marked for mono.
+    expect(copyOptionsSummary(base).at(-1)).toEqual({ text: "bun install …", mono: true });
     expect(
       copySegmentsText(
-        copyFooterSummary({ mode: "send-files", path: "~/Code/ryco", targetLabel: "D" }),
+        copyOptionsSummary({
+          ...base,
+          changes: 1,
+          commits: 0,
+          ignoredFiles: 1,
+          setupCommand: null,
+          followUp: true,
+        }),
       ),
-    ).toBe("Sends to ~/Code/ryco on D");
+    ).toBe("+ 1 uncommitted change · 1 ignored file · settings · an agent finishes setup");
+    // A link carries no work; nothing at all says so.
     expect(
-      copySegmentsText(copyFooterSummary({ mode: "link", path: "~/Code/ryco", targetLabel: "D" })),
-    ).toBe("Links ~/Code/ryco on D");
+      copySegmentsText(copyOptionsSummary({ ...base, mode: "link", setupCommand: null })),
+    ).toBe("+ settings");
+    expect(
+      copySegmentsText(
+        copyOptionsSummary({
+          ...base,
+          changes: 0,
+          commits: 0,
+          copySettings: false,
+          setupCommand: "  ",
+        }),
+      ),
+    ).toBe("Nothing extra");
+  });
+
+  it("shortens a long setup command to its first words", () => {
+    expect(shortSetupCommand("bun install")).toBe("bun install");
+    expect(shortSetupCommand("pnpm i\npnpm build")).toBe("pnpm i");
+    expect(shortSetupCommand("bun install --frozen-lockfile")).toBe("bun install …");
+    expect(shortSetupCommand("./scripts/a-very-long-setup-script-name.sh --flag")).toBe(
+      "./scripts/a-very-long-s…",
+    );
   });
 
   it("finds a path's parent on any node", () => {
@@ -473,6 +542,14 @@ describe("the progress list", () => {
         "D",
       ),
     ).toBe("Keep Ryco open until the upload finishes (2.0 of 38 MB).");
+    // With the upload's speed known, how long is left.
+    expect(
+      copyProgressFooter(
+        progress({ phase: "upload", uploadedBytes: 2 * 1024 * 1024, totalBytes: 38 * 1024 * 1024 }),
+        "D",
+        { bytesPerSecond: 3 * 1024 * 1024, secondsLeft: 12 },
+      ),
+    ).toBe("Keep Ryco open until the upload finishes (12 s left).");
     expect(copyProgressFooter(progress({ phase: "acquire" }), "D")).toBe(
       "Keep Ryco open until D starts the copy.",
     );

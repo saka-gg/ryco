@@ -140,6 +140,51 @@ export function showProjectCopyResultToast(
   present(copyId, viewKey(view), options);
 }
 
+export interface ProjectCopyInterruptedToastActions {
+  /** Reopens the copy dialog on the stopped copy. */
+  readonly onResume: () => void;
+  /** Gives it up and cleans up what it sent. */
+  readonly onDiscard: () => void;
+}
+
+/**
+ * A copy whose upload stopped when Ryco closed, offered again after a start:
+ * "Resume" (the copy dialog) or "Discard". It stays until one is picked or it
+ * is dismissed; the Copies block keeps offering it either way.
+ */
+export function showProjectCopyInterruptedToast(
+  copyId: string,
+  text: { readonly title: string; readonly description: string },
+  actions: ProjectCopyInterruptedToastActions,
+): void {
+  const options = stackedThreadToast({
+    type: "warning",
+    title: text.title,
+    description: text.description,
+    timeout: 0,
+    actionProps: {
+      children: "Resume",
+      onClick: () => {
+        dismissProjectCopyToast(copyId);
+        actions.onResume();
+      },
+    },
+    actionVariant: "outline",
+    data: {
+      hideCopyButton: true,
+      secondaryActionProps: {
+        children: "Discard",
+        onClick: () => {
+          dismissProjectCopyToast(copyId);
+          actions.onDiscard();
+        },
+      },
+      secondaryActionVariant: "ghost",
+    },
+  });
+  present(copyId, `interrupted:${text.title}`, options);
+}
+
 export function dismissProjectCopyToast(copyId: string): void {
   const shown = toasts.get(copyId);
   if (!shown) return;
