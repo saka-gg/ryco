@@ -10,6 +10,7 @@ import * as Schema from "effect/Schema";
 import { deepMerge } from "./Struct.ts";
 import { fromLenientJson } from "./schemaJson.ts";
 import { createModelSelection } from "./model.ts";
+import { nextSettingsSharing, resolveSettingsSharingPatch } from "./settingsSharing.ts";
 
 const PersistedSettingsObjectJson = fromLenientJson(Schema.Record(Schema.String, Schema.Unknown));
 
@@ -125,8 +126,21 @@ function patchProjectOverrides<Value, PatchValue extends Value>(
  * Applies a server settings patch while treating textGenerationModelSelection as
  * replace-on-provider/model updates. This prevents stale nested options from
  * surviving a reset patch that intentionally omits options.
+ *
+ * `settingsSharing` entries are resolved first (`resolveSettingsSharingPatch`: a catch-up the
+ * node no longer needs drops its value too; a non-shareable key throws), and the sharing record
+ * is written with the values in the same result, so a value and its stamp land together.
  */
 export function applyServerSettingsPatch(
+  current: ServerSettings,
+  patch: ServerSettingsPatch,
+): ServerSettings {
+  const sharing = resolveSettingsSharingPatch(current, patch);
+  const next = applyResolvedServerSettingsPatch(current, sharing.patch);
+  return { ...next, settingsSharing: nextSettingsSharing(current, next, sharing.entries) };
+}
+
+function applyResolvedServerSettingsPatch(
   current: ServerSettings,
   patch: ServerSettingsPatch,
 ): ServerSettings {
@@ -163,6 +177,7 @@ export function applyServerSettingsPatch(
     cliProxyHubs: _cliProxyHubs,
     usagePriceOverrides: _usagePriceOverrides,
     enableLegacyTokenStreaming: legacyTokenStreaming,
+    settingsSharing: _settingsSharing,
     ...persistedPatch
   } = patch;
   let next = deepMerge(current, persistedPatch);

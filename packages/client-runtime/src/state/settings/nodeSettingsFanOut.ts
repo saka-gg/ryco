@@ -7,58 +7,25 @@
  * Kept off the `state/settings` index, which the app shell imports: only settings surfaces use
  * this.
  */
-import type { EnvironmentId, ServerConfig } from "@ryco/contracts";
 import type { ServerSettingsPatch } from "@ryco/contracts/settings";
 import * as Equal from "effect/Equal";
 
-/** What a client knows of a node's config: its capabilities and its settings. */
-export type NodeSettingsConfig = Pick<ServerConfig, "environment" | "settings">;
+import {
+  writeNodeSettingsPatches,
+  type NodeSettingsApplyResult,
+  type NodeSettingsConfig,
+  type NodeSettingsNotApplied,
+  type NodeSettingsTarget,
+} from "./nodeSettingsTargets.ts";
 
-/** Why a node cannot take a settings write now. */
-export type NodeSettingsBlocker = "disconnected" | "unsupported" | "read-only";
-
-/** A node a settings write may go to, writable now or with what stops it. */
-export interface NodeSettingsTarget {
-  readonly environmentId: EnvironmentId;
-  readonly label: string;
-  /** The node's own last known config; null while none is known. */
-  readonly config: NodeSettingsConfig | null;
-  readonly connected: boolean;
-  /** This client may change the node's settings now (its owner, or a hosted grant). */
-  readonly canWrite: boolean;
-  /** Writes through the node's own connection; the node checks access and CAS itself. */
-  readonly write: (patch: ServerSettingsPatch) => Promise<unknown>;
-}
-
-/**
- * Why a write cannot go to a node now: not connected (or no config yet), a node that does not
- * know the setting (`supported`, from the node's own config), or a client that may not change
- * it. Null when it can.
- */
-export function nodeSettingsBlocker(
-  target: Pick<NodeSettingsTarget, "config" | "connected" | "canWrite">,
-  supported?: (config: NodeSettingsConfig) => boolean,
-): NodeSettingsBlocker | null {
-  if (!target.connected || target.config == null) return "disconnected";
-  if (supported !== undefined && !supported(target.config)) return "unsupported";
-  return target.canWrite ? null : "read-only";
-}
-
-export interface NodeSettingsNotApplied {
-  readonly environmentId: EnvironmentId;
-  readonly label: string;
-  readonly reason: NodeSettingsBlocker | "failed";
-  /** The node's own message, for a failed write. */
-  readonly detail?: string;
-}
-
-export interface NodeSettingsApplyResult {
-  readonly applied: ReadonlyArray<{
-    readonly environmentId: EnvironmentId;
-    readonly label: string;
-  }>;
-  readonly notApplied: ReadonlyArray<NodeSettingsNotApplied>;
-}
+export {
+  nodeSettingsBlocker,
+  type NodeSettingsApplyResult,
+  type NodeSettingsBlocker,
+  type NodeSettingsConfig,
+  type NodeSettingsNotApplied,
+  type NodeSettingsTarget,
+} from "./nodeSettingsTargets.ts";
 
 /**
  * The write each node gets: one patch for every node, or one built from each node's own config.
@@ -74,38 +41,16 @@ export type NodeSettingsPatch =
  * Writes a patch to every node it can reach, in parallel, and reports the nodes it could not:
  * blocked ones ({@link nodeSettingsBlocker}) and failed writes, with the node's own message.
  */
-export async function applyNodeSettingsPatch(
+export function applyNodeSettingsPatch(
   targets: ReadonlyArray<NodeSettingsTarget>,
   patch: NodeSettingsPatch,
   options?: { readonly supported?: (config: NodeSettingsConfig) => boolean },
 ): Promise<NodeSettingsApplyResult> {
-  const outcomes = await Promise.all(
-    targets.map(async (target) => {
-      const node = { environmentId: target.environmentId, label: target.label };
-      const blocker = nodeSettingsBlocker(target, options?.supported);
-      const config = target.config;
-      if (blocker !== null || config === null) {
-        return { ok: false as const, entry: { ...node, reason: blocker ?? "disconnected" } };
-      }
-      try {
-        await target.write(typeof patch === "function" ? patch(config) : patch);
-        return { ok: true as const, entry: node };
-      } catch (error) {
-        return {
-          ok: false as const,
-          entry: {
-            ...node,
-            reason: "failed" as const,
-            ...(error instanceof Error ? { detail: error.message } : {}),
-          },
-        };
-      }
-    }),
+  return writeNodeSettingsPatches(
+    targets,
+    (_target, config) => (typeof patch === "function" ? patch(config) : patch),
+    options,
   );
-  return {
-    applied: outcomes.flatMap((outcome) => (outcome.ok ? [outcome.entry] : [])),
-    notApplied: outcomes.flatMap((outcome) => (outcome.ok ? [] : [outcome.entry])),
-  };
 }
 
 const NOT_APPLIED_REASON: Record<NodeSettingsNotApplied["reason"], string> = {

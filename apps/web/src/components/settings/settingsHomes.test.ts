@@ -90,6 +90,8 @@ const SERVER_SETTING_HOMES = {
   usagePriceOverrides: "usage",
   observability: "diagnostics",
   agentControl: "agent-control",
+  // Bookkeeping for shared device settings, written with the values it describes.
+  settingsSharing: null,
 } as const satisfies Record<keyof ServerSettings, SettingsPageSectionId | null>;
 
 function keepsRowsIn(section: SettingsPageSectionId, storage: SettingsStorage): boolean {

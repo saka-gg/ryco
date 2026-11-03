@@ -282,6 +282,22 @@
       "types": "./src/state/settings/nodeSettingsFanOut.ts",
       "import": "./src/state/settings/nodeSettingsFanOut.ts"
     },
+    "./state/settings/nodeSettingsTargets": {
+      "types": "./src/state/settings/nodeSettingsTargets.ts",
+      "import": "./src/state/settings/nodeSettingsTargets.ts"
+    },
+    "./state/settings/settingsSharingClock": {
+      "types": "./src/state/settings/settingsSharingClock.ts",
+      "import": "./src/state/settings/settingsSharingClock.ts"
+    },
+    "./state/settings/sharedDeviceSettings": {
+      "types": "./src/state/settings/sharedDeviceSettings.ts",
+      "import": "./src/state/settings/sharedDeviceSettings.ts"
+    },
+    "./state/settings/sharedDeviceSettingsRunner": {
+      "types": "./src/state/settings/sharedDeviceSettingsRunner.ts",
+      "import": "./src/state/settings/sharedDeviceSettingsRunner.ts"
+    },
     "./state/terminal": {
       "types": "./src/state/terminal/index.ts",
       "import": "./src/state/terminal/index.ts"

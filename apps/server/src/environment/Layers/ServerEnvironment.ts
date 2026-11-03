@@ -11,6 +11,7 @@ import packageJson from "../../../package.json" with { type: "json" };
 import { resolveServerEnvironmentLabel } from "./ServerEnvironmentLabel.ts";
 import { desktopAppAutomaticUpdateMode } from "@ryco/shared/desktopResourceTelemetry";
 import { inferEnvironmentMachineKind } from "@ryco/shared/environmentIcon";
+import { SETTINGS_SHARING_VERSION } from "@ryco/shared/settingsSharing";
 
 function platformOs(): ExecutionEnvironmentDescriptor["platform"]["os"] {
   switch (process.platform) {
@@ -145,6 +146,7 @@ export const makeServerEnvironment = Effect.fn("makeServerEnvironment")(function
       usagePriceOverrides: true,
       serverFollowUpQueue: true,
       liveThreadModelSelection: true,
+      settingsSharingVersion: SETTINGS_SHARING_VERSION,
       fileAttachments: { maxUploadBytes: PROVIDER_SEND_TURN_MAX_FILE_BYTES },
     },
   };

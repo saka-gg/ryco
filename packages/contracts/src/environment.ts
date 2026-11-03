@@ -5,6 +5,7 @@ import * as Schema from "effect/Schema";
 import {
   EnvironmentId,
   NonNegativeInt,
+  PositiveInt,
   ProjectId,
   ThreadId,
   TrimmedNonEmptyString,
@@ -223,6 +224,14 @@ export const ExecutionEnvironmentCapabilities = Schema.Struct({
    * until it is sent.
    */
   liveThreadModelSelection: Schema.optionalKey(Schema.Literal(true)),
+  /**
+   * The node keeps `settingsSharing` (shared or per-device state and stamps per setting) and
+   * applies its catch-up rules. The number names the set of setting keys it shares
+   * (`@ryco/shared/settingsSharing`: a key added later needs a later version), so the pre-auth
+   * descriptor stays small and names no settings. Absent on older servers, which drop
+   * `settingsSharing` from patches and must only get plain per-device edits.
+   */
+  settingsSharingVersion: Schema.optionalKey(PositiveInt),
   fileAttachments: Schema.optional(Schema.Struct({ maxUploadBytes: NonNegativeInt })),
 });
 export type ExecutionEnvironmentCapabilities = typeof ExecutionEnvironmentCapabilities.Type;

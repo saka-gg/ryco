@@ -62,6 +62,7 @@ import { ServerConfig } from "./config.ts";
 import { type DeepPartial } from "@ryco/shared/Struct";
 import { formatSchemaError, fromLenientJson } from "@ryco/shared/schemaJson";
 import { applyServerSettingsPatch, migrateLegacyServerSettings } from "@ryco/shared/serverSettings";
+import { resolveSettingsSharingPatch } from "@ryco/shared/settingsSharing";
 import {
   listEnabledProviderInstances,
   resolveProviderInstanceEnabled,
@@ -1193,7 +1194,21 @@ export const makeServerSettings = Effect.gen(function* () {
       writeSemaphore.withPermits(1)(
         Effect.gen(function* () {
           const current = yield* getSettingsFromCache;
-          const normalizedPatch = { ...patch };
+          // A catch-up this node no longer needs (an override here, or a newer stamp) is dropped
+          // with its value before anything is validated; a non-shareable key fails the write.
+          const sharing = yield* Effect.try({
+            try: () => resolveSettingsSharingPatch(current, patch),
+            catch: (cause) =>
+              new ServerSettingsError({
+                settingsPath,
+                detail: cause instanceof Error ? cause.message : "Invalid shared settings.",
+                cause,
+              }),
+          });
+          const normalizedPatch =
+            patch.settingsSharing === undefined
+              ? { ...patch }
+              : { ...sharing.patch, settingsSharing: patch.settingsSharing };
           const validateRoot = (root: string, label?: string) =>
             validateWorktreeRoot(root, worktreeAccessPolicy, label).pipe(
               Effect.mapError(
@@ -1201,13 +1216,16 @@ export const makeServerSettings = Effect.gen(function* () {
               ),
             );
           // Empty roots select the managed default and need no validation.
-          if (patch.worktreeRoot)
-            normalizedPatch.worktreeRoot = yield* validateRoot(patch.worktreeRoot);
-          if (patch.chatsRoot)
-            normalizedPatch.chatsRoot = yield* validateRoot(patch.chatsRoot, "Chats folder");
-          if (patch.projectWorktreeRoots !== undefined) {
+          if (normalizedPatch.worktreeRoot)
+            normalizedPatch.worktreeRoot = yield* validateRoot(normalizedPatch.worktreeRoot);
+          if (normalizedPatch.chatsRoot)
+            normalizedPatch.chatsRoot = yield* validateRoot(
+              normalizedPatch.chatsRoot,
+              "Chats folder",
+            );
+          if (normalizedPatch.projectWorktreeRoots !== undefined) {
             const roots: Array<[string, string | null]> = [];
-            for (const [id, root] of Object.entries(patch.projectWorktreeRoots)) {
+            for (const [id, root] of Object.entries(normalizedPatch.projectWorktreeRoots)) {
               roots.push([id, root ? yield* validateRoot(root) : null]);
             }
             normalizedPatch.projectWorktreeRoots = Object.fromEntries(roots);

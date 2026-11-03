@@ -76,6 +76,7 @@ describe("pre-auth server environment descriptor", () => {
       "responseStreamingModes",
       "secretRequests",
       "serverFollowUpQueue",
+      "settingsSharingVersion",
       "stagedOnlyCommit",
       "storageManagement",
       "terminalWriteRequireIdle",
