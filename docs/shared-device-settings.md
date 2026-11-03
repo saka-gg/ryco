@@ -185,6 +185,11 @@ offline device catches up when it reconnects with settings closed. In hosted mod
 through each node session's current grant (see Hosted), and it restarts with its own client id,
 clock and cache when the signed-in account changes.
 
+A settings restore (Data & backup → Restore settings, `docs/device-settings.md`) writes the file's
+shared settings through the same commands: to every device with `writeSharedSetting` (offline
+devices queue, overrides stay), or to the devices a person picks with `setSettingOverride`, which
+the dialog names as their own values.
+
 ## Mobile
 
 The native app (`apps/mobile/src/features/settings/sharing/`) uses the same runtime:
@@ -205,7 +210,7 @@ The native app (`apps/mobile/src/features/settings/sharing/`) uses the same runt
 - The settings home groups and names its rows from `@ryco/client-runtime/state/settings/settingsSections`,
   the same section model as the web's settings page.
 
-Writes outside the rows: the settings page's "Restore defaults" (this device's), the desktop quit
+Writes outside the rows: the settings page's "Restore this device's defaults", the desktop quit
 dialog's "Continue after restart" (this computer's backend) and an agent's settings change on a
 node stay plain per-device edits; on a key that already has a shared write they make that device
 keep its own value. The one-time auto-settle hand-over writes only devices that keep no rule yet.

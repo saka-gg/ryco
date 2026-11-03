@@ -35,6 +35,7 @@ import { AddDeviceCard } from "./AddDeviceEntry";
 import { ConnectionsSettings } from "./ConnectionsSettings";
 import { KeybindingsSettingsPanel } from "./KeybindingsSettings";
 import { ProvidersSettingsPanel } from "./ProvidersSettingsPanel";
+import { requestProviderEditor, useProviderEditorRequest } from "./providerEditorRequest";
 import { SourceControlPreferences } from "./SourceControlPreferences";
 import { ComposerSettings } from "./ComposerSettings";
 import { ChatWidthSetting } from "./ChatWidthSetting";
@@ -2385,6 +2386,64 @@ describe("GeneralSettingsPanel observability", () => {
       .element(page.getByRole("heading", { name: "Add provider instance" }))
       .toBeInTheDocument();
     await expect.element(page.getByText("Step 1", { exact: true })).toBeInTheDocument();
+  });
+
+  it("opens the instance and the prefilled add dialog the providers table asks for", async () => {
+    const config = createBaseServerConfig();
+    setServerConfigSnapshot(config);
+    const environmentId = config.environment.environmentId;
+    requestProviderEditor({
+      kind: "edit",
+      environmentId,
+      instanceId: ProviderInstanceId.make("claudeAgent"),
+    });
+
+    mounted = await render(
+      <AppAtomRegistryProvider>
+        <SettingsTargetProvider
+          value={{
+            environmentId,
+            nodeLabel: "Local environment",
+            serverConfig: config,
+            primary: true,
+            connected: true,
+          }}
+        >
+          <ProvidersSettingsPanel />
+        </SettingsTargetProvider>
+      </AppAtomRegistryProvider>,
+    );
+
+    await expect.element(page.getByRole("region", { name: "Edit Claude" })).toBeInTheDocument();
+    expect(useProviderEditorRequest.getState().request).toBeNull();
+
+    // A request for another device waits for that device.
+    const other = {
+      kind: "add" as const,
+      environmentId: EnvironmentId.make("environment-other"),
+      preset: {
+        driver: ProviderDriverKind.make("claudeAgent"),
+        displayName: "Work",
+        instanceId: ProviderInstanceId.make("claudeAgent_work"),
+      },
+    };
+    requestProviderEditor(other);
+    await expect
+      .element(page.getByRole("heading", { name: "Add provider instance" }))
+      .not.toBeInTheDocument();
+    expect(useProviderEditorRequest.getState().request).toEqual(other);
+
+    requestProviderEditor({ ...other, environmentId });
+    await expect
+      .element(page.getByRole("heading", { name: "Add provider instance" }))
+      .toBeInTheDocument();
+    // Identity, filled in: the new instance joins the row it was added from.
+    await expect.element(page.getByRole("textbox", { name: /^Instance ID/ })).toBeVisible();
+    await expect
+      .element(page.getByRole("textbox", { name: /^Instance ID/ }))
+      .toHaveValue("claudeAgent_work");
+    await expect.element(page.getByRole("textbox", { name: /^Label/ })).toHaveValue("Work");
+    useProviderEditorRequest.setState({ request: null });
   });
 
   it("keeps multiple instances scannable and supports arrow-key editor selection", async () => {

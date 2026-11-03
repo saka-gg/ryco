@@ -43,6 +43,11 @@ import {
 } from "../../environments/primary";
 import { hostedWebConnectionScopes } from "../../hostedHub/hostedConnectionScopes";
 import {
+  clearHubNodeDetailRequest,
+  peekHubNodeDetailRequest,
+} from "../../hostedHub/hubNodeDetailRequest";
+import { getHubPathname } from "../../hostedHub/hubRoutes";
+import {
   getRoutedHostedNode,
   installHostedNodeHistory,
   resetHostedNodeRoutesForTests,
@@ -531,6 +536,12 @@ describe("the device bar and This app", () => {
     // Hosted: this app has no backend of its own, so Access says where it lives.
     await expect.element(page.getByText(/are set on Studio node itself/)).toBeVisible();
     expect(useSettingsDialogStore.getState().deviceTab).toBe("access");
+    // ...and links to the node's own page on the Hub, which opens with its details.
+    await page.getByRole("button", { name: "Open on Hub" }).click();
+    expect(getHubPathname()).toBe("/nodes");
+    expect(peekHubNodeDetailRequest()).toBe(studio.id);
+    clearHubNodeDetailRequest();
+    window.history.replaceState(null, "", "/");
 
     await tab("Computer use").click();
     await expect
