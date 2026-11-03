@@ -33,6 +33,11 @@ import { Effect, FileSystem, Layer, Path, Result, Schema } from "effect";
 import { ChildProcessSpawner } from "effect/process";
 
 import {
+  GIT_HOST_KEY_FAILURE,
+  GIT_UNREACHABLE_PATTERNS,
+  gitFailureSummary,
+} from "../../sourceControl/gitCloneCommon.ts";
+import {
   CLONE_REMOTE_URL_SYNTAX_DETAIL,
   resolveCloneCredentials,
   validateCloneRemoteUrl,
@@ -61,58 +66,6 @@ const LS_REMOTE_MAX_OUTPUT_BYTES = 32 * 1024 * 1024;
 const SSH_COMMAND_PROBE_TIMEOUT_MS = 10_000;
 /** Never a passphrase or host-key prompt, and a dead host fails in seconds, not minutes. */
 export const BATCH_SSH_COMMAND = "ssh -o BatchMode=yes -o ConnectTimeout=15";
-
-const HOST_KEY_FAILURE =
-  /host key verification failed|no \S+ host key is known for|remote host identification has changed/i;
-/** git, ssh and curl wording for "this node cannot reach or read that remote". */
-const UNREACHABLE_PATTERNS: ReadonlyArray<RegExp> = [
-  /could not resolve host/i,
-  /nodename nor servname/i,
-  /name or service not known/i,
-  /temporary failure in name resolution/i,
-  /connection refused/i,
-  /connection timed out/i,
-  /operation timed out/i,
-  /connection reset/i,
-  /connection closed by/i,
-  /network is unreachable/i,
-  /no route to host/i,
-  /failed to connect to/i,
-  /ssh: connect to host/i,
-  /kex_exchange_identification/i,
-  /permission denied \(/i,
-  /authentication failed/i,
-  /access denied/i,
-  /could not read (?:username|password)/i,
-  /terminal prompts disabled/i,
-  /repository not found/i,
-  /repository '[^']*' not found/i,
-  /does not appear to be a git repository/i,
-  /the requested url returned error/i,
-  /unable to access/i,
-  /ssl certificate problem/i,
-  /could not read from remote repository/i,
-];
-/** A progress update, e.g. `Receiving objects:  42% (42/100)`; never the reason for a failure. */
-const PROGRESS_LINE = /^(?:remote: )?[A-Za-z ]+:\s+\d{1,3}% \(/;
-
-/**
- * The line of git's stderr that says why it failed: the ssh host-key or network reason first,
- * then the first `fatal:`/`error:` line, then the last line. Bounded for messages.
- */
-export function gitFailureSummary(stderr: string): string {
-  const lines = stderr
-    .split(/[\r\n]+/)
-    .map((line) => line.trim())
-    .filter((line) => line.length > 0 && !PROGRESS_LINE.test(line));
-  const reason =
-    lines.find((line) => HOST_KEY_FAILURE.test(line)) ??
-    lines.find((line) => UNREACHABLE_PATTERNS.some((pattern) => pattern.test(line))) ??
-    lines.find((line) => /^(?:fatal|error):/i.test(line)) ??
-    lines.at(-1) ??
-    "";
-  return tailOfText(redactGitCredentials(reason), 500);
-}
 
 /** What the copy dialog shows for a failure: `host-key-unknown <host>`, or git's reason. */
 export function remoteAccessDetail(error: GitNetworkError): string {
@@ -218,14 +171,14 @@ export const makeGitNetwork = Effect.gen(function* () {
   ): GitNetworkError => {
     const stderr = output.stderrTail;
     const detail = stderr.trim().length > 0 ? stderr : `git exited with code ${output.exitCode}.`;
-    if (HOST_KEY_FAILURE.test(stderr)) {
+    if (GIT_HOST_KEY_FAILURE.test(stderr)) {
       const host =
         (remote ? sshHostOfRemoteUrl(remote.url) : null) ??
         /host key is known for (\S+?)(?:\s|$)/i.exec(stderr)?.[1] ??
         null;
       return failure(operation, "host-key-unknown", detail, { host, exitCode: output.exitCode });
     }
-    const reason = UNREACHABLE_PATTERNS.some((pattern) => pattern.test(stderr))
+    const reason = GIT_UNREACHABLE_PATTERNS.some((pattern) => pattern.test(stderr))
       ? "unreachable"
       : "failed";
     return failure(operation, reason, detail, { exitCode: output.exitCode });

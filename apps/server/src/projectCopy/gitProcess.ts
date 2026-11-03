@@ -1,22 +1,30 @@
 /**
  * gitProcess - runs one git child process of a cross-node project copy.
  *
- * Every child gets `NON_INTERACTIVE_GIT_ENV` and a closed stdin, is reported to the step's
- * observer (pid, process group, start time) so a later server can find it after a crash, and is
- * cancelled by interrupting the effect: its process group gets SIGTERM, then SIGKILL after 5 s,
- * and the effect completes only once the child exited. An overall timeout and an optional
- * no-output stall timeout end it the same way. stdout is collected as text (bounded), stderr is
- * redacted, kept as a tail and passed to the observer in whole lines; patch and bundle bytes
- * never pass through here, git reads and writes them by path.
+ * Every child is the `git` Ryco spawns everywhere (`resolveGitExecutable`: the git behind macOS's
+ * xcrun shim, with the shim's environment), gets `NON_INTERACTIVE_GIT_ENV` and a closed stdin, is
+ * reported to the step's observer (pid, process group, start time) so a later server can find it
+ * after a crash, and is cancelled by interrupting the effect: its process group gets SIGTERM,
+ * then SIGKILL after 5 s, and the effect completes only once the child exited. An overall timeout
+ * and an optional no-output stall timeout end it the same way; both count only time the event
+ * loop was free to run (`@ryco/shared/responsiveDeadline`), so a machine sleep does not expire
+ * them. stdout is collected as text (bounded), stderr is redacted, kept as a tail and passed to
+ * the observer in whole lines; patch and bundle bytes never pass through here, git reads and
+ * writes them by path.
  *
  * @module gitProcess
  */
 import { redactGitCredentials } from "@ryco/shared/gitRemoteUrl";
+import {
+  makeResponsiveIdleDeadline,
+  timeoutWhileResponsiveOption,
+} from "@ryco/shared/responsiveDeadline";
 import { Duration, Effect, Option, Stream } from "effect";
 import { ChildProcess, ChildProcessSpawner } from "effect/process";
 
 import { governChildProcess } from "../processGovernor.ts";
 import { collectUint8StreamText } from "../stream/collectUint8StreamText.ts";
+import { resolveGitExecutable } from "../vcs/gitExecutable.ts";
 import { NON_INTERACTIVE_GIT_ENV } from "../vcs/GitVcsDriver.ts";
 import { GitNetworkError } from "./Errors.ts";
 import type { ProjectCopyProcessObserver } from "./Services/ProjectCopyProcess.ts";
@@ -61,6 +69,7 @@ export interface ProjectCopyGitInput {
   readonly args: ReadonlyArray<string>;
   /** On top of the server's environment and `NON_INTERACTIVE_GIT_ENV`. */
   readonly env?: Readonly<Record<string, string>> | undefined;
+  /** May be infinite: a transfer with a stall limit needs no other. */
   readonly timeoutMs: number;
   /** Fails `stalled` after this long without output on stdout or stderr. */
   readonly stallTimeoutMs?: number | undefined;
@@ -103,7 +112,8 @@ export const runProjectCopyGit = Effect.fn("runProjectCopyGit")(function* (
       exitCode: null,
     });
 
-  let lastOutputAt = Date.now();
+  // Started over by every chunk of output; never expires without a stall limit.
+  const quiet = yield* makeResponsiveIdleDeadline(input.stallTimeoutMs ?? Number.POSITIVE_INFINITY);
   let stderrTail = "";
   let pendingStderr = "";
   let reportedChild = false;
@@ -116,7 +126,7 @@ export const runProjectCopyGit = Effect.fn("runProjectCopyGit")(function* (
   };
 
   const onStderrText = (text: string): Effect.Effect<void> => {
-    lastOutputAt = Date.now();
+    quiet.touch();
     pendingStderr += text;
     const cut = Math.max(pendingStderr.lastIndexOf("\n"), pendingStderr.lastIndexOf("\r"));
     if (cut === -1 && pendingStderr.length < MAX_PENDING_STDERR_CHARS) return Effect.void;
@@ -127,23 +137,22 @@ export const runProjectCopyGit = Effect.fn("runProjectCopyGit")(function* (
   };
 
   const stallWatch = (stallTimeoutMs: number): Effect.Effect<never, GitNetworkError> =>
-    Effect.suspend(() => {
-      const idleMs = Date.now() - lastOutputAt;
-      return idleMs >= stallTimeoutMs
-        ? Effect.fail(
-            failure("stalled", `git printed nothing for ${describeDuration(stallTimeoutMs)}.`),
-          )
-        : Effect.sleep(Duration.millis(stallTimeoutMs - idleMs)).pipe(
-            Effect.andThen(stallWatch(stallTimeoutMs)),
-          );
-    });
+    quiet.expired.pipe(
+      Effect.andThen(
+        Effect.fail(
+          failure("stalled", `git printed nothing for ${describeDuration(stallTimeoutMs)}.`),
+        ),
+      ),
+    );
 
   const runChild = Effect.gen(function* () {
+    const env = { ...process.env, ...NON_INTERACTIVE_GIT_ENV, ...input.env };
+    const git = yield* Effect.promise(() => resolveGitExecutable(env));
     const child = yield* spawner
       .spawn(
-        ChildProcess.make("git", [...input.args], {
+        ChildProcess.make(git.command, [...input.args], {
           cwd: input.cwd,
-          env: { ...process.env, ...NON_INTERACTIVE_GIT_ENV, ...input.env },
+          env: { ...env, ...git.env },
           stdin: "ignore",
           forceKillAfter: PROJECT_COPY_FORCE_KILL_AFTER,
         }),
@@ -153,7 +162,7 @@ export const runProjectCopyGit = Effect.fn("runProjectCopyGit")(function* (
           failure("internal", `git could not start: ${describeCause(cause)}`),
         ),
       );
-    lastOutputAt = Date.now();
+    quiet.touch();
     if (input.observer?.onChild) {
       reportedChild = true;
       yield* input.observer.onChild({
@@ -169,13 +178,7 @@ export const runProjectCopyGit = Effect.fn("runProjectCopyGit")(function* (
     const work = Effect.all(
       [
         collectUint8StreamText({
-          stream: child.stdout.pipe(
-            Stream.tap(() =>
-              Effect.sync(() => {
-                lastOutputAt = Date.now();
-              }),
-            ),
-          ),
+          stream: child.stdout.pipe(Stream.tap(() => Effect.sync(quiet.touch))),
           maxBytes: maxOutputBytes,
         }).pipe(Effect.mapError(readFailure("stdout"))),
         child.stderr.pipe(
@@ -212,7 +215,7 @@ export const runProjectCopyGit = Effect.fn("runProjectCopyGit")(function* (
   return yield* governChildProcess(
     "git",
     // Scope close (completion, timeout, stall, interruption) kills the group and waits for it.
-    runChild.pipe(Effect.scoped, Effect.timeoutOption(Duration.millis(input.timeoutMs))),
+    runChild.pipe(Effect.scoped, timeoutWhileResponsiveOption(Duration.millis(input.timeoutMs))),
   ).pipe(
     Effect.flatMap(
       Option.match({

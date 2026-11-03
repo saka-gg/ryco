@@ -3,7 +3,8 @@
  *
  * `SourceControlRepositoryService` loads this module with `import()` on the first clone, so none of
  * it is in the server's boot chunk. It serves only that RPC (the command palette and older
- * clients); the cross-node project import has its own git runner.
+ * clients); the cross-node project import has its own git runner and shares the building blocks
+ * in `gitCloneCommon.ts` with this one.
  *
  * - **Detached.** A clone runs in a fiber that lives as long as the service, keyed by its
  *   destination and remote URL. A request only joins it, so a dropped connection (a hidden tab,
@@ -19,7 +20,8 @@
  *   smudge filter or post-checkout hook) is published anyway, with an error that says so.
  * - **Errors** are git's last real messages, credential-redacted, never its progress redraws or
  *   the raw command error (which holds the command line and all of stderr).
- * - At most {@link CLONE_CONCURRENCY} clones run at once.
+ * - At most `CLONE_CONCURRENCY` clones run at once, the cross-node import's transfers counted
+ *   in (`gitCloneCommon.ts`).
  *
  * @module gitCloneRun
  */
@@ -38,11 +40,15 @@ import { makeResponsiveIdleDeadline } from "@ryco/shared/responsiveDeadline";
 import { Clock, Effect, Exit, Fiber, FiberMap, Result, Schedule, Semaphore } from "effect";
 
 import { processIsAlive } from "../device/bootOwnership.ts";
-import { GIT_PROCESS_LIMIT } from "../processGovernor.ts";
 import type * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
+import {
+  CLONE_ENV,
+  CLONE_STALL_TIMEOUT_MS,
+  cloneFailureDetail,
+  isGitCloneProgressLine,
+  withGitCloneSlot,
+} from "./gitCloneCommon.ts";
 
-/** A clone fails after this long without any output (the cross-node import uses the same). */
-export const CLONE_STALL_TIMEOUT_MS = 5 * 60_000;
 /** A clone no request has waited for during this long is stopped. */
 export const CLONE_ORPHAN_GRACE_MS = 10 * 60_000;
 /** How long a finished clone's outcome answers the same request again. */
@@ -55,47 +61,8 @@ export const CLONE_KEPT_OUTPUT_BYTES = 16 * 1024;
 /** git's last messages that explain a failure. */
 export const CLONE_FAILURE_TAIL_LINES = 4;
 const CLONE_FAILURE_LINE_MAX_CHARS = 500;
-const CLONE_FAILURE_DETAIL_MAX_CHARS = 1_000;
 const CLONE_FAILURE_LOG_MAX_CHARS = 2_000;
-/**
- * A clone holds one git process permit for its whole life, so clones take at most half of the
- * process pool and background git work (status, sweeps) keeps room.
- */
-export const CLONE_CONCURRENCY = Math.min(2, Math.max(1, Math.floor(GIT_PROCESS_LIMIT / 2)));
-const cloneSlots = Semaphore.makeUnsafe(CLONE_CONCURRENCY);
-/**
- * On top of `execute`'s `LC_ALL=C LANG=C`: the progress meters start at once, no terminal prompt
- * can hang the clone, and git-lfs prints progress to a pipe so an LFS checkout keeps the stall
- * limit fed.
- */
-export const CLONE_ENV: Readonly<Record<string, string>> = {
-  GIT_PROGRESS_DELAY: "0",
-  GIT_TERMINAL_PROMPT: "0",
-  GIT_LFS_FORCE_PROGRESS: "1",
-};
 export const CLONE_STAGING_MARKER = ".ryco-clone-";
-
-const PROGRESS_LINE =
-  /^(?:remote:\s*)?(?:Enumerating objects|Counting objects|Compressing objects|Receiving objects|Resolving deltas|Unpacking objects|Updating files|Checking out files|Checking connectivity|Filtering content)\b/iu;
-const REMOTE_TOTAL_LINE = /^remote:\s*Total \d+/u;
-
-/** A progress-meter redraw, never part of an error message. */
-export function isGitCloneProgressLine(line: string): boolean {
-  const trimmed = line.trim();
-  return PROGRESS_LINE.test(trimmed) || REMOTE_TOTAL_LINE.test(trimmed);
-}
-
-/** User-facing detail from git's last messages. */
-export function cloneFailureDetail(
-  tail: ReadonlyArray<string>,
-  fallback = "The repository could not be cloned.",
-): string {
-  const joined = tail.join(" ").trim();
-  if (joined.length === 0) return fallback;
-  return joined.length <= CLONE_FAILURE_DETAIL_MAX_CHARS
-    ? joined
-    : `…${joined.slice(-(CLONE_FAILURE_DETAIL_MAX_CHARS - 1)).trimStart()}`;
-}
 
 const tailOfText = (text: string, maxChars: number): string => {
   const trimmed = text.trim();
@@ -571,7 +538,7 @@ export const cloneIntoDestination = (input: {
 }): Effect.Effect<void, SourceControlRepositoryError> =>
   input.checkDestination.pipe(
     Effect.andThen(
-      cloneSlots.withPermits(1)(
+      withGitCloneSlot(
         Effect.gen(function* () {
           yield* input.checkDestination;
           const outcome = yield* withCloneStaging(

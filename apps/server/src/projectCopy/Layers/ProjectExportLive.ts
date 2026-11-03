@@ -62,6 +62,7 @@ import {
   readWorkspacePlacement,
 } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
 import { ProjectAvatarStore } from "../../project/Services/ProjectAvatarStore.ts";
+import { RestartSensitiveWork } from "../../updates/restartSensitiveWork.ts";
 import { GitVcsDriver } from "../../vcs/GitVcsDriver.ts";
 import {
   buildChangesPatch,
@@ -187,6 +188,7 @@ export const makeProjectExport = Effect.fn("makeProjectExport")(function* (
   const avatars = yield* ProjectAvatarStore;
   const layerScope = yield* Effect.scope;
   const buildPermits = yield* Semaphore.make(EXPORT_BUILD_CONCURRENCY);
+  const restartWork = yield* RestartSensitiveWork;
   const ttlMs = options.ttlMs ?? EXPORT_TTL_MS;
   const exportsRoot = nodePath.join(config.stateDir, "project-exports");
   const entries = new Map<string, ExportEntry>();
@@ -657,10 +659,12 @@ export const makeProjectExport = Effect.fn("makeProjectExport")(function* (
       expiresAtMs: Number.POSITIVE_INFINITY,
     };
     entries.set(input.exportId, entry);
-    // In the layer's scope: a caller that disconnects leaves the build running for its retry.
+    // In the layer's scope: a caller that disconnects leaves the build running for its retry. A
+    // restart (a node updating itself) waits for it.
     entry.fiber = yield* buildPermits
       .withPermits(1)(build(request, directory))
       .pipe(
+        restartWork.track,
         Effect.onExit((exit) => settle(entry, input.exportId, exit)),
         Effect.forkIn(layerScope),
       );

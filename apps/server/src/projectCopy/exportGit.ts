@@ -31,6 +31,7 @@ import {
   remoteNamed,
 } from "../project/Layers/RepositoryIdentityResolver.ts";
 import { seedIndexFromCheckout } from "../vcs/GitTemporaryIndex.ts";
+import { NO_FSMONITOR_CONFIG_ARGS, SCRATCH_INDEX_CONFIG_ARGS } from "../vcs/GitDurableWrites.ts";
 import { BINARY_PATCH_DIFF_ARGS } from "../vcs/GitVcsDriver.ts";
 import { GIT_LFS_FILTER_OFF_ARGS } from "./gitProcess.ts";
 import type { GitNetworkShape } from "./Services/GitNetwork.ts";
@@ -75,18 +76,14 @@ export const PROJECT_EXPORT_SKIPPED_PATH_PREFIX = {
 } as const;
 
 /**
- * `-c` options of every export git command that reads the working tree: no hooks, no split
- * index, no fsmonitor daemon, and no LFS filter. LFS paths never enter the patch, so git-lfs
- * never needs to run (and a configured-but-missing git-lfs with `required=true` cannot fail the
- * export).
+ * `-c` options of every export git command that reads the working tree, which builds its patch in
+ * a scratch index: none of the user's hooks, no split index, no fsmonitor daemon, and no LFS
+ * filter. LFS paths never enter the patch, so git-lfs never needs to run (and a
+ * configured-but-missing git-lfs with `required=true` cannot fail the export).
  */
 const EXPORT_GIT_CONFIG_ARGS: ReadonlyArray<string> = [
-  "-c",
-  "core.hooksPath=/dev/null",
-  "-c",
-  "core.splitIndex=false",
-  "-c",
-  "core.fsmonitor=false",
+  ...SCRATCH_INDEX_CONFIG_ARGS,
+  ...NO_FSMONITOR_CONFIG_ARGS,
   ...GIT_LFS_FILTER_OFF_ARGS,
 ];
 

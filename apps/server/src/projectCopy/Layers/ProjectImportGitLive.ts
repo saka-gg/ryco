@@ -6,8 +6,9 @@
  * detached), then apply the uncommitted changes when HEAD is their base. A repository bundle
  * import replaces the clone with `git init` plus a fetch of the bundle's branches, tags and
  * remote-tracking refs. Every command runs in the repository root with `GitNetwork.env`, an
- * explicit timeout and hooks disabled, and reads bundles and patches by path. Network commands
- * (clone, submodules, LFS) go through `GitNetwork`.
+ * explicit timeout and the user's hooks disabled (`NO_USER_HOOK_ARGS`), and reads bundles and
+ * patches by path. Network commands (clone, submodules, LFS) go through `GitNetwork`, each in one
+ * of the clone slots `sourceControl` clones share (`gitCloneCommon.ts`).
  *
  * @module ProjectImportGitLive
  */
@@ -23,6 +24,13 @@ import {
 import { Effect, FileSystem, Layer, Path } from "effect";
 import { ChildProcessSpawner } from "effect/process";
 
+import {
+  CLONE_ENV,
+  CLONE_STALL_TIMEOUT_MS,
+  gitFailureSummary,
+  withGitCloneSlot,
+} from "../../sourceControl/gitCloneCommon.ts";
+import { NO_USER_HOOK_ARGS } from "../../vcs/GitDurableWrites.ts";
 import { WorkspacePaths } from "../../workspace/Services/WorkspacePaths.ts";
 import { type GitNetworkError, ProjectImportStepError } from "../Errors.ts";
 import {
@@ -43,24 +51,18 @@ import {
   type ProjectImportCloneInput,
   type ProjectImportCloneProgress,
 } from "../Services/ProjectImportGit.ts";
-import { gitFailureSummary, remoteAccessDetail } from "./GitNetworkLive.ts";
+import { remoteAccessDetail } from "./GitNetworkLive.ts";
 
-export const CLONE_TIMEOUT_MS = 30 * 60_000;
-export const CLONE_STALL_TIMEOUT_MS = 5 * 60_000;
-const SUBMODULES_TIMEOUT_MS = 10 * 60_000;
-const LFS_TIMEOUT_MS = 30 * 60_000;
+/**
+ * The network transfers (clone, submodules, LFS) have no time limit, as `sourceControl` clones:
+ * they print progress and fail after `CLONE_STALL_TIMEOUT_MS` without any output.
+ */
+const TRANSFER_TIMEOUT_MS = Number.POSITIVE_INFINITY;
 /** Fetching a bundle, a checkout, applying a patch: local, but up to hundreds of MiB. */
 const LOCAL_LONG_TIMEOUT_MS = 10 * 60_000;
 const LOCAL_SHORT_TIMEOUT_MS = 30_000;
 const OUTPUT_DETAIL_MAX_CHARS = 4_000;
-/** Hooks never run during an import: nothing is installed at this path. */
-const NO_HOOKS = ["-c", "core.hooksPath=/dev/null"] as const;
 const LFS_SKIP_SMUDGE = { GIT_LFS_SKIP_SMUDGE: "1" } as const;
-/**
- * git-lfs prints no progress when its output is not a terminal; forced on, a download keeps the
- * no-output stall limit fed for as long as bytes arrive.
- */
-const LFS_FORCE_PROGRESS = { GIT_LFS_FORCE_PROGRESS: "1" } as const;
 const OBJECT_ID = /^[0-9a-f]{40}(?:[0-9a-f]{24})?$/;
 const PREREQUISITES_MISSING = /lacks these prerequisite commits/i;
 
@@ -155,7 +157,7 @@ export const makeProjectImportGit = Effect.gen(function* () {
     runProjectCopyGit({
       operation: `ProjectImportGit.${input.operation}`,
       cwd: input.repositoryRoot,
-      args: [...NO_HOOKS, ...(input.config ?? []), ...input.args],
+      args: [...NO_USER_HOOK_ARGS, ...(input.config ?? []), ...input.args],
       env: { ...gitNetwork.env, ...input.env },
       timeoutMs: input.timeoutMs ?? LOCAL_SHORT_TIMEOUT_MS,
       maxOutputBytes: input.maxOutputBytes,
@@ -249,7 +251,7 @@ export const makeProjectImportGit = Effect.gen(function* () {
         operation: "ProjectImportGit.cloneNoCheckout",
         cwd: path.dirname(input.repositoryRoot),
         args: [
-          ...NO_HOOKS,
+          ...NO_USER_HOOK_ARGS,
           "clone",
           "--progress",
           "--no-checkout",
@@ -260,12 +262,15 @@ export const makeProjectImportGit = Effect.gen(function* () {
           input.repositoryRoot,
         ],
         remoteUrl: input.remoteUrl,
-        env: LFS_SKIP_SMUDGE,
-        timeoutMs: CLONE_TIMEOUT_MS,
+        env: { ...CLONE_ENV, ...LFS_SKIP_SMUDGE },
+        timeoutMs: TRANSFER_TIMEOUT_MS,
         stallTimeoutMs: CLONE_STALL_TIMEOUT_MS,
         observer: { onChild: input.observer?.onChild, onOutput },
       })
-      .pipe(Effect.mapError((error) => networkStepError("git clone", "clone-failed", error)));
+      .pipe(
+        withGitCloneSlot,
+        Effect.mapError((error) => networkStepError("git clone", "clone-failed", error)),
+      );
   });
 
   const initFromBundle = Effect.fn("ProjectImportGit.initFromBundle")(function* (input: {
@@ -707,13 +712,23 @@ export const makeProjectImportGit = Effect.gen(function* () {
         cwd: input.repositoryRoot,
         // Without `--progress` a submodule's clone prints nothing to a pipe until it is done, and
         // the no-output stall limit would end a long one.
-        args: [...NO_HOOKS, "submodule", "update", "--init", "--recursive", "--progress", "--"],
+        args: [
+          ...NO_USER_HOOK_ARGS,
+          "submodule",
+          "update",
+          "--init",
+          "--recursive",
+          "--progress",
+          "--",
+        ],
         remoteUrl: null,
-        timeoutMs: SUBMODULES_TIMEOUT_MS,
+        env: CLONE_ENV,
+        timeoutMs: TRANSFER_TIMEOUT_MS,
         stallTimeoutMs: CLONE_STALL_TIMEOUT_MS,
         observer: input.observer,
       })
       .pipe(
+        withGitCloneSlot,
         Effect.mapError((error) => networkStepError("git submodule update", "clone-failed", error)),
       );
   });
@@ -749,18 +764,23 @@ export const makeProjectImportGit = Effect.gen(function* () {
         operation: "ProjectImportGit.lfsPull",
         cwd: input.repositoryRoot,
         args: [
-          ...NO_HOOKS,
+          ...NO_USER_HOOK_ARGS,
           "lfs",
           "pull",
           ...(input.remoteName === null ? [] : ["--", input.remoteName]),
         ],
         remoteUrl: null,
-        env: LFS_FORCE_PROGRESS,
-        timeoutMs: LFS_TIMEOUT_MS,
+        // `GIT_LFS_FORCE_PROGRESS`: git-lfs prints no progress to a pipe otherwise, and a long
+        // download would read as a stall.
+        env: CLONE_ENV,
+        timeoutMs: TRANSFER_TIMEOUT_MS,
         stallTimeoutMs: CLONE_STALL_TIMEOUT_MS,
         observer: input.observer,
       })
-      .pipe(Effect.mapError((error) => networkStepError("git lfs pull", "clone-failed", error)));
+      .pipe(
+        withGitCloneSlot,
+        Effect.mapError((error) => networkStepError("git lfs pull", "clone-failed", error)),
+      );
     return { status: "pulled" as const };
   });
 

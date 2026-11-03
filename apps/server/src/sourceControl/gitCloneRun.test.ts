@@ -26,17 +26,19 @@ import { ServerConfig } from "../config.ts";
 import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import {
   CLONE_ENV,
+  CLONE_STALL_TIMEOUT_MS,
+  cloneFailureDetail,
+  isGitCloneProgressLine,
+} from "./gitCloneCommon.ts";
+import {
   CLONE_KEPT_OUTPUT_BYTES,
   CLONE_ORPHAN_GRACE_MS,
   CLONE_OUTCOME_RETENTION_MS,
   CLONE_STAGING_HOST,
-  CLONE_STALL_TIMEOUT_MS,
-  cloneFailureDetail,
   cloneIntoDestination,
   cloneStagingDirectoryName,
   cloneStagingOwner,
   cloneStagingToken,
-  isGitCloneProgressLine,
   makeCloneJobs,
   runWatchedGitClone,
   withCloneStaging,
@@ -135,6 +137,7 @@ describe("isGitCloneProgressLine", () => {
       "Filtering content: 50% (2/4), 1.00 MiB | 1.00 MiB/s",
       "remote: Total 12 (delta 0), reused 0 (delta 0), pack-reused 12",
       "Checking connectivity: 1200, done.",
+      "Downloading LFS objects:  42% (1/2), 1.0 MB | 1.0 MB/s",
     ]) {
       assert.isTrue(isGitCloneProgressLine(line), line);
     }

@@ -57,6 +57,10 @@ import {
   type ProjectSetupCommandResult,
 } from "../Services/ProjectSetupCommand.ts";
 import { ProjectTransfers } from "../Services/ProjectTransfers.ts";
+import {
+  makeRestartSensitiveWork,
+  RestartSensitiveWork,
+} from "../../updates/restartSensitiveWork.ts";
 import { makeProjectImportsLive, newestAtMostEvery } from "./ProjectImportsLive.ts";
 
 // ── Fixtures ──────────────────────────────────────────────────────────
@@ -818,6 +822,7 @@ describe("ProjectImportsLive", () => {
         // An empty destination folder the user made stays theirs when nothing was published.
         fs.mkdirSync(destination);
         const input = makeInput({ destinationPath: destination });
+        const restartWork = makeRestartSensitiveWork();
         yield* withImports(harness, (imports) =>
           Effect.gen(function* () {
             yield* imports.start(input);
@@ -828,6 +833,8 @@ describe("ProjectImportsLive", () => {
             );
             const staging = projectImportStagingPath(destination, input.importId);
             yield* untilEvent(harness, "clone-waiting");
+            // A node update waits while the job runs.
+            assert.equal(yield* restartWork.count, 1);
             assert.isTrue(fs.existsSync(path.join(staging, "README.md")));
             const row = yield* rowOf(input.importId);
             assert.equal(row?.staging_path, staging);
@@ -847,8 +854,9 @@ describe("ProjectImportsLive", () => {
             const settledRow = yield* rowOf(input.importId);
             assert.equal(settledRow?.status, "cancelled");
             assert.isNull(settledRow?.staging_path);
+            assert.equal(yield* restartWork.count, 0);
           }),
-        );
+        ).pipe(Effect.provideService(RestartSensitiveWork, restartWork));
       }),
     ),
   );

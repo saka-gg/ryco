@@ -64,6 +64,7 @@ import { ProjectAvatarStore } from "../../project/Services/ProjectAvatarStore.ts
 import { TerminalOutputTail } from "../../project/worktreeSetupOutputTail.ts";
 import { ProviderRegistry } from "../../provider/Services/ProviderRegistry.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
+import { RestartSensitiveWork } from "../../updates/restartSensitiveWork.ts";
 import { WorkspaceAccessPolicy } from "../../workspace/Services/WorkspaceAccessPolicy.ts";
 import {
   projectDestinationReservationKey,
@@ -352,6 +353,7 @@ export const makeProjectImports = (options: ProjectImportsLiveOptions = {}) =>
     const serverSettings = yield* Effect.serviceOption(ServerSettingsService);
     const serverConfig = yield* Effect.serviceOption(ServerConfig);
     const layerScope = yield* Effect.scope;
+    const restartWork = yield* RestartSensitiveWork;
     const processes = options.processes ?? osProjectImportProcessControl;
     const throttleMs = options.snapshotThrottleMs ?? DEFAULT_SNAPSHOT_THROTTLE_MS;
 
@@ -1433,7 +1435,10 @@ export const makeProjectImports = (options: ProjectImportsLiveOptions = {}) =>
           );
           return;
         }
-        yield* settle(job, yield* Effect.exit(runJob(job)));
+        // A restart (a node updating itself) waits until the job settled.
+        yield* restartWork.track(
+          Effect.exit(runJob(job)).pipe(Effect.flatMap((exit) => settle(job, exit))),
+        );
       }).pipe(Effect.ensuring(Deferred.succeed(job.admitted, undefined)));
 
     // ── Service ───────────────────────────────────────────────────────

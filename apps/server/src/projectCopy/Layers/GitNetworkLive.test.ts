@@ -19,7 +19,8 @@ import {
   writeFakeSsh,
 } from "../projectCopyGit.fixtures.ts";
 import { GitNetwork } from "../Services/GitNetwork.ts";
-import { BATCH_SSH_COMMAND, GitNetworkLive, gitFailureSummary } from "./GitNetworkLive.ts";
+import { gitFailureSummary } from "../../sourceControl/gitCloneCommon.ts";
+import { BATCH_SSH_COMMAND, GitNetworkLive } from "./GitNetworkLive.ts";
 
 const roots = tempRoots();
 afterEach(() => roots.cleanup());
