@@ -608,6 +608,19 @@ describe("CopyProjectDialog", () => {
     }
   });
 
+  it("says ignored files only travel over an encrypted connection on a direct copy (A33)", async () => {
+    const { screen } = await mount({ sourceInspection: inspection({ ignored: [".env"] }) });
+    try {
+      await expect.element(page.getByTestId("copy-ignored-files")).toMatchTextContent(".env");
+      await expect
+        .element(page.getByTestId("copy-encryption-note"))
+        .toMatchTextContent("These files are only sent over an encrypted connection");
+      await expect.element(page.getByTestId("copy-insecure-note")).not.toBeInTheDocument();
+    } finally {
+      await screen.unmount();
+    }
+  });
+
   it("only clones from a source without project copy", async () => {
     const { screen, laptop } = await mount({
       nodes: nodes({ [LAPTOP]: { projectCopySupport: "no" } }),

@@ -1124,10 +1124,18 @@ function CopyOptions(props: {
                   {props.relayedLabels.length === 1
                     ? `${props.relayedLabels[0]} is reached through the Hub. If that connection isn't`
                     : `${props.relayedLabels.join(" and ")} are reached through the Hub. If those connections aren't`}{" "}
-                  end-to-end encrypted, repository content travels through the Hub unencrypted, so
-                  these files are left out.
+                  end-to-end encrypted, these files are left out: they are only sent over an
+                  encrypted connection.
                 </span>
-              ) : null}
+              ) : (
+                <span
+                  className="py-1 text-[11.5px] text-muted-foreground"
+                  data-testid="copy-encryption-note"
+                >
+                  These files are only sent over an encrypted connection (HTTPS, Tailscale or this
+                  computer). Over an unencrypted one they are left out.
+                </span>
+              )}
             </div>,
           );
         }

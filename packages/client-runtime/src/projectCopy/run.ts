@@ -204,8 +204,9 @@ class CopyDetached extends Error {}
 /** The source no longer has the export (expired after a long pause). */
 class ExportGone extends Error {}
 /**
- * A node refused an artifact holding opted-in ignored files: its channel is a relay the Hub can
- * read (A33). The copy goes on without them, as a source on such a channel leaves them out.
+ * A node refused an artifact holding opted-in ignored files: its channel is not encrypted (a relay
+ * the Hub can read, or plain http from another computer; A33). The copy goes on without them, as a
+ * source on such a channel leaves them out.
  */
 class IgnoredFilesRefused extends Error {
   readonly nodeLabel: string;
@@ -1305,7 +1306,7 @@ const ARTIFACT_ORDER: ReadonlyArray<ProjectExportArtifactKind> = [
 ];
 
 const ignoredFilesLeftOutWarning = (nodeLabel: string) =>
-  `The ignored files were not copied: the Hub can read the connection to ${nodeLabel}.`;
+  `The ignored files were not copied: they are only sent over an encrypted connection, and the one to ${nodeLabel} is not.`;
 
 const SKIPPED_WARNINGS: Record<ProjectExportArtifactKind, (reason: string) => string> = {
   "commits-bundle": (reason) => `Unpushed commits were not copied (${reason}).`,

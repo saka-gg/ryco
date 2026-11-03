@@ -893,7 +893,7 @@ describe("startProjectCopy", () => {
         .filter((input) => input.purpose === "changes-patch");
       expect(patchBegins.map(carries)).toEqual([true, false]);
       expect(outcome.project?.warnings).toContain(
-        `The ignored files were not copied: the Hub can read the connection to ${refusing === "target" ? "Mac mini" : "MacBook"}.`,
+        `The ignored files were not copied: they are only sent over an encrypted connection, and the one to ${refusing === "target" ? "Mac mini" : "MacBook"} is not.`,
       );
       expectReleased(io);
     }
@@ -930,7 +930,7 @@ describe("startProjectCopy", () => {
       changes: null,
     });
     expect(outcome.project?.warnings).toContain(
-      "The ignored files were not copied: the Hub can read the connection to Mac mini.",
+      "The ignored files were not copied: they are only sent over an encrypted connection, and the one to Mac mini is not.",
     );
     expectReleased(io);
   });

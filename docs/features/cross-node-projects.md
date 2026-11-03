@@ -164,8 +164,11 @@ cap, **Send files**, **Bring unpushed commits** and **Bring uncommitted changes*
 with "Too large to send through the Hub (N MB). Push the branch, or connect both devices
 directly." On a direct connection one artifact may be up to 256 MB.
 
-Ignored files such as `.env` are never sent over a Hub channel that still runs in the legacy mode
-without end-to-end encryption; the dialog says so when the source is reached through the Hub.
+Ignored files such as `.env` are only sent over an encrypted connection: an end-to-end encrypted
+Hub channel, HTTPS, Tailscale, or Ryco on the same computer. Over an unencrypted connection (a Hub
+channel that still runs in the legacy mode without end-to-end encryption, or plain `http://` to
+another computer) they are left out and the rest of the copy goes on. The dialog says so next to
+the ignored files, with a warning when a node is reached through the Hub.
 
 A copy holds a connection to each of its relayed nodes until the destination starts the import.
 When that would take more Hub connections than the app keeps open, the dialog doesn't start the
