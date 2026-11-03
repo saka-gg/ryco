@@ -8,6 +8,7 @@
 import { CHAT_PROJECT_LABEL } from "@ryco/client-runtime/state/composer";
 import type { NodeCatalogEntry } from "@ryco/client-runtime/state/nodes";
 import type { EnvironmentId, ProjectId } from "@ryco/contracts";
+import { normalizeSearchQuery, scoreQueryMatch } from "@ryco/shared/searchRanking";
 
 import type { ProjectCheckoutOption } from "../projectCheckouts.logic";
 import { displayProjectPath } from "./projects/projectsModel.logic";
@@ -64,9 +65,13 @@ export function projectSelectorCheckoutItem(
   return `c\u0000${environmentId}\u0000${projectId}`;
 }
 
-/** A checkout path as the selector shows it: `~/Code/ryco` for `/Users/me/Code/ryco`. */
-export function projectSelectorPath(cwd: string): string {
-  return displayProjectPath(cwd);
+/**
+ * A checkout path as the selector shows it: `~/Code/ryco` for `/Users/me/Code/ryco`, under the
+ * node's own home directory when it is known (`~/code/ryco` for `/root/code/ryco`), else under
+ * the home its layout implies.
+ */
+export function projectSelectorPath(cwd: string, homeDirectory?: string | null): string {
+  return displayProjectPath(cwd, homeDirectory);
 }
 
 /**
@@ -79,6 +84,8 @@ export function buildProjectSelectorProjects(input: {
   readonly options: ReadonlyArray<ProjectCheckoutOption>;
   readonly resolveNode: (option: ProjectCheckoutOption) => ProjectSelectorNode | null;
   readonly unavailableReason: (node: ProjectSelectorNode) => string | null;
+  /** A node's home directory when this client already knows it (its cached path hints). */
+  readonly homeDirectoryOf?: ((environmentId: EnvironmentId) => string | null) | undefined;
 }): ProjectSelectorProject[] {
   const byKey = new Map<
     string,
@@ -98,7 +105,7 @@ export function buildProjectSelectorProjects(input: {
       environmentId: option.environmentId,
       projectId: option.projectId,
       cwd: option.cwd,
-      path: projectSelectorPath(option.cwd),
+      path: projectSelectorPath(option.cwd, input.homeDirectoryOf?.(option.environmentId)),
       node,
       unavailableReason: reason,
     };
@@ -252,12 +259,84 @@ export function preferredProjectCheckout(
   );
 }
 
+/** Ranks the draft's own project above equal matches, and just above a slightly better one. */
+const CURRENT_PROJECT_BOOST = 8;
+/** Path matches rank behind name matches of the same kind. */
+const PATH_FIELD_BASE = 10;
+const PATH_BOUNDARY_MARKERS: ReadonlyArray<string> = ["/", "\\", "-", "_", ".", " "];
+
+function scoreName(name: string, token: string): number | null {
+  return scoreQueryMatch({
+    value: name,
+    query: token,
+    exactBase: 0,
+    prefixBase: 2,
+    boundaryBase: 4,
+    includesBase: 6,
+    // A typo-tolerant match on names only: on paths it would match nearly everything.
+    ...(token.length >= 2 ? { fuzzyBase: 100 } : {}),
+  });
+}
+
+function scorePath(
+  checkouts: ReadonlyArray<ProjectSelectorCheckout>,
+  token: string,
+): number | null {
+  let best: number | null = null;
+  for (const checkout of checkouts) {
+    for (const path of [checkout.path, checkout.cwd]) {
+      const score = scoreQueryMatch({
+        value: path.toLowerCase(),
+        query: token,
+        exactBase: PATH_FIELD_BASE,
+        prefixBase: PATH_FIELD_BASE + 2,
+        boundaryBase: PATH_FIELD_BASE + 4,
+        includesBase: PATH_FIELD_BASE + 6,
+        boundaryMarkers: PATH_BOUNDARY_MARKERS,
+      });
+      if (score !== null && (best === null || score < best)) best = score;
+    }
+  }
+  return best;
+}
+
 /**
- * The rows the selector lists, top to bottom. A project matches when its name
- * or a checkout path contains the text; a path match expands the project so
- * the matching checkout shows. The node filter (`@node` or a chip) keeps only
- * checkouts on that node. "No project" leads when it applies and nothing
- * narrows the list to a node.
+ * How well a project matches the search words, lower is better (null: no
+ * match): every word must match its name (exactly, as a prefix, at a word
+ * boundary, inside it, or as a subsequence) or one of its checkout paths (not
+ * as a subsequence). `pathHit` says some word matched only a path, so the row
+ * expands to show the checkout it matched.
+ */
+export function scoreProjectSelectorMatch(
+  project: Pick<ProjectSelectorProject, "name">,
+  checkouts: ReadonlyArray<ProjectSelectorCheckout>,
+  text: string,
+): { readonly score: number; readonly pathHit: boolean } | null {
+  const tokens = normalizeSearchQuery(text)
+    .split(/\s+/u)
+    .filter((token) => token.length > 0);
+  if (tokens.length === 0) return { score: 0, pathHit: false };
+  const name = normalizeSearchQuery(project.name);
+  let score = 0;
+  let pathHit = false;
+  for (const token of tokens) {
+    const nameScore = scoreName(name, token);
+    const pathScore = scorePath(checkouts, token);
+    if (nameScore === null && pathScore === null) return null;
+    if (nameScore === null) pathHit = true;
+    score += Math.min(nameScore ?? Number.POSITIVE_INFINITY, pathScore ?? Number.POSITIVE_INFINITY);
+  }
+  return { score, pathHit };
+}
+
+/**
+ * The rows the selector lists, top to bottom. Without search words, projects
+ * keep their order (the sidebar's). With them, only matching projects list,
+ * best match first (`scoreProjectSelectorMatch`; the draft's own project gets
+ * a boost, ties keep the sidebar's order), and a project a word matched only
+ * by path expands so the matching checkout shows. The node filter (`@node` or
+ * a chip) keeps only checkouts on that node. "No project" leads when it
+ * applies and nothing narrows the list to a node.
  */
 export function buildProjectSelectorRows(input: {
   readonly projects: ReadonlyArray<ProjectSelectorProject>;
@@ -277,41 +356,50 @@ export function buildProjectSelectorRows(input: {
   ) {
     rows.push({ kind: "no-project", item: NO_PROJECT_ITEM });
   }
-  for (const project of input.projects) {
+  const matches: Array<{
+    readonly row: Extract<ProjectSelectorRow, { kind: "project" }>;
+    readonly score: number;
+    readonly order: number;
+  }> = [];
+  input.projects.forEach((project, order) => {
     const checkouts =
       input.nodeFilter === null
         ? project.checkouts
         : project.checkouts.filter((checkout) => checkout.environmentId === input.nodeFilter);
-    if (checkouts.length === 0) continue;
-    const pathHit =
-      text.length > 0 &&
-      checkouts.some(
-        (checkout) =>
-          checkout.path.toLowerCase().includes(text) || checkout.cwd.toLowerCase().includes(text),
-      );
-    if (text.length > 0 && !pathHit && !project.name.toLowerCase().includes(text)) continue;
+    if (checkouts.length === 0) return;
+    const match = scoreProjectSelectorMatch(project, checkouts, text);
+    if (match === null) return;
     const preferred = preferredProjectCheckout(checkouts, input.active);
-    if (!preferred) continue;
+    if (!preferred) return;
     const expandable = checkouts.length > 1;
-    const expanded = expandable && (input.expanded.has(project.key) || pathHit);
     const current = project.checkouts.some((checkout) => isActiveCheckout(checkout, input.active));
-    rows.push({
-      kind: "project",
-      item: project.item,
-      project,
-      checkouts,
-      preferred,
-      nodeCount: new Set(checkouts.map((checkout) => checkout.environmentId)).size,
-      expandable,
-      expanded,
-      current,
+    matches.push({
+      row: {
+        kind: "project",
+        item: project.item,
+        project,
+        checkouts,
+        preferred,
+        nodeCount: new Set(checkouts.map((checkout) => checkout.environmentId)).size,
+        expandable,
+        expanded: expandable && (input.expanded.has(project.key) || match.pathHit),
+        current,
+      },
+      score: text.length > 0 && current ? match.score - CURRENT_PROJECT_BOOST : match.score,
+      order,
     });
-    if (!expanded) continue;
-    for (const checkout of checkouts) {
+  });
+  if (text.length > 0) {
+    matches.sort((left, right) => left.score - right.score || left.order - right.order);
+  }
+  for (const { row } of matches) {
+    rows.push(row);
+    if (!row.expanded) continue;
+    for (const checkout of row.checkouts) {
       rows.push({
         kind: "checkout",
         item: checkout.item,
-        project,
+        project: row.project,
         checkout,
         current: isActiveCheckout(checkout, input.active),
       });

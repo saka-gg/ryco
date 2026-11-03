@@ -132,7 +132,8 @@ function searchFake(input: FilesystemSearchDirectoriesInput) {
   return {
     matches: matches.slice(0, limit),
     roots: [...roots],
-    truncated: matches.length > limit,
+    truncated: false,
+    limitReached: matches.length > limit,
     scannedDirectories: Object.keys(FOLDERS).length,
   };
 }

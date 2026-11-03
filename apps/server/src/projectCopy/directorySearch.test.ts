@@ -164,8 +164,30 @@ describe("searchDirectories", () => {
     const timed = await search({ query: "match", timeBudgetMs: 5, now: () => (clock += 3) });
     expect(timed.truncated).toBe(true);
     const capped = await search({ query: "match", maxEntriesPerDirectory: 2 });
-    expect(capped.truncated).toBe(true);
+    expect(capped.cappedDirectories).toBeGreaterThan(0);
     expect(capped.hits.length).toBeLessThan(3);
+  });
+
+  it("does not call the whole search cut short for one huge directory", async () => {
+    // One asset folder with more entries than one directory may hold; the match is elsewhere.
+    await tree(["Code/ryco", ...Array.from({ length: 6 }, (_, index) => `assets/file-${index}`)]);
+    const outcome = await search({ query: "ryco", maxEntriesPerDirectory: 4 });
+    expect(relativePaths(outcome)).toEqual(["Code/ryco"]);
+    expect(outcome).toMatchObject({ truncated: false, limitReached: false, cappedDirectories: 1 });
+  });
+
+  it("says when more folders matched than the limit", async () => {
+    await tree(Array.from({ length: 5 }, (_, index) => `Code/match-${index}`));
+    const over = await search({ query: "match", limit: 3 });
+    expect(over.hits).toHaveLength(3);
+    expect(over).toMatchObject({ truncated: false, limitReached: true, cappedDirectories: 0 });
+    const exact = await search({ query: "match", limit: 5 });
+    expect(exact.hits).toHaveLength(5);
+    expect(exact.limitReached).toBe(false);
+    // The empty query lists the roots' own folders, also up to the limit.
+    const listed = await search({ query: "", roots: [path.join(home, "Code")], limit: 2 });
+    expect(listed.hits).toHaveLength(2);
+    expect(listed.limitReached).toBe(true);
   });
 
   it("ends early when aborted", async () => {

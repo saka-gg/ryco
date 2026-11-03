@@ -13,6 +13,7 @@ import {
   useCallback,
   useLayoutEffect,
   useMemo,
+  useRef,
   useState,
   type KeyboardEvent,
   type RefObject,
@@ -51,6 +52,7 @@ import {
 } from "./ProjectSwitcher.logic";
 import { HighlightedText } from "./projectNodes/HighlightedText";
 import { NodeBadge, NodePicker } from "./projectNodes/NodePicker";
+import { NODE_LABEL_CELL, NodePathText, useNodeLabelColumn } from "./projectNodes/NodePathText";
 import {
   openCopyProject,
   preloadProjectNodesDialogs,
@@ -189,6 +191,9 @@ export function ProjectSelectorBody(props: ProjectSelectorBodyProps) {
     () => new Map(rows.map((row, index) => [row.item, index] as const)),
     [rows],
   );
+  // The checkout rows' node column fits the longest node name shown (up to a cap).
+  const listRef = useRef<HTMLDivElement | null>(null);
+  useNodeLabelColumn(listRef, rows);
   useLayoutEffect(() => {
     onListChange({
       items: rows.map((row) => row.item),
@@ -384,7 +389,7 @@ export function ProjectSelectorBody(props: ProjectSelectorBodyProps) {
           onAddProject={footerActions ? openAddProjectFromSelector : null}
         />
       </ComboboxEmpty>
-      <ComboboxList className="max-h-[300px] not-empty:p-1">
+      <ComboboxList ref={listRef} className="max-h-[300px] not-empty:p-1">
         {rows.map((row, index) => (
           <SelectorRow
             key={row.item}
@@ -540,11 +545,11 @@ function SelectorRow(props: {
         <span className={cn("truncate", row.current && "font-semibold")}>
           <HighlightedText text={project.name} query={highlightText} />
         </span>
-        <span className="truncate text-[11.5px] text-muted-foreground">
-          {subline.lead}
-          <span className="font-mono text-[11.5px]">
+        <span className="flex min-w-0 text-[11.5px] text-muted-foreground">
+          <span className="max-w-[60%] shrink-0 truncate whitespace-pre">{subline.lead}</span>
+          <NodePathText path={subline.path} className="flex-1 font-mono">
             <HighlightedText text={subline.path} query={highlightText} />
-          </span>
+          </NodePathText>
         </span>
       </span>
       <span className="flex shrink-0 gap-[3px]">
@@ -611,21 +616,25 @@ function CheckoutRow(props: {
         "data-selected:bg-primary/10 data-selected:text-foreground dark:data-selected:bg-primary/16 [&[data-highlighted][data-selected]]:bg-primary/14 dark:[&[data-highlighted][data-selected]]:bg-primary/22",
         "data-disabled:pointer-events-auto data-disabled:cursor-not-allowed data-disabled:opacity-50 data-disabled:hover:bg-transparent",
       )}
-      contentClassName="grid min-w-0 grid-cols-[16px_92px_minmax(84px,1fr)_auto_14px] items-center gap-2 max-sm:grid-cols-[16px_minmax(0,1fr)_auto_14px]"
+      contentClassName="grid min-w-0 grid-cols-[16px_var(--node-label-column,92px)_minmax(84px,1fr)_auto_14px] items-center gap-2 max-sm:grid-cols-[16px_minmax(0,1fr)_auto_14px]"
       onClick={() => {
         if (!unavailable) onSelect(row.item);
       }}
     >
       <NodeBadge node={checkout.node} size="sm" />
-      <span className="truncate">{checkout.node.label}</span>
-      <span
+      <span className="truncate" {...NODE_LABEL_CELL}>
+        {checkout.node.label}
+      </span>
+      <NodePathText
+        path={checkout.path}
+        title={checkout.cwd}
         className={cn(
-          "truncate font-mono text-[11.5px] text-muted-foreground max-sm:hidden",
+          "font-mono text-[11.5px] text-muted-foreground max-sm:hidden",
           row.current && "text-inherit opacity-80",
         )}
       >
         <HighlightedText text={checkout.path} query={highlightText} />
-      </span>
+      </NodePathText>
       <CheckoutMeta checkout={checkout} current={row.current} branchIcon={props.icons.branch} />
       {row.current ? <CheckIcon aria-hidden className="size-[13px]" /> : <span aria-hidden />}
     </ComboboxItem>

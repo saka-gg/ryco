@@ -13,6 +13,7 @@ import {
   projectRowSubline,
   projectSelectorParentIndex,
   projectSelectorValue,
+  scoreProjectSelectorMatch,
   stripNodeTokens,
   type ProjectSelectorNode,
   type ProjectSelectorRow,
@@ -110,6 +111,22 @@ describe("buildProjectSelectorProjects", () => {
       path: "C:\\Code\\homelab",
       unavailableReason: "Gaming PC is offline",
     });
+  });
+
+  it("shows paths under a node's known home directory", () => {
+    const projects = buildProjectSelectorProjects({
+      options: [option(PC, "notes-pc", "notes", "/root/code/notes", true)],
+      resolveNode: (entry) => NODES[entry.environmentId] ?? null,
+      unavailableReason: () => null,
+      homeDirectoryOf: (environmentId) => (environmentId === PC ? "/root" : null),
+    });
+    expect(projects[0]?.checkouts[0]?.path).toBe("~/code/notes");
+    const unknown = buildProjectSelectorProjects({
+      options: [option(PC, "notes-pc", "notes", "/root/code/notes", true)],
+      resolveNode: (entry) => NODES[entry.environmentId] ?? null,
+      unavailableReason: () => null,
+    });
+    expect(unknown[0]?.checkouts[0]?.path).toBe("/root/code/notes");
   });
 
   it("leaves out checkouts on nodes the caller does not list", () => {
@@ -246,6 +263,61 @@ describe("buildProjectSelectorRows", () => {
       showNoProject: true,
     });
     expect(itemsOf(rows)).toEqual(["no-project"]);
+  });
+
+  it("ranks the best match first and finds names by their letters", () => {
+    const rank = (text: string, active: typeof ACTIVE | null = null) =>
+      itemsOf(
+        buildProjectSelectorRows({
+          projects,
+          text,
+          nodeFilter: null,
+          expanded: new Set(),
+          active,
+          showNoProject: false,
+        }),
+      );
+    // "hub" starts a word of ryco-hub's name.
+    expect(rank("hub")).toEqual(["project:ryco-hub"]);
+    // An exact name beats a prefix of a longer one, whatever the sidebar's order.
+    expect(rank("homelab")).toEqual(["project:homelab"]);
+    expect(rank("ryco")).toEqual(["project:ryco", "project:ryco-hub"]);
+    // Letters in order, with gaps: "rhub" finds ryco-hub.
+    expect(rank("rhub")).toEqual(["project:ryco-hub"]);
+    // Every word must match: the name or a path.
+    expect(rank("ryco hub")).toEqual(["project:ryco-hub"]);
+    expect(rank("ryco dev")).toEqual(["project:ryco", "checkout:MacBook Pro", "checkout:Mac mini"]);
+  });
+
+  it("boosts the draft's own project over an equally good match", () => {
+    const hubDraft = { environmentId: MAC, projectId: ProjectId.make("hub-mac") };
+    const rows = buildProjectSelectorRows({
+      projects,
+      text: "ryco",
+      nodeFilter: null,
+      expanded: new Set(),
+      active: hubDraft,
+      showNoProject: false,
+    });
+    // ryco-hub only starts with "ryco"; the boost puts the draft's project first.
+    expect(itemsOf(rows)).toEqual(["project:ryco-hub", "project:ryco"]);
+    expect(rows[0]).toMatchObject({ current: true });
+  });
+
+  it("scores names, paths and misses", () => {
+    const [ryco] = projects;
+    expect(scoreProjectSelectorMatch(ryco!, ryco!.checkouts, "")).toEqual({
+      score: 0,
+      pathHit: false,
+    });
+    expect(scoreProjectSelectorMatch(ryco!, ryco!.checkouts, "RYCO")).toMatchObject({
+      score: 0,
+      pathHit: false,
+    });
+    expect(scoreProjectSelectorMatch(ryco!, ryco!.checkouts, "~/dev")).toMatchObject({
+      pathHit: true,
+    });
+    expect(scoreProjectSelectorMatch(ryco!, ryco!.checkouts, "zzz")).toBeNull();
   });
 });
 

@@ -38,6 +38,7 @@ import {
   BarChart3Icon,
   CalendarClockIcon,
   CheckIcon,
+  CopyIcon,
   GitPullRequestCreateIcon,
   GitPullRequestIcon,
   CircleAlertIcon,
@@ -78,6 +79,7 @@ import { useShallow } from "zustand/react/shallow";
 import { availablePaneSplit, useChatPanesStore } from "../chatPanesStore";
 import { useCommandPaletteStore } from "../commandPaletteStore";
 import { readEnvironmentApi } from "../environmentApi";
+import { useNodeCatalog } from "../environments/nodeCatalog";
 import { readPrimaryEnvironmentDescriptor, usePrimaryEnvironmentId } from "../environments/primary";
 import {
   useSavedEnvironmentRegistryStore,
@@ -193,6 +195,7 @@ import {
 import {
   addProjectDialogAvailable,
   openAddProject as openAddProjectDialog,
+  openCopyProject,
 } from "./projectNodes/projectNodesDialogStore";
 import { useCreatePullRequestDialogStore } from "./pullRequests/create/createPullRequestDialogStore";
 import { LazyCreatePullRequestDialogHost } from "./pullRequests/create/lazyCreatePullRequestDialogHost";
@@ -409,6 +412,7 @@ function OpenCommandPaletteDialog() {
   const hostedNodes = useHostedHubStore((state) => state.nodes);
   const savedEnvironmentRegistry = useSavedEnvironmentRegistryStore((state) => state.byId);
   const savedEnvironmentRuntimeById = useSavedEnvironmentRuntimeStore((state) => state.byId);
+  const nodeCount = useNodeCatalog().length;
 
   const addProjectEnvironmentOptions = useMemo(
     () =>
@@ -1518,6 +1522,50 @@ function OpenCommandPaletteDialog() {
       openAddProjectFlow();
     },
   });
+
+  // "Copy <project> to another node…" for the project on screen, as the project selector offers
+  // it: a desktop dialog (A26), and only with another node to copy to. Opening it only sets the
+  // dialog store; the app shell loads the dialog's code then.
+  const copyProjectTitle =
+    currentProjectEnvironmentId && currentProjectId && !activeContextIsChat
+      ? (projectTitleById.get(currentProjectId) ?? null)
+      : null;
+  if (
+    presentationTier !== "phone" &&
+    nodeCount > 1 &&
+    currentProjectEnvironmentId &&
+    currentProjectId &&
+    copyProjectTitle
+  ) {
+    actionItems.push({
+      kind: "action",
+      value: "action:copy-project-to-node",
+      searchTerms: [
+        "copy project",
+        "clone",
+        "another node",
+        "node",
+        "device",
+        "machine",
+        "move",
+        "transfer",
+        copyProjectTitle,
+      ],
+      title: (
+        <>
+          Copy <span className="font-semibold">{copyProjectTitle}</span> to another node…
+        </>
+      ),
+      icon: <CopyIcon className={ITEM_ICON_CLASS} />,
+      run: async () => {
+        setOpen(false);
+        openCopyProject({
+          source: scopeProjectRef(currentProjectEnvironmentId, currentProjectId),
+          origin: "palette",
+        });
+      },
+    });
+  }
 
   if (getPresentationTier() !== "phone") {
     actionItems.push({

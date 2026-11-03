@@ -1903,7 +1903,7 @@ describe("ChatView Navigation (full app)", () => {
     }
   });
 
-  it("picks the node first when several nodes can take projects", async () => {
+  it("opens on the thread's node when several nodes can take projects, then picks another", async () => {
     const remoteBrowseMock = vi.fn(async ({ partialPath }: { partialPath: string }) => {
       if (partialPath === "~/workspaces/") {
         return {
@@ -1978,6 +1978,11 @@ describe("ChatView Navigation (full app)", () => {
 
       await expect.element(palette).toBeInTheDocument();
       await palette.getByText("Add project", { exact: true }).click();
+      // The thread's node is preselected; its step pill goes back to pick another.
+      await expect
+        .element(addProjectDialog().getByText(/What do you want to add on Studio Mac\?/))
+        .toBeVisible();
+      await addProjectDialog().getByRole("button", { name: "Studio Mac" }).click();
       await expect
         .element(addProjectDialog().getByText("Which node should the project live on?"))
         .toBeVisible();

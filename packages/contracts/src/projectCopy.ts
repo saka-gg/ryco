@@ -239,8 +239,16 @@ export type FilesystemDirectoryMatch = typeof FilesystemDirectoryMatch.Type;
 export const FilesystemSearchDirectoriesResult = Schema.Struct({
   matches: Schema.Array(FilesystemDirectoryMatch),
   roots: Schema.Array(Schema.String),
-  /** The walk hit its directory or time budget. */
+  /**
+   * The walk stopped at its directory or time budget, so some folders were not searched. One
+   * directory read only in part (past the per-directory entry budget) does not set it.
+   */
   truncated: Schema.Boolean,
+  /**
+   * More folders matched than `limit`: `matches` are the best of them. Absent from nodes that
+   * predate it, whose `truncated` also covered directories read only in part.
+   */
+  limitReached: Schema.optional(Schema.Boolean),
   scannedDirectories: NonNegativeInt,
 });
 export type FilesystemSearchDirectoriesResult = typeof FilesystemSearchDirectoriesResult.Type;

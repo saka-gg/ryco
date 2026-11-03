@@ -54,10 +54,12 @@ import { Button } from "../ui/button";
 import { Spinner } from "../ui/spinner";
 import { getEnvironmentBrowsePlatform } from "./addProjectSources";
 import { HighlightedText } from "./HighlightedText";
+import { NodePathText } from "./NodePathText";
 import {
   buildFolderCrumbs,
   buildFolderPlaces,
   describeFolderSelection,
+  folderSearchNote,
   folderSelectionStatusKey,
   formatNodePath,
   nodePathLeaf,
@@ -66,6 +68,7 @@ import {
   type FolderSelectionStatus,
 } from "./folderPicker.logic";
 import {
+  FOLDER_SEARCH_LIMIT,
   useNodeDestinationPreview,
   useNodeEnvironmentApi,
   useNodeFolderSearch,
@@ -574,18 +577,20 @@ export function FolderPicker(props: FolderPickerProps) {
           aria-hidden
           className={cn("size-[13px] shrink-0 text-muted-foreground", selected && "text-inherit")}
         />
-        <span
-          className={cn("min-w-0 flex-1 truncate", display === "path" && "font-mono text-[11.5px]")}
-        >
-          {display === "path" ? (
+        {display === "path" ? (
+          <NodePathText
+            path={formatNodePath(row.path, homeDirectory)}
+            title={row.path}
+            className="flex-1 font-mono text-[11.5px]"
+          >
             <HighlightedText
               text={formatNodePath(row.path, homeDirectory)}
               query={debouncedQuery}
             />
-          ) : (
-            row.name
-          )}
-        </span>
+          </NodePathText>
+        ) : (
+          <span className="min-w-0 flex-1 truncate">{row.name}</span>
+        )}
         {sameRepository ? (
           <span className="whitespace-nowrap rounded-full bg-success/12 px-1.5 py-px font-medium text-[10.5px] text-success-foreground">
             same repository
@@ -630,6 +635,7 @@ export function FolderPicker(props: FolderPickerProps) {
   let body: ReactNode;
   if (searching) {
     const matches = search.data?.matches ?? [];
+    const searchNote = search.data ? folderSearchNote(search.data, FOLDER_SEARCH_LIMIT) : null;
     body = (
       <div className="h-[212px] overflow-y-auto p-1" data-slot="folder-picker-results">
         {matches.length > 0 ? (
@@ -638,9 +644,14 @@ export function FolderPicker(props: FolderPickerProps) {
               {matches.length} folder{matches.length === 1 ? "" : "s"} on {nodeLabel}
             </SectionLabel>
             {listbox(`Folders matching ${trimmedQuery}`, "path")}
-            {search.data?.truncated || matches.length >= 40 ? (
-              <div className="px-1.5 pt-1.5 pb-1 text-[11px] text-muted-foreground">
-                Showing the best matches. Type more to narrow them down.
+            {searchNote ? (
+              <div
+                className="px-1.5 pt-1.5 pb-1 text-[11px] text-muted-foreground"
+                data-testid="folder-picker-search-note"
+              >
+                {searchNote === "more-matches"
+                  ? "Showing the best matches. Type more to narrow them down."
+                  : `${nodeLabel} stopped searching before it looked everywhere. Type more of the name, or a path.`}
               </div>
             ) : null}
           </>

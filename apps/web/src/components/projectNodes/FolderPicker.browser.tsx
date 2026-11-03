@@ -215,6 +215,60 @@ describe("FolderPicker", () => {
     }
   });
 
+  it("says 'type more' only when more folders matched than it shows", async () => {
+    const { fake, screen } = await mount(<Harness />);
+    try {
+      const note = page.getByTestId("folder-picker-search-note");
+      const fakeSearch = fake.searchDirectories.getMockImplementation()!;
+      // Every match fits: no note (a capped directory on the node never sets one either).
+      fake.searchDirectories.mockImplementationOnce(async (input) => ({
+        ...(await fakeSearch(input)),
+        limitReached: false,
+      }));
+      await field().fill("ryco-hub");
+      await expect.element(option(/^~\/Code\/ryco-hub main$/)).toBeVisible();
+      await expect.element(note).not.toBeInTheDocument();
+
+      fake.searchDirectories.mockImplementationOnce(async (input) => ({
+        ...(await fakeSearch(input)),
+        limitReached: true,
+      }));
+      await field().fill("Code");
+      await expect
+        .element(note)
+        .toHaveTextContent("Showing the best matches. Type more to narrow them down.");
+
+      fake.searchDirectories.mockImplementationOnce(async (input) => ({
+        ...(await fakeSearch(input)),
+        truncated: true,
+        limitReached: false,
+      }));
+      await field().fill("Cod");
+      await expect
+        .element(note)
+        .toMatchTextContent(/^Mac mini stopped searching before it looked everywhere\./);
+    } finally {
+      await screen.unmount();
+    }
+  });
+
+  it("cuts a long result path at its start so the folder's name stays visible", async () => {
+    const { screen } = await mount(<Harness className="w-[220px]" />);
+    try {
+      await field().fill("cs2inspect");
+      const result = option(/cs2inspect-web/);
+      await expect.element(result).toBeVisible();
+      const path = result.element().querySelector<HTMLElement>('[data-slot="node-path"]')!;
+      expect(path.title).toBe("/Users/me/Dropbox/Code/Web/cs2inspect-web");
+      // The text overflows its box, and the box's end (the folder's name) is what shows.
+      expect(path.scrollWidth).toBeGreaterThan(path.clientWidth);
+      expect(getComputedStyle(path).direction).toBe("rtl");
+      expect(getComputedStyle(path).textOverflow).toBe("ellipsis");
+    } finally {
+      await screen.unmount();
+    }
+  });
+
   it("offers the node's free folder when a clone destination is taken", async () => {
     const onUseSuggestedPath = vi.fn();
     const { screen } = await mount(

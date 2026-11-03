@@ -152,6 +152,83 @@ describe("resolveAddProjectStart", () => {
     ).toEqual({ nodeId: MINI, step: 2, kind: "folder" });
   });
 
+  it("preselects the node on screen, else the last used one, and opens on the sources", () => {
+    expect(
+      resolveAddProjectStart({
+        request: null,
+        nodes: NODES,
+        linkAvailable: false,
+        contextNodeId: MINI,
+        lastUsed: { nodeId: LAPTOP, kind: "clone" },
+      }),
+    ).toEqual({ nodeId: MINI, step: 1, kind: "clone" });
+    expect(
+      resolveAddProjectStart({
+        request: null,
+        nodes: NODES,
+        linkAvailable: false,
+        contextNodeId: null,
+        lastUsed: { nodeId: LAPTOP, kind: "folder" },
+      }),
+    ).toEqual({ nodeId: LAPTOP, step: 1, kind: "folder" });
+    // A remembered source never skips the Source step; a requested one still does.
+    expect(
+      resolveAddProjectStart({
+        request: { environmentId: null, mode: "folder", projectRef: null },
+        nodes: NODES,
+        linkAvailable: false,
+        contextNodeId: MINI,
+        lastUsed: { nodeId: LAPTOP, kind: "clone" },
+      }),
+    ).toEqual({ nodeId: MINI, step: 2, kind: "folder" });
+  });
+
+  it("skips context and memory that can't take projects", () => {
+    expect(
+      resolveAddProjectStart({
+        request: null,
+        nodes: NODES,
+        linkAvailable: false,
+        contextNodeId: PC,
+        lastUsed: { nodeId: BUILD, kind: "copy" },
+      }),
+    ).toEqual({ nodeId: null, step: 0, kind: null });
+    expect(
+      resolveAddProjectStart({
+        request: null,
+        nodes: NODES,
+        linkAvailable: false,
+        contextNodeId: BUILD,
+        lastUsed: { nodeId: MINI, kind: null },
+      }),
+    ).toEqual({ nodeId: MINI, step: 1, kind: null });
+  });
+
+  it("keeps a named node over context and memory, and picks no node for a link", () => {
+    expect(
+      resolveAddProjectStart({
+        request: { environmentId: BUILD, mode: null, projectRef: null },
+        nodes: NODES,
+        linkAvailable: false,
+        contextNodeId: MINI,
+        lastUsed: { nodeId: LAPTOP, kind: "clone" },
+      }),
+    ).toEqual({ nodeId: null, step: 0, kind: null });
+    expect(
+      resolveAddProjectStart({
+        request: {
+          environmentId: null,
+          mode: "link",
+          projectRef: { environmentId: LAPTOP, projectId: RYCO_LAPTOP.id },
+        },
+        nodes: NODES,
+        linkAvailable: true,
+        contextNodeId: LAPTOP,
+        lastUsed: { nodeId: MINI, kind: "clone" },
+      }),
+    ).toEqual({ nodeId: null, step: 0, kind: "link" });
+  });
+
   it("skips the node step when only one node can take projects", () => {
     const nodes = NODES.filter((node) => node.environmentId !== MINI);
     expect(resolveAddProjectStart({ request: null, nodes, linkAvailable: false })).toEqual({

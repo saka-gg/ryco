@@ -1,10 +1,12 @@
 // FILE: folderPicker.logic.ts
 // Purpose: The folder picker's path model on a node of any platform (breadcrumbs, places,
-//          joining a child folder), match highlighting, and the status line that says what the
-//          selected folder is and whether it can be used for the picker's mode.
+//          joining a child folder), match highlighting, the note under search results, and the
+//          status line that says what the selected folder is and whether it can be used for the
+//          picker's mode.
 // Layer: Web UI logic, pure. Path parsing reuses `lib/projectPaths.ts`.
 
 import type {
+  FilesystemSearchDirectoriesResult,
   NodePathHints,
   ProjectDestinationPreview,
   ProjectDestinationState,
@@ -516,4 +518,25 @@ export function folderSelectionStatusKey(value: FolderSelectionStatus): string {
     value.preview?.state,
     value.preview?.resolvedPath,
   ].join("\u0000");
+}
+
+/* ───────── Search results ───────── */
+
+/**
+ * The note under the search results: `more-matches` when more folders matched
+ * than the list shows ("type more"), `incomplete` when the node's search ran
+ * out of time or folders before it searched everywhere. A directory the node
+ * read only in part says neither: one huge asset folder is not a reason to
+ * narrow the query. A node that predates `limitReached` reported both through
+ * `truncated`, so for it only a full list counts.
+ */
+export function folderSearchNote(
+  result: Pick<FilesystemSearchDirectoriesResult, "matches" | "truncated" | "limitReached">,
+  limit: number,
+): "more-matches" | "incomplete" | null {
+  if (result.limitReached === undefined) {
+    return result.matches.length >= limit ? "more-matches" : null;
+  }
+  if (result.limitReached) return "more-matches";
+  return result.truncated ? "incomplete" : null;
 }

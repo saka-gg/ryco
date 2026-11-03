@@ -1,7 +1,9 @@
 // FILE: AddProjectDialog.tsx
-// Purpose: "Add project": the node first, then the source (open a folder, clone a repository,
-//          copy from another node, link a checkout), then the folder; a clone or link follows
-//          the node's import inline, and the done step shows every node the project is on.
+// Purpose: "Add project": the node (preselected from the thread or project on screen, else
+//          the last one used, when no request names one), then the source (open a folder,
+//          clone a repository, copy from another node, link a checkout), then the folder; a
+//          clone or link follows the node's import inline, and the done step shows every node
+//          the project is on.
 //          It keeps what the command palette's add-project views did: Windows path checks, an
 //          existing project opens its latest thread, a missing folder is created, a new thread
 //          starts after adding, and the local Desktop node offers the native folder picker.
@@ -31,7 +33,7 @@ import {
 } from "@ryco/contracts/project-copy";
 import { normalizeGitRemoteUrl } from "@ryco/shared/git";
 import { excludeChatProjects } from "@ryco/shared/projectKind";
-import { useNavigate } from "@tanstack/react-router";
+import { useNavigate, useRouterState } from "@tanstack/react-router";
 import { CheckIcon, PlusIcon, XIcon } from "lucide-react";
 import {
   Fragment,
@@ -58,6 +60,7 @@ import { useSettings } from "../../hooks/useSettings";
 import { inferProjectTitleFromPath } from "../../lib/projectPaths";
 import { cn, newProjectId, randomUUID } from "../../lib/utils";
 import { readLocalApi } from "../../localApi";
+import { PROJECTS_ROUTE_PATH } from "../../projectsRoute";
 import { useServerConfig } from "../../rpc/serverState";
 import { useSettingsDialogStore } from "../../settingsDialogStore";
 import {
@@ -70,7 +73,7 @@ import type { Project } from "../../types";
 import { Button } from "../ui/button";
 import { Dialog, DialogClose, DialogPopup, DialogTitle } from "../ui/dialog";
 import { Spinner } from "../ui/spinner";
-import { stackedThreadToast, toastManager } from "../ui/toast";
+import { stackedThreadToast, toastManager, useActiveThreadRefFromRoute } from "../ui/toast";
 import {
   addedProjectLead,
   addProjectPrimaryLabel,
@@ -91,6 +94,7 @@ import {
   type AddProjectStep,
   type AddProjectCopySource,
 } from "./addProjectDialog.logic";
+import { readAddProjectLastUsed, rememberAddProjectLastUsed } from "./addProjectMemory";
 import { AddedProjectSummary, ImportProgressSteps } from "./AddProjectOutcome";
 import { CopyBar } from "./copyProjectDialogParts";
 import { AddProjectSourceStep, type AddProjectCloneChoice } from "./AddProjectSourceStep";
@@ -258,6 +262,22 @@ function useNodeConnection(environmentId: EnvironmentId | null): void {
   }, [environmentId]);
 }
 
+/**
+ * The node of what the user is looking at: the thread (or draft) on screen,
+ * else the checkout the projects page shows.
+ */
+function useAddProjectContextNodeId(): EnvironmentId | null {
+  const threadRef = useActiveThreadRefFromRoute();
+  const projectsPageNode = useRouterState({
+    select: (state) => {
+      if (state.location.pathname !== PROJECTS_ROUTE_PATH) return null;
+      const env = (state.location.search as { readonly env?: unknown }).env;
+      return typeof env === "string" && env.length > 0 ? (env as EnvironmentId) : null;
+    },
+  });
+  return threadRef?.environmentId ?? projectsPageNode;
+}
+
 /** Reads one node's path hints into the node step's card summaries. */
 function NodePathHintsProbe(props: {
   readonly environmentId: EnvironmentId;
@@ -304,8 +324,15 @@ function AddProjectFlow(props: {
     );
   }, [projects, request?.projectRef]);
 
+  const contextNodeId = useAddProjectContextNodeId();
   const [start] = useState(() =>
-    resolveAddProjectStart({ request, nodes, linkAvailable: linkSource !== null }),
+    resolveAddProjectStart({
+      request,
+      nodes,
+      linkAvailable: linkSource !== null,
+      contextNodeId,
+      lastUsed: readAddProjectLastUsed(),
+    }),
   );
   const [nodeId, setNodeId] = useState<EnvironmentId | null>(start.nodeId);
   const [step, setStep] = useState<AddProjectStep>(start.step);
@@ -447,6 +474,7 @@ function AddProjectFlow(props: {
   };
   const copyFrom = (entry: AddProjectCopySource) => {
     if (nodeId === null) return;
+    rememberAddProjectLastUsed(nodeId, "copy");
     closeAddProject();
     openCopyProject({
       source: scopeProjectRef(entry.source.environmentId, entry.source.id),
@@ -484,6 +512,7 @@ function AddProjectFlow(props: {
    */
   const addFolder = async (path: string, canonicalKey: string | null) => {
     if (node === null) return;
+    rememberAddProjectLastUsed(node.environmentId, "folder");
     const nodeApi = readEnvironmentApi(node.environmentId);
     if (!nodeApi) {
       toastError("Failed to add project", `${node.label} is still connecting. Try again shortly.`);
@@ -620,6 +649,7 @@ function AddProjectFlow(props: {
 
   const cloneTo = async (destination: string, choice: AddProjectCloneChoice) => {
     if (node === null) return;
+    rememberAddProjectLastUsed(node.environmentId, "clone");
     const validation = validateAddProjectPath(destination, { platform, currentProjectCwd: null });
     if (!validation.ok) {
       if (validation.reason) toastError("Clone failed", validation.reason);
@@ -691,6 +721,7 @@ function AddProjectFlow(props: {
 
   const linkAt = (destination: string, source: Project) => {
     if (node === null) return;
+    rememberAddProjectLastUsed(node.environmentId, "link");
     const repositoryRoot = status?.preview?.resolvedPath ?? destination;
     const input = buildLinkImportInput({
       importId: ProjectImportId.make(randomUUID()),

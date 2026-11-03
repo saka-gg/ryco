@@ -5,7 +5,9 @@
  * reads in flight, ranked with the workspace-entry (`@` picker) ranker. It never follows a
  * symlink or a Finder alias (both are not directories to `readdir`), treats a git repository as
  * a leaf, skips build output, caches, hidden folders and the macOS folders a privacy prompt
- * guards, and stops at a directory, per-directory entry and time budget. An empty query lists
+ * guards, and stops at a directory, per-directory entry and time budget. The outcome tells the
+ * three apart: the walk stopped early (`truncated`), more folders matched than it returns
+ * (`limitReached`), and directories it read only in part (`cappedDirectories`). An empty query lists
  * the roots' own folders instead, git repositories first.
  *
  * Paths come back as the roots were given (never realpath'd), so they match the node's stored
@@ -97,8 +99,15 @@ export interface DirectorySearchHit {
 
 export interface DirectorySearchOutcome {
   readonly hits: ReadonlyArray<DirectorySearchHit>;
-  /** The walk stopped at its directory, entry or time budget. */
+  /**
+   * The walk stopped at its directory or time budget, so folders were left unsearched. One
+   * huge directory is not that: see `cappedDirectories`.
+   */
   readonly truncated: boolean;
+  /** More folders matched than `limit`: `hits` are the best of them. */
+  readonly limitReached: boolean;
+  /** Directories read only up to the per-directory entry budget; the rest of each was skipped. */
+  readonly cappedDirectories: number;
   readonly scannedDirectories: number;
 }
 
@@ -216,6 +225,8 @@ export const searchDirectories = async (
 
   let scannedDirectories = 0;
   let truncated = false;
+  let limitReached = false;
+  let cappedDirectories = 0;
   const outOfBudget = () => {
     if (input.signal?.aborted) return true;
     if (scannedDirectories >= maxDirectories || now() > deadline) {
@@ -291,7 +302,7 @@ export const searchDirectories = async (
       scannedDirectories += 1;
       const read = await readChildren(directory.path);
       if (read === null) return;
-      if (read.capped) truncated = true;
+      if (read.capped) cappedDirectories += 1;
       // A repository is a leaf, unless the caller asked to search inside it.
       if (read.isRepository && directory.depth > 0) return;
       const depth = directory.depth + 1;
@@ -303,7 +314,10 @@ export const searchDirectories = async (
         const guarded = !otherRoot && isGuarded(directory, name, childPath);
         if (directory.trimmed && isTrimmed(name)) {
           const score = scoreWorkspaceEntry({ kind: "directory", normalizedPath: rankPath }, query);
-          const worst = ranked.length >= limit ? ranked[ranked.length - 1] : undefined;
+          const full = ranked.length >= limit;
+          // A match past a full list: whether it displaces one or not, there were more.
+          if (score !== null && full) limitReached = true;
+          const worst = full ? ranked[ranked.length - 1] : undefined;
           // Allocate a candidate only for a score the full list would admit.
           if (score !== null && limit > 0 && (worst === undefined || score <= worst.score)) {
             insertRankedSearchResult(
@@ -338,6 +352,8 @@ export const searchDirectories = async (
       .flatMap((hit) => (hit === undefined ? [] : [hit]))
       .toSorted((left, right) => left.score - right.score || left.path.localeCompare(right.path)),
     truncated,
+    limitReached,
+    cappedDirectories,
     scannedDirectories,
   };
 
@@ -351,7 +367,7 @@ export const searchDirectories = async (
       scannedDirectories += 1;
       const read = await readChildren(root.path);
       if (read === null) continue;
-      if (read.capped) truncated = true;
+      if (read.capped) cappedDirectories += 1;
       if (!root.trimmed) continue;
       for (const name of read.names) {
         if (!isTrimmed(name)) continue;
@@ -377,6 +393,8 @@ export const searchDirectories = async (
         .slice(0, limit)
         .map((row) => row.hit),
       truncated,
+      limitReached: rows.length > limit,
+      cappedDirectories,
       scannedDirectories,
     };
   }

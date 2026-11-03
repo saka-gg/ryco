@@ -396,6 +396,8 @@ describe("searchDirectories", () => {
       depth: 1,
     });
     expect(result.matches[1]).toMatchObject({ projectId: null, repositoryCanonicalKey: null });
+    // Every match fit, nothing was cut short.
+    expect(result).toMatchObject({ truncated: false, limitReached: false });
   });
 
   it("checks named roots: refused fails, missing is left out, foreign forms are invalid", async () => {

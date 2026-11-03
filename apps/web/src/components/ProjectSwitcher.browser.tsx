@@ -14,7 +14,10 @@ vi.mock("../hostedHub/hostedConnectionCoordinator", { spy: true });
 
 import { useCommandPaletteStore } from "../commandPaletteStore";
 import { useComposerDraftStore } from "../composerDraftStore";
-import { useSavedEnvironmentRuntimeStore } from "../environments/runtime";
+import {
+  useSavedEnvironmentRegistryStore,
+  useSavedEnvironmentRuntimeStore,
+} from "../environments/runtime";
 import {
   readHostedWorkspaceState,
   type HostedWorkspaceSnapshot,
@@ -22,8 +25,10 @@ import {
 import { hostedDraftTargetController } from "../hooks/useHostedDraftExecutionTarget";
 import { refreshGitStatus, resetGitStatusStateForTests } from "../lib/gitStatusState";
 import { AppAtomRegistryProvider, resetAppAtomRegistryForTests } from "../rpc/atomRegistry";
+import { defaultQueryClient } from "../rpc/queryClient";
 import { NewThreadWorkLocation } from "./chat/NewThreadWorkLocation";
 import { ProjectSwitcher } from "./ProjectSwitcher";
+import { nodePathHintsQueryKey } from "./projectNodes/nodePathQueries";
 import {
   requestProjectSelectorOpen,
   resetProjectNodesDialogStoreForTests,
@@ -35,6 +40,7 @@ import {
   fixtureProject,
   HUB_LOCAL,
   LOCAL_ENV,
+  RYCO_IDENTITY,
   RYCO_LOCAL,
   RYCO_STUDIO,
   STUDIO_ENV,
@@ -320,6 +326,93 @@ describe("ProjectSwitcher", () => {
       document.querySelectorAll('[data-testid="project-selector-checkout"] mark'),
     ).map((mark) => mark.textContent);
     expect(marks).toEqual(["src/ry"]);
+  });
+
+  it("ranks matches best first, by letters in order too", async () => {
+    await renderSelector();
+    await openSelector();
+    const search = page.getByRole("combobox", { name: "Search projects" });
+    await userEvent.fill(search, "hub");
+    await expect.poll(optionTexts).toEqual(["ryco-hubMacBook Pro · ~/Code/ryco-hub"]);
+    await userEvent.fill(search, "scr");
+    await expect.poll(optionTexts).toEqual(["scratchMacBook Pro · ~/tmp/scratch"]);
+    // Letters in order, with gaps between them.
+    await userEvent.fill(search, "rhb");
+    await expect.poll(optionTexts).toEqual(["ryco-hubMacBook Pro · ~/Code/ryco-hub"]);
+    // The exact name first; a longer name it starts comes after.
+    await userEvent.fill(search, "ryco");
+    await expect
+      .poll(optionTexts)
+      .toEqual([
+        "ryco2 nodes · ~/Code/ryco",
+        "MacBook Pro~/Code/ryco",
+        "Studio~/src/ryco",
+        "ryco-hubMacBook Pro · ~/Code/ryco-hub",
+      ]);
+  });
+
+  it("fits the node column to the longest name and cuts paths at their start", async () => {
+    const environments = defaultFixtureEnvironments();
+    seedProjectsFixtureStore({
+      ...environments,
+      [STUDIO_ENV]: {
+        ...environments[STUDIO_ENV]!,
+        projects: [
+          fixtureProject({
+            id: RYCO_STUDIO,
+            environmentId: STUDIO_ENV,
+            name: "ryco",
+            cwd: "/root/code/clients/acme/monorepo/services/gateway/ryco",
+            repositoryIdentity: RYCO_IDENTITY,
+          }),
+        ],
+      },
+    });
+    useSavedEnvironmentRegistryStore.setState((state) => ({
+      byId: {
+        ...state.byId,
+        [STUDIO_ENV]: { ...state.byId[STUDIO_ENV]!, label: "Mac Studio M4 Max von Laurin" },
+      },
+    }));
+    // The node's path hints, as a picker already read them: the selector asks for nothing.
+    defaultQueryClient.setQueryData(nodePathHintsQueryKey(STUDIO_ENV), {
+      homeDirectory: "/root",
+      pathSeparator: "/",
+      defaultProjectDirectory: "/root/code",
+      defaultProjectDirectorySource: "well-known",
+      codeRoots: [],
+      workspaceAccessRoot: null,
+    });
+    try {
+      await renderSelector();
+      await openSelector();
+      const rows = () =>
+        Array.from(
+          document.querySelectorAll<HTMLElement>('[data-testid="project-selector-checkout"]'),
+        );
+      await expect.poll(() => rows().length).toBe(2);
+      const labels = rows().map((row) => row.querySelector<HTMLElement>("[data-node-label]")!);
+      const paths = rows().map((row) => row.querySelector<HTMLElement>('[data-slot="node-path"]')!);
+      // One column for both rows, wider than the old 92 px, at most 160 px.
+      const widths = labels.map((label) => label.getBoundingClientRect().width);
+      expect(widths[0]).toBe(widths[1]);
+      expect(widths[0]).toBeGreaterThan(92);
+      expect(widths[0]).toBeLessThanOrEqual(160);
+      // "MacBook Pro" fits whole; only a name past the cap is cut.
+      expect(labels[0]!.scrollWidth).toBeLessThanOrEqual(labels[0]!.clientWidth);
+      // Home-relative under the node's own home, cut at the start: the folder's name shows.
+      expect(paths[1]!.textContent).toBe("~/code/clients/acme/monorepo/services/gateway/ryco");
+      expect(paths[1]!.title).toBe("/root/code/clients/acme/monorepo/services/gateway/ryco");
+      expect(paths[1]!.scrollWidth).toBeGreaterThan(paths[1]!.clientWidth);
+      expect(getComputedStyle(paths[1]!).direction).toBe("rtl");
+      const box = paths[1]!.getBoundingClientRect();
+      const text = paths[1]!.firstElementChild!.getBoundingClientRect();
+      // The text's end lines up with the box's end; its start runs off the box's start.
+      expect(Math.abs(text.right - box.right)).toBeLessThan(2);
+      expect(text.left).toBeLessThan(box.left);
+    } finally {
+      defaultQueryClient.clear();
+    }
   });
 
   it("moves the draft to another node's checkout, keeping what was typed", async () => {

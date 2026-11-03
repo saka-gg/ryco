@@ -6,6 +6,7 @@ import {
   buildFolderCrumbs,
   buildFolderPlaces,
   describeFolderSelection,
+  folderSearchNote,
   folderSelectionStatusKey,
   highlightMatch,
   resolveFolderDestination,
@@ -299,5 +300,37 @@ describe("describeFolderSelection", () => {
     const second = statusFor({ preview: preview({ state: "exists-not-empty" }) });
     expect(folderSelectionStatusKey(first)).toBe(folderSelectionStatusKey(second));
     expect(folderSelectionStatusKey(first)).not.toBe(folderSelectionStatusKey(statusFor({})));
+  });
+});
+
+describe("folderSearchNote", () => {
+  const matches = (count: number) => Array.from({ length: count }, () => ({}) as never);
+
+  it("asks for more only when more folders matched than shown", () => {
+    expect(
+      folderSearchNote({ matches: matches(2), truncated: false, limitReached: false }, 40),
+    ).toBe(null);
+    expect(
+      folderSearchNote({ matches: matches(40), truncated: false, limitReached: true }, 40),
+    ).toBe("more-matches");
+    // A full list that is every match is not cut.
+    expect(
+      folderSearchNote({ matches: matches(40), truncated: false, limitReached: false }, 40),
+    ).toBe(null);
+  });
+
+  it("says the search stopped early apart from a full list", () => {
+    expect(
+      folderSearchNote({ matches: matches(2), truncated: true, limitReached: false }, 40),
+    ).toBe("incomplete");
+    expect(
+      folderSearchNote({ matches: matches(40), truncated: true, limitReached: true }, 40),
+    ).toBe("more-matches");
+  });
+
+  it("reads a node without `limitReached` by whether the list is full", () => {
+    // Its `truncated` also covered one huge directory, so it alone says nothing.
+    expect(folderSearchNote({ matches: matches(2), truncated: true }, 40)).toBe(null);
+    expect(folderSearchNote({ matches: matches(40), truncated: true }, 40)).toBe("more-matches");
   });
 });

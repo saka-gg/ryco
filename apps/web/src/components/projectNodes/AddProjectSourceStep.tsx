@@ -58,6 +58,7 @@ import {
 } from "./addProjectSources";
 import { displayProjectPath } from "../../lib/projectPaths";
 import { NodeBadge } from "./NodePicker";
+import { NodePathText } from "./NodePathText";
 import { closeAddProject } from "./projectNodesDialogStore";
 
 const REPOSITORY_SEARCH_DEBOUNCE_MS = 200;
@@ -481,7 +482,7 @@ function CopyPanel(props: AddProjectSourceStepProps) {
         {props.copySources.length > 0 ? (
           props.copySources.map((entry) => {
             const sourceNode = nodeById.get(entry.source.environmentId);
-            const where = `${sourceNode?.label ?? "Another node"} · ${displayProjectPath(entry.source.cwd)}`;
+            const sourcePath = displayProjectPath(entry.source.cwd);
             return (
               <button
                 key={entry.key}
@@ -499,10 +500,13 @@ function CopyPanel(props: AddProjectSourceStepProps) {
                 />
                 <span className="min-w-0 flex-1 truncate">{entry.name}</span>
                 <span
-                  className="max-w-[220px] truncate font-mono text-[11px] text-muted-foreground"
-                  title={where}
+                  className="flex min-w-0 max-w-[240px] items-center text-[11px] text-muted-foreground"
+                  data-testid="add-project-copy-where"
                 >
-                  {where}
+                  <span className="max-w-[120px] shrink-0 truncate whitespace-pre">
+                    {`${sourceNode?.label ?? "Another node"} · `}
+                  </span>
+                  <NodePathText path={sourcePath} title={entry.source.cwd} className="font-mono" />
                 </span>
                 <ChevronRightIcon
                   aria-hidden

@@ -7,13 +7,14 @@
 import type { NodeCatalogEntry } from "@ryco/client-runtime/state/nodes";
 import type { ProjectImportSnapshot } from "@ryco/contracts/project-copy";
 import { CheckIcon } from "lucide-react";
-import { useMemo } from "react";
+import { useMemo, useRef } from "react";
 
 import { importProgressSteps, type AddedProjectNodeRow } from "./addProjectDialog.logic";
 import type { CopyProgressStep } from "./copyProjectDialog.logic";
 import { CopyProgressStepList } from "./copyProjectDialogParts";
 import { displayProjectPath } from "../../lib/projectPaths";
 import { NodeBadge } from "./NodePicker";
+import { NODE_LABEL_CELL, NodePathText, useNodeLabelColumn } from "./NodePathText";
 
 /**
  * The steps the node runs for a clone or link, as they report: done, running
@@ -61,6 +62,8 @@ export function AddedProjectSummary(props: {
     () => new Map(props.nodes.map((entry) => [entry.environmentId, entry] as const)),
     [props.nodes],
   );
+  const listRef = useRef<HTMLDivElement | null>(null);
+  useNodeLabelColumn(listRef, props.rows);
   return (
     <>
       <div className="flex flex-col items-center gap-1.5 pt-1.5 pb-1 text-center">
@@ -73,6 +76,7 @@ export function AddedProjectSummary(props: {
         <p className="m-0 text-muted-foreground">{props.lead}</p>
       </div>
       <div
+        ref={listRef}
         className="overflow-hidden rounded-[10px] border border-border"
         data-testid="add-project-node-list"
       >
@@ -85,10 +89,17 @@ export function AddedProjectSummary(props: {
               className="flex items-center gap-2 border-border px-2.5 py-2 text-[12.5px] not-first:border-t"
             >
               <NodeBadge node={node} size="sm" />
-              <span className="w-[104px] shrink-0 truncate">{node.label}</span>
-              <span className="min-w-0 flex-1 truncate font-mono text-[11.5px] text-muted-foreground">
-                {displayProjectPath(row.cwd)}
+              <span
+                className="w-(--node-label-column,104px) shrink-0 truncate"
+                {...NODE_LABEL_CELL}
+              >
+                {node.label}
               </span>
+              <NodePathText
+                path={displayProjectPath(row.cwd)}
+                title={row.cwd}
+                className="flex-1 font-mono text-[11.5px] text-muted-foreground"
+              />
               {row.isNew ? (
                 <span className="inline-flex items-center whitespace-nowrap rounded-full bg-primary/10 px-1.5 py-px text-[10.5px] text-foreground dark:bg-primary/18">
                   new

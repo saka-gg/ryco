@@ -349,6 +349,7 @@ export const makeNodePaths = (deps: NodePathsDependencies): NodePathsShape => {
         matches,
         roots,
         truncated: outcome.truncated,
+        limitReached: outcome.limitReached,
         scannedDirectories: outcome.scannedDirectories,
       };
     },

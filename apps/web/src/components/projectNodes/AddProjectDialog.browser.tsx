@@ -39,6 +39,7 @@ import {
   callNodeWithLease,
   createWebProjectCopyIo,
 } from "./copyRuntime/webProjectCopyIo";
+import { readAddProjectLastUsed, rememberAddProjectLastUsed } from "./addProjectMemory";
 import { openAddProject, useProjectNodesDialogStore } from "./projectNodesDialogStore";
 import {
   createFakeNodeApi,
@@ -235,6 +236,40 @@ describe("AddProjectDialog", () => {
     setProjectCopyRuntimeForTests(null);
   });
 
+  it("opens on the thread's node with the last used source, and the node pill goes back", async () => {
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot: snapshotWith(null),
+    });
+    try {
+      await waitForServerConfigToApply();
+      createMacMiniApi(addSavedNode({ environmentId: MINI, label: "Mac mini", projectCopy: true }));
+      // The last add cloned on the Mac mini; the thread on screen is on the Studio Mac.
+      rememberAddProjectLastUsed(MINI, "clone");
+      await openDialog();
+
+      await expect
+        .element(dialog().getByText(/What do you want to add on/), ELEMENT_WAIT)
+        .toMatchTextContent(/What do you want to add on Studio Mac\?/);
+      // The last source is preselected, not taken.
+      await expect
+        .element(dialog().getByRole("textbox", { name: "Repository to clone" }), ELEMENT_WAIT)
+        .toBeVisible();
+      await dialog().getByRole("button", { name: "Studio Mac" }).click();
+      await expect
+        .element(dialog().getByText("Which node should the project live on?"), ELEMENT_WAIT)
+        .toBeVisible();
+      await dialog()
+        .getByRole("radio", { name: /Mac mini/ })
+        .click();
+      await expect
+        .element(dialog().getByText(/What do you want to add on/), ELEMENT_WAIT)
+        .toMatchTextContent(/What do you want to add on Mac mini\?/);
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
   it("lists every node with its state, disables what can't take a project, then asks for the source", async () => {
     const mounted = await mountChatView({
       viewport: DEFAULT_VIEWPORT,
@@ -246,6 +281,8 @@ describe("AddProjectDialog", () => {
       addSavedNode({ environmentId: OFFLINE, label: "Gaming PC", state: "offline" });
       addSavedNode({ environmentId: BLOCKED, label: "hetzner-build", state: "client" });
       await openDialog();
+      // The thread's node is preselected; its pill goes back to the node step.
+      await dialog().getByRole("button", { name: "Studio Mac" }).click();
 
       await expect
         .element(dialog().getByText("Which node should the project live on?"), ELEMENT_WAIT)
@@ -316,6 +353,8 @@ describe("AddProjectDialog", () => {
       await clone.click();
 
       await vi.waitFor(() => expect(mini.importStart).toHaveBeenCalledTimes(1));
+      // The next open starts from this node and source.
+      expect(readAddProjectLastUsed()).toEqual({ nodeId: MINI, kind: "clone" });
       const input = mini.importStart.mock.calls[0]![0];
       expect(input).toMatchObject({
         title: "codex",
@@ -681,6 +720,40 @@ describe("AddProjectDialog", () => {
         .toMatchTextContent(
           /Studio Mac.*\/repo\/project.*Mac mini.*~\/Dropbox\/Code\/Web\/cs2inspect-web.*new/,
         );
+    } finally {
+      await mounted.cleanup();
+    }
+  });
+
+  it("offers copying the thread's project to another node in the command palette", async () => {
+    const mounted = await mountChatView({
+      viewport: DEFAULT_VIEWPORT,
+      snapshot: snapshotWith(null),
+    });
+    try {
+      await waitForServerConfigToApply();
+      const palette = page.getByTestId("command-palette");
+      const copyAction = palette.getByRole("option", { name: /Copy Project to another node…/ });
+      // One node: nowhere to copy to.
+      useCommandPaletteStore.getState().setOpen(true);
+      await expect.element(palette, ELEMENT_WAIT).toBeInTheDocument();
+      await expect.element(palette.getByText("Add project", { exact: true })).toBeVisible();
+      await expect.element(copyAction).not.toBeInTheDocument();
+      useCommandPaletteStore.getState().setOpen(false);
+
+      createMacMiniApi(addSavedNode({ environmentId: MINI, label: "Mac mini", projectCopy: true }));
+      useCommandPaletteStore.getState().setOpen(true);
+      await palette.getByRole("combobox").fill("copy");
+      await copyAction.click();
+      expect(useProjectNodesDialogStore.getState().copyProject).toMatchObject({
+        open: true,
+        request: {
+          source: { environmentId: LOCAL_ENVIRONMENT_ID, projectId: PROJECT_ID },
+          targetEnvironmentId: null,
+          origin: "palette",
+        },
+      });
+      expect(useCommandPaletteStore.getState().open).toBe(false);
     } finally {
       await mounted.cleanup();
     }

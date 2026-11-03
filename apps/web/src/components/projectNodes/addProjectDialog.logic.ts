@@ -63,28 +63,62 @@ export function addProjectStepForKind(kind: AddProjectSourceKind | null): AddPro
   return kind === "folder" || kind === "link" ? 2 : 1;
 }
 
+/** The node and source the user last added a project with (`addProjectMemory.ts` keeps it). */
+export interface AddProjectLastUsed {
+  readonly nodeId: EnvironmentId;
+  /** Null when only the node is remembered; `link` is never remembered (it needs a project). */
+  readonly kind: Exclude<AddProjectSourceKind, "link"> | null;
+}
+
 /**
- * Where an open starts. The node step is skipped when the request names a node
- * that can take projects, or when only one node can; a `link` needs the project
- * it links (`linkAvailable`) and otherwise opens on the sources.
+ * Where an open starts. A request that names a node opens past the node step
+ * when that node can take projects (and on the node step when it can't). Without
+ * one, the node is preselected: the only node that can take projects, else the
+ * node of what the user is looking at (`contextNodeId`: the thread or project on
+ * screen), else the one they last added a project on. A preselected node opens
+ * on the Source step, with the requested source, else the last used one,
+ * preselected; the stepper's node pill still goes back to pick another. A
+ * requested `folder` or `link` goes straight to the folder; a `link` needs the
+ * project it links (`linkAvailable`) and otherwise opens on the sources. A link
+ * is about another node than the project's, so it preselects no node by context.
  */
 export function resolveAddProjectStart(input: {
   readonly request: AddProjectDialogRequest | null;
   readonly nodes: ReadonlyArray<NodeCatalogEntry>;
   readonly linkAvailable: boolean;
+  /** The node of the thread or project on screen. */
+  readonly contextNodeId?: EnvironmentId | null | undefined;
+  readonly lastUsed?: AddProjectLastUsed | null | undefined;
 }): AddProjectStart {
   const mode = input.request?.mode ?? null;
   const kind = mode === "link" && !input.linkAvailable ? null : mode;
   const selectable = addProjectSelectableNodes(input.nodes);
+  const canTake = (environmentId: EnvironmentId | null): environmentId is EnvironmentId =>
+    environmentId !== null && selectable.some((node) => node.environmentId === environmentId);
   const requested = input.request?.environmentId ?? null;
+  if (requested !== null) {
+    // A node the request names is never swapped for another.
+    return canTake(requested)
+      ? { nodeId: requested, step: addProjectStepForKind(kind), kind }
+      : { nodeId: null, step: 0, kind };
+  }
+  const lastUsed = input.lastUsed ?? null;
+  const contextNodeId = input.contextNodeId ?? null;
+  const lastNodeId = lastUsed?.nodeId ?? null;
   const nodeId =
-    requested !== null && selectable.some((node) => node.environmentId === requested)
-      ? requested
-      : selectable.length === 1
-        ? selectable[0]!.environmentId
-        : null;
+    selectable.length === 1
+      ? selectable[0]!.environmentId
+      : mode === "link"
+        ? null
+        : canTake(contextNodeId)
+          ? contextNodeId
+          : canTake(lastNodeId)
+            ? lastNodeId
+            : null;
   if (nodeId === null) return { nodeId: null, step: 0, kind };
-  return { nodeId, step: addProjectStepForKind(kind), kind };
+  if (kind !== null) return { nodeId, step: addProjectStepForKind(kind), kind };
+  // A remembered source is preselected on the Source step, not taken: the user confirms it.
+  return { nodeId, step: 1, kind: lastUsed?.kind ?? null };
 }
 
 /* ───────── Labels ───────── */

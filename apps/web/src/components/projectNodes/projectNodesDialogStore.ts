@@ -49,6 +49,7 @@ export type CopyProjectDialogOrigin =
   | "kebab"
   | "projects-page"
   | "selector"
+  | "palette"
   | "add-project"
   | "devices-section";
 

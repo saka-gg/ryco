@@ -5,6 +5,7 @@
 //        node catalog's; nothing here connects to, wakes or retains a node.
 
 import type { EnvironmentId } from "@ryco/contracts";
+import type { NodePathHints } from "@ryco/contracts/project-copy";
 import { useMemo, useSyncExternalStore } from "react";
 
 import { useNodeCatalog } from "../environments/nodeCatalog";
@@ -20,6 +21,8 @@ import {
 } from "../platform/desktopWorkspace";
 import { withDirectDesktopExecutionMachine } from "../platform/desktopWorkspaceTarget";
 import { buildProjectCheckoutOptions } from "../projectCheckouts.logic";
+import { defaultQueryClient } from "../rpc/queryClient";
+import { nodePathHintsQueryKey } from "./projectNodes/nodePathQueries";
 import {
   buildProjectSelectorProjects,
   checkoutUnavailableReason,
@@ -28,6 +31,17 @@ import {
 } from "./ProjectSwitcher.logic";
 
 const NO_PROJECTS: ReadonlyArray<ProjectSelectorProject> = [];
+
+/**
+ * A node's home directory from its path hints when a picker or dialog already
+ * read them; this never asks the node.
+ */
+function cachedHomeDirectory(environmentId: EnvironmentId): string | null {
+  return (
+    defaultQueryClient.getQueryData<NodePathHints>(nodePathHintsQueryKey(environmentId))
+      ?.homeDirectory ?? null
+  );
+}
 
 // The hosted workspace republishes about every 100 ms while threads stream;
 // its status and machine list keep their identity across those republishes,
@@ -113,6 +127,7 @@ export function useProjectSelectorProjects(input: {
     };
     return buildProjectSelectorProjects({
       options: buildProjectCheckoutOptions(snapshots),
+      homeDirectoryOf: cachedHomeDirectory,
       resolveNode: (option): ProjectSelectorNode | null => {
         const node = nodeById.get(option.environmentId);
         if (hosted) {
