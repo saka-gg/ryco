@@ -533,7 +533,7 @@ const TIER_PREVIEW_OPTIONS: ReadonlyArray<{
  * root `data-tier` attribute; it never touches `prefers-color-scheme`,
  * `display-mode`, reduced motion, PWA lifecycle, or capability logic.
  */
-function TierPreviewSection() {
+export function TierPreviewSection() {
   const override = useTierOverrideStore((state) => state.override);
   const setOverride = useTierOverrideStore((state) => state.setOverride);
   const tier = usePresentationTier();

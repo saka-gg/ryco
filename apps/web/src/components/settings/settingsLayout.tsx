@@ -1,6 +1,14 @@
 import { useSettingsEditingScope } from "../../settingsTarget";
 import { AlertCircleIcon, InfoIcon, TriangleAlertIcon, Undo2Icon } from "lucide-react";
-import { type ComponentPropsWithoutRef, type ReactNode, useEffect, useRef, useState } from "react";
+import {
+  type ComponentPropsWithoutRef,
+  createContext,
+  type ReactNode,
+  useContext,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
 
 import { createVisibilityAwarePoller } from "../../lib/visibilityPolling";
 import { webAppLifecycle } from "../../platform/appLifecycle";
@@ -88,6 +96,38 @@ export function useRelativeLabelTick(instantsMs: ReadonlyArray<number | undefine
   }, [instantsKey]);
   return nowMs;
 }
+
+/** A small label beside a title: where a row is stored, or what a section edits. */
+export function SettingsChip({
+  icon,
+  children,
+  className,
+}: {
+  icon?: ReactNode;
+  children: ReactNode;
+  className?: string;
+}) {
+  return (
+    <span
+      data-slot="settings-chip"
+      className={cn(
+        "inline-flex shrink-0 items-center gap-1 rounded-full bg-muted px-1.5 py-px text-[10.5px] font-medium leading-4 text-muted-foreground [&_svg]:size-2.5",
+        className,
+      )}
+    >
+      {icon}
+      {children}
+    </span>
+  );
+}
+
+const SettingsRowChipContext = createContext<ReactNode>(null);
+/**
+ * A chip every row below shows beside its title. The settings page marks rows
+ * stored on a device "Per device" this way, in sections that mix them with
+ * this app's rows.
+ */
+export const SettingsRowChipProvider = SettingsRowChipContext.Provider;
 
 export function SettingsSection({
   title,
@@ -181,6 +221,7 @@ export function SettingsRow({
   className?: string;
 }) {
   const editingScope = useSettingsEditingScope();
+  const chip = useContext(SettingsRowChipContext);
   if (owner && editingScope !== "all" && editingScope !== owner) return null;
   return (
     <div
@@ -198,6 +239,7 @@ export function SettingsRow({
         <div className="min-w-0 flex-1">
           <div className="flex min-h-5 min-w-0 items-center gap-1">
             <h3 className="min-w-0 text-[13px] font-medium leading-5 text-foreground">{title}</h3>
+            {chip}
             {resetAction ? (
               <span className="inline-flex shrink-0 items-center">{resetAction}</span>
             ) : null}

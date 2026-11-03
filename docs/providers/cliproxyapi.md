@@ -16,7 +16,7 @@ its own; see [Route a provider through the hub](#route-a-provider-through-the-hu
 2. If Ryco's node runs on another machine than the hub, enable remote management on the hub
    (`allow-remote: true`). Localhost needs no change. Every request carries the management key, so
    reach remote hubs over `https://` or a private network such as Tailscale.
-3. In Ryco, open **Settings → Providers → CLIProxyAPI hubs → Add hub**. Enter the hub URL (for
+3. In Ryco, open **Settings → Providers & models → CLIProxyAPI hubs → Add hub**. Enter the hub URL (for
    example `http://127.0.0.1:8317`), the management key and an optional label. **Test connection**
    checks the URL and key without saving.
 

@@ -52,7 +52,7 @@ Ryco works with the platforms your team already uses:
 
 - Click a pull request or merge request link in a chat message and it opens on the **Pull requests** page when its repository is one of your projects, on a machine that is connected. A link to the Files, Checks or Commits view opens that tab.
 - Cmd-click or Ctrl-click (or any click with a modifier), a link to one comment, and a link to a repository you have not added open in the browser as before.
-- To always open links in the browser, set **Settings → Source control → Pull request links in chat** to **Browser**. The setting belongs to this browser or app.
+- To always open links in the browser, set **Settings → Git & pull requests → Pull request links in chat** to **Browser**. The setting belongs to this browser or app.
 - Ryco matches the link with the remote your project's pull request numbers come from (`upstream`, else `origin`, else the first remote by name), so a fork opens only the links of the repository it tracks.
 
 **Pull requests that need you, across repositories**
@@ -87,7 +87,7 @@ Ryco works with the platforms your team already uses:
 
 **Use Jira as a work-item system**
 
-- Add a Jira token from **Settings → Source Control → Atlassian Workflow**
+- Add a Jira token from **Settings → Git & pull requests → Atlassian Workflow**
 - Link a project to Jira project keys from the project settings panel
 - Browse Jira work items in the project explorer's **Jira** tab
 - View details, add/edit comments, update supported fields, and move work items through available transitions
@@ -115,7 +115,7 @@ Run a quick **Rescan** after setting up a new machine or changing credentials.
    ```bash
    gh auth login
    ```
-3. Open **Settings → Source Control** in Ryco and verify GitHub shows as authenticated
+3. Open **Settings → Git & pull requests** in Ryco and verify GitHub shows as authenticated
 
 That's it—you can now clone, publish, and create pull requests.
 
@@ -177,7 +177,7 @@ the reads Ryco makes by itself are rationed:
    ```bash
    glab auth login
    ```
-3. Check **Settings → Source Control** to confirm the connection
+3. Check **Settings → Git & pull requests** to confirm the connection
 
 ### For Bitbucket
 
@@ -193,14 +193,14 @@ For environment-variable setup:
    ```
 3. Restart Ryco and verify the connection in **Source Control settings**
 
-For in-app setup, open **Settings → Source Control → Atlassian Workflow** and save a Bitbucket token.
+For in-app setup, open **Settings → Git & pull requests → Atlassian Workflow** and save a Bitbucket token.
 
 ### For Jira Cloud
 
 Jira currently uses manual Atlassian API tokens.
 
 1. Create an Atlassian API token for the Jira account you want Ryco to use.
-2. Open **Settings → Source Control → Atlassian Workflow**.
+2. Open **Settings → Git & pull requests → Atlassian Workflow**.
 3. Save a Jira token with your Jira site URL, account email, and API token.
 4. Open a project's settings panel and link the Jira connection plus one or more Jira project keys.
 5. Use the project explorer's **Jira** tab to browse, search, update, comment on, and transition work items.
@@ -223,7 +223,7 @@ Choose one of the following setup methods.
    fj auth list
    fj -H codeberg.org whoami
    ```
-4. Restart Ryco and open **Settings → Source Control → Rescan**. Forgejo should show the account and host, for example `saka on codeberg.org`.
+4. Restart Ryco and open **Settings → Git & pull requests → Rescan**. Forgejo should show the account and host, for example `saka on codeberg.org`.
 
 Ryco looks for `fj` credentials in the standard Forgejo CLI data locations, including:
 

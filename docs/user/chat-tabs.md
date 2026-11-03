@@ -4,7 +4,7 @@ On desktop and in the browser, every chat you open gets a tab in the chat header
 The tabs take the place of the chat's title, after the project name. They stay until you close
 them, also across reloads. `Cmd` below is `Ctrl` on Windows and Linux.
 
-Turn them off in **Settings > Appearance > Open chat tabs**. The phone layout and the iPhone app
+Turn them off in **Settings > Chat & composer > Tabs > Open chat tabs**. The phone layout and the iPhone app
 have no tabs.
 
 ## What a tab shows

@@ -80,7 +80,7 @@ downgrades a binary over a database a newer one migrated.
 
 ### Copying Ryco's data into Ryco Nightly
 
-In the app: **Settings → General → About → Ryco Nightly**. On Ryco (macOS) it finds Ryco Nightly in
+In the app: **Settings → Updates → This app → Ryco Nightly**. On Ryco (macOS) it finds Ryco Nightly in
 `/Applications` or `~/Applications` (only a real bundle whose `Info.plist` names
 `com.laurinfrank.ryco.nightly`), and offers **Open Ryco Nightly** and **Copy my data and open**
 (refused while Nightly's node runs or when the two data folders overlap, after a confirmation).

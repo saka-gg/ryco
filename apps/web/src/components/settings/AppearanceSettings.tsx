@@ -84,19 +84,22 @@ import { DiffAppearanceSettings } from "./DiffAppearanceSettings";
 import { WindowTranslucencySettings } from "./WindowTranslucencySettings";
 import { ThemePreview } from "./ThemePreview";
 import { ThemeEditor } from "./ThemeEditor";
+import { TimeFormatSetting } from "./TimeFormatSetting";
 
 export function AppearanceSettingsPanel({
-  surface = "node",
+  surface = "phone",
 }: {
   /**
    * Which product is showing this panel.
    *
-   * `hub` is the account site's subset of browser-local appearance controls.
-   * Both surfaces persist on this client only; no appearance preference is a
-   * remote node setting. Workspace-specific controls are available from this
-   * browser/app's settings while viewing a workspace.
+   * `settings` is the settings page, which shows diff style under Git & pull
+   * requests and open chat tabs under Chat & composer, and the time format
+   * here. `phone` is the frozen phone tier's Appearance as it shipped. `hub` is
+   * the account site's subset of browser-local appearance controls. Every
+   * surface persists on this client only; no appearance preference is a remote
+   * node setting.
    */
-  readonly surface?: "node" | "hub";
+  readonly surface?: "settings" | "phone" | "hub";
 } = {}) {
   // Uncompiled on purpose: this panel reads theme and appearance state from
   // module storage during render (`getAllThemes()`,
@@ -105,6 +108,7 @@ export function AppearanceSettingsPanel({
   // appears. Babel's React Compiler never compiled it either.
   "use no memo";
   const isHub = surface === "hub";
+  const isSettingsPage = surface === "settings";
   // The frozen phone tier keeps the comfortable chat width, so it does not offer the setting.
   const isPhoneTier = usePresentationTier() === "phone";
   const {
@@ -587,7 +591,7 @@ export function AppearanceSettingsPanel({
         )}
       </SettingsSection>
 
-      {!isHub && <DiffAppearanceSettings />}
+      {!isHub && !isSettingsPage && <DiffAppearanceSettings />}
       <SettingsSection title="Typography">
         <SettingsRow
           title="Interface font"
@@ -707,7 +711,8 @@ export function AppearanceSettingsPanel({
       </SettingsSection>
       <SettingsSection title="Interface">
         {isHub || isPhoneTier ? null : <ChatWidthSetting />}
-        {isHub || isPhoneTier ? null : <OpenChatTabsSetting />}
+        {isHub || isPhoneTier || isSettingsPage ? null : <OpenChatTabsSetting />}
+        {isSettingsPage ? <TimeFormatSetting /> : null}
         <SettingsRow
           title="Primary color"
           description="Theme palettes control buttons by default; enable a custom color to pin one app accent."

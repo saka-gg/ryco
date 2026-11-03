@@ -6,7 +6,7 @@ Ryco's macOS Computer Use beta ports Synara 0.9.1's Cua runtime, native input me
 
 ## Start a task
 
-1. Enable **Private Agent Control** in **Settings → Integrations** for the local desktop environment.
+1. Enable **Private Agent Control** in **Settings → Agent Control** for the local desktop environment.
 2. In **Computer Use Beta**, choose **Set up Computer**. The guide checks Accessibility, Input Monitoring, then Screen Recording against the running app bundle. Grant permissions yourself in System Settings. Setup never sends a queued prompt.
 3. Send `/computer-use` followed by the task. An empty command stays in the composer. For subsequent human tasks, optionally turn on **Enable Computer by default**; this is separate from one-shot invocation.
 4. Use **Stop** in the preview to end Computer authority for the task. Hiding the preview only stops its capture subscription. Physical **Escape** interrupts the current input and requires a fresh observation before another action.

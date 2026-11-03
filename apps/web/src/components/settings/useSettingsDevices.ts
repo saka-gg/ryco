@@ -1,9 +1,7 @@
 import {
-  EnvironmentId,
   type DesktopWorkspaceMachineProjection,
   type EnvironmentId as EnvironmentIdType,
 } from "@ryco/contracts";
-import type { ReactElement } from "react";
 import { isSavedEnvironmentSwitchedOff } from "@ryco/client-runtime/connection";
 
 import { useDeviceName } from "../../deviceName";
@@ -14,18 +12,14 @@ import {
   useSavedEnvironmentRuntimeStore,
 } from "../../environments/runtime";
 import { useHostedHubStore } from "../../hostedHub/state";
-import { preloadableLazy, useLazyComponentReady } from "../../lib/preloadableLazy";
 import { useDesktopWorkspaceState } from "../../platform/desktopWorkspace";
 import { useSettingsDialogStore } from "../../settingsDialogStore";
-import { DeviceIcon } from "../DeviceIcon";
 import { useHostedConnectionActions } from "../hostedHub/HostedConnectionControls";
 import { nodeSelectionBlocked, selectableNodes } from "../hostedHub/HostedNodeDisplay.logic";
-import { Menu, MenuPopup, MenuRadioGroup, MenuRadioItem, MenuTrigger } from "../ui/menu";
-import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
-import { settingsNodeStatus, type SettingsNodeStatus } from "./SettingsScopeSentence.logic";
+import { settingsNodeStatus, type SettingsNodeStatus } from "./settingsDevices.logic";
 
-/** A device whose settings the settings page can show. */
-export interface SettingsNodeChoice {
+/** A device the settings page can show: a nav item, and a choice of the device bar. */
+export interface SettingsDeviceChoice {
   readonly environmentId: EnvironmentIdType;
   readonly label: string;
   /** Hosted: the directory's own rule for opening a node does not allow it now. */
@@ -33,9 +27,9 @@ export interface SettingsNodeChoice {
   readonly status: SettingsNodeStatus | null;
 }
 
-/** The devices settings can switch to, the one shown, and how to switch. */
-export interface SettingsNodeMenuModel {
-  readonly choices: ReadonlyArray<SettingsNodeChoice>;
+/** The devices settings can show, the one shown, and how to switch. */
+export interface SettingsDevicesModel {
+  readonly choices: ReadonlyArray<SettingsDeviceChoice>;
   readonly value: EnvironmentIdType | null;
   readonly select: (environmentId: EnvironmentIdType) => void;
 }
@@ -62,22 +56,14 @@ function readSavedConnectionStates(key: string): ReadonlyMap<string, SavedConnec
   );
 }
 
-/** Loaded only for a long list, which few people have. */
-const SettingsNodeCombobox = preloadableLazy(() =>
-  import("./SettingsNodeCombobox").then((module) => module.SettingsNodeCombobox),
-);
-
-/** T3 Code's threshold: more choices than this get a searchable list. */
-const SEARCHABLE_CHOICES_ABOVE = 6;
-
 export const SETTINGS_NODE_STATUS_LABELS: Record<SettingsNodeStatus, string> = {
   offline: "Offline",
   connecting: "Connecting",
 };
 
 /**
- * The one list of devices the settings page offers, for every menu that
- * switches it (the nav header and the scope sentence): the primary, then every
+ * The one list of devices the settings page offers, for the nav's device items
+ * and the device bar: the primary, then every
  * node a hosted browser may open, or the saved environments and the Desktop
  * workspace's machines, and the device shown. Choosing one moves the settings
  * target; in hosted mode it moves the selection cursor the rest of the hosted
@@ -85,14 +71,14 @@ export const SETTINGS_NODE_STATUS_LABELS: Record<SettingsNodeStatus, string> = {
  * target. A hosted choice waits for a current directory and a revalidated
  * browser, as the directory's rows do.
  */
-export function useSettingsNodeMenu(input: {
+export function useSettingsDevices(input: {
   readonly targetEnvironmentId: EnvironmentIdType | null;
   readonly targetLabel: string;
   readonly targetConnected: boolean;
   readonly targetMachine: DesktopWorkspaceMachineProjection | null;
   /** Runs before every switch, e.g. to clear a search. */
   readonly onSelect?: () => void;
-}): SettingsNodeMenuModel {
+}): SettingsDevicesModel {
   const hosted = isHostedHubMode();
   const primaryEnvironment = usePrimaryEnvironmentDescriptor();
   const primaryDeviceName = useDeviceName();
@@ -202,86 +188,4 @@ export function useSettingsNodeMenu(input: {
       if (node) void switchNodeInPlace(node);
     },
   };
-}
-
-function ChoiceLabel({ choice }: { readonly choice: SettingsNodeChoice }) {
-  return (
-    <span className="flex min-w-0 flex-1 items-center gap-2">
-      <DeviceIcon
-        environmentId={choice.environmentId}
-        label={choice.label}
-        className="size-3.5 shrink-0"
-      />
-      <span className="min-w-0 flex-1 truncate">{choice.label}</span>
-      {choice.status ? (
-        <span className="shrink-0 text-xs text-muted-foreground">
-          {SETTINGS_NODE_STATUS_LABELS[choice.status]}
-        </span>
-      ) : null}
-    </span>
-  );
-}
-
-/**
- * Switches the device whose settings the page shows, from the one list in
- * {@link useSettingsNodeMenu}. More than six devices get a search field
- * (`SettingsNodeCombobox`) once it has loaded; until then, the plain menu.
- */
-export function SettingsNodeMenu(props: {
-  readonly model: SettingsNodeMenuModel;
-  /** The button that opens the menu. */
-  readonly trigger: ReactElement;
-  readonly tooltip?: string;
-  readonly tooltipSide?: "top" | "right" | "bottom";
-}) {
-  const { model } = props;
-  const searchable = model.choices.length > SEARCHABLE_CHOICES_ABOVE;
-  // A failed load keeps the plain menu: Settings must never lose its way to switch device.
-  const searchReady = useLazyComponentReady(SettingsNodeCombobox, searchable, {
-    onLoadError: () => {},
-  });
-  const trigger = <MenuTrigger render={props.trigger} />;
-  const opener = props.tooltip ? (
-    <Tooltip>
-      <TooltipTrigger render={trigger} />
-      <TooltipPopup side={props.tooltipSide ?? "top"}>{props.tooltip}</TooltipPopup>
-    </Tooltip>
-  ) : (
-    trigger
-  );
-
-  // The plain menu works until the search field has loaded, and stays if it never does.
-  if (searchable && searchReady) {
-    return (
-      <SettingsNodeCombobox
-        model={model}
-        trigger={props.trigger}
-        tooltip={props.tooltip}
-        tooltipSide={props.tooltipSide}
-        renderChoice={(choice) => <ChoiceLabel choice={choice} />}
-      />
-    );
-  }
-
-  return (
-    <Menu>
-      {opener}
-      <MenuPopup align="start" className="min-w-52">
-        <MenuRadioGroup
-          value={model.value ?? ""}
-          onValueChange={(value) => model.select(EnvironmentId.make(String(value)))}
-        >
-          {model.choices.map((choice) => (
-            <MenuRadioItem
-              key={choice.environmentId}
-              value={choice.environmentId}
-              disabled={choice.disabled}
-            >
-              <ChoiceLabel choice={choice} />
-            </MenuRadioItem>
-          ))}
-        </MenuRadioGroup>
-      </MenuPopup>
-    </Menu>
-  );
 }

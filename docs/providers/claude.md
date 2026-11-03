@@ -253,7 +253,7 @@ configuration steps: <https://github.com/musistudio/claude-code-router>.
 
 CLIProxyAPI pools several Claude Code subscriptions behind one proxy. Route a Claude provider
 through it with the same environment variables as a router, and connect the hub itself under
-Settings → Providers → CLIProxyAPI hubs to see each subscription's usage on Statistics → Limits.
+Settings → Providers & models → CLIProxyAPI hubs to see each subscription's usage on Statistics → Limits.
 See [CLIProxyAPI hubs](./cliproxyapi.md). A Claude provider routed through the hub offers no sign-in
 from Settings: its accounts sign in on the hub.
 
@@ -404,7 +404,7 @@ context has dropped to 65% or below and climbed back to 80%.
 
 ### Choosing How An Instance Compacts
 
-Each Claude instance has two settings for this in Settings → Providers:
+Each Claude instance has two settings for this in Settings → Providers & models:
 
 - **Automatic compaction.** _At 80% between turns (Ryco)_, the default, is the behavior described
   above. _When Claude Code decides_ turns Ryco's compaction off for the instance: Ryco never sends
@@ -448,7 +448,7 @@ RYCO_CLAUDE_NATIVE_PROBE=1 bun run --cwd apps/server test -- src/provider/claude
 ## Steering A Running Turn
 
 A message you send while a Claude turn runs can steer that turn instead of waiting in the queue.
-Choose the default in Settings → Composer controls → Messages sent while a turn runs: Queue (the
+Choose the default in Settings → Chat & composer → Composer controls → Messages sent while a turn runs: Queue (the
 default) or Steer. While a turn runs, the opposite shortcut sends one message the other way: ⌘↵ /
 Ctrl+Enter, or ⇧⌘↵ / Ctrl+Shift+Enter when your Send shortcut is one of the ⌘↵ options (see
 [Send shortcut](../user/composer.md#send-shortcut)). Each queued row also has a Steer button.

@@ -214,12 +214,14 @@ function fireStackSample() {
   });
 }
 
-export function NotificationsTestSection() {
+export function NotificationsTestSection({
+  title = "Notifications",
+}: { readonly title?: string } = {}) {
   const [presetValue, setPresetValue] = useState<string>(PRESETS[0]?.value ?? "");
   const preset = PRESETS.find((entry) => entry.value === presetValue) ?? PRESETS[0];
 
   return (
-    <SettingsSection title="Notifications">
+    <SettingsSection title={title}>
       <SettingsRow
         title="Test notification"
         description="Preview the notification design with realistic samples. Nothing is sent or changed."

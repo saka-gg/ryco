@@ -1,48 +1,31 @@
-import type { SettingsSectionId } from "../../settingsDialogStore";
 import type { SettingsEditingScope, SettingsTarget } from "../../settingsTarget";
+import {
+  settingsSection,
+  type PhoneSettingsSectionId,
+  type SettingsPageSectionId,
+  type SettingsStorage,
+} from "./settingsRegistry";
 
 /**
- * Which settings sections a reader can actually open, as one predicate.
+ * Who may open which part of settings, as one set of predicates.
  *
- * IT LIVES HERE RATHER THAN IN `SettingsPage.tsx` BECAUSE IT HAS A THIRD
- * CALLER. The desktop dialog and the phone surface filter their navs with it,
- * and `HostedE2eeVerification` now asks the same question before it draws a
- * sentence that sends a reader to Settings → Security (docs/relay-e2ee-protocol
- * §13.5's accompanying text). That component sits in the eagerly loaded shell
- * and the settings page is deliberately behind a dynamic import
- * (`perf/webBundleSplitting.test.ts`), so importing the predicate from the
- * dialog would have pulled the dialog into the app entry to answer a question
- * about copy. This module imports nothing but a type.
+ * IT LIVES HERE RATHER THAN IN `SettingsPage.tsx` BECAUSE IT HAS CALLERS
+ * OUTSIDE THE PAGE. The settings page, the command palette and the phone
+ * surface filter with it, and `HostedE2eeVerification` asks the same question
+ * before it draws a sentence that sends a reader to a device's Security
+ * (docs/relay-e2ee-protocol §13.5's accompanying text). That component sits in
+ * the eagerly loaded shell and the settings page is deliberately behind a
+ * dynamic import (`perf/webBundleSplitting.test.ts`), so this module imports
+ * only the pure section registry.
+ *
+ * Sections mix where their rows are stored, so the gate is per part
+ * ({@link SettingsStorage}): this app's rows stay reachable for every reader,
+ * and rows stored on a device follow the reader's role on that device.
  */
 
 /** The role a hosted grant carries, or `null` when no fresh snapshot exists. */
 export type HostedSettingsRole = "viewer" | "operator" | "owner" | null;
 export type SettingsScope = "browser" | "device" | "account" | "node" | "mixed";
-
-const SETTINGS_SCOPE_BY_SECTION = {
-  account: "account",
-  general: "mixed",
-  inbox: "browser",
-  providers: "node",
-  "opinionated-plugins": "node",
-  "mcp-servers": "node",
-  integrations: "mixed",
-  "computer-use": "device",
-  appearance: "browser",
-  keybindings: "browser",
-  "source-control": "mixed",
-  connections: "device",
-  // This app's own updater and every device it reaches, never one node's settings.
-  updates: "device",
-  security: "node",
-  diagnostics: "node",
-  statistics: "node",
-  archived: "node",
-} as const satisfies Record<SettingsSectionId, SettingsScope>;
-
-export function settingsSectionScope(section: SettingsSectionId): SettingsScope {
-  return SETTINGS_SCOPE_BY_SECTION[section];
-}
 
 export function settingsScopeLabel(
   scope: SettingsScope,
@@ -59,69 +42,6 @@ export function settingsScopeLabel(
   if (scope === "account") return "Hub account";
   if (scope === "mixed") return `${app} + ${device}`;
   return app;
-}
-
-/**
- * Sections that exist only in the hosted client. Account management is one:
- * there is no Hub account to manage in the standard (local-server) mode, so the
- * section is filtered out entirely rather than rendered empty.
- *
- * Still hosted-only even though the hosted client no longer opens this dialog on
- * it — see `hostedSettingsSectionAllowed`. The two gates answer different
- * questions: this one is "does the section exist in this build", which has not
- * changed, and that one is "does the hosted client route here", which has.
- */
-export const DESKTOP_ONLY_SETTINGS_SECTIONS: ReadonlySet<SettingsSectionId> = new Set([
-  "computer-use",
-]);
-
-const HOSTED_ONLY_SECTIONS: ReadonlySet<SettingsSectionId> = new Set(["account"]);
-
-const HOSTED_OWNER_SECTIONS = new Set<SettingsSectionId>([
-  "general",
-  "inbox",
-  "providers",
-  "opinionated-plugins",
-  "mcp-servers",
-  "integrations",
-  "computer-use",
-  "source-control",
-  // Node-scoped and owner-only, like the rest of this set. In hosted mode the
-  // node's operator routes are unreachable anyway (the relay carries `ryco.rpc`
-  // and there is no HTTP tunnel), so the section renders this browser's own
-  // channel and says where the node-side state lives — but the gate stays
-  // closed for non-owners rather than relying on that.
-  "security",
-  "diagnostics",
-  "statistics",
-]);
-
-export function settingsSectionAvailable(
-  section: SettingsSectionId,
-  hosted: boolean,
-  desktop = false,
-): boolean {
-  if (DESKTOP_ONLY_SETTINGS_SECTIONS.has(section) && !desktop) return false;
-  return hosted || !HOSTED_ONLY_SECTIONS.has(section);
-}
-
-export function hostedSettingsSectionAllowed(
-  section: SettingsSectionId,
-  role: HostedSettingsRole,
-): boolean {
-  if (section === "connections") return false;
-  if (section === "appearance" || section === "keybindings") return true;
-  // Lists every device; whether one may be updated is each device's own owner
-  // check (the plan marks the rest skipped), not this node's role.
-  if (section === "updates") return true;
-  // Account management is a Hub page now, not a tab of this dialog, so the
-  // hosted client never opens the dialog on it. Kept closed rather than
-  // deleted: `SettingsSectionId` still carries the id, and a stale caller
-  // asking for it must not be answered with a section this dialog no longer
-  // renders in hosted mode.
-  if (section === "account") return false;
-  if (section === "archived") return role !== null;
-  return role === "owner" && HOSTED_OWNER_SECTIONS.has(section);
 }
 
 /**
@@ -151,48 +71,124 @@ export function hostedSettingsRoleSnapshot(
   return hostedSettingsRoleFresh(directoryStatus, transportStatus) ? role : null;
 }
 
+/** What decides whether a reader may open a part of settings. */
+export interface SettingsReach {
+  /** The hosted (Hub) client. */
+  readonly hosted: boolean;
+  /** The desktop app on this computer offers computer use. */
+  readonly desktopComputerUse: boolean;
+  /**
+   * The device the page shows, or null while none is known. `gated` is true when
+   * its role decides (hosted, or a device other than this app's own); `role` is
+   * already null while the hosted snapshot is stale ({@link hostedSettingsRoleSnapshot}).
+   */
+  readonly device: { readonly gated: boolean; readonly role: HostedSettingsRole } | null;
+}
+
 /**
- * Whether this build, in this mode, for this role, can open a section at all.
- *
- * The one composition every nav filter and every pointer at a section shares.
- * Written out at each call site it was three copies of the same two clauses,
- * and copy that names a destination ("Settings → Security explains what else
- * this tab cannot check") is exactly the kind of caller that drifts from a gate
- * it does not share.
+ * Whether a reader may open a part stored in `storage`. Rows on a device are
+ * owner-only wherever the role decides; archived threads are any role's to
+ * read; an unknown or stale role fails closed.
  */
-export function settingsSectionReachable(
-  section: SettingsSectionId,
-  {
-    hosted,
-    role,
-    desktop = false,
-  }: { readonly hosted: boolean; readonly role: HostedSettingsRole; readonly desktop?: boolean },
+export function settingsStorageReachable(storage: SettingsStorage, reach: SettingsReach): boolean {
+  switch (storage) {
+    case "app":
+      return true;
+    case "hub":
+      return reach.hosted;
+    case "desktop":
+      return !reach.hosted && reach.desktopComputerUse;
+    case "this-computer":
+      return !reach.hosted;
+    case "device":
+      return reach.device !== null && (!reach.device.gated || reach.device.role === "owner");
+    case "device-read":
+      return reach.device !== null && (!reach.device.gated || reach.device.role !== null);
+  }
+}
+
+/** Whether the nav lists a section: any of its parts is reachable. */
+export function settingsSectionListed(
+  section: SettingsPageSectionId,
+  reach: SettingsReach,
 ): boolean {
-  return (
-    settingsSectionAvailable(section, hosted, desktop) &&
-    (!hosted || hostedSettingsSectionAllowed(section, role))
+  return settingsSection(section).parts.some((storage) => settingsStorageReachable(storage, reach));
+}
+
+/** Whether a section shows the device bar: it has a reachable part stored on a device. */
+export function settingsSectionHasDeviceParts(
+  section: SettingsPageSectionId,
+  reach: SettingsReach,
+): boolean {
+  if (section === "device") return false;
+  return settingsSection(section).parts.some(
+    (storage) =>
+      (storage === "device" || storage === "device-read") &&
+      settingsStorageReachable(storage, reach),
   );
 }
 
-/** Destination filtering is separate from authorization and the frozen phone inventory. */
-export function settingsSectionInDestination(
-  section: SettingsSectionId,
-  scope: "client" | "node",
-  desktop: boolean,
+/** Whether every part of a section is this app's own ("This app" in its header). */
+export function settingsSectionAppOnly(section: SettingsPageSectionId): boolean {
+  return settingsSection(section).parts.every((storage) => storage === "app");
+}
+
+/**
+ * Where each section of the frozen web phone tier keeps its rows, for its gate
+ * ({@link settingsSectionReachable}). That tier is not extended (AGENTS.md); it
+ * keeps today's inventory and today's per-section gates, now read from the same
+ * storage rule the page uses.
+ */
+const PHONE_SECTION_STORAGE = {
+  account: "hub",
+  general: "device",
+  inbox: "device",
+  providers: "device",
+  "opinionated-plugins": "device",
+  "mcp-servers": "device",
+  appearance: "app",
+  keybindings: "app",
+  "source-control": "device",
+  connections: "this-computer",
+  security: "device",
+  statistics: "device",
+  archived: "device-read",
+  diagnostics: "device",
+} as const satisfies Record<PhoneSettingsSectionId, SettingsStorage>;
+
+/**
+ * Whether the frozen phone tier can open one of its sections. The Hub account
+ * is a Hub page, never a section of that sheet.
+ */
+export function settingsSectionReachable(
+  section: PhoneSettingsSectionId,
+  { hosted, role }: { readonly hosted: boolean; readonly role: HostedSettingsRole },
 ): boolean {
-  if (scope === "node")
-    return !["account", "appearance", "computer-use", "keybindings", "updates"].includes(section);
-  if (section === "integrations") return desktop;
-  return [
-    "general",
-    "inbox",
-    "appearance",
-    "keybindings",
-    "source-control",
-    "connections",
-    "updates",
-    "diagnostics",
-  ].includes(section);
+  if (section === "account") return false;
+  return settingsStorageReachable(PHONE_SECTION_STORAGE[section], {
+    hosted,
+    desktopComputerUse: false,
+    device: { gated: hosted, role },
+  });
+}
+
+/**
+ * Whether a reader can open a device's Security, the pointer §13.5's copy draws
+ * (`HostedE2eeVerification`). Hosted settings show the selected node, whose role
+ * is the shared snapshot.
+ */
+export function deviceSecurityReachable({
+  hosted,
+  role,
+}: {
+  readonly hosted: boolean;
+  readonly role: HostedSettingsRole;
+}): boolean {
+  return settingsStorageReachable("device", {
+    hosted,
+    desktopComputerUse: false,
+    device: { gated: hosted, role },
+  });
 }
 
 /**

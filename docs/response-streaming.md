@@ -1,6 +1,6 @@
 # Response streaming
 
-**Settings → General → Responses → Response streaming** chooses how a node delivers assistant
+**Settings → Chat & composer → Responses → Response streaming** chooses how a node delivers assistant
 text to every client while a reply streams. It is a node setting (`responseStreamingMode`), so
 web, desktop and the phone app all see the same thing.
 

@@ -374,8 +374,7 @@ describe("usage provider history", () => {
     await unpriced.getByRole("button", { name: "Set prices for claude-preview-y" }).click();
     expect(useSettingsDialogStore.getState()).toMatchObject({
       open: true,
-      section: "general",
-      editingScope: "node",
+      section: "usage",
       targetEnvironmentId: "fixture",
     });
     expect(useUsagePriceRowRequestStore.getState().request).toMatchObject({

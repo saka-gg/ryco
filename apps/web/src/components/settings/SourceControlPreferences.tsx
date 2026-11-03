@@ -59,203 +59,223 @@ function parseChangeRequestLinkTarget(value: string | null): ChangeRequestLinkTa
   return CHANGE_REQUEST_LINK_TARGET_OPTIONS.find((target) => target === value) ?? null;
 }
 
-export function SourceControlPreferences() {
+/** How the diff panel opens. Git & pull requests › Diffs on the settings page. */
+export function DiffDisplaySettings() {
   const settings = useSettings();
   const { updateSettings } = useUpdateSettings();
   const localScopeLabel = useAppPreferencesLabel();
   return (
-    <>
-      <SettingsSection title="Diff display">
-        <SettingsRow
-          title="Diff line wrapping"
-          description="Set the default wrap state when the diff panel opens."
-          scope={localScopeLabel}
-          resetAction={
-            settings.diffWordWrap !== DEFAULT_UNIFIED_SETTINGS.diffWordWrap ? (
-              <SettingResetButton
-                label="diff line wrapping"
-                onClick={() =>
-                  updateSettings({
-                    diffWordWrap: DEFAULT_UNIFIED_SETTINGS.diffWordWrap,
-                  })
-                }
-              />
-            ) : null
-          }
-          control={
-            <Switch
-              checked={settings.diffWordWrap}
-              onCheckedChange={(checked) => updateSettings({ diffWordWrap: Boolean(checked) })}
-              aria-label="Wrap diff lines by default"
-            />
-          }
-        />
-
-        <SettingsRow
-          title="Hide whitespace changes"
-          description="Set whether the diff panel ignores whitespace-only edits by default."
-          scope={localScopeLabel}
-          resetAction={
-            settings.diffIgnoreWhitespace !== DEFAULT_UNIFIED_SETTINGS.diffIgnoreWhitespace ? (
-              <SettingResetButton
-                label="diff whitespace changes"
-                onClick={() =>
-                  updateSettings({
-                    diffIgnoreWhitespace: DEFAULT_UNIFIED_SETTINGS.diffIgnoreWhitespace,
-                  })
-                }
-              />
-            ) : null
-          }
-          control={
-            <Switch
-              checked={settings.diffIgnoreWhitespace}
-              onCheckedChange={(checked) =>
-                updateSettings({ diffIgnoreWhitespace: Boolean(checked) })
+    <SettingsSection title="Diff display">
+      <SettingsRow
+        title="Diff line wrapping"
+        description="Set the default wrap state when the diff panel opens."
+        scope={localScopeLabel}
+        resetAction={
+          settings.diffWordWrap !== DEFAULT_UNIFIED_SETTINGS.diffWordWrap ? (
+            <SettingResetButton
+              label="diff line wrapping"
+              onClick={() =>
+                updateSettings({
+                  diffWordWrap: DEFAULT_UNIFIED_SETTINGS.diffWordWrap,
+                })
               }
-              aria-label="Hide whitespace changes by default"
             />
-          }
-        />
-      </SettingsSection>
-      <SettingsSection title="Git & pull requests">
-        <SettingsRow
-          title="Remote Git status"
-          description="Refresh remote branch and pull request metadata while a repository is open."
-          scope={localScopeLabel}
-          resetAction={
-            settings.gitStatusPollIntervalMs !==
-            DEFAULT_UNIFIED_SETTINGS.gitStatusPollIntervalMs ? (
-              <SettingResetButton
-                label="git status polling"
-                onClick={() =>
-                  updateSettings({
-                    gitStatusPollIntervalMs: DEFAULT_UNIFIED_SETTINGS.gitStatusPollIntervalMs,
-                  })
-                }
-              />
-            ) : null
-          }
-          control={
-            <Select
-              value={String(settings.gitStatusPollIntervalMs)}
-              onValueChange={(value) => {
-                const interval = parseGitStatusPollInterval(value);
-                if (interval !== null) {
-                  updateSettings({ gitStatusPollIntervalMs: interval });
-                }
-              }}
-            >
-              <SelectTrigger
-                size="sm"
-                className="w-full sm:w-40"
-                aria-label="Git status polling interval"
-              >
-                <SelectValue>
-                  {GIT_STATUS_POLL_INTERVAL_LABELS[settings.gitStatusPollIntervalMs]}
-                </SelectValue>
-              </SelectTrigger>
-              <SelectPopup align="end" alignItemWithTrigger={false}>
-                {GIT_STATUS_POLL_INTERVAL_OPTIONS.map((interval) => (
-                  <SelectItem key={interval} hideIndicator value={String(interval)}>
-                    {GIT_STATUS_POLL_INTERVAL_LABELS[interval]}
-                  </SelectItem>
-                ))}
-              </SelectPopup>
-            </Select>
-          }
-        />
+          ) : null
+        }
+        control={
+          <Switch
+            checked={settings.diffWordWrap}
+            onCheckedChange={(checked) => updateSettings({ diffWordWrap: Boolean(checked) })}
+            aria-label="Wrap diff lines by default"
+          />
+        }
+      />
 
-        <SettingsRow
-          title="PR & workflow updates"
-          description="Control automatic pull request and workflow refreshes. Automatic is fast after pushes and stops when checks settle."
-          scope={localScopeLabel}
-          resetAction={
-            settings.sourceControlRefreshMode !==
-            DEFAULT_UNIFIED_SETTINGS.sourceControlRefreshMode ? (
-              <SettingResetButton
-                label="PR and workflow updates"
-                onClick={() =>
-                  updateSettings({
-                    sourceControlRefreshMode: DEFAULT_UNIFIED_SETTINGS.sourceControlRefreshMode,
-                  })
-                }
-              />
-            ) : null
-          }
-          control={
-            <Select
-              value={settings.sourceControlRefreshMode}
-              onValueChange={(value) => {
-                const mode = parseSourceControlRefreshMode(value);
-                if (mode !== null) updateSettings({ sourceControlRefreshMode: mode });
-              }}
-            >
-              <SelectTrigger
-                size="sm"
-                className="w-full sm:w-40"
-                aria-label="PR and workflow update mode"
-              >
-                <SelectValue>
-                  {SOURCE_CONTROL_REFRESH_MODE_LABELS[settings.sourceControlRefreshMode]}
-                </SelectValue>
-              </SelectTrigger>
-              <SelectPopup align="end" alignItemWithTrigger={false}>
-                {SOURCE_CONTROL_REFRESH_MODE_OPTIONS.map((mode) => (
-                  <SelectItem key={mode} hideIndicator value={mode}>
-                    {SOURCE_CONTROL_REFRESH_MODE_LABELS[mode]}
-                  </SelectItem>
-                ))}
-              </SelectPopup>
-            </Select>
-          }
-        />
+      <SettingsRow
+        title="Hide whitespace changes"
+        description="Set whether the diff panel ignores whitespace-only edits by default."
+        scope={localScopeLabel}
+        resetAction={
+          settings.diffIgnoreWhitespace !== DEFAULT_UNIFIED_SETTINGS.diffIgnoreWhitespace ? (
+            <SettingResetButton
+              label="diff whitespace changes"
+              onClick={() =>
+                updateSettings({
+                  diffIgnoreWhitespace: DEFAULT_UNIFIED_SETTINGS.diffIgnoreWhitespace,
+                })
+              }
+            />
+          ) : null
+        }
+        control={
+          <Switch
+            checked={settings.diffIgnoreWhitespace}
+            onCheckedChange={(checked) =>
+              updateSettings({ diffIgnoreWhitespace: Boolean(checked) })
+            }
+            aria-label="Hide whitespace changes by default"
+          />
+        }
+      />
+    </SettingsSection>
+  );
+}
 
-        <SettingsRow
-          title="Pull request links in chat"
-          description="Open pull requests from repositories in Ryco on the Pull requests page. Cmd- or Ctrl-click always opens the browser."
-          scope={localScopeLabel}
-          resetAction={
-            settings.changeRequestLinkTarget !==
-            DEFAULT_UNIFIED_SETTINGS.changeRequestLinkTarget ? (
-              <SettingResetButton
-                label="pull request links"
-                onClick={() =>
-                  updateSettings({
-                    changeRequestLinkTarget: DEFAULT_UNIFIED_SETTINGS.changeRequestLinkTarget,
-                  })
-                }
-              />
-            ) : null
-          }
-          control={
-            <Select
-              value={settings.changeRequestLinkTarget}
-              onValueChange={(value) => {
-                const target = parseChangeRequestLinkTarget(value);
-                if (target !== null) updateSettings({ changeRequestLinkTarget: target });
-              }}
+/** Remote status, refreshes and pull request links in this app. */
+export function PullRequestPreferenceSettings({
+  title = "Git & pull requests",
+}: {
+  readonly title?: string;
+} = {}) {
+  const settings = useSettings();
+  const { updateSettings } = useUpdateSettings();
+  const localScopeLabel = useAppPreferencesLabel();
+  return (
+    <SettingsSection title={title}>
+      <SettingsRow
+        title="Remote Git status"
+        description="Refresh remote branch and pull request metadata while a repository is open."
+        scope={localScopeLabel}
+        resetAction={
+          settings.gitStatusPollIntervalMs !== DEFAULT_UNIFIED_SETTINGS.gitStatusPollIntervalMs ? (
+            <SettingResetButton
+              label="git status polling"
+              onClick={() =>
+                updateSettings({
+                  gitStatusPollIntervalMs: DEFAULT_UNIFIED_SETTINGS.gitStatusPollIntervalMs,
+                })
+              }
+            />
+          ) : null
+        }
+        control={
+          <Select
+            value={String(settings.gitStatusPollIntervalMs)}
+            onValueChange={(value) => {
+              const interval = parseGitStatusPollInterval(value);
+              if (interval !== null) {
+                updateSettings({ gitStatusPollIntervalMs: interval });
+              }
+            }}
+          >
+            <SelectTrigger
+              size="sm"
+              className="w-full sm:w-40"
+              aria-label="Git status polling interval"
             >
-              <SelectTrigger
-                size="sm"
-                className="w-full sm:w-40"
-                aria-label="Where pull request links open"
-              >
-                <SelectValue>
-                  {CHANGE_REQUEST_LINK_TARGET_LABELS[settings.changeRequestLinkTarget]}
-                </SelectValue>
-              </SelectTrigger>
-              <SelectPopup align="end" alignItemWithTrigger={false}>
-                {CHANGE_REQUEST_LINK_TARGET_OPTIONS.map((target) => (
-                  <SelectItem key={target} hideIndicator value={target}>
-                    {CHANGE_REQUEST_LINK_TARGET_LABELS[target]}
-                  </SelectItem>
-                ))}
-              </SelectPopup>
-            </Select>
-          }
-        />
-      </SettingsSection>
+              <SelectValue>
+                {GIT_STATUS_POLL_INTERVAL_LABELS[settings.gitStatusPollIntervalMs]}
+              </SelectValue>
+            </SelectTrigger>
+            <SelectPopup align="end" alignItemWithTrigger={false}>
+              {GIT_STATUS_POLL_INTERVAL_OPTIONS.map((interval) => (
+                <SelectItem key={interval} hideIndicator value={String(interval)}>
+                  {GIT_STATUS_POLL_INTERVAL_LABELS[interval]}
+                </SelectItem>
+              ))}
+            </SelectPopup>
+          </Select>
+        }
+      />
+
+      <SettingsRow
+        title="PR & workflow updates"
+        description="Control automatic pull request and workflow refreshes. Automatic is fast after pushes and stops when checks settle."
+        scope={localScopeLabel}
+        resetAction={
+          settings.sourceControlRefreshMode !==
+          DEFAULT_UNIFIED_SETTINGS.sourceControlRefreshMode ? (
+            <SettingResetButton
+              label="PR and workflow updates"
+              onClick={() =>
+                updateSettings({
+                  sourceControlRefreshMode: DEFAULT_UNIFIED_SETTINGS.sourceControlRefreshMode,
+                })
+              }
+            />
+          ) : null
+        }
+        control={
+          <Select
+            value={settings.sourceControlRefreshMode}
+            onValueChange={(value) => {
+              const mode = parseSourceControlRefreshMode(value);
+              if (mode !== null) updateSettings({ sourceControlRefreshMode: mode });
+            }}
+          >
+            <SelectTrigger
+              size="sm"
+              className="w-full sm:w-40"
+              aria-label="PR and workflow update mode"
+            >
+              <SelectValue>
+                {SOURCE_CONTROL_REFRESH_MODE_LABELS[settings.sourceControlRefreshMode]}
+              </SelectValue>
+            </SelectTrigger>
+            <SelectPopup align="end" alignItemWithTrigger={false}>
+              {SOURCE_CONTROL_REFRESH_MODE_OPTIONS.map((mode) => (
+                <SelectItem key={mode} hideIndicator value={mode}>
+                  {SOURCE_CONTROL_REFRESH_MODE_LABELS[mode]}
+                </SelectItem>
+              ))}
+            </SelectPopup>
+          </Select>
+        }
+      />
+
+      <SettingsRow
+        title="Pull request links in chat"
+        description="Open pull requests from repositories in Ryco on the Pull requests page. Cmd- or Ctrl-click always opens the browser."
+        scope={localScopeLabel}
+        resetAction={
+          settings.changeRequestLinkTarget !== DEFAULT_UNIFIED_SETTINGS.changeRequestLinkTarget ? (
+            <SettingResetButton
+              label="pull request links"
+              onClick={() =>
+                updateSettings({
+                  changeRequestLinkTarget: DEFAULT_UNIFIED_SETTINGS.changeRequestLinkTarget,
+                })
+              }
+            />
+          ) : null
+        }
+        control={
+          <Select
+            value={settings.changeRequestLinkTarget}
+            onValueChange={(value) => {
+              const target = parseChangeRequestLinkTarget(value);
+              if (target !== null) updateSettings({ changeRequestLinkTarget: target });
+            }}
+          >
+            <SelectTrigger
+              size="sm"
+              className="w-full sm:w-40"
+              aria-label="Where pull request links open"
+            >
+              <SelectValue>
+                {CHANGE_REQUEST_LINK_TARGET_LABELS[settings.changeRequestLinkTarget]}
+              </SelectValue>
+            </SelectTrigger>
+            <SelectPopup align="end" alignItemWithTrigger={false}>
+              {CHANGE_REQUEST_LINK_TARGET_OPTIONS.map((target) => (
+                <SelectItem key={target} hideIndicator value={target}>
+                  {CHANGE_REQUEST_LINK_TARGET_LABELS[target]}
+                </SelectItem>
+              ))}
+            </SelectPopup>
+          </Select>
+        }
+      />
+    </SettingsSection>
+  );
+}
+
+/** Both, as the frozen phone tier's General shows them. */
+export function SourceControlPreferences() {
+  return (
+    <>
+      <DiffDisplaySettings />
+      <PullRequestPreferenceSettings />
     </>
   );
 }

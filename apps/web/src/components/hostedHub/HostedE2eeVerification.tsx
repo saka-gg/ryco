@@ -11,7 +11,7 @@ import {
 } from "../../hostedHub/useWebE2eeSession";
 import {
   hostedSettingsRoleSnapshot,
-  settingsSectionReachable,
+  deviceSecurityReachable,
 } from "../settings/settingsSections.logic";
 import {
   E2EE_WEB_SAS_UNAVAILABLE,
@@ -40,10 +40,10 @@ import {
  * it is, rather than the long account.
  *
  * THAT POINTER IS A PROMISE ABOUT THE READER'S OWN SETTINGS DIALOG, so the
- * promise is checked before it is made. Settings → Security is owner-only in
+ * promise is checked before it is made. A node's Security in Settings is owner-only in
  * hosted mode and fails closed while the role snapshot is stale, and this
  * component has no role gate of its own — it draws for whoever is holding a
- * locked `web-unsigned` channel. Asking `settingsSectionReachable` the same
+ * locked `web-unsigned` channel. Asking `deviceSecurityReachable` the same
  * question the settings nav asks is what stops a viewer, an operator, or an
  * owner mid-reconnect being sent to a section that is not in their list; where
  * the answer is no they get the long form here instead, so §2.2's no-pin reason
@@ -115,7 +115,7 @@ function HostedE2eeVerificationView({
   // this reader's to open is asked of the shared role, whichever node's code
   // this is.
   const placement = hostedE2eeVerificationPlacement(
-    settingsSectionReachable("security", {
+    deviceSecurityReachable({
       hosted: isHostedHubMode(),
       role: hostedSettingsRoleSnapshot(hostedRole, directoryStatus, transportStatus),
     }),

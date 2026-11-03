@@ -10,6 +10,7 @@ import { selectArchivedSettingsGroups } from "./archivedSettings";
 import { OnboardingReplaySetting } from "../onboarding/OnboardingReplaySetting";
 import { SourceControlPreferences } from "./SourceControlPreferences";
 import { ComposerSettings } from "./ComposerSettings";
+import { TimeFormatSetting } from "./TimeFormatSetting";
 import { QuitShortcutSetting } from "./QuitShortcutSetting";
 import { ThreadNotificationSettings } from "./ThreadNotificationSettings";
 import { WindowCaptureSettings } from "./WindowCaptureSettings";
@@ -19,7 +20,7 @@ import { UsagePriceSettings } from "./UsagePriceSettings";
 import { ResponseStreamingSettings } from "./ResponseStreamingSettings";
 import { ApplyToAllNodes } from "./ApplyToAllNodes";
 import { ArchiveIcon, ArchiveX, MessageCircleDashedIcon } from "lucide-react";
-import { useCallback, useMemo, useState } from "react";
+import { useCallback, useMemo, useState, type ReactNode } from "react";
 import {
   ORCHESTRATION_WS_METHODS,
   EDITORS,
@@ -89,12 +90,6 @@ import { getEditorIcon, getEditorLabel } from "./SettingsPanels.editor";
 import { isNodeSettingsTargetReadOnly, settingsScopeLabel } from "./settingsSections.logic";
 import { useSettingsEditingScope, useSettingsTarget } from "../../settingsTarget";
 
-const TIMESTAMP_FORMAT_LABELS = {
-  locale: "System default",
-  "12-hour": "12-hour",
-  "24-hour": "24-hour",
-} as const;
-
 function EditorOptionIcon({ editor }: { editor: EditorId }) {
   const IconComponent = getEditorIcon(editor, navigator.platform);
   if (!IconComponent) return null;
@@ -152,13 +147,30 @@ function AboutBrandingHeader() {
   );
 }
 
-function AboutVersionSection({ scopeLabel }: { readonly scopeLabel: string }) {
+function UpdateTrackRow({ scopeLabel }: { readonly scopeLabel: string }) {
   const updateState = useDesktopUpdateState();
-
   const updateTrack = describeDesktopUpdateTrack({
     channel: updateState?.channel ?? "latest",
     currentVersion: updateState?.currentVersion ?? "",
   });
+  return (
+    <SettingsRow
+      title="Update track"
+      description={updateTrack.description}
+      scope={scopeLabel}
+      control={<span className="text-sm text-muted-foreground">{updateTrack.label}</span>}
+    />
+  );
+}
+
+function AboutVersionSection({
+  scopeLabel,
+  includeUpdateTrack,
+}: {
+  readonly scopeLabel: string;
+  readonly includeUpdateTrack: boolean;
+}) {
+  const updateState = useDesktopUpdateState();
 
   const handleButtonClick = useCallback(() => {
     const bridge = window.desktopBridge;
@@ -282,12 +294,7 @@ function AboutVersionSection({ scopeLabel }: { readonly scopeLabel: string }) {
           </Tooltip>
         }
       />
-      <SettingsRow
-        title="Update track"
-        description={updateTrack.description}
-        scope={scopeLabel}
-        control={<span className="text-sm text-muted-foreground">{updateTrack.label}</span>}
-      />
+      {includeUpdateTrack ? <UpdateTrackRow scopeLabel={scopeLabel} /> : null}
     </>
   );
 }
@@ -317,13 +324,142 @@ export function useSettingsRestore(onRestored?: () => void) {
   };
 }
 
-export function GeneralSettingsPanel() {
+/** The scope labels a General block's rows carry, for this app and the device shown. */
+function useGeneralScopeLabels() {
+  const settingsTarget = useSettingsTarget();
+  const appLabel = useAppPreferencesLabel();
+  const scopeOptions = {
+    appLabel,
+    nativeClient: isElectron,
+    nodeLabel: settingsTarget?.nodeLabel ?? null,
+  };
+  return {
+    local: settingsScopeLabel("browser", scopeOptions),
+    device: settingsScopeLabel("device", scopeOptions),
+    node: settingsScopeLabel("node", scopeOptions),
+  };
+}
+
+/** The editor that opens folders and files. Projects & worktrees on the settings page. */
+export function DefaultEditorSetting() {
   const settings = useSettings();
   const { updateSettings } = useUpdateSettings();
-  const isPhoneTier = usePresentationTier() === "phone";
+  const availableEditors = useServerAvailableEditors();
+  const localScopeLabel = useGeneralScopeLabels().local;
+  return (
+    <SettingsRow
+      title="Default editor"
+      description={
+        (availableEditors ?? []).length > 0
+          ? "Pin which editor opens directories and files. Auto uses your last selection from the Open menu."
+          : "No installed editors detected. Install a supported IDE to pick a default."
+      }
+      owner="client"
+      scope={localScopeLabel}
+      resetAction={
+        settings.preferredEditor !== DEFAULT_UNIFIED_SETTINGS.preferredEditor ? (
+          <SettingResetButton
+            label="default editor"
+            onClick={() =>
+              updateSettings({
+                preferredEditor: DEFAULT_UNIFIED_SETTINGS.preferredEditor,
+              })
+            }
+          />
+        ) : null
+      }
+      control={
+        <Select
+          value={settings.preferredEditor ?? "__auto__"}
+          onValueChange={(value) => {
+            if (value === "__auto__") {
+              updateSettings({ preferredEditor: null });
+              return;
+            }
+            const match = EDITORS.find((e) => e.id === value);
+            if (match) updateSettings({ preferredEditor: match.id as EditorId });
+          }}
+        >
+          <SelectTrigger size="sm" className="w-full sm:w-56" aria-label="Default editor">
+            {settings.preferredEditor ? (
+              <EditorOptionIcon editor={settings.preferredEditor} />
+            ) : null}
+            <SelectValue>
+              {settings.preferredEditor
+                ? getEditorLabel(settings.preferredEditor, navigator.platform)
+                : "Auto (last used)"}
+            </SelectValue>
+          </SelectTrigger>
+          <SelectPopup align="end" alignItemWithTrigger={false}>
+            <SelectItem hideIndicator value="__auto__">
+              <span className="inline-flex items-center gap-2">
+                <span aria-hidden="true" className="size-4" />
+                Auto (last used)
+              </span>
+            </SelectItem>
+            {EDITORS.filter(
+              (editor) =>
+                (availableEditors ?? []).includes(editor.id) &&
+                isEditorPreferenceEligible(editor.id),
+            ).map((editor) => (
+              <SelectItem key={editor.id} hideIndicator value={editor.id}>
+                <span className="inline-flex items-center gap-2">
+                  <EditorOptionIcon editor={editor.id} />
+                  {getEditorLabel(editor.id, navigator.platform)}
+                </span>
+              </SelectItem>
+            ))}
+          </SelectPopup>
+        </Select>
+      }
+    />
+  );
+}
+
+/** Whether the device checks its provider CLIs for updates. Updates on the settings page. */
+export function ProviderUpdateCheckSettings() {
+  const settings = useSettings();
+  const { updateSettings } = useUpdateSettings();
+  const nodeScopeLabel = useGeneralScopeLabels().node;
+  return (
+    <SettingsSection title="Provider updates" owner="node">
+      <SettingsRow
+        title="Provider update checks"
+        description="Check installed provider CLIs for newer versions. Disable if you install providers with Nix or another package manager."
+        owner="node"
+        scope={nodeScopeLabel}
+        resetAction={
+          settings.enableProviderUpdateChecks !==
+          DEFAULT_UNIFIED_SETTINGS.enableProviderUpdateChecks ? (
+            <SettingResetButton
+              label="provider update checks"
+              onClick={() =>
+                updateSettings({
+                  enableProviderUpdateChecks: DEFAULT_UNIFIED_SETTINGS.enableProviderUpdateChecks,
+                })
+              }
+            />
+          ) : null
+        }
+        control={
+          <Switch
+            checked={settings.enableProviderUpdateChecks}
+            onCheckedChange={(checked) =>
+              updateSettings({ enableProviderUpdateChecks: Boolean(checked) })
+            }
+            aria-label="Check providers for updates"
+          />
+        }
+      />
+    </SettingsSection>
+  );
+}
+
+/** Agent CPU priority on the device. A device page's Power on the settings page. */
+export function AgentProcessPrioritySettings() {
+  const settings = useSettings();
+  const { updateSettings } = useUpdateSettings();
   const serverConfig = useServerConfig();
-  const supportsProjectPreferences =
-    serverConfig?.environment.capabilities.projectPreferences === true;
   const supportsAgentProcessPriority =
     serverConfig?.environment.capabilities.agentProcessPriority === true;
   const settingsTarget = useSettingsTarget();
@@ -332,15 +468,397 @@ export function GeneralSettingsPanel() {
   // unreachable or read-only node cannot change it.
   const agentProcessPriorityDisabled =
     !supportsAgentProcessPriority || isNodeSettingsTargetReadOnly(editingScope, settingsTarget);
-  const appLabel = useAppPreferencesLabel();
-  const scopeOptions = {
-    appLabel,
-    nativeClient: isElectron,
-    nodeLabel: settingsTarget?.nodeLabel ?? null,
-  };
-  const localScopeLabel = settingsScopeLabel("browser", scopeOptions);
-  const deviceScopeLabel = settingsScopeLabel("device", scopeOptions);
-  const nodeScopeLabel = settingsScopeLabel("node", scopeOptions);
+  const nodeScopeLabel = useGeneralScopeLabels().node;
+  return (
+    <SettingsSection title="Agent processes" owner="node">
+      <SettingsRow
+        title="Lower agent CPU priority"
+        description="Run agents and everything they start (tests, builds, browsers) at a lower CPU priority, so Ryco, its UI and Git stay responsive when agents load this machine. Applies to agents started after the change (OpenCode: when its shared server restarts)."
+        owner="node"
+        scope={nodeScopeLabel}
+        status={
+          supportsAgentProcessPriority
+            ? undefined
+            : "This node does not support agent priority. Update the node to change this setting."
+        }
+        resetAction={
+          !agentProcessPriorityDisabled &&
+          settings.lowerAgentProcessPriority !==
+            DEFAULT_UNIFIED_SETTINGS.lowerAgentProcessPriority ? (
+            <SettingResetButton
+              label="lower agent CPU priority"
+              onClick={() =>
+                updateSettings({
+                  lowerAgentProcessPriority: DEFAULT_UNIFIED_SETTINGS.lowerAgentProcessPriority,
+                })
+              }
+            />
+          ) : null
+        }
+        control={
+          <Switch
+            checked={settings.lowerAgentProcessPriority}
+            disabled={agentProcessPriorityDisabled}
+            onCheckedChange={(checked) =>
+              updateSettings({ lowerAgentProcessPriority: Boolean(checked) })
+            }
+            aria-label="Lower agent CPU priority"
+          />
+        }
+      />
+    </SettingsSection>
+  );
+}
+
+/** New threads and worktree defaults stored on the device. Projects & worktrees on the settings page. */
+export function ProjectsAndThreadsSettings() {
+  const settings = useSettings();
+  const { updateSettings } = useUpdateSettings();
+  const isPhoneTier = usePresentationTier() === "phone";
+  const serverConfig = useServerConfig();
+  const supportsProjectPreferences =
+    serverConfig?.environment.capabilities.projectPreferences === true;
+  const nodeScopeLabel = useGeneralScopeLabels().node;
+  return (
+    <SettingsSection title="Projects & threads">
+      {(!supportsProjectPreferences || isPhoneTier) && (
+        <>
+          <SettingsRow
+            title="New threads"
+            description="Pick the default workspace mode for newly created draft threads."
+            owner="node"
+            scope={nodeScopeLabel}
+            resetAction={
+              settings.defaultThreadEnvMode !== DEFAULT_UNIFIED_SETTINGS.defaultThreadEnvMode ? (
+                <SettingResetButton
+                  label="new threads"
+                  onClick={() =>
+                    updateSettings({
+                      defaultThreadEnvMode: DEFAULT_UNIFIED_SETTINGS.defaultThreadEnvMode,
+                    })
+                  }
+                />
+              ) : null
+            }
+            control={
+              <Select
+                value={settings.defaultThreadEnvMode}
+                onValueChange={(value) => {
+                  if (value === "local" || value === "worktree") {
+                    updateSettings({ defaultThreadEnvMode: value });
+                  }
+                }}
+              >
+                <SelectTrigger
+                  size="sm"
+                  className="w-full sm:w-44"
+                  aria-label="Default thread mode"
+                >
+                  <SelectValue>
+                    {settings.defaultThreadEnvMode === "worktree" ? "New worktree" : "Local"}
+                  </SelectValue>
+                </SelectTrigger>
+                <SelectPopup align="end" alignItemWithTrigger={false}>
+                  <SelectItem hideIndicator value="local">
+                    Local
+                  </SelectItem>
+                  <SelectItem hideIndicator value="worktree">
+                    New worktree
+                  </SelectItem>
+                </SelectPopup>
+              </Select>
+            }
+          />
+
+          {!isPhoneTier && (
+            <SettingsRow
+              title="Worktree branch prefix"
+              description="Prefix for generated branches on this device. Use a Git namespace such as team/agent, without a trailing slash. Leave empty for no prefix. Existing branches keep their names."
+              owner="node"
+              scope={nodeScopeLabel}
+              resetAction={
+                settings.worktreeBranchPrefix !== DEFAULT_UNIFIED_SETTINGS.worktreeBranchPrefix ? (
+                  <SettingResetButton
+                    label="worktree branch prefix"
+                    onClick={() =>
+                      updateSettings({
+                        worktreeBranchPrefix: DEFAULT_UNIFIED_SETTINGS.worktreeBranchPrefix,
+                      })
+                    }
+                  />
+                ) : null
+              }
+              control={
+                <DraftInput
+                  className="w-full sm:w-72"
+                  value={settings.worktreeBranchPrefix}
+                  onCommit={(next) => {
+                    const prefix = next.trim();
+                    if (!Schema.is(WorktreeBranchPrefix)(prefix)) {
+                      toastManager.add({
+                        type: "error",
+                        title: "Invalid worktree branch prefix",
+                        description:
+                          "Use a valid Git namespace of up to 128 characters without a trailing slash, or leave it empty.",
+                      });
+                      return;
+                    }
+                    updateSettings({ worktreeBranchPrefix: prefix });
+                  }}
+                  placeholder="ryco"
+                  spellCheck={false}
+                  autoCapitalize="none"
+                  aria-label="Worktree branch prefix"
+                />
+              }
+            />
+          )}
+        </>
+      )}
+
+      {/* Every node has it, also one with project defaults, where a project may override it. */}
+      {!isPhoneTier && (
+        <SettingsRow
+          title="Name branches by change type"
+          description="Generated worktree branches start with the kind of change, such as fix/ or feat/, instead of the prefix. The prefix still names a new worktree's temporary branch until its first message is named."
+          owner="node"
+          scope={nodeScopeLabel}
+          status={
+            <ApplyToAllNodes
+              label="change type branch names"
+              select={selectBranchChangeTypes}
+              format={formatBranchChangeTypes}
+              patch={{ worktreeBranchChangeTypes: settings.worktreeBranchChangeTypes }}
+            />
+          }
+          resetAction={
+            settings.worktreeBranchChangeTypes !==
+            DEFAULT_UNIFIED_SETTINGS.worktreeBranchChangeTypes ? (
+              <SettingResetButton
+                label="change type branch names"
+                onClick={() =>
+                  updateSettings({
+                    worktreeBranchChangeTypes: DEFAULT_UNIFIED_SETTINGS.worktreeBranchChangeTypes,
+                  })
+                }
+              />
+            ) : null
+          }
+          control={
+            <Switch
+              checked={settings.worktreeBranchChangeTypes}
+              onCheckedChange={(checked) =>
+                updateSettings({ worktreeBranchChangeTypes: Boolean(checked) })
+              }
+              aria-label="Name worktree branches by change type"
+            />
+          }
+        />
+      )}
+
+      {!isPhoneTier && (
+        <SettingsRow
+          title="Continue after restart"
+          description="When Ryco restarts while an agent is working, send “Continue where you left off.” automatically. Threads you stopped, threads waiting for your approval, and restarts more than 30 minutes later are not continued."
+          owner="node"
+          scope={nodeScopeLabel}
+          resetAction={
+            settings.continueThreadsAfterRestart !==
+            DEFAULT_UNIFIED_SETTINGS.continueThreadsAfterRestart ? (
+              <SettingResetButton
+                label="continue after restart"
+                onClick={() =>
+                  updateSettings({
+                    continueThreadsAfterRestart:
+                      DEFAULT_UNIFIED_SETTINGS.continueThreadsAfterRestart,
+                  })
+                }
+              />
+            ) : null
+          }
+          control={
+            <Switch
+              checked={settings.continueThreadsAfterRestart}
+              onCheckedChange={(checked) =>
+                updateSettings({ continueThreadsAfterRestart: Boolean(checked) })
+              }
+              aria-label="Continue threads automatically after a restart"
+            />
+          }
+        />
+      )}
+
+      <SettingsRow
+        title="Add project starts in"
+        description='Leave empty to use "~/" when the Add Project browser opens.'
+        owner="node"
+        scope={nodeScopeLabel}
+        resetAction={
+          settings.addProjectBaseDirectory !== DEFAULT_UNIFIED_SETTINGS.addProjectBaseDirectory ? (
+            <SettingResetButton
+              label="add project base directory"
+              onClick={() =>
+                updateSettings({
+                  addProjectBaseDirectory: DEFAULT_UNIFIED_SETTINGS.addProjectBaseDirectory,
+                })
+              }
+            />
+          ) : null
+        }
+        control={
+          <DraftInput
+            className="w-full sm:w-72"
+            value={settings.addProjectBaseDirectory}
+            onCommit={(next) => updateSettings({ addProjectBaseDirectory: next })}
+            placeholder="~/"
+            spellCheck={false}
+            aria-label="Add project base directory"
+          />
+        }
+      />
+    </SettingsSection>
+  );
+}
+
+/** Ask before archiving, deleting or unpinning a thread. Rows of a confirmations section. */
+export function ThreadConfirmationSettings() {
+  const settings = useSettings();
+  const { updateSettings } = useUpdateSettings();
+  const localScopeLabel = useGeneralScopeLabels().local;
+  return (
+    <>
+      <SettingsRow
+        title="Archive confirmation"
+        description="Require a second click on the inline archive action before a thread is archived."
+        owner="client"
+        scope={localScopeLabel}
+        resetAction={
+          settings.confirmThreadArchive !== DEFAULT_UNIFIED_SETTINGS.confirmThreadArchive ? (
+            <SettingResetButton
+              label="archive confirmation"
+              onClick={() =>
+                updateSettings({
+                  confirmThreadArchive: DEFAULT_UNIFIED_SETTINGS.confirmThreadArchive,
+                })
+              }
+            />
+          ) : null
+        }
+        control={
+          <Switch
+            checked={settings.confirmThreadArchive}
+            onCheckedChange={(checked) =>
+              updateSettings({ confirmThreadArchive: Boolean(checked) })
+            }
+            aria-label="Confirm thread archiving"
+          />
+        }
+      />
+
+      <SettingsRow
+        title="Delete confirmation"
+        description="Ask before deleting a thread. Undo stays available for a few seconds either way."
+        owner="client"
+        scope={localScopeLabel}
+        resetAction={
+          settings.confirmThreadDelete !== DEFAULT_UNIFIED_SETTINGS.confirmThreadDelete ? (
+            <SettingResetButton
+              label="Delete confirmation"
+              onClick={() =>
+                updateSettings({
+                  confirmThreadDelete: DEFAULT_UNIFIED_SETTINGS.confirmThreadDelete,
+                })
+              }
+            />
+          ) : null
+        }
+        control={
+          <Switch
+            checked={settings.confirmThreadDelete}
+            onCheckedChange={(checked) => updateSettings({ confirmThreadDelete: Boolean(checked) })}
+            aria-label="Confirm thread deletion"
+          />
+        }
+      />
+
+      <SettingsRow
+        title="Unpin confirmation"
+        description="Ask before removing a thread from the pinned section."
+        owner="client"
+        scope={localScopeLabel}
+        resetAction={
+          settings.confirmThreadUnpin !== DEFAULT_UNIFIED_SETTINGS.confirmThreadUnpin ? (
+            <SettingResetButton
+              label="unpin confirmation"
+              onClick={() =>
+                updateSettings({
+                  confirmThreadUnpin: DEFAULT_UNIFIED_SETTINGS.confirmThreadUnpin,
+                })
+              }
+            />
+          ) : null
+        }
+        control={
+          <Switch
+            checked={settings.confirmThreadUnpin}
+            onCheckedChange={(checked) => updateSettings({ confirmThreadUnpin: Boolean(checked) })}
+            aria-label="Confirm thread unpinning"
+          />
+        }
+      />
+    </>
+  );
+}
+
+/** Ryco's name, version and source. About & help on the settings page. */
+export function AboutSettings({
+  includeUpdateTrack,
+  children,
+}: {
+  /** The settings page shows the update track and Nightly under Updates. */
+  readonly includeUpdateTrack: boolean;
+  readonly children?: ReactNode;
+}) {
+  const isPhoneTier = usePresentationTier() === "phone";
+  const editingScope = useSettingsEditingScope();
+  const labels = useGeneralScopeLabels();
+  return (
+    <SettingsSection title="About">
+      {editingScope !== "node" && <AboutBrandingHeader />}
+      {isElectron && editingScope !== "node" ? (
+        <AboutVersionSection scopeLabel={labels.device} includeUpdateTrack={includeUpdateTrack} />
+      ) : (
+        <SettingsRow
+          title={<AboutVersionTitle />}
+          description="Current version of the application."
+          owner="client"
+          scope={labels.local}
+        />
+      )}
+      {includeUpdateTrack && isElectron && !isPhoneTier && editingScope !== "node" && (
+        <NightlyAppSettings scope={labels.device} />
+      )}
+      {children}
+    </SettingsSection>
+  );
+}
+
+/** The update track and Ryco Nightly of this desktop app. Updates on the settings page. */
+export function DesktopUpdateTrackSettings() {
+  const labels = useGeneralScopeLabels();
+  if (!isElectron) return null;
+  return (
+    <SettingsSection title="This app">
+      <UpdateTrackRow scopeLabel={labels.device} />
+      <NightlyAppSettings scope={labels.device} />
+    </SettingsSection>
+  );
+}
+
+/** Where the device writes its logs, and a way to open them. */
+export function LogsFolderSetting({ title = "Diagnostics" }: { readonly title?: string } = {}) {
+  const settingsTarget = useSettingsTarget();
+  const nodeScopeLabel = useGeneralScopeLabels().node;
   const [openingPathByTarget, setOpeningPathByTarget] = useState({
     logsDirectory: false,
   });
@@ -409,482 +927,70 @@ export function GeneralSettingsPanel() {
   const isOpeningLogsDirectory = openingPathByTarget.logsDirectory;
 
   return (
+    <SettingsRow
+      title={title}
+      description={diagnosticsDescription}
+      owner="node"
+      scope={nodeScopeLabel}
+      status={
+        <>
+          <span className="block break-all font-mono text-[11px] text-foreground">
+            {logsDirectoryPath ?? "Resolving logs directory..."}
+          </span>
+          {openDiagnosticsError ? (
+            <span className="mt-1 block text-destructive">{openDiagnosticsError}</span>
+          ) : !canOpenNodePathLocally ? (
+            <span className="mt-1 block">
+              This path is on {settingsTarget?.nodeLabel}; open it from that machine.
+            </span>
+          ) : null}
+        </>
+      }
+      control={
+        <Button
+          size="xs"
+          variant="outline"
+          disabled={!canOpenNodePathLocally || !logsDirectoryPath || isOpeningLogsDirectory}
+          onClick={openLogsDirectory}
+        >
+          {isOpeningLogsDirectory ? "Opening..." : "Open logs folder"}
+        </Button>
+      }
+    />
+  );
+}
+
+/**
+ * The retired General section, for the frozen web phone tier only
+ * (`PhoneSettingsSurface`; AGENTS.md: that tier is not extended). The settings
+ * page shows these blocks in their new sections instead.
+ */
+export function GeneralSettingsPanel() {
+  const isPhoneTier = usePresentationTier() === "phone";
+  const editingScope = useSettingsEditingScope();
+  const deviceScopeLabel = useGeneralScopeLabels().device;
+  return (
     <SettingsPageContainer>
       <DeviceIdentitySettings />
       <SessionImportSettings />
       <SettingsSection title="Behavior" owner="client">
         <OnboardingReplaySetting />
-        <SettingsRow
-          title="Time format"
-          description="System default follows your browser or OS clock preference."
-          owner="client"
-          scope={localScopeLabel}
-          resetAction={
-            settings.timestampFormat !== DEFAULT_UNIFIED_SETTINGS.timestampFormat ? (
-              <SettingResetButton
-                label="time format"
-                onClick={() =>
-                  updateSettings({
-                    timestampFormat: DEFAULT_UNIFIED_SETTINGS.timestampFormat,
-                  })
-                }
-              />
-            ) : null
-          }
-          control={
-            <Select
-              value={settings.timestampFormat}
-              onValueChange={(value) => {
-                if (value === "locale" || value === "12-hour" || value === "24-hour") {
-                  updateSettings({ timestampFormat: value });
-                }
-              }}
-            >
-              <SelectTrigger size="sm" className="w-full sm:w-40" aria-label="Timestamp format">
-                <SelectValue>{TIMESTAMP_FORMAT_LABELS[settings.timestampFormat]}</SelectValue>
-              </SelectTrigger>
-              <SelectPopup align="end" alignItemWithTrigger={false}>
-                <SelectItem hideIndicator value="locale">
-                  {TIMESTAMP_FORMAT_LABELS.locale}
-                </SelectItem>
-                <SelectItem hideIndicator value="12-hour">
-                  {TIMESTAMP_FORMAT_LABELS["12-hour"]}
-                </SelectItem>
-                <SelectItem hideIndicator value="24-hour">
-                  {TIMESTAMP_FORMAT_LABELS["24-hour"]}
-                </SelectItem>
-              </SelectPopup>
-            </Select>
-          }
-        />
-
-        <SettingsRow
-          title="Default editor"
-          description={
-            (availableEditors ?? []).length > 0
-              ? "Pin which editor opens directories and files. Auto uses your last selection from the Open menu."
-              : "No installed editors detected. Install a supported IDE to pick a default."
-          }
-          owner="client"
-          scope={localScopeLabel}
-          resetAction={
-            settings.preferredEditor !== DEFAULT_UNIFIED_SETTINGS.preferredEditor ? (
-              <SettingResetButton
-                label="default editor"
-                onClick={() =>
-                  updateSettings({
-                    preferredEditor: DEFAULT_UNIFIED_SETTINGS.preferredEditor,
-                  })
-                }
-              />
-            ) : null
-          }
-          control={
-            <Select
-              value={settings.preferredEditor ?? "__auto__"}
-              onValueChange={(value) => {
-                if (value === "__auto__") {
-                  updateSettings({ preferredEditor: null });
-                  return;
-                }
-                const match = EDITORS.find((e) => e.id === value);
-                if (match) updateSettings({ preferredEditor: match.id as EditorId });
-              }}
-            >
-              <SelectTrigger size="sm" className="w-full sm:w-56" aria-label="Default editor">
-                {settings.preferredEditor ? (
-                  <EditorOptionIcon editor={settings.preferredEditor} />
-                ) : null}
-                <SelectValue>
-                  {settings.preferredEditor
-                    ? getEditorLabel(settings.preferredEditor, navigator.platform)
-                    : "Auto (last used)"}
-                </SelectValue>
-              </SelectTrigger>
-              <SelectPopup align="end" alignItemWithTrigger={false}>
-                <SelectItem hideIndicator value="__auto__">
-                  <span className="inline-flex items-center gap-2">
-                    <span aria-hidden="true" className="size-4" />
-                    Auto (last used)
-                  </span>
-                </SelectItem>
-                {EDITORS.filter(
-                  (editor) =>
-                    (availableEditors ?? []).includes(editor.id) &&
-                    isEditorPreferenceEligible(editor.id),
-                ).map((editor) => (
-                  <SelectItem key={editor.id} hideIndicator value={editor.id}>
-                    <span className="inline-flex items-center gap-2">
-                      <EditorOptionIcon editor={editor.id} />
-                      {getEditorLabel(editor.id, navigator.platform)}
-                    </span>
-                  </SelectItem>
-                ))}
-              </SelectPopup>
-            </Select>
-          }
-        />
+        <TimeFormatSetting />
+        <DefaultEditorSetting />
       </SettingsSection>
       {isPhoneTier && <SourceControlPreferences />}
       {!isPhoneTier && <ResponseStreamingSettings />}
-      <SettingsSection title="Provider updates" owner="node">
-        <SettingsRow
-          title="Provider update checks"
-          description="Check installed provider CLIs for newer versions. Disable if you install providers with Nix or another package manager."
-          owner="node"
-          scope={nodeScopeLabel}
-          resetAction={
-            settings.enableProviderUpdateChecks !==
-            DEFAULT_UNIFIED_SETTINGS.enableProviderUpdateChecks ? (
-              <SettingResetButton
-                label="provider update checks"
-                onClick={() =>
-                  updateSettings({
-                    enableProviderUpdateChecks: DEFAULT_UNIFIED_SETTINGS.enableProviderUpdateChecks,
-                  })
-                }
-              />
-            ) : null
-          }
-          control={
-            <Switch
-              checked={settings.enableProviderUpdateChecks}
-              onCheckedChange={(checked) =>
-                updateSettings({ enableProviderUpdateChecks: Boolean(checked) })
-              }
-              aria-label="Check providers for updates"
-            />
-          }
-        />
-      </SettingsSection>
-      {!isPhoneTier && (
-        <SettingsSection title="Agent processes" owner="node">
-          <SettingsRow
-            title="Lower agent CPU priority"
-            description="Run agents and everything they start (tests, builds, browsers) at a lower CPU priority, so Ryco, its UI and Git stay responsive when agents load this machine. Applies to agents started after the change (OpenCode: when its shared server restarts)."
-            owner="node"
-            scope={nodeScopeLabel}
-            status={
-              supportsAgentProcessPriority
-                ? undefined
-                : "This node does not support agent priority. Update the node to change this setting."
-            }
-            resetAction={
-              !agentProcessPriorityDisabled &&
-              settings.lowerAgentProcessPriority !==
-                DEFAULT_UNIFIED_SETTINGS.lowerAgentProcessPriority ? (
-                <SettingResetButton
-                  label="lower agent CPU priority"
-                  onClick={() =>
-                    updateSettings({
-                      lowerAgentProcessPriority: DEFAULT_UNIFIED_SETTINGS.lowerAgentProcessPriority,
-                    })
-                  }
-                />
-              ) : null
-            }
-            control={
-              <Switch
-                checked={settings.lowerAgentProcessPriority}
-                disabled={agentProcessPriorityDisabled}
-                onCheckedChange={(checked) =>
-                  updateSettings({ lowerAgentProcessPriority: Boolean(checked) })
-                }
-                aria-label="Lower agent CPU priority"
-              />
-            }
-          />
-        </SettingsSection>
-      )}
+      <ProviderUpdateCheckSettings />
+      {!isPhoneTier && <AgentProcessPrioritySettings />}
       {!isPhoneTier && <UsageLimitSettings />}
       {!isPhoneTier && <UsagePriceSettings />}
       {!isPhoneTier && editingScope !== "node" && <ComposerSettings />}
       {!isPhoneTier && <ProjectDefaultsSection />}
       {!isPhoneTier && <StorageSettings />}
-      <SettingsSection title="Projects & threads">
-        {(!supportsProjectPreferences || isPhoneTier) && (
-          <>
-            <SettingsRow
-              title="New threads"
-              description="Pick the default workspace mode for newly created draft threads."
-              owner="node"
-              scope={nodeScopeLabel}
-              resetAction={
-                settings.defaultThreadEnvMode !== DEFAULT_UNIFIED_SETTINGS.defaultThreadEnvMode ? (
-                  <SettingResetButton
-                    label="new threads"
-                    onClick={() =>
-                      updateSettings({
-                        defaultThreadEnvMode: DEFAULT_UNIFIED_SETTINGS.defaultThreadEnvMode,
-                      })
-                    }
-                  />
-                ) : null
-              }
-              control={
-                <Select
-                  value={settings.defaultThreadEnvMode}
-                  onValueChange={(value) => {
-                    if (value === "local" || value === "worktree") {
-                      updateSettings({ defaultThreadEnvMode: value });
-                    }
-                  }}
-                >
-                  <SelectTrigger
-                    size="sm"
-                    className="w-full sm:w-44"
-                    aria-label="Default thread mode"
-                  >
-                    <SelectValue>
-                      {settings.defaultThreadEnvMode === "worktree" ? "New worktree" : "Local"}
-                    </SelectValue>
-                  </SelectTrigger>
-                  <SelectPopup align="end" alignItemWithTrigger={false}>
-                    <SelectItem hideIndicator value="local">
-                      Local
-                    </SelectItem>
-                    <SelectItem hideIndicator value="worktree">
-                      New worktree
-                    </SelectItem>
-                  </SelectPopup>
-                </Select>
-              }
-            />
-
-            {!isPhoneTier && (
-              <SettingsRow
-                title="Worktree branch prefix"
-                description="Prefix for generated branches on this device. Use a Git namespace such as team/agent, without a trailing slash. Leave empty for no prefix. Existing branches keep their names."
-                owner="node"
-                scope={nodeScopeLabel}
-                resetAction={
-                  settings.worktreeBranchPrefix !==
-                  DEFAULT_UNIFIED_SETTINGS.worktreeBranchPrefix ? (
-                    <SettingResetButton
-                      label="worktree branch prefix"
-                      onClick={() =>
-                        updateSettings({
-                          worktreeBranchPrefix: DEFAULT_UNIFIED_SETTINGS.worktreeBranchPrefix,
-                        })
-                      }
-                    />
-                  ) : null
-                }
-                control={
-                  <DraftInput
-                    className="w-full sm:w-72"
-                    value={settings.worktreeBranchPrefix}
-                    onCommit={(next) => {
-                      const prefix = next.trim();
-                      if (!Schema.is(WorktreeBranchPrefix)(prefix)) {
-                        toastManager.add({
-                          type: "error",
-                          title: "Invalid worktree branch prefix",
-                          description:
-                            "Use a valid Git namespace of up to 128 characters without a trailing slash, or leave it empty.",
-                        });
-                        return;
-                      }
-                      updateSettings({ worktreeBranchPrefix: prefix });
-                    }}
-                    placeholder="ryco"
-                    spellCheck={false}
-                    autoCapitalize="none"
-                    aria-label="Worktree branch prefix"
-                  />
-                }
-              />
-            )}
-          </>
-        )}
-
-        {/* Every node has it, also one with project defaults, where a project may override it. */}
-        {!isPhoneTier && (
-          <SettingsRow
-            title="Name branches by change type"
-            description="Generated worktree branches start with the kind of change, such as fix/ or feat/, instead of the prefix. The prefix still names a new worktree's temporary branch until its first message is named."
-            owner="node"
-            scope={nodeScopeLabel}
-            status={
-              <ApplyToAllNodes
-                label="change type branch names"
-                select={selectBranchChangeTypes}
-                format={formatBranchChangeTypes}
-                patch={{ worktreeBranchChangeTypes: settings.worktreeBranchChangeTypes }}
-              />
-            }
-            resetAction={
-              settings.worktreeBranchChangeTypes !==
-              DEFAULT_UNIFIED_SETTINGS.worktreeBranchChangeTypes ? (
-                <SettingResetButton
-                  label="change type branch names"
-                  onClick={() =>
-                    updateSettings({
-                      worktreeBranchChangeTypes: DEFAULT_UNIFIED_SETTINGS.worktreeBranchChangeTypes,
-                    })
-                  }
-                />
-              ) : null
-            }
-            control={
-              <Switch
-                checked={settings.worktreeBranchChangeTypes}
-                onCheckedChange={(checked) =>
-                  updateSettings({ worktreeBranchChangeTypes: Boolean(checked) })
-                }
-                aria-label="Name worktree branches by change type"
-              />
-            }
-          />
-        )}
-
-        {!isPhoneTier && (
-          <SettingsRow
-            title="Continue after restart"
-            description="When Ryco restarts while an agent is working, send “Continue where you left off.” automatically. Threads you stopped, threads waiting for your approval, and restarts more than 30 minutes later are not continued."
-            owner="node"
-            scope={nodeScopeLabel}
-            resetAction={
-              settings.continueThreadsAfterRestart !==
-              DEFAULT_UNIFIED_SETTINGS.continueThreadsAfterRestart ? (
-                <SettingResetButton
-                  label="continue after restart"
-                  onClick={() =>
-                    updateSettings({
-                      continueThreadsAfterRestart:
-                        DEFAULT_UNIFIED_SETTINGS.continueThreadsAfterRestart,
-                    })
-                  }
-                />
-              ) : null
-            }
-            control={
-              <Switch
-                checked={settings.continueThreadsAfterRestart}
-                onCheckedChange={(checked) =>
-                  updateSettings({ continueThreadsAfterRestart: Boolean(checked) })
-                }
-                aria-label="Continue threads automatically after a restart"
-              />
-            }
-          />
-        )}
-
-        <SettingsRow
-          title="Add project starts in"
-          description='Leave empty to use "~/" when the Add Project browser opens.'
-          owner="node"
-          scope={nodeScopeLabel}
-          resetAction={
-            settings.addProjectBaseDirectory !==
-            DEFAULT_UNIFIED_SETTINGS.addProjectBaseDirectory ? (
-              <SettingResetButton
-                label="add project base directory"
-                onClick={() =>
-                  updateSettings({
-                    addProjectBaseDirectory: DEFAULT_UNIFIED_SETTINGS.addProjectBaseDirectory,
-                  })
-                }
-              />
-            ) : null
-          }
-          control={
-            <DraftInput
-              className="w-full sm:w-72"
-              value={settings.addProjectBaseDirectory}
-              onCommit={(next) => updateSettings({ addProjectBaseDirectory: next })}
-              placeholder="~/"
-              spellCheck={false}
-              aria-label="Add project base directory"
-            />
-          }
-        />
-      </SettingsSection>
+      <ProjectsAndThreadsSettings />
       <SettingsSection title="Confirmations" owner="client">
         {!isPhoneTier && <QuitShortcutSetting />}
-        <SettingsRow
-          title="Archive confirmation"
-          description="Require a second click on the inline archive action before a thread is archived."
-          owner="client"
-          scope={localScopeLabel}
-          resetAction={
-            settings.confirmThreadArchive !== DEFAULT_UNIFIED_SETTINGS.confirmThreadArchive ? (
-              <SettingResetButton
-                label="archive confirmation"
-                onClick={() =>
-                  updateSettings({
-                    confirmThreadArchive: DEFAULT_UNIFIED_SETTINGS.confirmThreadArchive,
-                  })
-                }
-              />
-            ) : null
-          }
-          control={
-            <Switch
-              checked={settings.confirmThreadArchive}
-              onCheckedChange={(checked) =>
-                updateSettings({ confirmThreadArchive: Boolean(checked) })
-              }
-              aria-label="Confirm thread archiving"
-            />
-          }
-        />
-
-        <SettingsRow
-          title="Delete confirmation"
-          description="Ask before deleting a thread. Undo stays available for a few seconds either way."
-          owner="client"
-          scope={localScopeLabel}
-          resetAction={
-            settings.confirmThreadDelete !== DEFAULT_UNIFIED_SETTINGS.confirmThreadDelete ? (
-              <SettingResetButton
-                label="Delete confirmation"
-                onClick={() =>
-                  updateSettings({
-                    confirmThreadDelete: DEFAULT_UNIFIED_SETTINGS.confirmThreadDelete,
-                  })
-                }
-              />
-            ) : null
-          }
-          control={
-            <Switch
-              checked={settings.confirmThreadDelete}
-              onCheckedChange={(checked) =>
-                updateSettings({ confirmThreadDelete: Boolean(checked) })
-              }
-              aria-label="Confirm thread deletion"
-            />
-          }
-        />
-
-        <SettingsRow
-          title="Unpin confirmation"
-          description="Ask before removing a thread from the pinned section."
-          owner="client"
-          scope={localScopeLabel}
-          resetAction={
-            settings.confirmThreadUnpin !== DEFAULT_UNIFIED_SETTINGS.confirmThreadUnpin ? (
-              <SettingResetButton
-                label="unpin confirmation"
-                onClick={() =>
-                  updateSettings({
-                    confirmThreadUnpin: DEFAULT_UNIFIED_SETTINGS.confirmThreadUnpin,
-                  })
-                }
-              />
-            ) : null
-          }
-          control={
-            <Switch
-              checked={settings.confirmThreadUnpin}
-              onCheckedChange={(checked) =>
-                updateSettings({ confirmThreadUnpin: Boolean(checked) })
-              }
-              aria-label="Confirm thread unpinning"
-            />
-          }
-        />
+        <ThreadConfirmationSettings />
       </SettingsSection>
       {!isPhoneTier && editingScope !== "node" && (
         <ThreadNotificationSettings scope={deviceScopeLabel} />
@@ -896,68 +1002,42 @@ export function GeneralSettingsPanel() {
 
       {!isPhoneTier && editingScope !== "node" && <CliCommandSettings scope={deviceScopeLabel} />}
 
-      <SettingsSection title="About">
-        {editingScope !== "node" && <AboutBrandingHeader />}
-        {isElectron && editingScope !== "node" ? (
-          <AboutVersionSection scopeLabel={deviceScopeLabel} />
-        ) : (
-          <SettingsRow
-            title={<AboutVersionTitle />}
-            description="Current version of the application."
-            owner="client"
-            scope={localScopeLabel}
-          />
-        )}
-        {isElectron && !isPhoneTier && editingScope !== "node" && (
-          <NightlyAppSettings scope={deviceScopeLabel} />
-        )}
-        <SettingsRow
-          title="Diagnostics"
-          description={diagnosticsDescription}
-          owner="node"
-          scope={nodeScopeLabel}
-          status={
-            <>
-              <span className="block break-all font-mono text-[11px] text-foreground">
-                {logsDirectoryPath ?? "Resolving logs directory..."}
-              </span>
-              {openDiagnosticsError ? (
-                <span className="mt-1 block text-destructive">{openDiagnosticsError}</span>
-              ) : !canOpenNodePathLocally ? (
-                <span className="mt-1 block">
-                  This path is on {settingsTarget?.nodeLabel}; open it from that machine.
-                </span>
-              ) : null}
-            </>
-          }
-          control={
-            <Button
-              size="xs"
-              variant="outline"
-              disabled={!canOpenNodePathLocally || !logsDirectoryPath || isOpeningLogsDirectory}
-              onClick={openLogsDirectory}
-            >
-              {isOpeningLogsDirectory ? "Opening..." : "Open logs folder"}
-            </Button>
-          }
-        />
-      </SettingsSection>
+      <AboutSettings includeUpdateTrack>
+        <LogsFolderSetting />
+      </AboutSettings>
     </SettingsPageContainer>
   );
 }
 
-export function ArchivedThreadsPanel() {
+/** Lifecycle suggestions of the device the page shows. Data & backup on the settings page. */
+export function DeviceLifecycleSuggestionSettings() {
   const target = useSettingsTarget();
   const targetAllowsMutation = !target || (target.connected && target.canMutate !== false);
-  const projects = useStore(useShallow(selectProjectsAcrossEnvironments));
-  const threads = useStore(useShallow(selectThreadShellsAcrossEnvironments));
-  const { unarchiveThread, confirmAndDeleteThread } = useThreadActions();
   const config = useServerConfig();
   const lifecycleEnvironmentId = target?.environmentId ?? config?.environment.environmentId ?? null;
   const lifecycleCapability = useHostedRpcCapability(
     ORCHESTRATION_WS_METHODS.dispatchCommand,
     lifecycleEnvironmentId,
   );
+  return (
+    <LifecycleSuggestionSettings
+      environmentId={lifecycleEnvironmentId}
+      disabled={!targetAllowsMutation || !lifecycleCapability.allowed}
+    />
+  );
+}
+
+export function ArchivedThreadsPanel({
+  includeLifecycle = true,
+}: {
+  /** The settings page shows lifecycle suggestions under Data & backup. */
+  readonly includeLifecycle?: boolean;
+} = {}) {
+  const target = useSettingsTarget();
+  const targetAllowsMutation = !target || (target.connected && target.canMutate !== false);
+  const projects = useStore(useShallow(selectProjectsAcrossEnvironments));
+  const threads = useStore(useShallow(selectThreadShellsAcrossEnvironments));
+  const { unarchiveThread, confirmAndDeleteThread } = useThreadActions();
   const archivedGroups = useMemo(
     () => selectArchivedSettingsGroups(projects, threads, target?.environmentId),
     [projects, threads, target?.environmentId],
@@ -1058,10 +1138,7 @@ export function ArchivedThreadsPanel() {
           </SettingsSection>
         ))
       )}
-      <LifecycleSuggestionSettings
-        environmentId={lifecycleEnvironmentId}
-        disabled={!targetAllowsMutation || !lifecycleCapability.allowed}
-      />
+      {includeLifecycle ? <DeviceLifecycleSuggestionSettings /> : null}
     </SettingsPageContainer>
   );
 }

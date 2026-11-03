@@ -173,10 +173,10 @@ import { WorkspaceSearchDialog } from "./workspaceSearch/WorkspaceSearchDialog";
 import { AzureDevOpsIcon, BitbucketIcon, ForgejoIcon, GitHubIcon, GitLabIcon } from "./Icons";
 import { ProjectFavicon } from "./ProjectFavicon";
 import {
+  describeSettingsSearchEntry,
   filterSettingsSearchEntries,
   readSettingsSearchScope,
-  SETTINGS_LINK_SECTIONS,
-  SETTINGS_SECTION_TITLES,
+  settingsSearchEntryDestination,
 } from "./settings/settingsSearchIndex";
 import { requestSettingsReveal } from "./settings/settingsSearchReveal";
 import { useCreatePullRequestDialogStore } from "./pullRequests/create/createPullRequestDialogStore";
@@ -1255,7 +1255,6 @@ function OpenCommandPaletteDialog() {
   );
 
   const openSettings = useSettingsDialogStore((s) => s.openSettings);
-  const showSettingsSection = useSettingsDialogStore((s) => s.showSection);
   const settingsPageTarget = useSettingsPageTarget();
   const openSourceControlSettings = useCallback(() => {
     setOpen(false);
@@ -2008,8 +2007,7 @@ function OpenCommandPaletteDialog() {
   const activeGroups = currentView ? currentView.groups : rootGroups;
 
   // The rows the settings page would list for this query, for the device it
-  // would open. Statistics opens its own page, which the action above offers.
-  // The frozen phone tier keeps its own settings sheet.
+  // would open. The frozen phone tier keeps its own settings sheet.
   const settingsSearchItems =
     presentationTier === "phone"
       ? []
@@ -2017,14 +2015,21 @@ function OpenCommandPaletteDialog() {
           entries: filterSettingsSearchEntries(
             deferredQuery,
             readSettingsSearchScope(settingsPageTarget),
-          ).filter((entry) => !SETTINGS_LINK_SECTIONS.has(entry.section)),
-          sectionTitles: SETTINGS_SECTION_TITLES,
+          ),
+          describeEntry: (entry) =>
+            describeSettingsSearchEntry(
+              entry,
+              entry.storage === "device" ? settingsPageTarget.target?.nodeLabel : null,
+            ),
           icon: <SettingsIcon className={ITEM_ICON_CLASS} />,
           runEntry: (entry) => {
             setOpen(false);
             // Open on the device the results were checked against.
-            openSettings(entry.section, settingsPageTarget.environmentId);
-            showSettingsSection(entry.owner, entry.section);
+            const destination = settingsSearchEntryDestination(entry, {
+              target: settingsPageTarget.environmentId,
+              primary: primaryEnvironmentId,
+            });
+            openSettings(destination.section, destination.environmentId);
             requestSettingsReveal(entry.targetId ?? entry.title);
           },
         });

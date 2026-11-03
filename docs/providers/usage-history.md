@@ -57,7 +57,7 @@ an entry reprices history from the scan cache without reading transcripts again.
 Buckets count custom-priced tokens separately, and nodes advertise the setting with
 the `usagePriceOverrides` capability; older nodes drop it from settings patches.
 
-Each node's entries are edited in Settings → General → Model prices (desktop and web;
+Each node's entries are edited in Settings → Usage & cost → Model prices (desktop and web;
 the native app and the web phone layout only show their effect). The editor saves only
 the entries that changed, is disabled with an update notice on nodes without the
 capability, and drops the client's cached summaries of that node after a save. On the

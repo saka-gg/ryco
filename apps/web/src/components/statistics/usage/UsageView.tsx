@@ -552,7 +552,7 @@ function LegendDot({ color, label }: { readonly color: string; readonly label: s
 /** Open the node's model price editor with a row for `model`. */
 function setModelPrices(environmentId: EnvironmentId, model: string) {
   requestUsagePriceRow(environmentId, model);
-  useSettingsDialogStore.getState().openSettings("general", environmentId);
+  useSettingsDialogStore.getState().openSettings("usage", environmentId);
   requestSettingsReveal(USAGE_PRICE_SECTION_TITLE);
 }
 

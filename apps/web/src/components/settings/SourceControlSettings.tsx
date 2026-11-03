@@ -691,6 +691,7 @@ function AtlassianConfiguration({
   );
 }
 
+/** The frozen phone tier's Source control section: this app's and the device's rows. */
 export function SourceControlSettingsPanel() {
   const scope = useSettingsEditingScope();
   return scope === "client" ? (
@@ -702,7 +703,16 @@ export function SourceControlSettingsPanel() {
   );
 }
 
-function NodeSourceControlSettingsPanel() {
+/**
+ * The device's Git tools, hosting accounts and, unless the page shows it on its
+ * own, its writing settings.
+ */
+export function NodeSourceControlSettingsPanel({
+  includeWriting = true,
+}: {
+  /** The settings page shows writing first, under Git & pull requests › Writing. */
+  readonly includeWriting?: boolean;
+} = {}) {
   const scope = useSettingsEditingScope();
   const settingsTarget = useSettingsTarget();
   const primaryEnvironmentId = usePrimaryEnvironmentId();
@@ -738,9 +748,9 @@ function NodeSourceControlSettingsPanel() {
     return (
       <SettingsPageContainer>
         <SourceControlSectionSkeleton title="Version control" headerAction={scanButton} />
-        <SourceControlSectionSkeleton title="Hosting providers" />
+        <SourceControlSectionSkeleton title="Hosting accounts" />
         {/* Node settings, not discovery results: never wait for the scan. */}
-        <GitWritingSettingsSection />
+        {includeWriting ? <GitWritingSettingsSection /> : null}
       </SettingsPageContainer>
     );
   }
@@ -753,7 +763,7 @@ function NodeSourceControlSettingsPanel() {
     <SettingsPageContainer>
       {scope === "all" && <SourceControlPreferences />}
       {hasDiscoveryItems ? null : (
-        <SettingsSection title="Hosting providers">
+        <SettingsSection title="Hosting accounts">
           <SettingsEmpty
             icon={<GitIcon className="size-4" />}
             title="Nothing detected yet"
@@ -778,7 +788,7 @@ function NodeSourceControlSettingsPanel() {
 
       {hasDiscoveryItems ? (
         <SettingsSection
-          title="Hosting providers"
+          title="Hosting accounts"
           description="Command-line tools on this device that power pull requests and reviews."
           headerAction={hasVcsItems ? null : scanButton}
         >
@@ -795,7 +805,7 @@ function NodeSourceControlSettingsPanel() {
         </SettingsSection>
       ) : null}
 
-      <GitWritingSettingsSection />
+      {includeWriting ? <GitWritingSettingsSection /> : null}
 
       <AtlassianConfiguration environmentId={environmentId} />
     </SettingsPageContainer>

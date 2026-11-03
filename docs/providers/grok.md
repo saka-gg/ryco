@@ -33,7 +33,7 @@ grok login --device-auth
 ```
 
 You can also sign in from Ryco, on any node you own: when Grok cannot start on a node, its instance
-shows **Account sign-in** in **Settings → Providers**. **Sign in** runs `grok login --device-auth`
+shows **Account sign-in** in **Settings → Providers & models**. **Sign in** runs `grok login --device-auth`
 on that node, with the instance's environment variables, in a terminal shown in Settings; open its
 sign-in link on the device you use and follow the steps there, so a remote or headless node needs no
 browser of its own. The login keeps running if you close Settings, and ends when it exits, after 15
@@ -42,13 +42,13 @@ default `~/.grok`) at a time. Grok does not report which account it uses, so onc
 and Grok starts, Settings shows it as signed in.
 
 You can instead add `XAI_API_KEY` in the Grok provider instance's **Environment variables** section
-under **Settings → Providers**. Mark it sensitive so Ryco stores it as a server secret and does not
+under **Settings → Providers & models**. Mark it sensitive so Ryco stores it as a server secret and does not
 send the value back to clients after saving.
 
 ## Configure Ryco
 
 The built-in Grok instance is enabled by default and expects the binary to be named `grok`. Open
-**Settings → Providers → Grok** to set a different binary path or add another named Grok instance
+**Settings → Providers & models → Grok** to set a different binary path or add another named Grok instance
 with its own environment and accent color.
 
 Ryco discovers Grok's available models during the provider health check. If discovery returns no
@@ -57,7 +57,7 @@ applies the new model to the same Grok session on the next message; the conversa
 
 ## Credit usage
 
-Once a Grok instance has started an ACP session, **Settings → Providers** shows it as signed in,
+Once a Grok instance has started an ACP session, **Settings → Providers & models** shows it as signed in,
 with the email of the CLI login, or as signed in with an xAI API key when the instance sets
 `XAI_API_KEY`.
 
@@ -106,7 +106,7 @@ If Grok is unavailable in Ryco:
    starts; the command waits for JSON-RPC messages on standard input.
 4. If Ryco uses a custom binary path, confirm it points to the Grok executable rather than its
    containing directory.
-5. Refresh the Grok provider in **Settings → Providers** after correcting the installation or
+5. Refresh the Grok provider in **Settings → Providers & models** after correcting the installation or
    credentials.
 
 The current CLI reference is available in the

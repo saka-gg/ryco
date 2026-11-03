@@ -1,5 +1,5 @@
 import { isElectron, isHostedHubMode } from "../../env";
-import { useSettingsTarget, useSettingsEditingScope } from "../../settingsTarget";
+import { useSettingsTarget } from "../../settingsTarget";
 import { WS_METHODS, type ServerSettingsPatch, type UnifiedSettings } from "@ryco/contracts";
 
 import { useHostedRpcCapability } from "../../hostedHub/capabilities";
@@ -31,35 +31,46 @@ const ComputerUseSettings = preloadableLazy(() =>
 );
 
 /**
- * The section body for the settings page's code-split loader. On desktops that
- * offer Computer Use it resolves only once that subsection's chunk has loaded
- * too, so the section's first commit renders it instead of its loading state.
- * A failed subsection load still resolves: the subsection reports it itself.
+ * The device page's Computer use, for the settings page's code-split loader.
+ * On desktops that offer Computer Use it resolves only once that chunk has
+ * loaded too, so the part's first commit renders it instead of its loading
+ * state. A failed load still resolves: the part reports it itself.
  */
-export async function loadIntegrationsSettingsPanel(): Promise<typeof IntegrationsSettingsPanel> {
+export async function loadDeviceComputerUseSettings(): Promise<typeof DeviceComputerUseSettings> {
   if (window.desktopBridge?.computerUse) await ComputerUseSettings.preload();
-  return IntegrationsSettingsPanel;
+  return DeviceComputerUseSettings;
 }
 
-export function IntegrationsSettingsPanel() {
-  const scope = useSettingsEditingScope();
+/**
+ * A device's Computer use: this computer's native controls in the desktop app,
+ * otherwise where they are. Operating system permissions are approved on the
+ * device itself.
+ */
+export function DeviceComputerUseSettings() {
   const target = useSettingsTarget();
   const localDevice = isElectron && !isHostedHubMode() && target?.primary === true;
-  const canUseNativeControls =
-    Boolean(window.desktopBridge?.computerUse) && (scope !== "node" || localDevice);
+  if (localDevice && window.desktopBridge?.computerUse) return <ComputerUseSection />;
+  const label = target?.nodeLabel ?? "this device";
+  return (
+    <SettingsSection
+      title="Device permissions"
+      description={
+        localDevice || target?.primary
+          ? `Computer use needs the Ryco desktop app on ${label}.`
+          : `To enable screen recording, accessibility, or computer use on ${label}, open Ryco on ${label} and use Settings → ${label} → Computer use. Operating system permissions must be approved on that device.`
+      }
+      bare
+    >
+      {null}
+    </SettingsSection>
+  );
+}
+
+/** Agent Control on the device the page shows. */
+export function AgentControlSettingsPanel() {
   return (
     <SettingsPageContainer>
-      {scope !== "client" && <NodeIntegrationsSettingsPanel />}
-      {scope === "node" && target && !localDevice && (
-        <SettingsSection
-          title="Device permissions"
-          description={`To enable screen recording, accessibility, or computer use on ${target.nodeLabel}, open Ryco on ${target.nodeLabel} and use Settings → Integrations. Operating system permissions must be approved on that device.`}
-          bare
-        >
-          {null}
-        </SettingsSection>
-      )}
-      {canUseNativeControls && <ComputerUseSection />}
+      <NodeIntegrationsSettingsPanel />
     </SettingsPageContainer>
   );
 }

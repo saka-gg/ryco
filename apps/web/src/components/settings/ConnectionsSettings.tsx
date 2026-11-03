@@ -1554,7 +1554,19 @@ const DesktopSshHostRow = memo(function DesktopSshHostRow({
   );
 });
 
-export function ConnectionsSettings() {
+/**
+ * Which part of the connection settings to show. The settings page shows this
+ * computer's reach, pairing and clients on its own device page (`access`) and
+ * the devices this app connects to under All devices (`devices`); the frozen
+ * phone tier shows both (`all`).
+ */
+export type ConnectionsSettingsPart = "all" | "access" | "devices";
+
+export function ConnectionsSettings({
+  part = "all",
+}: { readonly part?: ConnectionsSettingsPart } = {}) {
+  const showAccess = part !== "devices";
+  const showDevices = part !== "access";
   const desktopBridge = window.desktopBridge;
   const [currentSessionRole, setCurrentSessionRole] = useState<"owner" | "client" | null>(
     desktopBridge ? "owner" : null,
@@ -2791,7 +2803,7 @@ export function ConnectionsSettings() {
 
   return (
     <SettingsPageContainer>
-      {canManageLocalBackend ? (
+      {!showAccess ? null : canManageLocalBackend ? (
         <>
           <SettingsSection
             title="Manage local backend"
@@ -2815,8 +2827,13 @@ export function ConnectionsSettings() {
                 {renderNetworkAccessRow()}
                 {renderEndpointRows("endpoint-rail")}
                 {renderTailscaleRow()}
-                <DesktopKeepAwakeRow desktopBridge={desktopBridge} />
-                <DesktopConversationCacheRow desktopBridge={desktopBridge} />
+                {/* The settings page shows these under Power and Data & backup. */}
+                {part === "all" ? (
+                  <>
+                    <DesktopKeepAwakeRow desktopBridge={desktopBridge} />
+                    <DesktopConversationCacheRow desktopBridge={desktopBridge} />
+                  </>
+                ) : null}
               </>
             ) : (
               renderDisabledNetworkAccessRow()
@@ -3018,85 +3035,88 @@ export function ConnectionsSettings() {
 
       {relaunchGuardDialog}
 
-      {desktopBridge ? <HubSection desktopBridge={desktopBridge} /> : null}
+      {showDevices && desktopBridge ? <HubSection desktopBridge={desktopBridge} /> : null}
 
-      <SettingsSection
-        title="Remote environments"
-        headerAction={
-          <Dialog
-            open={addBackendDialogOpen}
-            onOpenChange={(open) => {
-              setAddBackendDialogOpen(open);
-              if (!open) {
-                setSavedBackendError(null);
-              }
-            }}
-          >
-            <DialogTrigger
-              render={
-                <Button size="xs" variant="outline">
-                  <PlusIcon className="size-3" />
-                  Add environment
-                </Button>
-              }
-            />
-            <DialogPopup className="max-h-[80dvh] sm:max-w-3xl">
-              <DialogHeader>
-                <DialogTitle>Add Environment</DialogTitle>
-                <DialogDescription>Pair another environment to this client.</DialogDescription>
-              </DialogHeader>
-              <DialogPanel>
-                <div className="space-y-4">
-                  <div className="grid gap-3 sm:grid-cols-2">
-                    {renderConnectionModeCard({
-                      mode: "remote",
-                      title: "Remote link",
-                      description: "Enter a backend host and pairing code.",
-                      icon: <ChevronsLeftRightEllipsisIcon aria-hidden className="size-4" />,
-                    })}
-                    {desktopBridge
-                      ? renderConnectionModeCard({
-                          mode: "ssh",
-                          title: "SSH",
-                          description: "Use local SSH config, agent, and tunnels for the backend.",
-                          icon: <TerminalIcon aria-hidden className="size-4" />,
-                        })
-                      : null}
+      {showDevices ? (
+        <SettingsSection
+          title="Remote environments"
+          headerAction={
+            <Dialog
+              open={addBackendDialogOpen}
+              onOpenChange={(open) => {
+                setAddBackendDialogOpen(open);
+                if (!open) {
+                  setSavedBackendError(null);
+                }
+              }}
+            >
+              <DialogTrigger
+                render={
+                  <Button size="xs" variant="outline">
+                    <PlusIcon className="size-3" />
+                    Add environment
+                  </Button>
+                }
+              />
+              <DialogPopup className="max-h-[80dvh] sm:max-w-3xl">
+                <DialogHeader>
+                  <DialogTitle>Add Environment</DialogTitle>
+                  <DialogDescription>Pair another environment to this client.</DialogDescription>
+                </DialogHeader>
+                <DialogPanel>
+                  <div className="space-y-4">
+                    <div className="grid gap-3 sm:grid-cols-2">
+                      {renderConnectionModeCard({
+                        mode: "remote",
+                        title: "Remote link",
+                        description: "Enter a backend host and pairing code.",
+                        icon: <ChevronsLeftRightEllipsisIcon aria-hidden className="size-4" />,
+                      })}
+                      {desktopBridge
+                        ? renderConnectionModeCard({
+                            mode: "ssh",
+                            title: "SSH",
+                            description:
+                              "Use local SSH config, agent, and tunnels for the backend.",
+                            icon: <TerminalIcon aria-hidden className="size-4" />,
+                          })
+                        : null}
+                    </div>
+                    <AnimatedHeight>
+                      {savedBackendMode === "ssh" ? renderSshFields() : renderRemoteModeBody()}
+                    </AnimatedHeight>
                   </div>
-                  <AnimatedHeight>
-                    {savedBackendMode === "ssh" ? renderSshFields() : renderRemoteModeBody()}
-                  </AnimatedHeight>
-                </div>
-              </DialogPanel>
-            </DialogPopup>
-          </Dialog>
-        }
-      >
-        {savedEnvironmentIds.map((environmentId) => (
-          <SavedBackendListRow
-            key={environmentId}
-            environmentId={environmentId}
-            reconnectingEnvironmentId={reconnectingSavedEnvironmentId}
-            disconnectingEnvironmentId={disconnectingSavedEnvironmentId}
-            removingEnvironmentId={removingSavedEnvironmentId}
-            switchingEnvironmentId={switchingSavedEnvironmentId}
-            onConnect={handleConnectSavedBackend}
-            onDisconnect={handleDisconnectSavedBackend}
-            onRepair={handleRepairSavedBackend}
-            onRemove={handleRemoveSavedBackend}
-            onSetEnabled={handleSetSavedBackendEnabled}
-          />
-        ))}
+                </DialogPanel>
+              </DialogPopup>
+            </Dialog>
+          }
+        >
+          {savedEnvironmentIds.map((environmentId) => (
+            <SavedBackendListRow
+              key={environmentId}
+              environmentId={environmentId}
+              reconnectingEnvironmentId={reconnectingSavedEnvironmentId}
+              disconnectingEnvironmentId={disconnectingSavedEnvironmentId}
+              removingEnvironmentId={removingSavedEnvironmentId}
+              switchingEnvironmentId={switchingSavedEnvironmentId}
+              onConnect={handleConnectSavedBackend}
+              onDisconnect={handleDisconnectSavedBackend}
+              onRepair={handleRepairSavedBackend}
+              onRemove={handleRemoveSavedBackend}
+              onSetEnabled={handleSetSavedBackendEnabled}
+            />
+          ))}
 
-        {savedEnvironmentIds.length === 0 ? (
-          <div className={ITEM_ROW_CLASSNAME}>
-            <p className="text-xs text-muted-foreground">
-              No remote environments yet. Click &ldquo;Add environment&rdquo; to pair another
-              environment.
-            </p>
-          </div>
-        ) : null}
-      </SettingsSection>
+          {savedEnvironmentIds.length === 0 ? (
+            <div className={ITEM_ROW_CLASSNAME}>
+              <p className="text-xs text-muted-foreground">
+                No remote environments yet. Click &ldquo;Add environment&rdquo; to pair another
+                environment.
+              </p>
+            </div>
+          ) : null}
+        </SettingsSection>
+      ) : null}
     </SettingsPageContainer>
   );
 }

@@ -1,33 +1,6 @@
-// What the scope sentence above a node section says. Its own module, apart from
-// `settingsSections.logic`, which the app shell imports: only the settings page
-// needs this.
-import type { SettingsSectionId } from "../../settingsDialogStore";
-import { settingsSectionScope } from "./settingsSections.logic";
-
-/**
- * Whether a section's header says which node its changes apply to ("Changes
- * apply to [node]"): node sections only. A client section names this app, and a
- * browser or device section is this device's own, never a node's.
- */
-export function settingsScopeSentenceShown(
-  destination: "client" | "node",
-  section: SettingsSectionId,
-): boolean {
-  if (destination !== "node") return false;
-  const scope = settingsSectionScope(section);
-  return scope !== "browser" && scope !== "device";
-}
-
-/** Sections with node defaults that offer "Apply to all nodes", and so may show "Mixed". */
-const NODE_FAN_OUT_SECTIONS: ReadonlySet<SettingsSectionId> = new Set([
-  "general",
-  "inbox",
-  "source-control",
-]);
-
-export function settingsSectionHasNodeFanOut(section: SettingsSectionId): boolean {
-  return NODE_FAN_OUT_SECTIONS.has(section);
-}
+// Device status for the settings page's device items and device bar. Its own
+// module, apart from `settingsSections.logic`, which the app shell imports: only
+// the settings page needs this.
 
 /** Why a node a settings menu offers cannot be reached now, as its label says it. */
 export type SettingsNodeStatus = "offline" | "connecting";

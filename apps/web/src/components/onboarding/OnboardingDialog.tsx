@@ -80,7 +80,12 @@ interface TourItem {
   readonly title: string;
   readonly text: string;
   /** Rows in Settings → Connections to reveal; setup links to them and adds no flow of its own. */
-  readonly actions?: readonly { readonly label: string; readonly reveal: string }[];
+  readonly actions?: readonly {
+    readonly label: string;
+    readonly reveal: string;
+    /** This computer's own page (its pairing), or All devices (connecting more). */
+    readonly section: "device" | "devices";
+  }[];
 }
 
 /** `desktop`: Connections shows the Hub section only in the desktop app. */
@@ -106,17 +111,26 @@ function tourItems(desktop: boolean): readonly TourItem[] {
       title: "Use Ryco on your other devices",
       text: "Open this computer on your phone or another browser with a pairing link, or connect more computers.",
       actions: [
-        { label: "Pairing link", reveal: PAIRING_LINK_TARGET_ID },
-        { label: "Connect a computer", reveal: "Remote environments" },
-        ...(desktop ? [{ label: "Ryco Hub", reveal: "Hub" }] : []),
+        { label: "Pairing link", reveal: PAIRING_LINK_TARGET_ID, section: "device" },
+        { label: "Connect a computer", reveal: "Remote environments", section: "devices" },
+        ...(desktop ? [{ label: "Ryco Hub", reveal: "Hub", section: "devices" } as const] : []),
       ],
     },
   ];
 }
 
-/** Opens Settings → Connections on this app and scrolls to `target`. */
-function revealConnectionsSetting(target: string) {
-  useSettingsDialogStore.getState().openSettings("connections");
+/**
+ * Opens this computer's page (its pairing) or All devices in Settings and
+ * scrolls to `target`.
+ */
+function revealConnectionsSetting(
+  target: string,
+  section: "device" | "devices",
+  environmentId: EnvironmentId,
+) {
+  useSettingsDialogStore
+    .getState()
+    .openSettings(section, section === "device" ? environmentId : undefined);
   requestSettingsReveal(target);
 }
 
@@ -484,7 +498,13 @@ export function OnboardingDialog({
                               size="xs"
                               variant="outline"
                               disabled={!ready}
-                              onClick={() => revealConnectionsSetting(action.reveal)}
+                              onClick={() =>
+                                revealConnectionsSetting(
+                                  action.reveal,
+                                  action.section,
+                                  environmentId,
+                                )
+                              }
                             >
                               {action.label}
                             </Button>

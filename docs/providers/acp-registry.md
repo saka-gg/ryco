@@ -2,7 +2,7 @@
 
 ACP Registry instances run third-party agents through the shared `effect-acp` runtime. Existing Codex, Claude, Copilot, Cursor, Grok, and OpenCode instances keep their existing drivers.
 
-In Settings → Providers → Add instance, select **ACP Registry**, choose an agent, and explicitly install the displayed version. Installation occurs on the selected Ryco server, which may be a remote node. Save the instance after installation. The initial **Agent default** model starts a session without guessing a model identifier; models and commands advertised by the agent then populate the provider catalog.
+In Settings → Providers & models → Add instance, select **ACP Registry**, choose an agent, and explicitly install the displayed version. Installation occurs on the selected Ryco server, which may be a remote node. Save the instance after installation. The initial **Agent default** model starts a session without guessing a model identifier; models and commands advertised by the agent then populate the provider catalog.
 
 To run an ACP agent that is already installed on the node instead, choose **Local command** in the same step (see [Local ACP command](#local-acp-command)). The source is fixed once the instance exists.
 

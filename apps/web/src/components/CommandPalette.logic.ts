@@ -18,7 +18,6 @@ import type { SidebarThreadSortOrder } from "@ryco/contracts/settings";
 import { type ReactNode } from "react";
 import type { CurrentThreadLifecycle, ThreadSnoozeOption } from "../commandPaletteStore";
 import { sortThreads } from "../lib/threadSort";
-import type { SettingsSectionId } from "../settingsDialogStore";
 import { formatRelativeTimeLabel } from "../timestampFormat";
 import { type Project, type SidebarThreadSummary, type Thread } from "../types";
 import type { SettingsSearchEntry } from "./settings/settingsSearchIndex";
@@ -260,16 +259,17 @@ export function buildMessageSearchItems(input: {
 
 export function buildSettingsSearchItems(input: {
   entries: ReadonlyArray<SettingsSearchEntry>;
-  sectionTitles: Readonly<Record<SettingsSectionId, string>>;
+  /** Where the row lives, as the settings page names it. */
+  describeEntry: (entry: SettingsSearchEntry) => string;
   icon: ReactNode;
   runEntry: (entry: SettingsSearchEntry) => void;
 }): CommandPaletteActionItem[] {
   return input.entries.map((entry) => ({
     kind: "action" as const,
-    value: `settings:${entry.owner}:${entry.section}:${entry.title}`,
+    value: `settings:${entry.storage}:${entry.section}:${entry.title}`,
     searchTerms: [entry.title, entry.description, entry.keywords ?? ""],
     title: entry.title,
-    description: input.sectionTitles[entry.section],
+    description: input.describeEntry(entry),
     icon: input.icon,
     run: async () => {
       input.runEntry(entry);

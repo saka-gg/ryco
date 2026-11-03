@@ -5,12 +5,12 @@
 // file — the same reason `NodeSecuritySettingsHosted.browser.tsx` is its own
 // file.
 //
-// What is pinned here: hosted settings edit the selected node, and with the
-// global node menu gone from the header, the node header's "Switch device"
-// control is how a hosted reader chooses which node's settings they edit. The
-// settings address names no node: the control moves the selection cursor, the
-// page stays where it is, and the header names the node it lands on. The
-// cursor itself follows the last opened thread across the pages no node owns.
+// What is pinned here: hosted settings show the selected node's values, and
+// the device bar ("Values for") and the nav's device items are how a hosted
+// reader chooses which node that is. The settings address names no node: a
+// choice moves the selection cursor, the page stays where it is, and the bar
+// names the node it lands on. The cursor itself follows the last opened thread
+// across the pages no node owns.
 import "../../index.css";
 
 import { DEFAULT_SERVER_SETTINGS, EnvironmentId, type ServerConfig } from "@ryco/contracts";
@@ -141,7 +141,7 @@ beforeEach(() => {
   getHostedEnvironmentSessions().clear();
   resetHostedNodeRouteOrchestratorForTests();
   resetHostedNodeRoutesForTests();
-  useSettingsDialogStore.setState({ open: true, section: "general", editingScope: "node" });
+  useSettingsDialogStore.setState({ open: true, section: "projects" });
 });
 
 afterEach(async () => {
@@ -159,6 +159,13 @@ afterEach(async () => {
   vi.restoreAllMocks();
   document.body.innerHTML = "";
 });
+
+/** The node the device bar shows values for. */
+const shownNode = () =>
+  document.querySelector('[data-testid="settings-device-bar"] [aria-pressed="true"]')
+    ?.textContent ?? null;
+const pill = (label: string | RegExp) =>
+  page.getByTestId("settings-device-bar").getByRole("button", { name: label });
 
 describe("hosted settings choose their device", () => {
   it("moves the settings target to another node through the selection cursor, staying on settings", async () => {
@@ -188,17 +195,11 @@ describe("hosted settings choose their device", () => {
         <SettingsPage />
       </SidebarProvider>,
     );
-    const deviceHeader = () =>
-      document.querySelector<HTMLElement>('[aria-label="Device settings"]')?.textContent ?? "";
-    await vi.waitFor(() => expect(deviceHeader()).toContain(studio.label));
-
-    await page.getByRole("button", { name: "Settings device" }).click();
+    await vi.waitFor(() => expect(shownNode()).toBe(studio.label));
     // Every node this browser may open, and no revoked one.
-    await expect.element(page.getByRole("menuitemradio", { name: laptop.label })).toBeVisible();
-    await expect
-      .element(page.getByRole("menuitemradio", { name: revoked.label }))
-      .not.toBeInTheDocument();
-    await page.getByRole("menuitemradio", { name: laptop.label }).click();
+    await expect.element(pill(laptop.label)).toBeVisible();
+    await expect.element(pill(revoked.label)).not.toBeInTheDocument();
+    await pill(laptop.label).click();
 
     // The cursor moves; the address names no node and stays as it is.
     await vi.waitFor(() => expect(selectNode).toHaveBeenCalledWith(laptop.id));
@@ -207,15 +208,12 @@ describe("hosted settings choose their device", () => {
     expect(fakeWindow.entries()).toHaveLength(1);
     expect(navigate).not.toHaveBeenCalled();
 
-    // The node header names the node whose settings are now being edited.
-    await vi.waitFor(() => expect(deviceHeader()).toContain(laptop.label));
-    expect(deviceHeader()).not.toContain(studio.label);
-    expect(document.querySelector('[data-testid="settings-scope-label"]')?.textContent).toBe(
-      laptop.label,
-    );
+    // The bar names the node whose values are now shown, on the same section.
+    await vi.waitFor(() => expect(shownNode()).toBe(laptop.label));
+    expect(useSettingsDialogStore.getState().section).toBe("projects");
     // …and no connection chip rides along in the settings header.
     expect(document.querySelector("details > summary")).toBeNull();
-    // The page holds the demand for the node whose settings it shows.
+    // The page holds the demand for the node whose values it shows.
     await vi.waitFor(() =>
       expect(hostedWebConnectionScopes.list()).toEqual([
         expect.objectContaining({
@@ -239,27 +237,24 @@ describe("hosted settings choose their device", () => {
     fakeWindow = createFakeHistoryWindow("/settings");
     installHostedNodeHistory(fakeWindow as unknown as Window & typeof globalThis);
     const selectNode = selectingNode();
-    useSettingsDialogStore.setState({ editingScope: "client" });
 
     mounted = await render(
       <SidebarProvider>
         <SettingsPage />
       </SidebarProvider>,
     );
-    const deviceHeader = () =>
-      document.querySelector<HTMLElement>('[aria-label="Device settings"]')?.textContent ?? "";
-    await vi.waitFor(() => expect(deviceHeader()).toContain("Choose a device"));
+    await expect.element(page.getByText("Choose a device")).toBeVisible();
+    expect(shownNode()).toBeNull();
     expect(hostedWebConnectionScopes.list()).toEqual([]);
 
-    await page.getByRole("button", { name: "Settings device" }).click();
-    await expect.element(page.getByRole("menuitemradio", { name: studio.label })).toBeVisible();
-    await page.getByRole("menuitemradio", { name: laptop.label }).click();
+    // The nav lists every node under Devices; one opens its page.
+    const devices = page.getByRole("group", { name: "Devices" });
+    await expect.element(devices.getByRole("button", { name: studio.label })).toBeVisible();
+    await devices.getByRole("button", { name: laptop.label }).click();
 
     await vi.waitFor(() => expect(selectNode).toHaveBeenCalledWith(laptop.id));
-    await vi.waitFor(() => expect(deviceHeader()).toContain(laptop.label));
-    expect(document.querySelector('[data-testid="settings-scope-label"]')?.textContent).toBe(
-      laptop.label,
-    );
+    await vi.waitFor(() => expect(document.querySelector("h2")?.textContent).toBe(laptop.label));
+    expect(useSettingsDialogStore.getState().section).toBe("device");
   });
 
   it("targets the last opened thread's node from node-less home and settings", async () => {
@@ -293,9 +288,7 @@ describe("hosted settings choose their device", () => {
         <SettingsPage />
       </SidebarProvider>,
     );
-    const deviceHeader = () =>
-      document.querySelector<HTMLElement>('[aria-label="Device settings"]')?.textContent ?? "";
-    await vi.waitFor(() => expect(deviceHeader()).toContain(studio.label));
+    await vi.waitFor(() => expect(shownNode()).toBe(studio.label));
     expect(document.querySelector("details > summary")).toBeNull();
     expect(fakeWindow.location.pathname).toBe("/settings");
 
@@ -307,8 +300,7 @@ describe("hosted settings choose their device", () => {
     history.push("/settings");
     history.flush();
     expect(fakeWindow.location.pathname).toBe("/settings");
-    await vi.waitFor(() => expect(deviceHeader()).toContain(laptop.label));
-    expect(deviceHeader()).not.toContain(studio.label);
+    await vi.waitFor(() => expect(shownNode()).toBe(laptop.label));
   });
 
   it("waits for a current directory and browser before offering another node", async () => {
@@ -334,22 +326,16 @@ describe("hosted settings choose their device", () => {
         <SettingsPage />
       </SidebarProvider>,
     );
-    await page.getByRole("button", { name: "Settings device" }).click();
-    await expect
-      .element(page.getByRole("menuitemradio", { name: laptop.label }))
-      .toHaveAttribute("aria-disabled", "true");
+    await expect.element(pill(laptop.label)).toBeDisabled();
   });
 });
 
-describe("the scope sentence names the node a section changes", () => {
+describe("the device bar and This app", () => {
   afterEach(() => {
     resetServerStateForTests();
   });
 
-  /**
-   * Hosted on Studio, with the node's config in: its node sections are listed
-   * (the ones without a config are not).
-   */
+  /** Hosted on Studio, with the node's config in. */
   function signInOnStudio(overrides: Partial<ReturnType<typeof useHostedHubStore.getState>> = {}) {
     setServerConfigSnapshot({
       environment: {
@@ -396,10 +382,8 @@ describe("the scope sentence names the node a section changes", () => {
     });
     writePrimary(studio);
   }
-  const scopeLabel = () =>
-    document.querySelector('[data-testid="settings-scope-label"]')?.textContent ?? null;
 
-  it("switches the node through the nav's own menu, and the section's rows follow", async () => {
+  it("marks rows stored on the device, and remounts them for the node it switches to", async () => {
     await page.viewport(1_280, 720);
     signInOnStudio();
     fakeWindow = createFakeHistoryWindow("/settings");
@@ -414,30 +398,18 @@ describe("the scope sentence names the node a section changes", () => {
         </SidebarProvider>
       </AppAtomRegistryProvider>,
     );
-    await expect.element(page.getByText("Changes apply to", { exact: true })).toBeVisible();
-    const menu = page.getByRole("button", { name: `${studio.label}, switch device` });
-    await expect.element(menu).toBeVisible();
+    await expect.element(page.getByText("Values for", { exact: true })).toBeVisible();
+    await expect.element(page.getByText("Per device").first()).toBeVisible();
     const panelBefore = document.querySelector(".settings-panel-enter");
     expect(panelBefore).not.toBeNull();
 
-    await menu.click();
-    // The nav's own list: every node this browser may open, and no revoked one.
-    await expect.element(page.getByRole("menuitemradio", { name: laptop.label })).toBeVisible();
-    await expect
-      .element(page.getByRole("menuitemradio", { name: revoked.label }))
-      .not.toBeInTheDocument();
-    await page.getByRole("menuitemradio", { name: laptop.label }).click();
-
-    // The selection cursor moves, staying on settings, and the sentence follows it.
+    await pill(laptop.label).click();
     await vi.waitFor(() => expect(selectNode).toHaveBeenCalledWith(laptop.id));
     expect(fakeWindow.location.pathname).toBe("/settings");
-    await vi.waitFor(() => expect(scopeLabel()).toBe(laptop.label));
-    await expect
-      .element(page.getByRole("button", { name: `${laptop.label}, switch device` }))
-      .toBeVisible();
+    await vi.waitFor(() => expect(shownNode()).toBe(laptop.label));
     await expect
       .element(page.getByTestId("settings-destination-description"))
-      .toHaveTextContent("Identity, imports, updates, and project defaults for this device.");
+      .toHaveTextContent("New threads, worktrees and where projects open.");
     // The section is mounted again for the node it now shows, so its rows reload.
     expect(document.querySelector(".settings-panel-enter")).not.toBe(panelBefore);
   });
@@ -457,46 +429,15 @@ describe("the scope sentence names the node a section changes", () => {
         </SidebarProvider>
       </AppAtomRegistryProvider>,
     );
-    await page.getByRole("button", { name: `${studio.label}, switch device` }).click();
-    // The directory's own rule for opening a node holds for this menu too.
-    await expect
-      .element(page.getByRole("menuitemradio", { name: laptop.label }))
-      .toHaveAttribute("aria-disabled", "true");
-    await expect
-      .element(page.getByRole("menuitemradio", { name: /^Garage box/ }))
-      .toHaveTextContent(`${offline.label}Offline`);
+    // The directory's own rule for opening a node holds for the bar too.
+    await expect.element(pill(laptop.label)).toBeDisabled();
+    await expect.element(pill(offline.label)).toHaveAttribute("title", "Offline");
   });
 
-  it("searches the devices when there are more than six", async () => {
-    await page.viewport(1_280, 720);
-    const more = ["e", "f", "g", "h", "i"].map((letter, index) =>
-      node(`node_${letter.repeat(22)}`, `Rack ${index + 1}`),
-    );
-    signInOnStudio({ nodes: [studio, laptop, ...more] });
-    const selectNode = selectingNode();
-
-    mounted = await render(
-      <AppAtomRegistryProvider>
-        <SidebarProvider>
-          <SettingsPage />
-        </SidebarProvider>
-      </AppAtomRegistryProvider>,
-    );
-    // A searchable list: its trigger is a combobox.
-    await page.getByRole("combobox", { name: `${studio.label}, switch device` }).click();
-    const search = page.getByRole("combobox", { name: "Search devices" });
-    await expect.element(search).toBeVisible();
-    await search.fill("rack 3");
-    await expect.element(page.getByRole("option", { name: "Rack 3" })).toBeVisible();
-    await expect.element(page.getByRole("option", { name: "Rack 2" })).not.toBeInTheDocument();
-    await page.getByRole("option", { name: "Rack 3" }).click();
-    await vi.waitFor(() => expect(selectNode).toHaveBeenCalledWith(more[2]!.id));
-  });
-
-  it("shows no sentence on this app's own sections", async () => {
+  it("shows no device bar on this app's own sections, and says so", async () => {
     await page.viewport(1_280, 720);
     signInOnStudio();
-    useSettingsDialogStore.setState({ section: "appearance", editingScope: "client" });
+    useSettingsDialogStore.setState({ section: "appearance" });
 
     mounted = await render(
       <AppAtomRegistryProvider>
@@ -507,8 +448,31 @@ describe("the scope sentence names the node a section changes", () => {
     );
     await expect
       .element(page.getByTestId("settings-destination-description"))
-      .toHaveTextContent("Theme, typography, and interface details for this app.");
-    await expect.element(page.getByText("Changes apply to")).not.toBeInTheDocument();
-    expect(document.querySelector('[data-testid="settings-scope-sentence"]')).toBeNull();
+      .toHaveTextContent("How this app looks.This app");
+    expect(document.querySelector('[data-testid="settings-device-bar"]')).toBeNull();
+  });
+
+  it("keeps this app's rows for a hosted viewer, and hides the node's", async () => {
+    await page.viewport(1_280, 720);
+    signInOnStudio({ effectiveRole: "viewer" });
+    useSettingsDialogStore.setState({ section: "chat" });
+
+    mounted = await render(
+      <AppAtomRegistryProvider>
+        <SidebarProvider>
+          <SettingsPage />
+        </SidebarProvider>
+      </AppAtomRegistryProvider>,
+    );
+    await expect.element(page.getByRole("heading", { name: "Composer controls" })).toBeVisible();
+    await expect.element(page.getByText("No settings you can change")).toBeVisible();
+    await expect
+      .element(page.getByRole("heading", { name: "Response streaming" }))
+      .not.toBeInTheDocument();
+    const nav = page.getByRole("navigation", { name: "Settings sections" });
+    await expect
+      .element(nav.getByRole("button", { name: "Providers & models" }))
+      .not.toBeInTheDocument();
+    await expect.element(nav.getByRole("button", { name: "Chat & composer" })).toBeVisible();
   });
 });

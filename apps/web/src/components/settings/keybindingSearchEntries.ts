@@ -36,7 +36,7 @@ function keybindingSearchEntry(
   ).flatMap((rule) => keySearchTerms(rule.key));
   return {
     section: "keybindings",
-    owner: "client",
+    storage: "app",
     title,
     description: `${getCommandMeta(command).category.label} shortcut`,
     keywords: [...new Set([...commands, ...keys])].join(" "),

@@ -210,12 +210,12 @@ describe("§13.5 the inline form is short, and still discharges the duty", () =>
     // silently becomes the only account an owner is ever offered.
     // `SettingsPage.test.ts` holds this string to the label the nav draws, so
     // renaming the section fails there rather than stranding the reader here.
-    expect(E2EE_WEB_SAS_MORE).toContain("Settings → Security");
+    expect(E2EE_WEB_SAS_MORE).toContain("Settings → Devices → this node → Security");
   });
 });
 
 describe("the short form is drawn only where its pointer resolves", () => {
-  it("asks for the long form when Settings → Security is not this reader's to open", () => {
+  it("asks for the long form when a node's Security in Settings is not this reader's to open", () => {
     // The pointer promises a section that is owner-only in hosted mode and
     // fails closed on a stale role snapshot, while `HostedE2eeVerification`
     // draws for anyone holding a locked `web-unsigned` channel. Sending a viewer

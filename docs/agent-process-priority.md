@@ -3,7 +3,7 @@
 Agents run test suites, compilers and browsers. When several do so at once they can load a node
 far beyond its core count, and the Ryco server (its event loop, relay, SQLite writes and Git
 helpers) then competes with them on equal terms. The node setting **Lower agent CPU priority**
-(Settings → General → Agent processes; `lowerAgentProcessPriority`, on by default) starts agent
+(Settings → Devices → <device> → Power; `lowerAgentProcessPriority`, on by default) starts agent
 CLIs at a lower CPU priority than the server. Everything an agent starts inherits it.
 
 ## What runs lowered
