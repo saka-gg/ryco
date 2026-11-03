@@ -39,6 +39,17 @@ export interface AgentControlDetailSection {
   readonly lines: ReadonlyArray<string>;
 }
 
+/**
+ * One fact the card shows without expanding, as a label and a value: what a
+ * project request runs (its setup command, verbatim) and what it carries.
+ * `code` values are shown verbatim in a monospace face, `path` values too.
+ */
+export interface AgentControlPlanFact {
+  readonly label: string;
+  readonly value: string;
+  readonly format: "text" | "code" | "path";
+}
+
 export interface AgentControlProposalCardModel {
   readonly proposalId: AgentControlProposalId;
   readonly status: AgentControlProposalStatus;
@@ -61,6 +72,8 @@ export interface AgentControlProposalCardModel {
   readonly affectedThreadIds: ReadonlyArray<ThreadId>;
   readonly affectedProjectIds: ReadonlyArray<string>;
   readonly detailSections: ReadonlyArray<AgentControlDetailSection>;
+  /** Facts shown without expanding the plan; empty for most plans. */
+  readonly keyFacts: ReadonlyArray<AgentControlPlanFact>;
   /**
    * The kind the node sent when this build cannot read the plan (`unsupported`
    * in the tolerant view); null otherwise. Such a card is never approved here.
@@ -801,8 +814,14 @@ interface PlanPresentation {
   readonly targetLabel: string;
   readonly runtimeLabel: string | null;
   readonly detailSections: ReadonlyArray<AgentControlDetailSection>;
-  /** Used when the server sent no prompt summary. */
+  /** Used when the server sent no prompt summary, or always with `preferSummary`. */
   readonly summary?: string;
+  /**
+   * The plan's own summary wins over the server's prompt summary, which is kept
+   * audit-safe (titles only) and so omits what the user approves here.
+   */
+  readonly preferSummary?: boolean;
+  readonly keyFacts?: ReadonlyArray<AgentControlPlanFact>;
 }
 
 type ProjectFollowUpThread = (
@@ -890,12 +909,49 @@ const projectSummaryExtras = (
     .join("");
 };
 
+/** The setup command verbatim (never cut: it is what runs), or that none runs. */
+const projectSetupFact = (
+  setup: AgentControlImportProjectPlan["setup"],
+  nodeLabel: string,
+): AgentControlPlanFact =>
+  setup === null
+    ? { label: "Setup", value: "No setup command", format: "text" }
+    : { label: `Runs on ${nodeLabel}`, value: setup.command, format: "code" };
+
+const projectFollowUpFact = (
+  followUp: ProjectFollowUpThread,
+): ReadonlyArray<AgentControlPlanFact> =>
+  followUp === null ? [] : [{ label: "Then starts", value: followUp.title, format: "text" }];
+
+/** What a copy carries beyond what the remote has. */
+export function copyProjectCarriedLabel(plan: AgentControlCopyProjectToNodePlan): string {
+  const carried = [
+    ...(plan.bringCommits ? ["unpushed commits"] : []),
+    ...(plan.bringChanges ? ["uncommitted changes"] : []),
+    ...(plan.copySettings ? ["project settings"] : []),
+  ];
+  const what =
+    carried.length === 0
+      ? "Only what the remote has"
+      : `${carried[0]![0]!.toUpperCase()}${carried.join(", ").slice(1)}`;
+  return plan.branch == null ? what : `${what} · branch ${plan.branch}`;
+}
+
 function importProjectPresentation(plan: AgentControlImportProjectPlan): PlanPresentation {
   return {
     actionLabel: "Set up project",
     targetLabel: plan.title,
     runtimeLabel: projectFollowUpRuntimeLabel(plan.followUpThread),
     summary: `Clone ${plan.remoteUrl} into ${plan.destinationPath}${projectSummaryExtras(plan)}.`,
+    preferSummary: true,
+    keyFacts: [
+      { label: "Folder", value: plan.destinationPath, format: "path" },
+      ...(plan.branch === null
+        ? []
+        : [{ label: "Branch", value: plan.branch, format: "text" as const }]),
+      projectSetupFact(plan.setup, "this node"),
+      ...projectFollowUpFact(plan.followUpThread),
+    ],
     detailSections: [
       {
         heading: "Clone and register on this node",
@@ -941,7 +997,14 @@ function copyProjectToNodePresentation(plan: AgentControlCopyProjectToNodePlan):
     runtimeLabel: projectFollowUpRuntimeLabel(plan.followUpThread),
     summary: `Copy ${plan.source.title} to ${copyDestinationLabel(plan)}${
       copied.length === 0 ? "" : `, with ${copied.join(", ")}`
-    }${projectSummaryExtras(plan)}.`,
+    }${plan.branch == null ? "" : ` on branch ${plan.branch}`}${projectSummaryExtras(plan)}.`,
+    preferSummary: true,
+    // The folder comes from the approving app, which resolves it on the target.
+    keyFacts: [
+      { label: "Brings", value: copyProjectCarriedLabel(plan), format: "text" },
+      projectSetupFact(plan.setup, target),
+      ...projectFollowUpFact(plan.followUpThread),
+    ],
     detailSections: [
       {
         heading: `Copy to ${target}`,
@@ -952,6 +1015,7 @@ function copyProjectToNodePresentation(plan: AgentControlCopyProjectToNodePlan):
           `Target node: ${target} (${plan.target.environmentId})`,
           `Destination: ${plan.destination.kind}`,
           `Folder: ${copyDestinationLabel(plan)}`,
+          `Branch: ${plan.branch ?? (plan.source.kind === "project" ? "the project's current branch" : "the repository's default branch")}`,
           `Unpushed commits: ${plan.bringCommits ? "copied" : "not copied"}`,
           `Uncommitted changes: ${plan.bringChanges ? "copied" : "not copied"}`,
           `Project settings: ${plan.copySettings ? "copied" : "not copied"}`,
@@ -1058,7 +1122,11 @@ export function buildAgentControlProposalCardModel(
       proposal.plan.kind === "deviceOpenUrl"
         ? "High risk · opens an external URL or deep link"
         : null,
-    summary: proposal.promptSummary ?? plan.summary ?? null,
+    summary:
+      (plan.preferSummary === true ? plan.summary : undefined) ??
+      proposal.promptSummary ??
+      plan.summary ??
+      null,
     expiresAt: proposal.expiresAt,
     isPending: proposal.status === "pending-user-approval",
     outcomeLabel: outcomeLabel(proposal),
@@ -1067,6 +1135,7 @@ export function buildAgentControlProposalCardModel(
     affectedThreadIds: execution.affectedThreadIds,
     affectedProjectIds: execution.affectedProjectIds,
     detailSections: plan.detailSections,
+    keyFacts: plan.keyFacts ?? [],
     unsupportedKind: proposal.plan.kind === "unsupported" ? proposal.plan.originalKind : null,
     requiresClientExecutor: isClientExecutedAgentControlPlan(proposal.plan),
     clientExecutionTarget: proposal.plan.kind === "copyProjectToNode" ? proposal.plan.target : null,

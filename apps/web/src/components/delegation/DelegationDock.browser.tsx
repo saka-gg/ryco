@@ -433,13 +433,25 @@ describe("DelegationDock", () => {
         .element(line)
         .toMatchTextContent(/To\s*\/Users\/me\/Code\/ryco\s*on Mac mini · new folder/);
       await expect.element(line).toMatchTextContent(/Setup thread: Opus 5\.5 · Claude/);
+      // The command it runs, verbatim, on the row too.
+      await expect
+        .element(page.getByTestId("agent-control-plan-facts"))
+        .toMatchTextContent(/Runs on Mac mini\s*bun install/);
 
-      // Details shows the whole preview in the card, in place of the line.
+      // Details shows the whole preview in the card, in place of the line: the folder, what it
+      // brings and the command, without expanding the plan.
       await page.getByRole("button", { name: "Details" }).click();
       const block = page.getByTestId("agent-control-execution-preview");
       await expect.element(block).toMatchTextContent(/On Mac mini/);
       await expect.element(block).toMatchTextContent(/Mac mini's code directory\./);
+      await expect.element(block).toMatchTextContent(/Brings\s*Project settings/);
+      await expect.element(block).toMatchTextContent(/Runs on Mac mini\s*bun install/);
+      await expect.element(block).toMatchTextContent(/Then starts\s*Finish setting up ryco/);
       expect(block.elements()).toHaveLength(1);
+      // The card's summary says it too, not the server's titles-only text.
+      await expect
+        .element(page.getByText(/^Copy ryco to a folder named after the source/))
+        .toMatchTextContent(/runs `bun install`/);
       expect(load).toHaveBeenCalledTimes(1);
 
       await page.getByRole("button", { name: "Approve", exact: true }).click();

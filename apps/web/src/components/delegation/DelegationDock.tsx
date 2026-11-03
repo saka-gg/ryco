@@ -34,7 +34,10 @@ import { buildThreadRouteHref, buildThreadRouteParams } from "../../threadRoutes
 import { formatElapsedClockLabel } from "../../timestampFormat";
 import { useAgentControlClientExecutor } from "../agent-control/agentControlClientExecutor";
 import { useAgentControlSyncEnvironmentIds } from "../agent-control/agentControlSyncGate";
-import { AgentControlClientExecutionPreview } from "../agent-control/AgentControlClientExecutionPreview";
+import {
+  AgentControlClientExecutionPreview,
+  AgentControlPlanFacts,
+} from "../agent-control/AgentControlClientExecutionPreview";
 import { AgentControlProposalCard } from "../agent-control/AgentControlProposalCard";
 import { useAgentControlDecisions } from "../agent-control/useAgentControlDecisions";
 import { useAutomationProposalSync } from "../automations/data/useAutomationProposalSync";
@@ -634,6 +637,10 @@ function DelegationDockContent(props: {
                 enabled={cardDecisions.canApprove}
                 variant="row"
               />
+            ) : null}
+            {!detailsOpen ? (
+              // The setup command it runs, verbatim; Details shows the whole plan.
+              <AgentControlPlanFacts facts={model.keyFacts} variant="row" />
             ) : null}
             {error !== null ? (
               <p role="alert" className="px-3 pb-1.5 text-[11.5px] text-destructive-foreground">

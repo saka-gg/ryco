@@ -606,6 +606,22 @@ describe("cross-node project cards", () => {
     expect(lines.join("\n")).toContain("Runs commands: a setup command and an agent thread");
     expect(model.requiresClientExecutor).toBe(false);
     expect(model.clientExecutionTarget).toBeNull();
+    // Shown without expanding: where it goes, the branch, the command verbatim, the thread.
+    expect(model.keyFacts).toEqual([
+      { label: "Folder", value: "/Users/me/Code/ryco", format: "path" },
+      { label: "Branch", value: "main", format: "text" },
+      { label: "Runs on this node", value: "bun install && bun run build", format: "code" },
+      { label: "Then starts", value: "Finish setup", format: "text" },
+    ]);
+    // The plan's summary wins over the server's audit-safe one, which leaves the command out.
+    expect(
+      buildAgentControlProposalCardModel(
+        makeProposal({
+          plan: importPlan,
+          promptSummary: "Set up project ryco from a repository on this node",
+        }),
+      ).summary,
+    ).toBe(model.summary);
     expect(agentControlCardDecisions(model, null)).toEqual({
       canApprove: true,
       approveUnavailableLabel: null,
@@ -625,13 +641,13 @@ describe("cross-node project cards", () => {
     );
     expect(model.actionLabel).toBe("Copy to Mac mini");
     expect(model.targetLabel).toBe("ryco");
-    // The server's summary wins over the client's.
-    expect(model.summary).toBe("Copy ryco to Mac mini");
-    // A multi-line command is named in the client's summary, never cut.
-    expect(
+    // The plan's summary wins over the server's audit-safe one, which says neither what it
+    // brings nor what it runs. A multi-line command is named in it, never cut.
+    expect(model.summary).toBe(
       buildAgentControlProposalCardModel(makeProposal({ plan: copyPlan(), promptSummary: null }))
         .summary,
-    ).toBe(
+    );
+    expect(model.summary).toBe(
       'Copy ryco to ryco-copy in Mac mini\'s code directory, with unpushed commits, uncommitted changes, project settings; runs a setup command (see details); starts "Finish setup".',
     );
     expect(model.riskLabels).toEqual(["creates project", "cross node", "runs commands"]);
@@ -655,6 +671,25 @@ describe("cross-node project cards", () => {
       environmentId: "env-mac-mini",
       label: "Mac mini",
     });
+    // What it brings and the command verbatim, next to the folder the approving app resolves.
+    expect(model.keyFacts).toEqual([
+      {
+        label: "Brings",
+        value: "Unpushed commits, uncommitted changes, project settings",
+        format: "text",
+      },
+      { label: "Runs on Mac mini", value: "mise install\nbun install", format: "code" },
+      { label: "Then starts", value: "Finish setup", format: "text" },
+    ]);
+    const onBranch = buildAgentControlProposalCardModel(
+      makeProposal({
+        plan: copyPlan({ branch: "release/1.2", bringCommits: false, bringChanges: false }),
+      }),
+    );
+    expect(onBranch.keyFacts[0]?.value).toBe("Project settings · branch release/1.2");
+    expect(onBranch.summary).toContain("with project settings on branch release/1.2");
+    expect(linesOf(onBranch)).toContain("Branch: release/1.2");
+    expect(lines).toContain("Branch: the project's current branch");
 
     const plainSummary = buildAgentControlProposalCardModel(
       makeProposal({
@@ -675,6 +710,10 @@ describe("cross-node project cards", () => {
       }),
     );
     expect(plainSummary.summary).toBe("Copy ryco to ~/src/ryco.");
+    expect(plainSummary.keyFacts).toEqual([
+      { label: "Brings", value: "Only what the remote has", format: "text" },
+      { label: "Setup", value: "No setup command", format: "text" },
+    ]);
     expect(linesOf(plainSummary)).toContain("Source: repository https://github.com/example/ryco");
     expect(linesOf(plainSummary)).toContain("Setup command: none");
     expect(linesOf(plainSummary).join("\n")).not.toContain("Runs commands");

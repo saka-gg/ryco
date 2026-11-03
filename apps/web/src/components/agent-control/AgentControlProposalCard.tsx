@@ -10,7 +10,10 @@ import { useSettingsDialogStore } from "../../settingsDialogStore";
 import { formatExpiresInLabel } from "../../timestampFormat";
 import { Badge } from "../ui/badge";
 import { Button } from "../ui/button";
-import { AgentControlClientExecutionPreview } from "./AgentControlClientExecutionPreview";
+import {
+  AgentControlClientExecutionPreview,
+  AgentControlPlanFacts,
+} from "./AgentControlClientExecutionPreview";
 import { useAgentControlClientExecutor } from "./agentControlClientExecutor";
 
 const TONE_BADGE_VARIANT: Record<
@@ -112,6 +115,19 @@ export const AgentControlProposalCard = memo(function AgentControlProposalCard({
         {model.summary !== null ? (
           <p className="mt-1 text-sm text-muted-foreground">{model.summary}</p>
         ) : null}
+        {/* What it runs and carries, next to where it lands, without expanding the plan. */}
+        {proposal !== undefined && model.requiresClientExecutor ? (
+          <AgentControlClientExecutionPreview
+            executor={executor}
+            environmentId={environmentId}
+            proposal={proposal}
+            enabled={model.isPending && cardDecisions.canApprove}
+            variant="card"
+            facts={model.keyFacts}
+          />
+        ) : (
+          <AgentControlPlanFacts facts={model.keyFacts} variant="card" />
+        )}
         {model.riskLabels.length > 0 ? (
           <div className="mt-1.5 flex flex-wrap gap-1">
             {model.riskLabels.map((risk) => (
@@ -210,15 +226,6 @@ export const AgentControlProposalCard = memo(function AgentControlProposalCard({
               </div>
             ))}
           </div>
-        ) : null}
-        {proposal !== undefined && model.requiresClientExecutor ? (
-          <AgentControlClientExecutionPreview
-            executor={executor}
-            environmentId={environmentId}
-            proposal={proposal}
-            enabled={model.isPending && cardDecisions.canApprove}
-            variant="card"
-          />
         ) : null}
       </div>
       {model.isPending && showDecisions ? (
