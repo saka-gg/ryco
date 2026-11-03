@@ -682,6 +682,40 @@ describe.skipIf(!hasCurrentBuild)("built server bundle", () => {
     ]);
   });
 
+  it("loads the cross-node project copy services, tools and runs after the server serves", () => {
+    // The services are stand-ins that load `ProjectCopyServices.ts` on first use (or at a start
+    // that has copy work left over); the executor and the MCP server hold only an import().
+    const lazy =
+      /apps\/server\/src\/(?:projectCopy\/(?:Layers\/(?:ProjectCopyServices|ProjectImportsLive|ProjectExportLive|ProjectTransfersLive|ProjectImportGitLive|ProjectSetupCommandLive|NodePathsLive|GitNetworkLive)|exportGit|gitProcess|directorySearch|privacyGuardedFolders|projectImportFollowUp|projectImportProcesses)|agentControl\/(?:projectCopyRuns|Mcp\/projectCopyTools)|project\/codeRoots|sourceControl\/gitCloneCommon)\.ts$/u;
+    const boot = staticGraph("src/cliMain.ts").files;
+    expect(boot.filter((file) => lazy.test(file))).toEqual([]);
+    expect(boot).toContain("apps/server/src/projectCopy/Layers/ProjectCopyServicesDeferred.ts");
+    expect(
+      staticGraph("src/cliMain.ts", { dynamic: true })
+        .files.filter((file) => lazy.test(file))
+        .toSorted(),
+    ).toEqual([
+      "apps/server/src/agentControl/Mcp/projectCopyTools.ts",
+      "apps/server/src/agentControl/projectCopyRuns.ts",
+      "apps/server/src/project/codeRoots.ts",
+      "apps/server/src/projectCopy/Layers/GitNetworkLive.ts",
+      "apps/server/src/projectCopy/Layers/NodePathsLive.ts",
+      "apps/server/src/projectCopy/Layers/ProjectCopyServices.ts",
+      "apps/server/src/projectCopy/Layers/ProjectExportLive.ts",
+      "apps/server/src/projectCopy/Layers/ProjectImportGitLive.ts",
+      "apps/server/src/projectCopy/Layers/ProjectImportsLive.ts",
+      "apps/server/src/projectCopy/Layers/ProjectSetupCommandLive.ts",
+      "apps/server/src/projectCopy/Layers/ProjectTransfersLive.ts",
+      "apps/server/src/projectCopy/directorySearch.ts",
+      "apps/server/src/projectCopy/exportGit.ts",
+      "apps/server/src/projectCopy/gitProcess.ts",
+      "apps/server/src/projectCopy/privacyGuardedFolders.ts",
+      "apps/server/src/projectCopy/projectImportFollowUp.ts",
+      "apps/server/src/projectCopy/projectImportProcesses.ts",
+      "apps/server/src/sourceControl/gitCloneCommon.ts",
+    ]);
+  });
+
   it("keeps the boot chunks within budget", () => {
     const cliChunk = readFileSync(builtEntry, "utf8").match(/import\("(\.\/cliMain[^"]+)"\)/u)?.[1];
     const serve = builtStaticClosure(path.resolve(serverRoot, "dist", cliChunk!));
@@ -712,6 +746,11 @@ describe.skipIf(!hasCurrentBuild)("built server bundle", () => {
       expect(source).not.toMatch(
         /^\/\/#region src\/sourceControl\/ForgejoPullRequestPageApi\.ts$/mu,
       );
+      // The cross-node project copy loads on first use (ProjectCopyServicesDeferred.ts).
+      expect(source).not.toMatch(
+        /^\/\/#region src\/projectCopy\/(?:Layers\/ProjectImportsLive|Layers\/ProjectExportLive|exportGit)\.ts$/mu,
+      );
+      expect(source).not.toMatch(/^\/\/#region src\/agentControl\/projectCopyRuns\.ts$/mu);
       // Loaded the first time a person sets a delegation limit.
       expect(source).not.toMatch(/^\/\/#region src\/agentControl\/delegationLimitCheck\.ts$/mu);
       expect(source).not.toMatch(/^\/\/#region src\/persistence\/delegationTreeQueries\.ts$/mu);

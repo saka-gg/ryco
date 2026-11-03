@@ -51,10 +51,8 @@ import {
   ProjectTransfers,
   type ProjectTransfersShape,
 } from "../Services/ProjectTransfers.ts";
+import { PROJECT_IMPORTS_DIRECTORY, PROJECT_TRANSFERS_DIRECTORY } from "../projectCopyStartup.ts";
 
-export const PROJECT_TRANSFERS_DIRECTORY = "project-transfers";
-/** Claimed transfers, one directory per import; the import job owns each directory's lifetime. */
-export const PROJECT_IMPORTS_DIRECTORY = "project-imports";
 /** Uncommitted and unclaimed transfers expire this long after their last append. */
 export const PROJECT_TRANSFER_TTL_MS = 60 * 60 * 1000;
 /** Declared bytes of every unclaimed transfer together. Claimed files belong to their import. */

@@ -72,6 +72,7 @@ import {
   tryReserveProjectDestination,
 } from "../destinationReservation.ts";
 import type { ProjectImportStepError } from "../Errors.ts";
+import { PROJECT_IMPORT_SETTLED_RETENTION_MS } from "../projectCopyStartup.ts";
 import { startProjectImportFollowUp } from "../projectImportFollowUp.ts";
 import {
   osProjectImportProcessControl,
@@ -117,8 +118,6 @@ import { NodePaths } from "../Services/NodePaths.ts";
 
 /** Output and clone progress are published, and subscribers get a snapshot, at most this often. */
 const DEFAULT_SNAPSHOT_THROTTLE_MS = 1_000;
-/** Settled jobs without a leftover are forgotten after this long. */
-const SETTLED_RETENTION_MS = 30 * 24 * 60 * 60 * 1_000;
 const SETUP_SCRIPT_NAME = "Setup";
 
 export interface ProjectImportsLiveOptions {
@@ -1899,7 +1898,7 @@ export const makeProjectImports = (options: ProjectImportsLiveOptions = {}) =>
         }),
       );
       // Settled jobs without a leftover are only history after a month.
-      const cutoff = new Date(Date.now() - SETTLED_RETENTION_MS).toISOString();
+      const cutoff = new Date(Date.now() - PROJECT_IMPORT_SETTLED_RETENTION_MS).toISOString();
       yield* sql`DELETE FROM project_imports
         WHERE status <> 'running' AND staging_path IS NULL AND updated_at < ${cutoff}`;
     });

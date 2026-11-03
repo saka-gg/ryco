@@ -19,16 +19,12 @@ import {
   MessageId,
   ThreadId,
   WorktreeId,
-  type AgentControlClientExecutionState,
-  type AgentControlClientExecutorId,
-  type AgentControlCopyProjectToNodePlan,
   type AgentControlExecutionReceipt,
   type AgentControlErrorCode,
   type AgentControlImportProjectPlan,
   type AgentControlOperation,
   type AgentControlOperationState,
   type AgentControlProposal,
-  type AgentControlProposalId,
   type AgentControlResultEnvelope,
   type ChatAttachment,
   type ClientOrchestrationCommand,
@@ -40,11 +36,6 @@ import {
   type ThreadQueueAddCommand,
   type ThreadTurnStartCommand,
 } from "@ryco/contracts";
-import {
-  PROJECT_IMPORT_TERMINAL_STATUSES,
-  type ProjectImportId,
-  type ProjectImportSnapshot,
-} from "@ryco/contracts/project-copy";
 import { Cause, Duration, Effect, Layer, Option, Stream } from "effect";
 
 import { ServerConfig } from "../../config.ts";
@@ -93,17 +84,10 @@ import {
 import { AgentControlOperationStore } from "../Services/AgentControlOperationStore.ts";
 import { AgentControlProposalEvents } from "../Services/AgentControlProposalEvents.ts";
 import { AgentControlProposalStore } from "../Services/AgentControlProposalStore.ts";
-import { AgentControlClientExecutionError, AgentControlProposalNotFoundError } from "../Errors.ts";
 import {
-  AGENT_CONTROL_CLIENT_EXECUTION_DEADLINE_MS,
-  AGENT_CONTROL_CLIENT_EXECUTION_STARTED_DEADLINE_MS,
-  agentControlClientExecutionMissedDeadlineMessage,
-  agentControlClientExecutorIdHash,
-  agentControlClientExecutorMatches,
   agentControlProjectImportId,
-  agentControlProjectImportInput,
-  boundedProjectCopyText,
   isAgentControlClientExecutedKind,
+  isPastAgentControlClientExecutionDeadline,
 } from "../projectCopyControl.ts";
 import { ProjectImports } from "../../projectCopy/Services/ProjectImports.ts";
 
@@ -113,14 +97,6 @@ const TARGET_WAKE_SPACING_MS = 100;
 const RECOVERY_SCAN_LIMIT = 100;
 /** How often expired client executions are failed while the node runs. */
 const CLIENT_EXECUTION_SWEEP_INTERVAL = Duration.minutes(1);
-/** An import follower polls the job when its change stream ends early. */
-const PROJECT_IMPORT_POLL_INTERVAL = Duration.seconds(5);
-/** Consecutive failed reads (5 minutes of them) after which a follower gives up. */
-const PROJECT_IMPORT_POLL_MAX_FAILURES = 60;
-
-const isProjectImportTerminal = (snapshot: ProjectImportSnapshot): boolean =>
-  PROJECT_IMPORT_TERMINAL_STATUSES.includes(snapshot.status);
-
 type ProposalWithPlan<P> = AgentControlProposal & { readonly plan: P };
 
 export interface AgentControlExecutionLiveOptions {
@@ -1867,549 +1843,39 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
         return operation;
       });
 
-    // ── importProject: executed here, settled from its import job ──────────
+    // ── importProject and copyProjectToNode (`projectCopyRuns.ts`, loaded on first use) ────
 
-    /**
-     * Settles an `importProject` from its import job's terminal snapshot (or its absence). Never
-     * compensates: the job alone owns, and cleans up, what it created.
-     */
-    const settleProjectImport = (
-      proposalId: AgentControlProposalId,
-      snapshot: Option.Option<ProjectImportSnapshot>,
-      unavailable?: string,
-    ) =>
-      Effect.gen(function* () {
-        const proposal = yield* proposals.getById(proposalId);
-        const operation = yield* operations.getByProposalId(proposalId);
-        if (
-          Option.isNone(proposal) ||
-          proposal.value.status !== "executing" ||
-          Option.isNone(operation) ||
-          operation.value.status !== "running"
-        )
-          return;
-        const current = operation.value;
-        if (Option.isSome(snapshot) && snapshot.value.status === "completed") {
-          const job = snapshot.value;
-          const state = appendStep(
-            {
-              ...current.state,
-              resources: {
-                ...current.state.resources,
-                projectIds: unique([...(current.state.resources.projectIds ?? []), job.projectId]),
-                threadIds: unique([
-                  ...current.state.resources.threadIds,
-                  ...(job.followUpThreadId === null ? [] : [job.followUpThreadId]),
-                ]),
-              },
-            },
-            "project-import-completed",
-          );
-          const detail = boundedProjectCopyText(
-            [`Set up ${job.title} on this node.`, ...job.warnings].join(" "),
-            "Set up the project on this node.",
-          );
-          const completed = yield* operations.transition({
-            operationId: current.operationId,
-            expectedStatus: "running",
-            nextStatus: "completed",
-            actor: "executor",
-            attempt: current.attempt,
-            state,
-            result: completedResult({ ...current, state }, detail),
-            updatedAt: new Date().toISOString(),
-          });
-          yield* proposals.settleExecution({
-            proposalId,
-            result: completedResult(completed, detail),
-            now: new Date().toISOString(),
-          });
-          return;
-        }
-        const message = Option.match(snapshot, {
-          onNone: () =>
-            unavailable ?? "The import did not start; nothing was changed on this node.",
-          onSome: (job) =>
-            [
-              job.error?.message ?? `The import was ${job.status}.`,
-              ...(job.leftoverPath === null
-                ? []
-                : [`A partial copy is left at ${job.leftoverPath}; discard it from Projects.`]),
-            ].join(" "),
-        });
-        yield* settleProposalFailure(proposal.value, current, {
-          revalidation: false,
-          message: boundedProjectCopyText(message, "The import failed."),
-          retryable: true,
-        });
-      }).pipe(
-        // A concurrent settle won; its state stands.
-        Effect.catchTag("AgentControlInvalidTransitionError", () => Effect.void),
-      );
-
-    /** The job's terminal snapshot; none when the node does not know the job. */
-    const awaitProjectImport = (
-      importId: ProjectImportId,
-    ): Effect.Effect<
-      | { readonly _tag: "settled"; readonly snapshot: Option.Option<ProjectImportSnapshot> }
-      | { readonly _tag: "unavailable" }
-    > => {
-      if (Option.isNone(projectImports)) return Effect.succeed({ _tag: "unavailable" });
-      const imports = projectImports.value;
-      const poll = Effect.gen(function* () {
-        let failures = 0;
-        while (failures < PROJECT_IMPORT_POLL_MAX_FAILURES) {
-          const read = yield* Effect.exit(imports.get(importId));
-          if (read._tag === "Failure") {
-            failures += 1;
-          } else {
-            failures = 0;
-            if (Option.isNone(read.value) || isProjectImportTerminal(read.value.value))
-              return { _tag: "settled" as const, snapshot: read.value };
-          }
-          yield* Effect.sleep(PROJECT_IMPORT_POLL_INTERVAL);
-        }
-        return { _tag: "unavailable" as const };
-      });
-      // The change stream ends at the terminal snapshot; one that ends or fails early (an
-      // unknown job, a restarted import service) is followed by polling.
-      return imports.subscribe({ importId }).pipe(
-        Stream.filter(isProjectImportTerminal),
-        Stream.runHead,
-        Effect.flatMap(
-          Option.match({
-            onNone: () => poll,
-            onSome: (snapshot) =>
-              Effect.succeed({ _tag: "settled" as const, snapshot: Option.some(snapshot) }),
+    const projectCopyRuns = yield* Effect.cached(
+      Effect.promise(() => import("../projectCopyRuns.ts")).pipe(
+        Effect.map((module) =>
+          module.makeProjectCopyRuns({
+            proposals,
+            operations,
+            validator,
+            projectImports,
+            followerScope,
+            appendStep,
+            completedResult,
+            failedResult,
+            executionReceipt,
+            boundedCauseMessage,
+            settleProposalFailure,
           }),
         ),
-        Effect.catch(() => poll),
-      );
-    };
-
-    /** Follows the job in the background until it settles the proposal. */
-    const followProjectImport = (proposalId: AgentControlProposalId, importId: ProjectImportId) =>
-      awaitProjectImport(importId).pipe(
-        Effect.flatMap((outcome) =>
-          outcome._tag === "settled"
-            ? settleProjectImport(proposalId, outcome.snapshot)
-            : settleProjectImport(
-                proposalId,
-                Option.none(),
-                "The import's progress could not be read on this node; check Projects for the project.",
-              ),
-        ),
-        Effect.catchCause((cause) =>
-          Effect.logError("Agent Control project import follower failed", {
-            proposalId,
-            cause: Cause.hasInterruptsOnly(cause) ? "interrupted" : "failure",
-          }),
-        ),
-        Effect.forkIn(followerScope),
-        Effect.asVoid,
-      );
-
-    /**
-     * Starts the job (`importId` derived from the operation, so a retry finds the same job) and
-     * leaves its follower to settle the proposal: a clone and setup can take an hour, and the
-     * executor must not wait for them.
-     */
-    const startProjectImport = (
-      proposal: ProposalWithPlan<AgentControlImportProjectPlan>,
-      initial: AgentControlOperation,
-    ) =>
-      Effect.gen(function* () {
-        const plan = proposal.plan;
-        const importId = agentControlProjectImportId(initial.operationId);
-        let operation = initial;
-        const started = yield* Effect.exit(
-          Effect.gen(function* () {
-            if (Option.isNone(projectImports))
-              return yield* Effect.fail(new Error("Project import is unavailable on this node."));
-            operation = yield* operations.checkpoint({
-              operationId: operation.operationId,
-              expectedStatus: "running",
-              attempt: operation.attempt,
-              state: appendStep(
-                {
-                  ...operation.state,
-                  resources: {
-                    ...operation.state.resources,
-                    projectIds: unique([
-                      ...(operation.state.resources.projectIds ?? []),
-                      plan.projectId,
-                    ]),
-                  },
-                },
-                "project-import-planned",
-              ),
-              updatedAt: new Date().toISOString(),
-            });
-            const job = yield* projectImports.value
-              .start(
-                agentControlProjectImportInput(plan, { importId, proposalId: proposal.proposalId }),
-              )
-              .pipe(
-                // A start that failed after the job was recorded is followed, not failed.
-                Effect.catch((error) =>
-                  projectImports.value.get(importId).pipe(
-                    Effect.catch(() => Effect.succeed(Option.none<ProjectImportSnapshot>())),
-                    Effect.flatMap(
-                      Option.match({
-                        onNone: () =>
-                          Effect.fail(
-                            new Error(
-                              boundedProjectCopyText(error.message, "The import could not start."),
-                            ),
-                          ),
-                        onSome: Effect.succeed,
-                      }),
-                    ),
-                  ),
-                ),
-              );
-            operation = yield* operations.checkpoint({
-              operationId: operation.operationId,
-              expectedStatus: "running",
-              attempt: operation.attempt,
-              state: appendStep(operation.state, "project-import-started"),
-              updatedAt: new Date().toISOString(),
-            });
-            return job;
-          }),
-        );
-        if (started._tag === "Failure") {
-          yield* settleProposalFailure(proposal, operation, {
-            revalidation: false,
-            message: boundedCauseMessage(started.cause, "The import could not start."),
-            retryable: true,
-          });
-          return;
-        }
-        if (isProjectImportTerminal(started.value)) {
-          yield* settleProjectImport(proposal.proposalId, Option.some(started.value));
-          return;
-        }
-        yield* followProjectImport(proposal.proposalId, importId);
-      });
-
-    // ── copyProjectToNode: executed by the approving client ───────────────
-
-    const isCopyProposal = (
-      proposal: AgentControlProposal,
-    ): proposal is ProposalWithPlan<AgentControlCopyProjectToNodePlan> =>
-      proposal.plan.kind === "copyProjectToNode";
-
-    const requireProposal = (proposalId: AgentControlProposalId) =>
-      proposals.getById(proposalId).pipe(
-        Effect.flatMap(
-          Option.match({
-            onNone: () => Effect.fail(new AgentControlProposalNotFoundError({ proposalId })),
-            onSome: Effect.succeed,
-          }),
-        ),
-      );
-
-    const requireClientExecuted = (proposal: AgentControlProposal) =>
-      isCopyProposal(proposal) && isAgentControlClientExecutedKind(proposal.plan.kind)
-        ? Effect.succeed(proposal)
-        : Effect.fail(
-            new AgentControlClientExecutionError({
-              reason: "not-client-executed",
-              detail: "This request is not executed by the app that approves it.",
-            }),
-          );
-
-    const notExecuting = (proposal: AgentControlProposal) =>
-      new AgentControlClientExecutionError({
-        reason: "not-executing",
-        detail: `This request is ${proposal.status}.`,
-        status: proposal.status,
-      });
-
-    const executorMismatch = () =>
-      new AgentControlClientExecutionError({
-        reason: "executor-mismatch",
-        detail: "Another app is running this request.",
-      });
-
-    /** The executor binding of a proposal's operation; the presented executor must match it. */
-    const requireBinding = (
-      proposal: AgentControlProposal,
-      executorId: AgentControlClientExecutorId,
-    ) =>
-      Effect.gen(function* () {
-        const operation = yield* operations.getByProposalId(proposal.proposalId);
-        const binding = Option.isSome(operation)
-          ? operation.value.state.clientExecution
-          : undefined;
-        if (Option.isNone(operation) || binding === undefined)
-          return yield* Effect.fail(notExecuting(proposal));
-        if (!agentControlClientExecutorMatches(binding.executorIdHash, executorId))
-          return yield* Effect.fail(executorMismatch());
-        return { operation: operation.value, binding };
-      });
+      ),
+    );
 
     const beginClientExecution: AgentControlExecutionShape["beginClientExecution"] = (input) =>
-      Effect.gen(function* () {
-        const proposal = yield* requireClientExecuted(yield* requireProposal(input.proposalId));
-        if (proposal.status === "approved") {
-          // Re-checked as the executor before anything runs, exactly like a server-run plan.
-          const invalid =
-            computeAgentControlPlanDigest(proposal.plan) !== proposal.planDigest
-              ? "The approved plan digest no longer matches its immutable payload."
-              : yield* validator.revalidateExecution(proposal).pipe(
-                  Effect.as(null),
-                  Effect.catch((error) =>
-                    Effect.succeed(
-                      error.detail.trim().length > 0
-                        ? error.detail.slice(0, 2_000)
-                        : "The approved plan no longer passes current server validation.",
-                    ),
-                  ),
-                );
-          const now = Date.now();
-          const binding: AgentControlClientExecutionState = {
-            executorIdHash: agentControlClientExecutorIdHash(input.executorId),
-            deadlineAt: new Date(now + AGENT_CONTROL_CLIENT_EXECUTION_DEADLINE_MS).toISOString(),
-            importId: null,
-            targetEnvironmentId: proposal.plan.target.environmentId,
-          };
-          const begun = yield* proposals
-            .beginExecution({
-              proposalId: proposal.proposalId,
-              actor: "executor",
-              now: new Date(now).toISOString(),
-              // The operation (with the binding) lands in the same transaction: the proposal is
-              // never executing without it.
-              withinTransaction: (executing) =>
-                operations
-                  .createForProposal({
-                    proposal: executing,
-                    now: new Date(now).toISOString(),
-                    state: {
-                      completedSteps: [],
-                      resources: {
-                        projectIds: [],
-                        automationIds: [],
-                        threadIds: [],
-                        ownedThreadIds: [],
-                        worktreeIds: [],
-                        ownedWorktrees: [],
-                      },
-                      commandReceipts: [],
-                      clientExecution: binding,
-                    },
-                  })
-                  .pipe(
-                    Effect.flatMap(({ operation, replayed }) =>
-                      replayed
-                        ? Effect.void
-                        : operations
-                            .transition({
-                              operationId: operation.operationId,
-                              expectedStatus: "pending",
-                              nextStatus: "running",
-                              actor: "executor",
-                              attempt: operation.attempt + 1,
-                              state: operation.state,
-                              result: null,
-                              updatedAt: new Date(now).toISOString(),
-                            })
-                            .pipe(Effect.asVoid),
-                    ),
-                  ),
-            })
-            .pipe(
-              Effect.map(Option.some),
-              // Another accept won the begin: the binding check below decides.
-              Effect.catchTag("AgentControlInvalidTransitionError", () =>
-                Effect.succeed(Option.none<AgentControlProposal>()),
-              ),
-            );
-          if (Option.isSome(begun) && invalid !== null) {
-            const { operation } = yield* requireBinding(begun.value, input.executorId);
-            yield* settleProposalFailure(begun.value, operation, {
-              revalidation: true,
-              message: invalid,
-              retryable: true,
-            });
-            return yield* requireProposal(proposal.proposalId);
-          }
-          if (Option.isSome(begun)) return begun.value;
-        }
-        // Executing or settled: only the executor that holds it gets its state back.
-        const latest = yield* requireProposal(proposal.proposalId);
-        if (latest.status === "approved") return yield* Effect.fail(notExecuting(latest));
-        yield* requireBinding(latest, input.executorId);
-        return latest;
-      });
+      Effect.flatMap(projectCopyRuns, (runs) => runs.beginClientExecution(input));
 
     const reportClientExecution: AgentControlExecutionShape["reportClientExecution"] = (input) =>
-      Effect.gen(function* () {
-        let proposal = yield* requireClientExecuted(yield* requireProposal(input.proposalId));
-        const plan = proposal.plan;
-        const { operation, binding } = yield* requireBinding(proposal, input.executorId);
-        // An operation that settled before its proposal (a crash in between) settles it now.
-        if (
-          proposal.status === "executing" &&
-          operation.status !== "running" &&
-          operation.result !== null
-        ) {
-          const settled = yield* proposals.settleExecution({
-            proposalId: proposal.proposalId,
-            result: operation.result,
-            now: new Date().toISOString(),
-          });
-          if (!isCopyProposal(settled)) return settled;
-          proposal = settled;
-        }
-        if (proposal.status !== "executing" || operation.status !== "running") {
-          // Repeating the outcome that settled it answers with the receipt.
-          const settledAs =
-            proposal.status === "completed"
-              ? "completed"
-              : proposal.status === "failed"
-                ? "failed"
-                : null;
-          if (settledAs !== null && settledAs === input.outcome) return proposal;
-          return yield* Effect.fail(notExecuting(proposal));
-        }
-        const now = new Date();
-        const importId = input.importId ?? binding.importId;
-        if (input.outcome === "started") {
-          yield* operations.checkpoint({
-            operationId: operation.operationId,
-            expectedStatus: "running",
-            attempt: operation.attempt,
-            state: appendStep(
-              {
-                ...operation.state,
-                clientExecution: {
-                  ...binding,
-                  importId,
-                  deadlineAt: new Date(
-                    now.getTime() + AGENT_CONTROL_CLIENT_EXECUTION_STARTED_DEADLINE_MS,
-                  ).toISOString(),
-                },
-              },
-              "client-import-started",
-            ),
-            updatedAt: now.toISOString(),
-          });
-          return proposal;
-        }
-        const settle = (result: AgentControlResultEnvelope, state: AgentControlOperationState) =>
-          operations
-            .transition({
-              operationId: operation.operationId,
-              expectedStatus: "running",
-              nextStatus: result.outcome === "completed" ? "completed" : "failed",
-              actor: "executor",
-              attempt: operation.attempt,
-              state,
-              result,
-              updatedAt: now.toISOString(),
-            })
-            .pipe(
-              Effect.andThen(
-                proposals.settleExecution({
-                  proposalId: proposal.proposalId,
-                  result,
-                  now: now.toISOString(),
-                }),
-              ),
-              // A concurrent report or the deadline sweep settled it first.
-              Effect.catchTag("AgentControlInvalidTransitionError", () =>
-                requireProposal(proposal.proposalId).pipe(
-                  Effect.flatMap((latest) =>
-                    latest.status === input.outcome
-                      ? Effect.succeed(latest)
-                      : Effect.fail(notExecuting(latest)),
-                  ),
-                ),
-              ),
-            );
-        if (input.outcome === "completed") {
-          const reported = input.result ?? null;
-          if (reported === null || reported.targetEnvironmentId !== plan.target.environmentId) {
-            return yield* Effect.fail(
-              new AgentControlClientExecutionError({
-                reason: "result-mismatch",
-                detail:
-                  reported === null
-                    ? "A completed report carries the project it created."
-                    : "The reported node is not this request's target.",
-              }),
-            );
-          }
-          const state = appendStep(
-            { ...operation.state, clientExecution: { ...binding, importId } },
-            "client-execution-completed",
-          );
-          return yield* settle(
-            {
-              outcome: "completed",
-              remoteProject: {
-                environmentId: reported.targetEnvironmentId,
-                projectId: reported.projectId,
-              },
-              execution: executionReceipt({ ...operation, state }),
-              detail: boundedProjectCopyText(
-                [`Copied to ${plan.target.label}.`, ...reported.warnings].join(" "),
-                `Copied to ${plan.target.label}.`,
-              ),
-              completedAt: now.toISOString(),
-            },
-            state,
-          );
-        }
-        const state = appendStep(
-          { ...operation.state, clientExecution: { ...binding, importId } },
-          "client-execution-failed",
-        );
-        return yield* settle(
-          failedResult(
-            { ...operation, state },
-            {
-              revalidation: false,
-              message: boundedProjectCopyText(
-                input.error,
-                `The copy to ${plan.target.label} failed in the app that approved it.`,
-              ),
-              retryable: true,
-            },
-          ),
-          state,
-        );
-      });
+      Effect.flatMap(projectCopyRuns, (runs) => runs.reportClientExecution(input));
 
-    const isPastDeadline = (operation: AgentControlOperation, now: string) =>
-      operation.state.clientExecution !== undefined &&
-      operation.state.clientExecution.deadlineAt <= now;
+    /** Fails a client execution whose report deadline passed; a report that won stands. */
+    const failMissedClientExecution = (operation: AgentControlOperation) =>
+      Effect.flatMap(projectCopyRuns, (runs) => runs.failMissedClientExecution(operation));
 
-    /** Fails one client execution whose report deadline passed; a report that won stands. */
-    const failMissedClientExecution = (listed: AgentControlOperation) =>
-      Effect.gen(function* () {
-        // Re-read: a `started` report since the listing moved the deadline (the operation's
-        // compare-and-set checks only its status).
-        const operation = yield* operations.getByProposalId(listed.proposalId);
-        if (
-          Option.isNone(operation) ||
-          operation.value.status !== "running" ||
-          !isPastDeadline(operation.value, new Date().toISOString())
-        )
-          return;
-        const proposal = yield* proposals.getById(listed.proposalId);
-        if (Option.isNone(proposal) || !isCopyProposal(proposal.value)) return;
-        yield* settleProposalFailure(proposal.value, operation.value, {
-          revalidation: false,
-          message: agentControlClientExecutionMissedDeadlineMessage(
-            proposal.value.plan.target.label,
-          ),
-          retryable: true,
-        });
-      }).pipe(Effect.catchTag("AgentControlInvalidTransitionError", () => Effect.void));
+    const isPastDeadline = isPastAgentControlClientExecutionDeadline;
 
     const sweepClientExecutions: AgentControlExecutionShape["sweepClientExecutions"] = Effect.gen(
       function* () {
@@ -2489,7 +1955,7 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
         }
 
         if (executing.plan.kind === "importProject") {
-          yield* startProjectImport(
+          yield* (yield* projectCopyRuns).startProjectImport(
             executing as ProposalWithPlan<AgentControlImportProjectPlan>,
             operation,
           );
@@ -2606,7 +2072,7 @@ export const makeAgentControlExecution = (options?: AgentControlExecutionLiveOpt
           const proposal = proposalOption.value;
           // The import job is the truth: settle from it (or keep following it), never compensate.
           if (operation.status === "running" && proposal.plan.kind === "importProject") {
-            yield* followProjectImport(
+            yield* (yield* projectCopyRuns).followProjectImport(
               proposal.proposalId,
               agentControlProjectImportId(operation.operationId),
             );

@@ -17,13 +17,9 @@ import { Duration, Effect } from "effect";
 import { TestClock } from "effect/testing";
 import { describe, expect } from "vite-plus/test";
 
+import { PROJECT_IMPORTS_DIRECTORY, PROJECT_TRANSFERS_DIRECTORY } from "../projectCopyStartup.ts";
 import type { ProjectTransfersShape } from "../Services/ProjectTransfers.ts";
-import {
-  PROJECT_IMPORTS_DIRECTORY,
-  PROJECT_TRANSFERS_DIRECTORY,
-  type ProjectTransfersOptions,
-  makeProjectTransfers,
-} from "./ProjectTransfersLive.ts";
+import { type ProjectTransfersOptions, makeProjectTransfers } from "./ProjectTransfersLive.ts";
 
 const sha256 = (bytes: Uint8Array) => createHash("sha256").update(bytes).digest("hex");
 const newTransferId = () => randomUUID() as ProjectTransferId;

@@ -90,6 +90,7 @@ import {
   type ProjectCopyCallerChannel,
 } from "../callerChannel.ts";
 import { sha256File } from "../fileSha256.ts";
+import { PROJECT_EXPORTS_DIRECTORY } from "../projectCopyStartup.ts";
 import { GitNetwork } from "../Services/GitNetwork.ts";
 import {
   ProjectExport,
@@ -190,7 +191,7 @@ export const makeProjectExport = Effect.fn("makeProjectExport")(function* (
   const buildPermits = yield* Semaphore.make(EXPORT_BUILD_CONCURRENCY);
   const restartWork = yield* RestartSensitiveWork;
   const ttlMs = options.ttlMs ?? EXPORT_TTL_MS;
-  const exportsRoot = nodePath.join(config.stateDir, "project-exports");
+  const exportsRoot = nodePath.join(config.stateDir, PROJECT_EXPORTS_DIRECTORY);
   const entries = new Map<string, ExportEntry>();
 
   const git: ExportGit = (command) =>

@@ -16,6 +16,7 @@ import {
   type AgentControlClientExecutedPlanKind,
   type AgentControlClientExecutorId,
   type AgentControlImportProjectPlan,
+  type AgentControlOperation,
   type AgentControlProposalId,
 } from "@ryco/contracts";
 import {
@@ -70,6 +71,14 @@ export const agentControlClientExecutorMatches = (
   const actual = Buffer.from(agentControlClientExecutorIdHash(executorId), "hex");
   return expected.length === actual.length && timingSafeEqual(expected, actual);
 };
+
+/** Whether a client-executed run's report deadline passed (ISO timestamps compare as text). */
+export const isPastAgentControlClientExecutionDeadline = (
+  operation: Pick<AgentControlOperation, "state">,
+  now: string,
+): boolean =>
+  operation.state.clientExecution !== undefined &&
+  operation.state.clientExecution.deadlineAt <= now;
 
 export const agentControlClientExecutionMissedDeadlineMessage = (targetLabel: string) =>
   `The app that approved this request did not report back; check ${targetLabel}.`;

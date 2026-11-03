@@ -55,10 +55,7 @@ import * as GitVcsDriver from "../vcs/GitVcsDriver.ts";
 import { WorkspaceAccessPolicyLayer } from "../workspace/Layers/WorkspaceAccessPolicy.ts";
 import { WorkspacePathsLive } from "../workspace/Layers/WorkspacePaths.ts";
 import { ProjectCopyServicesLive } from "./Layers/ProjectCopyServices.ts";
-import {
-  PROJECT_IMPORTS_DIRECTORY,
-  PROJECT_TRANSFERS_DIRECTORY,
-} from "./Layers/ProjectTransfersLive.ts";
+import { PROJECT_IMPORTS_DIRECTORY, PROJECT_TRANSFERS_DIRECTORY } from "./projectCopyStartup.ts";
 import {
   commitFiles,
   git,

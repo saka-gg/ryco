@@ -80,7 +80,7 @@ import type { GitVcsDriverShape } from "../vcs/GitVcsDriver.ts";
 import { containsPath, samePath } from "../workspace/checkoutInspection.ts";
 import type { WorkspaceAccessPolicyShape } from "../workspace/Services/WorkspaceAccessPolicy.ts";
 import type { ChatFoldersShape } from "./chatFolders.ts";
-import { type ResolvedCodeRoots, resolveNodeCodeRoots } from "./codeRoots.ts";
+import type { ResolvedCodeRoots } from "./codeRoots.ts";
 import {
   canonicalChatsRoot,
   firstFreeDestination,
@@ -313,7 +313,8 @@ export async function scanChatFolder(root: string, maxEntries: number): Promise<
  * Where a promoted chat goes by default: the node's "normal code directory" from the shared code
  * roots resolver (`codeRoots.ts`). The workspace access root under `--restrict-to-cwd`, else the
  * "Add project base directory" setting, else the folder holding at least two of `projectRoots`,
- * else the first existing well-known folder (`~/Code`, `~/Developer`, …), else home.
+ * else the first existing well-known folder (`~/Code`, `~/Developer`, …), else home. The resolver
+ * loads with the first promotion, off the boot path.
  */
 export const resolvePromotionParent = async (input: {
   readonly workspaceAccessRoot: string | undefined;
@@ -324,8 +325,11 @@ export const resolvePromotionParent = async (input: {
   /** Folders the OS empties (`CodeRootsInput.temporaryDirectories`); the OS's own by default. */
   readonly temporaryDirectories?: ReadonlyArray<string>;
 }): Promise<string> =>
-  (await resolveNodeCodeRoots({ ...input, projectRoots: input.projectRoots ?? [] }))
-    .defaultProjectDirectory;
+  (
+    await (
+      await import("./codeRoots.ts")
+    ).resolveNodeCodeRoots({ ...input, projectRoots: input.projectRoots ?? [] })
+  ).defaultProjectDirectory;
 
 /** `<parent>/<slug>`, or the first free `<slug>-2`, `<slug>-3`, …; the plain name when none is. */
 export const suggestPromotionDestination = async (parent: string, title: string) => {
