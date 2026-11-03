@@ -2177,6 +2177,99 @@ it.layer(NodeServices.layer)("server settings", (it) => {
   );
 });
 
+it.layer(NodeServices.layer)("shared device settings", (it) => {
+  const stamp = { at: 1_700_000_000_000, by: "client-a" };
+
+  it.effect("persists a value and its stamp in one write and reads both back after a restart", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const { settingsPath } = yield* ServerConfig;
+      const settings = yield* ServerSettingsService;
+      const saved = yield* settings.updateSettings({
+        worktreeBranchPrefix: "team",
+        settingsSharing: { worktreeBranchPrefix: { mode: "shared", stamp } },
+      });
+      assert.deepEqual(saved.settingsSharing, {
+        worktreeBranchPrefix: { mode: "shared", stamp },
+      });
+      const persisted = JSON.parse(yield* fs.readFileString(settingsPath));
+      assert.equal(persisted.worktreeBranchPrefix, "team");
+      assert.deepEqual(persisted.settingsSharing, {
+        worktreeBranchPrefix: { mode: "shared", stamp },
+      });
+      const reloaded = yield* loadSettingsInFreshService();
+      assert.equal(reloaded.worktreeBranchPrefix, "team");
+      assert.deepEqual(reloaded.settingsSharing, saved.settingsSharing);
+      // Clients get the record as stored; redaction only touches secrets.
+      assert.deepEqual(
+        redactServerSettingsForClient(reloaded).settingsSharing,
+        saved.settingsSharing,
+      );
+    }).pipe(Effect.provide(makeServerSettingsLayer())),
+  );
+
+  it.effect("refuses sharing entries for keys this node does not share, writing nothing", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const { settingsPath } = yield* ServerConfig;
+      const settings = yield* ServerSettingsService;
+      yield* settings.updateSettings({ worktreeBranchPrefix: "before" });
+      const before = yield* fs.readFileString(settingsPath);
+      for (const key of ["providerInstances", "environmentIcon", "projectWorktreeRoots"]) {
+        const rejected = yield* settings
+          .updateSettings({
+            worktreeBranchPrefix: "after",
+            settingsSharing: { [key]: { mode: "override", stamp } },
+          })
+          .pipe(Effect.flip);
+        assert.include(rejected.detail, "is not a shared setting");
+      }
+      assert.equal(yield* fs.readFileString(settingsPath), before);
+    }).pipe(Effect.provide(makeServerSettingsLayer())),
+  );
+
+  it.effect("reports a value the node rejects and keeps neither the value nor its stamp", () =>
+    Effect.gen(function* () {
+      const settings = yield* ServerSettingsService;
+      const rejected = yield* settings
+        .updateSettings({
+          worktreeRoot: "relative/path",
+          settingsSharing: {
+            worktreeRoot: { mode: "shared", stamp, onlyIfOlderShared: true },
+          },
+        })
+        .pipe(Effect.flip);
+      assert.include(rejected.detail, "absolute");
+      const current = yield* settings.getSettings;
+      assert.equal(current.worktreeRoot, "");
+      assert.deepEqual(current.settingsSharing, {});
+    }).pipe(Effect.provide(makeServerSettingsLayer())),
+  );
+
+  it.effect("drops a catch-up for an override before validating its value", () =>
+    Effect.gen(function* () {
+      const settings = yield* ServerSettingsService;
+      yield* settings.updateSettings({
+        settingsSharing: { worktreeRoot: { mode: "override", stamp } },
+      });
+      const saved = yield* settings.updateSettings({
+        worktreeRoot: "relative/path",
+        worktreeBranchPrefix: "team",
+        settingsSharing: {
+          worktreeRoot: {
+            mode: "shared",
+            stamp: { ...stamp, at: stamp.at + 1 },
+            onlyIfOlderShared: true,
+          },
+        },
+      });
+      assert.equal(saved.worktreeRoot, "");
+      assert.equal(saved.worktreeBranchPrefix, "team");
+      assert.equal(saved.settingsSharing.worktreeRoot?.mode, "override");
+    }).pipe(Effect.provide(makeServerSettingsLayer())),
+  );
+});
+
 describe("makePersistedSettingsEncoder", () => {
   const SyntheticSettings = Schema.Struct({
     // Without per-field decoding defaults, a stored policy must list every field.
