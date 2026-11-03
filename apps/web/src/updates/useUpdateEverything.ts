@@ -130,12 +130,17 @@ export const updateEverythingRunner = createUpdateEverythingRunner({
   checkAll: checkEverything,
 });
 
-export function useUpdateEverything(): UpdateEverythingController {
-  const plan = useSyncExternalStore(
+/** What "Update everything" would do now, for every connected device; no run controls. */
+export function useUpdateEverythingPlan(): UpdateEverythingPlan {
+  return useSyncExternalStore(
     subscribeUpdateEverythingPlan,
     readUpdateEverythingPlan,
     readUpdateEverythingPlan,
   );
+}
+
+export function useUpdateEverything(): UpdateEverythingController {
+  const plan = useUpdateEverythingPlan();
   const runState = useSyncExternalStore(
     updateEverythingRunner.subscribe,
     updateEverythingRunner.getSnapshot,

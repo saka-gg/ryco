@@ -16,7 +16,11 @@ import { useDesktopWorkspaceState } from "../../platform/desktopWorkspace";
 import { useSettingsDialogStore } from "../../settingsDialogStore";
 import { useHostedConnectionActions } from "../hostedHub/HostedConnectionControls";
 import { nodeSelectionBlocked, selectableNodes } from "../hostedHub/HostedNodeDisplay.logic";
-import { settingsNodeStatus, type SettingsNodeStatus } from "./settingsDevices.logic";
+import {
+  settingsNodeStatus,
+  type SettingsDeviceKind,
+  type SettingsNodeStatus,
+} from "./settingsDevices.logic";
 
 /** A device the settings page can show: a nav item, and a choice of the device bar. */
 export interface SettingsDeviceChoice {
@@ -25,6 +29,10 @@ export interface SettingsDeviceChoice {
   /** Hosted: the directory's own rule for opening a node does not allow it now. */
   readonly disabled: boolean;
   readonly status: SettingsNodeStatus | null;
+  /** How this app reaches it. */
+  readonly kind: SettingsDeviceKind;
+  /** When it was last seen (ms), where the Hub directory or the saved record says; else null. */
+  readonly lastSeenAt: number | null;
 }
 
 /** The devices settings can show, the one shown, and how to switch. */
@@ -162,12 +170,32 @@ export function useSettingsDevices(input: {
     });
   };
 
+  const kind = (environmentId: EnvironmentIdType): SettingsDeviceKind => {
+    if (hosted) return "hub";
+    if (environmentId === primaryEnvironment?.environmentId) return "this-computer";
+    const saved = savedEnvironments[environmentId];
+    if (saved?.desktopSsh) return "ssh";
+    return saved && !saved.hubLink ? "remote" : "hub";
+  };
+  const lastSeenAt = (environmentId: EnvironmentIdType): number | null => {
+    const at = hosted
+      ? (hostedNode(environmentId)?.presence.lastHeartbeatAt ??
+        hostedNode(environmentId)?.lastAuthenticatedAt ??
+        null)
+      : savedEnvironments[environmentId]?.lastConnectedAt
+        ? Date.parse(savedEnvironments[environmentId].lastConnectedAt)
+        : null;
+    return typeof at === "number" && Number.isFinite(at) ? at : null;
+  };
+
   return {
     choices: [...labels].map(([environmentId, label]) => ({
       environmentId,
       label,
       disabled: blocked(environmentId),
       status: status(environmentId),
+      kind: kind(environmentId),
+      lastSeenAt: lastSeenAt(environmentId),
     })),
     value: targetEnvironmentId,
     select: (environmentId) => {

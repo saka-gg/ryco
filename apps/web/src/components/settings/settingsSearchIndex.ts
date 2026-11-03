@@ -113,7 +113,7 @@ export const SETTINGS_SEARCH_INDEX: ReadonlyArray<SettingsSearchEntry> = [
   {
     section: "device",
     storage: "device",
-    part: "identity",
+    part: "overview",
     title: "Device name",
     description: "Rename the selected device for everyone who can access it.",
     keywords: "machine hostname node name rename icon",
@@ -712,19 +712,25 @@ export function describeSettingsSearchEntry(
 
 /**
  * Where picking a result opens: its section, on the device the search was
- * checked against, or this app's own device page for a row of this computer.
+ * checked against, or this app's own device page for a row of this computer;
+ * a device page row on its tab.
  */
 export function settingsSearchEntryDestination(
-  entry: Pick<SettingsSearchEntry, "section" | "storage">,
+  entry: Pick<SettingsSearchEntry, "section" | "storage" | "part">,
   devices: {
     readonly target: EnvironmentId | null;
     readonly primary: EnvironmentId | null;
   },
-): { readonly section: SettingsPageSectionId; readonly environmentId: EnvironmentId | null } {
+): {
+  readonly section: SettingsPageSectionId;
+  readonly environmentId: EnvironmentId | null;
+  readonly deviceTab: SettingsDevicePartId | null;
+} {
   const ownDevice = entry.storage === "this-computer" || entry.storage === "desktop";
   return {
     section: entry.section,
     environmentId: ownDevice ? (devices.primary ?? devices.target) : devices.target,
+    deviceTab: entry.section === "device" ? (entry.part ?? null) : null,
   };
 }
 

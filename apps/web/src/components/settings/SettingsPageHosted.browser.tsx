@@ -63,7 +63,7 @@ import { resetServerStateForTests, setServerConfigSnapshot } from "../../rpc/ser
 import { useSettingsDialogStore } from "../../settingsDialogStore";
 import { createFakeHistoryWindow, type FakeHistoryWindow } from "../../../test/fakeHistoryWindow";
 import { SidebarProvider } from "../ui/sidebar";
-import { SettingsPage } from "./SettingsPage";
+import { SettingsPage, type SettingsPageLocation } from "./SettingsPage";
 
 const account = {
   id: "acct_aaaaaaaaaaaaaaaaaaaaaa",
@@ -474,5 +474,103 @@ describe("the device bar and This app", () => {
       .element(nav.getByRole("button", { name: "Providers & models" }))
       .not.toBeInTheDocument();
     await expect.element(nav.getByRole("button", { name: "Chat & composer" })).toBeVisible();
+  });
+
+  const renderPage = (location?: SettingsPageLocation) =>
+    render(
+      <AppAtomRegistryProvider>
+        <SidebarProvider>
+          <SettingsPage location={location} />
+        </SidebarProvider>
+      </AppAtomRegistryProvider>,
+    );
+  const tab = (name: string) => page.getByRole("tab", { name, exact: true });
+
+  it("lists a card per device on All devices, and a card opens its page on Overview", async () => {
+    await page.viewport(1_280, 720);
+    signInOnStudio();
+    useSettingsDialogStore.setState({ section: "devices", deviceTab: "power" });
+
+    mounted = await renderPage();
+    const cards = page.getByRole("list", { name: "Devices" });
+    await expect.element(cards.getByRole("button", { name: /Studio node/ })).toBeVisible();
+    await expect.element(cards.getByRole("button", { name: /Travel laptop/ })).toBeVisible();
+    await expect.element(cards.getByText("Hub device").first()).toBeVisible();
+    // A hosted browser runs no backend of its own to pair a device with.
+    await expect.element(page.getByText("Add a device")).not.toBeInTheDocument();
+
+    await cards.getByRole("button", { name: /Studio node/ }).click();
+    await expect.element(tab("Overview")).toHaveAttribute("aria-selected", "true");
+    expect(useSettingsDialogStore.getState()).toMatchObject({
+      section: "device",
+      deviceTab: null,
+    });
+    await expect.element(page.getByRole("heading", { name: "Studio node" })).toBeVisible();
+  });
+
+  it("shows one tab at a time, and an old id opens its tab", async () => {
+    await page.viewport(1_280, 720);
+    signInOnStudio();
+    useSettingsDialogStore.setState({ section: "security", deviceTab: null });
+
+    mounted = await renderPage();
+    await expect.element(tab("Security")).toHaveAttribute("aria-selected", "true");
+    await vi.waitFor(() =>
+      expect(useSettingsDialogStore.getState()).toMatchObject({
+        section: "device",
+        deviceTab: "security",
+      }),
+    );
+
+    await tab("Access").click();
+    await expect.element(tab("Access")).toHaveAttribute("aria-selected", "true");
+    // Hosted: this app has no backend of its own, so Access says where it lives.
+    await expect.element(page.getByText(/are set on Studio node itself/)).toBeVisible();
+    expect(useSettingsDialogStore.getState().deviceTab).toBe("access");
+
+    await tab("Computer use").click();
+    await expect
+      .element(page.getByText("Computer use needs the Ryco desktop app on Studio node."))
+      .toBeVisible();
+  });
+
+  it("follows its address and writes its place back, without naming the hosted node", async () => {
+    await page.viewport(1_280, 720);
+    signInOnStudio();
+    useSettingsDialogStore.setState({ section: "appearance", deviceTab: null });
+    const replace = vi.fn();
+
+    mounted = await renderPage({ search: { section: "device", tab: "power" }, replace });
+    await expect.element(tab("Power")).toHaveAttribute("aria-selected", "true");
+    expect(useSettingsDialogStore.getState()).toMatchObject({
+      section: "device",
+      deviceTab: "power",
+    });
+
+    await tab("Security").click();
+    await vi.waitFor(() =>
+      expect(replace).toHaveBeenLastCalledWith({ section: "device", tab: "security" }),
+    );
+  });
+
+  it("keeps five devices in the bar and the rest under More, with a search", async () => {
+    await page.viewport(1_280, 720);
+    const many = Array.from({ length: 5 }, (_, index) =>
+      node(`node_${String(index).repeat(22)}`, `Box ${index + 1}`),
+    );
+    signInOnStudio({ nodes: [studio, laptop, ...many] });
+    const selectNode = selectingNode();
+
+    mounted = await renderPage();
+    const bar = page.getByTestId("settings-device-bar");
+    await expect.element(pill(studio.label)).toBeVisible();
+    expect(bar.getByRole("button").elements()).toHaveLength(6);
+
+    await bar.getByRole("button", { name: /More/ }).click();
+    await page.getByRole("searchbox", { name: "Search devices" }).fill("box 5");
+    const others = page.getByRole("list", { name: "Other devices" });
+    await expect.element(others.getByRole("listitem")).toHaveTextContent("Box 5");
+    await others.getByRole("listitem").click();
+    await vi.waitFor(() => expect(selectNode).toHaveBeenCalledWith(many[4]!.id));
   });
 });

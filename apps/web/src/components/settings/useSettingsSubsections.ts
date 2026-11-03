@@ -33,19 +33,16 @@ export function useSettingsSubsections(
     const scan = () => {
       entries = searching
         ? []
-        : // A device page lists its parts, not every section inside them.
-          Array.from(
-            root.querySelector("[data-settings-part]")
-              ? root.querySelectorAll<HTMLElement>("[data-settings-part]")
-              : root.querySelectorAll<HTMLElement>("[data-settings-section]"),
-          ).map((element) => {
-            if (!identities.has(element)) identities.set(element, `section-${++nextId}`);
-            return {
-              id: identities.get(element)!,
-              title: (element.dataset.settingsPart ?? element.dataset.settingsSection)!,
-              element,
-            };
-          });
+        : Array.from(root.querySelectorAll<HTMLElement>("[data-settings-section]")).map(
+            (element) => {
+              if (!identities.has(element)) identities.set(element, `section-${++nextId}`);
+              return {
+                id: identities.get(element)!,
+                title: element.dataset.settingsSection!,
+                element,
+              };
+            },
+          );
       setSections((previous) =>
         previous.length === entries.length &&
         previous.every(
@@ -79,7 +76,7 @@ export function useSettingsSubsections(
       childList: true,
       subtree: true,
       attributes: true,
-      attributeFilter: ["data-settings-section", "data-settings-part", "aria-current"],
+      attributeFilter: ["data-settings-section", "aria-current"],
     });
     root.addEventListener("scroll", track, true);
     return () => {

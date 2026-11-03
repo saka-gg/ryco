@@ -92,7 +92,11 @@ export const KNOWN_BAILOUTS: Readonly<Record<string, ReadonlyArray<string>>> = {
   "src/components/settings/ChatsFolderSettings.tsx": ["useChatsSettingsSave"],
   "src/components/settings/ComputerBetaSettings.tsx": ["ComputerBetaSettings"],
   "src/components/settings/ComputerUseSettings.tsx": ["ComputerUseSettings"],
-  "src/components/settings/ConnectionsSettings.tsx": ["ConnectionsSettings"],
+  // The same try/finally handlers ConnectionsSettings held before its split.
+  "src/components/settings/ConnectionsSettings.tsx": [
+    "ConnectedDevicesSettings",
+    "useLocalBackendAccess",
+  ],
   "src/components/settings/DesktopConversationCacheRow.tsx": ["DesktopConversationCacheRow"],
   "src/components/settings/DesktopKeepAwakeRow.tsx": ["DesktopKeepAwakeRow"],
   "src/components/settings/DeviceIconPicker.tsx": ["DeviceIconPicker"],

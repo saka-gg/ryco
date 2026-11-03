@@ -38,9 +38,12 @@ export type SettingsStorage =
   | "desktop"
   | "hub";
 
-/** The device page's parts, in page order. Phase 2 turns them into tabs. */
+/**
+ * The device page's tabs, in tab order, with where each keeps its values.
+ * Overview holds the device's facts and identity.
+ */
 export const SETTINGS_DEVICE_PARTS = [
-  { id: "identity", title: "Identity", storage: "device" },
+  { id: "overview", title: "Overview", storage: "device" },
   { id: "access", title: "Access", storage: "this-computer" },
   { id: "security", title: "Security", storage: "device" },
   { id: "computer-use", title: "Computer use", storage: "desktop" },
@@ -58,6 +61,10 @@ export const SETTINGS_DEVICE_PART_TITLES: Readonly<Record<SettingsDevicePartId, 
     SettingsDevicePartId,
     string
   >;
+
+export function isSettingsDevicePartId(id: string): id is SettingsDevicePartId {
+  return SETTINGS_DEVICE_PARTS.some((part) => part.id === id);
+}
 
 /**
  * The sections the frozen web phone tier still navigates (`PhoneSettingsSurface`).
@@ -310,6 +317,70 @@ export function settingsSection(id: SettingsPageSectionId): SettingsSection {
 /** The section the page shows for any id a caller asked for. */
 export function resolveSettingsPageSection(id: SettingsSectionId): SettingsPageSectionId {
   return isSettingsPageSectionId(id) ? id : LEGACY_SECTION_HOMES[id];
+}
+
+/** The device page tab old ids open; the rest open on Overview. */
+const LEGACY_DEVICE_TABS: Partial<Record<LegacySettingsSectionId, SettingsDevicePartId>> = {
+  "computer-use": "computer-use",
+  security: "security",
+};
+
+/**
+ * The tab a device page opens on: the one asked for, else the one an old id
+ * names (`security` opens Security), else Overview.
+ */
+export function resolveSettingsDeviceTab(
+  requested: SettingsSectionId,
+  tab: SettingsDevicePartId | null,
+): SettingsDevicePartId {
+  if (tab !== null) return tab;
+  return (
+    (isSettingsPageSectionId(requested) ? undefined : LEGACY_DEVICE_TABS[requested]) ?? "overview"
+  );
+}
+
+export function isSettingsSectionId(id: string): id is SettingsSectionId {
+  return (
+    isSettingsPageSectionId(id) || (LEGACY_SETTINGS_SECTIONS as ReadonlyArray<string>).includes(id)
+  );
+}
+
+/**
+ * Where the settings page is, as its address carries it (`/settings?section=…`):
+ * the section, a device page's tab, and outside hosted mode the device. The
+ * page keeps it in step with the settings store, so Back and Forward, and a
+ * link, open the same device and tab.
+ */
+export interface SettingsLocationSearch {
+  readonly section?: SettingsSectionId;
+  readonly device?: string;
+  readonly tab?: SettingsDevicePartId;
+}
+
+/** The `/settings` route's search, with anything unknown dropped. */
+export function parseSettingsLocationSearch(
+  search: Record<string, unknown>,
+): SettingsLocationSearch {
+  const section =
+    typeof search.section === "string" && isSettingsSectionId(search.section)
+      ? search.section
+      : undefined;
+  const tab =
+    typeof search.tab === "string" && isSettingsDevicePartId(search.tab) ? search.tab : undefined;
+  const device =
+    typeof search.device === "string" && search.device.length > 0 && search.device.length <= 256
+      ? search.device
+      : undefined;
+  return {
+    ...(section ? { section } : {}),
+    ...(device ? { device } : {}),
+    ...(tab ? { tab } : {}),
+  };
+}
+
+/** One string per location, equal while the location is. */
+export function settingsLocationKey(search: SettingsLocationSearch): string {
+  return [search.section ?? "", search.device ?? "", search.tab ?? ""].join("\n");
 }
 
 /** The frozen phone tier's section for any id a caller asked for. */
