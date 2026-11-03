@@ -54,6 +54,7 @@ import {
   useSavedEnvironmentRegistryStore,
 } from "../environments/runtime";
 import { startDesktopWorkspaceBridge } from "../platform/desktopWorkspace";
+import { scheduleSettingsSharingStart } from "../settingsSharing/settingsSharingStart";
 import {
   configureClientTracing,
   disableClientTracing,
@@ -401,8 +402,11 @@ function EnvironmentConnectionManagerBootstrap() {
         if (!disposed) stopInteractionReports = startClientInteractionReporting();
       })
       .catch((error: unknown) => console.warn("Interaction reports failed to load.", error));
+    // Shared device settings catch up on devices that come back online, settings open or not.
+    const stopSettingsSharing = scheduleSettingsSharingStart();
     return () => {
       disposed = true;
+      stopSettingsSharing();
       stopNodeUpdates?.();
       stopInteractionReports?.();
       stopDesktopWorkspace();

@@ -1,8 +1,7 @@
 import { Schema } from "effect";
-import { useEffect, useRef } from "react";
-import { GitWritingStyle, WS_METHODS, type ServerConfig } from "@ryco/contracts";
+import { GitWritingStyle, WS_METHODS } from "@ryco/contracts";
 import { DEFAULT_UNIFIED_SETTINGS, type ServerSettings } from "@ryco/contracts/settings";
-import type { NodeSettingsConfig } from "@ryco/client-runtime/state/settings/nodeSettingsFanOut";
+import type { NodeSettingsConfig } from "@ryco/client-runtime/state/settings/nodeSettingsTargets";
 import {
   DEFAULT_GIT_WRITING_STYLE,
   GIT_WRITING_STYLE_OPTIONS,
@@ -11,18 +10,16 @@ import {
 } from "@ryco/shared/gitWritingStyle";
 
 import { useHostedRpcCapability } from "../../hostedHub/capabilities";
-import { useSettings, useUpdateSettings } from "../../hooks/useSettings";
-import { useServerConfigSelector } from "../../rpc/serverState";
 import { useSettingsTarget } from "../../settingsTarget";
 import { DraftTextarea } from "../ui/draft-textarea";
 import { Switch } from "../ui/switch";
-import { ApplyToAllNodes } from "./ApplyToAllNodes";
 import {
   ProjectOverrideSelectEditor,
   ProjectOverrideSelectSetting,
   type ProjectOverrideSelectSpec,
 } from "./ProjectOverrideSelectSetting";
-import { SettingResetButton, SettingsRow, SettingsSection } from "./settingsLayout";
+import { SettingsSection } from "./settingsLayout";
+import { SharedSettingRow, sharedControlLabel } from "./sharedSettings/SharedSettingRow";
 
 const GIT_WRITING_INSTRUCTION_ROWS = [
   {
@@ -46,69 +43,33 @@ const GIT_WRITING_INSTRUCTION_ROWS = [
 
 const GIT_WRITING_INSTRUCTIONS_MAX_LENGTH = 4_000;
 
-/**
- * One instructions row. "Apply to all nodes" sends the text committed last, even while this
- * node's save is still on its way: clicking the button commits the text first, and a node other
- * than the primary one shows it only once the node answers.
- */
+/** One instructions row, shared across devices: a text area, committed on blur. */
 function GitWritingInstructionsRow(props: {
   readonly row: (typeof GIT_WRITING_INSTRUCTION_ROWS)[number];
-  readonly value: string;
-  readonly onCommit: (next: string) => void;
   readonly allowed: boolean;
 }) {
-  const { row, value } = props;
-  const committed = useRef<string | null>(null);
-  // A value from the node (this save's answer, or a change made elsewhere) replaces it.
-  useEffect(() => {
-    committed.current = null;
-  }, [value]);
+  const { row } = props;
   return (
-    <SettingsRow
-      title={row.title}
+    <SharedSettingRow
+      settingKey={row.key}
       description={row.description}
-      status={
-        <ApplyToAllNodes
-          label={row.title.toLowerCase()}
-          select={row.select}
-          format={formatInstructions}
-          patch={() => ({ [row.key]: committed.current ?? value })}
-          disabled={!props.allowed}
+      layout="block"
+      defaultValue={DEFAULT_UNIFIED_SETTINGS[row.key]}
+      resetLabel={row.title.toLowerCase()}
+      render={(control) => (
+        <DraftTextarea
+          value={control.value}
+          onCommit={(next) => control.onChange(next.trim())}
+          placeholder={row.placeholder}
+          maxLength={GIT_WRITING_INSTRUCTIONS_MAX_LENGTH}
+          disabled={!props.allowed || control.disabled}
+          aria-label={sharedControlLabel(row.title, control)}
         />
-      }
-      resetAction={
-        value !== DEFAULT_UNIFIED_SETTINGS[row.key] ? (
-          <SettingResetButton
-            label={row.title.toLowerCase()}
-            onClick={() => props.onCommit(DEFAULT_UNIFIED_SETTINGS[row.key])}
-          />
-        ) : null
-      }
-    >
-      <DraftTextarea
-        value={value}
-        onCommit={(next) => {
-          committed.current = next.trim();
-          props.onCommit(next.trim());
-        }}
-        placeholder={row.placeholder}
-        maxLength={GIT_WRITING_INSTRUCTIONS_MAX_LENGTH}
-        disabled={!props.allowed}
-        aria-label={row.title}
-      />
-    </SettingsRow>
+      )}
+    />
   );
 }
 
-/** Instructions as the "Mixed" list shows them: the start of the text, or None. */
-function formatInstructions(text: string): string {
-  const line = text.trim().replace(/\s+/g, " ");
-  if (!line) return "None";
-  return line.length > 60 ? `${line.slice(0, 59)}…` : line;
-}
-
-const selectPullRequestTemplates = (settings: ServerSettings): boolean =>
-  settings.pullRequestTemplates;
 const nodeKeepsPullRequestTemplates = (config: NodeSettingsConfig): boolean =>
   config.environment.capabilities.changeRequestTemplates === true;
 
@@ -135,7 +96,7 @@ const GIT_WRITING_STYLE_SETTING: ProjectOverrideSelectSpec<GitWritingStyle> = {
     };
   },
   patch: gitWritingStylePatch,
-  applyToAllNodesLabel: "writing style",
+  sharedKey: "gitWritingStyle",
   unsupportedStatus: "Update this node to choose a writing style.",
   inheritStatus: (node) => `Uses the device default (${styleLabel(node)}).`,
   saveFailed: "Could not save the writing style. Try again.",
@@ -157,78 +118,40 @@ export function GitWritingStyleEditor(props: {
   return <ProjectOverrideSelectEditor spec={GIT_WRITING_STYLE_SETTING} {...props} />;
 }
 
-// Module level, so unrelated config pushes (provider probes) never re-render.
-const selectChangeRequestTemplatesSupported = (config: ServerConfig | null): boolean =>
-  config?.environment.capabilities.changeRequestTemplates === true;
-
 /**
- * Settings → Source Control: the node's writing style, the user's own commit and pull
- * request instructions, and pull request templates. Rendered without waiting for the hosting
- * provider scan.
+ * Settings → Git & pull requests: the device's writing style, the user's own commit and pull
+ * request instructions, and pull request templates, each shared across devices. Rendered
+ * without waiting for the hosting provider scan.
  */
 export function GitWritingSettingsSection() {
-  const settings = useSettings();
-  const { updateSettings } = useUpdateSettings();
   const settingsTarget = useSettingsTarget();
   // Settings writes, gated by the settings-update method rather than by sensing the transport.
   const settingsCapability = useHostedRpcCapability(
     WS_METHODS.serverUpdateSettings,
     settingsTarget?.environmentId ?? null,
   );
-  // Older nodes drop the setting; their dialog never offers templates either.
-  const templatesSupported = useServerConfigSelector(selectChangeRequestTemplatesSupported);
   return (
     <SettingsSection title="Commit & pull request writing" owner="node">
       <GitWritingStyleSettings projectId="" projects={[]} />
       {GIT_WRITING_INSTRUCTION_ROWS.map((row) => (
-        <GitWritingInstructionsRow
-          key={row.key}
-          row={row}
-          value={settings[row.key]}
-          onCommit={(next) => updateSettings({ [row.key]: next })}
-          allowed={settingsCapability.allowed}
-        />
+        <GitWritingInstructionsRow key={row.key} row={row} allowed={settingsCapability.allowed} />
       ))}
-      <SettingsRow
+      <SharedSettingRow
+        settingKey="pullRequestTemplates"
         title="Pull request templates"
         description="Fill generated pull request descriptions from the repository's template, and offer its templates when you open a pull request."
-        status={
-          templatesSupported ? (
-            <ApplyToAllNodes
-              label="pull request templates"
-              select={selectPullRequestTemplates}
-              format={(on) => (on ? "On" : "Off")}
-              patch={{ pullRequestTemplates: settings.pullRequestTemplates }}
-              supported={nodeKeepsPullRequestTemplates}
-              disabled={!settingsCapability.allowed}
-            />
-          ) : (
-            "Update this node to use pull request templates."
-          )
-        }
-        resetAction={
-          templatesSupported &&
-          settings.pullRequestTemplates !== DEFAULT_UNIFIED_SETTINGS.pullRequestTemplates ? (
-            <SettingResetButton
-              label="pull request templates"
-              onClick={() =>
-                updateSettings({
-                  pullRequestTemplates: DEFAULT_UNIFIED_SETTINGS.pullRequestTemplates,
-                })
-              }
-            />
-          ) : null
-        }
-        control={
+        knowsSetting={nodeKeepsPullRequestTemplates}
+        unknownSettingStatus="Update this node to use pull request templates."
+        defaultValue={DEFAULT_UNIFIED_SETTINGS.pullRequestTemplates}
+        resetLabel="pull request templates"
+        render={(control) => (
           <Switch
-            checked={settings.pullRequestTemplates}
-            disabled={!settingsCapability.allowed || !templatesSupported}
-            onCheckedChange={(checked) =>
-              updateSettings({ pullRequestTemplates: Boolean(checked) })
-            }
-            aria-label="Use pull request templates"
+            checked={control.value}
+            disabled={!settingsCapability.allowed || control.disabled}
+            onCheckedChange={(checked) => control.onChange(Boolean(checked))}
+            aria-label={sharedControlLabel("Use pull request templates", control)}
           />
-        }
+        )}
       />
     </SettingsSection>
   );

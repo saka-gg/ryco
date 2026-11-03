@@ -215,12 +215,15 @@ vi.mock("../../environments/runtime", () => {
     startEnvironmentConnectionService: () => undefined,
     subscribeEnvironmentConnections: () => () => {},
     updateEnvironmentServerSettings: mockUpdateEnvironmentServerSettings,
-    useSavedEnvironmentRegistryStore: (
-      selector: (state: { byId: Record<string, never> }) => unknown,
-    ) => selector({ byId: {} }),
-    useSavedEnvironmentRuntimeStore: (
-      selector: (state: { byId: Record<string, never> }) => unknown,
-    ) => selector({ byId: {} }),
+    // Stores with nothing saved; shared settings rows read them outside React too.
+    useSavedEnvironmentRegistryStore: Object.assign(
+      (selector: (state: { byId: Record<string, never> }) => unknown) => selector({ byId: {} }),
+      { getState: () => ({ byId: {} }), subscribe: () => () => undefined },
+    ),
+    useSavedEnvironmentRuntimeStore: Object.assign(
+      (selector: (state: { byId: Record<string, never> }) => unknown) => selector({ byId: {} }),
+      { getState: () => ({ byId: {} }), subscribe: () => () => undefined },
+    ),
   };
 });
 
@@ -1134,7 +1137,7 @@ describe("GeneralSettingsPanel observability", () => {
         .element()
         .closest("[data-setting-scope]")
         ?.getAttribute("data-setting-scope"),
-    ).toBe("Device connecting…");
+    ).toBe("Local environment");
   });
 
   it("shows only local controls in this browser's General settings", async () => {
@@ -1356,7 +1359,8 @@ describe("GeneralSettingsPanel observability", () => {
         </SettingsEditingScopeProvider>
       </AppAtomRegistryProvider>,
     );
-    await page.getByLabelText("Check providers for updates").click();
+    // Shared rows offer no control for a device this client cannot write now.
+    await expect.element(page.getByLabelText("Check providers for updates")).toBeDisabled();
     expect(mockUpdateEnvironmentServerSettings).not.toHaveBeenCalled();
   });
 

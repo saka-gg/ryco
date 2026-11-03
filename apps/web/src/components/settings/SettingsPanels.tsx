@@ -18,7 +18,7 @@ import { CliCommandSettings } from "./CliCommandSettings";
 import { UsageLimitSettings } from "./UsageLimitSettings";
 import { UsagePriceSettings } from "./UsagePriceSettings";
 import { ResponseStreamingSettings } from "./ResponseStreamingSettings";
-import { ApplyToAllNodes } from "./ApplyToAllNodes";
+import { SharedSettingRow, sharedControlLabel } from "./sharedSettings/SharedSettingRow";
 import { ArchiveIcon, ArchiveX, MessageCircleDashedIcon } from "lucide-react";
 import { useCallback, useMemo, useState, type ReactNode } from "react";
 import {
@@ -30,11 +30,7 @@ import {
 } from "@ryco/contracts";
 import { scopeThreadRef } from "@ryco/client-runtime/scoped";
 import { CHAT_PROJECT_LABEL } from "@ryco/client-runtime/state/composer";
-import {
-  DEFAULT_UNIFIED_SETTINGS,
-  type ServerSettings,
-  WorktreeBranchPrefix,
-} from "@ryco/contracts/settings";
+import { DEFAULT_UNIFIED_SETTINGS, WorktreeBranchPrefix } from "@ryco/contracts/settings";
 import { APP_BASE_NAME, APP_VERSION } from "../../branding";
 import {
   canCheckForUpdate,
@@ -106,11 +102,6 @@ function AboutVersionTitle() {
 }
 
 const REPOSITORY_URL = "https://github.com/saka-gg/ryco";
-
-const selectBranchChangeTypes = (settings: ServerSettings): boolean =>
-  settings.worktreeBranchChangeTypes;
-const formatBranchChangeTypes = (byType: boolean): string =>
-  byType ? "By change type" : "By prefix";
 
 function openExternalLink(url: string) {
   void ensureLocalApi()
@@ -418,38 +409,21 @@ export function DefaultEditorSetting() {
 
 /** Whether the device checks its provider CLIs for updates. Updates on the settings page. */
 export function ProviderUpdateCheckSettings() {
-  const settings = useSettings();
-  const { updateSettings } = useUpdateSettings();
-  const nodeScopeLabel = useGeneralScopeLabels().node;
   return (
     <SettingsSection title="Provider updates" owner="node">
-      <SettingsRow
-        title="Provider update checks"
+      <SharedSettingRow
+        settingKey="enableProviderUpdateChecks"
         description="Check installed provider CLIs for newer versions. Disable if you install providers with Nix or another package manager."
-        owner="node"
-        scope={nodeScopeLabel}
-        resetAction={
-          settings.enableProviderUpdateChecks !==
-          DEFAULT_UNIFIED_SETTINGS.enableProviderUpdateChecks ? (
-            <SettingResetButton
-              label="provider update checks"
-              onClick={() =>
-                updateSettings({
-                  enableProviderUpdateChecks: DEFAULT_UNIFIED_SETTINGS.enableProviderUpdateChecks,
-                })
-              }
-            />
-          ) : null
-        }
-        control={
+        defaultValue={DEFAULT_UNIFIED_SETTINGS.enableProviderUpdateChecks}
+        resetLabel="provider update checks"
+        render={(control) => (
           <Switch
-            checked={settings.enableProviderUpdateChecks}
-            onCheckedChange={(checked) =>
-              updateSettings({ enableProviderUpdateChecks: Boolean(checked) })
-            }
-            aria-label="Check providers for updates"
+            checked={control.value}
+            disabled={control.disabled}
+            onCheckedChange={(checked) => control.onChange(Boolean(checked))}
+            aria-label={sharedControlLabel("Check providers for updates", control)}
           />
-        }
+        )}
       />
     </SettingsSection>
   );
@@ -512,50 +486,34 @@ export function AgentProcessPrioritySettings() {
 
 /** New threads and worktree defaults stored on the device. Projects & worktrees on the settings page. */
 export function ProjectsAndThreadsSettings() {
-  const settings = useSettings();
-  const { updateSettings } = useUpdateSettings();
   const isPhoneTier = usePresentationTier() === "phone";
   const serverConfig = useServerConfig();
   const supportsProjectPreferences =
     serverConfig?.environment.capabilities.projectPreferences === true;
-  const nodeScopeLabel = useGeneralScopeLabels().node;
   return (
     <SettingsSection title="Projects & threads">
       {(!supportsProjectPreferences || isPhoneTier) && (
         <>
-          <SettingsRow
-            title="New threads"
+          <SharedSettingRow
+            settingKey="defaultThreadEnvMode"
             description="Pick the default workspace mode for newly created draft threads."
-            owner="node"
-            scope={nodeScopeLabel}
-            resetAction={
-              settings.defaultThreadEnvMode !== DEFAULT_UNIFIED_SETTINGS.defaultThreadEnvMode ? (
-                <SettingResetButton
-                  label="new threads"
-                  onClick={() =>
-                    updateSettings({
-                      defaultThreadEnvMode: DEFAULT_UNIFIED_SETTINGS.defaultThreadEnvMode,
-                    })
-                  }
-                />
-              ) : null
-            }
-            control={
+            defaultValue={DEFAULT_UNIFIED_SETTINGS.defaultThreadEnvMode}
+            resetLabel="new threads"
+            render={(control) => (
               <Select
-                value={settings.defaultThreadEnvMode}
+                value={control.value}
+                disabled={control.disabled}
                 onValueChange={(value) => {
-                  if (value === "local" || value === "worktree") {
-                    updateSettings({ defaultThreadEnvMode: value });
-                  }
+                  if (value === "local" || value === "worktree") control.onChange(value);
                 }}
               >
                 <SelectTrigger
                   size="sm"
                   className="w-full sm:w-44"
-                  aria-label="Default thread mode"
+                  aria-label={sharedControlLabel("Default thread mode", control)}
                 >
                   <SelectValue>
-                    {settings.defaultThreadEnvMode === "worktree" ? "New worktree" : "Local"}
+                    {control.value === "worktree" ? "New worktree" : "Local"}
                   </SelectValue>
                 </SelectTrigger>
                 <SelectPopup align="end" alignItemWithTrigger={false}>
@@ -567,31 +525,20 @@ export function ProjectsAndThreadsSettings() {
                   </SelectItem>
                 </SelectPopup>
               </Select>
-            }
+            )}
           />
 
           {!isPhoneTier && (
-            <SettingsRow
-              title="Worktree branch prefix"
+            <SharedSettingRow
+              settingKey="worktreeBranchPrefix"
               description="Prefix for generated branches on this device. Use a Git namespace such as team/agent, without a trailing slash. Leave empty for no prefix. Existing branches keep their names."
-              owner="node"
-              scope={nodeScopeLabel}
-              resetAction={
-                settings.worktreeBranchPrefix !== DEFAULT_UNIFIED_SETTINGS.worktreeBranchPrefix ? (
-                  <SettingResetButton
-                    label="worktree branch prefix"
-                    onClick={() =>
-                      updateSettings({
-                        worktreeBranchPrefix: DEFAULT_UNIFIED_SETTINGS.worktreeBranchPrefix,
-                      })
-                    }
-                  />
-                ) : null
-              }
-              control={
+              defaultValue={DEFAULT_UNIFIED_SETTINGS.worktreeBranchPrefix}
+              resetLabel="worktree branch prefix"
+              render={(control) => (
                 <DraftInput
                   className="w-full sm:w-72"
-                  value={settings.worktreeBranchPrefix}
+                  value={control.value}
+                  disabled={control.disabled}
                   onCommit={(next) => {
                     const prefix = next.trim();
                     if (!Schema.is(WorktreeBranchPrefix)(prefix)) {
@@ -603,14 +550,14 @@ export function ProjectsAndThreadsSettings() {
                       });
                       return;
                     }
-                    updateSettings({ worktreeBranchPrefix: prefix });
+                    control.onChange(prefix);
                   }}
                   placeholder="ryco"
                   spellCheck={false}
                   autoCapitalize="none"
-                  aria-label="Worktree branch prefix"
+                  aria-label={sharedControlLabel("Worktree branch prefix", control)}
                 />
-              }
+              )}
             />
           )}
         </>
@@ -618,103 +565,58 @@ export function ProjectsAndThreadsSettings() {
 
       {/* Every node has it, also one with project defaults, where a project may override it. */}
       {!isPhoneTier && (
-        <SettingsRow
-          title="Name branches by change type"
+        <SharedSettingRow
+          settingKey="worktreeBranchChangeTypes"
           description="Generated worktree branches start with the kind of change, such as fix/ or feat/, instead of the prefix. The prefix still names a new worktree's temporary branch until its first message is named."
-          owner="node"
-          scope={nodeScopeLabel}
-          status={
-            <ApplyToAllNodes
-              label="change type branch names"
-              select={selectBranchChangeTypes}
-              format={formatBranchChangeTypes}
-              patch={{ worktreeBranchChangeTypes: settings.worktreeBranchChangeTypes }}
-            />
-          }
-          resetAction={
-            settings.worktreeBranchChangeTypes !==
-            DEFAULT_UNIFIED_SETTINGS.worktreeBranchChangeTypes ? (
-              <SettingResetButton
-                label="change type branch names"
-                onClick={() =>
-                  updateSettings({
-                    worktreeBranchChangeTypes: DEFAULT_UNIFIED_SETTINGS.worktreeBranchChangeTypes,
-                  })
-                }
-              />
-            ) : null
-          }
-          control={
+          defaultValue={DEFAULT_UNIFIED_SETTINGS.worktreeBranchChangeTypes}
+          resetLabel="change type branch names"
+          render={(control) => (
             <Switch
-              checked={settings.worktreeBranchChangeTypes}
-              onCheckedChange={(checked) =>
-                updateSettings({ worktreeBranchChangeTypes: Boolean(checked) })
-              }
-              aria-label="Name worktree branches by change type"
+              checked={control.value}
+              disabled={control.disabled}
+              onCheckedChange={(checked) => control.onChange(Boolean(checked))}
+              aria-label={sharedControlLabel("Name worktree branches by change type", control)}
             />
-          }
+          )}
         />
       )}
 
       {!isPhoneTier && (
-        <SettingsRow
-          title="Continue after restart"
+        <SharedSettingRow
+          settingKey="continueThreadsAfterRestart"
           description="When Ryco restarts while an agent is working, send “Continue where you left off.” automatically. Threads you stopped, threads waiting for your approval, and restarts more than 30 minutes later are not continued."
-          owner="node"
-          scope={nodeScopeLabel}
-          resetAction={
-            settings.continueThreadsAfterRestart !==
-            DEFAULT_UNIFIED_SETTINGS.continueThreadsAfterRestart ? (
-              <SettingResetButton
-                label="continue after restart"
-                onClick={() =>
-                  updateSettings({
-                    continueThreadsAfterRestart:
-                      DEFAULT_UNIFIED_SETTINGS.continueThreadsAfterRestart,
-                  })
-                }
-              />
-            ) : null
-          }
-          control={
+          defaultValue={DEFAULT_UNIFIED_SETTINGS.continueThreadsAfterRestart}
+          resetLabel="continue after restart"
+          render={(control) => (
             <Switch
-              checked={settings.continueThreadsAfterRestart}
-              onCheckedChange={(checked) =>
-                updateSettings({ continueThreadsAfterRestart: Boolean(checked) })
-              }
-              aria-label="Continue threads automatically after a restart"
+              checked={control.value}
+              disabled={control.disabled}
+              onCheckedChange={(checked) => control.onChange(Boolean(checked))}
+              aria-label={sharedControlLabel(
+                "Continue threads automatically after a restart",
+                control,
+              )}
             />
-          }
+          )}
         />
       )}
 
-      <SettingsRow
-        title="Add project starts in"
+      <SharedSettingRow
+        settingKey="addProjectBaseDirectory"
         description='Leave empty to use "~/" when the Add Project browser opens.'
-        owner="node"
-        scope={nodeScopeLabel}
-        resetAction={
-          settings.addProjectBaseDirectory !== DEFAULT_UNIFIED_SETTINGS.addProjectBaseDirectory ? (
-            <SettingResetButton
-              label="add project base directory"
-              onClick={() =>
-                updateSettings({
-                  addProjectBaseDirectory: DEFAULT_UNIFIED_SETTINGS.addProjectBaseDirectory,
-                })
-              }
-            />
-          ) : null
-        }
-        control={
+        defaultValue={DEFAULT_UNIFIED_SETTINGS.addProjectBaseDirectory}
+        resetLabel="add project base directory"
+        render={(control) => (
           <DraftInput
             className="w-full sm:w-72"
-            value={settings.addProjectBaseDirectory}
-            onCommit={(next) => updateSettings({ addProjectBaseDirectory: next })}
+            value={control.value}
+            disabled={control.disabled}
+            onCommit={(next) => control.onChange(next)}
             placeholder="~/"
             spellCheck={false}
-            aria-label="Add project base directory"
+            aria-label={sharedControlLabel("Add project base directory", control)}
           />
-        }
+        )}
       />
     </SettingsSection>
   );
@@ -1009,22 +911,12 @@ export function GeneralSettingsPanel() {
   );
 }
 
-/** Lifecycle suggestions of the device the page shows. Data & backup on the settings page. */
+/**
+ * Lifecycle suggestions, shared across devices; each device's row is writable while this
+ * client may change that device's settings. Data & backup on the settings page.
+ */
 export function DeviceLifecycleSuggestionSettings() {
-  const target = useSettingsTarget();
-  const targetAllowsMutation = !target || (target.connected && target.canMutate !== false);
-  const config = useServerConfig();
-  const lifecycleEnvironmentId = target?.environmentId ?? config?.environment.environmentId ?? null;
-  const lifecycleCapability = useHostedRpcCapability(
-    ORCHESTRATION_WS_METHODS.dispatchCommand,
-    lifecycleEnvironmentId,
-  );
-  return (
-    <LifecycleSuggestionSettings
-      environmentId={lifecycleEnvironmentId}
-      disabled={!targetAllowsMutation || !lifecycleCapability.allowed}
-    />
-  );
+  return <LifecycleSuggestionSettings disabled={false} />;
 }
 
 export function ArchivedThreadsPanel({

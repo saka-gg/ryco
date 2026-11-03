@@ -1,10 +1,11 @@
 import { isElectron, isHostedHubMode } from "../../env";
 import { useSettingsTarget } from "../../settingsTarget";
-import { WS_METHODS, type ServerSettingsPatch, type UnifiedSettings } from "@ryco/contracts";
+import { WS_METHODS } from "@ryco/contracts";
+import type { AgentControlSettings } from "@ryco/contracts/settings";
 
 import { useHostedRpcCapability } from "../../hostedHub/capabilities";
 import { hostedCapabilityCopy } from "../../hostedHub/switchTarget";
-import { useSettings, useUpdateSettings } from "../../hooks/useSettings";
+import { useSettings } from "../../hooks/useSettings";
 import { ChevronDownIcon, KeyRoundIcon } from "lucide-react";
 import { useState } from "react";
 
@@ -15,6 +16,7 @@ import { Switch } from "../ui/switch";
 import { AgentControlMcpInstallations } from "./AgentControlMcpInstallations";
 import { ExternalIntegrationsSettings } from "./IntegrationsSettings";
 import { SettingsSelect, type SettingsSelectOption } from "./SettingsSelect";
+import { SharedSettingRow, sharedControlLabel } from "./sharedSettings/SharedSettingRow";
 import {
   SettingsBlock,
   SettingsCard,
@@ -91,7 +93,6 @@ function ComputerUseSection() {
 
 function NodeIntegrationsSettingsPanel() {
   const enabled = useSettings((settings) => settings.agentControl.enabled);
-  const { updateSettings } = useUpdateSettings();
   const target = useSettingsTarget();
   const settingsCapability = useHostedRpcCapability(
     WS_METHODS.serverUpdateSettings,
@@ -106,7 +107,8 @@ function NodeIntegrationsSettingsPanel() {
         title="Agent Control"
         description="Private tools for every agent, including visual replies (inline HTML pages). Ryco sessions receive the tools automatically. Connect supported standalone provider profiles with one click. Routine private-session actions run directly; destructive and security-sensitive changes require approval."
       >
-        <SettingsRow
+        <SharedSettingRow
+          settingKey="agentControl"
           title="Enable Agent Control"
           description={
             enabled
@@ -118,16 +120,18 @@ function NodeIntegrationsSettingsPanel() {
               <span className="text-destructive-foreground">{settingsReason}</span>
             ) : undefined
           }
-          control={
+          compareBy={selectEnabled}
+          formatValue={(value) => (value.enabled ? "On" : "Off")}
+          render={(control) => (
             <Switch
-              checked={enabled}
-              disabled={!settingsCapability.allowed}
+              checked={control.value.enabled}
+              disabled={!settingsCapability.allowed || control.disabled}
               onCheckedChange={(checked) =>
-                updateSettings(agentControlPatch({ enabled: Boolean(checked) }))
+                control.onChange({ ...control.value, enabled: Boolean(checked) })
               }
-              aria-label="Enable Agent Control"
+              aria-label={sharedControlLabel("Enable Agent Control", control)}
             />
-          }
+          )}
         />
       </SettingsSection>
       {enabled ? (
@@ -175,14 +179,10 @@ function NodeIntegrationsSettingsPanel() {
   );
 }
 
-/**
- * An Agent Control settings change carrying only the fields it changes. The node, and the
- * optimistic local copy, merge settings patches deeply, so a device with stale settings never
- * sends back an old `enabled` or limit; the hook's patch type is shallow, hence the cast.
- */
-const agentControlPatch = (
-  change: NonNullable<ServerSettingsPatch["agentControl"]>,
-): Partial<UnifiedSettings> => ({ agentControl: change }) as unknown as Partial<UnifiedSettings>;
+// Each row compares only the part of Agent Control it edits.
+const selectEnabled = (value: AgentControlSettings) => value.enabled;
+const selectMaxDepth = (value: AgentControlSettings) => value.delegation.maxDepth;
+const selectMaxTasks = (value: AgentControlSettings) => value.delegation.maxTasksPerTree;
 
 const NO_LIMIT = "none";
 const DEPTH_OPTIONS: ReadonlyArray<SettingsSelectOption<string>> = [
@@ -209,7 +209,10 @@ const withCurrent = (
     ? options
     : [...options, { value: String(limit), label: label(limit) }];
 
-/** The person's opt-in limits on agents delegating to agents (`ryco_create_threads`). */
+/**
+ * The person's opt-in limits on agents delegating to agents (`ryco_create_threads`). Part of
+ * the shared Agent Control setting; each row compares and edits its own limit.
+ */
 function DelegationLimitsSection({
   disabled,
   disabledReason,
@@ -217,10 +220,6 @@ function DelegationLimitsSection({
   disabled: boolean;
   disabledReason: string | null | undefined;
 }) {
-  const limits = useSettings((settings) => settings.agentControl.delegation);
-  const { updateSettings } = useUpdateSettings();
-  const setLimits = (next: Partial<typeof limits>) =>
-    updateSettings(agentControlPatch({ delegation: next }));
   const status =
     disabled && disabledReason ? (
       <span className="text-destructive-foreground">{disabledReason}</span>
@@ -230,32 +229,65 @@ function DelegationLimitsSection({
       title="Delegation limits"
       description="Stop agents from delegating without end. A chat you start can hand work to tasks, and tasks can hand work on in turn. These limits apply to new requests; tasks already created keep running."
     >
-      <SettingsRow
+      <SharedSettingRow
+        settingKey="agentControl"
         title="How deep tasks can go"
         description="Levels of tasks below the chat that started them. A task at the last level gets no delegation tools."
         status={status}
-        control={
-          <SettingsSelect
-            value={limitValue(limits.maxDepth)}
-            disabled={disabled}
-            ariaLabel="How deep tasks can go"
-            options={withCurrent(DEPTH_OPTIONS, limits.maxDepth, (limit) => `${limit} levels`)}
-            onValueChange={(value) => setLimits({ maxDepth: parseLimit(value) })}
-          />
+        compareBy={selectMaxDepth}
+        formatValue={(value) =>
+          value.delegation.maxDepth === null ? "No limit" : `${value.delegation.maxDepth} levels`
         }
+        render={(control) => (
+          <SettingsSelect
+            value={limitValue(control.value.delegation.maxDepth)}
+            disabled={disabled || control.disabled}
+            ariaLabel={sharedControlLabel("How deep tasks can go", control)}
+            options={withCurrent(
+              DEPTH_OPTIONS,
+              control.value.delegation.maxDepth,
+              (limit) => `${limit} levels`,
+            )}
+            onValueChange={(value) =>
+              control.onChange({
+                ...control.value,
+                delegation: { ...control.value.delegation, maxDepth: parseLimit(value) as never },
+              })
+            }
+          />
+        )}
       />
-      <SettingsRow
+      <SharedSettingRow
+        settingKey="agentControl"
         title="Tasks per chat"
         description="How many tasks one chat and everything it delegated may create in all, finished and archived ones included."
-        control={
-          <SettingsSelect
-            value={limitValue(limits.maxTasksPerTree)}
-            disabled={disabled}
-            ariaLabel="Tasks per chat"
-            options={withCurrent(TASK_OPTIONS, limits.maxTasksPerTree, (limit) => `${limit} tasks`)}
-            onValueChange={(value) => setLimits({ maxTasksPerTree: parseLimit(value) })}
-          />
+        compareBy={selectMaxTasks}
+        formatValue={(value) =>
+          value.delegation.maxTasksPerTree === null
+            ? "No limit"
+            : `${value.delegation.maxTasksPerTree} tasks`
         }
+        render={(control) => (
+          <SettingsSelect
+            value={limitValue(control.value.delegation.maxTasksPerTree)}
+            disabled={disabled || control.disabled}
+            ariaLabel={sharedControlLabel("Tasks per chat", control)}
+            options={withCurrent(
+              TASK_OPTIONS,
+              control.value.delegation.maxTasksPerTree,
+              (limit) => `${limit} tasks`,
+            )}
+            onValueChange={(value) =>
+              control.onChange({
+                ...control.value,
+                delegation: {
+                  ...control.value.delegation,
+                  maxTasksPerTree: parseLimit(value) as never,
+                },
+              })
+            }
+          />
+        )}
       />
     </SettingsSection>
   );

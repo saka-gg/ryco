@@ -89,7 +89,6 @@ export const KNOWN_BAILOUTS: Readonly<Record<string, ReadonlyArray<string>>> = {
   "src/components/settings/AccountSettings.tsx": ["PasskeysSection"],
   "src/components/settings/AcpRegistryAuthentication.tsx": ["AcpRegistryAuthenticationContent"],
   "src/components/settings/AgentControlMcpInstallations.tsx": ["AgentControlMcpInstallations"],
-  "src/components/settings/ChatsFolderSettings.tsx": ["useChatsSettingsSave"],
   "src/components/settings/ComputerBetaSettings.tsx": ["ComputerBetaSettings"],
   "src/components/settings/ComputerUseSettings.tsx": ["ComputerUseSettings"],
   // The same try/finally handlers ConnectionsSettings held before its split.

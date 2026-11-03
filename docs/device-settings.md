@@ -18,6 +18,21 @@ one home (`apps/web/src/components/settings/settingsRegistry.ts`).
   device's authorized connection. Choosing another device never changes the current app's
   appearance. A device owner may manage supported remote settings; operators and viewers keep
   their existing access limits, and this app's own rows stay available to them.
+- **Shared device settings** (worktree and thread defaults, Git writing, retention, prices, ...;
+  `docs/shared-device-settings.md`) show every device at once. While the devices agree a row is
+  one control, "Same on all N devices · Set per device", and a change writes every device; a
+  device that is offline or read-only shows **queued** and takes the value when it is back. While
+  they differ, or after "Set per device", the row lists each device with its status dot, its own
+  control and its marks (**Own value** with "Reset to shared", queued, syncing, "Update to share
+  settings", "Couldn't apply: …") and offers "Use “X” everywhere". An offline device shows its last
+  known value, read only. The device bar's **All devices** pill (the default with two or more
+  devices) shows this; a device pill shows that device's own values, with what the others hold, and
+  a change there gives that device its own value. Rows that are not shared keep editing the chosen
+  device and say which ("On <device>").
+- **All devices** ends with **Compare settings**: every shared setting against every device,
+  "Only differences" on by default; a row opens its setting where it lives, with its device list
+  open. A device page's Overview starts with **Where this device differs**: its own values, queued
+  and refused settings, each with Open.
 - **A device's page** (its item under Devices) holds its identity, access (reach, pairing links and
   authorized clients, on this computer), security, computer use and power (keep awake, agent CPU
   priority).

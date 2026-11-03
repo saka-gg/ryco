@@ -61,6 +61,7 @@ import type { HostedHubNode } from "../../hostedHub/types";
 import { AppAtomRegistryProvider } from "../../rpc/atomRegistry";
 import { resetServerStateForTests, setServerConfigSnapshot } from "../../rpc/serverState";
 import { useSettingsDialogStore } from "../../settingsDialogStore";
+import { setSettingsDeviceView } from "./sharedSettings/sharedSettingsMode";
 import { createFakeHistoryWindow, type FakeHistoryWindow } from "../../../test/fakeHistoryWindow";
 import { SidebarProvider } from "../ui/sidebar";
 import { SettingsPage, type SettingsPageLocation } from "./SettingsPage";
@@ -142,6 +143,8 @@ beforeEach(() => {
   resetHostedNodeRouteOrchestratorForTests();
   resetHostedNodeRoutesForTests();
   useSettingsDialogStore.setState({ open: true, section: "projects" });
+  // These tests follow the device pills; "All devices" has its own test below.
+  setSettingsDeviceView("device");
 });
 
 afterEach(async () => {
@@ -156,6 +159,7 @@ afterEach(async () => {
   resetHostedNodeRoutesForTests();
   resetPrimaryEnvironmentDescriptorForTests();
   useSettingsDialogStore.setState({ open: false, section: "general" });
+  setSettingsDeviceView("all");
   vi.restoreAllMocks();
   document.body.innerHTML = "";
 });
@@ -553,6 +557,20 @@ describe("the device bar and This app", () => {
     );
   });
 
+  it("shows every device's values by default in a section with shared rows", async () => {
+    setSettingsDeviceView("all");
+    signInOnStudio({ nodes: [studio, laptop] });
+    mounted = await renderPage();
+    const all = page
+      .getByTestId("settings-device-bar")
+      .getByRole("button", { name: "All devices" });
+    await expect.element(all).toHaveAttribute("aria-pressed", "true");
+    await expect.element(pill(studio.label)).toHaveAttribute("aria-pressed", "false");
+    // A device pill shows that device's own values.
+    await pill(studio.label).click();
+    await expect.element(all).toHaveAttribute("aria-pressed", "false");
+  });
+
   it("keeps five devices in the bar and the rest under More, with a search", async () => {
     await page.viewport(1_280, 720);
     const many = Array.from({ length: 5 }, (_, index) =>
@@ -564,7 +582,8 @@ describe("the device bar and This app", () => {
     mounted = await renderPage();
     const bar = page.getByTestId("settings-device-bar");
     await expect.element(pill(studio.label)).toBeVisible();
-    expect(bar.getByRole("button").elements()).toHaveLength(6);
+    // "All devices", five device pills and More.
+    expect(bar.getByRole("button").elements()).toHaveLength(7);
 
     await bar.getByRole("button", { name: /More/ }).click();
     await page.getByRole("searchbox", { name: "Search devices" }).fill("box 5");

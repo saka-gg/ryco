@@ -45,16 +45,13 @@ describe("AutoSettleSettingsSection", () => {
     expect(onChange).toHaveBeenCalledWith(14);
   });
 
-  it("shows the node's own rule, names the node, and offers to apply it everywhere", async () => {
+  it("shows the node's own rule and names the node", async () => {
     const onChange = vi.fn();
-    const onApplyToAll = vi.fn();
     mounted = await render(
       <AutoSettleSettingsSection
         node={{ label: "Studio", ownsRule: true, value: 30, editable: true }}
         deviceValue={3}
         onChange={onChange}
-        onApplyToAll={onApplyToAll}
-        status={<span role="status">Applied to Studio. Not changed: Laptop (not connected).</span>}
       />,
     );
 
@@ -62,13 +59,6 @@ describe("AutoSettleSettingsSection", () => {
     await expect
       .element(page.getByText(/Set on Studio, so every device lists its tasks the same way\./))
       .toBeInTheDocument();
-    await expect
-      .element(page.getByRole("status"))
-      .toHaveTextContent("Applied to Studio. Not changed: Laptop (not connected).");
-
-    await page.getByRole("button", { name: "Apply to all connected nodes" }).click();
-    expect(onApplyToAll).toHaveBeenCalledOnce();
-
     await page.getByLabelText("Auto-settle inactive tasks").click();
     await page.getByText("Off", { exact: true }).last().click();
     expect(onChange).toHaveBeenCalledWith(null);
@@ -103,8 +93,5 @@ describe("AutoSettleSettingsSection", () => {
         page.getByText(/Old box does not keep this rule yet, so it applies on this device only\./),
       )
       .toBeInTheDocument();
-    await expect
-      .element(page.getByRole("button", { name: "Apply to all connected nodes" }))
-      .not.toBeInTheDocument();
   });
 });

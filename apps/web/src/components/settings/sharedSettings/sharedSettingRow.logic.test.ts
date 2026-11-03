@@ -1,0 +1,214 @@
+import type { NodeSettingsConfig } from "@ryco/client-runtime/state/settings/nodeSettingsTargets";
+import {
+  readSharedSettingView,
+  type SharingDevice,
+} from "@ryco/client-runtime/state/settings/sharedDeviceSettings";
+import { DEFAULT_SERVER_SETTINGS, EnvironmentId, type ServerSettings } from "@ryco/contracts";
+import { SETTINGS_SHARING_VERSION } from "@ryco/shared/settingsSharing";
+import { describe, expect, it } from "vite-plus/test";
+
+import {
+  buildSharedRowCommand,
+  describeSharedRowOutcome,
+  readSharedRowModel,
+  type SharedSettingsMode,
+} from "./sharedSettingRow.logic";
+
+const stamp = (at: number, by = "a") => ({ at, by });
+
+function device(
+  id: string,
+  settings: Partial<ServerSettings> = {},
+  options: { connected?: boolean; canWrite?: boolean; sharing?: boolean } = {},
+): SharingDevice {
+  return {
+    environmentId: EnvironmentId.make(id),
+    label: id,
+    connected: options.connected ?? true,
+    canWrite: options.canWrite ?? true,
+    config: {
+      environment: {
+        capabilities:
+          options.sharing === false ? {} : { settingsSharingVersion: SETTINGS_SHARING_VERSION },
+      },
+      settings: { ...DEFAULT_SERVER_SETTINGS, ...settings },
+    } as unknown as NodeSettingsConfig,
+  };
+}
+
+const ALL: SharedSettingsMode = { kind: "all" };
+
+function model(
+  devices: ReadonlyArray<SharingDevice>,
+  input: { mode?: SharedSettingsMode; open?: boolean } = {},
+) {
+  const view = readSharedSettingView({ key: "worktreeRoot", devices });
+  return readSharedRowModel({ view, devices, mode: input.mode ?? ALL, open: input.open ?? false });
+}
+
+describe("shared row model", () => {
+  it("is one control while every device agrees, counting devices waiting for it", () => {
+    const devices = [
+      device("a", {
+        worktreeRoot: "/w",
+        settingsSharing: { worktreeRoot: { mode: "shared", stamp: stamp(5) } },
+      }),
+      device(
+        "b",
+        {
+          worktreeRoot: "/old",
+          settingsSharing: { worktreeRoot: { mode: "shared", stamp: stamp(1) } },
+        },
+        { connected: false },
+      ),
+    ];
+    expect(model(devices)).toMatchObject({ kind: "same", value: "/w", deviceCount: 2, queued: 1 });
+  });
+
+  it("lists the devices while they differ, offering the shared value everywhere", () => {
+    const devices = [
+      device("a", {
+        worktreeRoot: "/w",
+        settingsSharing: { worktreeRoot: { mode: "shared", stamp: stamp(5) } },
+      }),
+      device("b", {
+        worktreeRoot: "/mine",
+        settingsSharing: { worktreeRoot: { mode: "override", stamp: stamp(5) } },
+      }),
+    ];
+    expect(model(devices)).toMatchObject({ kind: "list", differs: 1, everywhere: "/w" });
+    // "Set per device" opens the list while they agree; nothing to unify then.
+    expect(model([device("a"), device("b")], { open: true })).toMatchObject({
+      kind: "list",
+      differs: 0,
+      everywhere: null,
+    });
+  });
+
+  it("reads one device's own value with what the others hold", () => {
+    const devices = [device("a", { worktreeRoot: "/a" }), device("b", { worktreeRoot: "/b" })];
+    expect(
+      model(devices, { mode: { kind: "device", environmentId: EnvironmentId.make("a") } }),
+    ).toMatchObject({
+      kind: "single",
+      device: { value: "/a" },
+      others: [{ label: "b", value: "/b" }],
+    });
+  });
+
+  it("treats devices on the same shared write as agreeing, though each stored its own path", () => {
+    const entry = { worktreeRoot: { mode: "shared" as const, stamp: stamp(7) } };
+    const devices = [
+      device("mac", { worktreeRoot: "/Users/me/w", settingsSharing: entry }),
+      device("linux", { worktreeRoot: "/home/me/w", settingsSharing: entry }),
+    ];
+    expect(model(devices)).toMatchObject({ kind: "same", value: "/Users/me/w" });
+  });
+
+  it("never offers one control when no device can share", () => {
+    const devices = [device("a", {}, { sharing: false }), device("b", {}, { sharing: false })];
+    expect(model(devices).kind).toBe("list");
+  });
+
+  it("marks only connected devices this client may write as editable", () => {
+    const devices = [
+      device("a", { worktreeRoot: "/a" }),
+      device("b", { worktreeRoot: "/b" }, { connected: false }),
+      device("c", { worktreeRoot: "/c" }, { canWrite: false }),
+    ];
+    const result = model(devices);
+    if (result.kind !== "list") throw new Error("expected a list");
+    expect(result.devices.map((entry) => entry.editable)).toEqual([true, false, false]);
+  });
+});
+
+describe("shared row commands", () => {
+  const nextStamp = () => stamp(10, "me");
+  const command = (
+    devices: ReadonlyArray<SharingDevice>,
+    action: Parameters<typeof buildSharedRowCommand>[0]["action"],
+  ) =>
+    buildSharedRowCommand({
+      key: "worktreeRoot",
+      action,
+      view: readSharedSettingView({ key: "worktreeRoot", devices }),
+      devices,
+      nextStamp,
+    });
+
+  it("writes every shared device for the one control", () => {
+    const result = command([device("a"), device("b")], { kind: "all", value: "/x" });
+    expect(result?.writes.map((write) => write.environmentId)).toEqual(["a", "b"]);
+    expect(result?.writes[0]?.patch.settingsSharing?.worktreeRoot).toMatchObject({
+      mode: "shared",
+    });
+  });
+
+  it("gives one device among several its own value", () => {
+    const result = command([device("a"), device("b")], {
+      kind: "device",
+      environmentId: EnvironmentId.make("b"),
+      value: "/x",
+    });
+    expect(result?.writes).toEqual([
+      expect.objectContaining({
+        environmentId: "b",
+        patch: expect.objectContaining({
+          worktreeRoot: "/x",
+          settingsSharing: { worktreeRoot: { mode: "override", stamp: stamp(10, "me") } },
+        }),
+      }),
+    ]);
+  });
+
+  it("keeps the only device on the shared value, unless it keeps its own", () => {
+    const only = command([device("a")], {
+      kind: "device",
+      environmentId: EnvironmentId.make("a"),
+      value: "/x",
+    });
+    expect(only?.writes[0]?.patch.settingsSharing?.worktreeRoot).toMatchObject({ mode: "shared" });
+    const own = command(
+      [
+        device("a", {
+          settingsSharing: { worktreeRoot: { mode: "override", stamp: stamp(2) } },
+        }),
+      ],
+      { kind: "device", environmentId: EnvironmentId.make("a"), value: "/x" },
+    );
+    expect(own?.writes[0]?.patch.settingsSharing?.worktreeRoot).toMatchObject({
+      mode: "override",
+    });
+  });
+
+  it("writes an older node plainly, without sharing state", () => {
+    const result = command([device("a"), device("old", {}, { sharing: false })], {
+      kind: "device",
+      environmentId: EnvironmentId.make("old"),
+      value: "/x",
+    });
+    expect(result?.writes).toEqual([{ environmentId: "old", patch: { worktreeRoot: "/x" } }]);
+  });
+
+  it("says which offline device keeps its own value after “Use … everywhere”", () => {
+    const devices = [
+      device("a"),
+      device(
+        "box",
+        { settingsSharing: { worktreeRoot: { mode: "override", stamp: stamp(2) } } },
+        { connected: false },
+      ),
+      device("shared-offline", {}, { connected: false }),
+    ];
+    const action = { kind: "everywhere" as const, value: "/x" };
+    const built = command(devices, action);
+    if (built === null) throw new Error("expected a command");
+    const notes = describeSharedRowOutcome({
+      action,
+      command: built,
+      result: { applied: [{ environmentId: EnvironmentId.make("a"), label: "a" }], notApplied: [] },
+      view: readSharedSettingView({ key: "worktreeRoot", devices }),
+    });
+    expect(notes).toEqual(["box keeps its own value until it is online."]);
+  });
+});

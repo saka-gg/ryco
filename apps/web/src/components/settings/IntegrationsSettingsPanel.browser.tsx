@@ -39,6 +39,8 @@ vi.mock("../../hostedHub/capabilities", () => ({
     allowed: harness.settingsAllowed,
     reason: harness.settingsReason,
   }),
+  readHostedRpcCapability: () => ({ allowed: harness.settingsAllowed }),
+  subscribeHostedRpcCapabilities: () => () => undefined,
 }));
 
 vi.mock("./IntegrationsSettings", () => ({
@@ -63,6 +65,30 @@ import {
   DeviceComputerUseSettings,
   loadDeviceComputerUseSettings,
 } from "./IntegrationsSettingsPanel";
+import { SharedSettingsSourceProvider } from "./sharedSettings/sharedSettingsSource";
+import {
+  createTestSharedSettings,
+  TestDeviceTarget,
+} from "./sharedSettings/sharedSettingsTestSource";
+
+/** Agent Control on one simulated device, shared-settings rows and all. */
+function renderAgentControl() {
+  const network = createTestSharedSettings([
+    {
+      id: "local",
+      label: "Studio Mac",
+      settings: { agentControl: { enabled: harness.enabled, delegation: harness.delegation } },
+    },
+  ]);
+  render(
+    <SharedSettingsSourceProvider value={network.source}>
+      <TestDeviceTarget network={network} id="local">
+        <AgentControlSettingsPanel />
+      </TestDeviceTarget>
+    </SharedSettingsSourceProvider>,
+  );
+  return network;
+}
 
 const LOCAL_TARGET = {
   environmentId: EnvironmentId.make("local"),
@@ -195,7 +221,7 @@ describe("AgentControlSettingsPanel", () => {
   });
 
   it("persists the Agent Control feature gate from Settings", async () => {
-    render(<AgentControlSettingsPanel />);
+    const network = renderAgentControl();
 
     const toggle = page.getByLabelText("Enable Agent Control");
     await expect.element(toggle).not.toBeChecked();
@@ -203,13 +229,15 @@ describe("AgentControlSettingsPanel", () => {
 
     await toggle.click();
 
-    expect(harness.updateSettings).toHaveBeenCalledWith({ agentControl: { enabled: true } });
+    await expect
+      .poll(() => network.settings("local").agentControl)
+      .toEqual({ enabled: true, delegation: { maxDepth: null, maxTasksPerTree: null } });
   });
 
   it("keeps the toggle disabled when Settings writes are unavailable", async () => {
     harness.settingsAllowed = false;
     harness.settingsReason = "Only an owner can change this setting.";
-    render(<AgentControlSettingsPanel />);
+    renderAgentControl();
 
     await expect.element(page.getByLabelText("Enable Agent Control")).toBeDisabled();
     await expect.element(page.getByText("Only an owner can change this setting.")).toBeVisible();
@@ -229,20 +257,20 @@ describe("AgentControlSettingsPanel", () => {
   it("sets the delegation limits once Agent Control is on, keeping the other limit", async () => {
     harness.enabled = true;
     harness.delegation = { maxDepth: null, maxTasksPerTree: 50 };
-    render(<AgentControlSettingsPanel />);
+    const network = renderAgentControl();
 
     await page.getByLabelText("How deep tasks can go").click();
     await page.getByRole("option", { name: "1 level: tasks can't delegate" }).click();
-    // Only the changed limit: a stale device never sends back `enabled` or the other limit.
-    expect(harness.updateSettings).toHaveBeenCalledWith({
-      agentControl: { delegation: { maxDepth: 1 } },
-    });
+    // The other limit and `enabled` stay as the device holds them.
+    await expect
+      .poll(() => network.settings("local").agentControl)
+      .toEqual({ enabled: true, delegation: { maxDepth: 1, maxTasksPerTree: 50 } });
 
     await page.getByLabelText("Tasks per chat").click();
     await page.getByRole("option", { name: "250 tasks" }).click();
-    expect(harness.updateSettings).toHaveBeenLastCalledWith({
-      agentControl: { delegation: { maxTasksPerTree: 250 } },
-    });
+    await expect
+      .poll(() => network.settings("local").agentControl)
+      .toEqual({ enabled: true, delegation: { maxDepth: 1, maxTasksPerTree: 250 } });
   });
 
   it("hides the delegation limits while Agent Control is off", async () => {

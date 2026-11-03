@@ -46,12 +46,14 @@ vi.mock("../../environments/runtime", () => ({
   startEnvironmentConnectionService: () => undefined,
   subscribeEnvironmentConnections: () => () => {},
   updateEnvironmentServerSettings: harness.updateSettings,
-  useSavedEnvironmentRegistryStore: (
-    selector: (state: { byId: Record<string, never> }) => unknown,
-  ) => selector({ byId: {} }),
-  useSavedEnvironmentRuntimeStore: (
-    selector: (state: { byId: Record<string, never> }) => unknown,
-  ) => selector({ byId: {} }),
+  useSavedEnvironmentRegistryStore: Object.assign(
+    (selector: (state: { byId: Record<string, never> }) => unknown) => selector({ byId: {} }),
+    { getState: () => ({ byId: {} }), subscribe: () => () => undefined },
+  ),
+  useSavedEnvironmentRuntimeStore: Object.assign(
+    (selector: (state: { byId: Record<string, never> }) => unknown) => selector({ byId: {} }),
+    { getState: () => ({ byId: {} }), subscribe: () => () => undefined },
+  ),
 }));
 
 const environmentId = EnvironmentId.make("env-prices");
@@ -130,8 +132,10 @@ describe("UsagePriceSettings", () => {
     await page.getByLabelText("Cache read price of claude-opus-5-preview").fill("0.5");
     await page.getByRole("button", { name: "Save prices" }).click();
 
+    // The whole map is written (the setting is shared across devices as one value).
     expect(harness.updateSettings).toHaveBeenCalledWith(environmentId, {
       usagePriceOverrides: {
+        ...SAVED,
         "claude-opus-5-preview": {
           price: { inputUsdPerMillion: 5, outputUsdPerMillion: 25, cacheReadUsdPerMillion: 0.5 },
         },

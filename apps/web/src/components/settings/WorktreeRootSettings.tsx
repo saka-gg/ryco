@@ -8,6 +8,7 @@ import { updateEnvironmentServerSettings } from "../../environments/runtime";
 import { ensureLocalApi } from "../../localApi";
 import { DraftInput } from "../ui/draft-input";
 import { SETTINGS_CONTROL_WIDTH, SettingResetButton, SettingsRow } from "./settingsLayout";
+import { SharedSettingRow, sharedControlLabel } from "./sharedSettings/SharedSettingRow";
 
 /** A node-scoped preference. Paths are interpreted and validated by the selected server. */
 export function WorktreeRootSettings({
@@ -21,6 +22,8 @@ export function WorktreeRootSettings({
   const target = useSettingsTarget();
   const scope = useSettingsEditingScope();
   const environmentId = target?.environmentId ?? config?.environment.environmentId;
+  // The device default is shared across devices; a project's own root stays on its device.
+  if (projectId === "") return <SharedWorktreeRootRow />;
   // Remount the editor on node changes so in-flight errors and drafts never cross environments.
   return (
     <WorktreeRootEditor
@@ -125,6 +128,36 @@ export function WorktreeRootEditor({
           autoCapitalize="none"
         />
       }
+    />
+  );
+}
+
+/** Where the shown device creates worktrees now. */
+function EffectiveWorktreeRoot() {
+  const root = useServerConfig()?.settings.worktreeRoot;
+  return <span className="block break-all">Effective: {root || "Ryco-managed directory"}</span>;
+}
+
+function SharedWorktreeRootRow() {
+  return (
+    <SharedSettingRow
+      settingKey="worktreeRoot"
+      description="Where new worktrees are created. Use an absolute path or ~/; leave empty to use the default. Existing checkouts keep their paths."
+      status={<EffectiveWorktreeRoot />}
+      defaultValue=""
+      resetLabel="worktree root"
+      render={(control) => (
+        <DraftInput
+          className={SETTINGS_CONTROL_WIDTH.lg}
+          value={control.value}
+          disabled={control.disabled}
+          onCommit={(root) => control.onChange(root.trim())}
+          placeholder="Ryco-managed directory"
+          aria-label={sharedControlLabel("Worktree root directory", control)}
+          spellCheck={false}
+          autoCapitalize="none"
+        />
+      )}
     />
   );
 }

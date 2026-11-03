@@ -15,18 +15,15 @@ import {
 import { readEffectiveProjectPreferences } from "@ryco/client-runtime/state/settings";
 import {
   nodeKeepsProjectPreferences,
-  nodePreferencesPatchFor,
   projectPreferenceCanReset,
   projectPreferenceResetValue,
   projectPreferencesWritePatch,
   projectPreferenceSupported,
 } from "@ryco/client-runtime/state/settings/projectPreferenceEditing";
-import type { ServerSettings } from "@ryco/contracts/settings";
 import {
   PROJECT_PREFERENCE_FIELDS,
   PROJECT_PREFERENCE_PROJECT_GONE,
   projectPreferenceSourceLabel,
-  projectPreferenceValueLabel,
   readProjectPreferenceText,
 } from "@ryco/shared/projectPreferences";
 import { createModelSelection } from "@ryco/shared/model";
@@ -45,15 +42,10 @@ import { ProviderModelPicker } from "../chat/ProviderModelPicker";
 import { TraitsPicker } from "../chat/TraitsPicker";
 import { DraftInput } from "../ui/draft-input";
 import { Button } from "../ui/button";
-import { ApplyToAllNodes } from "./ApplyToAllNodes";
+import { SharedSettingRow, sharedControlLabel } from "./sharedSettings/SharedSettingRow";
 import { SettingResetButton, SettingsBlock, SettingsNotice, SettingsRow } from "./settingsLayout";
 import { SETTINGS_CONTROL_WIDTH } from "./settingsLayout";
 import { SettingsSelect } from "./SettingsSelect";
-
-// Module level, so each row compares its nodes with one stable selector.
-const SELECT_NODE_PREFERENCE = Object.fromEntries(
-  PROJECT_PREFERENCE_VALUE_KEYS.map((key) => [key, (settings: ServerSettings) => settings[key]]),
-) as Readonly<Record<ProjectPreferenceValueKey, (settings: ServerSettings) => unknown>>;
 
 export function ProjectPreferenceSettings({
   projectId,
@@ -174,6 +166,8 @@ function ProjectPreferenceEditor(props: {
     if (effective && !projectPreferenceSupported(effective, key)) return null;
     const field = PROJECT_PREFERENCE_FIELDS[key];
     if (!projectId && field.nodeDefaultRow === "separate") return null;
+    // A device default is shared across devices; a project's override stays on its device.
+    if (!projectId) return <SharedNodePreferenceRow key={key} preferenceKey={key} />;
     const value = effective?.[key]?.value;
     const control =
       field.kind === "text" ? (
@@ -219,22 +213,7 @@ function ProjectPreferenceEditor(props: {
         title={field.title}
         owner="node"
         description={field.description}
-        status={
-          <>
-            {source(key)}
-            {projectId ? null : (
-              // A node default only; a project override never goes to other nodes.
-              <ApplyToAllNodes
-                label={field.resetLabel}
-                select={SELECT_NODE_PREFERENCE[key]}
-                format={(node) => projectPreferenceValueLabel(key, node)}
-                patch={nodePreferencesPatchFor({ [key]: value })}
-                supported={nodeKeepsProjectPreferences}
-                disabled={blocked || value === undefined}
-              />
-            )}
-          </>
-        }
+        status={source(key)}
         resetAction={reset(key, field.resetLabel)}
         control={control}
       />
@@ -329,5 +308,76 @@ function ProjectPreferenceEditor(props: {
         </SettingsBlock>
       ) : null}
     </>
+  );
+}
+
+/**
+ * A node default a project may override, as a shared device setting: every device's value on
+ * the settings page, written through the sharing commands.
+ */
+function SharedNodePreferenceRow({
+  preferenceKey: key,
+}: {
+  readonly preferenceKey: ProjectPreferenceValueKey;
+}) {
+  const field = PROJECT_PREFERENCE_FIELDS[key];
+  const [error, setError] = useState<string | null>(null);
+  return (
+    <SharedSettingRow
+      settingKey={key}
+      title={field.title}
+      description={field.description}
+      status={
+        error ? (
+          <span role="alert" className="text-destructive-foreground">
+            {error}
+          </span>
+        ) : undefined
+      }
+      knowsSetting={nodeKeepsProjectPreferences}
+      unknownSettingStatus="Update this device's Ryco server to configure inherited project defaults."
+      defaultValue={DEFAULT_UNIFIED_SETTINGS[key] as never}
+      resetLabel={field.resetLabel}
+      render={(control) =>
+        field.kind === "text" ? (
+          <DraftInput
+            className={SETTINGS_CONTROL_WIDTH.md}
+            value={typeof control.value === "string" ? control.value : ""}
+            disabled={control.disabled}
+            placeholder={field.placeholder}
+            aria-label={sharedControlLabel(field.controlLabel, control)}
+            spellCheck={false}
+            autoCapitalize="none"
+            onCommit={(input) => {
+              const next = readProjectPreferenceText(key, input);
+              if (next === null) {
+                setError(field.invalidMessage);
+                return;
+              }
+              setError(null);
+              control.onChange(next as never);
+            }}
+          />
+        ) : (
+          <SettingsSelect<string>
+            ariaLabel={sharedControlLabel(field.controlLabel, control)}
+            width="sm"
+            value={String(
+              (field.options.find((option) => option.value === control.value) ?? field.options[0])
+                ?.value,
+            )}
+            disabled={control.disabled}
+            onValueChange={(id) => {
+              const option = field.options.find((candidate) => String(candidate.value) === id);
+              if (option) control.onChange(option.value as never);
+            }}
+            options={field.options.map((option) => ({
+              value: String(option.value),
+              label: option.label,
+            }))}
+          />
+        )
+      }
+    />
   );
 }
