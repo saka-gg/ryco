@@ -26,7 +26,10 @@ import {
   type CommandPaletteGroup,
   type CommandPaletteSubmenuItem,
 } from "./CommandPalette.logic";
-import { SETTINGS_SECTION_TITLES, type SettingsSearchEntry } from "./settings/settingsSearchIndex";
+import {
+  describeSettingsSearchEntry,
+  type SettingsSearchEntry,
+} from "./settings/settingsSearchIndex";
 
 const LOCAL_ENVIRONMENT_ID = EnvironmentId.make("environment-local");
 const PROJECT_ID = ProjectId.make("project-1");
@@ -578,7 +581,7 @@ describe("buildSettingsSearchItems", () => {
     title: string,
     overrides: Partial<SettingsSearchEntry> = {},
   ): SettingsSearchEntry {
-    return { section: "appearance", owner: "client", title, description: "", ...overrides };
+    return { section: "appearance", storage: "app", title, description: "", ...overrides };
   }
 
   function actionItem(value: string, title: string): CommandPaletteActionItem {
@@ -588,7 +591,7 @@ describe("buildSettingsSearchItems", () => {
   function settingsItems(entries: ReadonlyArray<SettingsSearchEntry>, runEntry = vi.fn()) {
     return buildSettingsSearchItems({
       entries,
-      sectionTitles: SETTINGS_SECTION_TITLES,
+      describeEntry: (entry) => describeSettingsSearchEntry(entry),
       icon: null,
       runEntry,
     });
@@ -616,7 +619,7 @@ describe("buildSettingsSearchItems", () => {
       ["messages-search", "Messages"],
     ]);
     const item = groups[1]?.items[0];
-    expect(item).toMatchObject({ title: "Diff style", description: "Appearance" });
+    expect(item).toMatchObject({ title: "Diff style", description: "You › Appearance" });
     if (item?.kind !== "action") throw new Error("expected action item");
     await item.run();
     expect(runEntry).toHaveBeenCalledWith(diffStyle);

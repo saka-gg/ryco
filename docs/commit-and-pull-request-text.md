@@ -1,7 +1,7 @@
 # Commit messages and pull request text
 
 Ryco writes commit messages and pull request titles and descriptions with the model chosen
-under **Settings → Providers → Text generation**. The prompt carries the staged diff, the
+under **Settings → Providers & models → Text generation**. The prompt carries the staged diff, the
 branch, the commit list and your commit or pull request instructions. Ryco uses the answer
 directly: it commits with the generated message, and opens the pull request with the
 generated title and description.

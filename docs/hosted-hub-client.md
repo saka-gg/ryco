@@ -70,7 +70,7 @@ Ryco never changes Keychain access rules to suppress an operating-system prompt.
 
 Native mobile authentication requires a hardware-backed device key. If the device cannot provide
 one, setup explains the limitation and offers retry without falling back to a software key.
-Node-level security details live under **Settings → Security** (the device group of the settings page);
+Node-level security details live under **Settings → Devices → <node> → Security**;
 the existing owner and connection-readiness checks still apply.
 
 Sign-in uses the existing Hub passkey options and verification endpoints. The client converts the
@@ -344,7 +344,7 @@ desktop-local, and SSH-assisted routing keep their current URL shapes.
 Opening a thread moves the selection cursor to its node (see **Selection is a cursor** above). The
 pages no node owns leave the cursor where the last thread put it, so the pages that act on one node —
 Settings, Tasks, Statistics, adding a project, a new thread — keep that node as their target without
-the address naming it, and Settings → **Switch device** moves the cursor in place. Opened with the
+the address naming it, and the device bar and device items in Settings move the cursor in place. Opened with the
 cursor on no node, as after a reload or in a new tab, Settings and Tasks offer the nodes to choose
 from instead, and a choice moves the cursor in place the same way.
 
@@ -667,11 +667,11 @@ is one line and the pointer at the rest of it:
 
 <!-- shipped-text:web-sas-more -->
 
-> Settings → Security explains what else this tab cannot check.
+> Settings → Devices → this node → Security explains what this tab cannot check.
 
 <!-- /shipped-text:web-sas-more -->
 
-In Settings → Security, the same code is drawn with the longer account. It names both of the reasons
+On a node's page in Settings (Devices → <node> → Security), the same code is drawn with the longer account. It names both of the reasons
 the browser tier is denied the active-Hub column, and keeps them apart: one needs a substituted
 bundle and one needs nothing at all.
 
@@ -704,7 +704,7 @@ analytics, and it must not be captured into qualification evidence, screenshots,
 a channel locked encrypted but produced no code, the surface says so rather than rendering nothing —
 an absent comparison value is reported, not silently dropped.
 
-The code renders in the desktop thread connection popover and again in Settings → Security, which is
+The code renders in the desktop thread connection popover and again on a node's Security in Settings, which is
 where the popover's pointer leads. That section is owner-only in hosted mode, so the popover asks
 whether this reader can open it before it points there: a viewer, an operator, or an owner whose
 role snapshot has gone stale is shown the longer account in the popover itself, with the `ryco e2ee

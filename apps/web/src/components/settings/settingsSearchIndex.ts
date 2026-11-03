@@ -1,10 +1,21 @@
+import type { EnvironmentId } from "@ryco/contracts";
+
 import { isElectron, isHostedHubMode } from "../../env";
 import type { EnvironmentSettingsTargetState } from "../../hooks/useEnvironmentSettingsTarget";
-import type { SettingsSectionId } from "../../settingsDialogStore";
 import { isLocalOnboardingClient } from "../onboarding/localOnboarding";
-import { settingsSectionInDestination, settingsSectionReachable } from "./settingsSections.logic";
-
-export type SettingsDestination = "client" | "node";
+import {
+  SETTINGS_DEVICE_PART_TITLES,
+  SETTINGS_GROUP_TITLES,
+  settingsSection,
+  type SettingsDevicePartId,
+  type SettingsPageSectionId,
+  type SettingsStorage,
+} from "./settingsRegistry";
+import {
+  settingsSectionListed,
+  settingsStorageReachable,
+  type SettingsReach,
+} from "./settingsSections.logic";
 
 export type SettingsDesktopCapability =
   | "cliCommand"
@@ -15,8 +26,16 @@ export type SettingsDesktopCapability =
   | "windowTranslucencySupported";
 
 export interface SettingsSearchEntry {
-  readonly section: SettingsSectionId;
-  readonly owner: SettingsDestination;
+  /** The row's one home. */
+  readonly section: SettingsPageSectionId;
+  /**
+   * Where the row keeps its value, which decides who reaches it. A `device` row
+   * shows the device the page shows; a `this-computer` or `desktop` row lives on
+   * this app's own device page.
+   */
+  readonly storage: Exclude<SettingsStorage, "hub">;
+  /** A device page row's part. */
+  readonly part?: SettingsDevicePartId;
   readonly localOnboardingOnly?: boolean;
   readonly desktopCapability?: SettingsDesktopCapability;
   readonly title: string;
@@ -31,87 +50,90 @@ export interface SettingsSearchEntry {
  * Static search index over the settings surface. Panels are lazy-mounted, so
  * a runtime registry would only ever see the sections the user has already
  * visited — this manifest is the searchable source of truth instead. When a
- * row is added or renamed, add it here; the settings browser test asserting
- * search results keeps the prominent entries honest.
+ * row is added, moved or renamed, change it here; `settingsHomes.test.ts`
+ * fails an entry whose section does not keep rows stored where it says.
  */
 export const SETTINGS_SEARCH_INDEX: ReadonlyArray<SettingsSearchEntry> = [
   {
-    section: "general",
-    owner: "node",
+    section: "projects",
+    storage: "device",
     title: "Project defaults",
     description:
       "Inherited initial model, effort, thread location, branch prefix, and worktree setup.",
     keywords: "inherit override reset scope project model effort setup",
   },
-
   {
-    section: "general",
-    owner: "client",
+    section: "about",
+    storage: "app",
     title: "Welcome tour",
     description: "Replay provider setup, add a project, and learn the essentials.",
     keywords: "onboarding first run getting started setup",
     localOnboardingOnly: true,
   },
   {
-    section: "appearance",
+    section: "source-control",
+    storage: "app",
     title: "Diff style",
-    owner: "client",
     description: "Preview unified and split layouts for code changes.",
     keywords: "diff design side by side stacked layout",
   },
   {
-    section: "integrations",
+    section: "device",
+    storage: "desktop",
+    part: "computer-use",
     title: "Browser Use",
-    owner: "client",
     description: "Pair browsers and manage agent access to local tabs.",
     keywords: "chrome brave edge browser extension",
     desktopCapability: "computerUse",
   },
   {
-    section: "general",
+    section: "keybindings",
+    storage: "app",
     title: "Quit shortcut",
-    owner: "client",
     description: "Prevent accidental quits: press twice, hold, or quit immediately.",
     keywords: "ctrl cmd q exit desktop",
     desktopCapability: "quitShortcut",
   },
   {
-    section: "general",
+    section: "projects",
+    storage: "app",
     title: "Terminal command",
-    owner: "client",
     description: "Install the ryco command to use this app's node from any terminal.",
     keywords: "cli command line shell path install ryco nightly",
     desktopCapability: "cliCommand",
   },
   {
-    section: "general",
+    section: "chat",
+    storage: "app",
     title: "Window capture",
-    owner: "client",
     description: "Capture shortcut and Mac permissions for attaching app windows to the composer.",
     keywords: "screenshot snapshot appsnap screen recording input monitoring option keys hotkey",
     desktopCapability: "windowCapture",
   },
   {
-    section: "general",
+    section: "device",
+    storage: "device",
+    part: "identity",
     title: "Device name",
-    owner: "node",
     description: "Rename the selected device for everyone who can access it.",
     keywords: "machine hostname node name rename icon",
     targetId: "Device",
   },
   {
-    section: "integrations",
+    section: "device",
+    storage: "device",
+    part: "computer-use",
     title: "Device permissions",
-    owner: "node",
     description:
       "Manage permissions on the selected device or learn where local approval is required.",
     keywords: "computer use accessibility screen recording capture device local remote",
   },
   {
-    section: "integrations",
+    section: "device",
+    storage: "desktop",
+    part: "computer-use",
     desktopCapability: "computerUse",
     title: "Computer use",
-    owner: "client",
     targetId: "Computer Use",
     description: "Control local apps and browsers, manage permissions, and pair a browser.",
     keywords:
@@ -119,64 +141,64 @@ export const SETTINGS_SEARCH_INDEX: ReadonlyArray<SettingsSearchEntry> = [
   },
   {
     section: "inbox",
+    storage: "device",
     title: "Auto-settle inactive tasks",
-    owner: "client",
     description: "Move inactive tasks to Settled after their last message or turn.",
     keywords: "housekeeping settled archive inactive threads days",
   },
   {
-    section: "general",
+    section: "appearance",
+    storage: "app",
     title: "Time format",
-    owner: "client",
     description: "System default, 12-hour or 24-hour clock.",
     keywords: "clock hours",
   },
   {
-    section: "general",
+    section: "projects",
+    storage: "app",
     title: "Default editor",
-    owner: "client",
     description: "Pin which editor opens directories and files.",
     keywords: "vscode cursor open in",
   },
   {
     section: "source-control",
+    storage: "app",
     title: "Diff line wrapping",
-    owner: "client",
     description: "Default wrap state when the diff panel opens.",
     keywords: "word wrap",
   },
   {
     section: "source-control",
+    storage: "app",
     title: "Hide whitespace changes",
-    owner: "client",
     description: "Whether the diff panel ignores whitespace-only edits.",
     keywords: "diff",
   },
   {
     section: "source-control",
+    storage: "app",
     title: "Remote Git status",
-    owner: "client",
     description: "Refresh remote branch and pull request metadata.",
     keywords: "git polling refresh remote",
   },
   {
     section: "source-control",
+    storage: "app",
     title: "PR & workflow updates",
-    owner: "client",
     description: "Choose automatic, reduced, or manual pull request and workflow refreshes.",
     keywords: "github actions checks ci polling refresh",
   },
   {
     section: "source-control",
+    storage: "app",
     title: "Pull request links in chat",
-    owner: "client",
     description: "Open pull request links on the Pull requests page or in the browser.",
     keywords: "pr link url open browser github gitlab merge request",
   },
   {
-    section: "general",
+    section: "chat",
+    storage: "device",
     title: "Response streaming",
-    owner: "node",
     description:
       "Show replies a paragraph at a time, a whole message at a time, or token by token.",
     keywords:
@@ -184,304 +206,309 @@ export const SETTINGS_SEARCH_INDEX: ReadonlyArray<SettingsSearchEntry> = [
     targetId: "response-streaming",
   },
   {
-    section: "general",
+    section: "updates",
+    storage: "device",
     title: "Provider update checks",
-    owner: "node",
     description: "Check installed provider CLIs for newer versions.",
     keywords: "upgrade cli",
   },
   {
-    section: "general",
+    section: "device",
+    storage: "device",
+    part: "power",
     title: "Lower agent CPU priority",
-    owner: "node",
     description: "Run agents and their tests and builds at a lower CPU priority.",
     keywords: "nice cpu priority responsive load performance below normal agent processes",
   },
   {
-    section: "general",
+    section: "projects",
+    storage: "device",
     title: "New threads",
-    owner: "node",
     description: "Default workspace mode for newly created drafts.",
     keywords: "local worktree draft",
   },
   {
-    section: "general",
+    section: "projects",
+    storage: "device",
     title: "Worktree branch prefix",
-    owner: "node",
     description: "Default prefix for generated worktree branches on this device.",
     keywords: "git namespace branch naming ryco",
   },
   {
-    section: "general",
+    section: "projects",
+    storage: "device",
     title: "Worktree root",
-    owner: "node",
     description:
       "Environment worktree directory and project overrides. Existing checkouts keep their paths.",
     keywords: "folder path location inherit reset",
   },
   {
-    section: "general",
+    section: "projects",
+    storage: "device",
     title: "Worktree submodules",
-    owner: "node",
     description:
       "Initialization for new worktrees, with project overrides and repository configuration.",
     keywords: "git recursive top-level none initialize inherit",
   },
   {
-    section: "general",
+    section: "projects",
+    storage: "device",
     title: "Add project starts in",
-    owner: "node",
     description: "Starting directory for the Add Project browser.",
     keywords: "folder path",
   },
   {
-    section: "general",
+    section: "inbox",
+    storage: "app",
     title: "Archive confirmation",
-    owner: "client",
     description: "Ask before archiving a thread.",
     keywords: "confirm",
   },
   {
-    section: "general",
+    section: "inbox",
+    storage: "app",
     title: "Delete confirmation",
-    owner: "client",
     description: "Ask before deleting a thread.",
     keywords: "confirm remove",
   },
   {
-    section: "general",
+    section: "inbox",
+    storage: "app",
     title: "Unpin confirmation",
-    owner: "client",
     description: "Ask before removing a thread from pinned threads.",
     keywords: "confirm pin unpin favorite",
   },
   {
-    section: "general",
+    section: "notifications",
+    storage: "app",
     title: "Thread alerts",
-    owner: "client",
     description: "Notifications or a sound when a thread finishes, fails, or needs you.",
     keywords: "notifications sound badge alerts toast chime approval",
   },
   {
-    section: "general",
+    section: "notifications",
+    storage: "app",
     title: "In-app alerts",
-    owner: "client",
     description: "A toast with Open thread when another thread finishes or needs you.",
     keywords: "notifications sound badge alerts toast",
   },
   {
-    section: "general",
+    section: "updates",
+    storage: "app",
     title: "Update track",
-    owner: "client",
     description: "Which release channel the app follows.",
     keywords: "beta stable release channel",
   },
   {
     section: "appearance",
+    storage: "app",
     title: "Interface font",
-    owner: "client",
     description: "Normal app text, navigation, dialogs, and controls.",
     keywords: "typeface dm sans inter geist",
   },
   {
     section: "appearance",
+    storage: "app",
     title: "Code font",
-    owner: "client",
     description: "Code blocks, diffs, file paths, and terminal surfaces.",
     keywords: "monospace jetbrains fira",
   },
   {
     section: "appearance",
+    storage: "app",
     title: "Text size",
-    owner: "client",
     description: "Scale the interface independently from the theme.",
     keywords: "zoom font size compact",
   },
   {
     section: "appearance",
+    storage: "app",
     title: "Contrast",
-    owner: "client",
     description: "Make text and borders stronger, or softer, than the theme draws them.",
     keywords: "accessibility readability legibility high contrast",
   },
   {
     section: "appearance",
+    storage: "app",
     title: "Primary color",
-    owner: "client",
     description: "Accent color for links, focus rings, and actions.",
     keywords: "accent custom violet amber",
   },
   {
     section: "appearance",
+    storage: "app",
     title: "Translucent window",
-    owner: "client",
     desktopCapability: "windowTranslucencySupported",
     description: "Let the desktop show through the app window, blurred.",
     keywords: "vibrancy glass transparency translucent see-through wallpaper blur opacity macos",
   },
   {
     section: "appearance",
+    storage: "app",
     title: "Theme palette",
-    owner: "client",
     description: "Built-in and custom color themes; import and export.",
     keywords: "dark midnight graphite nord dracula catppuccin",
   },
   {
-    section: "general",
+    section: "keybindings",
+    storage: "app",
     title: "Send shortcut",
-    owner: "client",
     description: "Send with Enter, or with Mod+Enter for multiline prompts or always.",
     keywords: "enter return cmd command ctrl multiline new line submit composer",
   },
   {
-    section: "general",
+    section: "chat",
+    storage: "app",
     title: "Messages sent while a turn runs",
-    owner: "client",
     description:
       "Queue follow-ups or steer them into the running turn, or do the opposite for one message.",
     keywords: "steer queue follow-up enter mod",
   },
   {
-    section: "general",
+    section: "chat",
+    storage: "app",
     title: "Review large Claude resumes",
-    owner: "client",
     description: "Ask before a send resumes a large Claude conversation that sat idle.",
     keywords: "claude cache prompt compact compaction resume idle tokens cost don't ask again",
   },
   {
-    section: "general",
+    section: "chat",
+    storage: "app",
     title: "Auto-collapse wide composer labels",
-    owner: "client",
     description: "Show long composer mode labels only on hover or focus.",
     keywords: "chips",
   },
   {
-    section: "general",
+    section: "chat",
+    storage: "app",
     title: "Always use Build mode",
-    owner: "client",
     description: "Hide the mode selector and send every turn in Build mode.",
     keywords: "composer",
   },
   {
     section: "appearance",
+    storage: "app",
     title: "Chat width",
-    owner: "client",
     description: "How wide messages and the composer grow on large screens.",
     keywords: "comfortable wide full width column layout timeline monitor",
   },
   {
-    section: "appearance",
+    section: "chat",
+    storage: "app",
     title: "Open chat tabs",
-    owner: "client",
     description: "Keep the chats you open as tabs in the chat header, like a browser.",
     keywords: "tabs tab strip header browser open chats threads",
   },
   {
     section: "appearance",
+    storage: "app",
     title: "Color mode",
-    owner: "client",
     description: "Light, dark, or follow the system preference.",
     keywords: "color mode dark light",
   },
   {
     section: "source-control",
+    storage: "device",
     title: "Writing style",
-    owner: "node",
     description:
       "Write commit messages and pull requests like the repository or as Conventional Commits.",
     keywords: "git commit message pr title conventional commits repository style writing",
   },
   {
     section: "source-control",
+    storage: "device",
     title: "Commit message instructions",
-    owner: "node",
     description: "Guide the style of generated commit messages.",
     keywords: "git writing prompt text generation conventional commits custom",
   },
   {
     section: "source-control",
+    storage: "device",
     title: "Pull request instructions",
-    owner: "node",
     description: "Guide generated pull request titles and descriptions.",
     keywords: "git writing prompt text generation pr body description before after custom",
   },
   {
     section: "source-control",
+    storage: "device",
     title: "Pull request templates",
-    owner: "node",
     description: "Fill pull request descriptions from the repository's template.",
     keywords: "pr template description github gitlab merge request",
   },
   {
     section: "providers",
+    storage: "device",
     title: "Provider instances",
-    owner: "node",
     description: "Configure Codex, Claude, Copilot, OpenCode, and Cursor.",
     keywords: "api model driver accent",
   },
   {
-    section: "integrations",
+    section: "agent-control",
+    storage: "device",
     title: "Private Agent Control",
-    owner: "node",
     targetId: "Agent Control",
     description: "Pair local Codex or Claude MCP clients with scoped, revocable access.",
     keywords: "model context protocol tools pairing codex claude approval agent control",
   },
   {
-    section: "mcp-servers",
+    section: "plugins",
+    storage: "device",
     title: "MCP Servers",
-    owner: "node",
     description: "Manage Codex, Claude, and other provider-native MCP servers.",
     keywords: "model context protocol tools add server oauth profiles providers",
   },
   {
     section: "keybindings",
+    storage: "app",
     title: "Keyboard shortcuts",
-    owner: "client",
     description: "Customize app shortcuts locally or import legacy node bindings.",
     keywords: "shortcuts hotkeys keyboard",
   },
   {
     section: "source-control",
+    storage: "device",
     title: "Version Control",
-    owner: "node",
     description: "Git behavior and defaults.",
     keywords: "git commit",
   },
   {
     section: "source-control",
-    title: "Source Control Providers",
-    owner: "node",
+    storage: "device",
+    title: "Hosting accounts",
     description: "GitHub and other source control provider connections.",
     keywords: "github pr pull request",
   },
   {
-    section: "connections",
+    section: "device",
+    storage: "this-computer",
+    part: "access",
     title: "Network access",
-    owner: "client",
     description: "Expose the local backend on your network.",
     keywords: "lan host remote",
   },
   {
-    section: "connections",
+    section: "device",
+    storage: "this-computer",
+    part: "access",
     title: "Pairing link",
-    owner: "client",
     description: "Scan to open this backend on another device.",
     keywords: "qr code phone mobile",
     // PAIRING_LINK_TARGET_ID: no heading reads "Pairing link", so it jumps to the Network access row.
     targetId: "pairing-link",
   },
   {
-    section: "connections",
+    section: "device",
+    storage: "this-computer",
+    part: "access",
     title: "Tailscale HTTPS",
-    owner: "client",
     description: "Serve over your tailnet with HTTPS.",
     keywords: "vpn remote",
   },
   {
-    section: "connections",
+    section: "device",
+    storage: "this-computer",
+    part: "power",
     title: "Keep this computer awake",
-    owner: "client",
     desktopCapability: "setKeepAwakeMode",
     description:
       "Stop idle sleep while other devices reach this computer or agents work, on AC power.",
@@ -490,16 +517,17 @@ export const SETTINGS_SEARCH_INDEX: ReadonlyArray<SettingsSearchEntry> = [
     targetId: "desktop-keep-awake",
   },
   {
-    section: "connections",
+    section: "device",
+    storage: "this-computer",
+    part: "access",
     title: "Authorized clients",
-    owner: "client",
     description: "Devices and sessions allowed to connect.",
     keywords: "revoke tokens",
   },
   {
     section: "updates",
+    storage: "app",
     title: "Update everything",
-    owner: "client",
     description: "Update Ryco and its providers on every connected device in one click.",
     keywords: "upgrade release version check for updates node cli provider channel",
   },
@@ -507,150 +535,197 @@ export const SETTINGS_SEARCH_INDEX: ReadonlyArray<SettingsSearchEntry> = [
   // what else this tab cannot check" — so the terms it sends them looking for
   // have to resolve here. `SettingsPage.test.ts` asserts they do.
   {
-    section: "security",
+    section: "device",
+    storage: "device",
+    part: "security",
     title: "Session code",
-    owner: "node",
     description: "Compare this browser's channel against the one your node's CLI shows.",
     keywords: "security verification websas e2ee compare short authentication string",
   },
   {
-    section: "security",
+    section: "device",
+    storage: "device",
+    part: "security",
     title: "Enrollment fingerprint",
-    owner: "node",
     description: "This node's identity, and the prekey and continuity behind it.",
     keywords: "security e2ee key fingerprint rotate lineage",
   },
   {
-    section: "security",
+    section: "device",
+    storage: "device",
+    part: "security",
     title: "Authorized client keys",
-    owner: "node",
     description: "Approve, reduce, revoke, or delete a client key, and open a pairing window.",
     keywords: "security e2ee pairing fingerprint refused attempts",
   },
   {
-    section: "security",
+    section: "device",
+    storage: "device",
+    part: "security",
     title: "Admission policy",
-    owner: "node",
     description: "Require E2EE, require approved clients, and advance the policy generation.",
     keywords: "security e2ee strict fallback plaintext",
   },
   {
     section: "diagnostics",
+    storage: "device",
     title: "Diagnostics",
-    owner: "node",
     description: "Logs, tracing, resource history, and live activity.",
     keywords: "debug performance slow",
   },
   {
-    section: "diagnostics",
+    section: "notifications",
+    storage: "app",
     title: "Test notification",
-    owner: "client",
     description: "Fire sample notifications to preview the toast design and stacking.",
     keywords: "toast notifications preview trigger sample",
   },
   {
-    section: "statistics",
+    section: "usage",
+    storage: "device",
     title: "Statistics",
-    owner: "node",
     description: "Usage activity and history.",
     keywords: "heatmap usage tokens",
   },
   {
-    section: "general",
+    section: "usage",
+    storage: "device",
     title: "Model prices",
-    owner: "node",
     description: "Custom prices and model mappings for usage cost.",
     keywords: "usage cost price pricing rates override map alias preview gateway unpriced",
   },
   {
-    section: "archived",
+    section: "inbox",
+    storage: "device-read",
     title: "Archive",
-    owner: "node",
     description: "Archived threads; unarchive or delete them.",
     keywords: "unarchive delete restore retention cleanup suggestions",
+  },
+  {
+    section: "data",
+    storage: "device",
+    title: "Import conversations",
+    description: "Bring Codex or Claude history into Ryco, whole projects at a time.",
+    keywords: "import sessions history codex claude migrate",
+  },
+  {
+    section: "data",
+    storage: "device",
+    title: "Chats folder",
+    description: "Where chats without a project keep their files.",
+    keywords: "chats root folder path no project cleanup empty",
+  },
+  {
+    section: "data",
+    storage: "device",
+    title: "Storage",
+    description: "What Ryco keeps on this device, retention, and cleanup.",
+    keywords: "disk space retention cleanup database shrink compaction worktrees",
+  },
+  {
+    section: "data",
+    storage: "app",
+    title: "Settings file",
+    description: "Export this app's settings to a file, or import one.",
+    keywords: "backup restore export import json preferences",
+  },
+  {
+    section: "usage",
+    storage: "device",
+    title: "Usage limits",
+    description: "Resume or snooze threads that hit a usage limit.",
+    keywords: "limit rate auto-resume snooze quota",
+  },
+  {
+    section: "plugins",
+    storage: "device",
+    title: "Ryco plugins",
+    description: "Plugins Ryco installs into each agent on this device.",
+    keywords: "plugin skills claude codex opinionated install",
+  },
+  {
+    section: "devices",
+    storage: "app",
+    title: "Remote environments",
+    description: "Devices this app connects to, and adding another.",
+    keywords: "add device environment remote ssh pair connect hub",
+  },
+  {
+    section: "about",
+    storage: "app",
+    title: "Version",
+    description: "The version of Ryco this app runs.",
+    keywords: "about release build check for updates",
   },
 ];
 
 /**
- * Section titles as the settings nav draws them. They live here, not in the
- * settings page, so the command palette can name a section without loading it.
- */
-export const SETTINGS_SECTION_TITLES: Readonly<Record<SettingsSectionId, string>> = {
-  account: "Account",
-  general: "General",
-  inbox: "Inbox",
-  appearance: "Appearance",
-  providers: "Providers",
-  "opinionated-plugins": "Plugins",
-  "mcp-servers": "MCP",
-  integrations: "Integrations",
-  "computer-use": "Computer use",
-  keybindings: "Keybindings",
-  "source-control": "Source control",
-  connections: "Connections",
-  updates: "Updates",
-  security: "Security",
-  diagnostics: "Diagnostics",
-  statistics: "Statistics",
-  archived: "Archive",
-};
-
-/** Sections that open another page instead of rendering a panel in settings. */
-export const SETTINGS_LINK_SECTIONS: ReadonlySet<SettingsSectionId> = new Set(["statistics"]);
-
-/**
- * What the settings page can show: this client, and the device it edits.
- * Built by {@link readSettingsSearchScope}.
+ * What the settings page can show: this app, and the device it shows values
+ * for. Built by {@link readSettingsSearchScope}.
  */
 export interface SettingsSearchScope {
-  readonly hosted: boolean;
-  /** Desktop with computer use, where Integrations is also an app section. */
-  readonly desktopComputerUse: boolean;
+  readonly reach: SettingsReach;
   readonly localOnboarding: boolean;
   readonly hasDesktopCapability: (capability: SettingsDesktopCapability) => boolean;
-  /** The device whose settings the page shows. */
-  readonly node: Pick<EnvironmentSettingsTargetState, "target" | "isPrimary" | "nodeRole">;
 }
 
-export function readSettingsSearchScope(node: SettingsSearchScope["node"]): SettingsSearchScope {
+/** Who may open which part of settings, for the device the page shows. */
+export function readSettingsReach(
+  node: Pick<EnvironmentSettingsTargetState, "target" | "isPrimary" | "nodeRole">,
+): SettingsReach {
+  const hosted = isHostedHubMode();
   return {
-    hosted: isHostedHubMode(),
+    hosted,
     desktopComputerUse: isElectron && Boolean(window.desktopBridge?.computerUse),
+    // A hosted role is already null while its snapshot is stale, and a device
+    // that is not connected grants nothing until it is.
+    device: node.target
+      ? { gated: hosted || !node.isPrimary, role: node.target.connected ? node.nodeRole : null }
+      : null,
+  };
+}
+
+export function readSettingsSearchScope(
+  node: Pick<EnvironmentSettingsTargetState, "target" | "isPrimary" | "nodeRole">,
+): SettingsSearchScope {
+  return {
+    reach: readSettingsReach(node),
     localOnboarding: isLocalOnboardingClient(),
     hasDesktopCapability: (capability) => Boolean(window.desktopBridge?.[capability]),
-    node,
   };
 }
 
 /**
- * Whether the settings nav lists a section under a destination. The page
- * builds its nav from this and the command palette its Settings results, so a
- * result never names a section the page then refuses.
+ * Where a result lives, as the nav names it: "Work › Projects & worktrees", or
+ * for a device page row "Devices › <device> › Security".
  */
-export function settingsSectionListed(
-  scope: SettingsSearchScope,
-  destination: SettingsDestination,
-  section: SettingsSectionId,
-): boolean {
-  if (destination === "client") {
-    return (
-      settingsSectionInDestination(section, "client", scope.desktopComputerUse) &&
-      (section !== "connections" || !scope.hosted)
-    );
-  }
-  const target = scope.node.target;
-  // The device's own connection settings live under Security; "Connections"
-  // belongs to the app, which is what reaches devices.
-  return (
-    target !== null &&
-    section !== "connections" &&
-    settingsSectionInDestination(section, "node", scope.desktopComputerUse) &&
-    settingsSectionReachable(section, {
-      hosted: scope.hosted || !scope.node.isPrimary,
-      role: target.connected ? scope.node.nodeRole : null,
-      desktop: false,
-    })
-  );
+export function describeSettingsSearchEntry(
+  entry: Pick<SettingsSearchEntry, "section" | "part">,
+  deviceLabel?: string | null,
+): string {
+  const section = settingsSection(entry.section);
+  const group = SETTINGS_GROUP_TITLES[section.group];
+  if (entry.section !== "device") return `${group} › ${section.title}`;
+  const part = entry.part ? ` › ${SETTINGS_DEVICE_PART_TITLES[entry.part]}` : "";
+  return `${group}${deviceLabel ? ` › ${deviceLabel}` : ""}${part}`;
+}
+
+/**
+ * Where picking a result opens: its section, on the device the search was
+ * checked against, or this app's own device page for a row of this computer.
+ */
+export function settingsSearchEntryDestination(
+  entry: Pick<SettingsSearchEntry, "section" | "storage">,
+  devices: {
+    readonly target: EnvironmentId | null;
+    readonly primary: EnvironmentId | null;
+  },
+): { readonly section: SettingsPageSectionId; readonly environmentId: EnvironmentId | null } {
+  const ownDevice = entry.storage === "this-computer" || entry.storage === "desktop";
+  return {
+    section: entry.section,
+    environmentId: ownDevice ? (devices.primary ?? devices.target) : devices.target,
+  };
 }
 
 /** The entries a settings search lists for `query`, in index order. */
@@ -663,7 +738,8 @@ export function filterSettingsSearchEntries(
   if (normalizedQuery.length === 0) return [];
   return entries.filter(
     (entry) =>
-      settingsSectionListed(scope, entry.owner, entry.section) &&
+      settingsSectionListed(entry.section, scope.reach) &&
+      settingsStorageReachable(entry.storage, scope.reach) &&
       (!entry.localOnboardingOnly || scope.localOnboarding) &&
       (!entry.desktopCapability || scope.hasDesktopCapability(entry.desktopCapability)) &&
       `${entry.title} ${entry.description} ${entry.keywords ?? ""}`

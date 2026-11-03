@@ -30,7 +30,7 @@ describe("keybinding search entries", () => {
 
   it("opens the Keybindings panel at a row titled like the result", () => {
     for (const entry of KEYBINDING_SEARCH_ENTRIES) {
-      expect(entry).toMatchObject({ section: "keybindings", owner: "client" });
+      expect(entry).toMatchObject({ section: "keybindings", storage: "app" });
       expect(entry.title).not.toMatch(/^Run:/);
     }
     const byTarget = (command: StaticKeybindingCommand) =>

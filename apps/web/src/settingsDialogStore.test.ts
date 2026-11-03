@@ -7,13 +7,12 @@ describe("settingsDialogStore", () => {
   beforeEach(() => {
     useSettingsDialogStore.setState({
       open: false,
-      editingScope: "client",
       section: "general",
       targetEnvironmentId: null,
     });
   });
 
-  it("keeps an explicit node target until the dialog closes", () => {
+  it("keeps an explicit device until settings close", () => {
     const environmentId = EnvironmentId.make("environment-qa");
 
     useSettingsDialogStore.getState().openSettings("providers", environmentId);
@@ -31,16 +30,28 @@ describe("settingsDialogStore", () => {
       targetEnvironmentId: null,
     });
   });
-  it("keeps local appearance separate when switching from a node destination", () => {
-    const store = useSettingsDialogStore.getState();
-    store.openSettings("providers", EnvironmentId.make("remote"));
-    expect(useSettingsDialogStore.getState().editingScope).toBe("node");
-    store.setEditingScope("client");
+
+  it("opens a device's page when only the device is named", () => {
+    const environmentId = EnvironmentId.make("remote");
+    useSettingsDialogStore.getState().openSettings(undefined, environmentId);
     expect(useSettingsDialogStore.getState()).toMatchObject({
-      editingScope: "client",
-      section: "general",
+      section: "device",
+      targetEnvironmentId: environmentId,
     });
-    store.openSettings("appearance");
-    expect(useSettingsDialogStore.getState().editingScope).toBe("client");
+  });
+
+  it("switches the device without leaving the section", () => {
+    const store = useSettingsDialogStore.getState();
+    store.openSettings("projects");
+    store.setTargetEnvironmentId(EnvironmentId.make("remote"));
+    expect(useSettingsDialogStore.getState()).toMatchObject({
+      section: "projects",
+      targetEnvironmentId: "remote",
+    });
+  });
+
+  it("keeps an old id as asked, for the page and the phone tier to redirect", () => {
+    useSettingsDialogStore.getState().openSettings("connections");
+    expect(useSettingsDialogStore.getState().section).toBe("connections");
   });
 });

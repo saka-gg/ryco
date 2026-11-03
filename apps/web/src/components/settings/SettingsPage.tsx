@@ -1,27 +1,32 @@
 import { useRouter } from "@tanstack/react-router";
+import type { EnvironmentId } from "@ryco/contracts";
 import {
   ActivityIcon,
   AppWindowIcon,
-  ArchiveIcon,
   ArrowUpCircleIcon,
   ArrowUpRightIcon,
-  BarChart3Icon,
   BlocksIcon,
+  BotIcon,
   ChevronsUpDownIcon,
+  DatabaseIcon,
+  FolderIcon,
+  GaugeIcon,
   GitBranchIcon,
+  InboxIcon,
+  InfoIcon,
   KeyboardIcon,
-  Link2Icon,
+  LayersIcon,
+  LayoutGridIcon,
+  MessageSquareIcon,
+  MonitorIcon,
   PaletteIcon,
   PlugIcon,
-  PuzzleIcon,
-  RotateCcwIcon,
   SearchIcon,
-  ServerIcon,
-  Settings2Icon,
   ShieldIcon,
-  SparklesIcon,
   UserRoundIcon,
+  BellIcon,
   XIcon,
+  type LucideIcon,
 } from "lucide-react";
 import {
   Suspense,
@@ -30,7 +35,6 @@ import {
   useLayoutEffect,
   useRef,
   useState,
-  type ComponentType,
   type CSSProperties,
   type ReactNode,
 } from "react";
@@ -39,35 +43,45 @@ import {
   APP_SIDEBAR_CHROME_INSET_TRANSITION_CLASS,
   COLLAPSED_APP_SIDEBAR_CHROME_INSET_CLASS,
 } from "../../appChrome";
-import { useAppPreferencesLabel, useDeviceName } from "../../deviceName";
 import { isElectron, isHostedHubMode } from "../../env";
+import { usePrimaryEnvironmentId } from "../../environments/primary/context";
 import { useAppSidebarCollapsed } from "../../hooks/useAppSidebarCollapsed";
 import { useSettingsPageTarget } from "../../hooks/useSettingsPageTarget";
 import { navigateHub } from "../../hostedHub/hubRoutes";
 import { useHostedNodePageDemand } from "../../hostedHub/useHostedNodePageDemand";
-import { preloadableLazy, type PreloadableModule } from "../../lib/preloadableLazy";
 import { cn } from "../../lib/utils";
 import { retainDesktopWorkspaceInteractiveScope } from "../../platform/desktopWorkspace";
-import { type SettingsSectionId, useSettingsDialogStore } from "../../settingsDialogStore";
-import { SettingsEditingScopeProvider, SettingsTargetProvider } from "../../settingsTarget";
+import { useSettingsDialogStore } from "../../settingsDialogStore";
 import { DeviceIcon } from "../DeviceIcon";
-import { parseStatisticsSearch } from "../statistics/statisticsSearch";
 import { Button } from "../ui/button";
 import { Kbd } from "../ui/kbd";
 import { Menu, MenuPopup, MenuRadioGroup, MenuRadioItem, MenuTrigger } from "../ui/menu";
 import { SidebarInset } from "../ui/sidebar";
 import { Skeleton } from "../ui/skeleton";
 import { Tooltip, TooltipPopup, TooltipTrigger } from "../ui/tooltip";
-import { ArchivedThreadsPanel, GeneralSettingsPanel, useSettingsRestore } from "./SettingsPanels";
+import { useActiveIndicator } from "../ui/useActiveIndicator";
 import { KEYBINDING_SEARCH_ENTRIES } from "./keybindingSearchEntries";
 import {
+  preloadSettingsSection,
+  SettingsDevicePage,
+  settingsDeviceReady,
+  SettingsPartsProvider,
+  SettingsSectionPanel,
+} from "./SettingsSectionPanels";
+import {
+  SETTINGS_GROUPS,
+  SETTINGS_SECTIONS,
+  resolveSettingsPageSection,
+  settingsSection,
+  type SettingsPageSectionId,
+} from "./settingsRegistry";
+import {
+  describeSettingsSearchEntry,
   filterSettingsSearchEntries,
+  readSettingsReach,
   readSettingsSearchScope,
-  SETTINGS_LINK_SECTIONS,
   SETTINGS_SEARCH_INDEX,
-  SETTINGS_SECTION_TITLES,
-  settingsSectionListed,
-  type SettingsDestination,
+  settingsSearchEntryDestination,
   type SettingsSearchEntry,
 } from "./settingsSearchIndex";
 import {
@@ -75,268 +89,54 @@ import {
   useSettingsSearchRevealStore,
   type SettingsSearchTarget,
 } from "./settingsSearchReveal";
-import { SettingsCard, SettingsEmpty } from "./settingsLayout";
-import { useApplyToAllNodesShown } from "./ApplyToAllNodes";
-import { SettingsNodeMenu, useSettingsNodeMenu } from "./SettingsNodeMenu";
-import { SettingsScopeSentence } from "./SettingsScopeSentence";
 import {
-  settingsScopeSentenceShown,
-  settingsSectionHasNodeFanOut,
-} from "./SettingsScopeSentence.logic";
-import { useSettingsSubsections } from "./useSettingsSubsections";
-import { preloadWindowCaptureSettings } from "./WindowCaptureSettings";
-import { useActiveIndicator } from "../ui/useActiveIndicator";
-
-interface NavItem {
-  readonly id: SettingsSectionId;
-  readonly icon: ComponentType<{ className?: string }>;
-  /** One line under the page title. A pair when the two destinations differ. */
-  readonly description: string | { readonly client: string; readonly node: string };
-}
-
-const NAV_ITEMS: ReadonlyArray<NavItem> = [
-  {
-    id: "account",
-    icon: UserRoundIcon,
-    description: "Your Hub identity, sign-in methods, and recovery.",
-  },
-  {
-    id: "general",
-    icon: Settings2Icon,
-    description: {
-      client: "Behavior, notifications, and defaults for this app.",
-      node: "Identity, imports, updates, and project defaults for this device.",
-    },
-  },
-  {
-    id: "inbox",
-    icon: SparklesIcon,
-    description: "How the inbox settles inactive tasks.",
-  },
-  {
-    id: "appearance",
-    icon: PaletteIcon,
-    description: "Theme, typography, and interface details for this app.",
-  },
-  {
-    id: "providers",
-    icon: BlocksIcon,
-    description: "Coding agents on this device and the models they offer.",
-  },
-  {
-    id: "opinionated-plugins",
-    icon: PuzzleIcon,
-    description: "Ryco plugins installed into each agent on this device.",
-  },
-  {
-    id: "mcp-servers",
-    icon: ServerIcon,
-    description: "Model Context Protocol servers each agent can reach.",
-  },
-  {
-    id: "integrations",
-    icon: PlugIcon,
-    description: {
-      client: "Desktop permissions, computer use, and the browser bridge.",
-      node: "Agent Control and the tools that can drive this device.",
-    },
-  },
-  {
-    id: "keybindings",
-    icon: KeyboardIcon,
-    description: "Keyboard shortcuts saved in this app or browser profile.",
-  },
-  {
-    id: "source-control",
-    icon: GitBranchIcon,
-    description: {
-      client: "How this app presents commits, branches, and pull requests.",
-      node: "Git behavior and the hosting providers this device can reach.",
-    },
-  },
-  {
-    id: "connections",
-    icon: Link2Icon,
-    description: "The devices this app can reach and how it reaches them.",
-  },
-  {
-    id: "updates",
-    icon: ArrowUpCircleIcon,
-    description: "Ryco and its providers on every device this app reaches, in one click.",
-  },
-  {
-    id: "security",
-    icon: ShieldIcon,
-    description: "Who can reach this device, live sessions, and pairing policy.",
-  },
-  {
-    id: "diagnostics",
-    icon: ActivityIcon,
-    description: {
-      client: "Performance and presentation checks for this app.",
-      node: "Logs, traces, processes, and resource history for this device.",
-    },
-  },
-  {
-    id: "statistics",
-    icon: BarChart3Icon,
-    description: "Usage and activity for this device.",
-  },
-  {
-    id: "archived",
-    icon: ArchiveIcon,
-    description: "Archived threads on this device. Unarchive or delete them.",
-  },
-];
-
-/**
- * Every section the settings page can navigate to.
- *
- * Exported so `PhoneSettingsSurface`'s mirrored registry can be checked against
- * it rather than trusted: a section added here and not there is unreachable on
- * every phone-tier presentation, and `openSettings(id)` for it falls back to the
- * list with no error.
- */
-export const SETTINGS_SECTION_IDS: ReadonlyArray<SettingsSectionId> = NAV_ITEMS.map(
-  (item) => item.id,
-);
-
-/**
- * The section labels the nav draws, by id.
- *
- * Exported so copy that NAMES a section can be held to the label the nav
- * actually shows: §13.5's `E2EE_WEB_SAS_MORE` sends an owner to
- * "Settings → Security", and `SettingsPage.test.ts` reads this map to fail
- * that pointer if the section is ever renamed underneath it.
- */
-export const SETTINGS_SECTION_LABELS: ReadonlyMap<SettingsSectionId, string> = new Map(
-  NAV_ITEMS.map((item) => [item.id, SETTINGS_SECTION_TITLES[item.id]] as const),
-);
-
-// The gates themselves live in `settingsSections.logic.ts`, because
-// `HostedE2eeVerification` — which sits in the eagerly loaded shell — has to ask
-// the same question before it points a reader at Settings → Security, and this
-// module is behind a dynamic import on purpose. Re-exported here so the two nav
-// surfaces and their tests keep importing them from where they already do.
-export {
-  hostedSettingsRoleFresh,
-  hostedSettingsRoleSnapshot,
-  hostedSettingsSectionAllowed,
-  settingsSectionAvailable,
-  settingsSectionReachable,
-  settingsSectionScope,
-  settingsScopeLabel,
+  settingsSectionAppOnly,
+  settingsSectionListed,
+  settingsStorageReachable,
+  type SettingsReach,
 } from "./settingsSections.logic";
+import { SettingsCard, SettingsChip, SettingsEmpty } from "./settingsLayout";
+import type { SettingsNodeStatus } from "./settingsDevices.logic";
+import {
+  SETTINGS_NODE_STATUS_LABELS,
+  useSettingsDevices,
+  type SettingsDeviceChoice,
+  type SettingsDevicesModel,
+} from "./useSettingsDevices";
+import { useSettingsSubsections } from "./useSettingsSubsections";
 
-// Section bodies render synchronously once loaded: a `React.lazy` boundary
-// committed `PanelFallback` on every first visit and React then held the
-// section for up to 300 ms (its Suspense reveal throttle). Hovering or focusing
-// a nav item, and the settings route loader for the open section, preload them.
-const LazyAccountSettingsPanel = preloadableLazy(() =>
-  import("./AccountSettings").then((module) => module.AccountSettingsPanel),
-);
-const LazyProvidersSettingsPanel = preloadableLazy(() =>
-  import("./ProvidersSettingsPanel").then((module) => module.ProvidersSettingsPanel),
-);
-const LazyInboxSettings = preloadableLazy(() =>
-  import("./InboxSettings").then((module) => module.InboxSettings),
-);
-const LazyOpinionatedPluginsSettingsPanel = preloadableLazy(() =>
-  import("./OpinionatedPluginsSettings").then((module) => module.OpinionatedPluginsSettingsPanel),
-);
-// Resolves with its desktop Computer Use subsection (its own chunk) loaded, so
-// the section's first commit includes it.
-const LazyIntegrationsSettings = preloadableLazy(() =>
-  import("./IntegrationsSettingsPanel").then((module) => module.loadIntegrationsSettingsPanel()),
-);
-const LazyMcpServersSettings = preloadableLazy(() =>
-  import("./McpServersSettings").then((module) => module.McpServersSettings),
-);
-const LazyAppearanceSettingsPanel = preloadableLazy(() =>
-  import("./AppearanceSettings").then((module) => module.AppearanceSettingsPanel),
-);
-const LazyKeybindingsSettingsPanel = preloadableLazy(() =>
-  import("./KeybindingsSettings").then((module) => module.KeybindingsSettingsPanel),
-);
-const LazySourceControlSettingsPanel = preloadableLazy(() =>
-  import("./SourceControlSettings").then((module) => module.SourceControlSettingsPanel),
-);
-const LazyConnectionsSettings = preloadableLazy(() =>
-  import("./ConnectionsSettings").then((module) => module.ConnectionsSettings),
-);
-const LazyUpdatesSettings = preloadableLazy(() =>
-  import("./UpdatesSettings").then((module) => module.UpdatesSettings),
-);
-const LazyNodeSecuritySettings = preloadableLazy(() =>
-  import("./NodeSecuritySettings").then((module) => module.NodeSecuritySettings),
-);
-const LazyDiagnosticsSettings = preloadableLazy(() =>
-  import("./DiagnosticsSettings").then((module) => module.DiagnosticsSettings),
-);
-
-const LAZY_SECTION_PANELS: Partial<Record<SettingsSectionId, PreloadableModule>> = {
-  account: LazyAccountSettingsPanel,
-  inbox: LazyInboxSettings,
-  providers: LazyProvidersSettingsPanel,
-  "opinionated-plugins": LazyOpinionatedPluginsSettingsPanel,
-  "mcp-servers": LazyMcpServersSettings,
-  integrations: LazyIntegrationsSettings,
-  appearance: LazyAppearanceSettingsPanel,
-  keybindings: LazyKeybindingsSettingsPanel,
-  "source-control": LazySourceControlSettingsPanel,
-  connections: LazyConnectionsSettings,
-  updates: LazyUpdatesSettings,
-  security: LazyNodeSecuritySettings,
-  diagnostics: LazyDiagnosticsSettings,
+/** Each section's nav icon. Typed over every section, so a new one fails typecheck until drawn. */
+const SETTINGS_SECTION_ICONS: Readonly<Record<SettingsPageSectionId, LucideIcon>> = {
+  appearance: PaletteIcon,
+  keybindings: KeyboardIcon,
+  notifications: BellIcon,
+  account: UserRoundIcon,
+  chat: MessageSquareIcon,
+  inbox: InboxIcon,
+  projects: FolderIcon,
+  "source-control": GitBranchIcon,
+  providers: BlocksIcon,
+  usage: GaugeIcon,
+  plugins: PlugIcon,
+  "agent-control": BotIcon,
+  devices: LayoutGridIcon,
+  device: MonitorIcon,
+  updates: ArrowUpCircleIcon,
+  data: DatabaseIcon,
+  diagnostics: ActivityIcon,
+  about: InfoIcon,
 };
 
-/** Starts (or joins) the chunk load of a section's body. Never rejects. */
-export function preloadSettingsSection(section: SettingsSectionId): Promise<void> {
-  // General renders with the page; only its Window capture subsection loads a
-  // chunk of its own, on desktops that offer window capture.
-  if (section === "general") return preloadWindowCaptureSettings();
-  return LAZY_SECTION_PANELS[section]?.preload() ?? Promise.resolve();
-}
+export { preloadSettingsSection } from "./SettingsSectionPanels";
 
-function navDescription(item: NavItem, destination: SettingsDestination): string {
-  return typeof item.description === "string" ? item.description : item.description[destination];
-}
-
-function SectionPanel({ section }: { section: SettingsSectionId }) {
-  switch (section) {
-    case "account":
-      return <LazyAccountSettingsPanel />;
-    case "general":
-      return <GeneralSettingsPanel />;
-    case "inbox":
-      return <LazyInboxSettings />;
-    case "providers":
-      return <LazyProvidersSettingsPanel />;
-    case "opinionated-plugins":
-      return <LazyOpinionatedPluginsSettingsPanel />;
-    case "mcp-servers":
-      return <LazyMcpServersSettings />;
-    case "integrations":
-      return <LazyIntegrationsSettings />;
-    case "appearance":
-      return <LazyAppearanceSettingsPanel />;
-    case "keybindings":
-      return <LazyKeybindingsSettingsPanel />;
-    case "source-control":
-      return <LazySourceControlSettingsPanel />;
-    case "connections":
-      return <LazyConnectionsSettings />;
-    case "updates":
-      return <LazyUpdatesSettings />;
-    case "security":
-      return <LazyNodeSecuritySettings />;
-    case "diagnostics":
-      return <LazyDiagnosticsSettings />;
-    case "archived":
-      return <ArchivedThreadsPanel />;
-    default:
-      return null;
-  }
+/** Whether a section shows the device bar: it keeps rows on a device. */
+function sectionUsesDevice(section: SettingsPageSectionId): boolean {
+  return (
+    section !== "device" &&
+    settingsSection(section).parts.some(
+      (storage) => storage === "device" || storage === "device-read",
+    )
+  );
 }
 
 function PanelFallback() {
@@ -362,27 +162,6 @@ function PanelFallback() {
         </div>
       ))}
     </div>
-  );
-}
-
-// Export and Import of this app's preferences load with the first general page that shows them.
-const LazyClientSettingsFileActions = preloadableLazy(() =>
-  import("./ClientSettingsFileActions").then((module) => module.ClientSettingsFileActions),
-);
-
-function RestoreDefaultsButton({ onRestored }: { onRestored: () => void }) {
-  const { changedSettingLabels, restoreDefaults } = useSettingsRestore(onRestored);
-  return (
-    <Button
-      size="xs"
-      variant="ghost"
-      className="text-muted-foreground hover:text-foreground"
-      disabled={changedSettingLabels.length === 0}
-      onClick={() => void restoreDefaults()}
-    >
-      <RotateCcwIcon />
-      Restore defaults
-    </Button>
   );
 }
 
@@ -421,32 +200,122 @@ function hasOpenEscapeOwner(): boolean {
   );
 }
 
-interface NavGroup {
-  readonly destination: SettingsDestination;
-  readonly items: ReadonlyArray<NavItem>;
+/** A nav entry: a section, or one device's page. */
+type NavKey = SettingsPageSectionId | `device:${string}`;
+
+function deviceNavKey(environmentId: EnvironmentId): NavKey {
+  return `device:${environmentId}`;
+}
+
+const STATUS_DOT_CLASS: Record<"online" | SettingsNodeStatus, string> = {
+  online: "bg-success",
+  connecting: "bg-warning",
+  offline: "bg-muted-foreground/50",
+};
+
+function DeviceStatusDot({ status }: { readonly status: SettingsNodeStatus | null }) {
+  return (
+    <span
+      aria-hidden
+      className={cn("size-1.5 shrink-0 rounded-full", STATUS_DOT_CLASS[status ?? "online"])}
+    />
+  );
+}
+
+const NAV_ITEM_CLASS =
+  "group/nav flex h-8 w-full items-center gap-2.5 rounded-lg px-2.5 text-left text-[13px] outline-hidden transition-colors duration-150 focus-visible:ring-2 focus-visible:ring-ring";
+
+function NavButton(props: {
+  readonly navKey: NavKey;
+  readonly active: boolean;
+  readonly icon: ReactNode;
+  readonly label: string;
+  readonly trailing?: ReactNode;
+  readonly className?: string;
+  readonly onSelect: () => void;
+  readonly onIntent?: () => void;
+  readonly subsections: ReturnType<typeof useSettingsSubsections>;
+}) {
+  const { subsections } = props;
+  return (
+    <div className="flex flex-col">
+      <button
+        type="button"
+        data-nav-key={props.navKey}
+        onClick={props.onSelect}
+        onPointerEnter={props.onIntent}
+        onFocus={props.onIntent}
+        aria-current={props.active ? "page" : undefined}
+        className={cn(
+          NAV_ITEM_CLASS,
+          props.active
+            ? "font-medium text-foreground"
+            : "text-muted-foreground hover:bg-accent/50 hover:text-foreground",
+          props.className,
+        )}
+      >
+        {props.icon}
+        <span className="min-w-0 flex-1 truncate">{props.label}</span>
+        {props.trailing}
+      </button>
+      {props.active && subsections.sections.length > 1 ? (
+        <div className="settings-subsections-enter relative my-1 ml-[1.0625rem] flex flex-col border-l border-border/70 pl-2">
+          {subsections.sections.map(({ id, title, element }) => {
+            const current = subsections.active === element;
+            return (
+              <button
+                key={id}
+                type="button"
+                aria-current={current ? "location" : undefined}
+                className={cn(
+                  "relative truncate rounded-sm py-1 pr-2 pl-2.5 text-left text-xs outline-hidden transition-colors focus-visible:ring-2 focus-visible:ring-ring",
+                  current
+                    ? "text-foreground before:absolute before:top-1/2 before:-left-[calc(0.5rem+1px)] before:h-4 before:w-px before:-translate-y-1/2 before:bg-foreground"
+                    : "text-muted-foreground/80 hover:text-foreground",
+                )}
+                onClick={() => {
+                  if (element.hasAttribute("data-settings-action")) element.click();
+                  element.scrollIntoView({
+                    block: "start",
+                    behavior: window.matchMedia("(prefers-reduced-motion: reduce)").matches
+                      ? "instant"
+                      : "smooth",
+                  });
+                }}
+              >
+                {title}
+              </button>
+            );
+          })}
+        </div>
+      ) : null}
+    </div>
+  );
 }
 
 function SettingsNav({
-  groups,
-  activeDestination,
-  activeSection,
-  clientLabel,
-  nodeHeader,
-  extraClientItems,
+  sections,
+  devices,
+  primaryEnvironmentId,
+  activeKey,
   subsections,
-  onSelect,
+  onSelectSection,
+  onSelectDevice,
 }: {
-  groups: ReadonlyArray<NavGroup>;
-  activeDestination: SettingsDestination;
-  activeSection: SettingsSectionId;
-  clientLabel: string;
-  nodeHeader: ReactNode;
-  extraClientItems?: ReactNode;
-  subsections: ReturnType<typeof useSettingsSubsections>;
-  onSelect: (destination: SettingsDestination, item: NavItem) => void;
+  readonly sections: ReadonlyArray<SettingsPageSectionId>;
+  readonly devices: ReadonlyArray<SettingsDeviceChoice>;
+  readonly primaryEnvironmentId: EnvironmentId | null;
+  readonly activeKey: NavKey;
+  readonly subsections: ReturnType<typeof useSettingsSubsections>;
+  readonly onSelectSection: (section: SettingsPageSectionId) => void;
+  readonly onSelectDevice: (environmentId: EnvironmentId) => void;
 }) {
-  const activeKey = `${activeDestination}:${activeSection}`;
   const { listRef, rect, animate } = useActiveIndicator(activeKey);
+  const iconClass = (active: boolean) =>
+    cn(
+      "size-4 shrink-0 transition-colors",
+      active ? "text-foreground" : "text-muted-foreground/70",
+    );
   return (
     <nav
       aria-label="Settings sections"
@@ -467,95 +336,71 @@ function SettingsNav({
             transform: `translateY(${rect?.top ?? 0}px)`,
           }}
         />
-        {groups.map((group, groupIndex) => (
-          <div
-            key={group.destination}
-            role="group"
-            aria-label={group.destination === "client" ? clientLabel : "Device settings"}
-            className={cn("flex flex-col gap-px", groupIndex > 0 && "mt-5")}
-          >
-            {group.destination === "client" ? (
-              <div className="flex h-7 items-center gap-2 px-2.5 text-[11px] font-medium text-muted-foreground">
-                <AppWindowIcon className="size-3.5 shrink-0 opacity-70" />
-                <span className="min-w-0 truncate" title={clientLabel}>
-                  {clientLabel}
-                </span>
+        {SETTINGS_GROUPS.map((group, groupIndex) => {
+          const groupSections = sections.filter(
+            (id) => settingsSection(id).group === group.id && id !== "device",
+          );
+          const groupDevices = group.id === "devices" ? devices : [];
+          if (groupSections.length === 0 && groupDevices.length === 0) return null;
+          return (
+            <div
+              key={group.id}
+              role="group"
+              aria-label={group.title}
+              className={cn("flex flex-col gap-px", groupIndex > 0 && "mt-4")}
+            >
+              <div className="flex h-7 items-center px-2.5 text-[11px] font-medium text-muted-foreground">
+                {group.title}
               </div>
-            ) : (
-              nodeHeader
-            )}
-            {group.destination === "client" ? extraClientItems : null}
-            {group.items.map((item) => {
-              const key = `${group.destination}:${item.id}`;
-              const active = key === activeKey;
-              const Icon = item.icon;
-              const isLink = SETTINGS_LINK_SECTIONS.has(item.id);
-              return (
-                <div key={key} className="flex flex-col">
-                  <button
-                    type="button"
-                    data-nav-key={key}
-                    onClick={() => onSelect(group.destination, item)}
-                    onPointerEnter={() => void preloadSettingsSection(item.id)}
-                    onFocus={() => void preloadSettingsSection(item.id)}
-                    aria-current={active ? "page" : undefined}
-                    className={cn(
-                      "group/nav flex h-8 w-full items-center gap-2.5 rounded-lg px-2.5 text-left text-[13px] outline-hidden transition-colors duration-150 focus-visible:ring-2 focus-visible:ring-ring",
-                      active
-                        ? "font-medium text-foreground"
-                        : "text-muted-foreground hover:bg-accent/50 hover:text-foreground",
-                    )}
-                  >
-                    <Icon
-                      className={cn(
-                        "size-4 shrink-0 transition-colors",
-                        active ? "text-foreground" : "text-muted-foreground/70",
-                      )}
-                    />
-                    <span className="min-w-0 flex-1 truncate">
-                      {SETTINGS_SECTION_TITLES[item.id]}
-                    </span>
-                    {isLink ? (
-                      <ArrowUpRightIcon className="size-3.5 shrink-0 opacity-0 transition-opacity group-hover/nav:opacity-60" />
-                    ) : null}
-                  </button>
-                  {active && subsections.sections.length > 1 ? (
-                    <div className="settings-subsections-enter relative my-1 ml-[1.0625rem] flex flex-col border-l border-border/70 pl-2">
-                      {subsections.sections.map(({ id, title, element }) => {
-                        const current = subsections.active === element;
-                        return (
-                          <button
-                            key={id}
-                            type="button"
-                            aria-current={current ? "location" : undefined}
-                            className={cn(
-                              "relative truncate rounded-sm py-1 pr-2 pl-2.5 text-left text-xs outline-hidden transition-colors focus-visible:ring-2 focus-visible:ring-ring",
-                              current
-                                ? "text-foreground before:absolute before:top-1/2 before:-left-[calc(0.5rem+1px)] before:h-4 before:w-px before:-translate-y-1/2 before:bg-foreground"
-                                : "text-muted-foreground/80 hover:text-foreground",
-                            )}
-                            onClick={() => {
-                              if (element.hasAttribute("data-settings-action")) element.click();
-                              element.scrollIntoView({
-                                block: "start",
-                                behavior: window.matchMedia("(prefers-reduced-motion: reduce)")
-                                  .matches
-                                  ? "instant"
-                                  : "smooth",
-                              });
-                            }}
-                          >
-                            {title}
-                          </button>
-                        );
-                      })}
-                    </div>
-                  ) : null}
-                </div>
-              );
-            })}
-          </div>
-        ))}
+              {groupSections.map((id) => {
+                const Icon = SETTINGS_SECTION_ICONS[id];
+                const active = activeKey === id;
+                const link = settingsSection(id).link === true;
+                return (
+                  <NavButton
+                    key={id}
+                    navKey={id}
+                    active={active}
+                    icon={<Icon className={iconClass(active)} />}
+                    label={settingsSection(id).title}
+                    trailing={
+                      link ? (
+                        <ArrowUpRightIcon className="size-3.5 shrink-0 opacity-0 transition-opacity group-hover/nav:opacity-60" />
+                      ) : undefined
+                    }
+                    onSelect={() => onSelectSection(id)}
+                    onIntent={() => void preloadSettingsSection(id)}
+                    subsections={subsections}
+                  />
+                );
+              })}
+              {groupDevices.map((device) => {
+                const key = deviceNavKey(device.environmentId);
+                const active = activeKey === key;
+                return (
+                  <NavButton
+                    key={key}
+                    navKey={key}
+                    active={active}
+                    className="pl-[1.375rem]"
+                    icon={<DeviceStatusDot status={device.status} />}
+                    label={device.label}
+                    trailing={
+                      device.environmentId === primaryEnvironmentId && !isHostedHubMode() ? (
+                        <span className="shrink-0 rounded-full bg-muted px-1.5 text-[10.5px] text-muted-foreground">
+                          this
+                        </span>
+                      ) : undefined
+                    }
+                    onSelect={() => onSelectDevice(device.environmentId)}
+                    onIntent={() => void preloadSettingsSection("device")}
+                    subsections={subsections}
+                  />
+                );
+              })}
+            </div>
+          );
+        })}
       </div>
     </nav>
   );
@@ -563,59 +408,169 @@ function SettingsNav({
 
 /** Narrow widths swap the side nav for a compact section picker. */
 function CompactSectionPicker({
-  groups,
-  activeDestination,
-  activeSection,
-  clientLabel,
-  nodeLabel,
-  onSelect,
+  sections,
+  devices,
+  activeKey,
+  activeLabel,
+  onSelectSection,
+  onSelectDevice,
 }: {
-  groups: ReadonlyArray<NavGroup>;
-  activeDestination: SettingsDestination;
-  activeSection: SettingsSectionId;
-  clientLabel: string;
-  nodeLabel: string;
-  onSelect: (destination: SettingsDestination, item: NavItem) => void;
+  readonly sections: ReadonlyArray<SettingsPageSectionId>;
+  readonly devices: ReadonlyArray<SettingsDeviceChoice>;
+  readonly activeKey: NavKey;
+  readonly activeLabel: string;
+  readonly onSelectSection: (section: SettingsPageSectionId) => void;
+  readonly onSelectDevice: (environmentId: EnvironmentId) => void;
 }) {
-  const active = groups
-    .find((group) => group.destination === activeDestination)
-    ?.items.find((item) => item.id === activeSection);
   return (
     <Menu>
       <MenuTrigger
         render={
           <Button variant="outline" size="sm" className="mb-6 w-full justify-between md:hidden">
-            <span className="truncate">
-              {active ? SETTINGS_SECTION_TITLES[active.id] : "Sections"}
-            </span>
+            <span className="truncate">{activeLabel}</span>
             <ChevronsUpDownIcon className="size-3.5 opacity-60" />
           </Button>
         }
       />
       <MenuPopup align="start" className="max-h-[60dvh] min-w-56 overflow-y-auto">
-        {groups.map((group) => (
-          <MenuRadioGroup
-            key={group.destination}
-            value={activeDestination === group.destination ? activeSection : ""}
-          >
-            <div className="px-2 pt-2 pb-1 text-[11px] font-medium text-muted-foreground">
-              {group.destination === "client" ? clientLabel : nodeLabel}
-            </div>
-            {group.items.map((item) => (
-              <MenuRadioItem
-                key={item.id}
-                value={item.id}
-                onClick={() => onSelect(group.destination, item)}
-                onPointerEnter={() => void preloadSettingsSection(item.id)}
-                onFocus={() => void preloadSettingsSection(item.id)}
-              >
-                {SETTINGS_SECTION_TITLES[item.id]}
-              </MenuRadioItem>
-            ))}
-          </MenuRadioGroup>
-        ))}
+        {SETTINGS_GROUPS.map((group) => {
+          const groupSections = sections.filter(
+            (id) => settingsSection(id).group === group.id && id !== "device",
+          );
+          const groupDevices = group.id === "devices" ? devices : [];
+          if (groupSections.length === 0 && groupDevices.length === 0) return null;
+          return (
+            <MenuRadioGroup key={group.id} value={activeKey}>
+              <div className="px-2 pt-2 pb-1 text-[11px] font-medium text-muted-foreground">
+                {group.title}
+              </div>
+              {groupSections.map((id) => (
+                <MenuRadioItem
+                  key={id}
+                  value={id}
+                  onClick={() => onSelectSection(id)}
+                  onPointerEnter={() => void preloadSettingsSection(id)}
+                  onFocus={() => void preloadSettingsSection(id)}
+                >
+                  {settingsSection(id).title}
+                </MenuRadioItem>
+              ))}
+              {groupDevices.map((device) => (
+                <MenuRadioItem
+                  key={device.environmentId}
+                  value={deviceNavKey(device.environmentId)}
+                  onClick={() => onSelectDevice(device.environmentId)}
+                >
+                  <span className="flex items-center gap-2 pl-2">
+                    <DeviceStatusDot status={device.status} />
+                    {device.label}
+                  </span>
+                </MenuRadioItem>
+              ))}
+            </MenuRadioGroup>
+          );
+        })}
       </MenuPopup>
     </Menu>
+  );
+}
+
+/**
+ * "Values for: [device pills]" at the top of a section with rows stored on a
+ * device: the one device those rows read and write. Choosing a pill moves the
+ * settings target, as the device menu did; it never opens a second target.
+ */
+function DeviceBar({ model }: { readonly model: SettingsDevicesModel }) {
+  if (model.choices.length === 0) return null;
+  return (
+    <div
+      role="group"
+      aria-label="Device values shown"
+      data-testid="settings-device-bar"
+      className="mb-8 flex flex-wrap items-center gap-1.5 rounded-lg border border-border/70 px-2.5 py-2"
+    >
+      <span className="mr-1 inline-flex items-center gap-1.5 text-xs text-muted-foreground">
+        <LayersIcon aria-hidden className="size-3.5" />
+        Values for
+      </span>
+      {model.choices.map((choice) => {
+        const selected = choice.environmentId === model.value;
+        return (
+          <button
+            key={choice.environmentId}
+            type="button"
+            aria-pressed={selected}
+            disabled={choice.disabled}
+            title={choice.status ? SETTINGS_NODE_STATUS_LABELS[choice.status] : undefined}
+            onClick={() => model.select(choice.environmentId)}
+            className={cn(
+              "inline-flex h-6 max-w-56 items-center gap-1.5 rounded-full border px-2.5 text-xs outline-hidden transition-colors focus-visible:ring-2 focus-visible:ring-ring disabled:opacity-50",
+              selected
+                ? "border-foreground bg-foreground text-background"
+                : "border-border text-foreground hover:bg-accent/60",
+            )}
+          >
+            <DeviceStatusDot status={choice.status} />
+            <span className="truncate">{choice.label}</span>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+/** The device list All devices shows: the nav's device items, as rows that open each page. */
+function DeviceList({
+  devices,
+  primaryEnvironmentId,
+  onOpen,
+}: {
+  readonly devices: ReadonlyArray<SettingsDeviceChoice>;
+  readonly primaryEnvironmentId: EnvironmentId | null;
+  readonly onOpen: (environmentId: EnvironmentId) => void;
+}) {
+  if (devices.length === 0) {
+    return (
+      <SettingsCard>
+        <SettingsEmpty
+          icon={<MonitorIcon />}
+          title="No devices yet"
+          description="Devices this app connects to show up here."
+        />
+      </SettingsCard>
+    );
+  }
+  return (
+    <SettingsCard>
+      {devices.map((device) => (
+        <button
+          key={device.environmentId}
+          type="button"
+          disabled={device.disabled}
+          onClick={() => onOpen(device.environmentId)}
+          className="flex w-full min-w-0 items-center gap-3 border-t border-border/60 px-4 py-3 text-left outline-hidden transition-colors first:border-t-0 hover:bg-accent/40 focus-visible:bg-accent/40 disabled:opacity-50 sm:px-5"
+        >
+          <DeviceIcon
+            environmentId={device.environmentId}
+            label={device.label}
+            className="size-4 shrink-0 text-muted-foreground"
+          />
+          <span className="min-w-0 flex-1">
+            <span className="block truncate text-[13px] font-medium text-foreground">
+              {device.label}
+            </span>
+            <span className="flex items-center gap-1.5 text-xs text-muted-foreground">
+              <DeviceStatusDot status={device.status} />
+              {device.status ? SETTINGS_NODE_STATUS_LABELS[device.status] : "Online"}
+              {device.environmentId === primaryEnvironmentId && !isHostedHubMode()
+                ? " · This computer"
+                : null}
+            </span>
+          </span>
+          <ArrowUpRightIcon aria-hidden className="size-3.5 shrink-0 text-muted-foreground" />
+        </button>
+      ))}
+    </SettingsCard>
   );
 }
 
@@ -625,12 +580,12 @@ const SEARCH_ENTRIES = [...SETTINGS_SEARCH_INDEX, ...KEYBINDING_SEARCH_ENTRIES];
 function SearchResults({
   query,
   results,
-  destinationLabel,
+  deviceLabel,
   onPick,
 }: {
   query: string;
   results: ReadonlyArray<SettingsSearchEntry>;
-  destinationLabel: (destination: SettingsDestination) => string;
+  deviceLabel: string | null;
   onPick: (entry: SettingsSearchEntry) => void;
 }) {
   if (results.length === 0) {
@@ -650,7 +605,7 @@ function SearchResults({
       </p>
       {results.map((entry, index) => (
         <button
-          key={`${entry.owner}:${entry.section}:${entry.title}`}
+          key={`${entry.storage}:${entry.section}:${entry.title}`}
           type="button"
           onClick={() => onPick(entry)}
           onPointerEnter={() => void preloadSettingsSection(entry.section)}
@@ -665,7 +620,7 @@ function SearchResults({
             </span>
           </span>
           <span className="mt-0.5 shrink-0 text-[11px] text-muted-foreground/80">
-            {destinationLabel(entry.owner)} · {SETTINGS_SECTION_TITLES[entry.section]}
+            {describeSettingsSearchEntry(entry, entry.storage === "device" ? deviceLabel : null)}
           </span>
         </button>
       ))}
@@ -673,80 +628,126 @@ function SearchResults({
   );
 }
 
+/** Why the shown device's rows are not on screen, said once under the device bar. */
+function DeviceNotice({
+  devicePage,
+  section,
+  reach,
+  label,
+  environmentId,
+  connected,
+  status,
+  machine,
+}: {
+  /** A device's page explains each part it cannot show; only its connection is said here. */
+  readonly devicePage: boolean;
+  readonly section: SettingsPageSectionId;
+  readonly reach: SettingsReach;
+  readonly label: string | null;
+  readonly environmentId: EnvironmentId | null;
+  readonly connected: boolean;
+  readonly status: SettingsNodeStatus | null;
+  readonly machine: { readonly online: boolean; readonly canConnect: boolean } | null;
+}) {
+  const className =
+    "mb-9 rounded-[min(var(--radius-xl),0.875rem)] border border-dashed border-border/80 py-12";
+  if (label === null) {
+    return (
+      <SettingsEmpty
+        icon={<MonitorIcon />}
+        title="Choose a device"
+        description="Pick a device above to see the settings it keeps."
+        className={className}
+      />
+    );
+  }
+  if (!connected) {
+    return (
+      <SettingsEmpty
+        icon={<DeviceIcon environmentId={environmentId} label={label} />}
+        title={
+          (machine && !machine.online) || status === "offline"
+            ? `${label} is offline`
+            : machine?.canConnect || status === "connecting"
+              ? `Connecting to ${label}…`
+              : `${label} isn't connected`
+        }
+        description={
+          machine && !machine.online
+            ? "Its settings will be available when it reconnects."
+            : `Connect to ${label} to manage its settings.`
+        }
+        className={className}
+      />
+    );
+  }
+  const deviceParts = settingsSection(section).parts.filter(
+    (storage) => storage === "device" || storage === "device-read",
+  );
+  if (!devicePage && !deviceParts.some((storage) => settingsStorageReachable(storage, reach))) {
+    return (
+      <SettingsEmpty
+        icon={<ShieldIcon />}
+        title="No settings you can change"
+        description={`Your access to ${label} does not allow changing its settings.`}
+        className={className}
+      />
+    );
+  }
+  return null;
+}
+
 export function SettingsPage() {
   const leaveSettings = useLeaveSettings();
-  const router = useRouter();
   const appSidebarCollapsed = useAppSidebarCollapsed();
-  const section = useSettingsDialogStore((s) => s.section);
-  const editingScope = useSettingsDialogStore((s) => s.editingScope);
-  const showSection = useSettingsDialogStore((s) => s.showSection);
+  const storeSection = useSettingsDialogStore((s) => s.section);
+  const setSection = useSettingsDialogStore((s) => s.setSection);
   const closeSettings = useSettingsDialogStore((s) => s.closeSettings);
   const hosted = isHostedHubMode();
+  const primaryEnvironmentId = usePrimaryEnvironmentId();
   const pageTarget = useSettingsPageTarget();
   const {
     environmentId: targetEnvironmentId,
-    target: authorizedTarget,
+    target,
     isPrimary: targetIsPrimary,
     roleFresh,
     desktopWorkspaceMachine,
   } = pageTarget;
-  const settingsTarget = authorizedTarget;
-  const primaryDeviceName = useDeviceName();
-  const appPreferencesLabel = useAppPreferencesLabel();
-  const targetNodeLabel = authorizedTarget?.nodeLabel ?? primaryDeviceName;
-  useEffect(() => {
-    if (editingScope !== "node" || !isElectron || !targetEnvironmentId || targetIsPrimary) return;
-    return retainDesktopWorkspaceInteractiveScope(targetEnvironmentId);
-  }, [editingScope, targetEnvironmentId, targetIsPrimary]);
-  // Hosted settings edit the node the selection cursor is on, and their address
-  // names no node, so the page holds that node's demand while it shows its
-  // settings.
-  useHostedNodePageDemand(editingScope === "node" ? targetEnvironmentId : null);
+  const reach = readSettingsReach(pageTarget);
 
   const [searchQuery, setSearchQuery] = useState("");
-  // One list of devices for the nav header's menu and the scope sentence.
-  const nodeMenu = useSettingsNodeMenu({
+  // One list of devices for the nav's device items and the device bar.
+  const devices = useSettingsDevices({
     targetEnvironmentId,
-    targetLabel: targetNodeLabel,
-    targetConnected: authorizedTarget?.connected === true,
+    targetLabel: target?.nodeLabel ?? "",
+    targetConnected: target?.connected === true,
     targetMachine: desktopWorkspaceMachine,
     onSelect: () => setSearchQuery(""),
   });
-  // Hosted with no node under the cursor yet, the node group still shows, as
-  // the device switcher and nothing else, so a node can be chosen here.
-  const showNodeGroup = settingsTarget !== null || (hosted && nodeMenu.choices.length > 0);
-  const fanOutShown = useApplyToAllNodesShown();
 
-  const searchScope = readSettingsSearchScope(pageTarget);
-  const clientItems = NAV_ITEMS.filter((item) =>
-    settingsSectionListed(searchScope, "client", item.id),
+  const listedSections = SETTINGS_SECTIONS.map((section) => section.id).filter(
+    (id) => id !== "device" && settingsSectionListed(id, reach),
   );
-  const nodeItems = NAV_ITEMS.filter((item) => settingsSectionListed(searchScope, "node", item.id));
-  const groups: NavGroup[] = [{ destination: "client", items: clientItems }];
-  if (showNodeGroup) groups.push({ destination: "node", items: nodeItems });
-
-  const destination: SettingsDestination =
-    editingScope === "node" && settingsTarget ? "node" : "client";
-  const visibleItems = destination === "node" ? nodeItems : clientItems;
-  const requestedSection =
-    section === "computer-use" && window.desktopBridge?.computerUse
-      ? "integrations"
-      : destination === "node" && section === "connections"
-        ? "security"
-        : section;
-  const effectiveSection = visibleItems.some(
-    (item) => item.id === requestedSection && !SETTINGS_LINK_SECTIONS.has(item.id),
-  )
+  const requestedSection = resolveSettingsPageSection(storeSection);
+  const sectionShown = (id: SettingsPageSectionId) =>
+    id === "device" ? target !== null : listedSections.includes(id) && !settingsSection(id).link;
+  const effectiveSection: SettingsPageSectionId = sectionShown(requestedSection)
     ? requestedSection
-    : (visibleItems.find((item) => !SETTINGS_LINK_SECTIONS.has(item.id))?.id ?? "appearance");
-  const activeItem = NAV_ITEMS.find((item) => item.id === effectiveSection);
+    : (listedSections.find((id) => !settingsSection(id).link) ?? "appearance");
+  const usesDevice = effectiveSection === "device" || sectionUsesDevice(effectiveSection);
+
+  useEffect(() => {
+    if (!usesDevice || !isElectron || !targetEnvironmentId || targetIsPrimary) return;
+    return retainDesktopWorkspaceInteractiveScope(targetEnvironmentId);
+  }, [usesDevice, targetEnvironmentId, targetIsPrimary]);
+  // Hosted settings show the node the selection cursor is on, and their address
+  // names no node, so the page holds that node's demand while it shows its values.
+  useHostedNodePageDemand(usesDevice ? targetEnvironmentId : null);
 
   useEffect(() => {
     if (hosted && !roleFresh) return;
-    if (section !== effectiveSection || editingScope !== destination) {
-      showSection(destination, effectiveSection);
-    }
-  }, [destination, editingScope, effectiveSection, hosted, roleFresh, section, showSection]);
+    if (storeSection !== effectiveSection) setSection(effectiveSection);
+  }, [effectiveSection, hosted, roleFresh, setSection, storeSection]);
 
   // The command palette can ask for a row before this page mounts; a request
   // that arrives while it shows replaces any search in progress.
@@ -761,12 +762,20 @@ export function SettingsPage() {
   }, [revealRequest]);
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const normalizedQuery = searchQuery.trim().toLowerCase();
-  const searchResults = filterSettingsSearchEntries(searchQuery, searchScope, SEARCH_ENTRIES);
+  const searchResults = filterSettingsSearchEntries(
+    searchQuery,
+    readSettingsSearchScope(pageTarget),
+    SEARCH_ENTRIES,
+  );
 
   const [restoreSignal, setRestoreSignal] = useState(0);
   const handleRestored = useCallback(() => setRestoreSignal((value) => value + 1), []);
 
-  const panelKey = `${destination}:${effectiveSection}:${targetEnvironmentId ?? ""}`;
+  const activeKey: NavKey =
+    effectiveSection === "device" && targetEnvironmentId
+      ? deviceNavKey(targetEnvironmentId)
+      : effectiveSection;
+  const panelKey = `${effectiveSection}:${usesDevice ? (targetEnvironmentId ?? "") : ""}`;
   const subsections = useSettingsSubsections(panelKey, normalizedQuery.length > 0, searchTarget);
   const { contentRef: setSubsectionRoot } = subsections;
   const scrollRef = useRef<HTMLDivElement | null>(null);
@@ -785,26 +794,23 @@ export function SettingsPage() {
     if (!searchTarget) scrollRef.current?.scrollTo({ top: 0 });
   }, [panelKey, searchTarget]);
 
-  const selectSection = useCallback(
-    (nextDestination: SettingsDestination, item: NavItem) => {
-      if (SETTINGS_LINK_SECTIONS.has(item.id)) {
-        closeSettings();
-        void router.navigate({
-          to: "/statistics",
-          search: parseStatisticsSearch(
-            nextDestination === "node" && targetEnvironmentId
-              ? { environmentIds: [targetEnvironmentId] }
-              : {},
-          ),
-        });
-        return;
-      }
-      setSearchTarget(null);
-      setSearchQuery("");
-      showSection(nextDestination, item.id);
-    },
-    [closeSettings, router, showSection, targetEnvironmentId],
-  );
+  const selectSection = (section: SettingsPageSectionId) => {
+    if (section === "account") {
+      // The Hub account is a Hub page, never a section of this one.
+      closeSettings();
+      navigateHub({ kind: "account", section: "overview" });
+      return;
+    }
+    setSearchTarget(null);
+    setSearchQuery("");
+    setSection(section);
+  };
+  const selectDevice = (environmentId: EnvironmentId) => {
+    setSearchTarget(null);
+    setSearchQuery("");
+    setSection("device");
+    devices.select(environmentId);
+  };
 
   // Escape leaves settings unless something on the page wants the key first.
   useEffect(() => {
@@ -837,270 +843,215 @@ export function SettingsPage() {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, []);
 
-  const destinationLabel = (value: SettingsDestination) =>
-    value === "node" ? targetNodeLabel : "This app";
-
-  const nodeHeaderLabel = settingsTarget ? targetNodeLabel : "Choose a device";
-  const nodeHeader = showNodeGroup ? (
-    <div className="flex h-7 items-center gap-2 pr-1 pl-2.5 text-[11px] font-medium text-muted-foreground">
-      <DeviceIcon
-        environmentId={targetEnvironmentId}
-        label={nodeHeaderLabel}
-        className="size-3.5 shrink-0 opacity-70"
-      />
-      <span className="min-w-0 flex-1 truncate" title={nodeHeaderLabel}>
-        {nodeHeaderLabel}
-      </span>
-      {nodeMenu.choices.length > (settingsTarget ? 1 : 0) ? (
-        <SettingsNodeMenu
-          model={nodeMenu}
-          tooltip="Switch device"
-          tooltipSide="right"
-          trigger={
-            <Button
-              size="icon-xs"
-              variant="ghost"
-              aria-label="Settings device"
-              className="size-6 text-muted-foreground hover:text-foreground sm:size-6"
-            >
-              <ChevronsUpDownIcon className="size-3.5" />
-            </Button>
-          }
-        />
-      ) : null}
-    </div>
-  ) : null;
-
-  const hubAccountItem = hosted ? (
-    <button
-      type="button"
-      onClick={() => {
-        closeSettings();
-        navigateHub({ kind: "account", section: "overview" });
-      }}
-      className="group/nav flex h-8 w-full items-center gap-2.5 rounded-lg px-2.5 text-left text-[13px] text-muted-foreground outline-hidden transition-colors hover:bg-accent/50 hover:text-foreground focus-visible:ring-2 focus-visible:ring-ring"
-    >
-      <UserRoundIcon className="size-4 shrink-0 text-muted-foreground/70" />
-      <span className="min-w-0 flex-1 truncate">Hub account</span>
-      <ArrowUpRightIcon className="size-3.5 shrink-0 opacity-0 transition-opacity group-hover/nav:opacity-60" />
-    </button>
-  ) : null;
-
   const searching = normalizedQuery.length > 0;
-  const nodeUnavailable = destination === "node" && !authorizedTarget?.connected;
-  const nodeForbidden = destination === "node" && nodeItems.length === 0;
-  const showRestore = !searching && effectiveSection === "general";
+  const definition = settingsSection(effectiveSection);
+  const targetLabel = target?.nodeLabel ?? null;
+  const targetStatus =
+    devices.choices.find((choice) => choice.environmentId === targetEnvironmentId)?.status ?? null;
+  const devicePage = effectiveSection === "device" && target !== null;
+  const activeLabel = devicePage ? (targetLabel ?? definition.title) : definition.title;
 
   return (
     <SidebarInset
       data-slot="settings-page"
       className="h-dvh min-h-0 overflow-hidden overscroll-y-none bg-background text-foreground"
     >
-      <SettingsEditingScopeProvider value={destination}>
-        <SettingsTargetProvider value={destination === "node" ? authorizedTarget : null}>
-          <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
-            <header
-              className={cn(
-                "flex shrink-0 items-center gap-3 border-b border-border/70 pr-3 sm:pr-4",
-                APP_SIDEBAR_CHROME_INSET_TRANSITION_CLASS,
-                appSidebarCollapsed ? COLLAPSED_APP_SIDEBAR_CHROME_INSET_CLASS : "pl-4 sm:pl-5",
-                isElectron
-                  ? "drag-region h-[52px] wco:h-[env(titlebar-area-height)] wco:pr-[calc(100vw-env(titlebar-area-width)-env(titlebar-area-x)+0.75rem)]"
-                  : "h-14",
-              )}
-            >
-              <h1 className="shrink-0 text-sm font-semibold tracking-tight">Settings</h1>
-              <div className="relative ml-auto w-full max-w-72 min-w-0 md:ml-6 md:max-w-80">
-                <SearchIcon
-                  aria-hidden
-                  className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground/70"
-                />
-                <input
-                  ref={searchInputRef}
-                  type="search"
-                  value={searchQuery}
-                  onChange={(event) => {
-                    setSearchTarget(null);
-                    setSearchQuery(event.target.value);
-                  }}
-                  placeholder="Search settings"
-                  aria-label="Search settings"
-                  className="h-8 w-full rounded-lg border border-transparent bg-muted/60 pr-9 pl-8 text-[13px] outline-hidden transition-[background-color,border-color,box-shadow] placeholder:text-muted-foreground/70 hover:bg-muted focus-visible:border-ring focus-visible:bg-background focus-visible:ring-[3px] focus-visible:ring-ring/20 [&::-webkit-search-cancel-button]:appearance-none"
-                />
-                {searchQuery ? (
-                  <button
-                    type="button"
-                    aria-label="Clear search"
-                    onClick={() => {
-                      setSearchQuery("");
-                      searchInputRef.current?.focus();
-                    }}
-                    className="absolute top-1/2 right-1.5 flex size-5 -translate-y-1/2 items-center justify-center rounded-sm text-muted-foreground hover:text-foreground"
-                  >
-                    <XIcon className="size-3.5" />
-                  </button>
-                ) : (
-                  <Kbd className="pointer-events-none absolute top-1/2 right-2 -translate-y-1/2">
-                    /
-                  </Kbd>
-                )}
-              </div>
-              <div className="ml-auto flex shrink-0 items-center gap-1">
-                <Tooltip>
-                  <TooltipTrigger
-                    render={
-                      <Button
-                        size="icon-sm"
-                        variant="ghost"
-                        aria-label="Close settings"
-                        className="text-muted-foreground hover:text-foreground"
-                        onClick={leaveSettings}
-                      >
-                        <XIcon />
-                      </Button>
-                    }
-                  />
-                  <TooltipPopup side="bottom">
-                    Close <Kbd className="ml-1">Esc</Kbd>
-                  </TooltipPopup>
-                </Tooltip>
-              </div>
-            </header>
-
-            <div className="flex min-h-0 min-w-0 flex-1">
-              <SettingsNav
-                groups={groups}
-                activeDestination={destination}
-                activeSection={effectiveSection}
-                clientLabel="This app"
-                nodeHeader={nodeHeader}
-                extraClientItems={hubAccountItem}
-                subsections={subsections}
-                onSelect={selectSection}
+      <SettingsPartsProvider
+        value={{ reach, target, primaryEnvironmentId, onRestored: handleRestored }}
+      >
+        <div className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+          <header
+            className={cn(
+              "flex shrink-0 items-center gap-3 border-b border-border/70 pr-3 sm:pr-4",
+              APP_SIDEBAR_CHROME_INSET_TRANSITION_CLASS,
+              appSidebarCollapsed ? COLLAPSED_APP_SIDEBAR_CHROME_INSET_CLASS : "pl-4 sm:pl-5",
+              isElectron
+                ? "drag-region h-[52px] wco:h-[env(titlebar-area-height)] wco:pr-[calc(100vw-env(titlebar-area-width)-env(titlebar-area-x)+0.75rem)]"
+                : "h-14",
+            )}
+          >
+            <h1 className="shrink-0 text-sm font-semibold tracking-tight">Settings</h1>
+            <div className="relative ml-auto w-full max-w-72 min-w-0 md:ml-6 md:max-w-80">
+              <SearchIcon
+                aria-hidden
+                className="pointer-events-none absolute top-1/2 left-2.5 size-3.5 -translate-y-1/2 text-muted-foreground/70"
               />
-              <div
-                ref={setScrollRef}
-                className="min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto [scrollbar-gutter:stable]"
-              >
-                <div className="mx-auto w-full max-w-[52rem] px-5 pt-8 pb-24 sm:px-8 lg:px-10 lg:pt-10">
-                  <CompactSectionPicker
-                    groups={groups}
-                    activeDestination={destination}
-                    activeSection={effectiveSection}
-                    clientLabel="This app"
-                    nodeLabel={targetNodeLabel}
-                    onSelect={selectSection}
+              <input
+                ref={searchInputRef}
+                type="search"
+                value={searchQuery}
+                onChange={(event) => {
+                  setSearchTarget(null);
+                  setSearchQuery(event.target.value);
+                }}
+                placeholder="Search settings"
+                aria-label="Search settings"
+                className="h-8 w-full rounded-lg border border-transparent bg-muted/60 pr-9 pl-8 text-[13px] outline-hidden transition-[background-color,border-color,box-shadow] placeholder:text-muted-foreground/70 hover:bg-muted focus-visible:border-ring focus-visible:bg-background focus-visible:ring-[3px] focus-visible:ring-ring/20 [&::-webkit-search-cancel-button]:appearance-none"
+              />
+              {searchQuery ? (
+                <button
+                  type="button"
+                  aria-label="Clear search"
+                  onClick={() => {
+                    setSearchQuery("");
+                    searchInputRef.current?.focus();
+                  }}
+                  className="absolute top-1/2 right-1.5 flex size-5 -translate-y-1/2 items-center justify-center rounded-sm text-muted-foreground hover:text-foreground"
+                >
+                  <XIcon className="size-3.5" />
+                </button>
+              ) : (
+                <Kbd className="pointer-events-none absolute top-1/2 right-2 -translate-y-1/2">
+                  /
+                </Kbd>
+              )}
+            </div>
+            <div className="ml-auto flex shrink-0 items-center gap-1">
+              <Tooltip>
+                <TooltipTrigger
+                  render={
+                    <Button
+                      size="icon-sm"
+                      variant="ghost"
+                      aria-label="Close settings"
+                      className="text-muted-foreground hover:text-foreground"
+                      onClick={leaveSettings}
+                    >
+                      <XIcon />
+                    </Button>
+                  }
+                />
+                <TooltipPopup side="bottom">
+                  Close <Kbd className="ml-1">Esc</Kbd>
+                </TooltipPopup>
+              </Tooltip>
+            </div>
+          </header>
+
+          <div className="flex min-h-0 min-w-0 flex-1">
+            <SettingsNav
+              sections={listedSections}
+              devices={devices.choices}
+              primaryEnvironmentId={primaryEnvironmentId}
+              activeKey={activeKey}
+              subsections={subsections}
+              onSelectSection={selectSection}
+              onSelectDevice={selectDevice}
+            />
+            <div
+              ref={setScrollRef}
+              className="min-h-0 min-w-0 flex-1 overflow-x-hidden overflow-y-auto [scrollbar-gutter:stable]"
+            >
+              <div className="mx-auto w-full max-w-[52rem] px-5 pt-8 pb-24 sm:px-8 lg:px-10 lg:pt-10">
+                <CompactSectionPicker
+                  sections={listedSections}
+                  devices={devices.choices}
+                  activeKey={activeKey}
+                  activeLabel={activeLabel}
+                  onSelectSection={selectSection}
+                  onSelectDevice={selectDevice}
+                />
+                {searching ? (
+                  <SearchResults
+                    query={searchQuery.trim()}
+                    results={searchResults}
+                    deviceLabel={targetLabel}
+                    onPick={(entry) => {
+                      const destination = settingsSearchEntryDestination(entry, {
+                        target: targetEnvironmentId,
+                        primary: primaryEnvironmentId,
+                      });
+                      setSearchTarget({ targetId: entry.targetId ?? entry.title });
+                      setSearchQuery("");
+                      setSection(destination.section);
+                      if (
+                        destination.environmentId &&
+                        destination.environmentId !== targetEnvironmentId
+                      )
+                        devices.select(destination.environmentId);
+                    }}
                   />
-                  {searching ? (
-                    <SearchResults
-                      query={searchQuery.trim()}
-                      results={searchResults}
-                      destinationLabel={destinationLabel}
-                      onPick={(entry) => {
-                        setSearchTarget({ targetId: entry.targetId ?? entry.title });
-                        showSection(entry.owner, entry.section);
-                        setSearchQuery("");
-                      }}
-                    />
-                  ) : (
-                    <div key={`${panelKey}:${restoreSignal}`} className="settings-panel-enter">
-                      <header className="mb-8 flex items-start justify-between gap-4">
-                        <div className="min-w-0">
-                          {settingsScopeSentenceShown(destination, effectiveSection) ? (
-                            <SettingsScopeSentence
-                              model={nodeMenu}
-                              environmentId={targetEnvironmentId}
-                              label={targetNodeLabel}
-                              status={
-                                nodeMenu.choices.find(
-                                  (choice) => choice.environmentId === targetEnvironmentId,
-                                )?.status ?? null
-                              }
-                              mixedClause={
-                                fanOutShown && settingsSectionHasNodeFanOut(effectiveSection)
-                              }
-                            />
-                          ) : (
-                            <p className="mb-1.5 flex items-center gap-1.5 text-xs text-muted-foreground">
-                              {destination === "node" ? (
-                                <DeviceIcon
-                                  environmentId={targetEnvironmentId}
-                                  label={targetNodeLabel}
-                                  className="size-3.5 shrink-0"
-                                />
-                              ) : (
-                                <AppWindowIcon className="size-3.5 shrink-0" />
-                              )}
-                              <span className="truncate" data-testid="settings-scope-label">
-                                {destination === "node" ? targetNodeLabel : appPreferencesLabel}
-                              </span>
-                            </p>
-                          )}
-                          <h2 className="text-xl font-semibold tracking-[-0.015em] text-foreground">
-                            {activeItem ? SETTINGS_SECTION_TITLES[activeItem.id] : "Settings"}
-                          </h2>
-                          {activeItem ? (
-                            <p
-                              className="mt-1 text-[13px] text-muted-foreground"
-                              data-testid="settings-destination-description"
-                            >
-                              {navDescription(activeItem, destination)}
-                            </p>
-                          ) : null}
-                        </div>
-                        {showRestore ? (
-                          <div className="flex shrink-0 items-start gap-2 pt-6">
-                            {destination === "client" ? (
-                              <Suspense fallback={null}>
-                                <LazyClientSettingsFileActions />
-                              </Suspense>
-                            ) : null}
-                            <RestoreDefaultsButton onRestored={handleRestored} />
-                          </div>
-                        ) : null}
-                      </header>
-                      {nodeUnavailable ? (
-                        <SettingsEmpty
-                          icon={
+                ) : (
+                  <div key={`${panelKey}:${restoreSignal}`} className="settings-panel-enter">
+                    <header className="mb-8 min-w-0">
+                      {devicePage ? (
+                        <div className="flex items-center gap-3">
+                          <span className="flex size-9 shrink-0 items-center justify-center rounded-[min(var(--radius-lg),0.625rem)] bg-muted text-muted-foreground">
                             <DeviceIcon
                               environmentId={targetEnvironmentId}
-                              label={targetNodeLabel}
+                              label={targetLabel ?? ""}
+                              className="size-4.5"
+                            />
+                          </span>
+                          <div className="min-w-0">
+                            <h2 className="truncate text-xl font-semibold tracking-[-0.015em] text-foreground">
+                              {targetLabel}
+                            </h2>
+                            <p
+                              className="mt-0.5 flex items-center gap-1.5 text-[13px] text-muted-foreground"
+                              data-testid="settings-destination-description"
+                            >
+                              <DeviceStatusDot status={targetStatus} />
+                              {targetStatus ? SETTINGS_NODE_STATUS_LABELS[targetStatus] : "Online"}
+                              {target?.primary && !hosted ? " · This computer" : null}
+                            </p>
+                          </div>
+                        </div>
+                      ) : (
+                        <>
+                          <h2 className="text-xl font-semibold tracking-[-0.015em] text-foreground">
+                            {definition.title}
+                          </h2>
+                          <p
+                            className="mt-1 flex flex-wrap items-center gap-x-2 gap-y-1 text-[13px] text-muted-foreground"
+                            data-testid="settings-destination-description"
+                          >
+                            {definition.description}
+                            {settingsSectionAppOnly(effectiveSection) ? (
+                              <SettingsChip icon={<AppWindowIcon aria-hidden />}>
+                                This app
+                              </SettingsChip>
+                            ) : null}
+                          </p>
+                        </>
+                      )}
+                    </header>
+                    {usesDevice && !devicePage ? <DeviceBar model={devices} /> : null}
+                    {usesDevice && (!devicePage || !settingsDeviceReady(target)) ? (
+                      <DeviceNotice
+                        devicePage={devicePage}
+                        section={effectiveSection}
+                        reach={reach}
+                        label={targetLabel}
+                        environmentId={targetEnvironmentId}
+                        connected={settingsDeviceReady(target)}
+                        status={targetStatus}
+                        machine={desktopWorkspaceMachine}
+                      />
+                    ) : null}
+                    <Suspense fallback={<PanelFallback />}>
+                      {effectiveSection === "device" ? (
+                        <SettingsDevicePage />
+                      ) : effectiveSection === "account" ? null : (
+                        <SettingsSectionPanel
+                          section={effectiveSection}
+                          deviceList={
+                            <DeviceList
+                              devices={devices.choices}
+                              primaryEnvironmentId={primaryEnvironmentId}
+                              onOpen={selectDevice}
                             />
                           }
-                          title={
-                            desktopWorkspaceMachine && !desktopWorkspaceMachine.online
-                              ? `${targetNodeLabel} is offline`
-                              : desktopWorkspaceMachine?.canConnect
-                                ? `Connecting to ${targetNodeLabel}…`
-                                : `${targetNodeLabel} isn't connected`
-                          }
-                          description={
-                            desktopWorkspaceMachine && !desktopWorkspaceMachine.online
-                              ? "Its settings will be available when it reconnects."
-                              : `Connect to ${targetNodeLabel} to manage its settings.`
-                          }
-                          className="rounded-[min(var(--radius-xl),0.875rem)] border border-dashed border-border/80 py-16"
                         />
-                      ) : nodeForbidden ? (
-                        <SettingsEmpty
-                          icon={<ShieldIcon />}
-                          title="No settings you can change"
-                          description={`Your access to ${targetNodeLabel} does not allow changing its settings.`}
-                          className="rounded-[min(var(--radius-xl),0.875rem)] border border-dashed border-border/80 py-16"
-                        />
-                      ) : (
-                        <Suspense fallback={<PanelFallback />}>
-                          <SectionPanel section={effectiveSection} />
-                        </Suspense>
                       )}
-                    </div>
-                  )}
-                </div>
+                    </Suspense>
+                  </div>
+                )}
               </div>
             </div>
           </div>
-        </SettingsTargetProvider>
-      </SettingsEditingScopeProvider>
+        </div>
+      </SettingsPartsProvider>
     </SidebarInset>
   );
 }

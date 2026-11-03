@@ -29,7 +29,7 @@ export function ProjectNewThreadsSection({ member }: ProjectSectionProps) {
             size="sm"
             variant="ghost"
             onClick={() =>
-              useSettingsDialogStore.getState().openSettings("general", member.environmentId)
+              useSettingsDialogStore.getState().openSettings("projects", member.environmentId)
             }
           >
             Open settings

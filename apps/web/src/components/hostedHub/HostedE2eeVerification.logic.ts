@@ -32,11 +32,11 @@
 // same object, so the short form is never presented as the whole account.
 //
 // THE SHORT FORM IS ONLY SHORT BECAUSE OF THAT POINTER, SO THE POINTER HAS TO
-// RESOLVE. Settings → Security is owner-only in hosted mode
+// RESOLVE. A node's Security in Settings is owner-only in hosted mode
 // (`settingsSections.logic.ts`), and this component draws on any locked
 // `web-unsigned` channel whatever role the reader holds. A viewer or an operator
 // — or an owner inside the reconnect window, where the role snapshot is not
-// fresh and the gate fails closed — reading "Settings → Security explains what
+// fresh and the gate fails closed — reading "Settings → Devices → this node → Security explains what
 // else this tab cannot check" beside the code is being sent to a section their
 // dialog does not list, and §2.2's no-pin reason then lives nowhere they can
 // reach. {@link hostedE2eeVerificationPlacement} makes that a decision over the
@@ -180,14 +180,15 @@ export const E2EE_WEB_SAS_ADVISORY =
  * form that silently becomes the only thing an owner is ever offered.
  *
  * IT NAMES A SECTION, SO THE SECTION HAS TO BE THERE. `SettingsPage.test.ts`
- * asserts this sentence contains the label the settings nav actually draws for
- * `security`, so renaming the section fails a test instead of stranding the
+ * asserts this sentence contains the labels settings actually draws for
+ * Devices and a device's Security, so renaming the section fails a test instead of stranding the
  * pointer; {@link hostedE2eeVerificationPlacement} keeps it from being drawn for
  * a reader whose dialog does not list that section at all; and
  * `settingsSearchIndex.ts` carries the section's rows, so a reader who searches
  * for what this sentence names is not told it does not exist.
  */
-export const E2EE_WEB_SAS_MORE = "Settings → Security explains what else this tab cannot check.";
+export const E2EE_WEB_SAS_MORE =
+  "Settings → Devices → this node → Security explains what this tab cannot check.";
 
 /**
  * The long form, for the one surface an owner opens to read about this.
@@ -263,7 +264,7 @@ export const E2EE_WEB_SAS_UNAVAILABLE =
  * Which length is being drawn, and therefore which second sentence comes with
  * it.
  *
- * `inline` is the short form and its pointer at Settings → Security: the thread
+ * `inline` is the short form and its pointer at a node's Security in Settings: the thread
  * connection popover, where an owner is mid-comparison and has room for one
  * line. `settings`
  * is the long form and the command that reads the node's end — the page the
@@ -280,7 +281,7 @@ export type HostedE2eeVerificationPlacement = "inline" | "settings";
  * The short form only where its pointer resolves, and the long form everywhere
  * else.
  *
- * `inline` promises that Settings → Security carries the rest of the account.
+ * `inline` promises that a node's Security in Settings carries the rest of the account.
  * That section is owner-only in hosted mode and fails closed while the role
  * snapshot is stale, while `HostedE2eeVerification` draws on any locked
  * `web-unsigned` channel — so for a viewer, an operator, or an owner
@@ -290,7 +291,7 @@ export type HostedE2eeVerificationPlacement = "inline" | "settings";
  * command that produces the other end of the comparison in place of a pointer at
  * a section their dialog does not list.
  *
- * The caller passes the answer from `settingsSectionReachable("security", …)`
+ * The caller passes the answer from `deviceSecurityReachable(…)`
  * rather than a role, so this cannot drift from the gate the settings nav
  * filters on — it is the same predicate, asked once more.
  */

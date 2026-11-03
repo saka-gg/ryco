@@ -9,8 +9,8 @@
 // is no hosted role gate and the short form is always correct.
 //
 // What is pinned here: the short form's second sentence is a promise about the
-// reader's OWN settings dialog — "Settings → Security explains what else this
-// tab cannot check" — and Settings → Security is owner-only in hosted mode
+// reader's OWN settings dialog — "Settings → Devices → this node → Security explains
+// what else this tab cannot check" — and a node's Security in Settings is owner-only in hosted mode
 // (`settingsSections.logic.ts`), while this component draws for whoever holds a
 // locked `web-unsigned` channel. A viewer, an operator, or an owner whose role
 // snapshot has gone stale must therefore never be sent there, and must not lose
@@ -114,7 +114,7 @@ describe("§13.5 the code is drawn for every hosted role", () => {
       // The menu never grows disclosure prose for a different role.
       expect(block.getAttribute("data-form")).toBe("settings");
       expect(document.body.textContent).not.toContain(E2EE_WEB_SAS_MORE);
-      expect(document.body.textContent).not.toContain("Settings → Security");
+      expect(document.body.textContent).not.toContain("Settings → Devices");
       expect(block.textContent).toContain(CODE);
       expect(block.textContent).not.toContain(E2EE_WEB_SAS_DETAIL);
       expect(block.textContent).not.toContain(E2EE_WEB_SAS_COMPARE);

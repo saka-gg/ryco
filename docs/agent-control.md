@@ -212,7 +212,7 @@ chat with one automatic message, a normal queued turn that starts or resumes its
 ### Delegation limits
 
 Delegated tasks get the same Agent Control tools as the chat that started them, so a task can
-delegate in turn. Settings → Integrations → **Delegation limits** can stop that from running away.
+delegate in turn. Settings → Agent Control → **Delegation limits** can stop that from running away.
 Both limits are off until the person sets them; agents cannot change them.
 
 - A delegation tree starts at a chat that was not delegated itself (a chat the person started, a

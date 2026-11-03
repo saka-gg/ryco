@@ -2537,7 +2537,7 @@ describe("SourceControlSettingsPanel discovery states", () => {
     mounted = await renderSourceControlSettingsPanel();
 
     await expect.element(page.getByText("Version control")).toBeInTheDocument();
-    await expect.element(page.getByText("Hosting providers", { exact: true })).toBeInTheDocument();
+    await expect.element(page.getByText("Hosting accounts", { exact: true })).toBeInTheDocument();
     await expect
       .element(page.getByRole("button", { name: "Rescan server environment" }))
       .toBeDisabled();

@@ -35,7 +35,7 @@ are grouped by the recorded folder. Grouping, destinations and the run live in
 
 ## Import single conversations
 
-In **Settings → this node → General → Import local conversations**, choose a source and find
+In **Settings → Data & backup → Import conversations** (for the device chosen in its device bar), choose a source and find
 conversations. Select individual conversations,
 choose an existing Ryco target project, and select an available provider/model for future turns.
 A replacement project can be used when the original folder moved or no longer exists. Add a folder

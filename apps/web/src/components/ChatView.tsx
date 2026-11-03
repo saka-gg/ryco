@@ -2339,7 +2339,7 @@ export default function ChatView(props: ChatViewProps) {
             >
               {switchingOn ? "Switching on..." : "Switch on"}
             </Button>
-            <Button size="xs" variant="outline" onClick={() => openSettings("connections")}>
+            <Button size="xs" variant="outline" onClick={() => openSettings("devices")}>
               Connections
             </Button>
           </>
@@ -2380,7 +2380,7 @@ export default function ChatView(props: ChatViewProps) {
                 ? "Reconnecting..."
                 : "Reconnect"}
             </Button>
-            <Button size="xs" variant="outline" onClick={() => openSettings("connections")}>
+            <Button size="xs" variant="outline" onClick={() => openSettings("devices")}>
               Connections
             </Button>
           </>

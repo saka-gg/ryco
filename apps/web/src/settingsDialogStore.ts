@@ -1,41 +1,33 @@
-import { settingsSectionScope } from "./components/settings/settingsSections.logic";
 import type { EnvironmentId } from "@ryco/contracts";
 import { create } from "zustand";
 
-export type SettingsSectionId =
-  | "account"
-  | "general"
-  | "inbox"
-  | "providers"
-  | "opinionated-plugins"
-  | "mcp-servers"
-  | "integrations"
-  | "computer-use"
-  | "appearance"
-  | "keybindings"
-  | "source-control"
-  | "connections"
-  | "updates"
-  | "security"
-  | "diagnostics"
-  | "statistics"
-  | "archived";
+import type { SettingsSectionId } from "./components/settings/settingsRegistry";
 
-/** Sections only this app has: opening one never switches to a device's settings. */
-const CLIENT_ONLY_SECTIONS: ReadonlySet<SettingsSectionId> = new Set(["keybindings", "updates"]);
+export type { SettingsSectionId } from "./components/settings/settingsRegistry";
 
 interface SettingsDialogStore {
   open: boolean;
+  /**
+   * The section asked for. Old ids stay as asked: the page redirects them to
+   * their new home (`resolveSettingsPageSection`) and the frozen phone tier to
+   * its own (`resolvePhoneSettingsSection`).
+   */
   section: SettingsSectionId;
+  /**
+   * The device whose stored values the page shows: the device bar's choice and
+   * the device page's device. Null follows the thread being viewed, else the
+   * active device, else this app's own (`useSettingsPageTarget`).
+   */
   targetEnvironmentId: EnvironmentId | null;
-  editingScope: "client" | "node";
+  /** Show another device's values without leaving the section. */
   setTargetEnvironmentId: (environmentId: EnvironmentId) => void;
-  setEditingScope: (scope: "client" | "node") => void;
+  /**
+   * Open settings on a section. With a device and no section, open that
+   * device's page; with both, the section shows that device's values.
+   */
   openSettings: (section?: SettingsSectionId, environmentId?: EnvironmentId | null) => void;
   closeSettings: () => void;
   setSection: (section: SettingsSectionId) => void;
-  /** Move to a section in a specific destination without resetting the target. */
-  showSection: (scope: "client" | "node", section: SettingsSectionId) => void;
   /**
    * Mark settings open without changing where they point. The desktop settings
    * page calls this when it is reached by URL, Back, or Forward rather than by
@@ -48,26 +40,14 @@ export const useSettingsDialogStore = create<SettingsDialogStore>((set) => ({
   open: false,
   section: "general",
   targetEnvironmentId: null,
-  editingScope: "client",
-  setTargetEnvironmentId: (targetEnvironmentId) =>
-    set({ targetEnvironmentId, editingScope: "node", section: "general" }),
-  setEditingScope: (editingScope) => set({ editingScope, section: "general" }),
+  setTargetEnvironmentId: (targetEnvironmentId) => set({ targetEnvironmentId }),
   openSettings: (section, environmentId) =>
     set((state) => ({
       open: true,
-      section: section ?? (environmentId ? "general" : state.section),
-      editingScope:
-        section && CLIENT_ONLY_SECTIONS.has(section)
-          ? "client"
-          : environmentId || (section && settingsSectionScope(section) === "node")
-            ? "node"
-            : section
-              ? "client"
-              : state.editingScope,
+      section: section ?? (environmentId ? "device" : state.section),
       targetEnvironmentId: environmentId ?? null,
     })),
   closeSettings: () => set({ open: false, targetEnvironmentId: null }),
   setSection: (section) => set({ section }),
-  showSection: (editingScope, section) => set({ editingScope, section }),
   markOpen: () => set({ open: true }),
 }));
