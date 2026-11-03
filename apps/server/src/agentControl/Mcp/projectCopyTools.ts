@@ -65,6 +65,7 @@ import type {
 import { ToolFailure } from "./threadReads.ts";
 import {
   modelSelectionSchema,
+  replayedAgentControlMutation,
   submitAgentControlMutation,
   type AgentControlMcpToolDeps,
   type AgentControlMcpToolDescriptor,
@@ -572,7 +573,11 @@ export function withProjectCopyTools(
       });
     });
 
-  /** The canonical folder on this node a new clone may take, or why not. */
+  /**
+   * The canonical folder on this node a new clone would take, with why it may not (null: it
+   * may). The problem is checked only after a replay is ruled out: once the request ran, its
+   * folder holds the project.
+   */
   const resolveLocalDestination = (
     destination: AgentControlCopyProjectDestination,
     remoteUrl: string,
@@ -592,11 +597,36 @@ export function withProjectCopyTools(
       const judgement = yield* nodePaths
         .judgeProjectDestination({ path: requested, intent: "create" })
         .pipe(Effect.mapError(copyFailure));
-      if (!judgement.usable || judgement.canonicalPath === null)
-        return yield* Effect.fail(
-          new ToolFailure(describeProjectDestinationProblem(judgement.preview).slice(0, 500)),
-        );
-      return judgement.canonicalPath;
+      const problem = judgement.usable
+        ? null
+        : new ToolFailure(describeProjectDestinationProblem(judgement.preview).slice(0, 500));
+      if (judgement.canonicalPath === null)
+        return yield* Effect.fail(problem ?? new ToolFailure("The folder cannot be resolved."));
+      return { canonicalPath: judgement.canonicalPath, problem };
+    });
+
+  /**
+   * Submits `plan`, unless it replays the caller's earlier request of the same id: then its
+   * receipt answers (the same id with another plan is refused). `problem` (the request could not
+   * start now) fails only a new request.
+   */
+  const submitOrReplay = (
+    session: AgentControlSessionRecord,
+    authority: AgentControlTurnAuthority,
+    requestId: AgentControlRequestId,
+    plan: AgentControlImportProjectPlan | AgentControlCopyProjectToNodePlan,
+    problem: ToolFailure | null = null,
+  ) =>
+    Effect.gen(function* () {
+      const replayed = yield* replayedAgentControlMutation(
+        deps.proposals,
+        session,
+        requestId,
+        plan,
+      );
+      if (Option.isSome(replayed)) return replayed.value;
+      if (problem !== null) return yield* Effect.fail(problem);
+      return yield* submitAgentControlMutation(deps, { session, authority, requestId, plan });
     });
 
   /** One project per request: a retry of the same request builds the same plan. */
@@ -615,7 +645,7 @@ export function withProjectCopyTools(
       const input = yield* decode(ProposeImportInput, args);
       const caller = yield* callerThread(session);
       const remoteUrl = yield* sanitizeRemote(input.remoteUrl);
-      const destinationPath = yield* resolveLocalDestination(
+      const destination = yield* resolveLocalDestination(
         input.destination ?? { kind: "default" },
         remoteUrl,
       );
@@ -625,7 +655,7 @@ export function withProjectCopyTools(
         kind: "importProject",
         projectId: projectIdFor(session, input.requestId),
         title,
-        destinationPath,
+        destinationPath: destination.canonicalPath,
         remoteUrl,
         branch: input.branch ?? null,
         setup:
@@ -642,12 +672,7 @@ export function withProjectCopyTools(
                 followUp.modelSelection ?? caller.modelSelection,
               ),
       });
-      return yield* submitAgentControlMutation(deps, {
-        session,
-        authority,
-        requestId: input.requestId,
-        plan,
-      });
+      return yield* submitOrReplay(session, authority, input.requestId, plan, destination.problem);
     });
 
   /** The directory entry `target` names: its environment id, else a unique label match. */
@@ -777,12 +802,7 @@ export function withProjectCopyTools(
             ? null
             : followUpThreadFor(followUp, caller, source.title, followUp.modelSelection ?? null),
       });
-      return yield* submitAgentControlMutation(deps, {
-        session,
-        authority,
-        requestId: input.requestId,
-        plan,
-      });
+      return yield* submitOrReplay(session, authority, input.requestId, plan);
     });
 
   const run = (

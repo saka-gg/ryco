@@ -24,6 +24,7 @@ import { Context, Effect, Layer, Option, PubSub, Redacted, Schema } from "effect
 import type { ProjectionSnapshotQueryShape } from "../../orchestration/Services/ProjectionSnapshotQuery.ts";
 import { ServerSettingsService } from "../../serverSettings.ts";
 import { AgentControlPolicyLive } from "../Layers/AgentControlPolicy.ts";
+import { computeAgentControlPlanDigest } from "../planDigest.ts";
 import { AgentControlSessionRegistryLive } from "../Layers/AgentControlSessionRegistry.ts";
 import { AgentControlPolicy } from "../Services/AgentControlPolicy.ts";
 import {
@@ -132,18 +133,20 @@ const preview = (
   detail: null,
 });
 
-/** `/code/taken` exists; everything else under `/code` is free. */
-const judge = (path: string) =>
-  path.endsWith("taken") ? preview(path, "exists-not-empty") : preview(path, "available");
+/** `/code/taken` and the `occupied` folders exist; everything else under `/code` is free. */
+const judge = (path: string, occupied: ReadonlySet<string> = new Set()) =>
+  path.endsWith("taken") || occupied.has(path)
+    ? preview(path, "exists-not-empty")
+    : preview(path, "available");
 
-const proposalFor = (plan: AgentControlActionPlan) =>
+const proposalFor = (plan: AgentControlActionPlan, requestId = "request") =>
   Schema.decodeUnknownSync(AgentControlProposal)({
     proposalId: "proposal-1",
-    requestId: "request",
+    requestId,
     principal: { kind: "provider-session", threadId: "caller", providerInstanceId: "codex" },
     planVersion: 1,
     plan,
-    planDigest: "a".repeat(64),
+    planDigest: computeAgentControlPlanDigest(plan),
     riskTags: [],
     promptSummary: null,
     status: "pending-user-approval",
@@ -170,6 +173,10 @@ const setup = (
 ) => {
   let enabled = true;
   const submitted: AgentControlActionPlan[] = [];
+  /** The caller's requests by id, as the proposal store keeps them. */
+  const byRequest = new Map<string, AgentControlProposal>();
+  /** Folders a request created since. */
+  const occupied = new Set<string>();
   const tools = withProjectCopyTools(emptyBase, {
     policy: {
       isEnabled: Effect.sync(() => enabled),
@@ -201,10 +208,14 @@ const setup = (
     } as never,
     proposals: {
       getProposal: () => Effect.die("unused"),
-      submit: (input: { readonly plan: AgentControlActionPlan }) =>
+      findByRequest: (_principal: unknown, requestId: string) =>
+        Effect.succeed(Option.fromNullishOr(byRequest.get(requestId))),
+      submit: (input: { readonly plan: AgentControlActionPlan; readonly requestId: string }) =>
         Effect.sync(() => {
           submitted.push(input.plan);
-          return { proposal: proposalFor(input.plan), replayed: false };
+          const proposal = proposalFor(input.plan, input.requestId);
+          byRequest.set(input.requestId, proposal);
+          return { proposal, replayed: false };
         }),
     } as never,
     projections: {
@@ -226,14 +237,14 @@ const setup = (
           defaultProjectDirectorySource: "existing-projects",
           codeRoots: [],
         }),
-      previewDestination: ({ path }) => Effect.succeed(judge(path)),
+      previewDestination: ({ path }) => Effect.succeed(judge(path, occupied)),
       judgeProjectDestination: ({ path }) => {
-        const verdict = judge(path);
+        const verdict = judge(path, occupied);
         const usable = verdict.state === "available";
         return Effect.succeed({
           preview: verdict,
           usable,
-          canonicalPath: usable ? `/private${path}` : null,
+          canonicalPath: `/private${path}`,
           projectRoot: usable ? `/private${path}` : null,
           reservationKey: usable ? path : null,
         });
@@ -251,7 +262,15 @@ const setup = (
     assert.isTrue(result.isError);
     return result.content[0]?.text ?? "";
   };
-  return { tools, call, value, failure, submitted, disable: () => (enabled = false) };
+  return {
+    tools,
+    call,
+    value,
+    failure,
+    submitted,
+    occupied,
+    disable: () => (enabled = false),
+  };
 };
 
 describe("project copy tools", () => {
@@ -358,14 +377,41 @@ describe("project copy tools", () => {
           envMode: "worktree",
           modelSelection: callerThread.modelSelection,
         });
-        // A retry of the request builds the same plan.
-        yield* harness.call(TOOLS.proposeImport, {
-          requestId: "import-1",
-          remoteUrl: "https://token123@github.com/me/new-app.git",
-          setup: { command: "bun install" },
-          followUpThread: { prompt: "Install the toolchain and run the tests." },
-        });
-        assert.deepEqual(harness.submitted[1], plan);
+        // A retry of the request, once the import made its folder, answers with its receipt.
+        harness.occupied.add("/code/new-app");
+        const retried = harness.value<{
+          readonly receipt: { readonly actionKind: string };
+          readonly replayed: boolean;
+        }>(
+          yield* harness.call(TOOLS.proposeImport, {
+            requestId: "import-1",
+            remoteUrl: "https://token123@github.com/me/new-app.git",
+            setup: { command: "bun install" },
+            followUpThread: { prompt: "Install the toolchain and run the tests." },
+          }),
+        );
+        assert.isTrue(retried.replayed);
+        assert.strictEqual(retried.receipt.actionKind, "importProject");
+        assert.lengthOf(harness.submitted, 1);
+        // The same id for another request is refused; a new id finds the folder taken.
+        assert.include(
+          harness.failure(
+            yield* harness.call(TOOLS.proposeImport, {
+              requestId: "import-1",
+              remoteUrl: "https://github.com/me/new-app.git",
+            }),
+          ),
+          "different plan",
+        );
+        assert.include(
+          harness.failure(
+            yield* harness.call(TOOLS.proposeImport, {
+              requestId: "import-1b",
+              remoteUrl: "https://github.com/me/new-app.git",
+            }),
+          ),
+          "/code/new-app-2 is free",
+        );
 
         assert.include(
           harness.failure(
@@ -415,6 +461,17 @@ describe("project copy tools", () => {
       assert.isTrue(plan.copySettings);
       assert.deepEqual(plan.setup, { command: "bun install", saveAsScript: false });
       assert.isNull(plan.followUpThread?.modelSelection);
+      // A retry answers with the request's receipt instead of a second request.
+      const retried = harness.value<{ readonly replayed: boolean }>(
+        yield* harness.call(TOOLS.proposeCopy, {
+          requestId: "copy-1",
+          target: "mac MINI",
+          setup: {},
+          followUpThread: { prompt: "Finish setting it up." },
+        }),
+      );
+      assert.isTrue(retried.replayed);
+      assert.lengthOf(harness.submitted, 1);
 
       yield* harness.call(TOOLS.proposeCopy, {
         requestId: "copy-2",
