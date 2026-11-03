@@ -150,6 +150,13 @@ describe("the providers × devices table", () => {
     expect(cell("Work", "Laptop")?.dataset.status).toBe("ready");
     expect(cell("Work", "Studio")?.dataset.status).toBe("missing");
     await expect.element(page.getByText("Claude · claudeAgent_work")).toBeVisible();
+    // Each row is named by its provider for assistive tech.
+    const rowHeaders = [...document.querySelectorAll('tbody th[scope="row"]')].map(
+      (header) => header.querySelector("span")?.textContent,
+    );
+    expect(rowHeaders).toHaveLength(document.querySelectorAll("tbody tr").length);
+    expect(rowHeaders.slice(0, 3)).toEqual(["Codex", "Claude", "Work"]);
+    await expect.element(page.getByRole("rowheader", { name: /^Work/ })).toBeVisible();
   });
 
   it("adds a provider to the device of its column, through that device's add dialog", async () => {

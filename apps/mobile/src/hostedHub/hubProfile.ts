@@ -263,6 +263,24 @@ export function readCachedMobileHubProfile(): HubProfile | null | undefined {
   return cachedProfile;
 }
 
+const profileListeners = new Set<() => void>();
+
+/** Sets the cached profile and tells listeners when it changed (hydrated, saved or cleared). */
+function setCachedProfile(next: HubProfile | null): void {
+  const changed = JSON.stringify(next) !== JSON.stringify(cachedProfile ?? null);
+  cachedProfile = next;
+  if (!changed) return;
+  for (const listener of Array.from(profileListeners)) listener();
+}
+
+/** Calls `listener` whenever the cached profile changes, e.g. once it is read from storage. */
+export function subscribeMobileHubProfile(listener: () => void): () => void {
+  profileListeners.add(listener);
+  return () => {
+    profileListeners.delete(listener);
+  };
+}
+
 export function hydrateMobileHubProfile(
   kv: Pick<KVService, "getItem">,
 ): Promise<HubProfile | null> {
@@ -275,7 +293,7 @@ export function hydrateMobileHubProfile(
     } catch {
       hydrated = null;
     }
-    if (profileRevision === revision) cachedProfile = hydrated;
+    if (profileRevision === revision) setCachedProfile(hydrated);
     return cachedProfile ?? null;
   })();
   return profileHydration;
@@ -288,14 +306,15 @@ export async function saveMobileHubProfile(
   const serialized = serializeHubProfile(profile);
   await kv.setItem(HUB_PROFILE_STORAGE_KEY, serialized);
   profileRevision += 1;
-  cachedProfile = deserializeHubProfile(serialized);
-  profileHydration = Promise.resolve(cachedProfile);
+  const saved = deserializeHubProfile(serialized);
+  setCachedProfile(saved);
+  profileHydration = Promise.resolve(saved);
 }
 
 export async function clearMobileHubProfile(kv: Pick<KVService, "removeItem">): Promise<void> {
   await kv.removeItem(HUB_PROFILE_STORAGE_KEY);
   profileRevision += 1;
-  cachedProfile = null;
+  setCachedProfile(null);
   profileHydration = Promise.resolve(null);
 }
 

@@ -86,7 +86,8 @@ describe("the phone's shared setting edits", () => {
     expect(studio?.settings.storageRetention.automatic).toBe(true);
     expect(studio?.settings.settingsSharing.storageRetention).toEqual({
       mode: "override",
-      stamp: { at: 5_000, by: "phone" },
+      // The stored id, then this app launch's own part.
+      stamp: { at: 5_000, by: "phone~phone" },
     });
     expect(laptop?.writes).toEqual([]);
   });

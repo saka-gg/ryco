@@ -59,7 +59,7 @@ export function DeviceComputerUseSettings() {
       description={
         localDevice || target?.primary
           ? `Computer use needs the Ryco desktop app on ${label}.`
-          : `To enable screen recording, accessibility, or computer use on ${label}, open Ryco on ${label} and use Settings → ${label} → Computer use. Operating system permissions must be approved on that device.`
+          : `To enable screen recording, accessibility, or computer use on ${label}, open the Ryco desktop app on ${label} and use Settings → Devices → ${label} → Computer use. Operating system permissions must be approved on that device.`
       }
       bare
     >
@@ -121,6 +121,7 @@ function NodeIntegrationsSettingsPanel() {
             ) : undefined
           }
           compareBy={selectEnabled}
+          applyField={applyEnabled}
           formatValue={(value) => (value.enabled ? "On" : "Off")}
           render={(control) => (
             <Switch
@@ -183,6 +184,19 @@ function NodeIntegrationsSettingsPanel() {
 const selectEnabled = (value: AgentControlSettings) => value.enabled;
 const selectMaxDepth = (value: AgentControlSettings) => value.delegation.maxDepth;
 const selectMaxTasks = (value: AgentControlSettings) => value.delegation.maxTasksPerTree;
+// And edits only that part of each device's own value, keeping the rest of it.
+const applyEnabled = (current: AgentControlSettings, edited: AgentControlSettings) => ({
+  ...current,
+  enabled: edited.enabled,
+});
+const applyMaxDepth = (current: AgentControlSettings, edited: AgentControlSettings) => ({
+  ...current,
+  delegation: { ...current.delegation, maxDepth: edited.delegation.maxDepth },
+});
+const applyMaxTasks = (current: AgentControlSettings, edited: AgentControlSettings) => ({
+  ...current,
+  delegation: { ...current.delegation, maxTasksPerTree: edited.delegation.maxTasksPerTree },
+});
 
 const NO_LIMIT = "none";
 const DEPTH_OPTIONS: ReadonlyArray<SettingsSelectOption<string>> = [
@@ -235,6 +249,8 @@ function DelegationLimitsSection({
         description="Levels of tasks below the chat that started them. A task at the last level gets no delegation tools."
         status={status}
         compareBy={selectMaxDepth}
+        applyField={applyMaxDepth}
+        field="maxDepth"
         formatValue={(value) =>
           value.delegation.maxDepth === null ? "No limit" : `${value.delegation.maxDepth} levels`
         }
@@ -262,6 +278,8 @@ function DelegationLimitsSection({
         title="Tasks per chat"
         description="How many tasks one chat and everything it delegated may create in all, finished and archived ones included."
         compareBy={selectMaxTasks}
+        applyField={applyMaxTasks}
+        field="maxTasksPerTree"
         formatValue={(value) =>
           value.delegation.maxTasksPerTree === null
             ? "No limit"

@@ -2228,6 +2228,44 @@ it.layer(NodeServices.layer)("shared device settings", (it) => {
     }).pipe(Effect.provide(makeServerSettingsLayer())),
   );
 
+  it.effect("drops a stored stamp past the maximum on load, keeping the rest of the file", () =>
+    Effect.gen(function* () {
+      const fs = yield* FileSystem.FileSystem;
+      const { settingsPath } = yield* ServerConfig;
+      const settings = yield* ServerSettingsService;
+      yield* settings.updateSettings({
+        worktreeBranchPrefix: "team",
+        runSetupScript: false,
+        settingsSharing: {
+          worktreeBranchPrefix: { mode: "shared", stamp },
+          runSetupScript: { mode: "shared", stamp },
+        },
+      });
+      // A stamp an older node accepted (up to MAX_SAFE_INTEGER) before the bound existed.
+      const persisted = JSON.parse(yield* fs.readFileString(settingsPath));
+      persisted.settingsSharing.worktreeBranchPrefix.stamp.at = Number.MAX_SAFE_INTEGER;
+      yield* fs.writeFileString(settingsPath, JSON.stringify(persisted));
+      const reloaded = yield* loadSettingsInFreshService();
+      assert.equal(reloaded.worktreeBranchPrefix, "team");
+      assert.deepEqual(reloaded.settingsSharing, {
+        runSetupScript: { mode: "shared", stamp },
+      });
+      // And a patch carrying one is refused.
+      const refused = yield* Effect.exit(
+        settings.updateSettings({
+          settingsSharing: {
+            worktreeBranchPrefix: {
+              mode: "shared",
+              stamp: { at: Number.MAX_SAFE_INTEGER, by: "x" },
+            },
+          },
+          worktreeBranchPrefix: "pinned",
+        }),
+      );
+      assert.isTrue(Exit.isFailure(refused));
+    }).pipe(Effect.provide(makeServerSettingsLayer())),
+  );
+
   it.effect("reports a value the node rejects and keeps neither the value nor its stamp", () =>
     Effect.gen(function* () {
       const settings = yield* ServerSettingsService;

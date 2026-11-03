@@ -14,6 +14,7 @@ import { render } from "vitest-browser-react";
 import { useSettingsDialogStore } from "../../../settingsDialogStore";
 import { Switch } from "../../ui/switch";
 import {
+  DeviceBound,
   SettingsCard,
   SettingsRow,
   SettingsSection,
@@ -23,6 +24,7 @@ import {
 import { useSettingsSearchRevealStore } from "../settingsSearchReveal";
 import { DeviceSettingsCompare } from "./DeviceSettingsCompare";
 import { DeviceSharingDifferences } from "./DeviceSharingDifferences";
+import { DeviceSharingPrompts } from "./DeviceSharingPrompt";
 import { SharedSettingRow, sharedControlLabel } from "./SharedSettingRow";
 import { sharedSettingRowId } from "./sharedSettingsCatalog";
 import {
@@ -418,5 +420,101 @@ describe("all devices while the device shown cannot be used", () => {
       device.connected = true;
     });
     await expect.poll(() => devices.settings("studio").enableProviderUpdateChecks).toBe(false);
+  });
+});
+
+describe("review fixes: devices that never shared, and the compare table", () => {
+  const prefix = (value: string, at: number) => ({
+    worktreeBranchPrefix: value,
+    settingsSharing: {
+      worktreeBranchPrefix: { mode: "shared" as const, stamp: { at, by: "someone" } },
+    },
+  });
+
+  it("asks before a device paired later takes the shared values, and keeps its own on request", async () => {
+    const devices = createTestSharedSettings([
+      { id: "laptop", label: "Laptop", settings: prefix("team", 5) },
+      { id: "later", label: "New box", settings: { worktreeBranchPrefix: "mine" } },
+    ]);
+    await show(devices, <DeviceSharingPrompts />);
+    await expect
+      .element(page.getByText("New box has 1 setting that differs from your shared ones"))
+      .toBeVisible();
+    // Nothing was written on its own.
+    expect(devices.device("later").writes).toEqual([]);
+    await page.getByRole("button", { name: "Keep its own" }).click();
+    await expect
+      .poll(() => sharedEntry(devices.settings("later"), "worktreeBranchPrefix")?.mode)
+      .toBe("override");
+    expect(devices.settings("later").worktreeBranchPrefix).toBe("mine");
+    await expect
+      .element(page.getByText("New box has 1 setting that differs from your shared ones"))
+      .not.toBeInTheDocument();
+  });
+
+  it("gives a device paired later the shared values on request", async () => {
+    const devices = createTestSharedSettings([
+      { id: "laptop", label: "Laptop", settings: prefix("team", 5) },
+      { id: "later", label: "New box", settings: { worktreeBranchPrefix: "mine" } },
+    ]);
+    await show(devices, <DeviceSharingDifferences environmentId={EnvironmentId.make("later")} />);
+    await expect.element(page.getByText("Differs from the other devices")).toBeVisible();
+    await page.getByRole("button", { name: "Use shared values" }).click();
+    await expect.poll(() => devices.settings("later").worktreeBranchPrefix).toBe("team");
+    await expect.element(page.getByText("Matches the other devices")).toBeVisible();
+  });
+
+  it("lists values that differ before any shared write, as written", async () => {
+    const devices = createTestSharedSettings([
+      { id: "laptop", label: "Laptop", settings: { worktreeBranchPrefix: "one" } },
+      { id: "studio", label: "Studio", settings: { worktreeBranchPrefix: "two" } },
+    ]);
+    await show(devices, <DeviceSharingDifferences environmentId={EnvironmentId.make("studio")} />);
+    await expect.element(page.getByText(/here: two/)).toBeVisible();
+  });
+
+  it("reads only, without Open, for a section the reader cannot open, and marks differences in words", async () => {
+    const devices = createTestSharedSettings([
+      { id: "laptop", label: "Laptop", settings: { worktreeBranchPrefix: "one" } },
+      { id: "studio", label: "Studio", settings: { worktreeBranchPrefix: "two" } },
+    ]);
+    await show(devices, <DeviceSettingsCompare canOpen={() => false} />);
+    const row = page.getByTestId("settings-compare-row").first();
+    await expect.element(row).toBeVisible();
+    expect(row.getByRole("button").elements()).toHaveLength(0);
+    await expect.element(row.getByText("differs").first()).toBeInTheDocument();
+  });
+
+  it("does not mount content bound to one device while only shared rows show", async () => {
+    let mounts = 0;
+    function Scan() {
+      mounts += 1;
+      return <p>Storage scan</p>;
+    }
+    const devices = createTestSharedSettings([
+      { id: "laptop", label: "Laptop" },
+      { id: "studio", label: "Studio" },
+    ]);
+    await show(
+      devices,
+      <SharedRowsOnlyProvider value={true}>
+        <DeviceBound>
+          <Scan />
+        </DeviceBound>
+        <PrefixRow />
+      </SharedRowsOnlyProvider>,
+    );
+    await expect.element(page.getByText("Same on all 2 devices")).toBeVisible();
+    expect(mounts).toBe(0);
+    await mounted?.rerender(
+      <SharedSettingsSourceProvider value={devices.source}>
+        <SharedRowsOnlyProvider value={false}>
+          <DeviceBound>
+            <Scan />
+          </DeviceBound>
+        </SharedRowsOnlyProvider>
+      </SharedSettingsSourceProvider>,
+    );
+    await expect.element(page.getByText("Storage scan")).toBeVisible();
   });
 });

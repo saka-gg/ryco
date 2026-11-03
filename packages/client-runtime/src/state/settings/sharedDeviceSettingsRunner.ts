@@ -33,6 +33,7 @@ import {
   planSettingsSharingCatchUp,
   readNewestSharedSetting,
   recordSettingsSharingCache,
+  settingsSharingCommandCatchUps,
   type SettingsSharingAttempt,
   type SettingsSharingAttempts,
   type SettingsSharingCache,
@@ -236,20 +237,33 @@ export function createSettingsSharingRunner(
     }
   };
 
+  /**
+   * Wakes the runner for the next attempt due on a device it could write now. An attempt that
+   * is already due was not planned again by the pass that just ran (its device went offline,
+   * lost write access, or stopped sharing the key): only a device change (`subscribe`) can make
+   * it plannable, so it never schedules a pass by itself, and a pass never re-arms itself at
+   * once.
+   */
   const scheduleRetry = () => {
     if (retryHandle !== null) timers.clear(retryHandle);
     retryHandle = null;
     if (!started) return;
+    const at = now();
+    const targets = options.readTargets();
     let earliest = Number.POSITIVE_INFINITY;
-    for (const forDevice of attempts.values())
-      for (const attempt of forDevice.values()) earliest = Math.min(earliest, attempt.retryAt);
+    for (const [environmentId, forDevice] of attempts) {
+      const target = targets.find((entry) => entry.environmentId === environmentId);
+      if (target === undefined || nodeSettingsBlocker(target) !== null) continue;
+      for (const attempt of forDevice.values())
+        if (attempt.retryAt > at) earliest = Math.min(earliest, attempt.retryAt);
+    }
     if (!Number.isFinite(earliest)) return;
     retryHandle = timers.set(
       () => {
         retryHandle = null;
         void runNow();
       },
-      Math.max(0, earliest - now()),
+      Math.max(debounceMs, earliest - at),
     );
   };
 
@@ -316,13 +330,17 @@ export function createSettingsSharingRunner(
     readCache: () => cache,
     noteCommand: (command, result) => {
       const shared = command.shared;
-      const source = result.applied[0]?.environmentId;
-      if (shared === null || source === undefined) return;
+      if (shared === null) return;
+      // Kept even when no device took it now: the devices it missed catch up from here.
+      const covers = settingsSharingCommandCatchUps(command, result);
+      const source = result.applied[0]?.environmentId ?? covers[0];
+      if (source === undefined) return;
       setCache(
         recordSettingsSharingCache(cache, command.key, {
           stamp: shared.stamp,
           value: shared.value as never,
           source,
+          ...(covers.length > 0 ? { covers } : {}),
         }),
       );
       schedule();

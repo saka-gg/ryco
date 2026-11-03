@@ -185,6 +185,9 @@ export function createSettingsSharingRuntime(
       return nextSettingsSharingStamp(current.clock, devices, current.runner.readCache());
     },
     runCommand: async (command, extra = []) => {
+      // The namespace the edit was made in: an account switch while it is written must not
+      // put this value in the next account's cache.
+      const owner = currentRunner();
       const known = options.readTargets();
       const result = await executeSettingsSharingCommand(
         [
@@ -196,7 +199,7 @@ export function createSettingsSharingRuntime(
         ],
         command,
       );
-      currentRunner()?.runner.noteCommand(command, result);
+      if (owner !== null && currentRunner() === owner) owner.runner.noteCommand(command, result);
       notify();
       return result;
     },

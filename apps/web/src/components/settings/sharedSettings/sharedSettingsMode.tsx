@@ -3,6 +3,7 @@ import type { ShareableServerSettingKey } from "@ryco/shared/settingsSharing";
 import { createContext, useContext } from "react";
 import { create } from "zustand";
 
+import { useSettingsDialogStore } from "../../../settingsDialogStore";
 import type { SharedSettingsMode } from "./sharedSettingRow.logic";
 
 /**
@@ -35,31 +36,47 @@ export function useSharedSettingsMode(): SharedSettingsModeValue {
 }
 
 /**
+ * How long a request to open a row waits for it to mount: its section loading. A row that never
+ * mounts (a section the reader cannot open) must not open later, when the reader gets there on
+ * their own.
+ */
+export const SHARED_ROW_OPEN_TTL_MS = 10_000;
+
+/**
  * A shared row to open with its device list once it mounts: the compare table and "Where this
  * device differs" ask for it before its section shows.
  */
-export const useSharedRowOpenRequest = create<{ readonly key: ShareableServerSettingKey | null }>(
-  () => ({ key: null }),
-);
+export const useSharedRowOpenRequest = create<{
+  readonly key: ShareableServerSettingKey | null;
+  /** When the request stops being honored (ms since the epoch). */
+  readonly expiresAt?: number;
+}>(() => ({ key: null }));
 
-export function requestSharedRowOpen(key: ShareableServerSettingKey): void {
-  useSharedRowOpenRequest.setState({ key });
+export function requestSharedRowOpen(key: ShareableServerSettingKey, nowMs = Date.now()): void {
+  useSharedRowOpenRequest.setState({ key, expiresAt: nowMs + SHARED_ROW_OPEN_TTL_MS });
 }
 
-export function takeSharedRowOpen(key: ShareableServerSettingKey): boolean {
-  if (useSharedRowOpenRequest.getState().key !== key) return false;
+export function takeSharedRowOpen(key: ShareableServerSettingKey, nowMs = Date.now()): boolean {
+  const { key: requested, expiresAt } = useSharedRowOpenRequest.getState();
+  if (requested === null) return false;
+  if (expiresAt !== undefined && nowMs >= expiresAt) {
+    useSharedRowOpenRequest.setState({ key: null });
+    return false;
+  }
+  if (requested !== key) return false;
   useSharedRowOpenRequest.setState({ key: null });
   return true;
 }
 
 /**
- * The device bar's choice on the settings page, kept while settings stay open: "All devices",
- * or the device chosen with its pill.
+ * The device bar's choice on the settings page: "All devices", or the device chosen with its
+ * pill. The settings store keeps it (`deviceView`), so `openSettings` with a device and the
+ * page's address set it too.
  */
-export const useSettingsDeviceView = create<{ readonly view: "all" | "device" }>(() => ({
-  view: "all",
-}));
+export function useSettingsDeviceView(): "all" | "device" {
+  return useSettingsDialogStore((state) => state.deviceView);
+}
 
 export function setSettingsDeviceView(view: "all" | "device"): void {
-  useSettingsDeviceView.setState({ view });
+  useSettingsDialogStore.getState().setDeviceView(view);
 }

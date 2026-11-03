@@ -1,4 +1,7 @@
-import type { SharingDevice } from "@ryco/client-runtime/state/settings/sharedDeviceSettings";
+import type {
+  SettingsSharingCommand,
+  SharingDevice,
+} from "@ryco/client-runtime/state/settings/sharedDeviceSettings";
 import { EnvironmentId, type ServerConfig } from "@ryco/contracts";
 import {
   DEFAULT_CLIENT_SETTINGS,
@@ -15,6 +18,8 @@ import {
   buildDeviceSettingsRestoreCommands,
   buildDeviceSettingsSection,
   DEVICE_SETTINGS_FILE_KEYS,
+  deviceSettingsRestoreHasWork,
+  pickableRestoreDevices,
   previewDeviceSettingsRestore,
   readDeviceSettingsSection,
   summarizeDeviceSettingsRestore,
@@ -152,19 +157,30 @@ describe("restoring device settings", () => {
       }),
     ];
     const previews = previewDeviceSettingsRestore({ values, devices, targets: { kind: "every" } });
-    expect(previews.map((preview) => [preview.label, preview.changes, preview.waits])).toEqual([
+    expect(
+      previews.map((preview) => [preview.label, preview.changes, preview.waits, preview.catchesUp]),
+    ).toEqual([
       [
         MAC,
-        ['worktreeBranchPrefix: "ryco" -> "team"', "pullRequestTemplates: true -> false"],
+        [
+          { key: "worktreeBranchPrefix", from: "ryco", to: "team" },
+          { key: "pullRequestTemplates", from: true, to: false },
+        ],
         null,
+        false,
       ],
       [
         BUILD,
-        ['worktreeBranchPrefix: "ryco" -> "team"', "pullRequestTemplates: true -> false"],
+        [
+          { key: "worktreeBranchPrefix", from: "ryco", to: "team" },
+          { key: "pullRequestTemplates", from: true, to: false },
+        ],
         "offline",
+        true,
       ],
-      [PI, ["pullRequestTemplates: true -> false"], null],
+      [PI, [{ key: "pullRequestTemplates", from: true, to: false }], null, false],
     ]);
+    expect(deviceSettingsRestoreHasWork(previews)).toBe(true);
     expect(previews[2]!.keepsOwn).toEqual(["worktreeBranchPrefix"]);
 
     const commands = buildDeviceSettingsRestoreCommands({
@@ -256,6 +272,164 @@ describe("restoring device settings", () => {
       worktreeBranchPrefix: "team",
       settingsSharing: { worktreeBranchPrefix: { mode: "override" } },
     });
+  });
+
+  const allApplied = (commands: ReadonlyArray<SettingsSharingCommand>) =>
+    commands.map((command) => ({
+      command,
+      result: {
+        applied: command.writes.map((write) => ({
+          environmentId: write.environmentId,
+          label: write.environmentId,
+        })),
+        notApplied: [],
+      },
+    }));
+
+  it("reports nothing as queued when every write is skipped, and offers no Apply", () => {
+    const devices = [
+      device(BUILD, {}, { canWrite: false }),
+      device(PI, {}, { connected: false, sharingVersion: null }),
+    ];
+    const targets = { kind: "every" } as const;
+    const previews = previewDeviceSettingsRestore({ values, devices, targets });
+    expect(previews.map((preview) => [preview.label, preview.waits, preview.catchesUp])).toEqual([
+      [BUILD, "read-only", false],
+      // An older Ryco never catches up a shared value.
+      [PI, "offline", false],
+    ]);
+    expect(deviceSettingsRestoreHasWork(previews)).toBe(false);
+
+    const commands = buildDeviceSettingsRestoreCommands({ values, devices, targets, nextStamp })!;
+    expect(commands.flatMap((command) => command.writes)).toEqual([]);
+    const outcomes = summarizeDeviceSettingsRestore(devices, allApplied(commands));
+    expect(
+      outcomes.map((outcome) => [outcome.label, outcome.queued, outcome.kept, outcome.notApplied]),
+    ).toEqual(
+      [BUILD, PI].map((id) => [
+        id,
+        [],
+        [],
+        [
+          { key: "worktreeBranchPrefix", reason: id === BUILD ? "read-only" : "offline" },
+          { key: "pullRequestTemplates", reason: id === BUILD ? "read-only" : "offline" },
+        ],
+      ]),
+    );
+  });
+
+  it("queues an offline device that follows the shared value, even with no device online", () => {
+    const devices = [device(MAC, {}, { connected: false })];
+    const previews = previewDeviceSettingsRestore({ values, devices, targets: { kind: "every" } });
+    expect(previews[0]).toMatchObject({ waits: "offline", catchesUp: true });
+    expect(deviceSettingsRestoreHasWork(previews)).toBe(true);
+    const commands = buildDeviceSettingsRestoreCommands({
+      values,
+      devices,
+      targets: { kind: "every" },
+      nextStamp,
+    })!;
+    const outcomes = summarizeDeviceSettingsRestore(devices, allApplied(commands));
+    expect(outcomes[0]).toMatchObject({
+      queued: ["worktreeBranchPrefix", "pullRequestTemplates"],
+      notApplied: [],
+    });
+  });
+
+  it("queues only a device that follows the shared value; other offline devices say why", () => {
+    const devices = [
+      device(MAC, {}),
+      device(BUILD, {}, { connected: false }),
+      device(
+        PI,
+        {
+          worktreeBranchPrefix: "pi",
+          settingsSharing: { worktreeBranchPrefix: { mode: "override", stamp: stamp(3) } },
+        },
+        { connected: false },
+      ),
+      device(EnvironmentId.make("env-old"), {}, { connected: false, sharingVersion: null }),
+      device(EnvironmentId.make("env-viewer"), {}, { canWrite: false }),
+    ];
+    const commands = buildDeviceSettingsRestoreCommands({
+      values: { worktreeBranchPrefix: "team" },
+      devices,
+      targets: { kind: "every" },
+      nextStamp,
+    })!;
+    const outcomes = summarizeDeviceSettingsRestore(devices, allApplied(commands));
+    expect(
+      outcomes.map((outcome) => [outcome.label, outcome.queued, outcome.kept, outcome.notApplied]),
+    ).toEqual([
+      [MAC, [], [], []],
+      [BUILD, ["worktreeBranchPrefix"], [], []],
+      [PI, [], [{ key: "worktreeBranchPrefix", reason: "override" }], []],
+      ["env-old", [], [], [{ key: "worktreeBranchPrefix", reason: "offline" }]],
+      ["env-viewer", [], [], [{ key: "worktreeBranchPrefix", reason: "read-only" }]],
+    ]);
+  });
+
+  it("to picked devices: a device that went offline drops out of the plan", () => {
+    const studio = device(BUILD, {});
+    const picked = new Set([MAC, BUILD]);
+    const targets = { kind: "chosen", environmentIds: picked } as const;
+    const later = [device(MAC, {}), { ...studio, connected: false }];
+    expect([...pickableRestoreDevices(later, picked)]).toEqual([MAC]);
+    expect(
+      previewDeviceSettingsRestore({ values, devices: later, targets }).map((p) => p.label),
+    ).toEqual([MAC]);
+    const commands = buildDeviceSettingsRestoreCommands({
+      values,
+      devices: later,
+      targets,
+      nextStamp,
+    })!;
+    expect(
+      commands.flatMap((command) => command.writes.map((write) => write.environmentId)),
+    ).toEqual([MAC, MAC]);
+  });
+
+  it("to picked devices: one that disconnects while writing is not applied, never queued", () => {
+    const devices = [device(MAC, {}), device(BUILD, {})];
+    const commands = buildDeviceSettingsRestoreCommands({
+      values: { worktreeBranchPrefix: "team" },
+      devices,
+      targets: { kind: "chosen", environmentIds: new Set([BUILD]) },
+      nextStamp,
+    })!;
+    const outcomes = summarizeDeviceSettingsRestore(devices, [
+      {
+        command: commands[0]!,
+        result: {
+          applied: [],
+          notApplied: [{ environmentId: BUILD, label: BUILD, reason: "disconnected" }],
+        },
+      },
+    ]);
+    expect(outcomes).toEqual([
+      {
+        environmentId: BUILD,
+        label: BUILD,
+        applied: [],
+        queued: [],
+        kept: [],
+        notApplied: [{ key: "worktreeBranchPrefix", reason: "offline" }],
+        failed: [],
+      },
+    ]);
+  });
+
+  it("to the only known device: it keeps following the shared value", () => {
+    const devices = [device(MAC, {})];
+    const targets = { kind: "chosen", environmentIds: new Set([MAC]) } as const;
+    const previews = previewDeviceSettingsRestore({ values, devices, targets });
+    expect(previews[0]!.becomesOwn).toEqual([]);
+    const commands = buildDeviceSettingsRestoreCommands({ values, devices, targets, nextStamp })!;
+    expect(commands[0]!.writes[0]!.patch).toMatchObject({
+      worktreeBranchPrefix: "team",
+      settingsSharing: { worktreeBranchPrefix: { mode: "shared" } },
+    });
+    expect(commands[0]!.shared).not.toBeNull();
   });
 
   it("writes nothing for values every device already holds, and nothing without a stamp", () => {

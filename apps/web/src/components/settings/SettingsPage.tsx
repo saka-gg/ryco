@@ -47,6 +47,10 @@ import {
 } from "../../appChrome";
 import { isElectron, isHostedHubMode } from "../../env";
 import { usePrimaryEnvironmentId } from "../../environments/primary/context";
+import {
+  hasSavedEnvironmentRegistryHydrated,
+  waitForSavedEnvironmentRegistryHydration,
+} from "../../environments/runtime";
 import { useAppSidebarCollapsed } from "../../hooks/useAppSidebarCollapsed";
 import { useEnvironmentSettingsTarget } from "../../hooks/useEnvironmentSettingsTarget";
 import { useSettingsPageTarget } from "../../hooks/useSettingsPageTarget";
@@ -124,8 +128,6 @@ import { sectionHasSharedSettings } from "./sharedSettings/sharedSettingsCatalog
 import { useSharedRowsDevice } from "./sharedSettings/sharedSettingsSource";
 import {
   SharedSettingsModeProvider,
-  setSettingsDeviceView,
-  useSettingsDeviceView,
   type SharedSettingsModeValue,
 } from "./sharedSettings/sharedSettingsMode";
 
@@ -153,14 +155,21 @@ const SETTINGS_SECTION_ICONS: Readonly<Record<SettingsPageSectionId, LucideIcon>
 
 export { preloadSettingsSection } from "./SettingsSectionPanels";
 
+/** Whether a section keeps rows on a device (a device's own page does). */
+function sectionKeepsDeviceRows(section: SettingsPageSectionId): boolean {
+  return settingsSection(section).parts.some(
+    (storage) => storage === "device" || storage === "device-read",
+  );
+}
+
+/** Whether the device bar offers "All devices" there (given two devices): shared rows, or Providers' table. */
+function sectionOffersAllDevices(section: SettingsPageSectionId): boolean {
+  return sectionHasSharedSettings(section) || section === "providers";
+}
+
 /** Whether a section shows the device bar: it keeps rows on a device. */
 function sectionUsesDevice(section: SettingsPageSectionId): boolean {
-  return (
-    section !== "device" &&
-    settingsSection(section).parts.some(
-      (storage) => storage === "device" || storage === "device-read",
-    )
-  );
+  return section !== "device" && sectionKeepsDeviceRows(section);
 }
 
 function PanelFallback() {
@@ -839,6 +848,7 @@ export function SettingsPage({
   const storeDeviceTab = useSettingsDialogStore((s) => s.deviceTab);
   const setSection = useSettingsDialogStore((s) => s.setSection);
   const setDeviceTab = useSettingsDialogStore((s) => s.setDeviceTab);
+  const setDeviceView = useSettingsDialogStore((s) => s.setDeviceView);
   const closeSettings = useSettingsDialogStore((s) => s.closeSettings);
   const hosted = isHostedHubMode();
   const primaryEnvironmentId = usePrimaryEnvironmentId();
@@ -872,18 +882,24 @@ export function SettingsPage({
     ? requestedSection
     : (listedSections.find((id) => !settingsSection(id).link) ?? "appearance");
   const usesDevice = effectiveSection === "device" || sectionUsesDevice(effectiveSection);
-  // "All devices" or the chosen device, for sections with shared rows.
-  const deviceView = useSettingsDeviceView((state) => state.view);
-  const allDevicesOffered =
-    devices.choices.length >= 2 &&
-    (sectionHasSharedSettings(effectiveSection) || effectiveSection === "providers");
+  // A section kept on a device the page cannot read yet (not connected, or its
+  // role unknown) stays asked for while another shows, so the page returns to it
+  // once the device connects.
+  const requestedWaitsForDevice =
+    effectiveSection !== requestedSection &&
+    !settingsDeviceReady(target) &&
+    sectionKeepsDeviceRows(requestedSection);
+  // "All devices" or the chosen device, for sections with shared rows, and Providers' table.
+  const deviceView = useSettingsDialogStore((s) => s.deviceView);
+  const allDevicesSection = sectionOffersAllDevices(effectiveSection);
+  const allDevicesOffered = devices.choices.length >= 2 && allDevicesSection;
   const showAllDevices = allDevicesOffered && deviceView === "all";
   const showDevice = useCallback(
     (environmentId: EnvironmentId) => {
-      setSettingsDeviceView("device");
+      setDeviceView("device");
       devices.select(environmentId);
     },
-    [devices],
+    [devices, setDeviceView],
   );
   // "All devices" while the device bar's device cannot be used (offline, or not this reader's to
   // change): shared rows still show, through another device this client may write now, and
@@ -929,47 +945,103 @@ export function SettingsPage({
   useHostedNodePageDemand(usesDevice ? targetEnvironmentId : null);
 
   useEffect(() => {
-    if (hosted && !roleFresh) return;
+    if ((hosted && !roleFresh) || requestedWaitsForDevice) return;
     // Only the section this render saw: the address may have moved it since.
     if (useSettingsDialogStore.getState().section !== storeSection) return;
     if (storeSection !== effectiveSection) setSection(effectiveSection, normalizedTab);
-  }, [effectiveSection, hosted, normalizedTab, roleFresh, setSection, storeSection]);
+  }, [
+    effectiveSection,
+    hosted,
+    normalizedTab,
+    requestedWaitsForDevice,
+    roleFresh,
+    setSection,
+    storeSection,
+  ]);
 
   // The address and the store say the same place. An address that changed
   // without this page (a link, Back, Forward) moves the store; otherwise the
   // store's place, once settled, is written back by replacing the entry. The
-  // device rides along outside hosted mode, whose address names no node.
+  // device and its view ride along outside hosted mode, whose address names no
+  // node (and so no node's own values either: a hosted view stays in the store).
   const locationKey = location ? settingsLocationKey(location.search) : null;
   const syncedLocationKey = useRef<string | null>(null);
-  // Only a listed device moves the target; an unknown one is written over.
-  const moveToLocationDevice = useEffectEvent((environmentId: EnvironmentId): boolean => {
-    if (
-      !devices.choices.some((choice) => choice.environmentId === environmentId && !choice.disabled)
-    )
-      return false;
-    devices.select(environmentId);
-    return true;
-  });
+  // The address's device while the device list may still be loading (the saved
+  // devices are read after the first render): it moves the target once listed,
+  // and the address keeps it meanwhile. `over` is the target it waits over; the
+  // reader choosing another device drops it.
+  const pendingLocationDevice = useRef<{
+    readonly device: EnvironmentId;
+    readonly over: EnvironmentId | null;
+  } | null>(null);
+  const [savedDevicesLoaded, setSavedDevicesLoaded] = useState(hasSavedEnvironmentRegistryHydrated);
+  // The devices a choice may move the target to, one id per line.
+  const selectableDeviceIds = devices.choices
+    .filter((choice) => !choice.disabled)
+    .map((choice) => choice.environmentId)
+    .join("\n");
+  const showLocationDevice = useEffectEvent((environmentId: EnvironmentId) =>
+    devices.select(environmentId),
+  );
   useEffect(() => {
     if (!location || locationKey === null) return;
+    // Only a listed device moves the target. An unknown one waits while the saved
+    // devices load, and is written over after.
+    const moveToLocationDevice = (environmentId: EnvironmentId): boolean => {
+      if (!selectableDeviceIds.split("\n").includes(environmentId)) return false;
+      showLocationDevice(environmentId);
+      return true;
+    };
+    const devicesStillLoading = (): boolean => {
+      if (savedDevicesLoaded || hasSavedEnvironmentRegistryHydrated()) return false;
+      void waitForSavedEnvironmentRegistryHydration().then(() => setSavedDevicesLoaded(true));
+      return true;
+    };
     if (locationKey !== syncedLocationKey.current) {
       syncedLocationKey.current = locationKey;
-      const { section, tab, device } = location.search;
+      pendingLocationDevice.current = null;
+      const { section, tab, device, view } = location.search;
       const state = useSettingsDialogStore.getState();
       const moveSection =
         section !== undefined && (section !== state.section || (tab ?? null) !== state.deviceTab);
       if (moveSection && section) state.setSection(section, tab ?? null);
-      const moveDevice =
+      // A named device shows its own values unless the address says every device's.
+      const moveView =
         !hosted &&
         device !== undefined &&
-        device !== targetEnvironmentId &&
-        moveToLocationDevice(device as EnvironmentId);
-      if (moveSection || moveDevice) return;
+        sectionOffersAllDevices(resolveSettingsPageSection(section ?? state.section)) &&
+        state.deviceView !== (view ?? "device");
+      if (moveView) state.setDeviceView(view ?? "device");
+      let moveDevice = false;
+      if (!hosted && device !== undefined && device !== targetEnvironmentId) {
+        moveDevice = moveToLocationDevice(device as EnvironmentId);
+        if (!moveDevice && devicesStillLoading()) {
+          pendingLocationDevice.current = {
+            device: device as EnvironmentId,
+            over: targetEnvironmentId,
+          };
+        }
+      }
+      if (moveSection || moveView || moveDevice) return;
+    }
+    const pending = pendingLocationDevice.current;
+    if (pending) {
+      if (pending.over !== targetEnvironmentId) {
+        pendingLocationDevice.current = null;
+      } else if (moveToLocationDevice(pending.device)) {
+        pendingLocationDevice.current = null;
+        return;
+      } else if (!devicesStillLoading()) {
+        pendingLocationDevice.current = null;
+      }
     }
     if ((hosted && !roleFresh) || storeSection !== effectiveSection) return;
+    const shownDevice =
+      !hosted && usesDevice ? (pendingLocationDevice.current?.device ?? targetEnvironmentId) : null;
     const next: SettingsLocationSearch = {
       section: effectiveSection,
-      ...(!hosted && usesDevice && targetEnvironmentId ? { device: targetEnvironmentId } : {}),
+      ...(shownDevice ? { device: shownDevice } : {}),
+      ...(shownDevice && allDevicesSection && deviceView === "all" ? { view: "all" } : {}),
       ...(normalizedTab ? { tab: normalizedTab } : {}),
     };
     const nextKey = settingsLocationKey(next);
@@ -977,12 +1049,16 @@ export function SettingsPage({
     syncedLocationKey.current = nextKey;
     location.replace(next);
   }, [
+    allDevicesSection,
+    deviceView,
     effectiveSection,
     hosted,
     location,
     locationKey,
     normalizedTab,
     roleFresh,
+    savedDevicesLoaded,
+    selectableDeviceIds,
     storeSection,
     targetEnvironmentId,
     usesDevice,
@@ -1259,7 +1335,7 @@ export function SettingsPage({
                             allDevicesOffered
                               ? {
                                   selected: showAllDevices,
-                                  select: () => setSettingsDeviceView("all"),
+                                  select: () => setDeviceView("all"),
                                 }
                               : null
                           }

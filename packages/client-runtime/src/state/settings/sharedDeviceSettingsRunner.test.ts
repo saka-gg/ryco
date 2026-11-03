@@ -143,15 +143,22 @@ describe("settings sharing runner", () => {
       value: "web",
       stamp: nextSettingsSharingStamp(web.clock, net.readTargets()),
     });
-    // The web's write lands last on the laptop.
+    // The web's write lands last on the laptop. Each client records its edit, which the
+    // offline device was meant to take.
     await executeSettingsSharingCommand(
       net.readTargets().filter((t) => t.environmentId === "laptop"),
       fromDesktop,
     );
-    await executeSettingsSharingCommand(net.readTargets(), fromWeb);
-    await executeSettingsSharingCommand(
-      net.readTargets().filter((t) => t.environmentId === "desktop"),
+    web.runner.noteCommand(
+      fromWeb,
+      await executeSettingsSharingCommand(net.readTargets(), fromWeb),
+    );
+    desktop.runner.noteCommand(
       fromDesktop,
+      await executeSettingsSharingCommand(
+        net.readTargets().filter((t) => t.environmentId === "desktop"),
+        fromDesktop,
+      ),
     );
     devices[2]!.connected = true;
     await settle();
@@ -260,7 +267,14 @@ describe("settings sharing runner", () => {
         },
       },
     });
-    const b = net.add("b");
+    const b = net.add("b", {
+      settings: {
+        settingsSharing: {
+          worktreeBranchPrefix: { mode: "shared", stamp: stamp(1) },
+          chatsRoot: { mode: "shared", stamp: stamp(1) },
+        },
+      },
+    });
     b.reject = (patch) => (patch.chatsRoot !== undefined ? "Chats folder does not exist" : null);
     const { runner, manual } = setup(net);
     runner.start();
@@ -344,6 +358,135 @@ describe("settings sharing runner", () => {
     await settle();
     await settle();
     expect(b.settings.worktreeBranchPrefix).toBe("new");
+    runner.stop();
+  });
+
+  it("does not spin while a device with a pending attempt is offline or read-only", async () => {
+    const net = createDeviceNetwork();
+    net.add("a", { settings: shared("new", 5) });
+    const b = net.add("b", { settings: shared("old", 1) });
+    b.reject = () => "Refused";
+    let reads = 0;
+    const readTargets = () => {
+      reads += 1;
+      return net.readTargets();
+    };
+    const { runner, manual } = setup(net, { readTargets });
+    runner.start();
+    await runner.runNow();
+    expect(runner.readAttempts().get(b.environmentId)?.get("worktreeBranchPrefix")?.state).toBe(
+      "failed",
+    );
+    // The device drops before its retry is due: once due, a pass plans nothing and nothing is
+    // scheduled again until the device changes.
+    b.connected = false;
+    for (let step = 0; step < 50; step += 1) {
+      manual.advance(settingsSharingRetryDelay(1));
+      await settle();
+    }
+    expect(reads).toBeLessThan(10);
+    expect(manual.pendingCount()).toBe(0);
+    // Read-only does the same.
+    b.connected = true;
+    b.canWrite = false;
+    net.notify();
+    manual.advance(1_000);
+    await settle();
+    const after = reads;
+    for (let step = 0; step < 50; step += 1) {
+      manual.advance(settingsSharingRetryDelay(5));
+      await settle();
+    }
+    expect(reads - after).toBeLessThan(10);
+    // Back with write access: retried, and applied.
+    b.canWrite = true;
+    b.reject = null;
+    net.notify();
+    manual.advance(1_000);
+    await settle();
+    await settle();
+    expect(b.settings.worktreeBranchPrefix).toBe("new");
+    runner.stop();
+  });
+
+  it("keeps an edit no device took now, and applies it when a device reconnects", async () => {
+    const net = createDeviceNetwork();
+    const a = net.add("a", { connected: false });
+    const b = net.add("b", { connected: false });
+    const { runner, clock } = setup(net);
+    runner.start();
+    const command = writeSharedSetting({
+      devices: net.readTargets(),
+      key: "worktreeBranchPrefix",
+      value: "team",
+      stamp: nextSettingsSharingStamp(clock, net.readTargets()),
+    });
+    const result = await executeSettingsSharingCommand(net.readTargets(), command);
+    expect(result.applied).toEqual([]);
+    runner.noteCommand(command, result);
+    expect(runner.readCache().worktreeBranchPrefix?.value).toBe("team");
+    a.connected = true;
+    b.connected = true;
+    await runner.runNow();
+    expect([a.settings.worktreeBranchPrefix, b.settings.worktreeBranchPrefix]).toEqual([
+      "team",
+      "team",
+    ]);
+    runner.stop();
+  });
+
+  it("does not overwrite a device paired after a shared edit; it waits for a person", async () => {
+    const net = createDeviceNetwork();
+    const a = net.add("a");
+    const { runner, clock } = setup(net);
+    runner.start();
+    const command = writeSharedSetting({
+      devices: net.readTargets(),
+      key: "worktreeBranchPrefix",
+      value: "team",
+      stamp: nextSettingsSharingStamp(clock, net.readTargets()),
+    });
+    runner.noteCommand(command, await executeSettingsSharingCommand(net.readTargets(), command));
+    expect(a.settings.worktreeBranchPrefix).toBe("team");
+    const later = net.add("later", { settings: { worktreeBranchPrefix: "mine" } });
+    await settle();
+    await runner.runNow();
+    expect(later.writes).toEqual([]);
+    expect(
+      readSharedSettingView({
+        key: "worktreeBranchPrefix",
+        devices: net.readTargets(),
+        cache: runner.readCache(),
+      }).devices[1]?.state,
+    ).toEqual({ kind: "differs" });
+    runner.stop();
+  });
+
+  it("keeps the devices an edit covers when a pass learned its value first", async () => {
+    const net = createDeviceNetwork();
+    const a = net.add("a");
+    const b = net.add("b", { connected: false });
+    const { runner, clock } = setup(net);
+    runner.start();
+    const command = writeSharedSetting({
+      devices: net.readTargets(),
+      key: "worktreeBranchPrefix",
+      value: "team",
+      stamp: nextSettingsSharingStamp(clock, net.readTargets()),
+    });
+    const result = await executeSettingsSharingCommand(net.readTargets(), command);
+    // A slow write elsewhere: a pass runs before the command is recorded.
+    await settle();
+    await runner.runNow();
+    expect(runner.readCache().worktreeBranchPrefix?.covers).toBeUndefined();
+    runner.noteCommand(command, result);
+    expect(runner.readCache().worktreeBranchPrefix?.covers).toEqual([b.environmentId]);
+    b.connected = true;
+    await runner.runNow();
+    expect([a.settings.worktreeBranchPrefix, b.settings.worktreeBranchPrefix]).toEqual([
+      "team",
+      "team",
+    ]);
     runner.stop();
   });
 });

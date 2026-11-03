@@ -283,7 +283,7 @@ describe("the New tasks panel", () => {
         settingsSharing: {
           defaultThreadEnvMode: {
             mode: "shared",
-            stamp: { at: expect.any(Number), by: "phone" },
+            stamp: { at: expect.any(Number), by: "phone~phone" },
             onlyIfOlderShared: true,
           },
         },

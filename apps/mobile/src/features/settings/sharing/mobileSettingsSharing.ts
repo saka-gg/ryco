@@ -1,7 +1,10 @@
 import type { NodeSettingsTarget } from "@ryco/client-runtime/state/settings/nodeSettingsTargets";
 import { createSettingsSharingRuntime } from "@ryco/client-runtime/state/settings/settingsSharingRuntime";
 
-import { readCachedMobileHubProfile } from "../../../hostedHub/hubProfile";
+import {
+  readCachedMobileHubProfile,
+  subscribeMobileHubProfile,
+} from "../../../hostedHub/hubProfile";
 import { useHostedHubStore } from "../../../hostedHub/state";
 import { uuidv4 } from "../../../lib/uuid";
 import { createMobileSettingsSharingStorage } from "../../../platform/settingsSharingStorage";
@@ -43,20 +46,29 @@ function subscribeSettingsSharingTargets(listener: () => void): () => void {
   };
 }
 
-function subscribeHostedAccount(listener: () => void): () => void {
+/**
+ * Calls `listener` when the namespace changes: the signed-in account, or the Hub profile, which
+ * is read from storage after start and may arrive after the account does.
+ */
+export function subscribeMobileSettingsSharingNamespace(listener: () => void): () => void {
   let last = JSON.stringify(readMobileSettingsSharingNamespace());
-  const unsubscribe = useHostedHubStore.subscribe(() => {
+  const check = () => {
     const next = JSON.stringify(readMobileSettingsSharingNamespace());
     if (next === last) return;
     last = next;
     listener();
-  });
-  return () => void unsubscribe();
+  };
+  const unsubscribeAccount = useHostedHubStore.subscribe(check);
+  const unsubscribeProfile = subscribeMobileHubProfile(check);
+  return () => {
+    unsubscribeAccount();
+    unsubscribeProfile();
+  };
 }
 
 export const mobileSettingsSharing = createSettingsSharingRuntime({
   readNamespace: () => readMobileSettingsSharingNamespace(),
-  subscribeNamespace: subscribeHostedAccount,
+  subscribeNamespace: subscribeMobileSettingsSharingNamespace,
   storage: createMobileSettingsSharingStorage(),
   generateId: uuidv4,
   readTargets: readSettingsSharingTargets,

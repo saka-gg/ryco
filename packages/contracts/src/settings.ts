@@ -863,6 +863,14 @@ export type UsagePriceOverrides = typeof UsagePriceOverrides.Type;
 export const SETTINGS_SHARING_ID_MAX_LENGTH = 128;
 /** Most entries a node keeps or a patch carries; far above the shareable key count. */
 export const SETTINGS_SHARING_ENTRY_LIMIT = 200;
+/**
+ * Highest stamp `at` a node accepts: 2^50 ms, about the year 37,600, far past any wall clock
+ * yet well below `Number.MAX_SAFE_INTEGER`, so a client's clock always has room to issue a
+ * later stamp than any it has seen (one stamp at the maximum would otherwise tie every later
+ * one). Clients also ignore stamps far ahead of their own wall clock
+ * (`SETTINGS_SHARING_MAX_CLOCK_LEAD_MS` in client-runtime).
+ */
+export const SETTINGS_SHARING_STAMP_MAX_AT = 2 ** 50;
 
 export const SettingsSharingMode = Schema.Literals(["shared", "override"]);
 export type SettingsSharingMode = typeof SettingsSharingMode.Type;
@@ -873,7 +881,7 @@ export type SettingsSharingMode = typeof SettingsSharingMode.Type;
  * A missing entry stands for the zero stamp, which is never written.
  */
 export const SettingsSharingStamp = Schema.Struct({
-  at: PositiveInt.check(Schema.isLessThanOrEqualTo(Number.MAX_SAFE_INTEGER)),
+  at: PositiveInt.check(Schema.isLessThanOrEqualTo(SETTINGS_SHARING_STAMP_MAX_AT)),
   by: TrimmedNonEmptyString.check(Schema.isMaxLength(SETTINGS_SHARING_ID_MAX_LENGTH)),
 });
 export type SettingsSharingStamp = typeof SettingsSharingStamp.Type;

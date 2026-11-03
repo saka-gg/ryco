@@ -83,6 +83,26 @@ describe("which sections the nav lists", () => {
     expect(settingsSectionListed("account", reach())).toBe(false);
   });
 
+  it("keeps a remote device's sections outside hosted mode while its role is unknown or not owner", () => {
+    // Offline or connecting (no role yet), or connected without ownership: the device bar's
+    // device must not send the page elsewhere; the page says why its rows do not show.
+    for (const role of ROLES) {
+      const remote = reach({ device: { gated: true, role } });
+      expect(settingsSectionListed("providers", remote)).toBe(true);
+      expect(settingsSectionListed("usage", remote)).toBe(true);
+      expect(settingsSectionListed("agent-control", remote)).toBe(true);
+    }
+    // Still nothing on a device to list before any device is known.
+    expect(settingsSectionListed("providers", reach({ device: null }))).toBe(false);
+    // Hosted, the role decides.
+    expect(
+      settingsSectionListed(
+        "providers",
+        reach({ hosted: true, device: { gated: true, role: null } }),
+      ),
+    ).toBe(false);
+  });
+
   it("shows the device bar only where a reachable part is stored on a device", () => {
     expect(settingsSectionHasDeviceParts("projects", reach())).toBe(true);
     expect(settingsSectionHasDeviceParts("appearance", reach())).toBe(false);

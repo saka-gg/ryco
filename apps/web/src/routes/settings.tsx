@@ -6,18 +6,20 @@ import { useSettingsDialogStore } from "../settingsDialogStore";
 import { preloadOpenSettingsSection, SettingsRouteComponent } from "../settingsRoute";
 
 export const Route = createFileRoute("/settings")({
-  // Section, device page tab and device, so Back, Forward and links open them.
+  // Section, device page tab, device and its view, so Back, Forward and links open them.
   // Only short strings pass here; the page checks their values
   // (`parseSettingsLocationSearch`), so the section list stays out of boot.
-  validateSearch: (search): { section?: string; device?: string; tab?: string } => {
+  validateSearch: (search): { section?: string; device?: string; view?: string; tab?: string } => {
     const pick = (value: unknown) =>
       typeof value === "string" && value.length > 0 && value.length <= 256 ? value : undefined;
     const section = pick(search.section);
     const device = pick(search.device);
+    const view = pick(search.view);
     const tab = pick(search.tab);
     return {
       ...(section ? { section } : {}),
       ...(device ? { device } : {}),
+      ...(view ? { view } : {}),
       ...(tab ? { tab } : {}),
     };
   },

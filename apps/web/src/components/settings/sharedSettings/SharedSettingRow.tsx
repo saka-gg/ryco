@@ -96,6 +96,20 @@ export interface SharedSettingRowProps<K extends ShareableServerSettingKey> {
    * reads in its hints and "Use … everywhere" (the catalog's format otherwise).
    */
   readonly compareBy?: (value: ShareableSettingValue<K>) => unknown;
+  /**
+   * With `compareBy`: puts the edited field into a device's own value, so the one control and
+   * "Use … everywhere" change that field on each device and keep the rest of each device's own
+   * value (`buildSharedRowCommand`).
+   */
+  readonly applyField?: (
+    current: ShareableSettingValue<K>,
+    edited: ShareableSettingValue<K>,
+  ) => ShareableSettingValue<K>;
+  /**
+   * Names this row among other rows of the same setting (one per field), for its element id.
+   * The key's first row leaves it out: "Open" from the compare table reveals that one.
+   */
+  readonly field?: string;
   readonly formatValue?: (value: ShareableSettingValue<K>) => string;
   readonly className?: string | undefined;
 }
@@ -209,6 +223,16 @@ function DeviceStateMark(props: {
       );
     case "unknown":
       return <span className="text-xs text-muted-foreground">Not connected yet</span>;
+    case "differs":
+      return (
+        <Badge
+          variant="warning"
+          size="sm"
+          title={`${props.label} keeps the value it had before sharing until you choose one`}
+        >
+          Not shared yet
+        </Badge>
+      );
     case "shared":
       return null;
   }
@@ -227,6 +251,12 @@ function useSharedSettingState<K extends ShareableServerSettingKey>(props: {
   readonly settingKey: K;
   readonly knowsSetting?: ((config: NodeSettingsConfig) => boolean) | undefined;
   readonly compareBy?: ((value: ShareableSettingValue<K>) => unknown) | undefined;
+  readonly applyField?:
+    | ((
+        current: ShareableSettingValue<K>,
+        edited: ShareableSettingValue<K>,
+      ) => ShareableSettingValue<K>)
+    | undefined;
   readonly formatValue?: ((value: ShareableSettingValue<K>) => string) | undefined;
 }) {
   const { settingKey: key } = props;
@@ -286,6 +316,7 @@ function useSharedSettingState<K extends ShareableServerSettingKey>(props: {
       devices: snapshot.devices,
       cache: snapshot.cache,
       nextStamp: () => source.nextStamp(snapshot.devices),
+      ...(props.applyField === undefined ? {} : { applyField: props.applyField }),
     });
     if (command === null) return null;
     setBusy(true);
@@ -310,7 +341,10 @@ function useSharedSettingState<K extends ShareableServerSettingKey>(props: {
   return { key, model, view, setOpen, busy, notes, send, format, display, showDevice, mode };
 }
 
-/** Runs a writer's save and throws the device's own message when it did not apply. */
+/**
+ * Runs a writer's save and throws the device's own message when it did not apply: refused, or
+ * not written anywhere (offline, read-only, too old).
+ */
 export async function saveSharedSetting<V>(
   save: (next: V) => Promise<NodeSettingsApplyResult | null>,
   next: V,
@@ -319,6 +353,18 @@ export async function saveSharedSetting<V>(
   if (result === null) throw new Error("This device cannot be changed now.");
   const failed = result.notApplied.find((entry) => entry.reason === "failed");
   if (failed !== undefined) throw new Error(failed.detail ?? `${failed.label} refused the value.`);
+  if (result.applied.length === 0) {
+    const missed = result.notApplied[0];
+    throw new Error(
+      missed === undefined
+        ? "No device could be changed now."
+        : missed.reason === "read-only"
+          ? `Only the owner of ${missed.label} can change it.`
+          : missed.reason === "unsupported"
+            ? `Update ${missed.label} to change this setting.`
+            : `${missed.label} is not connected.`,
+    );
+  }
   return result;
 }
 
@@ -368,7 +414,9 @@ export function useSharedSettingWriter<K extends ShareableServerSettingKey>(
       model.deviceCount > 1 ? (
         <span>
           Same on all {model.deviceCount} devices
-          {model.queued > 0 ? ` · ${model.queued} queued until online` : ""}
+          {sameModelNotes(model)
+            .map((part) => ` · ${part}`)
+            .join("")}
         </span>
       ) : null
     ) : others.length > 0 ? (
@@ -403,6 +451,25 @@ export function useSharedSettingWriter<K extends ShareableServerSettingKey>(
   return { save, status };
 }
 
+/** What the one control of a "same" row does not reach, in short parts. */
+function sameModelNotes(model: {
+  readonly queued: number;
+  readonly waitingForOwner: number;
+  readonly syncing: number;
+  readonly needUpdate: ReadonlyArray<string>;
+  readonly notLoaded: number;
+}): ReadonlyArray<string> {
+  return [
+    model.queued > 0 ? `${model.queued} queued until online` : null,
+    model.waitingForOwner > 0 ? `${model.waitingForOwner} waiting for an owner` : null,
+    model.syncing > 0 ? `${model.syncing} syncing` : null,
+    model.needUpdate.length > 0
+      ? `${model.needUpdate.join(", ")} need${model.needUpdate.length === 1 ? "s" : ""} an update to share settings`
+      : null,
+    model.notLoaded > 0 ? `${model.notLoaded} not loaded yet` : null,
+  ].filter((part) => part !== null);
+}
+
 export function SharedSettingRow<K extends ShareableServerSettingKey>(
   props: SharedSettingRowProps<K>,
 ) {
@@ -420,6 +487,10 @@ function SharedSettingRowBody<K extends ShareableServerSettingKey>(
   const { render } = props;
   const { key, model, setOpen, busy, notes, send, format, display, showDevice } =
     useSharedSettingState(props);
+  const rowId =
+    props.field === undefined
+      ? sharedSettingRowId(key)
+      : `${sharedSettingRowId(key)}-${props.field}`;
   const { lastSeenAt } = useSharedSettingsMode();
   const lastSeenLabel = (environmentId: EnvironmentId): string | null => {
     const at = lastSeenAt?.(environmentId) ?? null;
@@ -471,7 +542,7 @@ function SharedSettingRowBody<K extends ShareableServerSettingKey>(
             });
       return (
         <SettingsRow
-          id={sharedSettingRowId(key)}
+          id={rowId}
           title={title}
           description={props.description}
           owner="node"
@@ -529,13 +600,13 @@ function SharedSettingRowBody<K extends ShareableServerSettingKey>(
     });
     if (editor)
       return (
-        <div id={sharedSettingRowId(key)} data-shared-setting>
+        <div id={rowId} data-shared-setting>
           {control}
         </div>
       );
     return (
       <SettingsRow
-        id={sharedSettingRowId(key)}
+        id={rowId}
         scope={device.label}
         title={title}
         description={props.description}
@@ -558,10 +629,7 @@ function SharedSettingRowBody<K extends ShareableServerSettingKey>(
   }
 
   if (model.kind === "same") {
-    const waiting = [
-      model.queued > 0 ? `${model.queued} queued until online` : null,
-      model.syncing > 0 ? `${model.syncing} syncing` : null,
-    ].filter((part) => part !== null);
+    const waiting = sameModelNotes(model);
     const sameStatus = withStatus(
       <span className="flex flex-wrap items-center gap-x-1.5" data-testid="shared-setting-same">
         <span>Same on all {model.deviceCount} devices</span>
@@ -593,13 +661,13 @@ function SharedSettingRowBody<K extends ShareableServerSettingKey>(
     });
     if (editor)
       return (
-        <div id={sharedSettingRowId(key)} data-shared-setting>
+        <div id={rowId} data-shared-setting>
           {control}
         </div>
       );
     return (
       <SettingsRow
-        id={sharedSettingRowId(key)}
+        id={rowId}
         scope="All devices"
         title={title}
         description={props.description}
@@ -619,7 +687,7 @@ function SharedSettingRowBody<K extends ShareableServerSettingKey>(
   const everywhere = model.everywhere;
   const list = (
     <SettingsRow
-      id={sharedSettingRowId(key)}
+      id={rowId}
       scope="All devices"
       title={title}
       description={props.description}
@@ -647,6 +715,7 @@ function SharedSettingRowBody<K extends ShareableServerSettingKey>(
             block={block || editor}
             format={format}
             render={render}
+            title={typeof title === "string" ? title : display.title}
             onChange={(next) =>
               act({ kind: "device", environmentId: device.environmentId, value: next })
             }
@@ -692,6 +761,8 @@ function SharedDeviceRow<K extends ShareableServerSettingKey>(props: {
   readonly block: boolean;
   readonly format: (value: ShareableSettingValue<K> | undefined) => string;
   readonly render: (control: SharedSettingControl<K>) => ReactNode;
+  /** The row's title, for the accessible names of its per-device buttons. */
+  readonly title: string;
   readonly onChange: (next: ShareableSettingValue<K>) => void;
   readonly onReset: () => void;
   readonly onEdit: (() => void) | null;
@@ -736,7 +807,12 @@ function SharedDeviceRow<K extends ShareableServerSettingKey>(props: {
               {props.format(value)}
             </span>
             {props.onEdit && device.editable ? (
-              <Button size="xs" variant="outline" onClick={props.onEdit}>
+              <Button
+                size="xs"
+                variant="outline"
+                onClick={props.onEdit}
+                aria-label={`Edit ${props.title} on ${device.label}`}
+              >
                 Edit
               </Button>
             ) : null}

@@ -39,6 +39,8 @@ vi.mock("../chat/ProviderModelPicker", () => ({
 vi.mock("../chat/TraitsPicker", () => ({ TraitsPicker: () => <span>Traits picker</span> }));
 vi.mock("../../rpc/serverState", () => ({
   useServerConfig: () => harness.config,
+  usePrimaryServerConfigSelector: (selector: (config: unknown) => unknown) =>
+    selector(harness.config),
   applySettingsUpdated: vi.fn(),
 }));
 vi.mock("../../settingsTarget", () => ({

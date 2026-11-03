@@ -6,6 +6,7 @@ import type {
 import {
   editDeviceSetting,
   resetSettingToShared,
+  settingsSharingCommandCatchUps,
   sharedDeviceValuesAgree,
   useSettingEverywhere as settingEverywhereCommand,
   writeSharedSetting,
@@ -60,14 +61,25 @@ export type SharedRowModel<K extends ShareableServerSettingKey> =
       }>;
       readonly deviceCount: number;
     }
-  /** Every device holds (or is catching up to) the same value: one control. */
+  /**
+   * Every device that follows the shared value holds (or is catching up to) the same value:
+   * one control, which writes all of them. A device keeping its own value, or one the device
+   * refused, shows the list instead.
+   */
   | {
       readonly kind: "same";
       readonly value: ShareableSettingValue<K>;
+      /** The devices with a known value, all on it. */
       readonly deviceCount: number;
-      /** Offline or read-only devices that take it when they can. */
+      /** Offline devices that take it when they reconnect. */
       readonly queued: number;
+      /** Devices this reader may not change, which take it once an owner opens them. */
+      readonly waitingForOwner: number;
       readonly syncing: number;
+      /** Devices on an older Ryco, which the control does not change. */
+      readonly needUpdate: ReadonlyArray<string>;
+      /** Devices whose settings are not known yet, left out of the count. */
+      readonly notLoaded: number;
       readonly editable: boolean;
     }
   /** Each device with its own control. */
@@ -171,14 +183,34 @@ export function readSharedRowModel<K extends ShareableServerSettingKey>(input: {
   const allSame =
     first !== undefined && known.every((entry) => sameSetting(view, entry, first, equal));
   const firstValue = first === undefined ? undefined : shownValue(view, first);
-  if (allSame && shares && !input.open && firstValue !== undefined) {
+  // One control writes only devices following the shared value: a device keeping its own
+  // value (even an equal one), one with a value from before sharing, or one that refused the
+  // value shows in the list, with its mark.
+  const oneControlWritesAll = known.every(
+    (entry) =>
+      entry.state.kind !== "override" &&
+      entry.state.kind !== "differs" &&
+      entry.state.kind !== "couldNotApply",
+  );
+  if (allSame && shares && oneControlWritesAll && !input.open && firstValue !== undefined) {
     // This app's own device first: its stored value is the one it uses.
+    const count = (kind: SharedSettingDeviceState["kind"], reason?: string) =>
+      rows.filter(
+        (row) =>
+          row.state.kind === kind &&
+          (reason === undefined || (row.state.kind === "queued" && row.state.reason === reason)),
+      ).length;
     return {
       kind: "same",
       value: firstValue,
-      deviceCount,
-      queued: rows.filter((row) => row.state.kind === "queued").length,
-      syncing: rows.filter((row) => row.state.kind === "syncing").length,
+      deviceCount: known.length,
+      queued: count("queued", "offline"),
+      waitingForOwner: count("queued", "read-only"),
+      syncing: count("syncing"),
+      needUpdate: rows.flatMap((row) =>
+        row.state.kind === "unsupported" && row.value !== undefined ? [row.label] : [],
+      ),
+      notLoaded: rows.filter((row) => row.value === undefined).length,
       editable: rows.some((row) => row.editable && row.state.kind !== "unsupported"),
     };
   }
@@ -232,6 +264,15 @@ export function buildSharedRowCommand<K extends ShareableServerSettingKey>(input
   readonly devices: ReadonlyArray<SharingDevice>;
   readonly cache?: SettingsSharingCache;
   readonly nextStamp: () => SettingsSharingStamp | null;
+  /**
+   * For a row that edits one field of a larger value: puts the edited field of `edited` into a
+   * device's own value. Its one control and "Use … everywhere" then change only that field on
+   * each device, never the fields the row does not show.
+   */
+  readonly applyField?: (
+    current: ShareableSettingValue<K>,
+    edited: ShareableSettingValue<K>,
+  ) => ShareableSettingValue<K>;
 }): SettingsSharingCommand | null {
   const { key, action, devices } = input;
   if (action.kind === "reset") {
@@ -247,10 +288,16 @@ export function buildSharedRowCommand<K extends ShareableServerSettingKey>(input
   }
   const stamp = input.nextStamp();
   if (stamp === null) return null;
+  const { applyField } = input;
+  const edited = action.kind === "all" || action.kind === "everywhere" ? action.value : null;
+  const field =
+    applyField === undefined || edited === null
+      ? {}
+      : { valueFor: (current: ShareableSettingValue<K>) => applyField(current, edited) };
   if (action.kind === "all")
-    return writeSharedSetting({ devices, key, value: action.value, stamp });
+    return writeSharedSetting({ devices, key, value: action.value, stamp, ...field });
   if (action.kind === "everywhere")
-    return settingEverywhereCommand({ devices, key, value: action.value, stamp });
+    return settingEverywhereCommand({ devices, key, value: action.value, stamp, ...field });
   return editDeviceSetting({
     devices,
     environmentId: action.environmentId,
@@ -258,6 +305,21 @@ export function buildSharedRowCommand<K extends ShareableServerSettingKey>(input
     value: action.value,
     stamp,
   });
+}
+
+function skippedNote(skipped: SettingsSharingCommand["skipped"][number]): string {
+  switch (skipped.reason) {
+    case "offline":
+      return `Not saved: ${skipped.label} is offline.`;
+    case "read-only":
+      return `Not saved: only the owner of ${skipped.label} can change it.`;
+    case "unsupported":
+      return `Not saved: update ${skipped.label} to change this setting.`;
+    case "unknown":
+      return `Not saved: ${skipped.label}'s settings have not loaded yet.`;
+    case "override":
+      return `${skipped.label} keeps its own value.`;
+  }
 }
 
 /** What an edit could not do, in one line each: devices left out and refused writes. */
@@ -280,11 +342,23 @@ export function describeSharedRowOutcome<K extends ShareableServerSettingKey>(in
         notes.push(`${skipped.label} keeps its own value: only its owner can change it.`);
     }
   }
+  if (input.action.kind === "device") {
+    // A one-device edit the device could not take now: nothing is kept for it.
+    for (const skipped of input.command.skipped) notes.push(skippedNote(skipped));
+  }
+  const catchUps = new Set(settingsSharingCommandCatchUps(input.command, input.result));
   for (const failed of input.result.notApplied) {
     if (failed.reason === "failed")
       notes.push(`Couldn't save on ${failed.label}: ${failed.detail ?? "it refused the value"}.`);
     else if (failed.reason === "disconnected")
-      notes.push(`${failed.label} went offline; it catches up when it reconnects.`);
+      notes.push(
+        catchUps.has(failed.environmentId)
+          ? `${failed.label} went offline; it catches up when it reconnects.`
+          : `${failed.label} went offline before the change was saved there.`,
+      );
+    else if (failed.reason === "read-only")
+      notes.push(`Not saved on ${failed.label}: only its owner can change it.`);
+    else notes.push(`Not saved on ${failed.label}: update it to change this setting.`);
   }
   return notes;
 }

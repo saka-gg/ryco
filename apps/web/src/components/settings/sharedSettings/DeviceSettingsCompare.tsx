@@ -11,7 +11,7 @@ import { useMemo, useState } from "react";
 import { cn } from "../../../lib/utils";
 import { Badge } from "../../ui/badge";
 import { Switch } from "../../ui/switch";
-import { settingsSection } from "../settingsRegistry";
+import { settingsSection, type SettingsPageSectionId } from "../settingsRegistry";
 import { SettingsCard, SettingsSection } from "../settingsLayout";
 import { openSharedSetting } from "./openSharedSetting";
 import { readSharedRowModel } from "./sharedSettingRow.logic";
@@ -46,6 +46,12 @@ function CellMark({ state }: { readonly state: SharedSettingDeviceState }) {
           couldn't apply
         </Badge>
       );
+    case "differs":
+      return (
+        <Badge variant="warning" size="sm" title="Kept from before sharing">
+          not shared yet
+        </Badge>
+      );
     case "unknown":
     case "shared":
       return null;
@@ -57,7 +63,12 @@ function CellMark({ state }: { readonly state: SharedSettingDeviceState }) {
  * "Only differences" leaves out the settings every device agrees on; a row opens its setting
  * where it lives, with its device list open. Self-contained: it reads every device itself.
  */
-export function DeviceSettingsCompare() {
+export function DeviceSettingsCompare({
+  canOpen = () => true,
+}: {
+  /** Whether this reader can open a section; a row of one they can't reads only. */
+  readonly canOpen?: (section: SettingsPageSectionId) => boolean;
+} = {}) {
   const snapshot = useSharedSettingsSnapshot();
   const [onlyDifferences, setOnlyDifferences] = useState(true);
   const views = useMemo(
@@ -91,7 +102,11 @@ export function DeviceSettingsCompare() {
   return (
     <SettingsSection
       title="Compare settings"
-      description="Settings every device shares, side by side. Open one to change it."
+      description={
+        shown.some((row) => canOpen(SHARED_SETTING_DISPLAY[row.view.key].section))
+          ? "Settings every device shares, side by side. Open one to change it."
+          : "Settings every device shares, side by side."
+      }
       headerAction={
         <label htmlFor={toggleId} className="flex items-center gap-2 text-xs text-muted-foreground">
           <Switch
@@ -108,12 +123,16 @@ export function DeviceSettingsCompare() {
         <table className="w-full border-collapse text-xs" data-testid="settings-compare-table">
           <thead>
             <tr>
-              <th className="px-4 py-2 text-left font-medium whitespace-nowrap text-muted-foreground">
+              <th
+                scope="col"
+                className="px-4 py-2 text-left font-medium whitespace-nowrap text-muted-foreground"
+              >
                 Setting
               </th>
               {snapshot.devices.map((device) => (
                 <th
                   key={device.environmentId}
+                  scope="col"
                   className="px-3 py-2 text-left font-medium whitespace-nowrap text-muted-foreground"
                 >
                   <span className="inline-flex items-center gap-1.5">
@@ -145,6 +164,7 @@ export function DeviceSettingsCompare() {
                 <CompareRow
                   key={view.key}
                   settingKey={view.key}
+                  openable={canOpen(SHARED_SETTING_DISPLAY[view.key].section)}
                   devices={view.devices}
                   differs={differs}
                   reference={reference}
@@ -160,6 +180,8 @@ export function DeviceSettingsCompare() {
 
 function CompareRow(props: {
   readonly settingKey: ShareableServerSettingKey;
+  /** The reader can open the setting's section; otherwise the row only reads. */
+  readonly openable: boolean;
   readonly devices: ReturnType<typeof readSharedSettingViews>[number]["devices"];
   readonly differs: boolean;
   readonly reference: unknown;
@@ -168,26 +190,33 @@ function CompareRow(props: {
   const display = SHARED_SETTING_DISPLAY[key];
   return (
     <tr
-      className="group cursor-pointer border-t border-border/60 hover:bg-accent/40"
+      className={cn(
+        "group border-t border-border/60",
+        props.openable && "cursor-pointer hover:bg-accent/40",
+      )}
       data-testid="settings-compare-row"
       data-setting={key}
-      onClick={() => openSharedSetting(key)}
+      onClick={props.openable ? () => openSharedSetting(key) : undefined}
     >
-      <td className="px-4 py-2 align-middle">
-        <button
-          type="button"
-          className="rounded-sm text-left text-[13px] font-medium text-foreground outline-hidden group-hover:underline focus-visible:ring-2 focus-visible:ring-ring"
-          onClick={(event) => {
-            event.stopPropagation();
-            openSharedSetting(key);
-          }}
-        >
-          {display.title}
-        </button>
+      <th scope="row" className="px-4 py-2 text-left align-middle font-normal">
+        {props.openable ? (
+          <button
+            type="button"
+            className="rounded-sm text-left text-[13px] font-medium text-foreground outline-hidden group-hover:underline focus-visible:ring-2 focus-visible:ring-ring"
+            onClick={(event) => {
+              event.stopPropagation();
+              openSharedSetting(key);
+            }}
+          >
+            {display.title}
+          </button>
+        ) : (
+          <span className="text-[13px] font-medium text-foreground">{display.title}</span>
+        )}
         <span className="block text-muted-foreground">
           {settingsSection(display.section).title}
         </span>
-      </td>
+      </th>
       {props.devices.map((device) => {
         const cellDiffers =
           props.differs &&
@@ -209,6 +238,13 @@ function CompareRow(props: {
               <span className="truncate">
                 {device.written === undefined ? "—" : formatSharedSettingValue(key, device.written)}
               </span>
+              {cellDiffers ? (
+                // Not by colour alone.
+                <span className="text-warning-foreground" title="Differs">
+                  <span aria-hidden>≠</span>
+                  <span className="sr-only">differs</span>
+                </span>
+              ) : null}
               <CellMark state={device.state} />
             </span>
           </td>
