@@ -394,6 +394,22 @@ const DESKTOP_ACCOUNT_PROMPT_SOURCES: readonly ForbiddenBundleSource[] = [
   },
 ];
 
+/**
+ * The cross-node project copy RPCs, the schemas only they use and their client. The RPC
+ * client builds them on its socket with the first copy call; boot keeps only the fields an
+ * Agent Control copy plan names (`projectCopyPrimitives.ts`).
+ */
+const PROJECT_COPY_RPC_SOURCES: readonly ForbiddenBundleSource[] = [
+  {
+    pattern: /^packages\/contracts\/src\/projectCopy(?:Rpc)?\.ts$/u,
+    reason: "project copy RPC schemas (the first copy loads them)",
+  },
+  {
+    pattern: /^packages\/client-runtime\/src\/rpc\/projectCopyRpcClient\.ts$/u,
+    reason: "project copy RPC client (the first copy loads it)",
+  },
+];
+
 /** The thread routes (server thread and draft) share their chat graph. */
 const CHAT_ROUTE_FORBIDDEN_SOURCES: readonly ForbiddenBundleSource[] = [
   ...HOSTED_RUNTIME_SOURCES,
@@ -482,6 +498,7 @@ export const DEFAULT_BUNDLE_BUDGET_POLICY: BundleBudgetPolicy = {
         ...PAIRING_SOURCES,
         ...QUOTE_CITATION_SOURCES,
         ...DESKTOP_ACCOUNT_PROMPT_SOURCES,
+        ...PROJECT_COPY_RPC_SOURCES,
       ],
     },
     {

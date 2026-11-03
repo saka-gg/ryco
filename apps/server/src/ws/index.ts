@@ -15,7 +15,8 @@ import { makeAutomationCentreHandlers } from "./automationCentreRpc.ts";
 import { makeSideQuestionHandlers } from "./sideQuestionRpc.ts";
 import { makeSecretRequestHandlers } from "./secretRequestRpc.ts";
 import { Effect, Layer, Option, type Scope, type Stream } from "effect";
-import { WsDeviceRpcGroup, WsRpcGroup } from "@ryco/contracts";
+import { WsDeviceRpcGroup } from "@ryco/contracts";
+import { WsApplicationRpcGroup } from "@ryco/contracts/project-copy-rpc";
 import { type Rpc, type RpcGroup, RpcSerialization } from "effect/rpc";
 
 import { makeWsRpcContext } from "./context.ts";
@@ -84,7 +85,7 @@ const makeWsRpcHandlers = (
   Effect.gen(function* () {
     const ctx = yield* makeWsRpcContext(principal);
     yield* Effect.addFinalizer(() => ctx.clientWorkspaceUse.release);
-    return WsRpcGroup.of({
+    return WsApplicationRpcGroup.of({
       ...makeAgentControlHandlers(ctx),
       ...makeAutomationCentreHandlers(ctx),
       ...makeOrchestrationHandlers(ctx),
@@ -163,7 +164,7 @@ type WsRpcHandlersBuild = ReturnType<typeof makeWsRpcHandlers>;
  * serializes for an inferred export (TS7056).
  */
 type WsRpcLayer = Layer.Layer<
-  Rpc.ToHandler<RpcGroup.Rpcs<typeof WsRpcGroup>>,
+  Rpc.ToHandler<RpcGroup.Rpcs<typeof WsApplicationRpcGroup>>,
   Effect.Error<WsRpcHandlersBuild>,
   Exclude<
     Effect.Services<WsRpcHandlersBuild> | HandlerMapServices<Effect.Success<WsRpcHandlersBuild>>,
@@ -173,7 +174,9 @@ type WsRpcLayer = Layer.Layer<
 
 export const makeWsRpcLayer = (principal: RpcPrincipal): WsRpcLayer => {
   const build = makeWsRpcHandlers(principal);
-  // `WsRpcGroup.of` in `makeWsRpcHandlers` already checks every RPC has its handler.
-  const toLayer = WsRpcGroup.toLayer as unknown as (handlers: WsRpcHandlersBuild) => WsRpcLayer;
-  return toLayer.call(WsRpcGroup, build);
+  // `WsApplicationRpcGroup.of` in `makeWsRpcHandlers` already checks every RPC has its handler.
+  const toLayer = WsApplicationRpcGroup.toLayer as unknown as (
+    handlers: WsRpcHandlersBuild,
+  ) => WsRpcLayer;
+  return toLayer.call(WsApplicationRpcGroup, build);
 };

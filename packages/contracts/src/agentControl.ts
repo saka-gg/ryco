@@ -57,7 +57,7 @@ import {
   ProjectCopyRemoteUrl,
   ProjectImportId,
   ProjectImportSetup,
-} from "./projectCopy.ts";
+} from "./projectCopyPrimitives.ts";
 import {
   ModelSelection,
   AgentTokenMode,

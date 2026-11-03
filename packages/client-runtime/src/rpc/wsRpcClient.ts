@@ -25,7 +25,6 @@ import {
   type OrchestrationThreadStreamItem,
   type OrchestrationThreadWindowStreamItem,
 } from "@ryco/contracts/orchestration";
-import type { ProjectImportSnapshot } from "@ryco/contracts/project-copy";
 import { NODE_BROWSER_WS_METHODS } from "@ryco/contracts/node-browser";
 import { WS_METHODS } from "@ryco/contracts/rpc";
 import {
@@ -41,6 +40,7 @@ import { type WsRpcProtocolClient } from "./protocol.ts";
 import { resetWsReconnectBackoff } from "./wsConnectionState.ts";
 import { type SubscriptionFailureKind, WsTransport } from "./wsTransport.ts";
 import type { DeviceRpcClient } from "./deviceRpcClient.ts";
+import type { ProjectCopyRpcMethods } from "./projectCopyRpcClient.ts";
 import type {
   NodeBrowserFrameRequest,
   NodeBrowserFrameSource,
@@ -204,27 +204,24 @@ export interface WsRpcClient {
     readonly promoteChatPreview: RpcUnaryMethod<typeof WS_METHODS.projectsPromoteChatPreview>;
     readonly promoteChat: RpcUnaryMethod<typeof WS_METHODS.projectsPromoteChat>;
     readonly deleteChatFolder: RpcUnaryMethod<typeof WS_METHODS.projectsDeleteChatFolder>;
-    // Cross-node project copy; nodes advertise them with `capabilities.projectCopy`.
-    readonly pathHints: RpcUnaryMethod<typeof WS_METHODS.projectsPathHints>;
-    readonly previewDestination: RpcUnaryMethod<typeof WS_METHODS.projectsPreviewDestination>;
-    readonly checkRemoteAccess: RpcUnaryMethod<typeof WS_METHODS.projectsCheckRemoteAccess>;
-    readonly exportInspect: RpcUnaryMethod<typeof WS_METHODS.projectsExportInspect>;
-    readonly exportStart: RpcUnaryMethod<typeof WS_METHODS.projectsExportStart>;
-    readonly exportReadChunk: RpcUnaryMethod<typeof WS_METHODS.projectsExportReadChunk>;
-    readonly exportDispose: RpcUnaryMethod<typeof WS_METHODS.projectsExportDispose>;
-    readonly transferBegin: RpcUnaryMethod<typeof WS_METHODS.projectsTransferBegin>;
-    readonly transferAppend: RpcUnaryMethod<typeof WS_METHODS.projectsTransferAppend>;
-    readonly transferCommit: RpcUnaryMethod<typeof WS_METHODS.projectsTransferCommit>;
-    readonly transferAbort: RpcUnaryMethod<typeof WS_METHODS.projectsTransferAbort>;
-    readonly importStart: RpcUnaryMethod<typeof WS_METHODS.projectsImportStart>;
-    readonly subscribeImport: (
-      input: RpcInput<typeof WS_METHODS.projectsSubscribeImport>,
-      listener: (snapshot: ProjectImportSnapshot) => void,
-      options?: StreamSubscriptionOptions,
-    ) => () => void;
-    readonly cancelImport: RpcUnaryMethod<typeof WS_METHODS.projectsCancelImport>;
-    readonly listImports: RpcUnaryMethod<typeof WS_METHODS.projectsListImports>;
-    readonly discardImport: RpcUnaryMethod<typeof WS_METHODS.projectsDiscardImport>;
+    // Cross-node project copy; nodes advertise them with `capabilities.projectCopy`. Their
+    // RPC client and schemas load with the first call (`createProjectCopyRpcMethods`).
+    readonly pathHints: ProjectCopyRpcMethods["pathHints"];
+    readonly previewDestination: ProjectCopyRpcMethods["previewDestination"];
+    readonly checkRemoteAccess: ProjectCopyRpcMethods["checkRemoteAccess"];
+    readonly exportInspect: ProjectCopyRpcMethods["exportInspect"];
+    readonly exportStart: ProjectCopyRpcMethods["exportStart"];
+    readonly exportReadChunk: ProjectCopyRpcMethods["exportReadChunk"];
+    readonly exportDispose: ProjectCopyRpcMethods["exportDispose"];
+    readonly transferBegin: ProjectCopyRpcMethods["transferBegin"];
+    readonly transferAppend: ProjectCopyRpcMethods["transferAppend"];
+    readonly transferCommit: ProjectCopyRpcMethods["transferCommit"];
+    readonly transferAbort: ProjectCopyRpcMethods["transferAbort"];
+    readonly importStart: ProjectCopyRpcMethods["importStart"];
+    readonly subscribeImport: ProjectCopyRpcMethods["subscribeImport"];
+    readonly cancelImport: ProjectCopyRpcMethods["cancelImport"];
+    readonly listImports: ProjectCopyRpcMethods["listImports"];
+    readonly discardImport: ProjectCopyRpcMethods["discardImport"];
   };
   readonly sessionImport: {
     readonly sources: RpcUnaryMethod<typeof WS_METHODS.sessionImportSources>;
@@ -235,7 +232,8 @@ export interface WsRpcClient {
   };
   readonly filesystem: {
     readonly browse: RpcUnaryMethod<typeof WS_METHODS.filesystemBrowse>;
-    readonly searchDirectories: RpcUnaryMethod<typeof WS_METHODS.filesystemSearchDirectories>;
+    /** Cross-node project copy, loaded like the `projects` copy calls. */
+    readonly searchDirectories: ProjectCopyRpcMethods["searchDirectories"];
   };
   readonly sourceControl: {
     readonly lookupRepository: RpcUnaryMethod<typeof WS_METHODS.sourceControlLookupRepository>;
@@ -722,6 +720,86 @@ export interface WsRpcClient {
   };
 }
 
+/**
+ * The copy calls on `WsRpcClient.projects`, named once: the client builds them
+ * from this list and `createEnvironmentApi` forwards them with it
+ * (`pickProjectCopyCalls`). `filesystem.searchDirectories` is the other one.
+ */
+export const PROJECT_COPY_PROJECT_CALLS = [
+  "pathHints",
+  "previewDestination",
+  "checkRemoteAccess",
+  "exportInspect",
+  "exportStart",
+  "exportReadChunk",
+  "exportDispose",
+  "transferBegin",
+  "transferAppend",
+  "transferCommit",
+  "transferAbort",
+  "importStart",
+  "subscribeImport",
+  "cancelImport",
+  "listImports",
+  "discardImport",
+] as const satisfies ReadonlyArray<keyof ProjectCopyRpcMethods>;
+
+export type ProjectCopyProjectCalls = Pick<
+  ProjectCopyRpcMethods,
+  (typeof PROJECT_COPY_PROJECT_CALLS)[number]
+>;
+
+/** The copy calls of a `projects` API, for an API that forwards them. */
+export const pickProjectCopyCalls = (projects: ProjectCopyProjectCalls): ProjectCopyProjectCalls =>
+  Object.fromEntries(
+    PROJECT_COPY_PROJECT_CALLS.map((name) => [name, projects[name]]),
+  ) as unknown as ProjectCopyProjectCalls;
+
+/**
+ * The copy calls of one connection. The first one loads the copy RPC client
+ * (`projectCopyRpcClient.ts`, with `@ryco/contracts/project-copy-rpc`) and
+ * builds it on the connection's socket; boot never loads either. A failed load
+ * fails that call and the next call loads again.
+ */
+function lazyProjectCopyRpc(transport: WsTransport) {
+  let loading: Promise<ProjectCopyRpcMethods> | null = null;
+  const load = () =>
+    (loading ??= import("./projectCopyRpcClient.ts").then(
+      (module) => module.createProjectCopyRpcMethods(transport),
+      (error: unknown) => {
+        loading = null;
+        throw error;
+      },
+    ));
+  const call = (name: Exclude<keyof ProjectCopyRpcMethods, "subscribeImport">) => (input: never) =>
+    load().then((methods) => (methods[name] as (input: never) => Promise<unknown>)(input));
+  const subscribeImport: ProjectCopyRpcMethods["subscribeImport"] = (input, listener, options) => {
+    let active = true;
+    let unsubscribe: (() => void) | null = null;
+    void load().then(
+      (methods) => {
+        if (active) unsubscribe = methods.subscribeImport(input, listener, options);
+      },
+      () => {
+        if (active) options?.onError?.("failed");
+      },
+    );
+    return () => {
+      active = false;
+      unsubscribe?.();
+    };
+  };
+  return {
+    projects: Object.fromEntries(
+      PROJECT_COPY_PROJECT_CALLS.map((name) => [
+        name,
+        name === "subscribeImport" ? subscribeImport : call(name),
+      ]),
+    ) as unknown as ProjectCopyProjectCalls,
+    searchDirectories: call("searchDirectories") as ProjectCopyRpcMethods["searchDirectories"],
+  };
+}
+
 export function createWsRpcClient(
   transport: WsTransport,
   device?: DeviceRpcClient,
@@ -729,6 +807,7 @@ export function createWsRpcClient(
     readonly openNodeBrowserFrameSource?: WsRpcClient["nodeBrowser"]["openFrameSource"];
   },
 ): WsRpcClient {
+  const projectCopy = lazyProjectCopyRpc(transport);
   return {
     dispose: async () => {
       await Promise.all([transport.dispose(), device?.dispose()]);
@@ -799,42 +878,7 @@ export function createWsRpcClient(
         transport.request((client) => client[WS_METHODS.projectsPromoteChat](input)),
       deleteChatFolder: (input) =>
         transport.request((client) => client[WS_METHODS.projectsDeleteChatFolder](input)),
-      pathHints: (input) =>
-        transport.request((client) => client[WS_METHODS.projectsPathHints](input)),
-      previewDestination: (input) =>
-        transport.request((client) => client[WS_METHODS.projectsPreviewDestination](input)),
-      checkRemoteAccess: (input) =>
-        transport.request((client) => client[WS_METHODS.projectsCheckRemoteAccess](input)),
-      exportInspect: (input) =>
-        transport.request((client) => client[WS_METHODS.projectsExportInspect](input)),
-      exportStart: (input) =>
-        transport.request((client) => client[WS_METHODS.projectsExportStart](input)),
-      exportReadChunk: (input) =>
-        transport.request((client) => client[WS_METHODS.projectsExportReadChunk](input)),
-      exportDispose: (input) =>
-        transport.request((client) => client[WS_METHODS.projectsExportDispose](input)),
-      transferBegin: (input) =>
-        transport.request((client) => client[WS_METHODS.projectsTransferBegin](input)),
-      transferAppend: (input) =>
-        transport.request((client) => client[WS_METHODS.projectsTransferAppend](input)),
-      transferCommit: (input) =>
-        transport.request((client) => client[WS_METHODS.projectsTransferCommit](input)),
-      transferAbort: (input) =>
-        transport.request((client) => client[WS_METHODS.projectsTransferAbort](input)),
-      importStart: (input) =>
-        transport.request((client) => client[WS_METHODS.projectsImportStart](input)),
-      subscribeImport: (input, listener, options) =>
-        transport.subscribe(
-          (client) => client[WS_METHODS.projectsSubscribeImport](input),
-          listener,
-          { ...options, tag: WS_METHODS.projectsSubscribeImport },
-        ),
-      cancelImport: (input) =>
-        transport.request((client) => client[WS_METHODS.projectsCancelImport](input)),
-      listImports: (input) =>
-        transport.request((client) => client[WS_METHODS.projectsListImports](input)),
-      discardImport: (input) =>
-        transport.request((client) => client[WS_METHODS.projectsDiscardImport](input)),
+      ...projectCopy.projects,
     },
     sessionImport: {
       sources: (input) =>
@@ -848,8 +892,7 @@ export function createWsRpcClient(
     },
     filesystem: {
       browse: (input) => transport.request((client) => client[WS_METHODS.filesystemBrowse](input)),
-      searchDirectories: (input) =>
-        transport.request((client) => client[WS_METHODS.filesystemSearchDirectories](input)),
+      searchDirectories: projectCopy.searchDirectories,
     },
     sourceControl: {
       lookupRepository: (input) =>

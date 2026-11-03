@@ -345,19 +345,27 @@ it("routes cross-node project copy calls to their wire methods", async () => {
   const searchDirectories = vi.fn(() => Effect.succeed({ matches: [] }));
   const transferAppend = vi.fn(() => Effect.succeed({ transferId: "t", receivedBytes: 4 }));
   const publishNodeDirectory = vi.fn(() => Effect.succeed({ accepted: 0 }));
-  const transport = {
+  const appRequest = vi.fn((invoke: (client: unknown) => Effect.Effect<unknown>) =>
+    Effect.runPromise(
+      invoke({ [AGENT_CONTROL_WS_METHODS.publishNodeDirectory]: publishNodeDirectory }),
+    ),
+  );
+  // The copy RPCs ride the same socket through a client of their own group.
+  const copyView = {
     request: (invoke: (client: unknown) => Effect.Effect<unknown>) =>
       Effect.runPromise(
         invoke({
           [WS_METHODS.projectsPathHints]: pathHints,
           [WS_METHODS.filesystemSearchDirectories]: searchDirectories,
           [WS_METHODS.projectsTransferAppend]: transferAppend,
-          [AGENT_CONTROL_WS_METHODS.publishNodeDirectory]: publishNodeDirectory,
         }),
       ),
     subscribe: vi.fn(() => () => undefined),
   };
+  const withClient = vi.fn(() => copyView);
+  const transport = { request: appRequest, subscribe: vi.fn(), withClient };
   const client = createWsRpcClient(transport as unknown as WsTransport);
+  expect(withClient).not.toHaveBeenCalled();
   await client.projects.pathHints({});
   await client.filesystem.searchDirectories({ query: "app" });
   const append = { transferId: "t", offset: 0, dataBase64: "AAAA" } as Parameters<
@@ -378,9 +386,29 @@ it("routes cross-node project copy calls to their wire methods", async () => {
     typeof client.projects.subscribeImport
   >[0]["importId"];
   client.projects.subscribeImport({ importId }, listener);
-  expect(transport.subscribe).toHaveBeenCalledWith(expect.any(Function), listener, {
-    tag: WS_METHODS.projectsSubscribeImport,
-  });
+  await vi.waitFor(() =>
+    expect(copyView.subscribe).toHaveBeenCalledWith(expect.any(Function), listener, {
+      tag: WS_METHODS.projectsSubscribeImport,
+    }),
+  );
+  // One copy client per connection, built on the first copy call.
+  expect(withClient).toHaveBeenCalledTimes(1);
+  expect(transport.subscribe).not.toHaveBeenCalled();
+});
+
+it("loads the copy RPC client only when a copy call is made, and stops a subscription that ended first", async () => {
+  const withClient = vi.fn(() => ({ request: vi.fn(), subscribe: vi.fn(() => () => undefined) }));
+  const transport = { request: vi.fn(), subscribe: vi.fn(), withClient };
+  const client = createWsRpcClient(transport as unknown as WsTransport);
+  const importId = "00000000-0000-4000-8000-000000000000" as Parameters<
+    typeof client.projects.subscribeImport
+  >[0]["importId"];
+  const unsubscribe = client.projects.subscribeImport({ importId }, vi.fn());
+  unsubscribe();
+  await vi.waitFor(() => expect(withClient).toHaveBeenCalledTimes(1));
+  const view = withClient.mock.results[0]!.value;
+  await Promise.resolve();
+  expect(view.subscribe).not.toHaveBeenCalled();
 });
 
 it("asks for the tolerant plan view on every proposal read", async () => {

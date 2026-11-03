@@ -27,6 +27,7 @@ import {
   ProjectTransferBeginInput,
   ProjectTransferId,
 } from "./projectCopy.ts";
+import { WsProjectCopyRpcGroup } from "./projectCopyRpc.ts";
 import { WS_METHODS, WsRpcGroup } from "./rpc.ts";
 
 const importId = "0b8f4c2e-6a1d-4f3b-9c7e-2d5a8b1c4e6f";
@@ -121,7 +122,9 @@ describe("project copy ids and RPC names", () => {
       WS_METHODS.projectsListImports,
       WS_METHODS.projectsDiscardImport,
     ]) {
-      expect(WsRpcGroup.requests.has(method)).toBe(true);
+      expect(WsProjectCopyRpcGroup.requests.has(method)).toBe(true);
+      // Their schemas load with the first copy, never with the app group.
+      expect(WsRpcGroup.requests.has(method)).toBe(false);
     }
     expect(WS_METHODS.projectsSubscribeImport).toBe("projects.subscribeImport");
     expect(WS_METHODS.filesystemSearchDirectories).toBe("filesystem.searchDirectories");

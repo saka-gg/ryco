@@ -3,6 +3,7 @@ import type { EnvironmentApi, EnvironmentId } from "@ryco/contracts";
 import { isUnknownUnionMember } from "@ryco/contracts/base-schemas";
 
 import type { WsRpcClient } from "../rpc/index.ts";
+import { pickProjectCopyCalls } from "../rpc/wsRpcClient.ts";
 
 export function createEnvironmentApi(rpcClient: WsRpcClient): EnvironmentApi {
   return {
@@ -83,22 +84,7 @@ export function createEnvironmentApi(rpcClient: WsRpcClient): EnvironmentApi {
       promoteChatPreview: rpcClient.projects.promoteChatPreview,
       promoteChat: rpcClient.projects.promoteChat,
       deleteChatFolder: rpcClient.projects.deleteChatFolder,
-      pathHints: rpcClient.projects.pathHints,
-      previewDestination: rpcClient.projects.previewDestination,
-      checkRemoteAccess: rpcClient.projects.checkRemoteAccess,
-      exportInspect: rpcClient.projects.exportInspect,
-      exportStart: rpcClient.projects.exportStart,
-      exportReadChunk: rpcClient.projects.exportReadChunk,
-      exportDispose: rpcClient.projects.exportDispose,
-      transferBegin: rpcClient.projects.transferBegin,
-      transferAppend: rpcClient.projects.transferAppend,
-      transferCommit: rpcClient.projects.transferCommit,
-      transferAbort: rpcClient.projects.transferAbort,
-      importStart: rpcClient.projects.importStart,
-      subscribeImport: rpcClient.projects.subscribeImport,
-      cancelImport: rpcClient.projects.cancelImport,
-      listImports: rpcClient.projects.listImports,
-      discardImport: rpcClient.projects.discardImport,
+      ...pickProjectCopyCalls(rpcClient.projects),
     },
     filesystem: {
       browse: rpcClient.filesystem.browse,

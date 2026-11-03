@@ -350,6 +350,31 @@ describe("standard build static import graph", () => {
     }
   });
 
+  it("loads the project copy RPCs and their schemas with the first copy", () => {
+    // Their own group (`@ryco/contracts/project-copy-rpc`), which the node serves beside the
+    // app's; the RPC client builds it on the connection's socket the first time a copy calls
+    // one. Boot keeps only the fields an Agent Control copy plan names
+    // (`projectCopyPrimitives.ts`).
+    const forbidden = [
+      /^packages\/contracts\/src\/projectCopy(?:Rpc)?\.ts$/u,
+      /^packages\/client-runtime\/src\/rpc\/projectCopyRpcClient\.ts$/u,
+    ];
+    const entries = [
+      ...BOOT_GRAPH_ENTRIES,
+      "components/RootAppShell.tsx",
+      "components/routeViews/ChatThreadRouteView.tsx",
+      "components/routeViews/DraftChatThreadRouteView.tsx",
+    ];
+    for (const entry of entries) {
+      expect(forbiddenChains(entry, forbidden)).toEqual([]);
+    }
+    expect(
+      parseImports(
+        path.join(repoRoot, "packages/client-runtime/src/rpc/wsRpcClient.ts"),
+      ).dynamicImports.map(display),
+    ).toContain("packages/client-runtime/src/rpc/projectCopyRpcClient.ts");
+  });
+
   it("loads the missed-runs notice's words with the first notice", () => {
     // They share the Automations dialog's schedule vocabulary, which the shell
     // otherwise loads only with the dialog. This walk follows every re-export

@@ -220,38 +220,6 @@ import {
   FilesystemBrowseError,
 } from "./filesystem.ts";
 import {
-  FilesystemSearchDirectoriesInput,
-  FilesystemSearchDirectoriesResult,
-  NodePathHints,
-  NodePathHintsInput,
-  ProjectCancelImportInput,
-  ProjectCheckRemoteAccessInput,
-  ProjectCheckRemoteAccessResult,
-  ProjectCopyError,
-  ProjectDestinationPreview,
-  ProjectDestinationPreviewInput,
-  ProjectDiscardImportInput,
-  ProjectDiscardImportResult,
-  ProjectExportDisposeInput,
-  ProjectExportInspectInput,
-  ProjectExportInspection,
-  ProjectExportReadChunkInput,
-  ProjectExportReadChunkResult,
-  ProjectExportResult,
-  ProjectExportStartInput,
-  ProjectImportSnapshot,
-  ProjectImportStartInput,
-  ProjectListImportsInput,
-  ProjectListImportsResult,
-  ProjectSubscribeImportInput,
-  ProjectTransferAbortInput,
-  ProjectTransferAppendInput,
-  ProjectTransferBeginInput,
-  ProjectTransferCommitInput,
-  ProjectTransferCommitResult,
-  ProjectTransferProgress,
-} from "./projectCopy.ts";
-import {
   GitActionProgressEvent,
   GitActionResultUnavailableError,
   GitActionStoppedError,
@@ -547,7 +515,8 @@ export const WS_METHODS = {
   projectsSubscribeFileChanges: "projects.subscribeFileChanges",
   projectsStageFileReference: "projects.stageFileReference",
 
-  // Cross-node project copy (announced by `capabilities.projectCopy`)
+  // Cross-node project copy (announced by `capabilities.projectCopy`); their RPCs are
+  // `WsProjectCopyRpcGroup` in `@ryco/contracts/project-copy-rpc`.
   projectsPathHints: "projects.pathHints",
   filesystemSearchDirectories: "filesystem.searchDirectories",
   projectsPreviewDestination: "projects.previewDestination",
@@ -2000,113 +1969,6 @@ export const WsFilesystemBrowseRpc = Rpc.make(WS_METHODS.filesystemBrowse, {
   error: Schema.Union([FilesystemBrowseError, AuthRpcError]),
 });
 
-// Cross-node project copy: reads and scratch transfers on either node, the
-// durable import job on the destination.
-const ProjectCopyRpcError = Schema.Union([ProjectCopyError, AuthRpcError]);
-
-export const WsProjectsPathHintsRpc = Rpc.make(WS_METHODS.projectsPathHints, {
-  payload: NodePathHintsInput,
-  success: NodePathHints,
-  error: ProjectCopyRpcError,
-});
-
-export const WsFilesystemSearchDirectoriesRpc = Rpc.make(WS_METHODS.filesystemSearchDirectories, {
-  payload: FilesystemSearchDirectoriesInput,
-  success: FilesystemSearchDirectoriesResult,
-  error: ProjectCopyRpcError,
-});
-
-export const WsProjectsPreviewDestinationRpc = Rpc.make(WS_METHODS.projectsPreviewDestination, {
-  payload: ProjectDestinationPreviewInput,
-  success: ProjectDestinationPreview,
-  error: ProjectCopyRpcError,
-});
-
-export const WsProjectsCheckRemoteAccessRpc = Rpc.make(WS_METHODS.projectsCheckRemoteAccess, {
-  payload: ProjectCheckRemoteAccessInput,
-  success: ProjectCheckRemoteAccessResult,
-  error: ProjectCopyRpcError,
-});
-
-export const WsProjectsExportInspectRpc = Rpc.make(WS_METHODS.projectsExportInspect, {
-  payload: ProjectExportInspectInput,
-  success: ProjectExportInspection,
-  error: ProjectCopyRpcError,
-});
-
-export const WsProjectsExportStartRpc = Rpc.make(WS_METHODS.projectsExportStart, {
-  payload: ProjectExportStartInput,
-  success: ProjectExportResult,
-  error: ProjectCopyRpcError,
-});
-
-export const WsProjectsExportReadChunkRpc = Rpc.make(WS_METHODS.projectsExportReadChunk, {
-  payload: ProjectExportReadChunkInput,
-  success: ProjectExportReadChunkResult,
-  error: ProjectCopyRpcError,
-});
-
-export const WsProjectsExportDisposeRpc = Rpc.make(WS_METHODS.projectsExportDispose, {
-  payload: ProjectExportDisposeInput,
-  success: EmptyRpcResult,
-  error: ProjectCopyRpcError,
-});
-
-export const WsProjectsTransferBeginRpc = Rpc.make(WS_METHODS.projectsTransferBegin, {
-  payload: ProjectTransferBeginInput,
-  success: ProjectTransferProgress,
-  error: ProjectCopyRpcError,
-});
-
-export const WsProjectsTransferAppendRpc = Rpc.make(WS_METHODS.projectsTransferAppend, {
-  payload: ProjectTransferAppendInput,
-  success: ProjectTransferProgress,
-  error: ProjectCopyRpcError,
-});
-
-export const WsProjectsTransferCommitRpc = Rpc.make(WS_METHODS.projectsTransferCommit, {
-  payload: ProjectTransferCommitInput,
-  success: ProjectTransferCommitResult,
-  error: ProjectCopyRpcError,
-});
-
-export const WsProjectsTransferAbortRpc = Rpc.make(WS_METHODS.projectsTransferAbort, {
-  payload: ProjectTransferAbortInput,
-  success: EmptyRpcResult,
-  error: ProjectCopyRpcError,
-});
-
-export const WsProjectsImportStartRpc = Rpc.make(WS_METHODS.projectsImportStart, {
-  payload: ProjectImportStartInput,
-  success: ProjectImportSnapshot,
-  error: ProjectCopyRpcError,
-});
-
-export const WsProjectsSubscribeImportRpc = Rpc.make(WS_METHODS.projectsSubscribeImport, {
-  payload: ProjectSubscribeImportInput,
-  success: ProjectImportSnapshot,
-  error: ProjectCopyRpcError,
-  stream: true,
-});
-
-export const WsProjectsCancelImportRpc = Rpc.make(WS_METHODS.projectsCancelImport, {
-  payload: ProjectCancelImportInput,
-  success: ProjectImportSnapshot,
-  error: ProjectCopyRpcError,
-});
-
-export const WsProjectsListImportsRpc = Rpc.make(WS_METHODS.projectsListImports, {
-  payload: ProjectListImportsInput,
-  success: ProjectListImportsResult,
-  error: ProjectCopyRpcError,
-});
-
-export const WsProjectsDiscardImportRpc = Rpc.make(WS_METHODS.projectsDiscardImport, {
-  payload: ProjectDiscardImportInput,
-  success: ProjectDiscardImportResult,
-  error: ProjectCopyRpcError,
-});
-
 export const WsDeviceReadRpc = Rpc.make(DEVICE_WS_METHODS.read, {
   payload: DeviceReadRequest,
   success: DeviceReadResponse,
@@ -3062,23 +2924,6 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   | typeof WsChatAttachmentsReadChunkRpc
   | typeof WsShellOpenInEditorRpc
   | typeof WsFilesystemBrowseRpc
-  | typeof WsProjectsPathHintsRpc
-  | typeof WsFilesystemSearchDirectoriesRpc
-  | typeof WsProjectsPreviewDestinationRpc
-  | typeof WsProjectsCheckRemoteAccessRpc
-  | typeof WsProjectsExportInspectRpc
-  | typeof WsProjectsExportStartRpc
-  | typeof WsProjectsExportReadChunkRpc
-  | typeof WsProjectsExportDisposeRpc
-  | typeof WsProjectsTransferBeginRpc
-  | typeof WsProjectsTransferAppendRpc
-  | typeof WsProjectsTransferCommitRpc
-  | typeof WsProjectsTransferAbortRpc
-  | typeof WsProjectsImportStartRpc
-  | typeof WsProjectsSubscribeImportRpc
-  | typeof WsProjectsCancelImportRpc
-  | typeof WsProjectsListImportsRpc
-  | typeof WsProjectsDiscardImportRpc
   | typeof WsSubscribeVcsStatusRpc
   | typeof WsVcsPullRpc
   | typeof WsVcsRefreshStatusRpc
@@ -3325,23 +3170,6 @@ export const WsRpcGroup: RpcGroup.RpcGroup<
   WsChatAttachmentsReadChunkRpc,
   WsShellOpenInEditorRpc,
   WsFilesystemBrowseRpc,
-  WsProjectsPathHintsRpc,
-  WsFilesystemSearchDirectoriesRpc,
-  WsProjectsPreviewDestinationRpc,
-  WsProjectsCheckRemoteAccessRpc,
-  WsProjectsExportInspectRpc,
-  WsProjectsExportStartRpc,
-  WsProjectsExportReadChunkRpc,
-  WsProjectsExportDisposeRpc,
-  WsProjectsTransferBeginRpc,
-  WsProjectsTransferAppendRpc,
-  WsProjectsTransferCommitRpc,
-  WsProjectsTransferAbortRpc,
-  WsProjectsImportStartRpc,
-  WsProjectsSubscribeImportRpc,
-  WsProjectsCancelImportRpc,
-  WsProjectsListImportsRpc,
-  WsProjectsDiscardImportRpc,
   WsSubscribeVcsStatusRpc,
   WsVcsPullRpc,
   WsVcsRefreshStatusRpc,

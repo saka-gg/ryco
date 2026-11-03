@@ -206,6 +206,11 @@
       "import": "./src/projectCopy.ts",
       "require": "./src/projectCopy.ts"
     },
+    "./project-copy-rpc": {
+      "types": "./src/projectCopyRpc.ts",
+      "import": "./src/projectCopyRpc.ts",
+      "require": "./src/projectCopyRpc.ts"
+    },
     "./provider-instance": {
       "types": "./src/providerInstance.ts",
       "import": "./src/providerInstance.ts",

@@ -14,7 +14,6 @@ import {
   WsAgentControlSubscribeProposalsRpc,
   WsGitResumeStackedActionRpc,
   WsGitRunStackedActionRpc,
-  WsHostedRpcGroup,
   WsProviderSignInSubscribeRpc,
   WsNodeBrowserSubscribeRpc,
   WsOrchestrationReplayEventsPageRpc,
@@ -34,6 +33,7 @@ import {
   WsSubscribeVcsStatusRpc,
   WsSubscribeWorktreeSetupRpc,
 } from "./rpc.ts";
+import { WsNodeRpcGroup, WsProjectsSubscribeImportRpc } from "./projectCopyRpc.ts";
 import { NodeBrowserEvent, NodeBrowserWireEvent } from "./nodeBrowser.ts";
 import { ProviderSignInEvent, ProviderSignInWireEvent } from "./providerSignIn.ts";
 import { ServerConfigStreamEvent, ServerConfigStreamWireEvent } from "./server.ts";
@@ -320,6 +320,9 @@ const strictStreams = [
   // Optional: an older client whose decode fails stops watching and refreshes the open file
   // after turns, as it does on a node without the watch.
   WsProjectsSubscribeFileChangesRpc,
+  // An older client following an import a newer node runs fails on a step or status it does
+  // not know and stops following that import.
+  WsProjectsSubscribeImportRpc,
   WsServerSubscribeLocalTaskChangesRpc,
   WsServerSubscribeNodeUpdateRpc,
   WsSubscribeAuthAccessRpc,
@@ -334,7 +337,7 @@ const strictStreams = [
 
 describe("streams a node sends a client", () => {
   it("are each forward-compatible or strict on purpose", () => {
-    const streams = [...WsHostedRpcGroup.requests.values()]
+    const streams = [...WsNodeRpcGroup.requests.values()]
       .filter((rpc) => RpcSchema.isStreamSchema(rpc.successSchema))
       .map((rpc) => rpc._tag);
     const decided = [...cases.map(({ rpc }) => rpc), ...strictStreams].map((rpc) => rpc._tag);

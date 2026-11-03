@@ -53,9 +53,9 @@ import {
   type ServerProvider,
   SourceControlProviderError,
   WORKTREE_SETUP_CANCELLED_MESSAGE,
-  WsRpcGroup,
   WorktreeId,
 } from "@ryco/contracts";
+import { WsApplicationRpcGroup } from "@ryco/contracts/project-copy-rpc";
 import { RpcGroup } from "effect/rpc";
 import { issueLinkedDirectAccess } from "../auth/linkedDirectAccess.ts";
 
@@ -1566,7 +1566,8 @@ type EffectSuccess<T> = T extends Effect.Effect<infer A, infer _E, infer _R> ? A
 
 export type WsRpcContext = EffectSuccess<ReturnType<typeof makeWsRpcContext>>;
 
-export type WsRpcHandlers = RpcGroup.HandlersFrom<RpcGroup.Rpcs<typeof WsRpcGroup>>;
+/** The application group's handlers, the copy RPCs' among them. */
+export type WsRpcHandlers = RpcGroup.HandlersFrom<RpcGroup.Rpcs<typeof WsApplicationRpcGroup>>;
 
 export const defineWsHandlers = <const H extends Partial<WsRpcHandlers>>(handlers: H): H =>
   handlers;

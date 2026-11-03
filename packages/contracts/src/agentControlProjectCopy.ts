@@ -1,7 +1,7 @@
 import * as Schema from "effect/Schema";
 
 import { rejectExcessProperties } from "./baseSchemas.ts";
-import { ProjectCopyDirectoryName, ProjectDestinationState } from "./projectCopy.ts";
+import { ProjectCopyDirectoryName, ProjectDestinationState } from "./projectCopyPrimitives.ts";
 
 /**
  * Private-session tools for setting up projects on this node and copying them
