@@ -1745,6 +1745,23 @@ export const AGENT_CONTROL_NODE_DIRECTORY_MAX_ENTRIES = 64;
 export const AgentControlNodeProjectCopySupport = Schema.Literals(["yes", "no", "unknown"]);
 export type AgentControlNodeProjectCopySupport = typeof AgentControlNodeProjectCopySupport.Type;
 
+/** Projects one directory entry lists, at most. */
+export const AGENT_CONTROL_NODE_DIRECTORY_MAX_PROJECTS = 64;
+/** Projects one publication lists across all its entries, at most (keeps it one relay frame). */
+export const AGENT_CONTROL_NODE_DIRECTORY_MAX_PUBLISHED_PROJECTS = 256;
+const AgentControlNodeDirectoryPath = TrimmedNonEmptyString.check(Schema.isMaxLength(1_024));
+
+/** How the publishing app reaches the node: directly, or through the Hub's relay. */
+export const AgentControlNodeTransport = Schema.Literals(["direct", "relay"]);
+export type AgentControlNodeTransport = typeof AgentControlNodeTransport.Type;
+
+/** A repository project the publishing app saw on the node: its identity and folder. */
+export const AgentControlNodeDirectoryProject = Schema.Struct({
+  repositoryCanonicalKey: TrimmedNonEmptyString.check(Schema.isMaxLength(512)),
+  path: AgentControlNodeDirectoryPath,
+}).pipe(rejectExcessProperties);
+export type AgentControlNodeDirectoryProject = typeof AgentControlNodeDirectoryProject.Type;
+
 /** Non-secret facts about one node an owner client knows; never addresses or credentials. */
 export const AgentControlNodeDirectoryEntry = Schema.Struct({
   environmentId: AgentControlNodeEnvironmentId,
@@ -1752,6 +1769,16 @@ export const AgentControlNodeDirectoryEntry = Schema.Struct({
   platformOs: ExecutionEnvironmentPlatformOs,
   online: Schema.Boolean,
   projectCopySupport: AgentControlNodeProjectCopySupport,
+  /** Absent while the publishing app is not connected to the node. */
+  transport: Schema.optionalKey(AgentControlNodeTransport),
+  /** The node's normal code directory, when the publishing app has read its path hints. */
+  defaultProjectDirectory: Schema.optionalKey(AgentControlNodeDirectoryPath),
+  /** The node's repository projects as the publishing app last saw them; absent when unknown. */
+  projects: Schema.optionalKey(
+    Schema.Array(AgentControlNodeDirectoryProject).check(
+      Schema.isMaxLength(AGENT_CONTROL_NODE_DIRECTORY_MAX_PROJECTS),
+    ),
+  ),
 }).pipe(rejectExcessProperties);
 export type AgentControlNodeDirectoryEntry = typeof AgentControlNodeDirectoryEntry.Type;
 

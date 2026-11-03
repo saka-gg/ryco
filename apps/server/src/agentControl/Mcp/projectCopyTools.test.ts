@@ -169,6 +169,7 @@ const setup = (
   options: {
     readonly nodes?: ReadonlyArray<AgentControlNodeDirectoryListEntry>;
     readonly authority?: boolean;
+    readonly projectOverrides?: Record<string, unknown>;
   } = {},
 ) => {
   let enabled = true;
@@ -223,7 +224,7 @@ const setup = (
       getProjectShellById: (id) =>
         Effect.succeed(
           id === projectId
-            ? Option.some(project(projectId))
+            ? Option.some(project(projectId, options.projectOverrides))
             : id === chatId
               ? Option.some(project(chatId, { kind: "chat" }))
               : Option.none(),
@@ -326,6 +327,76 @@ describe("project copy tools", () => {
         EMPTY_NODE_DIRECTORY_HINT,
       );
     }),
+  );
+
+  it.effect(
+    "lists how each node is reached, its code directory and where this chat's repository is",
+    () =>
+      Effect.gen(function* () {
+        const repositoryIdentity = {
+          canonicalKey: "github.com/me/ryco",
+          locator: { source: "git-remote", remoteName: "origin", remoteUrl: "x" },
+        };
+        const harness = setup({
+          projectOverrides: { repositoryIdentity },
+          nodes: [
+            entry({
+              environmentId: thisNode,
+              label: "MacBook",
+              isThisNode: true,
+              transport: "direct",
+              defaultProjectDirectory: "/Users/me/code",
+              projects: [{ repositoryCanonicalKey: "github.com/me/ryco", path: "/code/ryco" }],
+            }),
+            entry({
+              environmentId: miniNode,
+              label: "Mac mini",
+              transport: "relay",
+              defaultProjectDirectory: "/Users/me/Developer",
+              projects: [
+                { repositoryCanonicalKey: "github.com/me/other", path: "/Users/me/Developer/o" },
+                {
+                  repositoryCanonicalKey: "github.com/me/ryco",
+                  path: "/Users/me/Developer/ryco",
+                },
+              ],
+            }),
+            entry({
+              environmentId: EnvironmentId.make("env-box"),
+              label: "Linux box",
+              transport: "direct",
+              projects: [],
+            }),
+            entry({ environmentId: EnvironmentId.make("env-unknown"), label: "Unknown" }),
+          ],
+        });
+        const listed = harness.value<{ readonly nodes: ReadonlyArray<Record<string, unknown>> }>(
+          yield* harness.call(TOOLS.listNodes, {}),
+        );
+        const [self, mini, box, unknown] = listed.nodes;
+        // This node: the agent runs here, so neither its transport nor "this project" is listed.
+        assert.strictEqual(self?.defaultProjectDirectory, "/Users/me/code");
+        assert.isUndefined(self?.transport);
+        assert.isUndefined(self?.thisProject);
+        assert.isUndefined(self?.projects);
+        assert.strictEqual(mini?.transport, "relay");
+        assert.strictEqual(mini?.defaultProjectDirectory, "/Users/me/Developer");
+        assert.deepEqual(mini?.thisProject, { present: true, path: "/Users/me/Developer/ryco" });
+        assert.deepEqual(box?.thisProject, { present: false });
+        assert.isUndefined(box?.defaultProjectDirectory);
+        // Nothing published about its projects: not known, so nothing is said.
+        assert.isUndefined(unknown?.thisProject);
+        assert.isUndefined(unknown?.transport);
+        // A project without a repository identity knows nowhere it is.
+        const plain = setup({ nodes: [entry({ environmentId: miniNode, projects: [] })] });
+        const plainListed = plain.value<{
+          readonly nodes: ReadonlyArray<Record<string, unknown>>;
+        }>(yield* plain.call(TOOLS.listNodes, {}));
+        assert.isUndefined(plainListed.nodes[0]?.thisProject);
+        // The description names the relay's cap.
+        const descriptor = harness.tools.descriptors.find((tool) => tool.name === TOOLS.listNodes);
+        assert.include(descriptor?.description, "24 MB");
+      }),
   );
 
   it.effect("suggests a free folder in this node's code directory", () =>
@@ -456,9 +527,11 @@ describe("project copy tools", () => {
       });
       assert.deepEqual(plan.target, { environmentId: miniNode, label: "Mac mini" });
       assert.deepEqual(plan.destination, { kind: "default" });
-      assert.isFalse(plan.bringCommits);
-      assert.isFalse(plan.bringChanges);
+      // The copy dialog's defaults; no branch, so the plan has no branch key at all.
+      assert.isTrue(plan.bringCommits);
+      assert.isTrue(plan.bringChanges);
       assert.isTrue(plan.copySettings);
+      assert.isFalse("branch" in plan);
       assert.deepEqual(plan.setup, { command: "bun install", saveAsScript: false });
       assert.isNull(plan.followUpThread?.modelSelection);
       // A retry answers with the request's receipt instead of a second request.
@@ -486,6 +559,45 @@ describe("project copy tools", () => {
         title: "tool",
       });
       assert.isFalse(repository.copySettings);
+      // A repository has no work of its own to bring.
+      assert.isFalse(repository.bringCommits);
+      assert.isFalse(repository.bringChanges);
+    }),
+  );
+
+  it.effect("passes a branch through to the plan and then brings no work by default", () =>
+    Effect.gen(function* () {
+      const harness = setup();
+      yield* harness.call(TOOLS.proposeCopy, {
+        requestId: "copy-branch",
+        target: miniNode,
+        branch: "release/1.2",
+      });
+      const plan = harness.submitted[0] as AgentControlCopyProjectToNodePlan;
+      assert.strictEqual(plan.branch, "release/1.2");
+      assert.isFalse(plan.bringCommits);
+      assert.isFalse(plan.bringChanges);
+      // Asked for explicitly, they stay on: the approving app judges whether they can come.
+      yield* harness.call(TOOLS.proposeCopy, {
+        requestId: "copy-branch-2",
+        target: miniNode,
+        branch: "release/1.2",
+        bringCommits: true,
+      });
+      assert.isTrue((harness.submitted[1] as AgentControlCopyProjectToNodePlan).bringCommits);
+      assert.include(
+        harness.failure(
+          yield* harness.call(TOOLS.proposeCopy, {
+            requestId: "copy-branch-3",
+            target: miniNode,
+            branch: "not a branch..",
+          }),
+        ),
+        "Invalid tool arguments",
+      );
+      const descriptor = harness.tools.descriptors.find((tool) => tool.name === TOOLS.proposeCopy);
+      assert.include(descriptor?.description, "Ryco wakes you");
+      assert.notInclude(descriptor?.description, "ryco_wait_for_control_request");
     }),
   );
 

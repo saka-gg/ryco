@@ -1,6 +1,11 @@
-import { AGENT_CONTROL_NODE_DIRECTORY_MAX_ENTRIES } from "@ryco/contracts/agent-control";
+import {
+  AGENT_CONTROL_NODE_DIRECTORY_MAX_ENTRIES,
+  AGENT_CONTROL_NODE_DIRECTORY_MAX_PROJECTS,
+  AGENT_CONTROL_NODE_DIRECTORY_MAX_PUBLISHED_PROJECTS,
+} from "@ryco/contracts/agent-control";
 import type {
   AgentControlNodeDirectoryEntry,
+  AgentControlNodeDirectoryProject,
   AgentControlPublishNodeDirectoryInput,
   EnvironmentId,
 } from "@ryco/contracts";
@@ -11,7 +16,9 @@ import { catalogPlatformOs, type NodeCatalogSnapshot } from "../workspace/nodeCa
  * Agent Control's node directory, fed by owner clients: every node that
  * supports project copy learns which other nodes this client holds owner on,
  * so an agent there can name a copy target. Entries are non-secret (id,
- * label, OS, presence, copy support). The publisher sends them on every
+ * label, OS, presence, copy support, how this client reaches the node, its
+ * code directory and where its repository projects are, so an agent can
+ * tell the project is already there). The publisher sends them on every
  * connect and whenever they change, coalesced, and backs off from a node that
  * refuses them.
  */
@@ -22,27 +29,87 @@ const NODE_DIRECTORY_RETRY_BASE_MS = 30_000;
 const NODE_DIRECTORY_RETRY_MAX_MS = 15 * 60_000;
 const NODE_DIRECTORY_ENVIRONMENT_ID_MAX_CHARS = 128;
 const NODE_DIRECTORY_LABEL_MAX_CHARS = 120;
+const NODE_DIRECTORY_PATH_MAX_CHARS = 1_024;
+const NODE_DIRECTORY_REPOSITORY_KEY_MAX_CHARS = 512;
+
+/** What this client knows of a node beyond the catalog, when it has read it. */
+export interface NodeDirectoryNodeFacts {
+  /** The node's normal code directory (its path hints); null when not read. */
+  readonly defaultProjectDirectory: string | null;
+  /** The node's projects with a repository identity; null when this client does not know them. */
+  readonly projects: ReadonlyArray<{
+    readonly repositoryCanonicalKey: string;
+    readonly path: string;
+  }> | null;
+}
+
+const boundedText = (value: string, max: number): string | null => {
+  const trimmed = value.trim();
+  return trimmed.length === 0 || trimmed.length > max ? null : trimmed;
+};
+
+/**
+ * A node's projects as published: valid and distinct. Null (not known) when they do not all fit
+ * the node's bound or what is left of the publication's: a partial list would say a project is
+ * missing when it is there.
+ */
+function publishedProjects(
+  projects: NonNullable<NodeDirectoryNodeFacts["projects"]>,
+  budget: number,
+): Array<AgentControlNodeDirectoryProject> | null {
+  const published: Array<AgentControlNodeDirectoryProject> = [];
+  const limit = Math.min(budget, AGENT_CONTROL_NODE_DIRECTORY_MAX_PROJECTS);
+  for (const project of projects) {
+    const key = boundedText(
+      project.repositoryCanonicalKey,
+      NODE_DIRECTORY_REPOSITORY_KEY_MAX_CHARS,
+    );
+    const path = boundedText(project.path, NODE_DIRECTORY_PATH_MAX_CHARS);
+    if (key === null || path === null) continue;
+    if (published.some((entry) => entry.repositoryCanonicalKey === key && entry.path === path))
+      continue;
+    if (published.length >= limit) return null;
+    published.push({ repositoryCanonicalKey: key, path });
+  }
+  return published;
+}
 
 /**
  * The entries this client publishes: the catalog's owner-held nodes, in the
- * catalog's order (primary first), bounded to the directory's limits.
+ * catalog's order (primary first), bounded to the directory's limits. `facts`
+ * adds what this client read of a node (its code directory, its projects);
+ * projects stay within one publication's total bound, first nodes first.
  */
 export function nodeDirectoryEntries(
   snapshot: NodeCatalogSnapshot,
+  facts?: (environmentId: EnvironmentId) => NodeDirectoryNodeFacts | null,
 ): ReadonlyArray<AgentControlNodeDirectoryEntry> {
   const entries: AgentControlNodeDirectoryEntry[] = [];
+  let projectBudget = AGENT_CONTROL_NODE_DIRECTORY_MAX_PUBLISHED_PROJECTS;
   for (const node of snapshot.nodes) {
     if (entries.length === AGENT_CONTROL_NODE_DIRECTORY_MAX_ENTRIES) break;
     if (!snapshot.ownerEnvironmentIds.has(node.environmentId)) continue;
     if (String(node.environmentId).length > NODE_DIRECTORY_ENVIRONMENT_ID_MAX_CHARS) continue;
     const label = node.label.trim().slice(0, NODE_DIRECTORY_LABEL_MAX_CHARS).trim();
     if (label.length === 0) continue;
+    const known = facts?.(node.environmentId) ?? null;
+    const directory =
+      known?.defaultProjectDirectory == null
+        ? null
+        : boundedText(known.defaultProjectDirectory, NODE_DIRECTORY_PATH_MAX_CHARS);
+    const projects =
+      known?.projects == null ? null : publishedProjects(known.projects, projectBudget);
+    if (projects !== null) projectBudget -= projects.length;
     entries.push({
       environmentId: node.environmentId,
       label,
       platformOs: catalogPlatformOs(node.platformOs) ?? "unknown",
       online: node.presence === "online",
       projectCopySupport: node.projectCopySupport,
+      ...(node.transport === null ? {} : { transport: node.transport }),
+      ...(directory === null ? {} : { defaultProjectDirectory: directory }),
+      // A node whose projects do not fit is published without them: not known, never empty.
+      ...(projects === null ? {} : { projects }),
     });
   }
   return entries;

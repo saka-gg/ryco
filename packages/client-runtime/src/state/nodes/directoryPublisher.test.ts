@@ -68,9 +68,78 @@ describe("nodeDirectoryEntries", () => {
       ]),
     };
     expect(nodeDirectoryEntries(snapshot)).toEqual([
-      entry(MINI, { label: "Mac mini", online: false }),
-      entry(SERVER, { label: "x".repeat(120), platformOs: "unknown", projectCopySupport: "no" }),
+      entry(MINI, { label: "Mac mini", online: false, transport: "direct" }),
+      entry(SERVER, {
+        label: "x".repeat(120),
+        platformOs: "unknown",
+        projectCopySupport: "no",
+        transport: "direct",
+      }),
     ]);
+  });
+
+  it("adds how a node is reached, its code directory and its projects, when known", () => {
+    const BOX = EnvironmentId.make("env-box");
+    const BIG = EnvironmentId.make("env-big");
+    const snapshot: NodeCatalogSnapshot = {
+      nodes: [
+        node(MINI, { transport: "relay" }),
+        node(SERVER, { transport: null, presence: "offline" }),
+        node(BOX),
+        node(BIG),
+      ],
+      ownerEnvironmentIds: new Set([MINI, SERVER, BOX, BIG]),
+    };
+    const many = (count: number, prefix: string) =>
+      Array.from({ length: count }, (_, index) => ({
+        repositoryCanonicalKey: `github.com/me/${prefix}-${index}`,
+        path: `/code/${prefix}-${index}`,
+      }));
+    const entries = nodeDirectoryEntries(snapshot, (environmentId) =>
+      environmentId === MINI
+        ? {
+            defaultProjectDirectory: " /Users/me/code ",
+            projects: [
+              { repositoryCanonicalKey: "github.com/me/app", path: "/Users/me/code/app" },
+              { repositoryCanonicalKey: "github.com/me/app", path: "/Users/me/code/app" },
+              { repositoryCanonicalKey: " ", path: "/Users/me/code/blank" },
+              { repositoryCanonicalKey: "github.com/me/long", path: `/${"x".repeat(2_000)}` },
+            ],
+          }
+        : environmentId === SERVER
+          ? { defaultProjectDirectory: null, projects: [] }
+          : environmentId === BOX
+            ? { defaultProjectDirectory: null, projects: null }
+            : // More than one entry may list: not known, rather than a partial list.
+              { defaultProjectDirectory: "/srv", projects: many(65, "big") },
+    );
+    expect(entries).toEqual([
+      entry(MINI, {
+        transport: "relay",
+        defaultProjectDirectory: "/Users/me/code",
+        projects: [{ repositoryCanonicalKey: "github.com/me/app", path: "/Users/me/code/app" }],
+      }),
+      // Offline: no transport; an empty project list is published as known and empty.
+      entry(SERVER, { online: false, projects: [] }),
+      entry(BOX, { transport: "direct" }),
+      entry(BIG, { transport: "direct", defaultProjectDirectory: "/srv" }),
+    ]);
+  });
+
+  it("keeps one publication's projects within its total bound, first nodes first", () => {
+    const ids = Array.from({ length: 5 }, (_, index) => EnvironmentId.make(`env-${index}`));
+    const entries = nodeDirectoryEntries(
+      { nodes: ids.map((id) => node(id)), ownerEnvironmentIds: new Set(ids) },
+      (environmentId) => ({
+        defaultProjectDirectory: null,
+        projects: Array.from({ length: 60 }, (_, index) => ({
+          repositoryCanonicalKey: `github.com/me/${environmentId}-${index}`,
+          path: `/code/${index}`,
+        })),
+      }),
+    );
+    // 4 × 60 = 240 fit the 256 total; the fifth node's 60 do not.
+    expect(entries.map((value) => value.projects?.length ?? null)).toEqual([60, 60, 60, 60, null]);
   });
 
   it("keeps the catalog's first 64 nodes", () => {

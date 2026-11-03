@@ -236,7 +236,8 @@ An offline node's checkout is disabled, and so is one the Hub won't let you use.
 Agents in Ryco sessions get four tools (the full reference is in
 [Agent Control](../agent-control.md#projects-on-other-nodes)):
 
-- `ryco_list_nodes`: the nodes your Ryco apps know about.
+- `ryco_list_nodes`: the nodes your Ryco apps know about, with each one's code directory, whether
+  the chat's project is already there, and whether your app reaches it through the Hub.
 - `ryco_suggest_project_destination`: a free folder in this node's normal code directory.
 - `ryco_propose_project_import`: clone a repository into a folder on the agent's own node.
 - `ryco_propose_project_copy`: copy a project of the agent's node, or a repository URL, to another
@@ -252,13 +253,15 @@ in the normal code directory." The agent
 2. calls `ryco_propose_project_copy` with `target: "Mac mini"`, `destination: { kind: "default" }`,
    `setup: {}` (the project's own setup script) and a `followUpThread` prompt such as "Install the
    toolchain this repository needs and check that its tests run";
-3. tells you the request waits for your approval.
+3. tells you the request waits for your approval, and ends its turn.
 
 Your laptop app shows the request: copy `ryco` to Mac mini, into `/Users/you/Code/ryco` (new
-folder), run `bun install`, then start a setup thread with the model shown. The setup command is
-shown exactly as it will run, and nothing else runs as setup. When you approve, the app copies the
-project like the copy dialog does, with the same toast, and reports back. The agent's request then
-completes with "Copied to Mac mini".
+folder), with what it brings (unpushed commits, uncommitted changes, settings), run `bun install`,
+then start a setup thread with the model shown. The setup command is shown exactly as it will run,
+without opening the details, and nothing else runs as setup. When you approve, the app copies the
+project like the copy dialog does, with the same toast, and reports back. Ryco then wakes the agent
+with the outcome (where the project is on the Mac mini, how `bun install` ended, the setup thread),
+so it can tell you.
 
 Only a Ryco app on a computer that is connected to the target node can approve a copy. The mobile
 app and the web app's phone layout show "Approve in Ryco on a computer connected to <node>". An

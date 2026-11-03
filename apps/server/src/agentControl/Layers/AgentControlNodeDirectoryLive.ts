@@ -95,6 +95,18 @@ const normalizeNodes = (
       platformOs: node.platformOs,
       online: node.online,
       projectCopySupport: node.projectCopySupport,
+      ...(node.transport === undefined ? {} : { transport: node.transport }),
+      ...(node.defaultProjectDirectory === undefined
+        ? {}
+        : { defaultProjectDirectory: node.defaultProjectDirectory }),
+      ...(node.projects === undefined
+        ? {}
+        : {
+            projects: node.projects.map((project) => ({
+              repositoryCanonicalKey: project.repositoryCanonicalKey,
+              path: project.path,
+            })),
+          }),
     });
   }
   return [...kept.values()];

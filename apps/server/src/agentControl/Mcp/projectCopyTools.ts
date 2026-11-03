@@ -7,8 +7,11 @@
  * `projects.copy` and exact active-turn authority. Never installed on the external endpoint.
  *
  * `ryco_suggest_project_destination` answers with paths of this node: a documented exception to
- * keeping workspace paths out of tool results, since the agent already runs here. Paths of other
- * nodes never appear; a copy's destination is resolved by the approving app.
+ * keeping workspace paths out of tool results, since the agent already runs here.
+ * `ryco_list_nodes` adds what owner clients published about other nodes (their code directory,
+ * where this chat's repository already is there): the user's own non-secret folder names, so an
+ * agent can avoid copying to a node that has the project. A copy's destination is still resolved
+ * by the approving app.
  *
  * @module agentControl/Mcp/projectCopyTools
  */
@@ -39,6 +42,7 @@ import {
 } from "@ryco/contracts";
 import {
   GitBranchName,
+  PROJECT_COPY_RELAY_MAX_ARTIFACT_BYTES,
   ProjectCopyRemoteUrl,
   ProjectSetupCommand,
   type ProjectCopyError,
@@ -123,6 +127,7 @@ const ProposeCopyInput = Schema.Struct({
   bringCommits: Schema.optional(Schema.Boolean),
   bringChanges: Schema.optional(Schema.Boolean),
   copySettings: Schema.optional(Schema.Boolean),
+  branch: Schema.optional(Schema.NullOr(GitBranchName)),
   setup: Schema.optional(
     Schema.NullOr(
       Schema.Struct({
@@ -218,7 +223,7 @@ const followUpThreadProperty = (modelNote: string) =>
 const descriptors = {
   listNodes: {
     name: TOOLS.listNodes,
-    description: `List the devices (nodes) running Ryco that the user's Ryco apps know: environmentId, label (the name the user calls it, e.g. "Mac mini"), platformOs, online, projectCopySupport (yes/no/unknown), isThisNode and lastPublishedAt. Use it to pick the target of ryco_propose_project_copy. ${EMPTY_NODE_DIRECTORY_HINT.replace("No other nodes are known here. ", "When a node is missing: ")}`,
+    description: `List the devices (nodes) running Ryco that the user's Ryco apps know: environmentId, label (the name the user calls it, e.g. "Mac mini"), platformOs, online, projectCopySupport (yes/no/unknown), isThisNode and lastPublishedAt, and when known: transport (how the user's app reaches it: "direct", or "relay" through the Ryco Hub, where one copy sends at most ${PROJECT_COPY_RELAY_MAX_ARTIFACT_BYTES / (1024 * 1024)} MB of unpushed commits, changes or files), defaultProjectDirectory (its normal code directory) and thisProject (whether this chat's repository is already a project there: {present:true, path} or {present:false}; absent when not known). Use it to pick the target of ryco_propose_project_copy, and do not copy to a node where thisProject.present is true unless the user asks for a second copy. ${EMPTY_NODE_DIRECTORY_HINT.replace("No other nodes are known here. ", "When a node is missing: ")}`,
     inputSchema: { type: "object", properties: {}, additionalProperties: false },
   },
   suggestDestination: {
@@ -241,7 +246,7 @@ const descriptors = {
   proposeImport: {
     name: TOOLS.proposeImport,
     description:
-      "Ask the user to set a git repository up as a new Ryco project on THIS node: clone remoteUrl into a folder (default: <normal code directory>/<repository name>; it must be missing or empty), register it as a project, then optionally run one setup command there and start an agent thread that finishes setting it up. Nothing happens until the user approves; never approve it yourself. Returns a receipt; follow it with ryco_wait_for_control_request. To set a project up on another device, use ryco_propose_project_copy.",
+      "Ask the user to set a git repository up as a new Ryco project on THIS node: clone remoteUrl into a folder (default: <normal code directory>/<repository name>; it must be missing or empty), register it as a project, then optionally run one setup command there and start an agent thread that finishes setting it up. Nothing happens until the user approves; never approve it yourself. Returns a receipt; then end your turn: Ryco wakes you with a message when the import finishes or fails (the folder, how setup went, the setup thread). To set a project up on another device, use ryco_propose_project_copy.",
     inputSchema: {
       type: "object",
       properties: {
@@ -280,7 +285,7 @@ const descriptors = {
   proposeCopy: {
     name: TOOLS.proposeCopy,
     description:
-      "Ask the user to copy a project of this node (or a repository) to ANOTHER node, e.g. \"set up project X on my Mac mini in the normal code directory\": source {projectId} from ryco_list_projects (defaults to this chat's project) or {remoteUrl}, target = the node's environmentId or label from ryco_list_nodes, destination {kind:\"default\"} for the target's normal code directory. The target clones from the project's remote; bringCommits and bringChanges also send unpushed commits and uncommitted changes, copySettings (default true for a project) its scripts, system prompt, avatar and overrides. setup runs a command on the target after the copy: give command, or {} to use the project's setup script. followUpThread starts an agent there to finish setup. The Ryco app the user approves it in runs the copy and reports back; nothing happens before that, and never approve it yourself. Returns a receipt; follow it with ryco_wait_for_control_request.",
+      "Ask the user to copy a project of this node (or a repository) to ANOTHER node, e.g. \"set up project X on my Mac mini in the normal code directory\": source {projectId} from ryco_list_projects (defaults to this chat's project) or {remoteUrl}, target = the node's environmentId or label from ryco_list_nodes, destination {kind:\"default\"} for the target's normal code directory. The target clones from the project's remote; like the copy dialog, it also sends unpushed commits (bringCommits) and uncommitted changes (bringChanges) by default, and copySettings (default true for a project) its scripts, system prompt, avatar and overrides. branch checks out another branch from the remote instead (then bringCommits and bringChanges default to false). setup runs a command on the target after the copy: give command, or {} to use the project's setup script. followUpThread starts an agent there to finish setup. The Ryco app the user approves it in runs the copy and reports back; nothing happens before that, and never approve it yourself. Returns a receipt; then end your turn: Ryco wakes you with a message when the copy finishes or fails (the folder on the target, how setup went, the setup thread).",
     inputSchema: {
       type: "object",
       properties: {
@@ -311,11 +316,18 @@ const descriptors = {
         destination: destinationProperty("the target node"),
         bringCommits: {
           type: "boolean",
-          description: "Also send commits not on any remote. Default false.",
+          description:
+            "Also send commits not on any remote. Default true for a project (false with branch or a repository source), as in the copy dialog; nothing is sent when there are none.",
         },
         bringChanges: {
           type: "boolean",
-          description: "Also send uncommitted changes. Default false.",
+          description:
+            "Also send uncommitted changes. Default true for a project (false with branch or a repository source), as in the copy dialog; nothing is sent when there are none.",
+        },
+        branch: {
+          anyOf: [{ type: "string", maxLength: 256 }, { type: "null" }],
+          description:
+            "Branch to check out on the target, as the remote has it. Defaults to the source project's current branch, or the repository's default branch.",
         },
         copySettings: {
           type: "boolean",
@@ -376,6 +388,33 @@ const errorResult = (text: string): AgentControlMcpToolResult => ({
 });
 
 const copyFailure = (error: ProjectCopyError) => new ToolFailure(error.message.slice(0, 500));
+
+/**
+ * What a publisher said about the node beyond its identity: how it is reached, its code
+ * directory, and whether the caller's repository (`repositoryKey`) is a project there. This node
+ * is the agent's own, so only its transport is left out (the agent runs on it).
+ */
+export const listedNodeExtras = (
+  node: AgentControlNodeDirectoryListEntry,
+  repositoryKey: string | null,
+) => {
+  const match =
+    repositoryKey === null || node.projects === undefined
+      ? undefined
+      : node.projects.find((project) => project.repositoryCanonicalKey === repositoryKey);
+  return {
+    ...(node.transport === undefined || node.isThisNode ? {} : { transport: node.transport }),
+    ...(node.defaultProjectDirectory === undefined
+      ? {}
+      : { defaultProjectDirectory: node.defaultProjectDirectory }),
+    ...(repositoryKey === null || node.projects === undefined || node.isThisNode
+      ? {}
+      : {
+          thisProject:
+            match === undefined ? { present: false } : { present: true, path: match.path },
+        }),
+  };
+};
 
 const describeNode = (node: AgentControlNodeDirectoryListEntry) =>
   `"${node.label}" (${node.environmentId}${node.isThisNode ? ", this node" : node.online ? ", online" : ", offline"})`;
@@ -531,10 +570,21 @@ export function withProjectCopyTools(
     modelSelection,
   });
 
-  const listNodes = (args: unknown) =>
+  /** The repository identity of the calling chat's project; null for none (or a chat). */
+  const callerRepositoryKey = (session: AgentControlSessionRecord) =>
+    Effect.gen(function* () {
+      const thread = yield* callerThread(session);
+      const project = yield* deps.projections.getProjectShellById(thread.projectId);
+      return Option.isNone(project) || isChatProject(project.value)
+        ? null
+        : (project.value.repositoryIdentity?.canonicalKey ?? null);
+    }).pipe(Effect.orElseSucceed(() => null));
+
+  const listNodes = (session: AgentControlSessionRecord, args: unknown) =>
     Effect.gen(function* () {
       yield* decode(AgentControlMcpListNodesInput, args);
       const directory = yield* listDirectory();
+      const repositoryKey = yield* callerRepositoryKey(session);
       const nodes = directory.nodes.map((node) => ({
         environmentId: node.environmentId,
         label: node.label,
@@ -543,6 +593,7 @@ export function withProjectCopyTools(
         projectCopySupport: node.projectCopySupport,
         isThisNode: node.isThisNode,
         lastPublishedAt: node.lastPublishedAt,
+        ...listedNodeExtras(node, repositoryKey),
       }));
       return nodes.some((node) => !node.isThisNode)
         ? { nodes }
@@ -790,9 +841,13 @@ export function withProjectCopyTools(
         source,
         target,
         destination: input.destination ?? { kind: "default" },
-        bringCommits: input.bringCommits ?? false,
-        bringChanges: input.bringChanges ?? false,
+        // The copy dialog's defaults for a project; another branch leaves its own work behind,
+        // and a repository has none.
+        bringCommits: input.bringCommits ?? (project !== null && input.branch == null),
+        bringChanges: input.bringChanges ?? (project !== null && input.branch == null),
         copySettings: input.copySettings ?? project !== null,
+        // Only when given, so a plan without one keeps the digest it always had.
+        ...(input.branch == null ? {} : { branch: input.branch }),
         setup:
           setupCommand === null || setupCommand === undefined
             ? null
@@ -811,7 +866,7 @@ export function withProjectCopyTools(
     args: unknown,
   ): Effect.Effect<unknown, ToolFailure> => {
     if (name === TOOLS.listNodes)
-      return authorize(session, name).pipe(Effect.andThen(listNodes(args)));
+      return authorize(session, name).pipe(Effect.andThen(listNodes(session, args)));
     if (name === TOOLS.suggestDestination)
       return authorize(session, name).pipe(Effect.andThen(suggestDestination(args)));
     return requireAuthority(session, name).pipe(

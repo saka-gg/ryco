@@ -253,6 +253,28 @@ it.layer(NodeServices.layer)("AgentControlNodeDirectoryLive", (it) => {
     ),
   );
 
+  it.effect(
+    "keeps how a node is reached, its code directory and its projects, across restarts",
+    () =>
+      withDirectory(({ open }) =>
+        Effect.gen(function* () {
+          const first = yield* open();
+          const published = entry("a", {
+            transport: "relay",
+            defaultProjectDirectory: "/Users/me/code",
+            projects: [{ repositoryCanonicalKey: "github.com/me/app", path: "/Users/me/code/app" }],
+          });
+          yield* first.publish({ publisherKey: "desktop", nodes: [published, entry("b")] });
+          const listed = (yield* first.list()).nodes;
+          assert.deepInclude(listed[0], published);
+          // A node published without them says nothing about them.
+          assert.isFalse("projects" in listed[1]!);
+          assert.isFalse("transport" in listed[1]!);
+          assert.deepStrictEqual((yield* (yield* open()).list()).nodes, listed);
+        }),
+      ),
+  );
+
   it.effect("recovers from a corrupt file and drops only the records that do not decode", () =>
     withDirectory(({ filePath, open }) =>
       Effect.gen(function* () {
