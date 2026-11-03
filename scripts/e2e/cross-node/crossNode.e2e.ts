@@ -23,6 +23,7 @@ import {
 } from "@ryco/contracts";
 import {
   PROJECT_COPY_CHUNK_BYTES,
+  PROJECT_COPY_DIRECT_CHUNK_BYTES,
   PROJECT_IMPORT_TERMINAL_STATUSES,
   type ProjectExportArtifact,
   type ProjectExportArtifactKind,
@@ -274,7 +275,13 @@ const transferArtifact = async (exportId: ProjectExportId, artifact: ProjectExpo
       sha256: artifact.sha256,
     }),
   );
-  expect(begun).toEqual({ transferId, receivedBytes: 0 });
+  // B takes 1 MiB chunks over this direct connection; the reads below stay at 160 KiB, which
+  // every node takes.
+  expect(begun).toEqual({
+    transferId,
+    receivedBytes: 0,
+    maxChunkBytes: PROJECT_COPY_DIRECT_CHUNK_BYTES,
+  });
   let offset = 0;
   let chunks = 0;
   let last: { readonly offset: number; readonly dataBase64: string } | null = null;
@@ -1207,14 +1214,27 @@ describe("cross-node project copy (node A on this machine, node B in Docker)", (
       const clonedSnapshot = cloned.outcome.progress.importSnapshot;
       expect(cloned.outcome.progress.error).toBeNull();
       expect(cloned.outcome.progress.phase).toBe("done");
-      expect(cloned.phases).toEqual(["acquire", "export", "upload", "import", "done"]);
+      // B sees this connection come from Docker's bridge: a plain one that is neither this
+      // computer, HTTPS nor Tailscale. B refuses the opted-in ignored files over it, so the copy
+      // exports and uploads once more without them and says so (A33, #1085).
+      expect(cloned.phases).toEqual([
+        "acquire",
+        "export",
+        "upload",
+        "export",
+        "upload",
+        "import",
+        "done",
+      ]);
       expect(clonedSnapshot?.status).toBe("completed");
       expect(clonedSnapshot?.warnings).toEqual([]);
       expect(cloned.outcome.record).toMatchObject({ stage: "finished", outcome: "completed" });
       expect(cloned.outcome.project).toMatchObject({
         environmentId: nodeBId,
         workspaceRoot: copy.plan.destinationPath,
-        warnings: [],
+        warnings: [
+          `The ignored files were not copied: they are only sent over an encrypted connection, and the one to ${nodeB.remote.label} is not.`,
+        ],
       });
       const destination = copy.plan.destinationPath;
       expect(await gitOnB(destination, "rev-parse", "HEAD")).toBe(fixture.headOid);
@@ -1226,11 +1246,12 @@ describe("cross-node project copy (node A on this machine, node B in Docker)", (
       expect(statusLines(await gitOutputOnB(destination, ...STATUS_ARGS))).toEqual(
         statusLines(await gitOutputOnA(...STATUS_ARGS)),
       );
-      for (const file of [fixture.trackedEdit, fixture.untrackedBinary, fixture.ignoredEnv]) {
+      for (const file of [fixture.trackedEdit, fixture.untrackedBinary]) {
         expect(await sha256OnB(path.posix.join(destination, file.path)), file.path).toBe(
           file.sha256,
         );
       }
+      expect(await existsOnB(path.posix.join(destination, fixture.ignoredEnv.path))).toBe(false);
       const project = await waitForProject("B", cloned.outcome.record.projectId);
       expect(project).toMatchObject({ title: fixture.title, workspaceRoot: destination });
       expect(project.scripts).toEqual(fixture.scripts);
