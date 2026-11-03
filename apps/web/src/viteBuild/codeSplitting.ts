@@ -47,18 +47,6 @@ import path from "node:path";
  */
 export const CODE_SPLITTING_MERGE_THRESHOLD_BYTES = 12 * 1024;
 
-/**
- * The standard build's `icons` subgroups fold below this instead. Every lazy
- * surface that imports a few lucide icons adds an importing-entry set, and at
- * 12 KiB the shell's icons had drifted into seven chunks (RootAppShell 117
- * files, 417.3 KiB; chat route 154 files, 714.6 KiB; 2026-10-22, with
- * cross-node project copy). At 14 KiB they are six again (116 files, 417.1
- * KiB; chat route 153 files, 714.4 KiB; draft route 148 files) while the pull
- * request and settings routes keep their bytes. 16 KiB saved two more files
- * but moved about 5 KiB gzip into those routes.
- */
-export const ICON_MERGE_THRESHOLD_BYTES = 14 * 1024;
-
 const SEP = String.raw`[\\/]`;
 const NODE_MODULES = String.raw`[\\/]node_modules[\\/](?:\.bun[\\/][^\\/]+[\\/]node_modules[\\/])?`;
 const LUCIDE_MODULE = new RegExp(`${NODE_MODULES}lucide-react${SEP}`);
@@ -523,13 +511,7 @@ export function createWebCodeSplittingOptions(input: {
         ...shared,
         entriesAware: false,
       }
-    : {
-        name: "icons",
-        test: isMergeableIconModule,
-        priority: 5,
-        ...shared,
-        entriesAwareMergeThreshold: ICON_MERGE_THRESHOLD_BYTES,
-      };
+    : { name: "icons", test: isMergeableIconModule, priority: 5, ...shared };
   return {
     groups: [
       {

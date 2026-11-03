@@ -50,11 +50,10 @@ import { getLocalStorageItem, setLocalStorageItem } from "../../../hooks/useLoca
 import { randomUUID } from "../../../lib/utils";
 import { selectProjectByRef, useStore } from "../../../store";
 import {
-  markProjectCopiesActive,
   PROJECT_COPY_RECORDS_STORAGE_KEY,
   PROJECT_COPY_STARTS_STORAGE_KEY,
-  publishProjectCopyBadges,
-} from "../projectNodesDialogStore";
+} from "../projectCopyStorage";
+import { markProjectCopiesActive, publishProjectCopyBadges } from "../projectNodesShellActions";
 import {
   agentControlReportRetryDelayMs,
   deliverAgentControlReport,

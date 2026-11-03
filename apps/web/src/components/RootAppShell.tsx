@@ -20,10 +20,8 @@ import { useAutomationsDialogStore } from "./automations/automationsDialogStore"
 import { useSessionImportDialogStore } from "./sessionImport/sessionImportDialogStore";
 import { usePromoteChatDialogStore } from "./chat/promoteChatDialogStore";
 import { useForkThreadDialogStore } from "./chat/forkThreadDialogStore";
-import {
-  hasStoredProjectCopyRecords,
-  useProjectNodesDialogStore,
-} from "./projectNodes/projectNodesDialogStore";
+import { hasStoredProjectCopyRecords } from "./projectNodes/projectCopyStorage";
+import { useProjectNodesDialogStore } from "./projectNodes/projectNodesDialogStore";
 import { ProviderUpdateLaunchNotification } from "./ProviderUpdateLaunchNotification";
 import { MissedAutomationRunsNotice } from "./automations/MissedAutomationRunsNotice";
 import {
@@ -270,13 +268,16 @@ function ProjectNodesDialogsMount() {
 function useResumeProjectCopies(enabled: boolean): void {
   useEffect(() => {
     if (!enabled) return;
-    return scheduleIdleTask(() => {
-      if (!hasStoredProjectCopyRecords()) return;
-      void import("./projectNodes/copyRuntime/copyManager")
-        .then((module) => module.resumeProjectCopies())
-        .catch((error: unknown) => console.warn("Resuming project copies failed.", error));
-    }, PROJECT_COPY_RESUME_IDLE_TIMEOUT_MS);
+    return scheduleIdleTask(resumeStoredProjectCopies, PROJECT_COPY_RESUME_IDLE_TIMEOUT_MS);
   }, [enabled]);
+}
+
+/** Outside the hook: React Compiler does not lower `import()` expressions. */
+function resumeStoredProjectCopies(): void {
+  if (!hasStoredProjectCopyRecords()) return;
+  void import("./projectNodes/copyRuntime/copyManager")
+    .then((module) => module.resumeProjectCopies())
+    .catch((error: unknown) => console.warn("Resuming project copies failed.", error));
 }
 
 const PROJECT_COPY_RESUME_IDLE_TIMEOUT_MS = 5_000;

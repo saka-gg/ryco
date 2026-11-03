@@ -18,8 +18,8 @@ import {
 import type { SidebarProjectGroupMember } from "../../../sidebarProjectGrouping";
 import { selectSidebarThreadsForProjectRef, useStore } from "../../../store";
 import { DeviceIcon } from "../../DeviceIcon";
+import { hasStoredProjectCopyRecords } from "../../projectNodes/projectCopyStorage";
 import {
-  hasStoredProjectCopyRecords,
   openCopyProject,
   preloadProjectNodesDialogs,
   useProjectNodesDialogStore,

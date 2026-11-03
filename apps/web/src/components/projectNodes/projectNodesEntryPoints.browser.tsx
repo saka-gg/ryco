@@ -12,8 +12,8 @@ import { ProjectNotOnBlock } from "../projects/sections/ProjectDevicesSection";
 import { useSidebarProjectContextMenu } from "../sidebar/hooks/useSidebarProjectContextMenu";
 import { ProjectSettingsMenu } from "../sidebar/ProjectSettingsMenu";
 import { Menu, MenuPopup, MenuTrigger } from "../ui/menu";
+import { crossNodeProjectActions } from "./projectNodesShellActions";
 import {
-  crossNodeProjectActions,
   resetProjectNodesDialogStoreForTests,
   useProjectNodesDialogStore,
   type CopyProjectDialogOrigin,

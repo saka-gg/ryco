@@ -46,10 +46,8 @@ import { useSidebarProjectContextMenu } from "./hooks/useSidebarProjectContextMe
 import { useSidebarProjectDialogs } from "./SidebarProjectDialogOwner";
 import { usePresentationTier } from "../../hooks/usePresentationTier";
 import { useCommandPaletteStore } from "../../commandPaletteStore";
-import {
-  crossNodeProjectActions,
-  type CopyProjectDialogOrigin,
-} from "../projectNodes/projectNodesDialogStore";
+import type { CopyProjectDialogOrigin } from "../projectNodes/projectNodesDialogStore";
+import { crossNodeProjectActions } from "../projectNodes/projectNodesShellActions";
 
 interface SidebarProjectItemProps {
   project: SidebarProjectSnapshot;

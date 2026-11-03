@@ -16,7 +16,6 @@ import {
   createSideEffectFreePackageLookup,
   createWebCodeSplittingOptions,
   HOSTED_ROUTE_GROUP_MODULES,
-  ICON_MERGE_THRESHOLD_BYTES,
   isLexicalModule,
   isMarkdownModule,
   isMergeableIconModule,
@@ -461,11 +460,7 @@ describe("web code splitting", () => {
       minShareCount: 2,
       entriesAware: false,
     });
-    expect(standard.groups[2]).toMatchObject({
-      name: "icons",
-      entriesAware: true,
-      entriesAwareMergeThreshold: ICON_MERGE_THRESHOLD_BYTES,
-    });
+    expect(standard.groups[2]).toMatchObject({ name: "icons", entriesAware: true });
     expect(hosted.groups.slice(4)).toEqual(standard.groups.slice(3));
   });
 

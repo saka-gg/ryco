@@ -5,16 +5,17 @@
 //          dialogs' surface mounted) and which checkouts it copies (the
 //          sidebar's badge), and carries "Show in project selector" to the
 //          new-thread hero.
-// Layer: Web UI state. The only static piece of the project-nodes feature: the
-//        command palette's store (boot) and the app shell import it. The
-//        dialogs (`ProjectNodesDialogs.tsx`), the copy runtime and the Agent
-//        Control executor all load lazily; entry points import only this file.
+// Layer: Web UI state. The only piece of the project-nodes feature in the boot
+//        bundle: the command palette's store imports it, so it keeps to what
+//        opening the dialogs needs. The shell's copy helpers
+//        (`projectNodesShellActions.ts`), the stored-records check
+//        (`projectCopyStorage.ts`), the dialogs (`ProjectNodesDialogs.tsx`), the
+//        copy runtime and the Agent Control executor load with the surfaces
+//        that use them.
 
 import type { EnvironmentId, ScopedProjectRef } from "@ryco/contracts";
-import * as Schema from "effect/Schema";
 import { create } from "zustand";
 
-import { getLocalStorageItem } from "../../hooks/useLocalStorage";
 import { getPresentationTier, type PresentationTier } from "../../lib/presentationTier";
 
 /**
@@ -111,7 +112,8 @@ export interface ProjectNodesDialogState {
 }
 
 const CLOSED = { open: false, token: 0, request: null } as const;
-const NO_COPY_BADGES: Readonly<Record<string, number | null>> = {};
+/** The empty `copyBadges`, kept identical so a store without copies never re-renders. */
+export const NO_COPY_BADGES: Readonly<Record<string, number | null>> = {};
 
 /** App-wide state of the project-nodes dialogs; `ProjectNodesDialogs` is their only host. */
 export const useProjectNodesDialogStore = create<ProjectNodesDialogState>()(() => ({
@@ -177,27 +179,6 @@ export function closeCopyProject(): void {
   useProjectNodesDialogStore.setState({ copyProject: { ...copyProject, open: false } });
 }
 
-/**
- * A project menu's cross-node actions for one checkout: copy it (the dialog
- * starts from it) and link a copy already on a node (the palette store's `openAddProject` in
- * link mode, passed in by the caller: the add-project dialog where it is
- * available, else the palette's add-project views). Both preload the dialogs
- * on menu intent.
- */
-export function crossNodeProjectActions(input: {
-  readonly projectRef: ScopedProjectRef;
-  readonly origin: CopyProjectDialogOrigin;
-  /** `openAddProject` from the command palette's store (which imports this module). */
-  readonly openAddProject: (options: OpenAddProjectOptions) => void;
-}): CrossNodeProjectActions {
-  const { projectRef, origin } = input;
-  return {
-    onCopy: () => openCopyProject({ source: projectRef, origin }),
-    onLink: () => input.openAddProject({ mode: "link", projectRef }),
-    onIntent: preloadProjectNodesDialogs,
-  };
-}
-
 /** How long a "Show in project selector" request waits for the project's hero to appear. */
 const PROJECT_SELECTOR_OPEN_REQUEST_TTL_MS = 15_000;
 
@@ -234,73 +215,6 @@ export function clearProjectSelectorOpenRequest(projectRef: ScopedProjectRef): v
   if (isProjectSelectorOpenRequested(request, projectRef)) {
     useProjectNodesDialogStore.setState({ projectSelectorOpenRequest: null });
   }
-}
-
-/** The copy runtime publishes its running copies' badges (see `copyBadges`). */
-export function publishProjectCopyBadges(badges: Readonly<Record<string, number | null>>): void {
-  const current = useProjectNodesDialogStore.getState().copyBadges;
-  const keys = Object.keys(badges);
-  if (
-    keys.length === Object.keys(current).length &&
-    keys.every((key) => key in current && current[key] === badges[key])
-  ) {
-    return;
-  }
-  useProjectNodesDialogStore.setState({
-    copyBadges: keys.length === 0 ? NO_COPY_BADGES : badges,
-  });
-}
-
-/**
- * The badge of a sidebar row that groups `memberKeys` (`scopedProjectKey`s):
- * a running copy's percent (null while unmeasured), undefined when none runs.
- */
-export function projectCopyBadgeFor(
-  badges: Readonly<Record<string, number | null>>,
-  memberKeys: ReadonlyArray<string>,
-): number | null | undefined {
-  if (badges === NO_COPY_BADGES) return undefined;
-  for (const key of memberKeys) {
-    if (key in badges) return badges[key] ?? null;
-  }
-  return undefined;
-}
-
-/** The copy runtime calls this when it starts or resumes a copy. */
-export function markProjectCopiesActive(): void {
-  if (useProjectNodesDialogStore.getState().copiesActive) return;
-  useProjectNodesDialogStore.setState({ copiesActive: true });
-}
-
-/**
- * Where the copy runtime keeps its job records (ids only). Here so the shell
- * can tell whether there is anything to resume without loading the runtime.
- * Hosted builds keep them in memory for the session (`useLocalStorage`).
- */
-export const PROJECT_COPY_RECORDS_STORAGE_KEY = "ryco:project-copies:v1";
-
-/**
- * Agent Control approvals of a copy that may have bound a proposal to this
- * client's executor before the copy's own record existed (ids only), so a
- * reload still ends such a proposal. Kept by the copy runtime.
- */
-export const PROJECT_COPY_STARTS_STORAGE_KEY = "ryco:project-copy-starts:v1";
-
-const hasStoredEntries = (key: string): boolean => {
-  try {
-    const stored = getLocalStorageItem(key, Schema.Unknown);
-    return Array.isArray(stored) && stored.length > 0;
-  } catch {
-    return false;
-  }
-};
-
-/** Whether a session left copy records behind (the copy runtime decides what to resume). */
-export function hasStoredProjectCopyRecords(): boolean {
-  return (
-    hasStoredEntries(PROJECT_COPY_RECORDS_STORAGE_KEY) ||
-    hasStoredEntries(PROJECT_COPY_STARTS_STORAGE_KEY)
-  );
 }
 
 /** Test-only: both dialogs closed, nothing running. */

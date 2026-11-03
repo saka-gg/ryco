@@ -9,15 +9,17 @@ import {
   closeAddProject,
   closeCopyProject,
   isProjectSelectorOpenRequested,
-  markProjectCopiesActive,
   openAddProject,
   openCopyProject,
-  projectCopyBadgeFor,
-  publishProjectCopyBadges,
   requestProjectSelectorOpen,
   resetProjectNodesDialogStoreForTests,
   useProjectNodesDialogStore,
 } from "./projectNodesDialogStore";
+import {
+  markProjectCopiesActive,
+  projectCopyBadgeFor,
+  publishProjectCopyBadges,
+} from "./projectNodesShellActions";
 
 const MINI = EnvironmentId.make("env-mini");
 const source = { environmentId: EnvironmentId.make("env-laptop"), projectId: ProjectId.make("p") };

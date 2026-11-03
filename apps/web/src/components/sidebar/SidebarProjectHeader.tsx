@@ -26,10 +26,10 @@ import { useHasIntersectedViewport } from "./hooks/useHasIntersectedViewport";
 import { SIDEBAR_PROJECT_MEMBERS_ATTRIBUTE } from "../chat/promoteChatDialogStore";
 import { preloadDraftRoute } from "./threadNavigationIntent";
 import {
-  projectCopyBadgeFor,
   useProjectNodesDialogStore,
   type CrossNodeProjectActions,
 } from "../projectNodes/projectNodesDialogStore";
+import { projectCopyBadgeFor } from "../projectNodes/projectNodesShellActions";
 
 export function SidebarProjectHeader(props: {
   project: SidebarProjectSnapshot;
