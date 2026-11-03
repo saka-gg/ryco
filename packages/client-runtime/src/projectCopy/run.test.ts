@@ -631,15 +631,21 @@ const until = (condition: () => boolean): Promise<void> =>
     poll();
   });
 
-/** The copy's outcome, or `"pending"` when it did not settle within `ms` (it hangs). */
-const settleWithin = (
+/**
+ * The copy's outcome, or `"pending"` when it did not settle within `turns` macrotasks (it hangs).
+ * The fake I/O never waits on the clock, so a copy that can finish does so in a few turns.
+ */
+const settleWithin = async (
   done: Promise<ProjectCopyOutcome>,
-  ms = 1_000,
-): Promise<ProjectCopyOutcome | "pending"> =>
-  Promise.race([
-    done,
-    new Promise<"pending">((resolve) => setTimeout(() => resolve("pending"), ms)),
-  ]);
+  turns = 200,
+): Promise<ProjectCopyOutcome | "pending"> => {
+  const result: { outcome: ProjectCopyOutcome | "pending" } = { outcome: "pending" };
+  void done.then((outcome) => {
+    result.outcome = outcome;
+  });
+  for (let turn = 0; turn < turns && result.outcome === "pending"; turn += 1) await tick();
+  return result.outcome;
+};
 
 describe("startProjectCopy", () => {
   it("exports, uploads in bounded chunks, starts the import and follows it", async () => {
